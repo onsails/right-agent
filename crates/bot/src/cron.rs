@@ -250,6 +250,71 @@ fn insert_running_run(
     )
 }
 
+fn is_background_continuation(spec: &CronSpec) -> bool {
+    matches!(
+        &spec.schedule_kind,
+        right_agent::cron_spec::ScheduleKind::BackgroundContinuation { .. }
+    )
+}
+
+const BACKGROUND_FAILURE_NOTIFY_CONTENT: &str =
+    "Background work failed before it could produce a result.";
+
+fn persist_background_failure_notify(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    job_name: &str,
+    reason: &str,
+) -> Result<(), rusqlite::Error> {
+    let notify = CronNotify {
+        content: BACKGROUND_FAILURE_NOTIFY_CONTENT.to_string(),
+        attachments: None,
+    };
+    let notify_json = serde_json::to_string(&notify)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let summary =
+        format!("Background job `{job_name}` failed before producing a result (run {run_id})");
+    let error_json = serde_json::json!({
+        "kind": "background_result_unavailable",
+        "job_name": job_name,
+        "run_id": run_id,
+        "reason": reason,
+    })
+    .to_string();
+
+    right_agent::async_runs::persist_run_output(
+        conn,
+        run_id,
+        right_agent::async_runs::RunOutput {
+            summary: Some(&summary),
+            notify_json: Some(&notify_json),
+            no_notify_reason: None,
+            error_json: Some(&error_json),
+            delivery_required: true,
+        },
+    )
+}
+
+fn update_failed_run_record(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    job_name: &str,
+    spec: &CronSpec,
+    exit_code: Option<i32>,
+    reason: &str,
+) {
+    if is_background_continuation(spec)
+        && let Err(e) = persist_background_failure_notify(conn, run_id, job_name, reason)
+    {
+        tracing::error!(
+            job = %job_name,
+            run_id = %run_id,
+            "failed to persist background failure notify: {e:#}"
+        );
+    }
+    update_run_record(conn, run_id, exit_code, "failed");
+}
+
 /// Pick the JSON schema and (optional) `--fork-session` source for a cron run.
 ///
 /// `BackgroundContinuation` is the only kind that runs against
@@ -543,13 +608,28 @@ async fn execute_job(
         );
         if which::which("claude").is_err() && which::which("claude-bun").is_err() {
             tracing::error!(job = %job_name, "claude binary not found in PATH");
-            update_run_record(&conn, &run_id, None, "failed");
+            update_failed_run_record(
+                &conn,
+                &run_id,
+                job_name,
+                spec,
+                None,
+                "claude binary not found in PATH",
+            );
             std::fs::remove_file(&lock_path).ok();
             return;
         }
         let host_log_dir = agent_dir.join("crons").join("logs");
         if let Err(e) = std::fs::create_dir_all(&host_log_dir) {
             tracing::error!(job = %job_name, "failed to create log dir: {e:#}");
+            update_failed_run_record(
+                &conn,
+                &run_id,
+                job_name,
+                spec,
+                None,
+                &format!("failed to create log dir: {e:#}"),
+            );
             std::fs::remove_file(&lock_path).ok();
             return;
         }
@@ -580,7 +660,14 @@ async fn execute_job(
     let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
-            update_run_record(&conn, &run_id, None, "failed");
+            update_failed_run_record(
+                &conn,
+                &run_id,
+                job_name,
+                spec,
+                None,
+                &format!("spawn failed: {e:#}"),
+            );
             std::fs::remove_file(&lock_path).ok();
             return;
         }
@@ -625,7 +712,14 @@ async fn execute_job(
         }
     };
     if exit_status.is_none() {
-        update_run_record(&conn, &run_id, None, "failed");
+        update_failed_run_record(
+            &conn,
+            &run_id,
+            job_name,
+            spec,
+            None,
+            "child wait failed or timed out",
+        );
         std::fs::remove_file(&lock_path).ok();
         return;
     }
@@ -685,6 +779,22 @@ async fn execute_job(
         );
         "failed"
     };
+
+    if status == "failed"
+        && is_background_continuation(spec)
+        && let Err(e) = persist_background_failure_notify(
+            &conn,
+            &run_id,
+            job_name,
+            &format!("subprocess failed with exit code {exit_code:?}"),
+        )
+    {
+        tracing::error!(
+            job = %job_name,
+            run_id = %run_id,
+            "failed to persist background failure notify: {e:#}"
+        );
+    }
 
     // DB update on completion (D-04)
     update_run_record(&conn, &run_id, exit_code, status);
@@ -803,8 +913,26 @@ async fn execute_job(
             }
             Err(reason) => {
                 tracing::warn!(job = %job_name, reason, "failed to parse cron output");
+                if is_background_continuation(spec) {
+                    if let Err(e) =
+                        persist_background_failure_notify(&conn, &run_id, job_name, &reason)
+                    {
+                        tracing::error!(
+                            job = %job_name,
+                            run_id = %run_id,
+                            "failed to persist background parse-failure notify: {e:#}"
+                        );
+                    }
+                    update_run_record(&conn, &run_id, exit_code, "failed");
+                }
             }
         }
+    } else if is_background_continuation(spec) {
+        tracing::info!(
+            job = %job_name,
+            run_id = %run_id,
+            "background failure notify persisted"
+        );
     } else {
         let exit_str = exit_code.map_or("unknown".to_string(), |c| c.to_string());
         let raw_detail = find_last_result_line(&collected_lines)
@@ -2118,5 +2246,52 @@ mod target_snapshot_tests {
                 Some("/log/bg-run-1.ndjson".into()),
             )
         );
+    }
+
+    #[test]
+    fn persist_background_failure_notify_sets_pending_delivery() {
+        let (_dir, conn) = migrated_conn();
+        let fork_from = uuid::Uuid::new_v4();
+        let spec = CronSpec {
+            schedule_kind: ScheduleKind::BackgroundContinuation { fork_from },
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: Some(-42),
+            target_thread_id: Some(9),
+        };
+        insert_running_run(
+            &conn,
+            "bg-run-failed",
+            "bg-job",
+            "2026-05-05T12:00:00Z",
+            "/log/bg-run-failed.ndjson",
+            &spec,
+        )
+        .unwrap();
+
+        persist_background_failure_notify(&conn, "bg-run-failed", "bg-job", "parse failed")
+            .unwrap();
+        update_run_record(&conn, "bg-run-failed", Some(0), "failed");
+
+        let row: (String, i64, String, String, String) = conn
+            .query_row(
+                "SELECT status, delivery_required, delivery_status, notify_json, error_json
+                   FROM async_runs WHERE id = 'bg-run-failed'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1, 1);
+        assert_eq!(row.2, "pending");
+        assert!(
+            row.3
+                .contains("Background work failed before it could produce a result.")
+        );
+        assert!(row.4.contains("bg-run-failed"));
+        assert!(row.4.contains("bg-job"));
     }
 }
