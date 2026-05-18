@@ -4,6 +4,8 @@
 //! MCP, or structured output — just enough to trigger CC's internal token refresh.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -49,6 +51,61 @@ fn health_probe_invocation(mcp_config_path: &str) -> crate::cc::invocation::Clau
         extra_args: vec!["--no-session-persistence".to_owned()],
         prompt: Some(HEALTH_PROMPT.to_owned()),
         debug_flag: None,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct ClaudeHealth {
+    // Stored for the later repair subprocess wiring task.
+    #[allow(dead_code)]
+    agent_name: String,
+    #[allow(dead_code)]
+    agent_dir: PathBuf,
+    #[allow(dead_code)]
+    ssh_config_path: Option<PathBuf>,
+    #[allow(dead_code)]
+    resolved_sandbox: Option<String>,
+    #[allow(dead_code)]
+    sandbox_exec: Option<right_openshell::sandbox_exec::SandboxExec>,
+    repair_lock: tokio::sync::Mutex<()>,
+    repair_notice_pending: AtomicBool,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl ClaudeHealth {
+    pub(crate) fn new(
+        agent_name: String,
+        agent_dir: PathBuf,
+        ssh_config_path: Option<PathBuf>,
+        resolved_sandbox: Option<String>,
+        sandbox_exec: Option<right_openshell::sandbox_exec::SandboxExec>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            agent_name,
+            agent_dir,
+            ssh_config_path,
+            resolved_sandbox,
+            sandbox_exec,
+            repair_lock: tokio::sync::Mutex::new(()),
+            repair_notice_pending: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn consume_repair_notice(&self) -> Option<&'static str> {
+        if self.repair_notice_pending.swap(false, Ordering::AcqRel) {
+            Some(REPAIR_NOTICE)
+        } else {
+            None
+        }
+    }
+
+    fn mark_repaired_for_next_turn(&self) {
+        self.repair_notice_pending.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn try_begin_repair_for_test(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        self.repair_lock.try_lock().ok()
     }
 }
 
@@ -204,5 +261,38 @@ mod tests {
             classify_init_status(crate::cc::stream::RightMcpInitStatus::Unhealthy { status: None }),
             ProbeInitDecision::Repair
         );
+    }
+
+    #[test]
+    fn repair_notice_is_one_shot() {
+        let health = ClaudeHealth::new(
+            "agent-b".to_owned(),
+            PathBuf::from("/tmp/agent"),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(health.consume_repair_notice(), None);
+        health.mark_repaired_for_next_turn();
+        assert_eq!(health.consume_repair_notice(), Some(REPAIR_NOTICE));
+        assert_eq!(health.consume_repair_notice(), None);
+    }
+
+    #[test]
+    fn repair_lock_rejects_concurrent_second_holder() {
+        let health = ClaudeHealth::new(
+            "agent-b".to_owned(),
+            PathBuf::from("/tmp/agent"),
+            None,
+            None,
+            None,
+        );
+
+        let first = health.try_begin_repair_for_test();
+        assert!(first.is_some());
+        assert!(health.try_begin_repair_for_test().is_none());
+        drop(first);
+        assert!(health.try_begin_repair_for_test().is_some());
     }
 }
