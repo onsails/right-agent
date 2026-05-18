@@ -22,6 +22,7 @@ use crate::cc::markdown_utils::html_escape;
 use super::BotType;
 #[cfg(test)]
 use super::ThinkingVisibility;
+use super::mcp_auth_choice::parse_token_input;
 use super::oauth_callback::PendingAuthMap;
 use super::session::{
     activate_session, create_session, deactivate_current, effective_thread_id,
@@ -1353,29 +1354,10 @@ async fn request_token_and_register(
             }
         };
 
-        // Parse "HeaderName: token_value" format or treat as raw token
-        let (token, auth_type, auth_header) =
-            if let Some((header, value)) = raw_input.split_once(": ") {
-                let header = header.trim();
-                let value = value.trim();
-                if !header.is_empty()
-                    && !header.contains(' ')
-                    && header
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                {
-                    tracing::info!(%header, "user specified custom auth header");
-                    (
-                        value.to_string(),
-                        "header".to_string(),
-                        Some(header.to_string()),
-                    )
-                } else {
-                    (raw_input, initial_auth_type, initial_auth_header)
-                }
-            } else {
-                (raw_input, initial_auth_type, initial_auth_header)
-            };
+        let parsed = parse_token_input(raw_input, initial_auth_type, initial_auth_header);
+        let token = parsed.token;
+        let auth_type = parsed.auth_type;
+        let auth_header = parsed.auth_header;
 
         tracing::info!(url = %bare_url, %auth_type, "mcp: registering server with token");
         match internal
