@@ -156,7 +156,8 @@ pub(crate) struct LearnedSkillSummary {
     pub(crate) excerpt: String,
 }
 
-const SKILL_INDEX_RECORD_DELIMITER: &str = "---RIGHT-SKILL---";
+const SKILL_INDEX_FIELD_SEPARATOR: char = '\0';
+const SANDBOX_SKILL_PATH_PREFIX: &str = "/sandbox/.claude/skills/";
 const SKILL_EXCERPT_MAX_BYTES: usize = 4_096;
 const SKILL_EXCERPT_MAX_CHARS: usize = 4_096;
 const SKILL_EXCERPT_MAX_LINES: usize = 120;
@@ -334,7 +335,8 @@ pub(crate) fn collect_host_rightx_skill_index(
 
         let skill_path = entry.path().join("SKILL.md");
         let excerpt = match read_bounded_skill_excerpt(&skill_path) {
-            Ok(excerpt) => excerpt,
+            Ok(Some(excerpt)) => excerpt,
+            Ok(None) => continue,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => return Err(err),
         };
@@ -345,12 +347,18 @@ pub(crate) fn collect_host_rightx_skill_index(
     Ok(skills)
 }
 
-fn read_bounded_skill_excerpt(path: &Path) -> std::io::Result<String> {
+fn read_bounded_skill_excerpt(path: &Path) -> std::io::Result<Option<String>> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Ok(None);
+    }
+
     let file = std::fs::File::open(path)?;
     let mut reader = std::io::BufReader::new(file).take(SKILL_EXCERPT_MAX_BYTES as u64);
     let mut bytes = Vec::with_capacity(SKILL_EXCERPT_MAX_BYTES);
     reader.read_to_end(&mut bytes)?;
-    Ok(bounded_skill_excerpt(&String::from_utf8_lossy(&bytes)))
+    let content = String::from_utf8_lossy(&bytes);
+    Ok(Some(bounded_skill_excerpt(&content)))
 }
 
 fn bounded_skill_excerpt(content: &str) -> String {
@@ -389,19 +397,16 @@ fn push_bounded_skill_char(out: &mut String, ch: char, chars: &mut usize) -> boo
 
 pub(crate) fn parse_sandbox_skill_index_stdout(stdout: &str) -> Vec<LearnedSkillSummary> {
     let mut skills = Vec::new();
+    let mut fields = stdout.split(SKILL_INDEX_FIELD_SEPARATOR);
 
-    for record in stdout.split(SKILL_INDEX_RECORD_DELIMITER).skip(1) {
-        let mut lines = record.lines();
-        let Some(path) = lines.find_map(|line| {
-            let line = line.trim();
-            (!line.is_empty()).then_some(line)
-        }) else {
-            continue;
+    while let Some(path) = fields.next() {
+        let Some(content) = fields.next() else {
+            break;
         };
         let Some(name) = sandbox_skill_name_from_path(path) else {
             continue;
         };
-        let excerpt = bounded_skill_excerpt_from_lines(lines);
+        let excerpt = bounded_skill_excerpt(content);
         skills.push(LearnedSkillSummary {
             name: name.to_owned(),
             excerpt,
@@ -414,8 +419,8 @@ pub(crate) fn parse_sandbox_skill_index_stdout(stdout: &str) -> Vec<LearnedSkill
 
 fn sandbox_skill_name_from_path(path: &str) -> Option<&str> {
     let path = path.trim();
-    let skill_dir = path.strip_suffix("/SKILL.md")?;
-    let name = skill_dir.rsplit_once("/.claude/skills/")?.1;
+    let tail = path.strip_prefix(SANDBOX_SKILL_PATH_PREFIX)?;
+    let name = tail.strip_suffix("/SKILL.md")?;
     (name.starts_with(LEARNED_SKILL_PREFIX) && !name.contains('/')).then_some(name)
 }
 
@@ -423,7 +428,7 @@ pub(crate) fn sandbox_skill_index_command() -> [&'static str; 3] {
     [
         "sh",
         "-lc",
-        "for f in /sandbox/.claude/skills/rightx-*/SKILL.md; do [ -f \"$f\" ] || continue; printf '%s\\n' '---RIGHT-SKILL---' \"$f\"; sed -n '1,120p' \"$f\" | head -c 4096; printf '\\n'; done",
+        "for f in /sandbox/.claude/skills/rightx-*/SKILL.md; do [ -f \"$f\" ] || continue; printf '%s\\0' \"$f\"; sed -n '1,120p' \"$f\" | head -c 4096 | tr '\\000' '\\n'; printf '\\0'; done",
     ]
 }
 
