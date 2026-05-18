@@ -1,11 +1,13 @@
 # Right Agent Prompting System
 
-How Right Agent constructs the prompt for each `claude -p` invocation.
+How Right Agent constructs composite prompts for session-bearing `claude -p`
+invocations, plus the explicit non-composite exception.
 
 ## Composite System Prompt Architecture
 
-Every CC invocation gets a **single composite system prompt** assembled from multiple files.
-No `--agent` flag — all content is in `--system-prompt-file`.
+Session-bearing CC invocations get a **single composite system prompt**
+assembled from multiple files. No `--agent` flag — all composite prompt content
+is in `--system-prompt-file`.
 
 **Why not `--agent`?** Testing proved that `--agent` with `@` file references doesn't work
 reliably when MCP tools are present (~8K+ tokens of tool definitions drown the agent's
@@ -20,9 +22,10 @@ identity files — this breaks CC's prompt caching and adds latency.
 
 ## Prompt Assembly
 
-A single function `build_prompt_assembly_script()` in `telegram/prompt.rs` generates a
-parameterized shell script that assembles the composite prompt. The script is
-identical for both modes — only the `root_path` parameter differs:
+A single function `build_prompt_assembly_script()` in
+`crates/bot/src/cc/prompt.rs` generates a parameterized shell script that
+assembles the composite prompt. The script is identical for both modes — only
+the `root_path` parameter differs:
 
 - **Sandbox mode (OpenShell):** `root_path=/sandbox`, executed via SSH
 - **No-sandbox mode:** `root_path=agent_dir`, executed via `bash -c`
@@ -32,7 +35,7 @@ producing the composite prompt in microseconds. Files are always fresh (no sync 
 
 ### Callers
 
-All three CC invocation paths use `build_prompt_assembly_script()`:
+Composite-prompt CC invocation paths use `build_prompt_assembly_script()`:
 
 | Caller | Module | mode | Schema | Model |
 |--------|--------|------|--------|-------|
@@ -41,6 +44,13 @@ All three CC invocation paths use `build_prompt_assembly_script()`:
 | Cron (background continuation) | `cron.rs` (`ScheduleKind::BackgroundContinuation`) | `Cron` | BG_CONTINUATION_SCHEMA_JSON | agent config |
 | Delivery (cron result relay) | `cron_delivery.rs` | `Normal` | reply-schema.json | claude-haiku-4-5-20251001 |
 | Reflection (post-failure summary) | `reflection.rs` | `Normal` | reply-schema.json | agent config |
+
+Background learned-skill review is the exception: it is a separate
+`BackgroundReview` Claude Code JSON invocation, not a normal composite-prompt
+reply path. It does not resume or fork the foreground session. The bot supplies
+a bounded report bundle from the completed foreground turn, accepted signal
+JSON, learning events for the source invocation, and the `rightx-*` skill
+index, then stores the structured output as a review report.
 
 `cron::execute_job` selects between `CRON_SCHEMA_JSON` and
 `BG_CONTINUATION_SCHEMA_JSON` via `select_schema_and_fork` (in
@@ -375,6 +385,13 @@ provenance, record events, and send foreground learning receipts; they do not
 move skill files from sandbox to host. The active agent writes skill package
 files under `.claude/skills/<skill_name>/`. Create and update both require
 `rightx-*` skill package names.
+
+Background learned-skill review is report-only in Stage 2. It may record
+high-confidence create/update candidates from a completed foreground turn, but
+it must not create, patch, archive, or delete skill package files. It does not
+expose or call `mcp__right__skill_learning_start` or
+`mcp__right__skill_learning_finish`; write/edit tools, `Agent`, and `Bash` are
+denied, leaving only read-only inspection tools available to the reviewer.
 
 ## Upstream MCP Server Instructions
 

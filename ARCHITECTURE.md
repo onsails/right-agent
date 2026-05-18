@@ -150,10 +150,15 @@ See: `docs/architecture/mcp.md` for dispatch detail and rationale.
 
 ### Prompting Architecture
 
-Every `claude -p` invocation gets a composite system prompt via
+Session-bearing `claude -p` invocations get a composite system prompt via
 `--system-prompt-file` (the sole prompt mechanism — no `--agent` flag).
 Prompt caching is critical — avoid per-message tool calls to read
 identity files.
+
+Background learned-skill review is the explicit exception: it is a
+report-only JSON invocation with no session resume/fork, no MCP config, no
+composite system prompt, and only read-only CC tools. It must not mutate skill
+files or call foreground learning/progress tools.
 
 See `PROMPT_SYSTEM.md` for full documentation.
 
@@ -163,11 +168,16 @@ Every `claude -p` invocation MUST go through `ClaudeInvocation` (defined in
 `crates/bot/src/cc/invocation.rs`). Direct construction of `claude_args`
 vectors is forbidden — the builder enforces invariant flags at compile time.
 
-**Invariants** (always present, cannot be omitted):
+**Invariants** (always present for session-bearing invocations, cannot be
+omitted):
 - `claude -p --dangerously-skip-permissions`
 - `--mcp-config <path>` + `--strict-mcp-config` — agents MUST have MCP access
 - `--output-format <stream-json|json>` (`--verbose` auto-added for `stream-json` only)
 - `--json-schema <schema>` — structured output
+
+Background learned-skill review is not session-bearing and intentionally omits
+`--mcp-config` / `--strict-mcp-config`; its tool surface is enforced by
+`--allowedTools Read,Glob,Grep,LS` plus mutation-tool denials.
 
 **Optional per-callsite:**
 - `--model` — override default model
@@ -176,9 +186,10 @@ vectors is forbidden — the builder enforces invariant flags at compile time.
 - `--resume` / `--session-id` — session management (worker, delivery)
 - `--disallowedTools` — disable CC built-ins that conflict with MCP equivalents
 
-**Adding a new `claude -p` callsite:** construct a `ClaudeInvocation`, set fields,
-call `.into_args()`, pass result to `build_prompt_assembly_script()`. Never build
-args manually.
+**Adding a new session-bearing `claude -p` callsite:** construct a
+`ClaudeInvocation`, set fields, call `.into_args()`, pass result to
+`build_prompt_assembly_script()`. Never build args manually. A no-MCP,
+no-composite-prompt callsite needs an explicit architecture exception here.
 
 ### Reflection Primitive
 
