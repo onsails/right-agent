@@ -159,6 +159,7 @@ where
         debug,
         stt,
         claude_health,
+        shutdown: shutdown.clone(),
     });
     let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
     let thinking_visibility: super::ThinkingVisibility = Arc::new(DashMap::new());
@@ -574,6 +575,7 @@ mod tests {
                 None,
                 None,
             ),
+            shutdown: CancellationToken::new(),
         });
         let stop_tokens: super::super::StopTokens = Arc::new(DashMap::new());
         let thinking_visibility: super::super::ThinkingVisibility = Arc::new(DashMap::new());
