@@ -215,7 +215,26 @@ fn insert_running_run(
 ) -> Result<(), rusqlite::Error> {
     // `async_runs.target_chat_id` is NOT NULL. Targetless cron runs are kept
     // explicit with sentinel 0; delivery reads convert it back with NULLIF.
-    let target_chat_id = Some(spec.target_chat_id.unwrap_or(0));
+    let target_chat_id = spec.target_chat_id.unwrap_or(0);
+    if let right_agent::cron_spec::ScheduleKind::BackgroundContinuation { fork_from } =
+        spec.schedule_kind
+    {
+        right_agent::async_runs::insert_queued_background_run(
+            conn,
+            right_agent::async_runs::NewBackgroundRun {
+                id: run_id,
+                source_session_id: &fork_from.to_string(),
+                run_session_id: run_id,
+                target_chat_id,
+                target_thread_id: spec.target_thread_id,
+                created_at: started_at,
+            },
+        )?;
+        return right_agent::async_runs::mark_background_spawned(
+            conn, run_id, started_at, log_path,
+        );
+    }
+
     right_agent::async_runs::insert_running_cron_run(
         conn,
         right_agent::async_runs::NewCronRun {
@@ -223,7 +242,7 @@ fn insert_running_run(
             job_name,
             started_at,
             log_path,
-            target_chat_id,
+            target_chat_id: Some(target_chat_id),
             target_thread_id: spec.target_thread_id,
         },
     )
@@ -2020,5 +2039,82 @@ mod target_snapshot_tests {
             )
             .unwrap();
         assert_eq!(target_chat_id, 0);
+    }
+
+    #[test]
+    fn insert_running_run_writes_background_async_run_for_bg_continuation() {
+        let (_dir, conn) = migrated_conn();
+        let fork_from = uuid::Uuid::new_v4();
+        let spec = CronSpec {
+            schedule_kind: ScheduleKind::BackgroundContinuation { fork_from },
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: Some(-42),
+            target_thread_id: Some(9),
+        };
+        insert_running_run(
+            &conn,
+            "bg-run-1",
+            "bg-job",
+            "2026-05-05T12:00:00Z",
+            "/log/bg-run-1.ndjson",
+            &spec,
+        )
+        .unwrap();
+
+        let row: (
+            String,
+            Option<String>,
+            String,
+            String,
+            Option<i64>,
+            Option<i64>,
+            String,
+            Option<String>,
+            i64,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT kind, producer_ref, source_session_id, run_session_id,
+                        target_chat_id, target_thread_id, status, handoff_state,
+                        delivery_required, delivery_status, log_path
+                   FROM async_runs WHERE id = 'bg-run-1'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "background".into(),
+                None,
+                fork_from.to_string(),
+                "bg-run-1".into(),
+                Some(-42),
+                Some(9),
+                "running".into(),
+                Some("spawned".into()),
+                1,
+                "pending".into(),
+                Some("/log/bg-run-1.ndjson".into()),
+            )
+        );
     }
 }
