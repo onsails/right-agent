@@ -161,6 +161,7 @@ impl ReviewOutput {
         right_agent::learned_skills::SkillReviewReport {
             agent_name: ctx.agent_name,
             source_invocation_id: ctx.source_invocation_id,
+            learning_episode_id: None,
             root_session_id: ctx.root_session_id,
             chat_id: ctx.chat_id,
             thread_id: ctx.thread_id,
@@ -375,38 +376,6 @@ pub(crate) fn select_review_trigger(
     } else {
         None
     }
-}
-
-pub(crate) fn review_cooldown_cutoff(
-    now: chrono::DateTime<chrono::Utc>,
-    cooldown: chrono::Duration,
-) -> Result<String, String> {
-    if cooldown < chrono::Duration::zero() {
-        return Err(format!(
-            "skill review cooldown must not be negative: {cooldown:?}"
-        ));
-    }
-
-    let cutoff = now.checked_sub_signed(cooldown).ok_or_else(|| {
-        format!("skill review cooldown cutoff out of range for now {now} and cooldown {cooldown:?}")
-    })?;
-    Ok(cutoff.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-}
-
-#[cfg(test)]
-fn review_cooldown_elapsed(
-    last_review_at: Option<&str>,
-    now: chrono::DateTime<chrono::Utc>,
-    cooldown: chrono::Duration,
-) -> Result<bool, String> {
-    let Some(last_review_at) = last_review_at else {
-        return Ok(true);
-    };
-    let last_review_at_timestamp = chrono::DateTime::parse_from_rfc3339(last_review_at)
-        .map_err(|err| format!("parse skill review last_review_at '{last_review_at}': {err}"))?
-        .with_timezone(&chrono::Utc);
-
-    Ok(now.signed_duration_since(last_review_at_timestamp) >= cooldown)
 }
 
 fn push_bounded_list(

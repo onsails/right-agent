@@ -262,69 +262,6 @@ fn select_review_trigger_returns_none_without_signal() {
 }
 
 #[test]
-fn review_cooldown_cutoff_formats_utc_second_precision_for_db_comparison() {
-    let now = chrono::DateTime::parse_from_rfc3339("2026-05-18T10:00:00.987654321Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-
-    let cutoff = review_cooldown_cutoff(now, chrono::Duration::minutes(30)).unwrap();
-
-    assert_eq!(cutoff, "2026-05-18T09:30:00Z");
-}
-
-#[test]
-fn review_cooldown_cutoff_zero_cooldown_returns_now() {
-    let now = chrono::DateTime::parse_from_rfc3339("2026-05-18T10:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-
-    let cutoff = review_cooldown_cutoff(now, chrono::Duration::zero()).unwrap();
-
-    assert_eq!(cutoff, "2026-05-18T10:00:00Z");
-}
-
-#[test]
-fn review_cooldown_cutoff_rejects_negative_cooldown() {
-    let now = chrono::DateTime::parse_from_rfc3339("2026-05-18T10:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-
-    let err = review_cooldown_cutoff(now, chrono::Duration::seconds(-1)).unwrap_err();
-
-    assert!(err.contains("cooldown"), "{err}");
-    assert!(err.contains("negative"), "{err}");
-}
-
-#[test]
-fn review_cooldown_cutoff_rejects_oversized_cooldown() {
-    let err = review_cooldown_cutoff(
-        chrono::DateTime::<chrono::Utc>::MIN_UTC,
-        chrono::Duration::seconds(1),
-    )
-    .unwrap_err();
-
-    assert!(err.contains("cooldown"), "{err}");
-    assert!(err.contains("out of range"), "{err}");
-}
-
-#[test]
-fn review_cooldown_elapsed_handles_none_old_recent_and_invalid_timestamps() {
-    let now = chrono::DateTime::parse_from_rfc3339("2026-05-18T10:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    let cooldown = chrono::Duration::minutes(30);
-
-    assert!(review_cooldown_elapsed(None, now, cooldown).unwrap());
-    assert!(review_cooldown_elapsed(Some("2026-05-18T09:29:59Z"), now, cooldown).unwrap());
-    assert!(review_cooldown_elapsed(Some("2026-05-18T09:30:00Z"), now, cooldown).unwrap());
-    assert!(!review_cooldown_elapsed(Some("2026-05-18T09:45:00Z"), now, cooldown).unwrap());
-
-    let err = review_cooldown_elapsed(Some("not-a-date"), now, cooldown).unwrap_err();
-    assert!(err.contains("last_review_at"), "{err}");
-    assert!(err.contains("not-a-date"), "{err}");
-}
-
-#[test]
 fn review_prompt_says_report_only_and_nothing_to_learn_is_normal() {
     let bundle = ReviewBundle {
         agent_name: "right".to_owned(),

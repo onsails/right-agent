@@ -53,7 +53,6 @@ const MEDIA_GROUP_HARD_CAP_MS: u64 = 2500;
 const CC_TIMEOUT_SECS: u64 = 600;
 
 const LEARNED_SKILL_REVIEW_DAILY_LIMIT: i64 = 12;
-const LEARNED_SKILL_REVIEW_COOLDOWN_MINUTES: i64 = 30;
 const BACKGROUND_REVIEW_MAX_BUDGET_USD: f64 = 0.50;
 const BACKGROUND_REVIEW_MAX_TURNS: u32 = 8;
 const BACKGROUND_REVIEW_TIMEOUT_SECS: u64 = 180;
@@ -2247,20 +2246,6 @@ fn maybe_spawn_learned_skill_review(
         return;
     };
 
-    let cooldown_cutoff = match crate::learning_review::review_cooldown_cutoff(
-        chrono::Utc::now(),
-        chrono::Duration::minutes(LEARNED_SKILL_REVIEW_COOLDOWN_MINUTES),
-    ) {
-        Ok(cutoff) => cutoff,
-        Err(e) => {
-            tracing::warn!(
-                agent = %ctx.agent_name,
-                "learned-skill review cooldown cutoff failed: {e}"
-            );
-            return;
-        }
-    };
-
     let (tool_iters_since_review, turns_since_review, skill_issue_hints_since_review) =
         match load_skill_review_gate_snapshot(conn, &ctx.agent_name) {
             Ok(snapshot) => snapshot,
@@ -2292,7 +2277,6 @@ fn maybe_spawn_learned_skill_review(
         ReviewGateInput {
             signal_trigger,
             today: &today,
-            cooldown_cutoff: Some(cooldown_cutoff.as_str()),
             daily_limit: LEARNED_SKILL_REVIEW_DAILY_LIMIT,
         },
     ) {
@@ -2708,6 +2692,7 @@ fn record_failed_background_review(
     let report = SkillReviewReport {
         agent_name: agent_name.clone(),
         source_invocation_id,
+        learning_episode_id: None,
         root_session_id,
         chat_id,
         thread_id,
@@ -4251,6 +4236,7 @@ mod tests {
         let report = SkillReviewReport {
             agent_name: "right".to_owned(),
             source_invocation_id: "inv-1".to_owned(),
+            learning_episode_id: None,
             root_session_id: Some("session-1".to_owned()),
             chat_id: Some(10),
             thread_id: Some(20),
@@ -4309,6 +4295,7 @@ mod tests {
         let report = SkillReviewReport {
             agent_name: "right".to_owned(),
             source_invocation_id: "inv-1".to_owned(),
+            learning_episode_id: None,
             root_session_id: Some("session-1".to_owned()),
             chat_id: Some(10),
             thread_id: Some(20),
