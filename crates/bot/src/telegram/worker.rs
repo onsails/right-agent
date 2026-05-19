@@ -2430,6 +2430,18 @@ fn clear_background_review_gate_on_shutdown(agent_db_dir: &Path, agent_name: &st
     }
 }
 
+fn sandbox_user_local_env_script() -> &'static str {
+    r#"if [ -f /sandbox/.right/env.sh ]; then
+  . /sandbox/.right/env.sh
+else
+  mkdir -p /sandbox/.local/bin /sandbox/.npm
+  export PATH="/sandbox/.local/bin:$PATH"
+  export NPM_CONFIG_PREFIX=/sandbox/.local
+  export NPM_CONFIG_CACHE=/sandbox/.npm
+fi
+"#
+}
+
 // `agent_dir` is the host-side agent root: `load_auth_token` opens its
 // `data.db` to fetch the OAuth token, matching `cc::invocation::build_claude_command`.
 fn build_background_review_claude_command(
@@ -2448,6 +2460,7 @@ fn build_background_review_claude_command(
             let escaped = token.replace('\'', "'\\''");
             script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
         }
+        script.push_str(sandbox_user_local_env_script());
         let quoted =
             right_openshell::openshell::quote_ssh_remote_args(args.iter().map(String::as_str))
                 .map_err(|e| BackgroundReviewFailure::new(format!("quote claude args: {e:#}")))?;
@@ -4399,6 +4412,44 @@ mod tests {
         assert!(ssh_args[8].contains("claude"));
         assert!(!ssh_args[8].contains("--resume"));
         assert!(!ssh_args[8].contains("--fork-session"));
+    }
+
+    #[test]
+    fn background_review_sandbox_command_sources_user_local_env() {
+        let temp = tempfile::tempdir().unwrap();
+        let args = vec![
+            "claude".to_owned(),
+            "-p".to_owned(),
+            "--".to_owned(),
+            "review prompt".to_owned(),
+        ];
+
+        let cmd = build_background_review_claude_command(
+            &args,
+            temp.path(),
+            Some(Path::new("ssh.config")),
+            Some("right-demo"),
+        )
+        .expect("sandbox name provided");
+        let std_cmd = cmd.as_std();
+        let ssh_args: Vec<String> = std_cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        let script = &ssh_args[8];
+        let env_pos = script
+            .find("/sandbox/.right/env.sh")
+            .expect("background review script must reference managed env");
+        let claude_pos = script
+            .find("claude")
+            .expect("background review script must invoke claude");
+        assert!(
+            env_pos < claude_pos,
+            "env setup must precede claude invocation"
+        );
+        assert!(script.contains("NPM_CONFIG_PREFIX=/sandbox/.local"));
+        assert!(script.contains("/sandbox/.local/bin"));
     }
 
     #[test]
