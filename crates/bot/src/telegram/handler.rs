@@ -34,6 +34,7 @@ use super::session::{
     activate_session, create_session, deactivate_current, effective_thread_id,
     find_sessions_by_uuid, list_sessions, truncate_label,
 };
+use super::tg;
 use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
 
 /// Newtype wrapper for the agent directory passed via dptree dependencies.
@@ -157,7 +158,7 @@ async fn send_failed_reply(
     err: &impl std::fmt::Display,
 ) -> Result<teloxide::types::Message, RequestError> {
     let escaped = html_escape(&format!("{err:#}"));
-    send_html_reply(bot, chat_id, eff_thread_id, &format!("Failed: {escaped}")).await
+    send_html_reply(bot, chat_id, eff_thread_id, &tg::error(&escaped)).await
 }
 
 /// Handle an incoming text message.
@@ -1263,7 +1264,7 @@ async fn prompt_mcp_auth_choice(
             teloxide::types::ChatId(prev.chat_id),
             prev.thread_id,
             &format!(
-                "Previous /mcp add <b>{prev_server}</b> auth choice superseded by a new /mcp command."
+                "Cancelled the previous MCP auth prompt for <b>{prev_server}</b> because a newer /mcp command started."
             ),
         )
         .await
@@ -1301,6 +1302,43 @@ async fn prompt_mcp_auth_choice(
     Ok(())
 }
 
+fn format_token_request_prompt(header_hint: &str, server_name: &str) -> String {
+    format!(
+        "Send {} for {}, or <code>HeaderName: token</code> to specify a custom header:",
+        html_escape(header_hint),
+        html_escape(server_name)
+    )
+}
+
+fn format_mcp_add_reply(
+    server_name: &str,
+    label: Option<&str>,
+    tools_count: usize,
+    warning: Option<&str>,
+    include_auth_action: bool,
+) -> String {
+    let escaped_server = html_escape(server_name);
+    let mut success = format!("Added MCP server <b>{escaped_server}</b>");
+    if let Some(label) = label {
+        success.push_str(&format!(" ({})", html_escape(label)));
+    }
+    success.push('.');
+    if tools_count > 0 {
+        success.push_str(&format!(" {tools_count} tools available."));
+    }
+
+    let mut blocks = vec![tg::success(&success)];
+    if let Some(warning) = warning {
+        blocks.push(tg::warning(&html_escape(warning)));
+    }
+    if include_auth_action {
+        blocks.push(tg::action(&format!(
+            "Run <code>/mcp auth {escaped_server}</code> to authenticate."
+        )));
+    }
+    tg::blocks(blocks)
+}
+
 /// Prompt the user for an auth token, then spawn a background task that waits
 /// for it (via `PendingTokenSlot`), parses optional `HeaderName: token` syntax,
 /// and registers/updates the MCP server with the resolved auth fields.
@@ -1328,11 +1366,11 @@ async fn request_token_and_register(
         .as_deref()
         .map(|h| format!("the {h} token"))
         .unwrap_or_else(|| "the token".into());
-    bot.send_message(
+    send_html_reply(
+        &bot,
         chat_id,
-        format!(
-            "Send {header_hint} for {server_name}, or HeaderName: token to specify a custom header:"
-        ),
+        eff_thread_id,
+        &format_token_request_prompt(&header_hint, &server_name),
     )
     .await?;
 
@@ -1356,7 +1394,7 @@ async fn request_token_and_register(
         let prev_thread_id = prev.thread_id;
         let mut send = bot.send_message(
             prev_chat_id,
-            "Previous MCP token request superseded by a new /mcp command.",
+            "Cancelled the previous MCP token prompt because a newer /mcp command started.",
         );
         if prev_thread_id != 0 {
             send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
@@ -1408,14 +1446,13 @@ async fn request_token_and_register(
             .await
         {
             Ok(resp) => {
-                let escaped = html_escape(&server_name);
-                let mut reply = format!("Added MCP server <b>{escaped}</b>.");
-                if resp.tools_count > 0 {
-                    reply.push_str(&format!(" {} tools available.", resp.tools_count));
-                }
-                if let Some(ref w) = resp.warning {
-                    reply.push_str(&format!("\n{}", html_escape(w)));
-                }
+                let reply = format_mcp_add_reply(
+                    &server_name,
+                    None,
+                    resp.tools_count,
+                    resp.warning.as_deref(),
+                    false,
+                );
                 send_html_reply(&bot, chat_id, eff_thread_id, &reply)
                     .await
                     .ok();
@@ -1998,17 +2035,13 @@ pub async fn handle_mcp_auth_choice_callback(
                 .await
             {
                 Ok(resp) => {
-                    let escaped = html_escape(&pending.server_name);
-                    let mut reply = format!("Added MCP server <b>{escaped}</b> (OAuth).");
-                    if resp.tools_count > 0 {
-                        reply.push_str(&format!(" {} tools available.", resp.tools_count));
-                    }
-                    if let Some(ref w) = resp.warning {
-                        reply.push_str(&format!("\n{}", html_escape(w)));
-                    }
-                    reply.push_str(&format!(
-                        "\nRun <code>/mcp auth {escaped}</code> to authenticate."
-                    ));
+                    let reply = format_mcp_add_reply(
+                        &pending.server_name,
+                        Some("OAuth"),
+                        resp.tools_count,
+                        resp.warning.as_deref(),
+                        true,
+                    );
                     send_html_reply(
                         &bot,
                         teloxide::types::ChatId(pending.chat_id),
@@ -2058,14 +2091,13 @@ pub async fn handle_mcp_auth_choice_callback(
                 .await
             {
                 Ok(resp) => {
-                    let escaped = html_escape(&pending.server_name);
-                    let mut reply = format!("Added MCP server <b>{escaped}</b>.");
-                    if resp.tools_count > 0 {
-                        reply.push_str(&format!(" {} tools available.", resp.tools_count));
-                    }
-                    if let Some(ref w) = resp.warning {
-                        reply.push_str(&format!("\n{}", html_escape(w)));
-                    }
+                    let reply = format_mcp_add_reply(
+                        &pending.server_name,
+                        None,
+                        resp.tools_count,
+                        resp.warning.as_deref(),
+                        false,
+                    );
                     send_html_reply(
                         &bot,
                         teloxide::types::ChatId(pending.chat_id),
@@ -2296,6 +2328,32 @@ mod tests {
         let data = "stop:notanumber:0";
         let parts: Vec<&str> = data.splitn(3, ':').collect();
         assert!(parts[1].parse::<i64>().is_err());
+    }
+
+    #[test]
+    fn token_request_prompt_formats_header_override_as_code() {
+        let text = format_token_request_prompt("the X<Api> token", "obs<idian>");
+
+        assert!(text.contains("<code>HeaderName: token</code>"));
+        assert!(text.contains("the X&lt;Api&gt; token"));
+        assert!(text.contains("obs&lt;idian&gt;"));
+        assert!(!text.contains("or HeaderName: token"));
+    }
+
+    #[test]
+    fn mcp_add_reply_formats_success_and_warning_as_telegram_status_blocks() {
+        let text = format_mcp_add_reply(
+            "obsidian",
+            None,
+            15,
+            Some("Plain HTTP: trusted/encrypted networks only."),
+            false,
+        );
+
+        assert_eq!(
+            text,
+            "✅ Added MCP server <b>obsidian</b>. 15 tools available.\n\n⚠️ Plain HTTP: trusted/encrypted networks only."
+        );
     }
 
     #[test]

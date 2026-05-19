@@ -187,6 +187,15 @@ fn internal_error(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
     error_response(StatusCode::INTERNAL_SERVER_ERROR, msg, None)
 }
 
+fn plain_http_warning(url: &str) -> Option<String> {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) if parsed.scheme() == "http" => {
+            Some("Plain HTTP: trusted/encrypted networks only.".to_string())
+        }
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -208,6 +217,7 @@ async fn handle_mcp_add(
 
     // Determine AuthMethod from request fields
     let auth_method = AuthMethod::from_db(req.auth_type.as_deref(), req.auth_header.as_deref());
+    let http_warning = plain_http_warning(&req.url);
 
     // Get DB connection, agent_dir, and proxies from DashMap (single lookup, scope guard before await)
     let (conn_arc, agent_dir, proxies_lock) = {
@@ -272,7 +282,7 @@ async fn handle_mcp_add(
             Json(McpAddResponse {
                 tools_count: 0,
                 excluded: Vec::new(),
-                warning: Some("OAuth server registered. Run /mcp auth to authenticate.".into()),
+                warning: http_warning,
             }),
         )
             .into_response();
@@ -301,7 +311,7 @@ async fn handle_mcp_add(
                 Json(McpAddResponse {
                     tools_count,
                     excluded: Vec::new(),
-                    warning: None,
+                    warning: http_warning,
                 }),
             )
                 .into_response()
@@ -1013,7 +1023,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_add_validates_url_non_https() {
+    async fn mcp_add_warns_for_plain_http_oauth_registration() {
         let tmp = tempfile::tempdir().unwrap();
         let app = make_test_router(tmp.path());
 
@@ -1023,15 +1033,17 @@ mod tests {
             serde_json::json!({
                 "agent": "test-agent",
                 "name": "notion",
-                "url": "http://mcp.notion.com/mcp"
+                "url": "http://mcp.notion.com/mcp",
+                "auth_type": "oauth"
             }),
         )
         .await;
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(status, StatusCode::OK, "body={body}");
+        assert_eq!(body["tools_count"], 0);
         assert!(
-            body["error"].as_str().unwrap().contains("HTTPS"),
-            "expected HTTPS error, got: {body}"
+            body["warning"].as_str().unwrap().contains("Plain HTTP"),
+            "expected plain HTTP warning, got: {body}"
         );
     }
 

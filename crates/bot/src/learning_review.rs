@@ -257,6 +257,15 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
         "Report-only review. Do not write files. Do not call learning tools. \
          Do not ask the user questions. nothing_to_learn is normal when evidence is weak.\n\n",
     );
+    prompt.push_str(
+        "Decision rules:\n\
+         - Candidates must be reusable across future sessions, not a summary of this one task.\n\
+         - Do not preserve one-off task narrative in candidate summaries.\n\
+         - Do not make persistent negative claims from transient tool failures.\n\
+         - Prefer update candidates for existing rightx-* skills when the evidence refines an installed learned skill.\n\
+         - Use create_candidate when repeated tool patterns or setup workflows are reusable and no existing rightx-* skill fits.\n\
+         - Use nothing_to_learn when the evidence is only normal task progress, isolated facts, or one-time content.\n\n",
+    );
     prompt.push_str(&format!("agent_name: {}\n", bundle.agent_name));
     prompt.push_str(&format!(
         "source_invocation_id: {}\n",

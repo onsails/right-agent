@@ -2669,6 +2669,16 @@ async fn record_successful_background_review<F, Fut, E>(
             "learned-skill review finish mark failed: {e:#}"
         );
     }
+    tracing::info!(
+        agent = %agent_name,
+        source_invocation_id = %report.source_invocation_id,
+        trigger_kind = %report.trigger_kind.as_str(),
+        status = %report.status.as_str(),
+        confidence = %report.confidence.as_str(),
+        candidate_skill_name = report.candidate_skill_name.as_deref().unwrap_or(""),
+        telegram_notified = report.telegram_notified,
+        "learned-skill background review completed"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4281,6 +4291,76 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, (0, 0, "create_candidate".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn record_successful_background_review_sends_notice_and_persists_notified_true() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(temp.path(), true).unwrap();
+        right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+        conn.execute(
+            "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name = 'right'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let report = SkillReviewReport {
+            agent_name: "right".to_owned(),
+            source_invocation_id: "inv-1".to_owned(),
+            root_session_id: Some("session-1".to_owned()),
+            chat_id: Some(10),
+            thread_id: Some(20),
+            trigger_kind: right_agent::learned_skills::ReviewTriggerKind::LearningSignal,
+            status: ReviewStatus::CreateCandidate,
+            confidence: right_agent::learned_skills::ReviewConfidence::High,
+            candidate_skill_name: Some("rightx-demo".to_owned()),
+            candidate_summary: Some("Demo candidate".to_owned()),
+            evidence_refs: vec!["event-1".to_owned()],
+            review_output_json: serde_json::json!({
+                "status": "create_candidate",
+                "confidence": "high",
+                "candidate_skill_name": "rightx-demo",
+                "candidate_summary": "Demo candidate",
+                "evidence_refs": ["event-1"],
+                "user_notice": "notice"
+            }),
+            telegram_notified: false,
+        };
+
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sent_for_closure = std::sync::Arc::clone(&sent);
+
+        record_successful_background_review(
+            temp.path(),
+            "right",
+            report,
+            Some("notice".to_owned()),
+            move |notice| {
+                let sent_for_future = std::sync::Arc::clone(&sent_for_closure);
+                async move {
+                    sent_for_future.lock().unwrap().push(notice);
+                    Ok::<(), &'static str>(())
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(sent.lock().unwrap().as_slice(), ["notice"]);
+
+        let conn = right_db::open_connection(temp.path(), false).unwrap();
+        let row: (i64, i64, String) = conn
+            .query_row(
+                "SELECT r.telegram_notified, s.review_running, s.last_review_status \
+                 FROM skill_review_reports r \
+                 JOIN skill_nudge_state s ON s.agent_name = r.agent_name \
+                 WHERE r.agent_name = 'right'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(row, (1, 0, "create_candidate".to_owned()));
     }
 
     #[test]
