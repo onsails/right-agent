@@ -63,6 +63,7 @@ pub(crate) async fn spawn_background_continuation(
 
     let mcp_instructions =
         fetch_mcp_instructions(&internal_client, &agent_name, &request.run_id).await;
+    let inherited_model = model.clone();
 
     let invocation = crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: Some(crate::cc::invocation::mcp_config_path(
@@ -189,6 +190,7 @@ pub(crate) async fn spawn_background_continuation(
         resolved_sandbox,
         debug,
         learning,
+        inherited_model,
         child,
         reader_handle,
         stderr_handle,
@@ -532,6 +534,7 @@ async fn complete_background_run(
     resolved_sandbox: Option<String>,
     debug: Arc<std::sync::atomic::AtomicBool>,
     learning: right_agent::agent::types::LearningConfig,
+    inherited_model: Option<String>,
     mut child: right_process::ProcessGroupChild,
     reader_handle: JoinHandle<Result<Vec<String>, String>>,
     stderr_handle: Option<JoinHandle<Result<String, String>>>,
@@ -612,6 +615,7 @@ async fn complete_background_run(
                 resolved_sandbox.as_deref(),
                 &debug,
                 &learning,
+                inherited_model.clone(),
                 request.target_chat_id,
                 request.target_thread_id,
             )
@@ -666,6 +670,7 @@ async fn persist_successful_background_output(
     resolved_sandbox: Option<&str>,
     debug: &Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent::agent::types::LearningConfig,
+    inherited_model: Option<String>,
     target_chat_id: i64,
     target_thread_id: Option<i64>,
 ) -> Result<(), String> {
@@ -709,6 +714,7 @@ async fn persist_successful_background_output(
         resolved_sandbox,
         debug,
         learning,
+        inherited_model,
         target_chat_id,
         target_thread_id,
     );
@@ -725,6 +731,7 @@ fn capture_background_completion_seed(
     resolved_sandbox: Option<&str>,
     debug: &Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent::agent::types::LearningConfig,
+    inherited_model: Option<String>,
     target_chat_id: i64,
     target_thread_id: Option<i64>,
 ) {
@@ -733,6 +740,7 @@ fn capture_background_completion_seed(
         agent_dir: agent_dir.to_path_buf(),
         agent_db_dir: agent_dir.to_path_buf(),
         agent_name: agent_name.to_owned(),
+        inherited_model,
         ssh_config_path: ssh_config_path.map(Path::to_path_buf),
         resolved_sandbox: resolved_sandbox.map(str::to_owned),
         debug: Arc::clone(debug),

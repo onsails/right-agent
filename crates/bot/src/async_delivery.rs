@@ -350,6 +350,7 @@ fn pending_label(pending: &PendingAsyncResult) -> &str {
 pub(crate) async fn run_delivery_loop(
     agent_dir: PathBuf,
     agent_name: String,
+    model: Arc<arc_swap::ArcSwap<Option<String>>>,
     bot: crate::telegram::BotType,
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
     idle_ts: Arc<IdleTimestamp>,
@@ -548,6 +549,7 @@ pub(crate) async fn run_delivery_loop(
                     resolved_sandbox.as_deref(),
                     &debug,
                     &learning,
+                    crate::snapshot_model(&model),
                 );
                 let outbox_subdir = match to_deliver.kind.as_str() {
                     "background" => "background",
@@ -607,6 +609,7 @@ fn capture_async_delivery_seed(
     resolved_sandbox: Option<&str>,
     debug: &Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent::agent::types::LearningConfig,
+    inherited_model: Option<String>,
 ) {
     if delivered.kind != "background" {
         return;
@@ -616,6 +619,7 @@ fn capture_async_delivery_seed(
         agent_dir: agent_dir.to_path_buf(),
         agent_db_dir: agent_dir.to_path_buf(),
         agent_name: agent_name.to_owned(),
+        inherited_model,
         ssh_config_path: ssh_config_path.map(Path::to_path_buf),
         resolved_sandbox: resolved_sandbox.map(str::to_owned),
         debug: Arc::clone(debug),

@@ -2480,6 +2480,7 @@ fn maybe_capture_learning_episode_seed(
         agent_dir: ctx.agent_dir.clone(),
         agent_db_dir: ctx.agent_db_dir.clone(),
         agent_name: ctx.agent_name.clone(),
+        inherited_model: crate::snapshot_model(&ctx.model),
         ssh_config_path: ctx.ssh_config_path.clone(),
         resolved_sandbox: ctx.resolved_sandbox.clone(),
         debug: Arc::clone(&ctx.debug),

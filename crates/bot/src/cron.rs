@@ -885,6 +885,7 @@ async fn execute_job(
         resolved_sandbox,
         &debug,
         &learning,
+        model.map(str::to_owned),
     );
 
     if let Some(result_line) = find_last_result_line(&collected_lines) {
@@ -972,12 +973,14 @@ fn capture_cron_completion_seed(
     resolved_sandbox: Option<&str>,
     debug: &Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent::agent::types::LearningConfig,
+    inherited_model: Option<String>,
 ) {
     let seed_ref = format!("cron:{run_id}");
     let runtime = crate::learning_episode::LearningEpisodeRuntime {
         agent_dir: agent_dir.to_path_buf(),
         agent_db_dir: agent_dir.to_path_buf(),
         agent_name: agent_name.to_owned(),
+        inherited_model,
         ssh_config_path: ssh_config_path.map(std::path::Path::to_path_buf),
         resolved_sandbox: resolved_sandbox.map(str::to_owned),
         debug: Arc::clone(debug),

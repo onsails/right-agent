@@ -975,10 +975,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_session_locks = Arc::clone(&session_locks);
     let delivery_debug = Arc::clone(&debug_flag);
     let delivery_learning = config.learning.clone();
+    let delivery_model = Arc::clone(&model_arc);
     let delivery_handle = tokio::spawn(async move {
         async_delivery::run_delivery_loop(
             delivery_agent_dir,
             delivery_agent_name,
+            delivery_model,
             delivery_bot,
             delivery_allowlist,
             delivery_idle_ts,

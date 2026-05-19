@@ -1,5 +1,7 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -51,6 +53,7 @@ pub(crate) struct LearningEpisodeRuntime {
     pub(crate) agent_dir: PathBuf,
     pub(crate) agent_db_dir: PathBuf,
     pub(crate) agent_name: String,
+    pub(crate) inherited_model: Option<String>,
     pub(crate) ssh_config_path: Option<PathBuf>,
     pub(crate) resolved_sandbox: Option<String>,
     pub(crate) debug: Arc<AtomicBool>,
@@ -358,79 +361,122 @@ pub(crate) fn validate_selector_output(
 pub(crate) async fn drain_ready_learning_episodes_once(
     runtime: LearningEpisodeRuntime,
 ) -> anyhow::Result<()> {
+    drain_ready_learning_episodes_once_with_selector(runtime, run_episode_selector_boxed).await
+}
+
+type EpisodeSelectorFuture =
+    Pin<Box<dyn Future<Output = anyhow::Result<EpisodeSelectorOutput>> + Send>>;
+type EpisodeSelector =
+    fn(LearningEpisodeRuntime, LearningEpisodeRow, SelectorCorpus) -> EpisodeSelectorFuture;
+
+fn run_episode_selector_boxed(
+    runtime: LearningEpisodeRuntime,
+    episode: LearningEpisodeRow,
+    corpus: SelectorCorpus,
+) -> EpisodeSelectorFuture {
+    Box::pin(async move { run_episode_selector(&runtime, &episode, &corpus).await })
+}
+
+pub(crate) async fn drain_ready_learning_episodes_once_with_selector(
+    runtime: LearningEpisodeRuntime,
+    selector: EpisodeSelector,
+) -> anyhow::Result<()> {
     let now = chrono::Utc::now();
     let now_str = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let today = now.format("%Y-%m-%d").to_string();
-    let (episode, corpus) = {
-        let conn = right_db::open_connection(&runtime.agent_db_dir, false)
-            .with_context(|| format!("open {} data.db", runtime.agent_name))?;
-        let Some(episode) = right_agent::learning_episodes::claim_ready_episode(
-            &conn,
-            &runtime.agent_name,
-            &now_str,
-        )?
-        else {
-            return Ok(());
-        };
-
-        let gate = try_mark_review_started(
-            &conn,
-            &runtime.agent_name,
-            ReviewGateInput {
-                signal_trigger: review_trigger_for_episode(episode.seed_trigger_kind),
-                today: &today,
-                daily_limit: LEARNING_EPISODE_REVIEW_DAILY_LIMIT,
-            },
-        )?;
-
-        match gate {
-            ReviewGateDecision::Start(_) => {}
-            ReviewGateDecision::Skip(
-                ReviewSkipReason::AlreadyRunning | ReviewSkipReason::DailyLimit,
-            ) => {
-                requeue_episode(
-                    &conn,
-                    episode.id,
-                    now,
-                    runtime.learning.episode_settle_seconds,
-                )?;
-                return Ok(());
-            }
-            ReviewGateDecision::Skip(ReviewSkipReason::BelowThreshold) => {
-                right_agent::learning_episodes::mark_episode_terminal(
-                    &conn,
-                    episode.id,
-                    LearningEpisodeStatus::NoEpisode,
-                    &serde_json::json!({"status":"no_episode","reason":"review gate below threshold"}),
-                )?;
-                return Ok(());
-            }
-        }
-
-        let corpus = load_selector_corpus(&conn, &episode)?;
-        (episode, corpus)
+    let conn = right_db::open_connection(&runtime.agent_db_dir, false)
+        .with_context(|| format!("open {} data.db", runtime.agent_name))?;
+    let Some(episode) =
+        right_agent::learning_episodes::claim_ready_episode(&conn, &runtime.agent_name, &now_str)?
+    else {
+        return Ok(());
     };
 
-    let output = run_episode_selector(&runtime, &episode, &corpus).await;
-    let conn = right_db::open_connection(&runtime.agent_db_dir, false)
-        .with_context(|| format!("reopen {} data.db", runtime.agent_name))?;
+    let gate = match try_mark_review_started(
+        &conn,
+        &runtime.agent_name,
+        ReviewGateInput {
+            signal_trigger: review_trigger_for_episode(episode.seed_trigger_kind),
+            today: &today,
+            daily_limit: LEARNING_EPISODE_REVIEW_DAILY_LIMIT,
+        },
+    ) {
+        Ok(gate) => gate,
+        Err(e) => {
+            let reason = format!("learning episode review gate failed: {e:#}");
+            mark_claimed_episode_failed(&conn, &runtime.agent_name, episode.id, &reason, false)?;
+            return Err(anyhow!(reason));
+        }
+    };
+
+    match gate {
+        ReviewGateDecision::Start(_) => {}
+        ReviewGateDecision::Skip(
+            ReviewSkipReason::AlreadyRunning | ReviewSkipReason::DailyLimit,
+        ) => {
+            requeue_episode_or_fail(
+                &conn,
+                &runtime.agent_name,
+                episode.id,
+                now,
+                runtime.learning.episode_settle_seconds,
+            )?;
+            return Ok(());
+        }
+        ReviewGateDecision::Skip(ReviewSkipReason::BelowThreshold) => {
+            right_agent::learning_episodes::mark_episode_terminal(
+                &conn,
+                episode.id,
+                LearningEpisodeStatus::NoEpisode,
+                &serde_json::json!({"status":"no_episode","reason":"review gate below threshold"}),
+            )?;
+            return Ok(());
+        }
+    }
+
+    let corpus = match load_selector_corpus(&conn, &episode) {
+        Ok(corpus) => corpus,
+        Err(e) => {
+            let reason = format!("learning episode corpus load failed: {e:#}");
+            mark_claimed_episode_failed(&conn, &runtime.agent_name, episode.id, &reason, true)?;
+            return Err(anyhow!(reason));
+        }
+    };
+
+    let output = selector(runtime.clone(), episode.clone(), corpus.clone()).await;
     match output {
         Ok(output) => {
             if let Err(e) = record_selector_output(&conn, &runtime, &episode, &corpus, output) {
                 let reason = format!("{e:#}");
-                right_agent::learning_episodes::mark_episode_failed(&conn, episode.id, &reason)?;
-                clear_review_running(&conn, &runtime.agent_name)?;
+                mark_claimed_episode_failed(&conn, &runtime.agent_name, episode.id, &reason, true)?;
                 return Err(anyhow!(reason));
             }
         }
         Err(e) => {
             let reason = format!("{e:#}");
-            right_agent::learning_episodes::mark_episode_failed(&conn, episode.id, &reason)?;
-            clear_review_running(&conn, &runtime.agent_name)?;
+            mark_claimed_episode_failed(&conn, &runtime.agent_name, episode.id, &reason, true)?;
             return Err(anyhow!(reason));
         }
     }
 
+    Ok(())
+}
+
+fn mark_claimed_episode_failed(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+    episode_id: i64,
+    reason: &str,
+    clear_gate: bool,
+) -> anyhow::Result<()> {
+    let mark_result = right_agent::learning_episodes::mark_episode_failed(conn, episode_id, reason);
+    let clear_result = if clear_gate {
+        clear_review_running(conn, agent_name)
+    } else {
+        Ok(())
+    };
+    mark_result.with_context(|| format!("mark learning episode {episode_id} failed"))?;
+    clear_result.with_context(|| format!("clear learning review running gate for {agent_name}"))?;
     Ok(())
 }
 
@@ -450,7 +496,7 @@ fn record_selector_output(
                 end_ref: output.end_ref.clone(),
                 message_refs: output.message_refs.clone(),
                 execution_event_refs: output.execution_event_refs.clone(),
-                selector_model: runtime.learning.episode_selector_model.clone(),
+                selector_model: effective_selector_model(runtime),
                 selector_output_json: output.raw.clone(),
                 boundary_rationale: output.boundary_rationale.clone(),
                 confidence: Some(output.confidence.clone()),
@@ -490,6 +536,14 @@ fn record_selector_output(
         status => return Err(anyhow!("selector returned invalid status {status:?}")),
     }
     Ok(())
+}
+
+fn effective_selector_model(runtime: &LearningEpisodeRuntime) -> Option<String> {
+    runtime
+        .learning
+        .episode_selector_model
+        .clone()
+        .or_else(|| runtime.inherited_model.clone())
 }
 
 fn call_episode_reviewer_bridge_placeholder(
@@ -603,7 +657,7 @@ async fn run_episode_selector(
         mcp_config_path: None,
         json_schema: Some(EPISODE_SELECTOR_SCHEMA_JSON.to_owned()),
         output_format: crate::cc::invocation::OutputFormat::Json,
-        model: runtime.learning.episode_selector_model.clone(),
+        model: effective_selector_model(runtime),
         max_budget_usd: Some(runtime.learning.episode_selector_max_budget_usd),
         max_turns: Some(3),
         resume_session_id: None,
@@ -699,6 +753,21 @@ fn requeue_episode(
     } else {
         Err(rusqlite::Error::QueryReturnedNoRows)
     }
+}
+
+fn requeue_episode_or_fail(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+    episode_id: i64,
+    now: chrono::DateTime<chrono::Utc>,
+    settle_seconds: u64,
+) -> anyhow::Result<()> {
+    if let Err(e) = requeue_episode(conn, episode_id, now, settle_seconds) {
+        let reason = format!("learning episode requeue failed: {e:#}");
+        mark_claimed_episode_failed(conn, agent_name, episode_id, &reason, false)?;
+        return Err(anyhow!(reason));
+    }
+    Ok(())
 }
 
 fn review_trigger_for_episode(
