@@ -2669,6 +2669,16 @@ async fn record_successful_background_review<F, Fut, E>(
             "learned-skill review finish mark failed: {e:#}"
         );
     }
+    tracing::info!(
+        agent = %agent_name,
+        source_invocation_id = %report.source_invocation_id,
+        trigger_kind = %report.trigger_kind.as_str(),
+        status = %report.status.as_str(),
+        confidence = %report.confidence.as_str(),
+        candidate_skill_name = report.candidate_skill_name.as_deref().unwrap_or(""),
+        telegram_notified = report.telegram_notified,
+        "learned-skill background review completed"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
