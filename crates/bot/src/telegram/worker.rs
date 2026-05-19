@@ -2430,21 +2430,6 @@ fn clear_background_review_gate_on_shutdown(agent_db_dir: &Path, agent_name: &st
     }
 }
 
-fn sandbox_user_local_env_script() -> &'static str {
-    r#"if [ -f /sandbox/.right/env.sh ]; then
-  . /sandbox/.right/env.sh
-else
-  mkdir -p /sandbox/.local/bin /sandbox/.npm
-  case ":$PATH:" in
-    *:/sandbox/.local/bin:*) ;;
-    *) export PATH="/sandbox/.local/bin:$PATH" ;;
-  esac
-  export NPM_CONFIG_PREFIX=/sandbox/.local
-  export NPM_CONFIG_CACHE=/sandbox/.npm
-fi
-"#
-}
-
 // `agent_dir` is the host-side agent root: `load_auth_token` opens its
 // `data.db` to fetch the OAuth token, matching `cc::invocation::build_claude_command`.
 fn build_background_review_claude_command(
@@ -2463,7 +2448,7 @@ fn build_background_review_claude_command(
             let escaped = token.replace('\'', "'\\''");
             script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
         }
-        script.push_str(sandbox_user_local_env_script());
+        script.push_str(crate::cc::sandbox_env::INLINE_FALLBACK_SCRIPT);
         let quoted =
             right_openshell::openshell::quote_ssh_remote_args(args.iter().map(String::as_str))
                 .map_err(|e| BackgroundReviewFailure::new(format!("quote claude args: {e:#}")))?;
