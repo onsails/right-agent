@@ -231,8 +231,8 @@ fn is_private_or_link_local_host(host: &url::Host<&str>) -> bool {
 
 /// Validate an explicitly registered MCP server URL.
 ///
-/// Public servers must use HTTPS. Loopback development servers may use HTTP or
-/// HTTPS. Private and link-local network addresses are rejected by default.
+/// Servers may use HTTP or HTTPS. Private and link-local network addresses are
+/// rejected by default.
 pub fn validate_server_url(url_str: &str) -> Result<(), CredentialError> {
     let parsed = parse_url(url_str)?;
 
@@ -247,10 +247,9 @@ pub fn validate_server_url(url_str: &str) -> Result<(), CredentialError> {
         )));
     }
 
-    let is_loopback = is_loopback_host(&url_host);
-    if parsed.scheme() != "https" && !(is_loopback && parsed.scheme() == "http") {
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
         return Err(CredentialError::InvalidServerUrl(format!(
-            "only HTTPS URLs are allowed, got '{}'",
+            "only HTTP/HTTPS URLs are allowed, got '{}'",
             parsed.scheme()
         )));
     }
@@ -512,13 +511,13 @@ pub fn is_loopback_url(url: &str) -> bool {
     parsed.host().is_some_and(|host| is_loopback_host(&host))
 }
 
-/// Check whether a URL is a valid public HTTPS URL (not localhost/private IP).
+/// Check whether a URL is a network-routable HTTP(S) URL (not localhost/private IP).
 pub fn is_public_url(url: &str) -> bool {
     let Ok(parsed) = parse_url(url) else {
         return false;
     };
 
-    if parsed.scheme() != "https" {
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
         return false;
     }
 
@@ -625,9 +624,14 @@ mod db_tests {
     }
 
     #[test]
-    fn validate_server_url_http_rejected() {
+    fn validate_server_url_plain_http_ok() {
+        validate_server_url("http://mcp.notion.com/mcp").unwrap();
+    }
+
+    #[test]
+    fn validate_server_url_rejects_non_http_schemes() {
         assert!(matches!(
-            validate_server_url("http://mcp.notion.com/mcp"),
+            validate_server_url("ftp://mcp.notion.com/mcp"),
             Err(CredentialError::InvalidServerUrl(_))
         ));
     }
@@ -819,12 +823,12 @@ mod db_tests {
     }
 
     #[test]
-    fn is_public_url_remains_false_for_loopback_and_private_urls() {
+    fn is_public_url_accepts_network_routable_http_and_https_urls() {
         assert!(is_public_url("https://mcp.notion.com/mcp"));
+        assert!(is_public_url("http://mcp.notion.com/mcp"));
         assert!(!is_public_url("http://localhost:3333/mcp"));
         assert!(!is_public_url("https://localhost/mcp"));
         assert!(!is_public_url("https://192.168.1.1/mcp"));
-        assert!(!is_public_url("http://mcp.notion.com/mcp"));
     }
 
     #[test]

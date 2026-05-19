@@ -120,10 +120,8 @@ The heuristic is a recommendation; the user's button choice is authoritative.
 | `header` | Custom header (e.g. `X-Api-Key`) | User chooses `Header`; Haiku may recommend the header name; user may override with `HeaderName: token` |
 | `query_string` | Embedded in URL | User chooses `URL as-is` for a URL containing `?` query params |
 
-`URL as-is` also covers no-auth and loopback development MCP servers. Public
-servers still require HTTPS. Explicit loopback registration allows HTTP/HTTPS
-for `localhost` hostnames, including a trailing dot, the IPv4 loopback range,
-IPv6 loopback, and IPv4-mapped loopback addresses; broad private/link-local
+`URL as-is` also covers no-auth and loopback development MCP servers. Explicit
+registration allows HTTP/HTTPS and warns for plain HTTP; broad private/link-local
 ranges remain blocked by default.
 
 ### MCP Aggregator
@@ -529,6 +527,16 @@ redesign spec at
 Past miss: `cmd_agent_rebootstrap` (`crates/right/src/main.rs`) shipped
 with raw `println!` and bare `✓`/`⚠` literals, bypassing the rail and
 theme detection. Do not repeat; migrate existing offenders when touched.
+
+## Telegram message UX
+
+Bot-authored Telegram status messages MUST use
+`crates/bot/src/telegram/tg.rs` helpers instead of raw severity prose.
+Success uses `✅`, warnings use `⚠️`, errors use `❌`, and next actions use
+`➡️`. Keep each block short and separate success/warning/action blocks with a
+blank line. Do not send raw `Warning:`, `Failed:`, or similar CLI-style
+prefixes for status replies. Escape untrusted text before passing it into
+`tg::*` helpers because the helpers accept Telegram HTML fragments.
 
 ## OpenShell Integration Conventions
 

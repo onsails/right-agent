@@ -71,7 +71,7 @@ selected signal/threshold trigger. The invocation does not resume or fork the
 foreground session. It receives a bounded bundle from the foreground stream log,
 accepted signal JSON, learning events for the source invocation, and the
 `rightx-*` skill index; then it stores a structured report and sends Telegram
-only for high-confidence create/update candidates with `user_notice`.
+only for high-confidence create/update candidates with `user_notice`. Reports that do not notify Telegram are still persisted in `skill_review_reports` and logged with trigger, status, confidence, candidate name, and `telegram_notified`; `nothing_to_learn` remains silent for users by default.
 
 CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 2.0 for cron,
 per-message from agent.yaml). Process timeout (600s) is a safety net only.

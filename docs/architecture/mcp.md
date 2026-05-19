@@ -19,12 +19,12 @@ custom-header recommendation; the user can override with `HeaderName: token`.
 `URL as-is` registers the exact original URL without token/header injection,
 preserving query-string credentials.
 
-URL validation has two modes. Public detection remains strict HTTPS and excludes
-loopback/private/link-local hosts. Explicit user-managed registration allows
-loopback HTTP/HTTPS for local development MCP servers: `localhost` hostnames
-including a trailing dot, IPv4 loopback, IPv6 loopback, and IPv4-mapped
-loopback addresses are accepted, while broad private/link-local ranges remain
-rejected.
+URL validation has two modes. Public detection accepts network-routable HTTP and
+HTTPS URLs, excludes loopback/private/link-local hosts, and returns a short
+`Plain HTTP: trusted/encrypted networks only.` warning when plain HTTP is
+registered. Telegram renders that warning through `telegram::tg`, not as raw
+`Warning:` prose. Explicit user-managed registration allows HTTP/HTTPS while
+broad private/link-local ranges remain rejected.
 
 ## MCP Token Refresh
 
@@ -220,4 +220,4 @@ Stage 2 background learned-skill review is report-only. Background review
 invocations do not expose or call `mcp__right__skill_learning_start` or
 `mcp__right__skill_learning_finish`; those remain foreground learning protocol
 tools. The reviewer records `skill_review_reports` and may notify Telegram only
-for high-confidence create/update candidates with `user_notice`.
+for high-confidence create/update candidates with `user_notice`. The reviewer prompt includes candidate decision rules: candidates must be reusable across future sessions, one-off task narrative must not become a skill, transient tool failures must not become persistent negative claims, and existing `rightx-*` skills should be updated before creating new candidates.

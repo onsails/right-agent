@@ -389,7 +389,7 @@ high-confidence create/update candidates from a completed foreground turn, but
 it must not create, patch, archive, or delete skill package files. It does not
 expose or call `mcp__right__skill_learning_start` or
 `mcp__right__skill_learning_finish`; write/edit tools, `Agent`, and `Bash` are
-denied, leaving only read-only inspection tools available to the reviewer.
+denied, leaving only read-only inspection tools available to the reviewer. The reviewer prompt explicitly prefers reusable future-session workflows, rejects one-off task narrative, avoids persistent claims from transient failures, and prefers update candidates for existing `rightx-*` skills when applicable.
 
 ## Upstream MCP Server Instructions
 
