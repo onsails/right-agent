@@ -46,11 +46,15 @@ fn insert_stream_event(
     } else {
         right_agent::learning_episodes::TrustLabel::Primary
     };
-    let content_json = bound_content_json(redact_sensitive_json(event.content_json.clone()));
+    let redacted_content_json = redact_sensitive_json(event.content_json.clone());
     let content_text = truncate_to_chars(
-        &redact_sensitive_text(&content_text_from_redacted_event(&event, &content_json)),
+        &redact_sensitive_text(&content_text_from_redacted_event(
+            &event,
+            &redacted_content_json,
+        )),
         MAX_CONTENT_TEXT_CHARS,
     );
+    let content_json = bound_content_json(redacted_content_json);
     let seq = seq
         .saturating_mul(1_000)
         .saturating_add(i64::try_from(block_index).unwrap_or(i64::MAX));
@@ -136,11 +140,7 @@ pub(crate) fn redact_sensitive_json(value: serde_json::Value) -> serde_json::Val
 }
 
 fn is_sensitive_key(key: &str) -> bool {
-    let normalized = key
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
+    let normalized = normalize_sensitive_key(key);
     normalized.contains("token")
         || normalized.contains("secret")
         || normalized.contains("password")
@@ -152,13 +152,29 @@ fn is_sensitive_key(key: &str) -> bool {
         || normalized.contains("credential")
 }
 
+fn normalize_sensitive_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 fn redact_sensitive_text(value: &str) -> String {
     let mut redact_next = false;
+    let mut redact_cookie_pairs = false;
     value
         .split_whitespace()
         .map(|part| {
+            if redact_cookie_pairs {
+                if part.contains('=') {
+                    return "[redacted]".to_string();
+                }
+                redact_cookie_pairs = false;
+            }
+
             if redact_next {
-                redact_next = false;
+                redact_next = is_auth_scheme(part);
                 return "[redacted]".to_string();
             }
 
@@ -166,6 +182,16 @@ fn redact_sensitive_text(value: &str) -> String {
             if let Some(separator) = separator {
                 let key = &part[..separator];
                 if is_sensitive_key(key) {
+                    let value = &part[separator + 1..];
+                    if value.is_empty() {
+                        if is_cookie_key(key) {
+                            redact_cookie_pairs = true;
+                        } else {
+                            redact_next = true;
+                        }
+                    } else if is_auth_scheme(value) {
+                        redact_next = true;
+                    }
                     return format!("{}[redacted]", &part[..=separator]);
                 }
             }
@@ -177,6 +203,15 @@ fn redact_sensitive_text(value: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn is_cookie_key(key: &str) -> bool {
+    normalize_sensitive_key(key).contains("cookie")
+}
+
+fn is_auth_scheme(value: &str) -> bool {
+    let normalized = normalize_sensitive_key(value);
+    matches!(normalized.as_str(), "bearer" | "basic")
 }
 
 fn summarize_tool_input(tool: &str, input: &serde_json::Value) -> String {
@@ -267,10 +302,25 @@ fn bound_content_json(value: serde_json::Value) -> serde_json::Value {
     if serialized.chars().count() <= MAX_CONTENT_JSON_CHARS {
         return value;
     }
-    serde_json::json!({
-        "truncated": true,
-        "preview": truncate_to_chars(&serialized, MAX_CONTENT_JSON_CHARS),
-    })
+    let mut preview_chars = MAX_CONTENT_JSON_CHARS;
+    loop {
+        let bounded = serde_json::json!({
+            "truncated": true,
+            "preview": truncate_to_chars(&serialized, preview_chars),
+        });
+        let Ok(bounded_serialized) = serde_json::to_string(&bounded) else {
+            return serde_json::json!({"serialization_error": true});
+        };
+        let bounded_chars = bounded_serialized.chars().count();
+        if bounded_chars <= MAX_CONTENT_JSON_CHARS {
+            return bounded;
+        }
+        if preview_chars == 0 {
+            return serde_json::json!({"truncated": true});
+        }
+        preview_chars =
+            preview_chars.saturating_sub((bounded_chars - MAX_CONTENT_JSON_CHARS).max(1));
+    }
 }
 
 fn truncate_to_chars(value: &str, max_chars: usize) -> String {
@@ -410,6 +460,67 @@ mod tests {
         assert!(!content_text.contains("sk-text-secret"), "{content_text}");
         assert!(content_json.contains("[redacted]"), "{content_json}");
         assert!(content_text.contains("[redacted]"), "{content_text}");
+    }
+
+    #[test]
+    fn persist_stream_line_redacts_header_style_secrets() {
+        let conn = conn();
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"curl -H Cookie: session=abc -H X-Api-Key: sk-live -H Authorization:Bearer sk-auth https://example.com"}}]}}"#;
+
+        let id = persist_stream_line(&conn, &scope(), 4, line)
+            .unwrap()
+            .unwrap();
+
+        let (content_json, content_text): (String, String) = conn
+            .query_row(
+                "SELECT content_json, content_text FROM execution_events WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        for secret in ["session=abc", "sk-live", "sk-auth"] {
+            assert!(!content_json.contains(secret), "{content_json}");
+            assert!(!content_text.contains(secret), "{content_text}");
+        }
+        assert!(content_json.contains("[redacted]"), "{content_json}");
+        assert!(content_text.contains("[redacted]"), "{content_text}");
+    }
+
+    #[test]
+    fn persist_stream_line_caps_content_text_and_json() {
+        let conn = conn();
+        let mut input = serde_json::Map::new();
+        for i in 0..6 {
+            input.insert(
+                format!("safe_{i}"),
+                serde_json::Value::String("x".repeat(2_100)),
+            );
+        }
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "Unknown",
+                    "input": input,
+                }]
+            }
+        })
+        .to_string();
+
+        let id = persist_stream_line(&conn, &scope(), 5, &line)
+            .unwrap()
+            .unwrap();
+
+        let (content_json, content_text): (String, String) = conn
+            .query_row(
+                "SELECT content_json, content_text FROM execution_events WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(content_json.chars().count() <= 8_000, "{content_json}");
+        assert_eq!(content_text.chars().count(), 2_000);
     }
 
     #[test]
