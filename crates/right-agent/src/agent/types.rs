@@ -195,6 +195,27 @@ backoff_seconds: 30
     }
 
     #[test]
+    fn learning_config_rejects_zero_budget() {
+        let yaml = "learning:\n  episode_selector_max_budget_usd: 0\n";
+        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn learning_config_rejects_negative_budget() {
+        let yaml = "learning:\n  episode_selector_max_budget_usd: -0.01\n";
+        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn learning_config_rejects_zero_settle_seconds() {
+        let yaml = "learning:\n  episode_settle_seconds: 0\n";
+        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn agent_config_rejects_unknown_fields() {
         let yaml = r#"
 restart: never

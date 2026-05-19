@@ -99,6 +99,34 @@ fn default_episode_settle_seconds() -> u64 {
     90
 }
 
+fn deserialize_positive_finite_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if value.is_finite() && value > 0.0 {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "episode_selector_max_budget_usd must be finite and > 0.0",
+        ))
+    }
+}
+
+fn deserialize_positive_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    if value > 0 {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "episode_settle_seconds must be greater than 0",
+        ))
+    }
+}
+
 /// Network access policy for sandbox.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -268,10 +296,16 @@ pub struct LearningConfig {
     /// Optional selector model. None means inherit the agent model.
     pub episode_selector_model: Option<String>,
     /// Maximum spend for one episode-selection invocation.
-    #[serde(default = "default_episode_selector_max_budget_usd")]
+    #[serde(
+        default = "default_episode_selector_max_budget_usd",
+        deserialize_with = "deserialize_positive_finite_f64"
+    )]
     pub episode_selector_max_budget_usd: f64,
     /// Delay after seed evidence before selecting the episode boundary.
-    #[serde(default = "default_episode_settle_seconds")]
+    #[serde(
+        default = "default_episode_settle_seconds",
+        deserialize_with = "deserialize_positive_u64"
+    )]
     pub episode_settle_seconds: u64,
 }
 
