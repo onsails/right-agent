@@ -87,3 +87,16 @@ Learned skill packages are agent-owned directories under
 `/sandbox/.claude/skills/rightx-*`. The learning MCP tools do not patch
 non-`rightx-*` skill directories and do not copy skill files from sandbox to
 host.
+
+### User-Local CLI Environment
+
+For OpenShell agents, Right Agent treats `/sandbox/.local/bin` as the canonical
+user-installed executable directory. Startup sync writes
+`/sandbox/.right/env.sh`, ensures `/sandbox/.bashrc` sources it, and the Claude
+invocation wrapper sources the same file with an inline fallback. This makes
+manually installed CLIs and `npm install -g` bins available both to `claude -p`
+turns and to `right agent ssh` shells.
+
+The managed environment sets `NPM_CONFIG_PREFIX=/sandbox/.local` and
+`NPM_CONFIG_CACHE=/sandbox/.npm`. Agents should not use `sudo` or `~/bin` for
+sandbox tool installs.
