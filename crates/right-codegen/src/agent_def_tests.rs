@@ -242,6 +242,22 @@ fn operating_instructions_constant_is_non_empty() {
 }
 
 #[test]
+fn operating_instructions_describe_soul_as_operating_contract() {
+    let ops = crate::OPERATING_INSTRUCTIONS;
+    for needle in [
+        "`SOUL.md` — your compact operating contract",
+        "autonomy",
+        "pushback",
+        "escalation boundaries",
+    ] {
+        assert!(
+            ops.contains(needle),
+            "OPERATING_INSTRUCTIONS must describe SOUL.md operating contract: missing {needle:?}"
+        );
+    }
+}
+
+#[test]
 fn operating_instructions_route_reusable_workflows_to_right_learn_skill() {
     let ops = crate::OPERATING_INSTRUCTIONS;
     for needle in [
@@ -254,6 +270,32 @@ fn operating_instructions_route_reusable_workflows_to_right_learn_skill() {
             ops.contains(needle),
             "OPERATING_INSTRUCTIONS must mention {needle:?}"
         );
+    }
+}
+
+#[test]
+fn right_memory_skills_route_remember_requests_by_storage_layer() {
+    let hindsight = include_str!("../skills/right-memory-hindsight/SKILL.md");
+    let file = include_str!("../skills/right-memory-file/SKILL.md");
+
+    for (name, skill) in [
+        ("right-memory-hindsight", hindsight),
+        ("right-memory-file", file),
+    ] {
+        for needle in [
+            "When the user says \"remember\"",
+            "first classify what kind of persistent fact it is",
+            "`TOOLS.md`",
+            "`USER.md`",
+            "`SOUL.md`",
+            "`IDENTITY.md`",
+            "memory is the fallback",
+        ] {
+            assert!(
+                skill.contains(needle),
+                "{name} must route remember requests by storage layer: missing {needle:?}"
+            );
+        }
     }
 }
 
@@ -368,6 +410,23 @@ fn bootstrap_instructions_constant_is_non_empty() {
         crate::BOOTSTRAP_INSTRUCTIONS.contains("### SOUL.md"),
         "BOOTSTRAP_INSTRUCTIONS must contain SOUL.md structure"
     );
+}
+
+#[test]
+fn bootstrap_instructions_generate_soul_operating_contract() {
+    let bootstrap = crate::BOOTSTRAP_INSTRUCTIONS;
+    for needle in [
+        "**Operating Contract**",
+        "act on reversible low-risk work",
+        "public, costly, destructive, credential/security, or private-data actions",
+        "challenge weak assumptions with evidence",
+        "usable outcomes over polished artifacts",
+    ] {
+        assert!(
+            bootstrap.contains(needle),
+            "BOOTSTRAP_INSTRUCTIONS must generate SOUL operating contract: missing {needle:?}"
+        );
+    }
 }
 
 #[test]

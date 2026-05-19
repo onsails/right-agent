@@ -414,3 +414,25 @@ fn test_get_info_mentions_cron_and_mcp_tools() {
         "instructions should mention mcp_list: {instructions}"
     );
 }
+
+#[test]
+fn test_get_info_routes_memory_before_retain() {
+    let (server, _dir) = setup_server_with_dir();
+    let info = server.get_info();
+    let instructions = info.instructions.unwrap_or_default();
+    for needle in [
+        "remember",
+        "first classify",
+        "TOOLS.md",
+        "USER.md",
+        "SOUL.md",
+        "IDENTITY.md",
+        "memory_retain",
+        "fallback",
+    ] {
+        assert!(
+            instructions.contains(needle),
+            "instructions should route memory before retain: missing {needle:?}; {instructions}"
+        );
+    }
+}

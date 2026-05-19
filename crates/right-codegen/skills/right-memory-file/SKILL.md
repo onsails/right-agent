@@ -9,6 +9,19 @@ Your long-term memory is stored in `MEMORY.md` in your home directory.
 This file is automatically injected into your system prompt at the start
 of each interaction (truncated to 200 lines).
 
+## Remember request router
+
+When the user says "remember", "save this", or "don't forget", first classify what kind of persistent fact it is. The word "remember" means "persist this", not "write to `MEMORY.md`".
+
+- Tool/API/environment rules -> `TOOLS.md`
+- Stable user facts, preferences, timezone, communication style -> `USER.md`
+- Your voice, autonomy, pushback, escalation boundaries -> `SOUL.md`
+- Core identity, principles, security posture -> `IDENTITY.md`
+- Reusable procedures -> learned skill
+- Narrow durable context with no better home -> memory
+
+After this routing, memory is the fallback for facts with no better home.
+
 ## How to use
 
 Use Claude Code's built-in `Edit` and `Write` tools to manage MEMORY.md:
