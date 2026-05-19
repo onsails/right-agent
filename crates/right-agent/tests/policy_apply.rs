@@ -100,6 +100,31 @@ async fn exec_true(sandbox_name: &str, mtls_dir: &Path) -> i32 {
     exit
 }
 
+async fn curl_scoped_npm_metadata(sandbox_name: &str, mtls_dir: &Path) -> (String, i32) {
+    let mut client = openshell::connect_grpc(mtls_dir)
+        .await
+        .expect("connect_grpc");
+    let id = openshell::resolve_sandbox_id(&mut client, sandbox_name)
+        .await
+        .expect("resolve_sandbox_id");
+    openshell::exec_in_sandbox(
+        &mut client,
+        &id,
+        &[
+            "curl",
+            "-fsS",
+            "--max-time",
+            "15",
+            "https://registry.npmjs.org/@types%2fnode",
+            "-o",
+            "/dev/null",
+        ],
+        DEFAULT_EXEC_TIMEOUT_SECS,
+    )
+    .await
+    .expect("exec_in_sandbox")
+}
+
 fn cleanup_sandbox(name: &str) {
     test_cleanup::unregister_test_sandbox(name);
     test_cleanup::delete_sandbox_sync(name);
@@ -127,6 +152,31 @@ async fn ci_openshell_generated_permissive_policy_applies_to_live_openshell() {
     assert_eq!(
         exit, 0,
         "sandbox exec failed after creation with permissive codegen policy"
+    );
+}
+
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
+#[tokio::test]
+async fn ci_openshell_generated_permissive_policy_allows_scoped_npm_metadata() {
+    let _slot = acquire_sandbox_slot();
+
+    let policy = generate_policy(
+        8100,
+        &NetworkPolicy::Permissive,
+        right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
+    );
+    let name = spawn_with_policy("policy-apply-scoped-npm", &policy).await;
+
+    let mtls_dir = match openshell::preflight_check() {
+        OpenShellStatus::Ready(dir) => dir,
+        other => panic!("OpenShell not ready: {other:?}"),
+    };
+
+    let (out, exit) = curl_scoped_npm_metadata(&name, &mtls_dir).await;
+    cleanup_sandbox(&name);
+    assert_eq!(
+        exit, 0,
+        "scoped npm metadata request failed after creation with permissive codegen policy:\n{out}"
     );
 }
 

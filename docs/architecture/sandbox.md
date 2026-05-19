@@ -49,9 +49,12 @@ Sandbox migration (`right agent config` filesystem-policy drift):
 
 Sandbox network:
   ├─ HTTP CONNECT proxy at 10.200.0.1:3128 (set via HTTPS_PROXY env)
-  ├─ TLS MITM: proxy auto-detects TLS (ClientHello peek) and terminates
-  │   unconditionally for credential injection (OpenShell v0.0.30+)
+  ├─ TLS MITM: L7 endpoints use TLS auto-detect (ClientHello peek) and
+  │   termination for credential injection (OpenShell v0.0.30+)
   │   └─ Sandbox trusts CA via /etc/openshell-tls/ca-bundle.pem
+  ├─ Permissive public web uses hostless public allowed_ips raw tunnels
+  │   (`tls: skip`, no protocol/access) on 80/443 so scoped npm metadata
+  │   paths containing `%2F` are not rejected by L7 request-target parsing
   └─ Policy controls which domains/IPs are allowed (wildcards supported for scoped public hosts)
 
 Right MCP host access:

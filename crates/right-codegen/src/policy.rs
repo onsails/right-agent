@@ -157,13 +157,11 @@ fn permissive_endpoints() -> String {
         r#"      - port: 443
         allowed_ips:
 {allowed_ips}
-        protocol: rest
-        access: full
+        tls: skip
       - port: 80
         allowed_ips:
 {allowed_ips}
-        protocol: rest
-        access: full"#
+        tls: skip"#
     )
 }
 
@@ -232,11 +230,12 @@ fn right_mcp_allowed_ips_yaml(host_mcp_access: HostMcpAccess) -> String {
 ///   after resolving `host.openshell.internal` from inside the target sandbox.
 ///
 /// Network policy allows outbound HTTP/HTTPS. Since OpenShell v0.0.30
-/// the proxy auto-detects TLS via ClientHello peek and terminates unconditionally
-/// for credential injection — `tls: terminate` is no longer written (emits a
-/// per-request deprecation WARN in the sandbox supervisor log and is scheduled
-/// for removal). Omitting the field yields identical behaviour. The right MCP
-/// server on the host is accessed via plain HTTP through the Docker bridge.
+/// L7 endpoints auto-detect TLS via ClientHello peek; `tls: terminate` and
+/// `tls: passthrough` are deprecated and no longer written. Permissive public
+/// web endpoints intentionally use `tls: skip` raw tunnels so normal public
+/// internet request targets such as scoped npm metadata (`%2F`) bypass L7
+/// parsing. The right MCP server on the host is accessed via plain HTTP
+/// through the Docker bridge.
 pub fn generate_policy(
     right_mcp_port: u16,
     network_policy: &NetworkPolicy,
@@ -527,12 +526,48 @@ mod tests {
         }
     }
 
-    /// Regression: OpenShell v0.0.30 deprecated the `tls:` field. Emitting
-    /// `tls: terminate` causes a per-request WARN in the sandbox supervisor
-    /// log ("'tls: terminate' is deprecated; TLS termination is now automatic")
-    /// and the field is slated for removal. Auto-detect does the right thing.
     #[test]
-    fn does_not_emit_deprecated_tls_terminate() {
+    fn permissive_public_web_endpoints_are_l4_only() {
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&policy).expect("policy must be valid YAML");
+        let endpoints = parsed["network_policies"]["outbound"]["endpoints"]
+            .as_array()
+            .expect("outbound endpoints must be a list");
+
+        for port in [443_u64, 80] {
+            let endpoint = endpoints
+                .iter()
+                .find(|endpoint| endpoint["port"].as_u64() == Some(port))
+                .unwrap_or_else(|| panic!("missing permissive endpoint for port {port}"));
+            assert!(
+                endpoint.get("protocol").is_none(),
+                "permissive public-web endpoint on port {port} must be L4-only; \
+                 L7 REST inspection rejects scoped npm request targets containing %2F",
+            );
+            assert!(
+                endpoint.get("access").is_none(),
+                "permissive public-web endpoint on port {port} must not set L7 access presets",
+            );
+            assert_eq!(
+                endpoint["tls"].as_str(),
+                Some("skip"),
+                "permissive public-web endpoint on port {port} must skip TLS termination; \
+                 OpenShell auto-termination still routes encoded scoped npm paths through L7",
+            );
+        }
+    }
+
+    /// Regression: OpenShell v0.0.30 deprecated `tls: terminate` and
+    /// `tls: passthrough`. Restrictive L7 endpoints rely on auto-detect and
+    /// must not emit `tls`; permissive public-web endpoints intentionally use
+    /// `tls: skip` to bypass L7 request-target parsing for raw internet access.
+    #[test]
+    fn does_not_emit_deprecated_tls_modes() {
         let permissive = generate_policy(
             8100,
             &NetworkPolicy::Permissive,
@@ -545,10 +580,14 @@ mod tests {
         );
         for (name, policy) in [("permissive", &permissive), ("restrictive", &restrictive)] {
             assert!(
-                !policy.contains("tls:"),
-                "{name} policy must not emit tls: field (deprecated in OpenShell v0.0.30+)",
+                !policy.contains("tls: terminate") && !policy.contains("tls: passthrough"),
+                "{name} policy must not emit deprecated tls modes",
             );
         }
+        assert!(
+            !restrictive.contains("tls:"),
+            "restrictive L7 policy must use TLS auto-detect rather than explicit tls fields",
+        );
     }
 
     #[test]
