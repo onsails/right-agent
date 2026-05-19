@@ -164,6 +164,37 @@ fn system_prompt_mentions_right_mcp() {
 }
 
 #[test]
+fn system_prompt_delegates_remember_routing_to_right_memory_skill() {
+    let result = generate_system_prompt(
+        "test",
+        &right_agent_config::SandboxMode::Openshell,
+        "/sandbox",
+    );
+
+    for needle in [
+        "Identity files are always-loaded durable context",
+        "`SOUL.md`",
+        "agent-authored durable voice",
+        "/right-memory",
+    ] {
+        assert!(
+            result.contains(needle),
+            "system prompt must preserve identity ownership and right-memory delegation: missing {needle:?}"
+        );
+    }
+
+    for forbidden in [
+        "compact operating contract",
+        "\"Remember\" requests are routed by semantic type before storage. Tool/API/env rules go to",
+    ] {
+        assert!(
+            !result.contains(forbidden),
+            "system prompt must not duplicate detailed routing or prescribe SOUL defaults: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
 fn system_prompt_contains_ssh_block_for_openshell() {
     let result = generate_system_prompt(
         "mybot",
@@ -242,17 +273,31 @@ fn operating_instructions_constant_is_non_empty() {
 }
 
 #[test]
-fn operating_instructions_describe_soul_as_operating_contract() {
+fn operating_instructions_keep_soul_agent_authored_and_delegate_remember_routing() {
     let ops = crate::OPERATING_INSTRUCTIONS;
     for needle in [
-        "`SOUL.md` — your compact operating contract",
-        "autonomy",
-        "pushback",
-        "escalation boundaries",
+        "`SOUL.md`",
+        "agent-authored durable voice",
+        "Do not invent platform-default content for this file",
+        "Use the `/right-memory` skill to classify the correct persistence target",
+        "smallest accurate edit",
     ] {
         assert!(
             ops.contains(needle),
-            "OPERATING_INSTRUCTIONS must describe SOUL.md operating contract: missing {needle:?}"
+            "OPERATING_INSTRUCTIONS must describe ownership-safe SOUL routing: missing {needle:?}"
+        );
+    }
+
+    for forbidden in [
+        "compact operating contract",
+        "Edit the always-loaded file when the fact belongs in one",
+        "`TOOLS.md` for tool/API/environment rules",
+        "`USER.md` for user profile",
+        "`SOUL.md` for your voice",
+    ] {
+        assert!(
+            !ops.contains(forbidden),
+            "OPERATING_INSTRUCTIONS must not duplicate detailed routing or platform SOUL defaults: found {forbidden:?}"
         );
     }
 }
@@ -413,18 +458,28 @@ fn bootstrap_instructions_constant_is_non_empty() {
 }
 
 #[test]
-fn bootstrap_instructions_generate_soul_operating_contract() {
+fn bootstrap_instructions_do_not_invent_platform_soul_contract() {
     let bootstrap = crate::BOOTSTRAP_INSTRUCTIONS;
     for needle in [
-        "**Operating Contract**",
-        "act on reversible low-risk work",
-        "public, costly, destructive, credential/security, or private-data actions",
-        "challenge weak assumptions with evidence",
-        "usable outcomes over polished artifacts",
+        "based on the user's bootstrap choices",
+        "If the user gave no signal, keep it minimal",
+        "do not invent a platform-default operating contract",
     ] {
         assert!(
             bootstrap.contains(needle),
-            "BOOTSTRAP_INSTRUCTIONS must generate SOUL operating contract: missing {needle:?}"
+            "BOOTSTRAP_INSTRUCTIONS must keep SOUL user/agent-authored: missing {needle:?}"
+        );
+    }
+
+    for forbidden in [
+        "**Operating Contract**",
+        "act on reversible low-risk work",
+        "credential/security, or private-data actions",
+        "usable outcomes over polished artifacts",
+    ] {
+        assert!(
+            !bootstrap.contains(forbidden),
+            "BOOTSTRAP_INSTRUCTIONS must not prescribe platform SOUL content: found {forbidden:?}"
         );
     }
 }
