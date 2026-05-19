@@ -421,6 +421,27 @@ fn shell_printf_b_arg(content: &str) -> String {
         .into_owned()
 }
 
+fn shell_arg(content: &str) -> String {
+    shlex::try_quote(content)
+        .expect("shlex::try_quote cannot fail for valid UTF-8")
+        .into_owned()
+}
+
+fn bashrc_read_script(path: &str) -> String {
+    let path_arg = shell_arg(path);
+    let message = shell_arg(&format!("not a regular file: {path}"));
+    format!(
+        "if [ -f {path_arg} ]; then \
+           cat {path_arg}; \
+         elif [ -e {path_arg} ]; then \
+           printf '%s\\n' {message} >&2; \
+           exit 1; \
+         else \
+           :; \
+         fi"
+    )
+}
+
 /// Ensure the sandbox has Right's managed user-local CLI/npm environment.
 ///
 /// `/sandbox/.local/bin` is the single canonical location for user-installed
@@ -445,14 +466,10 @@ async fn ensure_sandbox_user_local_env(
         ));
     }
 
-    // One-exec read: `[ ! -f ] || cat` succeeds (empty stdout) when the
-    // file is missing or not a regular file (e.g. a dangling symlink),
-    // succeeds (file body on stdout) when present and readable, and
-    // surfaces a real error (e.g. unreadable) as non-zero. We use `-f`
-    // rather than `-e` so dangling symlinks (which `-e` reports as
-    // absent only when broken, but `cat` would still fail on) are
-    // treated uniformly as "nothing to source".
-    let read_script = format!("[ ! -f {SANDBOX_BASHRC_PATH} ] || cat {SANDBOX_BASHRC_PATH}");
+    // One-exec read: missing and dangling-symlink paths are treated as an
+    // empty `.bashrc`; existing non-regular paths are rejected before the
+    // atomic writer can accidentally move the temp file into a directory.
+    let read_script = bashrc_read_script(SANDBOX_BASHRC_PATH);
     let (existing, code) = sbox.exec(&["bash", "-lc", &read_script]).await?;
     if code != 0 {
         return Err(miette::miette!(
@@ -707,6 +724,85 @@ percent % and backslash \\ and carriage\r and tab\t done\n";
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(output.stdout, content.as_bytes());
+    }
+
+    #[test]
+    fn bashrc_read_script_errors_on_existing_non_regular_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bashrc_path = tmp.path().join(".bashrc");
+        std::fs::create_dir(&bashrc_path).expect("create .bashrc dir");
+
+        let output = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(bashrc_read_script(
+                bashrc_path.to_str().expect("utf-8 temp path"),
+            ))
+            .output()
+            .expect("bash should run read script");
+
+        assert!(
+            !output.status.success(),
+            "directory .bashrc should be rejected, stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("not a regular file"),
+            "stderr should explain non-regular path, got {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn bashrc_read_script_reads_regular_file_and_allows_missing_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bashrc_path = tmp.path().join(".bashrc");
+        std::fs::write(&bashrc_path, "export TEST=1\n").expect("write .bashrc");
+
+        let output = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(bashrc_read_script(
+                bashrc_path.to_str().expect("utf-8 temp path"),
+            ))
+            .output()
+            .expect("bash should run read script");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"export TEST=1\n");
+
+        std::fs::remove_file(&bashrc_path).expect("remove .bashrc");
+        let output = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(bashrc_read_script(
+                bashrc_path.to_str().expect("utf-8 temp path"),
+            ))
+            .output()
+            .expect("bash should run read script");
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bashrc_read_script_treats_dangling_symlink_as_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bashrc_path = tmp.path().join(".bashrc");
+        std::os::unix::fs::symlink(tmp.path().join("missing-target"), &bashrc_path)
+            .expect("create dangling symlink");
+
+        let output = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(bashrc_read_script(
+                bashrc_path.to_str().expect("utf-8 temp path"),
+            ))
+            .output()
+            .expect("bash should run read script");
+
+        assert!(
+            output.status.success(),
+            "dangling symlink should be treated as missing, stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
     }
 
     #[ignore = "ci-openshell: requires live OpenShell gateway"]
