@@ -350,6 +350,10 @@ fn review_prompt_says_report_only_and_nothing_to_learn_is_normal() {
     assert!(prompt.contains("Do not call learning tools"));
     assert!(prompt.contains("Do not ask the user questions"));
     assert!(prompt.contains("nothing_to_learn is normal"));
+    assert!(prompt.contains("Candidates must be reusable across future sessions"));
+    assert!(prompt.contains("Do not preserve one-off task narrative"));
+    assert!(prompt.contains("Do not make persistent negative claims from transient tool failures"));
+    assert!(prompt.contains("Prefer update candidates for existing rightx-* skills"));
     assert!(prompt.contains("rightx-oauth-debugging"));
 }
 
