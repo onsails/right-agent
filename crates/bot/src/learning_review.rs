@@ -195,12 +195,18 @@ impl ReviewOutput {
             return Ok(());
         }
 
-        let has_observable_evidence = self.evidence_refs.iter().any(|ref_id| {
-            matches!(
-                index.get(ref_id),
-                Some(EvidenceKind::Message | EvidenceKind::ObservableExecution)
-            )
-        });
+        let mut has_observable_evidence = false;
+        for ref_id in &self.evidence_refs {
+            let Some(kind) = index.get(ref_id) else {
+                return Err(format!(
+                    "candidate evidence_ref is not part of the selected episode: {ref_id}"
+                ));
+            };
+            has_observable_evidence |= matches!(
+                kind,
+                EvidenceKind::Message | EvidenceKind::ObservableExecution
+            );
+        }
         if has_observable_evidence {
             Ok(())
         } else {
@@ -370,10 +376,20 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
         "Decision rules:\n\
          - Candidates must be reusable across future sessions, not a summary of this one task.\n\
          - Do not preserve one-off task narrative in candidate summaries.\n\
-         - Do not make persistent negative claims from transient tool failures.\n\
-         - Thinking events are secondary context. They can guide wording, but candidate evidence_refs must include at least one observable ref: msg:* or non-thinking exec:*.\n\
-         - Thinking events cannot be the only evidence for a candidate.\n\
-         - Prefer update candidates for existing rightx-* skills when the evidence refines an installed learned skill.\n\
+         - Do not make persistent negative claims from transient tool failures.\n",
+    );
+    if bundle.learning_episode_id.is_some() {
+        prompt.push_str(
+            "         - Thinking events are secondary context. They can guide wording, but candidate evidence_refs must include at least one observable ref: msg:* or non-thinking exec:*.\n\
+             - Thinking events cannot be the only evidence for a candidate.\n",
+        );
+    } else {
+        prompt.push_str(
+            "         - Legacy foreground evidence uses event-* refs. Candidate evidence_refs must cite available event-* refs from the event timeline.\n",
+        );
+    }
+    prompt.push_str(
+        "         - Prefer update candidates for existing rightx-* skills when the evidence refines an installed learned skill.\n\
          - Use create_candidate when repeated tool patterns or setup workflows are reusable and no existing rightx-* skill fits.\n\
          - Use nothing_to_learn when the evidence is only normal task progress, isolated facts, or one-time content.\n\n",
     );

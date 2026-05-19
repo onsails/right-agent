@@ -683,6 +683,17 @@ async fn run_episode_reviewer_inner(
     let status = report.status;
     insert_skill_review_report(&conn, &report)
         .with_context(|| format!("insert learning episode {episode_id} review report"))?;
+    if status == ReviewStatus::Failed {
+        right_agent::learning_episodes::mark_episode_failed(
+            &conn,
+            episode_id,
+            "reviewer returned failed status",
+        )
+        .with_context(|| format!("mark learning episode {episode_id} failed"))?;
+        mark_review_finished(&conn, &episode.agent_name, trigger_kind, status, false)
+            .with_context(|| format!("finish failed learning episode {episode_id} review gate"))?;
+        return Ok(());
+    }
     mark_episode_reviewed(&conn, episode_id)
         .with_context(|| format!("mark learning episode {episode_id} reviewed"))?;
     mark_review_finished(
