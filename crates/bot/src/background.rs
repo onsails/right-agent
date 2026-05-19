@@ -48,6 +48,7 @@ pub(crate) async fn spawn_background_continuation(
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     _session_guard: tokio::sync::OwnedMutexGuard<()>,
     debug: Arc<std::sync::atomic::AtomicBool>,
+    learning: right_agent::agent::types::LearningConfig,
 ) -> HandoffStatus {
     let log_path = bg_log_path(&agent_dir, &request.run_id);
     if let Some(parent) = log_path.parent()
@@ -82,7 +83,7 @@ pub(crate) async fn spawn_background_continuation(
         ),
         extra_args: vec![],
         prompt: Some(request.prompt.clone()),
-        debug_flag: Some(debug),
+        debug_flag: Some(Arc::clone(&debug)),
     };
     let claude_args = invocation.into_args();
 
@@ -183,7 +184,11 @@ pub(crate) async fn spawn_background_continuation(
     tokio::spawn(complete_background_run(
         request,
         agent_dir,
+        agent_name,
+        ssh_config_path,
         resolved_sandbox,
+        debug,
+        learning,
         child,
         reader_handle,
         stderr_handle,
@@ -522,7 +527,11 @@ async fn kill_unconfirmed_child(
 async fn complete_background_run(
     request: BackgroundRunRequest,
     agent_dir: PathBuf,
+    agent_name: String,
+    ssh_config_path: Option<PathBuf>,
     resolved_sandbox: Option<String>,
+    debug: Arc<std::sync::atomic::AtomicBool>,
+    learning: right_agent::agent::types::LearningConfig,
     mut child: right_process::ProcessGroupChild,
     reader_handle: JoinHandle<Result<Vec<String>, String>>,
     stderr_handle: Option<JoinHandle<Result<String, String>>>,
@@ -595,10 +604,16 @@ async fn complete_background_run(
         Ok(output) => {
             if let Err(reason) = persist_successful_background_output(
                 &agent_dir,
+                &agent_name,
                 &request.run_id,
                 exit_code,
                 &output,
+                ssh_config_path.as_deref(),
                 resolved_sandbox.as_deref(),
+                &debug,
+                &learning,
+                request.target_chat_id,
+                request.target_thread_id,
             )
             .await
             {
@@ -643,10 +658,16 @@ fn append_stderr_to_reason(reason: &str, stderr: &str) -> String {
 
 async fn persist_successful_background_output(
     agent_dir: &Path,
+    agent_name: &str,
     run_id: &str,
     exit_code: Option<i32>,
     output: &crate::cron::CronReplyOutput,
+    ssh_config_path: Option<&Path>,
     resolved_sandbox: Option<&str>,
+    debug: &Arc<std::sync::atomic::AtomicBool>,
+    learning: &right_agent::agent::types::LearningConfig,
+    target_chat_id: i64,
+    target_thread_id: Option<i64>,
 ) -> Result<(), String> {
     let notify = output
         .notify
@@ -679,7 +700,63 @@ async fn persist_successful_background_output(
         .map_err(|e| format!("finish background run: {e:#}"))?;
     tx.commit()
         .map_err(|e| format!("commit background output: {e:#}"))?;
+    capture_background_completion_seed(
+        &conn,
+        agent_dir,
+        agent_name,
+        run_id,
+        ssh_config_path,
+        resolved_sandbox,
+        debug,
+        learning,
+        target_chat_id,
+        target_thread_id,
+    );
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_background_completion_seed(
+    conn: &rusqlite::Connection,
+    agent_dir: &Path,
+    agent_name: &str,
+    run_id: &str,
+    ssh_config_path: Option<&Path>,
+    resolved_sandbox: Option<&str>,
+    debug: &Arc<std::sync::atomic::AtomicBool>,
+    learning: &right_agent::agent::types::LearningConfig,
+    target_chat_id: i64,
+    target_thread_id: Option<i64>,
+) {
+    let seed_ref = format!("async:{run_id}");
+    let runtime = crate::learning_episode::LearningEpisodeRuntime {
+        agent_dir: agent_dir.to_path_buf(),
+        agent_db_dir: agent_dir.to_path_buf(),
+        agent_name: agent_name.to_owned(),
+        ssh_config_path: ssh_config_path.map(Path::to_path_buf),
+        resolved_sandbox: resolved_sandbox.map(str::to_owned),
+        debug: Arc::clone(debug),
+        learning: learning.clone(),
+    };
+    let input = crate::learning_episode::EpisodeSeedInput {
+        agent_name,
+        kind: right_agent::learning_episodes::LearningEpisodeKind::AsyncContinuation,
+        seed_trigger_kind: right_agent::learning_episodes::EpisodeSeedTriggerKind::AsyncResult,
+        seed_ref: &seed_ref,
+        target_chat_id: Some(target_chat_id),
+        target_thread_id,
+        settle_seconds: learning.episode_settle_seconds,
+        now: &chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    };
+    if let Err(e) =
+        crate::learning_episode::capture_episode_seed_and_spawn_drain(conn, input, runtime)
+    {
+        tracing::warn!(
+            agent = %agent_name,
+            run_id,
+            "background completion learning episode seed capture failed: {e:#}"
+        );
+    }
 }
 
 async fn serialize_notify_for_host(

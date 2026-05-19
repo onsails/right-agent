@@ -7,6 +7,7 @@ mod config_watcher;
 pub(crate) mod cron;
 pub(crate) mod execution_events;
 mod keepalive;
+pub(crate) mod learning_episode;
 pub(crate) mod learning_review;
 pub(crate) mod login;
 pub(crate) mod reflection;
@@ -909,6 +910,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let cron_sandbox = resolved_sandbox.clone();
     let cron_upgrade_lock = Arc::clone(&upgrade_lock);
     let cron_debug = Arc::clone(&debug_flag);
+    let cron_learning = config.learning.clone();
     let cron_handle = tokio::spawn(async move {
         cron::run_cron_task(
             cron_agent_dir,
@@ -920,6 +922,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             cron_sandbox,
             cron_upgrade_lock,
             cron_debug,
+            cron_learning,
         )
         .await;
     });
@@ -971,6 +974,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_upgrade_lock = Arc::clone(&upgrade_lock);
     let delivery_session_locks = Arc::clone(&session_locks);
     let delivery_debug = Arc::clone(&debug_flag);
+    let delivery_learning = config.learning.clone();
     let delivery_handle = tokio::spawn(async move {
         async_delivery::run_delivery_loop(
             delivery_agent_dir,
@@ -985,6 +989,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             delivery_upgrade_lock,
             delivery_session_locks,
             delivery_debug,
+            delivery_learning,
         )
         .await;
     });

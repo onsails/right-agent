@@ -24,9 +24,9 @@ use crate::cc::worker_reply::{append_used_skill_receipts, should_accept_bootstra
 use crate::reflection::FailureKind;
 use right_agent::learned_skills::{
     NudgeSignalKind, NudgeSignalRecord, ReviewGateDecision, ReviewGateInput, ReviewStatus,
-    SkillReviewReport, clear_review_running, increment_turn_nudge_counters,
-    insert_skill_review_report, mark_review_finished, record_nudge_signal, select_reply_signal,
-    try_mark_review_started,
+    ReviewTriggerKind, SkillReviewReport, clear_review_running, increment_turn_nudge_counters,
+    insert_skill_review_report, mark_review_finished, record_nudge_signal, review_gate_decision,
+    select_reply_signal, try_mark_review_started,
 };
 
 use super::session::{
@@ -1580,6 +1580,7 @@ pub fn spawn_worker(
                         Arc::clone(&ctx.upgrade_lock),
                         session_guard,
                         Arc::clone(&ctx.debug),
+                        ctx.learning.clone(),
                     )
                     .await;
                     gate_release.release();
@@ -2384,6 +2385,100 @@ fn maybe_spawn_learned_skill_review(
             }
         }
     }));
+}
+
+#[allow(clippy::type_complexity)]
+const _: fn(
+    &rusqlite::Connection,
+    &WorkerContext,
+    i64,
+    i64,
+    &str,
+    Option<&str>,
+    Option<(NudgeSignalKind, serde_json::Value)>,
+) = maybe_spawn_learned_skill_review;
+
+fn maybe_capture_learning_episode_seed(
+    conn: &rusqlite::Connection,
+    ctx: &WorkerContext,
+    chat_id: i64,
+    eff_thread_id: i64,
+    source_invocation_id: Option<&str>,
+    accepted_signal: Option<&(NudgeSignalKind, serde_json::Value)>,
+) {
+    let Some(source_invocation_id) = source_invocation_id else {
+        return;
+    };
+    let has_learning_accepted = matches!(accepted_signal, Some((NudgeSignalKind::Learning, _)));
+    let has_skill_issue_accepted =
+        matches!(accepted_signal, Some((NudgeSignalKind::SkillIssue, _)));
+    let signal_trigger = crate::learning_review::select_review_trigger(
+        has_learning_accepted,
+        has_skill_issue_accepted,
+    );
+    let today = review_today_utc();
+    let decision = match review_gate_decision(
+        conn,
+        &ctx.agent_name,
+        ReviewGateInput {
+            signal_trigger,
+            today: &today,
+            daily_limit: LEARNED_SKILL_REVIEW_DAILY_LIMIT,
+        },
+    ) {
+        Ok(decision) => decision,
+        Err(e) => {
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                invocation_id = %source_invocation_id,
+                "learning episode gate decision failed: {e:#}"
+            );
+            return;
+        }
+    };
+    let ReviewGateDecision::Start(trigger_kind) = decision else {
+        return;
+    };
+    let seed_trigger_kind = match trigger_kind {
+        ReviewTriggerKind::LearningSignal => {
+            right_agent::learning_episodes::EpisodeSeedTriggerKind::LearningSignal
+        }
+        ReviewTriggerKind::SkillIssueSignal => {
+            right_agent::learning_episodes::EpisodeSeedTriggerKind::SkillIssueSignal
+        }
+        ReviewTriggerKind::EffortThreshold => {
+            right_agent::learning_episodes::EpisodeSeedTriggerKind::EffortThreshold
+        }
+    };
+    let seed_ref = format!("inv:{source_invocation_id}");
+    let runtime = crate::learning_episode::LearningEpisodeRuntime {
+        agent_dir: ctx.agent_dir.clone(),
+        agent_db_dir: ctx.agent_db_dir.clone(),
+        agent_name: ctx.agent_name.clone(),
+        ssh_config_path: ctx.ssh_config_path.clone(),
+        resolved_sandbox: ctx.resolved_sandbox.clone(),
+        debug: Arc::clone(&ctx.debug),
+        learning: ctx.learning.clone(),
+    };
+    let input = crate::learning_episode::EpisodeSeedInput {
+        agent_name: &ctx.agent_name,
+        kind: right_agent::learning_episodes::LearningEpisodeKind::ForegroundThread,
+        seed_trigger_kind,
+        seed_ref: &seed_ref,
+        target_chat_id: Some(chat_id),
+        target_thread_id: Some(eff_thread_id),
+        settle_seconds: ctx.learning.episode_settle_seconds,
+        now: &chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    };
+    if let Err(e) =
+        crate::learning_episode::capture_episode_seed_and_spawn_drain(conn, input, runtime)
+    {
+        tracing::warn!(
+            agent = %ctx.agent_name,
+            invocation_id = %source_invocation_id,
+            "learning episode seed capture failed: {e:#}"
+        );
+    }
 }
 
 /// Clears the `skill_nudge_state.review_running` flag without inserting a
@@ -4051,14 +4146,13 @@ async fn invoke_cc(
                 }
             }
 
-            maybe_spawn_learned_skill_review(
+            maybe_capture_learning_episode_seed(
                 &conn,
                 ctx,
                 chat_id,
                 eff_thread_id,
-                &session_uuid,
                 learning_invocation_id.as_deref(),
-                accepted_review_signal,
+                accepted_review_signal.as_ref(),
             );
 
             Ok(CcReply {
