@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use right_agent::agent::allowlist::AllowlistHandle;
 use teloxide::RequestError;
 use teloxide::dispatching::{DefaultKey, UpdateFilterExt};
 use teloxide::prelude::*;
@@ -130,7 +131,8 @@ fn message_entity_count(msg: &Message) -> usize {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_telegram<L>(
     token: String,
-    allowlist: right_agent::agent::allowlist::AllowlistHandle,
+    allowlist: AllowlistHandle,
+    legacy_chat_scope_ids: Vec<i64>,
     agent_dir: PathBuf,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pending_auth: PendingAuthMap,
@@ -351,6 +353,7 @@ where
                 .await;
         }
     }
+    delete_stale_chat_command_scopes(&bot, &allowlist, &legacy_chat_scope_ids).await;
 
     // Register commands in three overlapping scopes so autocomplete works in both DMs and
     // groups. Setting only Default is not enough when another tool sharing this token has
@@ -400,6 +403,34 @@ where
     Ok(())
 }
 
+fn chat_scope_cleanup_ids(allowlist: &AllowlistHandle, legacy_chat_ids: &[i64]) -> Vec<i64> {
+    let mut ids = std::collections::BTreeSet::new();
+    ids.extend(legacy_chat_ids.iter().copied().filter(|id| *id != 0));
+
+    let state = allowlist.0.read().expect("allowlist lock poisoned");
+    ids.extend(state.users().iter().map(|u| u.id));
+    ids.extend(state.groups().iter().map(|g| g.id));
+
+    ids.into_iter().collect()
+}
+
+async fn delete_stale_chat_command_scopes(
+    bot: &BotType,
+    allowlist: &AllowlistHandle,
+    legacy_chat_ids: &[i64],
+) {
+    use teloxide::types::{BotCommandScope, ChatId, Recipient};
+
+    for chat_id in chat_scope_cleanup_ids(allowlist, legacy_chat_ids) {
+        let scope = BotCommandScope::Chat {
+            chat_id: Recipient::Id(ChatId(chat_id)),
+        };
+        if let Err(e) = bot.delete_my_commands().scope(scope).await {
+            tracing::warn!(chat_id, "delete_my_commands(chat) failed: {e:#}");
+        }
+    }
+}
+
 /// Look up the command line of a process by PID, used to attribute SIGTERM/SIGINT senders.
 ///
 /// Runs `ps -p <pid> -o command=` (no header) and returns its trimmed stdout. Returns
@@ -436,7 +467,7 @@ fn lookup_sender_cmd(pid: i32) -> String {
 #[allow(clippy::too_many_arguments)]
 fn build_dispatcher(
     bot: BotType,
-    allowlist: right_agent::agent::allowlist::AllowlistHandle,
+    allowlist: AllowlistHandle,
     identity_arc: Arc<BotIdentity>,
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     agent_dir_arc: Arc<AgentDir>,
@@ -592,7 +623,9 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicI64};
 
-    use right_agent::agent::allowlist::{AllowlistHandle, AllowlistState};
+    use right_agent::agent::allowlist::{
+        AllowedGroup, AllowedUser, AllowlistFile, AllowlistHandle, AllowlistState,
+    };
     use right_mcp::internal_client::InternalClient;
     use right_memory::prefetch::PrefetchCache;
     use tokio::sync::{Mutex, RwLock};
@@ -703,6 +736,31 @@ mod tests {
             bg_requests,
             bg_handoff_gates,
             progress_state,
+        );
+    }
+
+    #[test]
+    fn chat_scope_cleanup_ids_include_legacy_and_current_allowlist() {
+        let now: chrono::DateTime<chrono::Utc> = "2026-05-19T12:00:00Z".parse().unwrap();
+        let allowlist = AllowlistHandle::new(AllowlistState::from_file(AllowlistFile {
+            version: 1,
+            users: vec![AllowedUser {
+                id: 42,
+                label: None,
+                added_by: None,
+                added_at: now,
+            }],
+            groups: vec![AllowedGroup {
+                id: -1001,
+                label: None,
+                opened_by: None,
+                opened_at: now,
+            }],
+        }));
+
+        assert_eq!(
+            chat_scope_cleanup_ids(&allowlist, &[42, 7, 0, -1001]),
+            vec![-1001, 7, 42]
         );
     }
 

@@ -1105,6 +1105,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         result = telegram::run_telegram(
             token,
             allowlist,
+            config.allowed_chat_ids.clone(),
             agent_dir,
             Arc::clone(&debug_flag),
             Arc::clone(&pending_auth),
