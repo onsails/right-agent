@@ -62,9 +62,10 @@ uses `BG_CONTINUATION_SCHEMA_JSON` and supplies the explicit
 `--resume <main-session> --fork-session --session-id <run_id>` invocation.
 
 **Model selection.** The agent's Claude model is read from
-`agent.yaml::model` (or omitted for CC's default). Users can switch via
-the Telegram `/model` command, which writes to `agent.yaml` and hot-reloads
-without restart — the next CC invocation passes `--model <new>`.
+`agent.yaml::model` (or omitted to inherit CC's own default). Users can
+switch among explicit curated models via the Telegram `/model` command,
+which writes to `agent.yaml` and hot-reloads without restart — the next CC
+invocation passes `--model <new>`.
 
 **Debug args.** When `agent.yaml::debug` (hot-reloadable via the `/debug`
 Telegram command) is true, `ClaudeInvocation` also appends

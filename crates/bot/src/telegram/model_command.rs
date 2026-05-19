@@ -1,7 +1,6 @@
 //! `/model` command — inline-keyboard menu for switching the agent's Claude model.
 //!
-//! UI: 4 curated options (Default / Sonnet / Sonnet 1M / Haiku) matching the
-//! Claude Code CLI `/model` picker.
+//! UI: 4 curated options (Opus 1M / Sonnet / Sonnet 1M / Haiku).
 //!
 //! Persistence: writes `agent.yaml::model` via `right_agent::agent::types::write_agent_yaml_model`.
 //! In-memory: stores into `AgentSettings.model: Arc<ArcSwap<Option<String>>>`.
@@ -9,9 +8,9 @@
 
 /// One row in the curated model menu.
 ///
-/// `model_id == None` represents the "Default" option — no `--model`
-/// flag, CC chooses its own default. All other rows pin a specific
-/// model via the exact model-ID string CC accepts on the command line.
+/// Curated rows pin a specific model via the exact model-ID string CC accepts
+/// on the command line. `model_id == None` is reserved for pre-existing
+/// absent config state and is not exposed as a selectable menu option.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ModelChoice {
     /// Short alias used in callback_data. Combined with the `model:` prefix
@@ -32,9 +31,9 @@ pub(crate) struct ModelChoice {
 /// shared types module.
 pub(crate) const MODEL_CHOICES: &[ModelChoice] = &[
     ModelChoice {
-        alias: "default",
-        label: "Default",
-        model_id: None,
+        alias: "opus1m",
+        label: "Opus 1M",
+        model_id: Some("claude-opus-4-7[1m]"),
         description: "Opus 4.7 (1M context) · Most capable",
     },
     ModelChoice {
@@ -214,8 +213,8 @@ pub(crate) async fn handle_model_callback(
         .store(std::sync::Arc::new(choice.model_id.map(str::to_owned)));
 
     tracing::info!(
-        from = ?old_value.as_deref().unwrap_or("default"),
-        to = ?choice.model_id.unwrap_or("default"),
+        from = ?old_value.as_deref().unwrap_or("inherit"),
+        to = ?choice.model_id.unwrap_or("inherit"),
         chat_id = q.message.as_ref().map(|m| m.chat().id.0),
         user_id = q.from.id.0,
         "model switched via /model"
@@ -283,9 +282,14 @@ mod tests {
     }
 
     #[test]
-    fn active_choice_default_for_none() {
-        let c = active_choice(None).unwrap();
-        assert_eq!(c.alias, "default");
+    fn active_choice_none_has_no_default() {
+        assert!(active_choice(None).is_none());
+    }
+
+    #[test]
+    fn opus_1m_choice_is_explicit_model() {
+        let c = lookup("opus1m").unwrap();
+        assert_eq!(c.model_id, Some("claude-opus-4-7[1m]"));
     }
 
     #[test]
@@ -313,17 +317,25 @@ mod tests {
             "expected checkmark on Sonnet:\n{body}"
         );
         assert!(
-            !body.contains("✓ Default"),
-            "no checkmark on Default:\n{body}"
+            !body.contains("✓ Opus 1M"),
+            "no checkmark on Opus 1M:\n{body}"
         );
     }
 
     #[test]
-    fn menu_body_shows_default_when_none() {
+    fn menu_body_has_no_default_when_none() {
         let body = render_menu_body(None);
         assert!(
-            body.contains("✓ Default"),
-            "expected checkmark on Default:\n{body}"
+            !body.contains("Default"),
+            "Default option must not be shown:\n{body}"
+        );
+        assert!(
+            !body.contains("✓"),
+            "no checkmark when no explicit model is configured:\n{body}"
+        );
+        assert!(
+            body.contains("Opus 1M"),
+            "Opus 1M option must be shown:\n{body}"
         );
     }
 
@@ -363,7 +375,7 @@ mod tests {
         assert_eq!(
             data,
             vec![
-                "model:default",
+                "model:opus1m",
                 "model:sonnet",
                 "model:sonnet1m",
                 "model:haiku"
