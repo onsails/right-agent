@@ -2390,8 +2390,8 @@ fn maybe_spawn_learned_skill_review(
 /// would be misleading, but the running gate must still be released or the
 /// next review path would refuse to start.
 ///
-/// Uses `clear_review_running` (not `mark_review_finished`) so the cooldown
-/// timestamp and status from any prior real review remain intact: no review
+/// Uses `clear_review_running` (not `mark_review_finished`) so the timestamp
+/// and status from any prior real review remain intact: no review
 /// actually finished here, only got interrupted.
 fn clear_background_review_gate_on_shutdown(agent_db_dir: &Path, agent_name: &str) {
     let conn = match right_db::open_connection(agent_db_dir, false) {

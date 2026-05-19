@@ -329,7 +329,7 @@ pub fn mark_episode_selected(
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     let selector_output_json = serde_json::to_string(&selection.selector_output_json)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    conn.execute(
+    let updated = conn.execute(
         "UPDATE learning_episodes \
          SET status='selected', \
              start_ref=?2, \
@@ -344,7 +344,7 @@ pub fn mark_episode_selected(
              episode_hash=?11, \
              last_evidence_at=COALESCE(?12, last_evidence_at), \
              updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
-         WHERE id=?1",
+         WHERE id=?1 AND status='selecting'",
         params![
             episode_id,
             selection.start_ref.as_deref(),
@@ -364,7 +364,7 @@ pub fn mark_episode_selected(
             selection.last_evidence_at.as_deref(),
         ],
     )?;
-    Ok(())
+    require_one_row_updated(updated)
 }
 
 pub fn mark_episode_terminal(
@@ -375,13 +375,13 @@ pub fn mark_episode_terminal(
 ) -> Result<(), rusqlite::Error> {
     let output_json = serde_json::to_string(output_json)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    conn.execute(
+    let updated = conn.execute(
         "UPDATE learning_episodes \
          SET status=?2, selector_output_json=?3, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
-         WHERE id=?1",
+         WHERE id=?1 AND status IN ('pending','selecting')",
         params![episode_id, status.as_str(), output_json],
     )?;
-    Ok(())
+    require_one_row_updated(updated)
 }
 
 pub fn mark_episode_failed(
@@ -389,13 +389,23 @@ pub fn mark_episode_failed(
     episode_id: i64,
     reason: &str,
 ) -> Result<(), rusqlite::Error> {
-    let output_json = serde_json::json!({ "error": reason });
-    mark_episode_terminal(
-        conn,
-        episode_id,
-        LearningEpisodeStatus::Failed,
-        &output_json,
-    )
+    let output_json = serde_json::to_string(&serde_json::json!({ "error": reason }))
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let updated = conn.execute(
+        "UPDATE learning_episodes \
+         SET status='failed', selector_output_json=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+         WHERE id=?1",
+        params![episode_id, output_json],
+    )?;
+    require_one_row_updated(updated)
+}
+
+fn require_one_row_updated(updated: usize) -> Result<(), rusqlite::Error> {
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    }
 }
 
 fn select_episode_in_tx(
@@ -496,6 +506,38 @@ mod tests {
         conn
     }
 
+    fn seed(seed_ref: &str) -> NewLearningEpisodeSeed {
+        NewLearningEpisodeSeed {
+            agent_name: "right".to_owned(),
+            kind: LearningEpisodeKind::ForegroundThread,
+            seed_trigger_kind: EpisodeSeedTriggerKind::LearningSignal,
+            seed_ref: seed_ref.to_owned(),
+            target_chat_id: Some(10),
+            target_thread_id: Some(20),
+            ready_after: "2026-05-19T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn selected_update() -> SelectedEpisodeUpdate {
+        SelectedEpisodeUpdate {
+            start_ref: Some("msg:1".to_owned()),
+            end_ref: Some("msg:3".to_owned()),
+            message_refs: vec!["msg:1".to_owned(), "msg:3".to_owned()],
+            execution_event_refs: vec!["event:7".to_owned()],
+            selector_model: Some("selector-model".to_owned()),
+            selector_output_json: serde_json::json!({"selected": true}),
+            boundary_rationale: Some("contains the correction".to_owned()),
+            confidence: Some("high".to_owned()),
+            context_incomplete: false,
+            episode_hash: Some("episode-hash".to_owned()),
+            last_evidence_at: Some("2026-05-19T00:00:03Z".to_owned()),
+        }
+    }
+
+    fn assert_query_returned_no_rows(result: Result<(), rusqlite::Error>) {
+        assert!(matches!(result, Err(rusqlite::Error::QueryReturnedNoRows)));
+    }
+
     #[test]
     fn execution_event_insert_round_trips_thinking_as_secondary() {
         let conn = conn();
@@ -531,20 +573,121 @@ mod tests {
     #[test]
     fn claim_ready_episode_moves_pending_to_selecting() {
         let conn = conn();
-        let id = insert_pending_episode(
-            &conn,
-            &NewLearningEpisodeSeed {
-                agent_name: "right".to_owned(),
-                kind: LearningEpisodeKind::ForegroundThread,
-                seed_trigger_kind: EpisodeSeedTriggerKind::LearningSignal,
-                seed_ref: "inv:inv-1".to_owned(),
-                target_chat_id: Some(10),
-                target_thread_id: Some(20),
-                ready_after: "2026-05-19T00:00:00Z".to_owned(),
-            },
-        )
-        .unwrap();
+        let id = insert_pending_episode(&conn, &seed("inv:inv-1")).unwrap();
         let claimed = claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z").unwrap();
         assert_eq!(claimed.map(|e| e.id), Some(id));
+    }
+
+    #[test]
+    fn mark_episode_selected_moves_selecting_to_selected() {
+        let conn = conn();
+        let id = insert_pending_episode(&conn, &seed("inv:inv-2")).unwrap();
+        claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
+            .unwrap()
+            .unwrap();
+
+        mark_episode_selected(&conn, id, &selected_update()).unwrap();
+
+        let row: (String, String, String, String) = conn
+            .query_row(
+                "SELECT status, start_ref, message_refs_json, execution_event_refs_json \
+                 FROM learning_episodes WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "selected");
+        assert_eq!(row.1, "msg:1");
+        assert_eq!(row.2, r#"["msg:1","msg:3"]"#);
+        assert_eq!(row.3, r#"["event:7"]"#);
+    }
+
+    #[test]
+    fn mark_episode_selected_rejects_missing_or_non_selecting_episode() {
+        let conn = conn();
+        let pending_id = insert_pending_episode(&conn, &seed("inv:inv-3")).unwrap();
+
+        assert_query_returned_no_rows(mark_episode_selected(&conn, pending_id, &selected_update()));
+        assert_query_returned_no_rows(mark_episode_selected(&conn, 999, &selected_update()));
+    }
+
+    #[test]
+    fn mark_episode_terminal_moves_pending_and_selecting_to_terminal_status() {
+        let conn = conn();
+        let pending_id = insert_pending_episode(&conn, &seed("inv:inv-4")).unwrap();
+        mark_episode_terminal(
+            &conn,
+            pending_id,
+            LearningEpisodeStatus::NoEpisode,
+            &serde_json::json!({"reason": "no bounded episode"}),
+        )
+        .unwrap();
+
+        let selecting_id = insert_pending_episode(&conn, &seed("inv:inv-5")).unwrap();
+        claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
+            .unwrap()
+            .unwrap();
+        mark_episode_terminal(
+            &conn,
+            selecting_id,
+            LearningEpisodeStatus::InsufficientContext,
+            &serde_json::json!({"reason": "missing events"}),
+        )
+        .unwrap();
+
+        let statuses: Vec<String> = conn
+            .prepare("SELECT status FROM learning_episodes ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(statuses, vec!["no_episode", "insufficient_context"]);
+    }
+
+    #[test]
+    fn mark_episode_terminal_rejects_missing_or_non_pending_selecting_episode() {
+        let conn = conn();
+        let id = insert_pending_episode(&conn, &seed("inv:inv-6")).unwrap();
+        claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
+            .unwrap()
+            .unwrap();
+        mark_episode_selected(&conn, id, &selected_update()).unwrap();
+
+        assert_query_returned_no_rows(mark_episode_terminal(
+            &conn,
+            id,
+            LearningEpisodeStatus::Reviewed,
+            &serde_json::json!({"reviewed": true}),
+        ));
+        assert_query_returned_no_rows(mark_episode_terminal(
+            &conn,
+            999,
+            LearningEpisodeStatus::NoEpisode,
+            &serde_json::json!({}),
+        ));
+    }
+
+    #[test]
+    fn mark_episode_failed_updates_existing_episode_and_rejects_missing_episode() {
+        let conn = conn();
+        let id = insert_pending_episode(&conn, &seed("inv:inv-7")).unwrap();
+        claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
+            .unwrap()
+            .unwrap();
+        mark_episode_selected(&conn, id, &selected_update()).unwrap();
+
+        mark_episode_failed(&conn, id, "selector crashed").unwrap();
+        assert_query_returned_no_rows(mark_episode_failed(&conn, 999, "missing"));
+
+        let row: (String, String) = conn
+            .query_row(
+                "SELECT status, selector_output_json FROM learning_episodes WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1, r#"{"error":"selector crashed"}"#);
     }
 }
