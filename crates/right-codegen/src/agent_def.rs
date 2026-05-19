@@ -183,7 +183,8 @@ your final response.
     if matches!(sandbox_mode, right_agent_config::SandboxMode::Openshell) {
         prompt.push_str(
             "
-User-installed CLI tools:
+## User-Installed CLI Tools
+
 - Put manually installed executables in `/sandbox/.local/bin`.
 - `/sandbox/.local/bin` is on PATH for your sandbox sessions.
 - Do not install tools into `~/bin`; use `/sandbox/.local/bin`.

@@ -201,6 +201,7 @@ fn system_prompt_openshell_mentions_user_local_bin_contract() {
         "/sandbox",
     );
 
+    assert!(result.contains("## User-Installed CLI Tools"));
     assert!(result.contains("/sandbox/.local/bin"));
     assert!(result.contains("Do not install tools into `~/bin`"));
     assert!(result.contains("Do not use sudo for tool installs"));
@@ -218,8 +219,10 @@ fn system_prompt_no_sandbox_omits_sandbox_user_local_bin_contract() {
     );
 
     assert!(!result.contains("/sandbox/.local/bin"));
+    assert!(!result.contains("User-Installed CLI Tools"));
     assert!(!result.contains("NPM_CONFIG_PREFIX=/sandbox/.local"));
     assert!(!result.contains("Do not install tools into `~/bin`"));
+    assert!(!result.contains("Do not use sudo for tool installs"));
 }
 
 #[test]
