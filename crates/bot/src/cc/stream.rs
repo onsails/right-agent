@@ -19,6 +19,26 @@ pub(crate) enum StreamEvent {
     Other,
 }
 
+/// Typed stream event persisted for later learning episode selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PersistedStreamEventKind {
+    AssistantText,
+    Thinking,
+    ToolCall,
+    ToolResult,
+    ToolError,
+    InvocationResult,
+}
+
+/// Parsed evidence from one CC stream-json line.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PersistedStreamEvent {
+    pub(crate) kind: PersistedStreamEventKind,
+    pub(crate) tool_name: Option<String>,
+    pub(crate) content_json: serde_json::Value,
+    pub(crate) content_text: String,
+}
+
 /// Usage info extracted from stream events.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct StreamUsage {
@@ -65,6 +85,111 @@ pub(crate) fn parse_stream_event(line: &str) -> StreamEvent {
             StreamEvent::Other
         }
         _ => StreamEvent::Other,
+    }
+}
+
+/// Parse a single CC stream-json line into a typed event suitable for durable
+/// execution evidence. Untyped lines return `None`.
+pub(crate) fn parse_persisted_stream_event(line: &str) -> Option<PersistedStreamEvent> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+    match event_type {
+        "assistant" => parse_assistant_persisted_event(&v),
+        "user" => parse_user_persisted_event(&v),
+        "result" => Some(PersistedStreamEvent {
+            kind: PersistedStreamEventKind::InvocationResult,
+            tool_name: None,
+            content_text: value_text(v.get("result").unwrap_or(&serde_json::Value::Null)),
+            content_json: v,
+        }),
+        _ => None,
+    }
+}
+
+fn parse_assistant_persisted_event(v: &serde_json::Value) -> Option<PersistedStreamEvent> {
+    let blocks = v.pointer("/message/content")?.as_array()?;
+    for block in blocks {
+        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match block_type {
+            "text" => {
+                let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if !text.is_empty() {
+                    return Some(PersistedStreamEvent {
+                        kind: PersistedStreamEventKind::AssistantText,
+                        tool_name: None,
+                        content_text: text.to_owned(),
+                        content_json: block.clone(),
+                    });
+                }
+            }
+            "thinking" => {
+                let thinking = block.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                if !thinking.is_empty() {
+                    return Some(PersistedStreamEvent {
+                        kind: PersistedStreamEventKind::Thinking,
+                        tool_name: None,
+                        content_text: thinking.to_owned(),
+                        content_json: block.clone(),
+                    });
+                }
+            }
+            "tool_use" => {
+                let tool = block.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                let input = block.get("input").unwrap_or(&serde_json::Value::Null);
+                return Some(PersistedStreamEvent {
+                    kind: PersistedStreamEventKind::ToolCall,
+                    tool_name: Some(tool.to_owned()),
+                    content_text: summarize_tool_input(tool, input),
+                    content_json: block.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_user_persisted_event(v: &serde_json::Value) -> Option<PersistedStreamEvent> {
+    let blocks = v.pointer("/message/content")?.as_array()?;
+    for block in blocks {
+        if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+            continue;
+        }
+        let is_error = block
+            .get("is_error")
+            .and_then(|is_error| is_error.as_bool())
+            .unwrap_or(false);
+        return Some(PersistedStreamEvent {
+            kind: if is_error {
+                PersistedStreamEventKind::ToolError
+            } else {
+                PersistedStreamEventKind::ToolResult
+            },
+            tool_name: None,
+            content_text: value_text(block.get("content").unwrap_or(&serde_json::Value::Null)),
+            content_json: block.clone(),
+        });
+    }
+    None
+}
+
+fn value_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|item| {
+                item.as_str().map(str::to_owned).or_else(|| {
+                    item.get("text")
+                        .and_then(|text| text.as_str())
+                        .map(str::to_owned)
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_string(),
     }
 }
 
@@ -380,6 +505,21 @@ mod tests {
         let line =
             r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#;
         assert!(matches!(parse_stream_event(line), StreamEvent::Thinking));
+    }
+
+    #[test]
+    fn persisted_event_parses_thinking_text() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Need check Notion first"}]}}"#;
+        let event = parse_persisted_stream_event(line).unwrap();
+        assert_eq!(event.kind, PersistedStreamEventKind::Thinking);
+        assert_eq!(event.content_text, "Need check Notion first");
+    }
+
+    #[test]
+    fn persisted_event_parses_tool_result_error() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":true,"content":"permission denied"}]}}"#;
+        let event = parse_persisted_stream_event(line).unwrap();
+        assert_eq!(event.kind, PersistedStreamEventKind::ToolError);
     }
 
     #[test]

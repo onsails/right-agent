@@ -3310,6 +3310,19 @@ async fn invoke_cc(
     ui_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut total_assistant_events: u32 = 0;
     let tg_chat_id = ctx.chat_id;
+    let learning_invocation_id = active_progress
+        .as_ref()
+        .map(|active| active.invocation_id.clone());
+    let execution_event_scope = crate::execution_events::ExecutionEventScope {
+        agent_name: &ctx.agent_name,
+        root_session_id: Some(&session_uuid),
+        invocation_id: learning_invocation_id.as_deref(),
+        turn_id: Some(i64::try_from(turn_id).unwrap_or(i64::MAX)),
+        async_run_id: None,
+        cron_job_name: None,
+        cron_run_id: None,
+    };
+    let mut execution_event_seq = 0_i64;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(CC_TIMEOUT_SECS);
     let mut timed_out = false;
@@ -3325,6 +3338,23 @@ async fn invoke_cc(
                             use std::io::Write;
                             let _ = writeln!(log, "{line}");
                         }
+                        if let Err(e) = crate::execution_events::persist_stream_line(
+                            &conn,
+                            &execution_event_scope,
+                            execution_event_seq,
+                            &line,
+                        ) {
+                            tracing::warn!(
+                                chat_id = log_ctx.chat_id,
+                                eff_thread_id = log_ctx.eff_thread_id,
+                                key = ?log_ctx.key(),
+                                session_uuid = %log_ctx.session_uuid,
+                                turn_id = log_ctx.turn_id,
+                                seq = execution_event_seq,
+                                "execution event persist failed: {e:#}"
+                            );
+                        }
+                        execution_event_seq += 1;
 
                         if api_key_source.is_none()
                             && let Some(src) = crate::cc::stream::parse_api_key_source(&line)
@@ -3648,9 +3678,6 @@ async fn invoke_cc(
         );
     }
 
-    let learning_invocation_id = active_progress
-        .as_ref()
-        .map(|active| active.invocation_id.clone());
     if let Some(active) = active_progress.take() {
         finish_progress_invocation(ctx, active).await;
     }
