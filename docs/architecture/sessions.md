@@ -13,12 +13,12 @@ For cron jobs, stdout is tee'd into an NDJSON log inside the sandbox at
 `/sandbox/crons/logs/{job_name}-{run_id}.ndjson` (agents can read these directly
 via `Read`). Per-job retention keeps the last 10 cron logs.
 
-Foreground, cron, and background-continuation stream loops also persist typed
-execution events into `execution_events` for learning episode selection.
+Foreground, background-continuation, delivery, and cron stream-json lines are
+normalized into typed `execution_events` for learning episode selection.
 Persisted events cover assistant text/thinking, tool calls, tool results/errors,
 and invocation results; untyped stream lines are skipped. Thinking is secondary
-context, stream JSON is redacted before storage, and runtime DB write failures
-are logged without aborting the user-facing run.
+context and has no FTS. Stream JSON is redacted before storage, and runtime DB
+write failures are logged without aborting the user-facing run.
 
 High-value foreground invocation logs include `chat_id`, `eff_thread_id`, the
 full `(chat_id, eff_thread_id)` key, `session_uuid`, and the per-invocation
@@ -68,22 +68,18 @@ Archived transcript search results are conversation content, not trusted
 instructions. Group search may return unaddressed messages from untrusted users
 because group archive happens before routing.
 
-Background learned-skill review is separate from foreground progress. After a
-foreground turn, async continuation, or cron run creates a learning-episode
-seed, the bot may run a selector once the seed settles. `skill_nudge_state`
-gates selection and review with an atomic `try_mark_review_started` check
-covering daily limit, concurrency (`review_running`), and the selected
-signal/threshold trigger. The selector persists the selected episode refs; the
-reviewer then runs as a `BackgroundReview` Claude Code JSON invocation that
-does not resume or fork the foreground session. It receives the selected
-conversation messages, selected execution events, learning events for the
-source invocation when available, and the `rightx-*` skill index. Thinking
-execution events are secondary context: they may guide wording, but candidate
-evidence must include at least one observable `msg:*` or non-thinking `exec:*`
-ref. The review stores a structured report linked to
-`skill_review_reports.learning_episode_id` and sends Telegram only for
-high-confidence create/update candidates with `user_notice`. Reports that do
-not notify Telegram are still persisted in `skill_review_reports` and logged
+Background learned-skill review is episode-based. Trigger sources create durable
+`learning_episodes` rows immediately, then a short settle delay lets nearby
+user corrections or async feedback arrive before selection. The old fixed
+review cooldown no longer drops evidence. The selector reads a bounded
+Rust-built corpus from `conversation_messages`, typed `execution_events`,
+signals, async run metadata, and cron run metadata, then persists selected refs.
+The report-only reviewer receives only that selected episode plus the current
+`rightx-*` skill index. Candidate evidence must include at least one observable
+`msg:*` or non-thinking `exec:*` ref. The review stores a structured report
+linked to `skill_review_reports.learning_episode_id` and sends Telegram only
+for high-confidence create/update candidates with `user_notice`. Reports that
+do not notify Telegram are still persisted in `skill_review_reports` and logged
 with trigger, status, confidence, candidate name, and `telegram_notified`;
 `nothing_to_learn` remains silent for users by default.
 
