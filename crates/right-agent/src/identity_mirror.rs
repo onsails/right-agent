@@ -7,55 +7,11 @@ use std::path::Path;
 /// source for sandboxed runtime.
 pub const IDENTITY_MIRROR_FILES: [&str; 3] = ["IDENTITY.md", "SOUL.md", "USER.md"];
 
-const SOUL_OPERATING_CONTRACT_MARKER: &str = "RIGHT_AGENT:SOUL_OPERATING_CONTRACT v1 START";
-
-const SOUL_OPERATING_CONTRACT_BLOCK: &str = "\
-<!-- RIGHT_AGENT:SOUL_OPERATING_CONTRACT v1 START -->
-## Operating Contract
-
-- Act on reversible, low-risk work without ceremony.
-- Ask before public, costly, destructive, credential/security, or private-data actions.
-- Challenge weak assumptions with evidence.
-- Prefer usable outcomes over polished artifacts.
-<!-- RIGHT_AGENT:SOUL_OPERATING_CONTRACT v1 END -->
-";
-
 /// Return true when every required identity mirror file exists on host.
 pub fn host_identity_mirror_complete(agent_dir: &Path) -> bool {
     IDENTITY_MIRROR_FILES
         .iter()
         .all(|name| agent_dir.join(name).exists())
-}
-
-/// Append the managed SOUL.md operating contract when an existing SOUL.md lacks it.
-pub fn with_soul_operating_contract(content: &str) -> Option<String> {
-    if content.contains(SOUL_OPERATING_CONTRACT_MARKER) {
-        return None;
-    }
-
-    let mut migrated = content.to_owned();
-    if !migrated.ends_with('\n') {
-        migrated.push('\n');
-    }
-    migrated.push('\n');
-    migrated.push_str(SOUL_OPERATING_CONTRACT_BLOCK);
-    Some(migrated)
-}
-
-/// Add the managed operating-contract block to a host SOUL.md mirror if present.
-pub fn migrate_host_soul_operating_contract(agent_dir: &Path) -> std::io::Result<bool> {
-    let soul_path = agent_dir.join("SOUL.md");
-    if !soul_path.exists() {
-        return Ok(false);
-    }
-
-    let content = std::fs::read_to_string(&soul_path)?;
-    let Some(migrated) = with_soul_operating_contract(&content) else {
-        return Ok(false);
-    };
-
-    std::fs::write(soul_path, migrated)?;
-    Ok(true)
 }
 
 /// Download authoritative sandbox identity files into the host agent directory.
@@ -122,58 +78,6 @@ mod tests {
 
         std::fs::write(dir.path().join("USER.md"), "# user\n").unwrap();
         assert!(host_identity_mirror_complete(dir.path()));
-    }
-
-    #[test]
-    fn soul_operating_contract_migration_appends_managed_block() {
-        let existing = "# SOUL\n\n- Direct and pragmatic.\n";
-        let migrated = with_soul_operating_contract(existing)
-            .expect("missing operating contract should be migrated");
-
-        assert!(migrated.starts_with(existing));
-        assert!(migrated.contains("RIGHT_AGENT:SOUL_OPERATING_CONTRACT v1 START"));
-        assert!(migrated.contains("## Operating Contract"));
-        assert!(migrated.contains("reversible, low-risk work"));
-        assert!(migrated.contains("credential/security"));
-        assert!(migrated.contains("usable outcomes over polished artifacts"));
-    }
-
-    #[test]
-    fn soul_operating_contract_migration_is_idempotent() {
-        let once = with_soul_operating_contract("# SOUL\n").expect("first migration");
-
-        assert!(
-            with_soul_operating_contract(&once).is_none(),
-            "second migration must not duplicate the managed block"
-        );
-    }
-
-    #[test]
-    fn host_soul_operating_contract_migration_skips_missing_soul() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let migrated = migrate_host_soul_operating_contract(dir.path()).unwrap();
-
-        assert!(!migrated);
-        assert!(!dir.path().join("SOUL.md").exists());
-    }
-
-    #[test]
-    fn host_soul_operating_contract_migration_updates_existing_soul_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let soul_path = dir.path().join("SOUL.md");
-        std::fs::write(&soul_path, "# SOUL\n").unwrap();
-
-        assert!(migrate_host_soul_operating_contract(dir.path()).unwrap());
-        assert!(!migrate_host_soul_operating_contract(dir.path()).unwrap());
-
-        let migrated = std::fs::read_to_string(&soul_path).unwrap();
-        assert_eq!(
-            migrated
-                .matches("RIGHT_AGENT:SOUL_OPERATING_CONTRACT v1 START")
-                .count(),
-            1
-        );
     }
 
     #[tokio::test]
