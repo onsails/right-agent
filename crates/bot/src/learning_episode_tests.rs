@@ -22,6 +22,7 @@ fn runtime() -> LearningEpisodeRuntime {
         resolved_sandbox: None,
         debug: std::sync::Arc::new(AtomicBool::new(false)),
         learning: right_agent::agent::types::LearningConfig::default(),
+        scheduler: None,
     }
 }
 
@@ -35,6 +36,7 @@ fn runtime_for_dir(path: &std::path::Path) -> LearningEpisodeRuntime {
         resolved_sandbox: None,
         debug: std::sync::Arc::new(AtomicBool::new(false)),
         learning: right_agent::agent::types::LearningConfig::default(),
+        scheduler: None,
     }
 }
 
@@ -98,8 +100,14 @@ fn thinking_only_review(
 ) -> EpisodeReviewInvocationFuture {
     Box::pin(async move {
         assert_eq!(bundle.episode_execution_events.len(), 1);
-        assert_eq!(bundle.episode_execution_events[0].event_kind, "thinking");
-        assert_eq!(bundle.episode_execution_events[0].trust_label, "secondary");
+        assert_eq!(
+            bundle.episode_execution_events[0].event_kind,
+            right_agent::learning_episodes::ExecutionEventKind::Thinking
+        );
+        assert_eq!(
+            bundle.episode_execution_events[0].trust_label,
+            right_agent::learning_episodes::TrustLabel::Secondary
+        );
         crate::learning_review::ReviewOutput::parse(serde_json::json!({
             "status": "create_candidate",
             "confidence": "high",
@@ -118,7 +126,10 @@ fn low_trust_message_review(
 ) -> EpisodeReviewInvocationFuture {
     Box::pin(async move {
         assert_eq!(bundle.episode_messages.len(), 1);
-        assert_eq!(bundle.episode_messages[0].trust_label, "low_trust");
+        assert_eq!(
+            bundle.episode_messages[0].trust_label,
+            right_agent::learning_episodes::TrustLabel::LowTrust
+        );
         crate::learning_review::ReviewOutput::parse(serde_json::json!({
             "status": "nothing_to_learn",
             "confidence": "low",
@@ -773,7 +784,7 @@ fn requeue_episode_or_fail_requests_follow_up_drain() {
         "inv:inv-requeue-follow-up",
     );
 
-    let follow_up = requeue_episode_or_fail(
+    requeue_episode_or_fail(
         &conn,
         "right",
         episode.id,
@@ -784,7 +795,59 @@ fn requeue_episode_or_fail_requests_follow_up_drain() {
     )
     .unwrap();
 
-    assert!(follow_up);
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM learning_episodes WHERE id=?1",
+            [episode.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "pending");
+}
+
+#[test]
+fn requeue_episode_or_fail_preserves_gate_when_no_row_matched() {
+    let conn = conn();
+    let episode = claimed_episode(
+        &conn,
+        LearningEpisodeKind::ForegroundThread,
+        EpisodeSeedTriggerKind::LearningSignal,
+        "inv:inv-requeue-no-row",
+    );
+    // Simulate a concurrent writer moving the row out of 'selecting' while a
+    // separate review owns the review_running gate. The requeue helper is used
+    // after Skip(AlreadyRunning), so it must not clear a gate it did not acquire.
+    right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+    conn.execute(
+        "UPDATE skill_nudge_state SET review_running=1 WHERE agent_name='right'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE learning_episodes SET status='pending' WHERE id=?1",
+        [episode.id],
+    )
+    .unwrap();
+
+    requeue_episode_or_fail(
+        &conn,
+        "right",
+        episode.id,
+        chrono::DateTime::parse_from_rfc3339("2026-05-19T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        90,
+    )
+    .unwrap();
+
+    let review_running: i64 = conn
+        .query_row(
+            "SELECT review_running FROM skill_nudge_state WHERE agent_name='right'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(review_running, 1);
 }
 
 #[test]
@@ -917,4 +980,192 @@ fn startup_recovery_marks_reviewing_episode_reviewed_from_successful_report() {
         )
         .unwrap();
     assert_eq!(status, "reviewed");
+}
+
+#[test]
+fn startup_recovery_preserves_review_running_when_prior_review_reported_status() {
+    // Regression: `recover_stale_inflight_episodes` must NOT clear
+    // `review_running` if a legitimate review has already reported a
+    // status (i.e. `last_review_status IS NOT NULL`). Only the stranded
+    // case — gate set with no prior status — should be cleared.
+    let conn = conn();
+    let episode = claimed_episode(
+        &conn,
+        LearningEpisodeKind::ForegroundThread,
+        EpisodeSeedTriggerKind::LearningSignal,
+        "inv:inv-recover-preserves-gate",
+    );
+    conn.execute(
+        "UPDATE learning_episodes SET status='reviewing' WHERE id=?1",
+        [episode.id],
+    )
+    .unwrap();
+    right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+    conn.execute(
+        "UPDATE skill_nudge_state \
+         SET review_running=1, last_review_status='succeeded' \
+         WHERE agent_name='right'",
+        [],
+    )
+    .unwrap();
+
+    let recovered =
+        recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z").unwrap();
+
+    let (episode_status, ready_after, review_running): (String, String, i64) = conn
+        .query_row(
+            "SELECT e.status, e.ready_after, s.review_running
+             FROM learning_episodes e
+             JOIN skill_nudge_state s ON s.agent_name=e.agent_name
+             WHERE e.id=?1",
+            [episode.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(recovered, 1);
+    assert_eq!(episode_status, "pending");
+    assert_eq!(ready_after, "2026-05-19T11:00:00Z");
+    assert_eq!(
+        review_running, 1,
+        "review_running must stay 1 because last_review_status is not NULL",
+    );
+}
+
+#[test]
+fn recovery_requeues_selected_episode_with_no_review_report_to_pending() {
+    // Regression: there is a narrow window between `mark_episode_selected`
+    // (which transitions `selecting` -> `selected` and is followed by the
+    // reviewer being invoked) where the bot can die. End state on disk is
+    // status='selected', review_running=1, and no skill_review_reports row.
+    // Startup recovery must requeue the episode to 'pending' and clear the
+    // stranded gate.
+    let conn = conn();
+    let message_id = insert_review_message(&conn, "selector-to-reviewer crash evidence");
+    let episode_id = prepare_selected_episode(
+        &conn,
+        "inv:inv-recover-selected-no-report",
+        vec![format!("msg:{message_id}")],
+        Vec::new(),
+    );
+
+    let recovered =
+        recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z").unwrap();
+
+    let (episode_status, ready_after, review_running): (String, String, i64) = conn
+        .query_row(
+            "SELECT e.status, e.ready_after, s.review_running
+             FROM learning_episodes e
+             JOIN skill_nudge_state s ON s.agent_name=e.agent_name
+             WHERE e.id=?1",
+            [episode_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(recovered, 1);
+    assert_eq!(episode_status, "pending");
+    assert_eq!(ready_after, "2026-05-19T11:00:00Z");
+    assert_eq!(
+        review_running, 0,
+        "review_running must clear because no review reported a status",
+    );
+}
+
+#[test]
+fn recovery_marks_selected_episode_with_review_report_as_reviewed() {
+    // Regression: if the reviewer actually inserted a `skill_review_reports`
+    // row but the bot died before finalizing the episode status, startup
+    // recovery must finalize the episode (status='reviewed') rather than
+    // requeue it. The gate-clear in `recover_stale_inflight_episodes` is
+    // scoped to `last_review_status IS NULL`, so a populated
+    // `last_review_status` here keeps `review_running=1`.
+    let conn = conn();
+    let message_id = insert_review_message(&conn, "selected-with-report evidence");
+    let episode_id = prepare_selected_episode(
+        &conn,
+        "inv:inv-recover-selected-with-report",
+        vec![format!("msg:{message_id}")],
+        Vec::new(),
+    );
+    right_agent::learned_skills::insert_skill_review_report(
+        &conn,
+        &right_agent::learned_skills::SkillReviewReport {
+            agent_name: "right".to_owned(),
+            source_invocation_id: "inv-recover-selected-with-report".to_owned(),
+            learning_episode_id: Some(episode_id),
+            root_session_id: None,
+            chat_id: Some(10),
+            thread_id: Some(20),
+            trigger_kind: ReviewTriggerKind::LearningSignal,
+            status: ReviewStatus::NothingToLearn,
+            confidence: right_agent::learned_skills::ReviewConfidence::Low,
+            candidate_skill_name: None,
+            candidate_summary: None,
+            evidence_refs: Vec::new(),
+            review_output_json: serde_json::json!({"status":"nothing_to_learn"}),
+            telegram_notified: false,
+        },
+    )
+    .unwrap();
+    // Simulate the reviewer's `mark_review_finished_in_tx` having stamped
+    // `last_review_status` before the crash. Without this, the recovery
+    // gate-clear (`last_review_status IS NULL`) would still fire.
+    conn.execute(
+        "UPDATE skill_nudge_state \
+         SET last_review_status='nothing_to_learn' \
+         WHERE agent_name='right'",
+        [],
+    )
+    .unwrap();
+
+    let recovered =
+        recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z").unwrap();
+
+    let (episode_status, review_running): (String, i64) = conn
+        .query_row(
+            "SELECT e.status, s.review_running
+             FROM learning_episodes e
+             JOIN skill_nudge_state s ON s.agent_name=e.agent_name
+             WHERE e.id=?1",
+            [episode_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(recovered, 1);
+    assert_eq!(episode_status, "reviewed");
+    assert_eq!(
+        review_running, 1,
+        "review_running must stay 1 because last_review_status is not NULL",
+    );
+}
+
+#[tokio::test]
+async fn drain_scheduler_joins_within_timeout_after_shutdown() {
+    // Regression: `DrainScheduler::spawn` must return a `JoinHandle` whose
+    // task observes `shutdown.cancelled()` and exits promptly. Previously the
+    // task was detached and could outlive `run_telegram`'s return while still
+    // holding a CC selector/reviewer child via `ProcessGroupChild`.
+    let temp = tempfile::tempdir().unwrap();
+    // Migrate the DB so a stray drain pass on shutdown finds an empty,
+    // schema-current corpus (it should not be reached given the cancel race).
+    let _ = right_db::open_connection(temp.path(), true).unwrap();
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (scheduler, handle) = DrainScheduler::spawn(
+        runtime_for_dir(temp.path()),
+        // Long settle so the task is parked on the debounce sleep when we
+        // cancel — exercises the `shutdown.cancelled()` arm in the sleep
+        // `select!` rather than the recv arm.
+        std::time::Duration::from_secs(60),
+        shutdown.clone(),
+    );
+
+    scheduler.schedule_drain();
+    // Give the task a moment to enter its debounce sleep.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    shutdown.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+        .await
+        .expect("drain task did not exit within 1s of shutdown")
+        .expect("drain task panicked");
 }

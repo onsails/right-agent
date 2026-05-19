@@ -73,7 +73,11 @@ fn nothing_to_learn_accepts_empty_candidate_fields() {
 
 #[test]
 fn review_prompt_marks_thinking_secondary() {
-    let bundle = ReviewBundle::for_test_with_execution_event("exec:3", "thinking", "secondary");
+    let bundle = ReviewBundle::for_test_with_execution_event(
+        "exec:3",
+        right_agent::learning_episodes::ExecutionEventKind::Thinking,
+        right_agent::learning_episodes::TrustLabel::Secondary,
+    );
     let prompt = build_review_prompt(&bundle);
     assert!(prompt.contains("secondary context"));
     assert!(prompt.contains("cannot be the only evidence"));
@@ -366,7 +370,7 @@ fn review_prompt_says_report_only_and_nothing_to_learn_is_normal() {
         episode_messages: vec![ReviewMessage {
             ref_id: "msg:1".to_owned(),
             role: "user".to_owned(),
-            trust_label: "primary".to_owned(),
+            trust_label: right_agent::learning_episodes::TrustLabel::Primary,
             content: "user asked for OAuth setup".to_owned(),
         }],
         episode_execution_events: Vec::new(),
@@ -406,8 +410,8 @@ fn review_prompt_keeps_legacy_event_refs_compatible_without_episode_id() {
         episode_messages: Vec::new(),
         episode_execution_events: vec![ReviewExecutionEvent {
             ref_id: "event-1".to_owned(),
-            event_kind: "stream_event".to_owned(),
-            trust_label: "primary".to_owned(),
+            event_kind: right_agent::learning_episodes::ExecutionEventKind::StreamEvent,
+            trust_label: right_agent::learning_episodes::TrustLabel::Primary,
             content: "legacy stream evidence".to_owned(),
         }],
         learning_events: Vec::new(),
@@ -440,13 +444,13 @@ fn review_prompt_wraps_external_sections() {
         episode_messages: vec![ReviewMessage {
             ref_id: "msg:1".to_owned(),
             role: "user".to_owned(),
-            trust_label: "primary".to_owned(),
+            trust_label: right_agent::learning_episodes::TrustLabel::Primary,
             content: "user asked X".to_owned(),
         }],
         episode_execution_events: vec![ReviewExecutionEvent {
             ref_id: "exec:1".to_owned(),
-            event_kind: "tool_call".to_owned(),
-            trust_label: "primary".to_owned(),
+            event_kind: right_agent::learning_episodes::ExecutionEventKind::ToolCall,
+            trust_label: right_agent::learning_episodes::TrustLabel::Primary,
             content: "tool ran Y".to_owned(),
         }],
         learning_events: vec!["start create rightx-foo".to_owned()],
@@ -508,7 +512,7 @@ fn review_prompt_omits_accepted_signal_wrap_when_signal_missing() {
         episode_messages: vec![ReviewMessage {
             ref_id: "msg:1".to_owned(),
             role: "user".to_owned(),
-            trust_label: "primary".to_owned(),
+            trust_label: right_agent::learning_episodes::TrustLabel::Primary,
             content: "fine".to_owned(),
         }],
         episode_execution_events: Vec::new(),
@@ -573,7 +577,7 @@ fn runner_test_bundle() -> ReviewBundle {
         episode_messages: vec![ReviewMessage {
             ref_id: "msg:1".to_owned(),
             role: "user".to_owned(),
-            trust_label: "primary".to_owned(),
+            trust_label: right_agent::learning_episodes::TrustLabel::Primary,
             content: "user corrected OAuth flow".to_owned(),
         }],
         episode_execution_events: Vec::new(),
@@ -591,19 +595,19 @@ fn review_prompt_bounds_signal_lists_and_skills() {
     let mut episode_messages = vec![ReviewMessage {
         ref_id: "msg:1".to_owned(),
         role: "user".to_owned(),
-        trust_label: "primary".to_owned(),
+        trust_label: right_agent::learning_episodes::TrustLabel::Primary,
         content: format!("event-head {} EVENT_ITEM_TAIL_MARKER", "e".repeat(9000)),
     }];
     episode_messages.extend((0..160).map(|i| ReviewMessage {
         ref_id: format!("msg:{i}"),
         role: "user".to_owned(),
-        trust_label: "primary".to_owned(),
+        trust_label: right_agent::learning_episodes::TrustLabel::Primary,
         content: format!("event-{i}"),
     }));
     episode_messages.push(ReviewMessage {
         ref_id: "msg:999".to_owned(),
         role: "user".to_owned(),
-        trust_label: "primary".to_owned(),
+        trust_label: right_agent::learning_episodes::TrustLabel::Primary,
         content: "EVENT_COUNT_TAIL_MARKER".to_owned(),
     });
 

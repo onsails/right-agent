@@ -258,6 +258,9 @@ pub struct WorkerContext {
     pub stt: Option<std::sync::Arc<crate::stt::SttContext>>,
     /// Learning-review configuration captured at bot startup. Changes require restart.
     pub learning: right_agent::agent::types::LearningConfig,
+    /// Per-agent debounced learning-episode drain scheduler. Capturing a seed
+    /// notifies the scheduler instead of spawning a per-seed timer task.
+    pub(crate) learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
     /// Shared Claude health state for MCP self-heal and one-shot repair notices.
     pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
     /// Process shutdown token used to cancel detached user-turn repair work.
@@ -1581,6 +1584,7 @@ pub fn spawn_worker(
                         session_guard,
                         Arc::clone(&ctx.debug),
                         ctx.learning.clone(),
+                        Arc::clone(&ctx.learning_drain_scheduler),
                     )
                     .await;
                     gate_release.release();
@@ -2476,29 +2480,25 @@ fn maybe_capture_learning_episode_seed(
     };
 
     let seed_ref = format!("inv:{source_invocation_id}");
-    let runtime = crate::learning_episode::LearningEpisodeRuntime {
-        agent_dir: ctx.agent_dir.clone(),
-        agent_db_dir: ctx.agent_db_dir.clone(),
-        agent_name: ctx.agent_name.clone(),
-        inherited_model: crate::snapshot_model(&ctx.model),
-        ssh_config_path: ctx.ssh_config_path.clone(),
-        resolved_sandbox: ctx.resolved_sandbox.clone(),
-        debug: Arc::clone(&ctx.debug),
-        learning: ctx.learning.clone(),
-    };
-    let input = crate::learning_episode::EpisodeSeedInput {
-        agent_name: &ctx.agent_name,
-        kind: right_agent::learning_episodes::LearningEpisodeKind::ForegroundThread,
+    let runtime = crate::learning_episode::LearningEpisodeRuntime::new(
+        ctx.agent_dir.clone(),
+        ctx.agent_db_dir.clone(),
+        ctx.agent_name.clone(),
+        crate::snapshot_model(&ctx.model),
+        ctx.ssh_config_path.clone(),
+        ctx.resolved_sandbox.clone(),
+        Arc::clone(&ctx.debug),
+        ctx.learning.clone(),
+        Some(Arc::clone(&ctx.learning_drain_scheduler)),
+    );
+    if let Err(e) = runtime.capture_completion_seed(
+        conn,
+        right_agent::learning_episodes::LearningEpisodeKind::ForegroundThread,
         seed_trigger_kind,
-        seed_ref: &seed_ref,
-        target_chat_id: Some(chat_id),
-        target_thread_id: Some(eff_thread_id),
-        settle_seconds: ctx.learning.episode_settle_seconds,
-        now: &chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-    };
-    if let Err(e) =
-        crate::learning_episode::capture_episode_seed_and_spawn_drain(conn, input, runtime)
-    {
+        &seed_ref,
+        Some(chat_id),
+        Some(eff_thread_id),
+    ) {
         tracing::warn!(
             agent = %ctx.agent_name,
             invocation_id = %source_invocation_id,
@@ -2625,8 +2625,8 @@ async fn run_background_learned_skill_review(
         .map(
             |(idx, event)| crate::learning_review::ReviewExecutionEvent {
                 ref_id: format!("event-{}", idx + 1),
-                event_kind: "stream_event".to_owned(),
-                trust_label: "primary".to_owned(),
+                event_kind: right_agent::learning_episodes::ExecutionEventKind::StreamEvent,
+                trust_label: right_agent::learning_episodes::TrustLabel::Primary,
                 content: event,
             },
         )

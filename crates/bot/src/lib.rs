@@ -914,6 +914,31 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         upgrade::run_startup_upgrade(cfg_path, &args.agent, sandbox).await;
     }
 
+    // Per-agent learning-episode drain scheduler. Spawned once at startup; all
+    // capture callsites notify this scheduler instead of spawning per-seed timers.
+    // The bootstrap runtime passed in is consumed by the spawn task; the returned
+    // `Arc<DrainScheduler>` is what production callers clone into their runtimes.
+    // The returned JoinHandle is awaited at shutdown so the drain task does not
+    // outlive `run_telegram` while still holding a CC selector/reviewer child.
+    let (learning_drain_scheduler, learning_drain_handle) = {
+        let bootstrap_runtime = crate::learning_episode::LearningEpisodeRuntime::new(
+            agent_dir.clone(),
+            agent_dir.clone(),
+            args.agent.clone(),
+            config.model.clone(),
+            ssh_config_path.clone(),
+            resolved_sandbox.clone(),
+            Arc::clone(&debug_flag),
+            config.learning.clone(),
+            None,
+        );
+        crate::learning_episode::DrainScheduler::spawn(
+            bootstrap_runtime,
+            std::time::Duration::from_secs(config.learning.episode_settle_seconds),
+            shutdown.clone(),
+        )
+    };
+
     {
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let conn = right_db::open_connection(&agent_dir, false).map_err(|e| {
@@ -923,17 +948,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             crate::learning_episode::has_ready_pending_episodes(&conn, &args.agent, &now)
                 .map_err(|e| miette::miette!("check ready learning episodes: {:#}", e))?;
         if recovered_learning_episodes > 0 || has_ready {
-            crate::learning_episode::LearningEpisodeRuntime {
-                agent_dir: agent_dir.clone(),
-                agent_db_dir: agent_dir.clone(),
-                agent_name: args.agent.clone(),
-                inherited_model: config.model.clone(),
-                ssh_config_path: ssh_config_path.clone(),
-                resolved_sandbox: resolved_sandbox.clone(),
-                debug: Arc::clone(&debug_flag),
-                learning: config.learning.clone(),
-            }
-            .drain_soon();
+            // Route through the per-agent debounced scheduler instead of
+            // spawning a one-shot timer task. The scheduler's first iteration
+            // will sleep `episode_settle_seconds` before draining; this is the
+            // same effective delay the prior `drain_soon()` would have used
+            // once debouncing collapsed it with the initial production traffic.
+            learning_drain_scheduler.schedule_drain();
         }
     }
 
@@ -949,6 +969,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let cron_upgrade_lock = Arc::clone(&upgrade_lock);
     let cron_debug = Arc::clone(&debug_flag);
     let cron_learning = config.learning.clone();
+    let cron_learning_drain_scheduler = Arc::clone(&learning_drain_scheduler);
     let cron_handle = tokio::spawn(async move {
         cron::run_cron_task(
             cron_agent_dir,
@@ -961,6 +982,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             cron_upgrade_lock,
             cron_debug,
             cron_learning,
+            cron_learning_drain_scheduler,
         )
         .await;
     });
@@ -1014,6 +1036,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_debug = Arc::clone(&debug_flag);
     let delivery_learning = config.learning.clone();
     let delivery_model = Arc::clone(&model_arc);
+    let delivery_learning_drain_scheduler = Arc::clone(&learning_drain_scheduler);
     let delivery_handle = tokio::spawn(async move {
         async_delivery::run_delivery_loop(
             delivery_agent_dir,
@@ -1030,6 +1053,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             delivery_session_locks,
             delivery_debug,
             delivery_learning,
+            delivery_learning_drain_scheduler,
         )
         .await;
     });
@@ -1100,6 +1124,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             Arc::clone(&session_locks),
             Arc::clone(&bg_requests),
             progress_state,
+            Arc::clone(&learning_drain_scheduler),
             update_listener,
         ) => result,
         result = axum_handle => result
@@ -1112,6 +1137,19 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     tracing::info!("waiting for cron to finish");
     let _ = cron_handle.await;
+    tracing::info!("waiting for learning-episode drain to finish");
+    match tokio::time::timeout(crate::cron::SHUTDOWN_JOB_TIMEOUT, learning_drain_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!("learning-episode drain task panicked: {e}");
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = crate::cron::SHUTDOWN_JOB_TIMEOUT.as_secs(),
+                "learning-episode drain task did not finish in time"
+            );
+        }
+    }
     tracing::info!("waiting for async delivery to finish");
     let _ = delivery_handle.await;
     if let Some(handle) = sync_handle {

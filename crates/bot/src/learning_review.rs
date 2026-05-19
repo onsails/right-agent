@@ -242,19 +242,30 @@ impl ReviewOutput {
 }
 
 pub(crate) fn parse_review_process_stdout(stdout: &str) -> Result<ReviewOutput, String> {
+    let raw = unwrap_structured_output_payload(stdout, "review")?;
+    ReviewOutput::parse(raw)
+}
+
+/// Unwrap the structured-output payload from a Stage 2 `claude -p --output-format json`
+/// stdout buffer. Falls back through `structured_output > result > root`, then
+/// JSON-decodes a string payload one extra time when the model returns the JSON
+/// as a quoted string. `label` is used only in error messages.
+pub(crate) fn unwrap_structured_output_payload(
+    stdout: &str,
+    label: &str,
+) -> Result<serde_json::Value, String> {
     let root: serde_json::Value =
-        serde_json::from_str(stdout).map_err(|e| format!("parse review stdout JSON: {e}"))?;
+        serde_json::from_str(stdout).map_err(|e| format!("parse {label} stdout JSON: {e}"))?;
     let selected = root
         .get("structured_output")
         .filter(|value| !value.is_null())
         .or_else(|| root.get("result").filter(|value| !value.is_null()))
         .unwrap_or(&root);
-    let raw = match selected.as_str() {
+    match selected.as_str() {
         Some(json) => serde_json::from_str(json)
-            .map_err(|e| format!("parse review stdout wrapper JSON string: {e}"))?,
-        None => selected.clone(),
-    };
-    ReviewOutput::parse(raw)
+            .map_err(|e| format!("parse {label} stdout wrapper JSON string: {e}")),
+        None => Ok(selected.clone()),
+    }
 }
 
 fn optional_trimmed_string(raw: &serde_json::Value, field: &str) -> Option<String> {
@@ -307,15 +318,15 @@ pub(crate) struct ReviewBundle {
 pub(crate) struct ReviewMessage {
     pub(crate) ref_id: String,
     pub(crate) role: String,
-    pub(crate) trust_label: String,
+    pub(crate) trust_label: right_agent::learning_episodes::TrustLabel,
     pub(crate) content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewExecutionEvent {
     pub(crate) ref_id: String,
-    pub(crate) event_kind: String,
-    pub(crate) trust_label: String,
+    pub(crate) event_kind: right_agent::learning_episodes::ExecutionEventKind,
+    pub(crate) trust_label: right_agent::learning_episodes::TrustLabel,
     pub(crate) content: String,
 }
 
@@ -323,8 +334,8 @@ impl ReviewBundle {
     #[cfg(test)]
     pub(crate) fn for_test_with_execution_event(
         ref_id: &str,
-        event_kind: &str,
-        trust_label: &str,
+        event_kind: right_agent::learning_episodes::ExecutionEventKind,
+        trust_label: right_agent::learning_episodes::TrustLabel,
     ) -> Self {
         Self {
             agent_name: "right".to_owned(),
@@ -339,8 +350,8 @@ impl ReviewBundle {
             episode_messages: Vec::new(),
             episode_execution_events: vec![ReviewExecutionEvent {
                 ref_id: ref_id.to_owned(),
-                event_kind: event_kind.to_owned(),
-                trust_label: trust_label.to_owned(),
+                event_kind,
+                trust_label,
                 content: "test event".to_owned(),
             }],
             learning_events: Vec::new(),
@@ -495,7 +506,10 @@ fn format_review_messages(messages: &[ReviewMessage]) -> Vec<String> {
         .map(|message| {
             format!(
                 "{} role={} trust_label={} content={}",
-                message.ref_id, message.role, message.trust_label, message.content
+                message.ref_id,
+                message.role,
+                message.trust_label.as_str(),
+                message.content
             )
         })
         .collect()
@@ -507,7 +521,10 @@ fn format_review_execution_events(events: &[ReviewExecutionEvent]) -> Vec<String
         .map(|event| {
             format!(
                 "{} event_kind={} trust_label={} content={}",
-                event.ref_id, event.event_kind, event.trust_label, event.content
+                event.ref_id,
+                event.event_kind.as_str(),
+                event.trust_label.as_str(),
+                event.content
             )
         })
         .collect()

@@ -103,8 +103,8 @@ pub(crate) fn parse_persisted_stream_events(line: &str) -> Vec<PersistedStreamEv
     let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     match event_type {
-        "assistant" => parse_assistant_persisted_event(&v),
-        "user" => parse_user_persisted_event(&v),
+        "assistant" => parse_assistant_persisted_event(v),
+        "user" => parse_user_persisted_event(v),
         "result" => vec![PersistedStreamEvent {
             kind: PersistedStreamEventKind::InvocationResult,
             tool_name: None,
@@ -115,47 +115,75 @@ pub(crate) fn parse_persisted_stream_events(line: &str) -> Vec<PersistedStreamEv
     }
 }
 
-fn parse_assistant_persisted_event(v: &serde_json::Value) -> Vec<PersistedStreamEvent> {
-    let Some(blocks) = v
-        .pointer("/message/content")
-        .and_then(|content| content.as_array())
-    else {
+/// Extract owned `/message/content` array from a stream-json event JSON.
+/// Returns `None` when the path is missing or not an array.
+fn take_message_content_blocks(mut v: serde_json::Value) -> Option<Vec<serde_json::Value>> {
+    let content = v
+        .get_mut("message")
+        .and_then(|message| message.get_mut("content"))?;
+    match std::mem::take(content) {
+        serde_json::Value::Array(blocks) => Some(blocks),
+        _ => None,
+    }
+}
+
+fn parse_assistant_persisted_event(v: serde_json::Value) -> Vec<PersistedStreamEvent> {
+    let Some(blocks) = take_message_content_blocks(v) else {
         return Vec::new();
     };
     let mut events = Vec::new();
     for block in blocks {
-        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        match block_type {
+        let block_type = block
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_owned();
+        match block_type.as_str() {
             "text" => {
-                let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                let text = block
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_owned();
                 if !text.is_empty() {
                     events.push(PersistedStreamEvent {
                         kind: PersistedStreamEventKind::AssistantText,
                         tool_name: None,
-                        content_text: text.to_owned(),
-                        content_json: block.clone(),
+                        content_text: text,
+                        content_json: block,
                     });
                 }
             }
             "thinking" => {
-                let thinking = block.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                let thinking = block
+                    .get("thinking")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_owned();
                 if !thinking.is_empty() {
                     events.push(PersistedStreamEvent {
                         kind: PersistedStreamEventKind::Thinking,
                         tool_name: None,
-                        content_text: thinking.to_owned(),
-                        content_json: block.clone(),
+                        content_text: thinking,
+                        content_json: block,
                     });
                 }
             }
             "tool_use" => {
-                let tool = block.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                let input = block.get("input").unwrap_or(&serde_json::Value::Null);
+                let tool = block
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("?")
+                    .to_owned();
+                let content_text = summarize_tool_input(
+                    &tool,
+                    block.get("input").unwrap_or(&serde_json::Value::Null),
+                );
                 events.push(PersistedStreamEvent {
                     kind: PersistedStreamEventKind::ToolCall,
-                    tool_name: Some(tool.to_owned()),
-                    content_text: summarize_tool_input(tool, input),
-                    content_json: block.clone(),
+                    tool_name: Some(tool),
+                    content_text,
+                    content_json: block,
                 });
             }
             _ => {}
@@ -164,11 +192,8 @@ fn parse_assistant_persisted_event(v: &serde_json::Value) -> Vec<PersistedStream
     events
 }
 
-fn parse_user_persisted_event(v: &serde_json::Value) -> Vec<PersistedStreamEvent> {
-    let Some(blocks) = v
-        .pointer("/message/content")
-        .and_then(|content| content.as_array())
-    else {
+fn parse_user_persisted_event(v: serde_json::Value) -> Vec<PersistedStreamEvent> {
+    let Some(blocks) = take_message_content_blocks(v) else {
         return Vec::new();
     };
     let mut events = Vec::new();
@@ -180,6 +205,7 @@ fn parse_user_persisted_event(v: &serde_json::Value) -> Vec<PersistedStreamEvent
             .get("is_error")
             .and_then(|is_error| is_error.as_bool())
             .unwrap_or(false);
+        let content_text = value_text(block.get("content").unwrap_or(&serde_json::Value::Null));
         events.push(PersistedStreamEvent {
             kind: if is_error {
                 PersistedStreamEventKind::ToolError
@@ -187,14 +213,14 @@ fn parse_user_persisted_event(v: &serde_json::Value) -> Vec<PersistedStreamEvent
                 PersistedStreamEventKind::ToolResult
             },
             tool_name: None,
-            content_text: value_text(block.get("content").unwrap_or(&serde_json::Value::Null)),
-            content_json: block.clone(),
+            content_text,
+            content_json: block,
         });
     }
     events
 }
 
-fn value_text(value: &serde_json::Value) -> String {
+pub(crate) fn value_text(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => String::new(),
         serde_json::Value::String(s) => s.clone(),

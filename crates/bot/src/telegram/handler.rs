@@ -118,6 +118,10 @@ pub struct AgentSettings {
     pub stt: Option<std::sync::Arc<crate::stt::SttContext>>,
     /// Learning-review configuration captured at bot startup. Changes require restart.
     pub learning: right_agent::agent::types::LearningConfig,
+    /// Per-agent debounced learning-episode drain scheduler. Spawned once at
+    /// bot startup; each capture callsite notifies it instead of spawning a
+    /// per-seed timer task.
+    pub(crate) learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
     /// Shared Claude health state for MCP self-heal and one-shot repair notices.
     pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
     /// Process shutdown token used to cancel detached user-turn repair work.
@@ -411,6 +415,7 @@ pub async fn handle_message(
                     upgrade_lock: Arc::clone(&settings.upgrade_lock),
                     stt: settings.stt.clone(),
                     learning: settings.learning.clone(),
+                    learning_drain_scheduler: Arc::clone(&settings.learning_drain_scheduler),
                     claude_health: Arc::clone(&settings.claude_health),
                     shutdown: settings.shutdown.clone(),
                 };
