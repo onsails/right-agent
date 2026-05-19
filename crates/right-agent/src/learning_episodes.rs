@@ -271,7 +271,7 @@ pub fn insert_pending_episode(
     let id = if inserted == 1 {
         tx.last_insert_rowid()
     } else {
-        tx.query_row(
+        let id = tx.query_row(
             "SELECT id FROM learning_episodes \
              WHERE agent_name=?1 AND kind=?2 AND seed_trigger_kind=?3 AND seed_ref=?4",
             params![
@@ -281,7 +281,14 @@ pub fn insert_pending_episode(
                 seed.seed_ref.as_str(),
             ],
             |r| r.get(0),
-        )?
+        )?;
+        tx.execute(
+            "UPDATE learning_episodes \
+             SET ready_after=?2, last_evidence_at=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+             WHERE id=?1 AND status='pending'",
+            params![id, seed.ready_after.as_str()],
+        )?;
+        id
     };
     tx.commit()?;
     Ok(id)
@@ -587,6 +594,28 @@ mod tests {
         let id = insert_pending_episode(&conn, &seed("inv:inv-1")).unwrap();
         let claimed = claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z").unwrap();
         assert_eq!(claimed.map(|e| e.id), Some(id));
+    }
+
+    #[test]
+    fn duplicate_pending_seed_extends_ready_after_and_last_evidence_at() {
+        let conn = conn();
+        let mut seed = seed("inv:inv-dup");
+        seed.ready_after = "2026-05-19T00:01:00Z".to_owned();
+        let id = insert_pending_episode(&conn, &seed).unwrap();
+
+        seed.ready_after = "2026-05-19T00:05:00Z".to_owned();
+        let duplicate_id = insert_pending_episode(&conn, &seed).unwrap();
+
+        let row: (String, String) = conn
+            .query_row(
+                "SELECT ready_after, last_evidence_at FROM learning_episodes WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(duplicate_id, id);
+        assert_eq!(row.0, "2026-05-19T00:05:00Z");
+        assert_eq!(row.1, "2026-05-19T00:05:00Z");
     }
 
     #[test]

@@ -201,6 +201,11 @@ foreground-only tools (`mcp__right__send_progress`,
 `mcp__right__skill_learning_finish`) via `--disallowedTools`; they have no live
 foreground invocation and must use their structured output delivery path.
 
+Stage 2 learning selector and reviewer calls are stricter: they omit MCP config
+and pass `--tools ""`, so no MCP or Claude Code tools are available. They
+receive only prompt-supplied selected context and the prebuilt learned-skill
+index.
+
 ## Learned Skill MCP Tools
 
 `mcp__right__skill_learning_start` and
@@ -221,11 +226,12 @@ Stage 2 background learned-skill review runs after `learning_episodes`
 selection and is report-only. Background review invocations do not expose or
 call `mcp__right__skill_learning_start` or
 `mcp__right__skill_learning_finish`; those remain foreground learning protocol
-tools. The reviewer records `skill_review_reports` and sends Telegram only for
-high-confidence create/update candidates with `user_notice`. Candidate evidence
-must cite at least one observable `msg:*` or non-thinking `exec:*` ref from the
-selected episode. The reviewer prompt includes candidate decision rules:
-candidates must be reusable across future sessions, one-off task narrative must
-not become a skill, transient tool failures must not become persistent negative
-claims, and existing `rightx-*` skills should be updated before creating new
-candidates.
+tools. The selector and reviewer have no MCP or Claude Code tools; all context
+comes from the prompt bundle. The reviewer records `skill_review_reports` and
+sends Telegram only for high-confidence create/update candidates with
+`user_notice`. Candidate evidence must cite at least one selected primary
+`msg:*` or non-thinking `exec:*` ref from the selected episode. The reviewer
+prompt includes candidate decision rules: candidates must be reusable across
+future sessions, one-off task narrative must not become a skill, transient tool
+failures must not become persistent negative claims, and existing `rightx-*`
+skills should be updated before creating new candidates.

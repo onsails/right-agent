@@ -74,8 +74,9 @@ user corrections or async feedback arrive before selection. The old fixed
 review cooldown no longer drops evidence. The selector reads a bounded
 Rust-built corpus from `conversation_messages`, typed `execution_events`,
 signals, async run metadata, and cron run metadata, then persists selected refs.
-The report-only reviewer receives only that selected episode plus the current
-`rightx-*` skill index. Candidate evidence must include at least one observable
+The selector and report-only reviewer run with no Claude Code tools and no MCP;
+they receive only prompt-supplied selected context plus the current `rightx-*`
+skill index. Candidate evidence must include at least one selected primary
 `msg:*` or non-thinking `exec:*` ref. The review stores a structured report
 linked to `skill_review_reports.learning_episode_id` and sends Telegram only
 for high-confidence create/update candidates with `user_notice`. Reports that
@@ -109,15 +110,11 @@ Per-callsite `--disallowedTools`:
   `mcp__right__skill_learning_finish`),
   same rationale as cron. Conversation search likewise has no foreground scope
   there.
-- **BackgroundReview** (`bot::telegram::worker`, with bundle/schema helpers in
-  `bot::learning_review`): baseline + foreground-only tools
-  (`mcp__right__send_progress`,
-  `mcp__right__skill_learning_start`,
-  `mcp__right__skill_learning_finish`) + `Agent` + write/edit tools + `Bash`.
-  Runtime allowed tools are read-only (`Read`, `Glob`, `Grep`, `LS`). Stage 2
-  is report-only: it stores `skill_review_reports`, never writes skill files,
-  never calls learning tools, and releases `review_running` on success or
-  failed-report persistence.
+- **Learning selector / BackgroundReview** (`bot::learning_episode` and legacy
+  `bot::telegram::worker` background review): no MCP config and `--tools ""`.
+  Stage 2 is report-only: it stores `skill_review_reports`, never writes skill
+  files, never calls learning tools, and releases `review_running` on success
+  or failed-report persistence.
 
 The baseline lives in `crates/bot/src/cc/invocation.rs::BASELINE_DISALLOWED_TOOLS`
 and explicitly excludes `Agent`.

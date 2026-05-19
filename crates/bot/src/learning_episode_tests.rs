@@ -112,6 +112,25 @@ fn thinking_only_review(
     })
 }
 
+fn low_trust_message_review(
+    _: LearningEpisodeRuntime,
+    bundle: crate::learning_review::ReviewBundle,
+) -> EpisodeReviewInvocationFuture {
+    Box::pin(async move {
+        assert_eq!(bundle.episode_messages.len(), 1);
+        assert_eq!(bundle.episode_messages[0].trust_label, "low_trust");
+        crate::learning_review::ReviewOutput::parse(serde_json::json!({
+            "status": "nothing_to_learn",
+            "confidence": "low",
+            "candidate_skill_name": null,
+            "candidate_summary": null,
+            "evidence_refs": [],
+            "user_notice": null
+        }))
+        .map_err(anyhow::Error::msg)
+    })
+}
+
 fn failed_structured_review(
     _: LearningEpisodeRuntime,
     _: crate::learning_review::ReviewBundle,
@@ -175,6 +194,17 @@ fn prepare_selected_episode(
 }
 
 fn insert_review_message(conn: &rusqlite::Connection, content: &str) -> i64 {
+    insert_review_message_with_route(conn, content, true, true, Some("session-review"), Some(1))
+}
+
+fn insert_review_message_with_route(
+    conn: &rusqlite::Connection,
+    content: &str,
+    addressed_to_bot: bool,
+    routed_to_agent: bool,
+    root_session_id: Option<&str>,
+    turn_id: Option<u64>,
+) -> i64 {
     right_db::conversation::archive_message(
         conn,
         ConversationMessage {
@@ -184,10 +214,10 @@ fn insert_review_message(conn: &rusqlite::Connection, content: &str) -> i64 {
             message_id: None,
             sender_user_id: None,
             sender_name: None,
-            addressed_to_bot: true,
-            routed_to_agent: true,
-            root_session_id: Some("session-review"),
-            turn_id: Some(1),
+            addressed_to_bot,
+            routed_to_agent,
+            root_session_id,
+            turn_id,
             role: ConversationRole::User,
             content,
         },
@@ -364,6 +394,128 @@ fn selected_episode_persists_effective_selector_model() {
     assert_eq!(selector_model, Some("claude-sonnet-inherited".to_owned()));
 }
 
+#[test]
+fn selected_selector_output_requires_non_null_boundaries_in_corpus() {
+    let corpus = SelectorCorpus::for_test(vec!["msg:1"], vec![]);
+    let mut output = EpisodeSelectorOutput::for_test_selected(vec!["msg:1"], vec![]);
+    output.start_ref = None;
+
+    let err = validate_selector_output(&corpus, &output).unwrap_err();
+
+    assert!(err.contains("selected output requires start_ref and end_ref"));
+}
+
+#[test]
+fn selected_episode_persists_episode_hash() {
+    let conn = conn();
+    let episode = claimed_episode(
+        &conn,
+        LearningEpisodeKind::ForegroundThread,
+        EpisodeSeedTriggerKind::LearningSignal,
+        "inv:inv-selected-hash",
+    );
+    let corpus = SelectorCorpus::for_test(
+        vec!["msg:1", "msg:2"],
+        vec![("exec:3", ExecutionEventKind::ToolResult)],
+    );
+    let output = EpisodeSelectorOutput::for_test_selected(vec!["msg:1", "msg:2"], vec!["exec:3"]);
+
+    record_selector_output(&conn, &runtime(), &episode, &corpus, output).unwrap();
+
+    let episode_hash: Option<String> = conn
+        .query_row(
+            "SELECT episode_hash FROM learning_episodes WHERE id=?1",
+            [episode.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(episode_hash.as_deref().is_some_and(|hash| !hash.is_empty()));
+}
+
+#[test]
+fn duplicate_selected_episode_is_suppressed_before_review() {
+    let conn = conn();
+    let existing = claimed_episode(
+        &conn,
+        LearningEpisodeKind::ForegroundThread,
+        EpisodeSeedTriggerKind::LearningSignal,
+        "inv:inv-duplicate-existing",
+    );
+    let corpus = SelectorCorpus::for_test(vec!["msg:1"], vec![]);
+    let output = EpisodeSelectorOutput::for_test_selected(vec!["msg:1"], vec![]);
+    record_selector_output(&conn, &runtime(), &existing, &corpus, output).unwrap();
+
+    let duplicate = claimed_episode(
+        &conn,
+        LearningEpisodeKind::ForegroundThread,
+        EpisodeSeedTriggerKind::LearningSignal,
+        "inv:inv-duplicate-current",
+    );
+    let output = EpisodeSelectorOutput::for_test_selected(vec!["msg:1"], vec![]);
+
+    let should_review = record_selector_output(&conn, &runtime(), &duplicate, &corpus, output)
+        .expect("duplicate should be terminal, not an error");
+
+    let row: (String, String) = conn
+        .query_row(
+            "SELECT status, selector_output_json FROM learning_episodes WHERE id=?1",
+            [duplicate.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(!should_review);
+    assert_eq!(row.0, "no_episode");
+    assert!(row.1.contains("duplicate_episode"));
+}
+
+#[test]
+fn selector_corpus_includes_execution_events_for_message_turns() {
+    let conn = conn();
+    let episode = claimed_episode(
+        &conn,
+        LearningEpisodeKind::ForegroundThread,
+        EpisodeSeedTriggerKind::LearningSignal,
+        "inv:seed-invocation",
+    );
+    insert_review_message_with_route(
+        &conn,
+        "nearby correction",
+        true,
+        true,
+        Some("session-nearby"),
+        Some(9),
+    );
+    let event_id = right_agent::learning_episodes::insert_execution_event(
+        &conn,
+        &NewExecutionEvent {
+            agent_name: "right".to_owned(),
+            root_session_id: Some("session-nearby".to_owned()),
+            invocation_id: Some("different-invocation".to_owned()),
+            turn_id: Some(9),
+            async_run_id: None,
+            cron_job_name: None,
+            cron_run_id: None,
+            seq: 7,
+            event_kind: ExecutionEventKind::ToolResult,
+            tool_name: None,
+            content_json: serde_json::json!({ "text": "tool evidence" }),
+            content_text: "tool evidence".to_owned(),
+            trust_label: TrustLabel::Primary,
+        },
+    )
+    .unwrap();
+
+    let corpus = load_selector_corpus(&conn, &episode).unwrap();
+
+    assert!(
+        corpus
+            .execution_events
+            .iter()
+            .any(|event| event.id == event_id),
+        "execution event sharing the included message turn must be in corpus"
+    );
+}
+
 #[tokio::test]
 async fn episode_reviewer_inserts_report_and_marks_reviewed() {
     let temp = tempfile::tempdir().unwrap();
@@ -491,6 +643,35 @@ async fn episode_reviewer_rejects_thinking_only_candidate_and_clears_gate() {
 }
 
 #[tokio::test]
+async fn episode_reviewer_preserves_low_trust_message_label_in_bundle() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = right_db::open_connection(temp.path(), true).unwrap();
+    let message_id = insert_review_message_with_route(
+        &conn,
+        "nearby unaddressed correction",
+        false,
+        false,
+        Some("session-review"),
+        Some(1),
+    );
+    let episode_id = prepare_selected_episode(
+        &conn,
+        "inv:inv-review-low-trust",
+        vec![format!("msg:{message_id}")],
+        Vec::new(),
+    );
+    drop(conn);
+
+    run_episode_reviewer_with_invocation(
+        runtime_for_dir(temp.path()),
+        episode_id,
+        low_trust_message_review,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn drain_marks_failed_and_clears_gate_when_corpus_load_fails_after_gate_start() {
     let temp = tempfile::tempdir().unwrap();
     let conn = right_db::open_connection(temp.path(), true).unwrap();
@@ -580,4 +761,160 @@ async fn drain_requeues_when_review_already_running() {
         )
         .unwrap();
     assert_eq!(row, ("pending".to_owned(), 1));
+}
+
+#[test]
+fn requeue_episode_or_fail_requests_follow_up_drain() {
+    let conn = conn();
+    let episode = claimed_episode(
+        &conn,
+        LearningEpisodeKind::ForegroundThread,
+        EpisodeSeedTriggerKind::LearningSignal,
+        "inv:inv-requeue-follow-up",
+    );
+
+    let follow_up = requeue_episode_or_fail(
+        &conn,
+        "right",
+        episode.id,
+        chrono::DateTime::parse_from_rfc3339("2026-05-19T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        90,
+    )
+    .unwrap();
+
+    assert!(follow_up);
+}
+
+#[test]
+fn startup_recovery_requeues_selecting_episode_and_clears_gate() {
+    let conn = conn();
+    let episode = claimed_episode(
+        &conn,
+        LearningEpisodeKind::ForegroundThread,
+        EpisodeSeedTriggerKind::LearningSignal,
+        "inv:inv-recover-selecting",
+    );
+    right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+    conn.execute(
+        "UPDATE skill_nudge_state SET review_running=1 WHERE agent_name='right'",
+        [],
+    )
+    .unwrap();
+
+    let recovered =
+        recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z").unwrap();
+
+    let row: (String, String, i64) = conn
+        .query_row(
+            "SELECT e.status, e.ready_after, s.review_running
+             FROM learning_episodes e
+             JOIN skill_nudge_state s ON s.agent_name=e.agent_name
+             WHERE e.id=?1",
+            [episode.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(recovered, 1);
+    assert_eq!(
+        row,
+        ("pending".to_owned(), "2026-05-19T11:00:00Z".to_owned(), 0)
+    );
+}
+
+#[test]
+fn startup_recovery_marks_reviewing_episode_failed_from_latest_failed_report() {
+    let conn = conn();
+    let message_id = insert_review_message(&conn, "failed review evidence");
+    let episode_id = prepare_selected_episode(
+        &conn,
+        "inv:inv-recover-failed-report",
+        vec![format!("msg:{message_id}")],
+        Vec::new(),
+    );
+    conn.execute(
+        "UPDATE learning_episodes SET status='reviewing' WHERE id=?1",
+        [episode_id],
+    )
+    .unwrap();
+    right_agent::learned_skills::insert_skill_review_report(
+        &conn,
+        &right_agent::learned_skills::SkillReviewReport {
+            agent_name: "right".to_owned(),
+            source_invocation_id: "inv-recover-failed-report".to_owned(),
+            learning_episode_id: Some(episode_id),
+            root_session_id: None,
+            chat_id: Some(10),
+            thread_id: Some(20),
+            trigger_kind: ReviewTriggerKind::LearningSignal,
+            status: ReviewStatus::Failed,
+            confidence: right_agent::learned_skills::ReviewConfidence::Low,
+            candidate_skill_name: None,
+            candidate_summary: None,
+            evidence_refs: Vec::new(),
+            review_output_json: serde_json::json!({"status":"failed"}),
+            telegram_notified: false,
+        },
+    )
+    .unwrap();
+
+    recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z").unwrap();
+
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM learning_episodes WHERE id=?1",
+            [episode_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "failed");
+}
+
+#[test]
+fn startup_recovery_marks_reviewing_episode_reviewed_from_successful_report() {
+    let conn = conn();
+    let message_id = insert_review_message(&conn, "successful review evidence");
+    let episode_id = prepare_selected_episode(
+        &conn,
+        "inv:inv-recover-success-report",
+        vec![format!("msg:{message_id}")],
+        Vec::new(),
+    );
+    conn.execute(
+        "UPDATE learning_episodes SET status='reviewing' WHERE id=?1",
+        [episode_id],
+    )
+    .unwrap();
+    right_agent::learned_skills::insert_skill_review_report(
+        &conn,
+        &right_agent::learned_skills::SkillReviewReport {
+            agent_name: "right".to_owned(),
+            source_invocation_id: "inv-recover-success-report".to_owned(),
+            learning_episode_id: Some(episode_id),
+            root_session_id: None,
+            chat_id: Some(10),
+            thread_id: Some(20),
+            trigger_kind: ReviewTriggerKind::LearningSignal,
+            status: ReviewStatus::NothingToLearn,
+            confidence: right_agent::learned_skills::ReviewConfidence::Low,
+            candidate_skill_name: None,
+            candidate_summary: None,
+            evidence_refs: Vec::new(),
+            review_output_json: serde_json::json!({"status":"nothing_to_learn"}),
+            telegram_notified: false,
+        },
+    )
+    .unwrap();
+
+    recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z").unwrap();
+
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM learning_episodes WHERE id=?1",
+            [episode_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "reviewed");
 }

@@ -462,6 +462,21 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             "reset stale background-review gates"
         );
     }
+    let learning_recovery_now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let recovered_learning_episodes = crate::learning_episode::recover_stale_inflight_episodes(
+        &conn,
+        &args.agent,
+        &learning_recovery_now,
+    )
+    .map_err(|e| miette::miette!("recover stale learning episodes: {:#}", e))?;
+    if recovered_learning_episodes > 0 {
+        tracing::info!(
+            agent = %args.agent,
+            count = recovered_learning_episodes,
+            "recovered stale learning episodes"
+        );
+    }
+    drop(conn);
 
     // Resolve Telegram token
     let token = telegram::resolve_token(&config)?;
@@ -897,6 +912,29 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         // resolved_sandbox is always Some when is_sandboxed is true.
         let sandbox = resolved_sandbox.as_deref().unwrap();
         upgrade::run_startup_upgrade(cfg_path, &args.agent, sandbox).await;
+    }
+
+    {
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let conn = right_db::open_connection(&agent_dir, false).map_err(|e| {
+            miette::miette!("failed to open data.db for learning drain check: {e:#}")
+        })?;
+        let has_ready =
+            crate::learning_episode::has_ready_pending_episodes(&conn, &args.agent, &now)
+                .map_err(|e| miette::miette!("check ready learning episodes: {:#}", e))?;
+        if recovered_learning_episodes > 0 || has_ready {
+            crate::learning_episode::LearningEpisodeRuntime {
+                agent_dir: agent_dir.clone(),
+                agent_db_dir: agent_dir.clone(),
+                agent_name: args.agent.clone(),
+                inherited_model: config.model.clone(),
+                ssh_config_path: ssh_config_path.clone(),
+                resolved_sandbox: resolved_sandbox.clone(),
+                debug: Arc::clone(&debug_flag),
+                learning: config.learning.clone(),
+            }
+            .drain_soon();
+        }
     }
 
     // CRON-01: spawn cron task alongside Telegram dispatcher.
