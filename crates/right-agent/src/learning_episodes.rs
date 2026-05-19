@@ -127,6 +127,10 @@ impl LearningEpisodeStatus {
         }
     }
 
+    pub fn is_selector_terminal(self) -> bool {
+        matches!(self, Self::NoEpisode | Self::InsufficientContext)
+    }
+
     fn from_db(value: String) -> Result<Self, InvalidDbValue> {
         match value.as_str() {
             "pending" => Ok(Self::Pending),
@@ -373,6 +377,9 @@ pub fn mark_episode_terminal(
     status: LearningEpisodeStatus,
     output_json: &serde_json::Value,
 ) -> Result<(), rusqlite::Error> {
+    if !status.is_selector_terminal() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     let output_json = serde_json::to_string(output_json)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     let updated = conn.execute(
@@ -394,7 +401,7 @@ pub fn mark_episode_failed(
     let updated = conn.execute(
         "UPDATE learning_episodes \
          SET status='failed', selector_output_json=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
-         WHERE id=?1",
+         WHERE id=?1 AND status IN ('pending','selecting','selected','reviewing')",
         params![episode_id, output_json],
     )?;
     require_one_row_updated(updated)
@@ -538,6 +545,10 @@ mod tests {
         assert!(matches!(result, Err(rusqlite::Error::QueryReturnedNoRows)));
     }
 
+    fn assert_invalid_query(result: Result<(), rusqlite::Error>) {
+        assert!(matches!(result, Err(rusqlite::Error::InvalidQuery)));
+    }
+
     #[test]
     fn execution_event_insert_round_trips_thinking_as_secondary() {
         let conn = conn();
@@ -657,8 +668,8 @@ mod tests {
         assert_query_returned_no_rows(mark_episode_terminal(
             &conn,
             id,
-            LearningEpisodeStatus::Reviewed,
-            &serde_json::json!({"reviewed": true}),
+            LearningEpisodeStatus::NoEpisode,
+            &serde_json::json!({"reason": "too late"}),
         ));
         assert_query_returned_no_rows(mark_episode_terminal(
             &conn,
@@ -669,13 +680,39 @@ mod tests {
     }
 
     #[test]
-    fn mark_episode_failed_updates_existing_episode_and_rejects_missing_episode() {
+    fn mark_episode_terminal_rejects_non_terminal_destination_status() {
         let conn = conn();
         let id = insert_pending_episode(&conn, &seed("inv:inv-7")).unwrap();
+
+        assert_invalid_query(mark_episode_terminal(
+            &conn,
+            id,
+            LearningEpisodeStatus::Selected,
+            &serde_json::json!({"invalid": true}),
+        ));
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM learning_episodes WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn mark_episode_failed_updates_in_flight_episode_and_rejects_missing_episode() {
+        let conn = conn();
+        let id = insert_pending_episode(&conn, &seed("inv:inv-8")).unwrap();
         claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
             .unwrap()
             .unwrap();
-        mark_episode_selected(&conn, id, &selected_update()).unwrap();
+        conn.execute(
+            "UPDATE learning_episodes SET status='reviewing' WHERE id=?1",
+            [id],
+        )
+        .unwrap();
 
         mark_episode_failed(&conn, id, "selector crashed").unwrap();
         assert_query_returned_no_rows(mark_episode_failed(&conn, 999, "missing"));
@@ -689,5 +726,34 @@ mod tests {
             .unwrap();
         assert_eq!(row.0, "failed");
         assert_eq!(row.1, r#"{"error":"selector crashed"}"#);
+    }
+
+    #[test]
+    fn mark_episode_failed_does_not_overwrite_final_statuses() {
+        let conn = conn();
+        let reviewed_id = insert_pending_episode(&conn, &seed("inv:inv-9")).unwrap();
+        let no_episode_id = insert_pending_episode(&conn, &seed("inv:inv-10")).unwrap();
+        conn.execute(
+            "UPDATE learning_episodes SET status='reviewed' WHERE id=?1",
+            [reviewed_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE learning_episodes SET status='no_episode' WHERE id=?1",
+            [no_episode_id],
+        )
+        .unwrap();
+
+        assert_query_returned_no_rows(mark_episode_failed(&conn, reviewed_id, "late failure"));
+        assert_query_returned_no_rows(mark_episode_failed(&conn, no_episode_id, "late failure"));
+
+        let statuses: Vec<String> = conn
+            .prepare("SELECT status FROM learning_episodes ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(statuses, vec!["reviewed", "no_episode"]);
     }
 }
