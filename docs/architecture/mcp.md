@@ -220,4 +220,4 @@ Stage 2 background learned-skill review is report-only. Background review
 invocations do not expose or call `mcp__right__skill_learning_start` or
 `mcp__right__skill_learning_finish`; those remain foreground learning protocol
 tools. The reviewer records `skill_review_reports` and may notify Telegram only
-for high-confidence create/update candidates with `user_notice`.
+for high-confidence create/update candidates with `user_notice`. The reviewer prompt includes candidate decision rules: candidates must be reusable across future sessions, one-off task narrative must not become a skill, transient tool failures must not become persistent negative claims, and existing `rightx-*` skills should be updated before creating new candidates.
