@@ -194,6 +194,35 @@ fn system_prompt_no_ssh_block_for_no_sandbox() {
 }
 
 #[test]
+fn system_prompt_openshell_mentions_user_local_bin_contract() {
+    let result = generate_system_prompt(
+        "mybot",
+        &right_agent_config::SandboxMode::Openshell,
+        "/sandbox",
+    );
+
+    assert!(result.contains("/sandbox/.local/bin"));
+    assert!(result.contains("Do not install tools into `~/bin`"));
+    assert!(result.contains("Do not use sudo for tool installs"));
+    assert!(result.contains("NPM_CONFIG_PREFIX=/sandbox/.local"));
+    assert!(result.contains("NPM_CONFIG_CACHE=/sandbox/.npm"));
+    assert!(result.contains("npm install -g"));
+}
+
+#[test]
+fn system_prompt_no_sandbox_omits_sandbox_user_local_bin_contract() {
+    let result = generate_system_prompt(
+        "mybot",
+        &right_agent_config::SandboxMode::None,
+        "/Users/example/.right/agents/mybot",
+    );
+
+    assert!(!result.contains("/sandbox/.local/bin"));
+    assert!(!result.contains("NPM_CONFIG_PREFIX=/sandbox/.local"));
+    assert!(!result.contains("Do not install tools into `~/bin`"));
+}
+
+#[test]
 fn operating_instructions_constant_is_non_empty() {
     assert!(
         !crate::OPERATING_INSTRUCTIONS.is_empty(),
