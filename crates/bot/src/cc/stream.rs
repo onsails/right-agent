@@ -90,32 +90,46 @@ pub(crate) fn parse_stream_event(line: &str) -> StreamEvent {
 
 /// Parse a single CC stream-json line into a typed event suitable for durable
 /// execution evidence. Untyped lines return `None`.
+#[allow(dead_code)]
 pub(crate) fn parse_persisted_stream_event(line: &str) -> Option<PersistedStreamEvent> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    parse_persisted_stream_events(line).into_iter().next()
+}
+
+/// Parse all typed events from a single CC stream-json line in block order.
+pub(crate) fn parse_persisted_stream_events(line: &str) -> Vec<PersistedStreamEvent> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Vec::new();
+    };
     let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     match event_type {
         "assistant" => parse_assistant_persisted_event(&v),
         "user" => parse_user_persisted_event(&v),
-        "result" => Some(PersistedStreamEvent {
+        "result" => vec![PersistedStreamEvent {
             kind: PersistedStreamEventKind::InvocationResult,
             tool_name: None,
             content_text: value_text(v.get("result").unwrap_or(&serde_json::Value::Null)),
             content_json: v,
-        }),
-        _ => None,
+        }],
+        _ => Vec::new(),
     }
 }
 
-fn parse_assistant_persisted_event(v: &serde_json::Value) -> Option<PersistedStreamEvent> {
-    let blocks = v.pointer("/message/content")?.as_array()?;
+fn parse_assistant_persisted_event(v: &serde_json::Value) -> Vec<PersistedStreamEvent> {
+    let Some(blocks) = v
+        .pointer("/message/content")
+        .and_then(|content| content.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
     for block in blocks {
         let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match block_type {
             "text" => {
                 let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
                 if !text.is_empty() {
-                    return Some(PersistedStreamEvent {
+                    events.push(PersistedStreamEvent {
                         kind: PersistedStreamEventKind::AssistantText,
                         tool_name: None,
                         content_text: text.to_owned(),
@@ -126,7 +140,7 @@ fn parse_assistant_persisted_event(v: &serde_json::Value) -> Option<PersistedStr
             "thinking" => {
                 let thinking = block.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
                 if !thinking.is_empty() {
-                    return Some(PersistedStreamEvent {
+                    events.push(PersistedStreamEvent {
                         kind: PersistedStreamEventKind::Thinking,
                         tool_name: None,
                         content_text: thinking.to_owned(),
@@ -137,7 +151,7 @@ fn parse_assistant_persisted_event(v: &serde_json::Value) -> Option<PersistedStr
             "tool_use" => {
                 let tool = block.get("name").and_then(|n| n.as_str()).unwrap_or("?");
                 let input = block.get("input").unwrap_or(&serde_json::Value::Null);
-                return Some(PersistedStreamEvent {
+                events.push(PersistedStreamEvent {
                     kind: PersistedStreamEventKind::ToolCall,
                     tool_name: Some(tool.to_owned()),
                     content_text: summarize_tool_input(tool, input),
@@ -147,11 +161,17 @@ fn parse_assistant_persisted_event(v: &serde_json::Value) -> Option<PersistedStr
             _ => {}
         }
     }
-    None
+    events
 }
 
-fn parse_user_persisted_event(v: &serde_json::Value) -> Option<PersistedStreamEvent> {
-    let blocks = v.pointer("/message/content")?.as_array()?;
+fn parse_user_persisted_event(v: &serde_json::Value) -> Vec<PersistedStreamEvent> {
+    let Some(blocks) = v
+        .pointer("/message/content")
+        .and_then(|content| content.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
     for block in blocks {
         if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
             continue;
@@ -160,7 +180,7 @@ fn parse_user_persisted_event(v: &serde_json::Value) -> Option<PersistedStreamEv
             .get("is_error")
             .and_then(|is_error| is_error.as_bool())
             .unwrap_or(false);
-        return Some(PersistedStreamEvent {
+        events.push(PersistedStreamEvent {
             kind: if is_error {
                 PersistedStreamEventKind::ToolError
             } else {
@@ -171,7 +191,7 @@ fn parse_user_persisted_event(v: &serde_json::Value) -> Option<PersistedStreamEv
             content_json: block.clone(),
         });
     }
-    None
+    events
 }
 
 fn value_text(value: &serde_json::Value) -> String {
@@ -520,6 +540,33 @@ mod tests {
         let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":true,"content":"permission denied"}]}}"#;
         let event = parse_persisted_stream_event(line).unwrap();
         assert_eq!(event.kind, PersistedStreamEventKind::ToolError);
+    }
+
+    #[test]
+    fn persisted_events_parse_all_assistant_blocks_in_order() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"First"},{"type":"thinking","thinking":"Then think"},{"type":"tool_use","name":"Bash","input":{"command":"pwd"}}]}}"#;
+        let events = parse_persisted_stream_events(line);
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                PersistedStreamEventKind::AssistantText,
+                PersistedStreamEventKind::Thinking,
+                PersistedStreamEventKind::ToolCall
+            ]
+        );
+    }
+
+    #[test]
+    fn persisted_events_parse_all_user_tool_results_in_order() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},{"type":"tool_result","tool_use_id":"toolu_2","is_error":true,"content":"denied"}]}}"#;
+        let events = parse_persisted_stream_events(line);
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                PersistedStreamEventKind::ToolResult,
+                PersistedStreamEventKind::ToolError
+            ]
+        );
     }
 
     #[test]
