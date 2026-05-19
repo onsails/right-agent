@@ -644,9 +644,16 @@ fn sandbox_script_sources_user_local_env_before_claude() {
     let env_pos = script
         .find("/sandbox/.right/env.sh")
         .expect("sandbox script must reference managed env");
+    let assembly_pos = script
+        .find("printf 'Base'")
+        .expect("sandbox script must assemble prompt");
     let claude_pos = script
         .find("claude -p")
         .expect("sandbox script must invoke claude");
+    assert!(
+        env_pos < assembly_pos,
+        "env setup must precede prompt assembly"
+    );
     assert!(
         env_pos < claude_pos,
         "env setup must precede claude invocation"
