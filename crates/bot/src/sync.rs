@@ -337,6 +337,9 @@ const SANDBOX_ENV_PATH: &str = "/sandbox/.right/env.sh";
 const SANDBOX_ENV_DIR: &str = "/sandbox/.right";
 const SANDBOX_LOCAL_BIN: &str = "/sandbox/.local/bin";
 const SANDBOX_NPM_CACHE: &str = "/sandbox/.npm";
+const SANDBOX_BASHRC_PATH: &str = "/sandbox/.bashrc";
+const MANAGED_ENV_START_MARKER: &str = "# >>> RIGHT_AGENT managed env >>>";
+const MANAGED_ENV_END_MARKER: &str = "# <<< RIGHT_AGENT managed env <<<";
 
 fn sandbox_env_file_content() -> String {
     format!(
@@ -360,10 +363,25 @@ fi
 }
 
 fn ensure_bashrc_sources_managed_env(existing: &str) -> String {
-    if existing.contains(">>> RIGHT_AGENT managed env >>>")
-        && existing.contains(". /sandbox/.right/env.sh")
+    if let Some(start) = existing.find(MANAGED_ENV_START_MARKER)
+        && let Some(end_relative) = existing[start..].find(MANAGED_ENV_END_MARKER)
     {
-        return existing.to_owned();
+        let end = start + end_relative + MANAGED_ENV_END_MARKER.len();
+        let end = if existing[end..].starts_with("\r\n") {
+            end + 2
+        } else if existing[end..].starts_with('\n') {
+            end + 1
+        } else {
+            end
+        };
+
+        let mut out = String::with_capacity(
+            existing.len() - (end - start) + managed_env_bashrc_block().len(),
+        );
+        out.push_str(&existing[..start]);
+        out.push_str(managed_env_bashrc_block());
+        out.push_str(&existing[end..]);
+        return out;
     }
 
     let mut out = existing.trim_end_matches('\n').to_owned();
@@ -390,7 +408,7 @@ fn shell_printf_b_arg(content: &str) -> String {
 /// `/sandbox/.local/bin` is the single canonical location for user-installed
 /// executables. npm global installs use `/sandbox/.local` as prefix and place
 /// bins in that directory. The managed env file is sourced by `.bashrc` for
-/// user SSH shells and by prompt assembly for non-login Claude invocations.
+/// user SSH shells and provides the shared contract for non-login Claude setup.
 async fn ensure_sandbox_user_local_env(
     sbox: &right_openshell::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
@@ -421,12 +439,24 @@ async fn ensure_sandbox_user_local_env(
         ));
     }
 
-    let (bashrc, code) = sbox.exec(&["cat", "/sandbox/.bashrc"]).await?;
-    let existing = if code == 0 { bashrc } else { String::new() };
+    let (bashrc, code) = sbox.exec(&["cat", SANDBOX_BASHRC_PATH]).await?;
+    let existing = if code == 0 {
+        bashrc
+    } else {
+        let (_, missing_code) = sbox.exec(&["test", "!", "-e", SANDBOX_BASHRC_PATH]).await?;
+        if missing_code == 0 {
+            String::new()
+        } else {
+            return Err(miette::miette!(
+                "sync: failed to read {SANDBOX_BASHRC_PATH} in {}: cat exited with {code}: {bashrc}",
+                sbox.sandbox_name()
+            ));
+        }
+    };
     let desired = ensure_bashrc_sources_managed_env(&existing);
     if desired != existing {
         let bashrc_content = shell_printf_b_arg(&desired);
-        let script = format!("printf '%b' {bashrc_content} > /sandbox/.bashrc");
+        let script = format!("printf '%b' {bashrc_content} > {SANDBOX_BASHRC_PATH}");
         let (output, code) = sbox.exec(&["bash", "-lc", &script]).await?;
         if code != 0 {
             return Err(miette::miette!(
@@ -506,6 +536,74 @@ mod tests {
 
         let updated_again = ensure_bashrc_sources_managed_env(&updated);
         assert_eq!(updated_again, updated);
+    }
+
+    #[test]
+    fn ensure_bashrc_sources_managed_env_replaces_malformed_managed_block() {
+        let original = "\
+export PATH=\"/usr/bin:/bin\"
+# >>> RIGHT_AGENT managed env >>>
+echo stale
+# <<< RIGHT_AGENT managed env <<<
+alias ll='ls -la'
+";
+        let expected = format!(
+            "export PATH=\"/usr/bin:/bin\"\n{}alias ll='ls -la'\n",
+            managed_env_bashrc_block()
+        );
+
+        assert_eq!(ensure_bashrc_sources_managed_env(original), expected);
+    }
+
+    #[test]
+    fn ensure_bashrc_sources_managed_env_preserves_partial_marker_content() {
+        let original = "\
+export PATH=\"/usr/bin:/bin\"
+# >>> RIGHT_AGENT managed env >>>
+echo user-kept-this
+";
+        let updated = ensure_bashrc_sources_managed_env(original);
+
+        assert!(updated.contains("# >>> RIGHT_AGENT managed env >>>\necho user-kept-this"));
+        assert!(updated.ends_with(managed_env_bashrc_block()));
+        assert_eq!(
+            updated.matches(">>> RIGHT_AGENT managed env >>>").count(),
+            2
+        );
+        assert_eq!(
+            updated.matches("<<< RIGHT_AGENT managed env <<<").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn ensure_bashrc_sources_managed_env_leaves_exact_block_byte_for_byte() {
+        let existing = format!(
+            "export PATH=\"/usr/bin:/bin\"\n{}alias ll='ls -la'\n",
+            managed_env_bashrc_block()
+        );
+
+        assert_eq!(ensure_bashrc_sources_managed_env(&existing), existing);
+    }
+
+    #[test]
+    fn shell_printf_b_arg_round_trips_shellish_content_through_bash() {
+        let content = "single ' quote\n\
+command $(printf exploited) and `printf exploited`\n\
+percent % and backslash \\ and carriage\r and tab\t done\n";
+        let arg = shell_printf_b_arg(content);
+        let output = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(format!("printf '%b' {arg}"))
+            .output()
+            .expect("bash should run printf roundtrip");
+
+        assert!(
+            output.status.success(),
+            "bash failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, content.as_bytes());
     }
 
     #[ignore = "ci-openshell: requires live OpenShell gateway"]
