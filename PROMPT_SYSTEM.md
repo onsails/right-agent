@@ -47,10 +47,14 @@ Composite-prompt CC invocation paths use `build_prompt_assembly_script()`:
 
 Background learned-skill review is the exception: it is a separate
 `BackgroundReview` Claude Code JSON invocation, not a normal composite-prompt
-reply path. It does not resume or fork the foreground session. The bot supplies
-a bounded report bundle from the completed foreground turn, accepted signal
-JSON, learning events for the source invocation, and the `rightx-*` skill
-index, then stores the structured output as a review report.
+reply path. It does not resume or fork the foreground session. Trigger sources
+create durable `learning_episodes` rows immediately; a short settle delay lets
+nearby user corrections or async feedback arrive before selection, and there is
+no fixed cooldown that drops later evidence. The selector reads a bounded
+Rust-built corpus from conversation messages, typed execution events, signals,
+async run metadata, and cron run metadata, then persists selected episode refs.
+The report-only reviewer receives those selected refs plus the current
+`rightx-*` skill index and stores the structured output as a review report.
 
 `cron::execute_job` always uses `CRON_SCHEMA_JSON` with no fork. Telegram
 background handoff is not cron-backed: `background::spawn_background_continuation`
@@ -410,8 +414,9 @@ denied, leaving only read-only inspection tools available to the reviewer. The
 reviewer prompt explicitly prefers reusable future-session workflows, rejects
 one-off task narrative, avoids persistent claims from transient failures,
 prefers update candidates for existing `rightx-*` skills when applicable, and
-treats thinking events as secondary context that cannot be the only candidate
-evidence.
+treats typed execution events with `event_kind = 'thinking'` as secondary
+context that cannot be the only candidate evidence. Candidate evidence must
+cite at least one observable selected `msg:*` or non-thinking `exec:*` ref.
 
 ## Upstream MCP Server Instructions
 

@@ -31,7 +31,7 @@ broad private/link-local ranges remain rejected.
 ```
 OAuth callback (bot) → POST /set-token to Aggregator (Unix socket)
   → Aggregator updates DynamicAuthClient.token in-memory
-  → Aggregator saves to mcp_servers SQLite table (auth_token, expires_at, etc.)
+  → Aggregator saves token fields to mcp_servers SQLite table
   → Aggregator schedules refresh timer (see "Refresh margin" below)
   → on timer: POST refresh_token to token_endpoint
   → classify outcome (success / Transient / Permanent)
@@ -69,13 +69,14 @@ stale counter from prior failures can't push the next retry past the
 ### Tool-call 401 detection
 
 A token can also die mid-session: the upstream MCP rejects a tool call
-even though the local refresh timer hasn't fired yet (clock skew, server-
-side revocation, etc.). `proxy.rs::ProxyBackend::tools_call` catches this
-by inspecting the rmcp error string via `proxy.rs::is_upstream_auth_error`
-— rmcp surfaces 401s from `StreamableHttpClient` as a `TransportSend`
-error whose `Display` contains `"Auth required"`. On match the backend
-flips to `NeedsAuth` and returns `ProxyError::NeedsAuth` (not opaque
-`tool_failed`), so `mcp_list` reports the truth instead of `connected`.
+even though the local refresh timer hasn't fired yet (clock skew, server-side
+revocation, or stale credentials). `proxy.rs::ProxyBackend::tools_call` catches
+this by inspecting the rmcp error string via
+`proxy.rs::is_upstream_auth_error` — rmcp surfaces 401s from
+`StreamableHttpClient` as a `TransportSend` error whose `Display` contains
+`"Auth required"`. On match the backend flips to `NeedsAuth` and returns
+`ProxyError::NeedsAuth` (not opaque `tool_failed`), so `mcp_list` reports the
+truth instead of `connected`.
 
 ### Post-refresh reconnect
 
@@ -216,8 +217,15 @@ directory. The receipt text is authored by the LLM and passed as the
 Create and update both require `rightx-*`. The learning flow never patches
 custom/manual/hub/core/platform/bundled/codegen-owned non-`rightx-*` skills.
 
-Stage 2 background learned-skill review is report-only. Background review
-invocations do not expose or call `mcp__right__skill_learning_start` or
+Stage 2 background learned-skill review runs after `learning_episodes`
+selection and is report-only. Background review invocations do not expose or
+call `mcp__right__skill_learning_start` or
 `mcp__right__skill_learning_finish`; those remain foreground learning protocol
-tools. The reviewer records `skill_review_reports` and may notify Telegram only
-for high-confidence create/update candidates with `user_notice`. The reviewer prompt includes candidate decision rules: candidates must be reusable across future sessions, one-off task narrative must not become a skill, transient tool failures must not become persistent negative claims, and existing `rightx-*` skills should be updated before creating new candidates.
+tools. The reviewer records `skill_review_reports` and sends Telegram only for
+high-confidence create/update candidates with `user_notice`. Candidate evidence
+must cite at least one observable `msg:*` or non-thinking `exec:*` ref from the
+selected episode. The reviewer prompt includes candidate decision rules:
+candidates must be reusable across future sessions, one-off task narrative must
+not become a skill, transient tool failures must not become persistent negative
+claims, and existing `rightx-*` skills should be updated before creating new
+candidates.

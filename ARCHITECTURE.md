@@ -161,10 +161,12 @@ Session-bearing `claude -p` invocations get a composite system prompt via
 Prompt caching is critical — avoid per-message tool calls to read
 identity files.
 
-Background learned-skill review is the explicit exception: it is a
-report-only JSON invocation with no session resume/fork, no MCP config, no
-composite system prompt, and only read-only CC tools. It must not mutate skill
-files or call foreground learning/progress tools.
+Background learned-skill review is the explicit exception: it is an
+episode-selected, report-only JSON invocation with no session resume/fork, no
+MCP config, no composite system prompt, and only read-only CC tools. It must
+not mutate skill files or call foreground learning/progress tools. Candidate
+evidence must cite at least one selected observable `msg:*` or non-thinking
+`exec:*` ref; thinking-only evidence is rejected.
 
 See `PROMPT_SYSTEM.md` for full documentation.
 
