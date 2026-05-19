@@ -24,7 +24,7 @@ MCP OAuth tokens are stored per-agent and refreshed automatically (10 minutes be
 All sandbox network traffic goes through OpenShell's HTTPS proxy:
 
 - **Endpoint allowlists** — restrictive mode uses scoped DNS wildcards (e.g., `*.anthropic.com`, `*.claude.ai`); permissive mode uses hostless public `allowed_ips` ranges. OpenShell v0.0.37+ rejects TLD/global DNS wildcards.
-- **TLS termination** — the proxy terminates and re-signs TLS with a per-sandbox CA for L7 inspection. OpenShell v0.0.30+ auto-detects TLS; generated HTTPS endpoints omit the deprecated `tls` field.
+- **TLS termination** — restrictive/L7 endpoints terminate and re-sign TLS with a per-sandbox CA for inspection. OpenShell v0.0.30+ auto-detects TLS; generated L7 endpoints omit deprecated `tls` modes. Permissive public web endpoints use `tls: skip` raw tunnels to avoid L7 request-target rejection for normal public internet traffic such as scoped npm metadata.
 - **Policy hot-reload** — network rules can be updated without restarting the sandbox via `openshell policy set --wait`
 
 ## Declarative Policies
@@ -39,7 +39,7 @@ Policies are regenerated on each `right up` from `agent.yaml` configuration and 
 
 ## Configuring Policies
 
-**Default behavior:** Out of the box with `network_policy: permissive`, agents can reach public HTTP/HTTPS endpoints through hostless `allowed_ips` ranges. All allowed traffic still goes through OpenShell's proxy; HTTPS traffic is terminated and re-signed for inspection. Permissive mode is not a DNS wildcard and does not include private/reserved IP ranges.
+**Default behavior:** Out of the box with `network_policy: permissive`, agents can reach public HTTP/HTTPS endpoints through hostless `allowed_ips` ranges. All allowed traffic still goes through OpenShell's proxy; public web HTTPS uses raw `tls: skip` tunnels rather than L7 inspection. Permissive mode is not a DNS wildcard and does not include private/reserved IP ranges.
 
 With `network_policy: restrictive`, only Anthropic and Claude domains are allowed:
 - `*.anthropic.com`, `anthropic.com`

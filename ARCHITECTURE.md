@@ -552,9 +552,10 @@ prefixes for status replies. Escape untrusted text before passing it into
 
 ## OpenShell Policy Gotchas
 
-- **Do not emit `tls:` field** (OpenShell v0.0.30+). The proxy auto-detects TLS via ClientHello peek and terminates unconditionally for credential injection. Writing `tls: terminate` or `tls: passthrough` triggers a per-request `WARN` in the sandbox supervisor log and the field is slated for removal. Omit the field for auto-detect; use `tls: skip` only to explicitly disable termination (raw tunnel).
+- **Do not emit deprecated `tls:` modes** (OpenShell v0.0.30+). The proxy auto-detects TLS via ClientHello peek and terminates for L7 endpoints. Writing `tls: terminate` or `tls: passthrough` triggers a per-request `WARN` in the sandbox supervisor log and the field is slated for removal. Omit the field for auto-detect; use `tls: skip` only to explicitly disable termination (raw tunnel).
 - `binaries: path: "**"` not `"/sandbox/**"`. Claude binary lives at `/usr/local/bin/claude`, not under `/sandbox/`.
-- `protocol: rest` and `access: full` are required for HTTPS endpoints so the proxy applies L7 policy on the terminated plaintext.
+- `protocol: rest` and `access: full` are required only for endpoints that intentionally use L7 HTTP policy on terminated plaintext.
+- Permissive public internet endpoints are hostless public `allowed_ips` raw tunnels (`tls: skip`, no `protocol`/`access`) on ports 80/443. Do not add L7 REST policy there: OpenShell rejects encoded `/` (`%2F`) request-targets used by scoped npm package metadata.
 - Scoped wildcard domains (`*.anthropic.com`) work — the earlier 403 was caused by the binaries restriction, not wildcard matching.
 - OpenShell v0.0.37+ rejects TLD/global host wildcards. Permissive public internet policy must use hostless public `allowed_ips` endpoints, not a DNS wildcard.
 - CC actively manages `.claude.json` — strips unknown project trust entries on startup. Use `--dangerously-skip-permissions` instead of relying on trust entries.
