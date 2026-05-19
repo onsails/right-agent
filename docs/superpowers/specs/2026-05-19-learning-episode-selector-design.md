@@ -152,6 +152,8 @@ learning_episodes
   confidence              -- low | medium | high
   context_incomplete
   episode_hash
+  ready_after
+  last_evidence_at
   created_at
   updated_at
 ```
