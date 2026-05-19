@@ -627,3 +627,48 @@ fn cron_mode_does_not_emit_memory_section_when_memory_mode_none() {
         "Cron mode with memory_mode=None must not emit composite-memory"
     );
 }
+
+#[test]
+fn sandbox_script_sources_user_local_env_before_claude() {
+    let script = build_prompt_assembly_script(
+        "Base",
+        PromptMode::Normal,
+        "/sandbox",
+        "/tmp/right-system-prompt.md",
+        "/sandbox",
+        &["claude".into(), "-p".into()],
+        None,
+        None,
+    );
+
+    let env_pos = script
+        .find("/sandbox/.right/env.sh")
+        .expect("sandbox script must reference managed env");
+    let claude_pos = script
+        .find("claude -p")
+        .expect("sandbox script must invoke claude");
+    assert!(
+        env_pos < claude_pos,
+        "env setup must precede claude invocation"
+    );
+    assert!(script.contains("NPM_CONFIG_PREFIX=/sandbox/.local"));
+    assert!(script.contains("NPM_CONFIG_CACHE=/sandbox/.npm"));
+    assert!(script.contains("/sandbox/.local/bin"));
+}
+
+#[test]
+fn no_sandbox_script_does_not_reference_sandbox_user_local_env() {
+    let script = build_prompt_assembly_script(
+        "Base",
+        PromptMode::Normal,
+        "/Users/example/.right/agents/demo",
+        "/Users/example/.right/agents/demo/.claude/prompt.md",
+        "/Users/example/.right/agents/demo",
+        &["claude".into(), "-p".into()],
+        None,
+        None,
+    );
+
+    assert!(!script.contains("/sandbox/.right/env.sh"));
+    assert!(!script.contains("NPM_CONFIG_PREFIX=/sandbox/.local"));
+}

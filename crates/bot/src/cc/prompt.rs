@@ -28,6 +28,26 @@ pub(crate) fn shell_escape(s: &str) -> String {
         .into_owned()
 }
 
+fn sandbox_user_local_env_prelude(workdir: &str) -> &'static str {
+    if workdir == "/sandbox" {
+        r#"
+if [ -f /sandbox/.right/env.sh ]; then
+  . /sandbox/.right/env.sh
+else
+  mkdir -p /sandbox/.local/bin /sandbox/.npm
+  case ":$PATH:" in
+    *:/sandbox/.local/bin:*) ;;
+    *) export PATH="/sandbox/.local/bin:$PATH" ;;
+  esac
+  export NPM_CONFIG_PREFIX=/sandbox/.local
+  export NPM_CONFIG_CACHE=/sandbox/.npm
+fi
+"#
+    } else {
+        ""
+    }
+}
+
 /// Prompt section: a file from disk that gets a markdown header.
 struct PromptSection {
     filename: &'static str,
@@ -77,6 +97,7 @@ pub(crate) fn build_prompt_assembly_script(
     let escaped_base = base_prompt.replace('\'', "'\\''");
     let escaped_args: Vec<String> = claude_args.iter().map(|a| shell_escape(a)).collect();
     let claude_cmd = escaped_args.join(" ");
+    let sandbox_env_prelude = sandbox_user_local_env_prelude(workdir);
 
     let file_sections = if matches!(mode, PromptMode::Bootstrap) {
         let escaped_bootstrap = right_codegen::BOOTSTRAP_INSTRUCTIONS.replace('\'', "'\\''");
@@ -152,7 +173,7 @@ fi"#
     };
 
     format!(
-        "{{ printf '{escaped_base}'\n{file_sections}\n{mcp_section}\n{memory_section}\n}} > {prompt_file}\ncd {workdir} && {claude_cmd} --system-prompt-file {prompt_file}"
+        "{sandbox_env_prelude}\n{{ printf '{escaped_base}'\n{file_sections}\n{mcp_section}\n{memory_section}\n}} > {prompt_file}\ncd {workdir} && {claude_cmd} --system-prompt-file {prompt_file}"
     )
 }
 
