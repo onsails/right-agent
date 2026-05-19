@@ -66,8 +66,8 @@ foreground turn completes, the bot may start a `BackgroundReview` Claude Code
 JSON invocation when a recorded/accepted learned-skill signal exists or the
 per-agent effort counter reaches the review interval. It is not run after every
 reply: `skill_nudge_state` gates it with an atomic `try_mark_review_started`
-check covering cooldown, daily limit, concurrency (`review_running`), and the
-selected signal/threshold trigger. The invocation does not resume or fork the
+check covering daily limit, concurrency (`review_running`), and the selected
+signal/threshold trigger. The invocation does not resume or fork the
 foreground session. It receives a bounded bundle from the foreground stream log,
 accepted signal JSON, learning events for the source invocation, and the
 `rightx-*` skill index; then it stores a structured report and sends Telegram
