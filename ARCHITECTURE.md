@@ -161,12 +161,13 @@ Session-bearing `claude -p` invocations get a composite system prompt via
 Prompt caching is critical — avoid per-message tool calls to read
 identity files.
 
-Background learned-skill review is the explicit exception: it is an
-episode-selected, report-only JSON invocation with no session resume/fork, no
-MCP config, no composite system prompt, and only read-only CC tools. It must
-not mutate skill files or call foreground learning/progress tools. Candidate
-evidence must cite at least one selected observable `msg:*` or non-thinking
-`exec:*` ref; thinking-only evidence is rejected.
+Stage 2 learning selector and reviewer invocations are explicit exceptions:
+they are report-only JSON invocations with no session resume/fork, no MCP
+config, no composite system prompt, and `--tools ""` so Claude Code exposes no
+tools. They receive only prompt-supplied selected context and the prebuilt
+`rightx-*` skill index. Candidate evidence must cite at least one selected
+primary `msg:*` or non-thinking `exec:*` ref; thinking-only and low-trust-only
+evidence is rejected.
 
 See `PROMPT_SYSTEM.md` for full documentation.
 
@@ -183,9 +184,10 @@ omitted):
 - `--output-format <stream-json|json>` (`--verbose` auto-added for `stream-json` only)
 - `--json-schema <schema>` — structured output
 
-Background learned-skill review is not session-bearing and intentionally omits
-`--mcp-config` / `--strict-mcp-config`; its tool surface is enforced by
-`--allowedTools Read,Glob,Grep,LS` plus mutation-tool denials.
+Stage 2 learning selector and reviewer calls are not session-bearing and
+intentionally omit `--mcp-config` / `--strict-mcp-config`; they pass
+`--tools ""` to disable every Claude Code tool and depend only on
+prompt-supplied context.
 
 **Optional per-callsite:**
 - `--model` — override default model

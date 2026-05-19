@@ -405,18 +405,20 @@ move skill files from sandbox to host. The active agent writes skill package
 files under `.claude/skills/<skill_name>/`. Create and update both require
 `rightx-*` skill package names.
 
-Background learned-skill review is report-only in Stage 2. It may record
-high-confidence create/update candidates from a selected learning episode, but
-it must not create, patch, archive, or delete skill package files. It does not
-expose or call `mcp__right__skill_learning_start` or
-`mcp__right__skill_learning_finish`; write/edit tools, `Agent`, and `Bash` are
-denied, leaving only read-only inspection tools available to the reviewer. The
-reviewer prompt explicitly prefers reusable future-session workflows, rejects
-one-off task narrative, avoids persistent claims from transient failures,
-prefers update candidates for existing `rightx-*` skills when applicable, and
-treats typed execution events with `event_kind = 'thinking'` as secondary
-context that cannot be the only candidate evidence. Candidate evidence must
-cite at least one observable selected `msg:*` or non-thinking `exec:*` ref.
+Background learned-skill review is report-only in Stage 2. The selector and
+reviewer invocations pass `--tools ""`, omit MCP config, and receive only
+prompt-supplied selected context plus the prebuilt `rightx-*` skill index. The
+reviewer may record high-confidence create/update candidates from a selected
+learning episode, but it must not create, patch, archive, or delete skill
+package files. It does not expose or call
+`mcp__right__skill_learning_start` or
+`mcp__right__skill_learning_finish`. The reviewer prompt explicitly prefers
+reusable future-session workflows, rejects one-off task narrative, avoids
+persistent claims from transient failures, prefers update candidates for
+existing `rightx-*` skills when applicable, and treats typed execution events
+with `event_kind = 'thinking'` and low-trust messages as secondary context that
+cannot be the only candidate evidence. Candidate evidence must cite at least
+one selected primary `msg:*` or non-thinking `exec:*` ref.
 
 ## Upstream MCP Server Instructions
 

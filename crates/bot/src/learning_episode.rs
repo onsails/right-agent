@@ -18,6 +18,7 @@ use right_agent::learning_episodes::{
     LearningEpisodeStatus, NewLearningEpisodeSeed, SelectedEpisodeUpdate,
 };
 use rusqlite::OptionalExtension as _;
+use sha2::{Digest as _, Sha256};
 
 const LEARNING_EPISODE_REVIEW_DAILY_LIMIT: i64 = 12;
 const EPISODE_SELECTOR_TIMEOUT_SECS: u64 = 120;
@@ -67,14 +68,22 @@ pub(crate) struct LearningEpisodeRuntime {
 }
 
 impl LearningEpisodeRuntime {
-    pub(crate) fn delayed_drain(self) {
-        let delay = self.learning.episode_settle_seconds;
+    pub(crate) fn drain_after(self, delay: Duration) {
         std::mem::drop(tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(delay)).await;
+            tokio::time::sleep(delay).await;
             if let Err(e) = drain_ready_learning_episodes_once(self).await {
                 tracing::warn!("learning episode drain failed: {e:#}");
             }
         }));
+    }
+
+    pub(crate) fn drain_soon(self) {
+        self.drain_after(Duration::from_secs(1));
+    }
+
+    pub(crate) fn delayed_drain(self) {
+        let delay = self.learning.episode_settle_seconds;
+        self.drain_after(Duration::from_secs(delay));
     }
 }
 
@@ -117,6 +126,8 @@ pub(crate) struct CorpusMessage {
     pub(crate) content: String,
     pub(crate) addressed_to_bot: bool,
     pub(crate) routed_to_agent: bool,
+    pub(crate) root_session_id: Option<String>,
+    pub(crate) turn_id: Option<i64>,
     pub(crate) created_at: String,
 }
 
@@ -147,6 +158,7 @@ struct SelectorPromptCorpus<'a> {
 struct SelectorPromptMessage<'a> {
     reference: String,
     role: &'a str,
+    trust_label: &'a str,
     content: &'a str,
     addressed_to_bot: bool,
     routed_to_agent: bool,
@@ -196,6 +208,8 @@ impl SelectorCorpus {
                         content: "test message".to_owned(),
                         addressed_to_bot: true,
                         routed_to_agent: true,
+                        root_session_id: None,
+                        turn_id: None,
                         created_at: "2026-05-19T00:00:00Z".to_owned(),
                     }
                 })
@@ -228,6 +242,7 @@ impl SelectorCorpus {
                 .map(|message| SelectorPromptMessage {
                     reference: message_ref(message.id),
                     role: &message.role,
+                    trust_label: message_trust_label(message),
                     content: &message.content,
                     addressed_to_bot: message.addressed_to_bot,
                     routed_to_agent: message.routed_to_agent,
@@ -350,6 +365,9 @@ pub(crate) fn validate_selector_output(
     }
 
     if output.status == "selected" {
+        if output.start_ref.is_none() || output.end_ref.is_none() {
+            return Err("selected output requires start_ref and end_ref".to_owned());
+        }
         let has_observable_execution = output.execution_event_refs.iter().any(|reference| {
             corpus.execution_events.iter().any(|event| {
                 execution_event_ref(event.id) == *reference
@@ -455,13 +473,15 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
         ReviewGateDecision::Skip(
             ReviewSkipReason::AlreadyRunning | ReviewSkipReason::DailyLimit,
         ) => {
-            requeue_episode_or_fail(
+            if requeue_episode_or_fail(
                 &conn,
                 &runtime.agent_name,
                 episode.id,
                 now,
                 runtime.learning.episode_settle_seconds,
-            )?;
+            )? {
+                runtime.clone().delayed_drain();
+            }
             return Ok(());
         }
         ReviewGateDecision::Skip(ReviewSkipReason::BelowThreshold) => {
@@ -547,6 +567,25 @@ fn record_selector_output(
 
     match output.status.as_str() {
         "selected" => {
+            let episode_hash = compute_episode_hash(episode, &output);
+            if let Some(status) =
+                find_duplicate_episode_status(conn, &runtime.agent_name, episode.id, &episode_hash)?
+            {
+                let output_json = serde_json::json!({
+                    "status": "no_episode",
+                    "reason": "duplicate_episode",
+                    "duplicate_status": status,
+                    "episode_hash": episode_hash,
+                });
+                right_agent::learning_episodes::mark_episode_terminal(
+                    conn,
+                    episode.id,
+                    LearningEpisodeStatus::NoEpisode,
+                    &output_json,
+                )?;
+                clear_review_running(conn, &runtime.agent_name)?;
+                return Ok(false);
+            }
             let selection = SelectedEpisodeUpdate {
                 start_ref: output.start_ref.clone(),
                 end_ref: output.end_ref.clone(),
@@ -557,7 +596,7 @@ fn record_selector_output(
                 boundary_rationale: output.boundary_rationale.clone(),
                 confidence: Some(output.confidence.clone()),
                 context_incomplete: output.context_incomplete,
-                episode_hash: None,
+                episode_hash: Some(episode_hash),
                 last_evidence_at: selected_last_evidence_at(corpus, &output),
             };
             right_agent::learning_episodes::mark_episode_selected(conn, episode.id, &selection)?;
@@ -602,6 +641,56 @@ fn effective_selector_model(runtime: &LearningEpisodeRuntime) -> Option<String> 
         .episode_selector_model
         .clone()
         .or_else(|| runtime.inherited_model.clone())
+}
+
+fn compute_episode_hash(episode: &LearningEpisodeRow, output: &EpisodeSelectorOutput) -> String {
+    let mut hasher = Sha256::new();
+    hash_part(&mut hasher, &episode.agent_name);
+    hash_part(&mut hasher, episode.kind.as_str());
+    hash_part(&mut hasher, episode.seed_trigger_kind.as_str());
+    for reference in &output.message_refs {
+        hash_part(&mut hasher, reference);
+    }
+    hash_part(&mut hasher, "");
+    for reference in &output.execution_event_refs {
+        hash_part(&mut hasher, reference);
+    }
+    hex_lower(&hasher.finalize())
+}
+
+fn hash_part(hasher: &mut Sha256, value: &str) {
+    hasher.update(value.len().to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn find_duplicate_episode_status(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+    current_episode_id: i64,
+    episode_hash: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT status FROM learning_episodes
+         WHERE agent_name=?1
+           AND episode_hash=?2
+           AND id<>?3
+           AND status IN ('pending','selecting','selected','reviewing','reviewed')
+         ORDER BY CASE status WHEN 'reviewed' THEN 0 ELSE 1 END, id ASC
+         LIMIT 1",
+        rusqlite::params![agent_name, episode_hash, current_episode_id],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 pub(crate) async fn run_episode_reviewer(
@@ -722,14 +811,9 @@ async fn run_episode_review_invocation(
         resume_session_id: None,
         new_session_id: None,
         fork_session: false,
-        allowed_tools: ["Read", "Glob", "Grep", "LS"]
-            .iter()
-            .map(|tool| (*tool).to_owned())
-            .collect(),
-        disallowed_tools: crate::cc::invocation::disallow_background_review_mutation_tools(
-            crate::cc::invocation::baseline_disallowed_tools(),
-        ),
-        extra_args: Vec::new(),
+        allowed_tools: Vec::new(),
+        disallowed_tools: Vec::new(),
+        extra_args: crate::cc::invocation::disable_all_tools_args(),
         prompt: Some(prompt),
         debug_flag: Some(Arc::clone(&runtime.debug)),
     };
@@ -832,10 +916,12 @@ fn load_selected_review_evidence(
     for ref_id in &episode.message_refs {
         let id = parse_prefixed_ref_id(ref_id, "msg:")?;
         let message = load_review_message(conn, id, ref_id)?;
-        evidence_index.insert(
-            ref_id.clone(),
-            crate::learning_review::EvidenceKind::Message,
-        );
+        let evidence_kind = if message.trust_label == "low_trust" {
+            crate::learning_review::EvidenceKind::LowTrustMessage
+        } else {
+            crate::learning_review::EvidenceKind::Message
+        };
+        evidence_index.insert(ref_id.clone(), evidence_kind);
         messages.push(message);
     }
 
@@ -875,13 +961,20 @@ fn load_review_message(
     ref_id: &str,
 ) -> anyhow::Result<crate::learning_review::ReviewMessage> {
     conn.query_row(
-        "SELECT role, content FROM conversation_messages WHERE id=?1",
+        "SELECT role, content, addressed_to_bot, routed_to_agent FROM conversation_messages WHERE id=?1",
         [id],
         |row| {
+            let addressed_to_bot: i64 = row.get(2)?;
+            let routed_to_agent: i64 = row.get(3)?;
+            let trust_label = if addressed_to_bot != 0 || routed_to_agent != 0 {
+                "primary"
+            } else {
+                "low_trust"
+            };
             Ok(crate::learning_review::ReviewMessage {
                 ref_id: ref_id.to_owned(),
                 role: row.get(0)?,
-                trust_label: "primary".to_owned(),
+                trust_label: trust_label.to_owned(),
                 content: row.get(1)?,
             })
         },
@@ -1068,6 +1161,7 @@ fn load_selector_corpus(
         invocation_id.as_deref(),
         async_run_id.as_deref(),
         cron_run_id.as_deref(),
+        &messages,
     )?;
     Ok(SelectorCorpus {
         kind: episode.kind,
@@ -1082,7 +1176,7 @@ fn load_corpus_messages(
     thread_id: i64,
 ) -> Result<Vec<CorpusMessage>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, role, content, addressed_to_bot, routed_to_agent, created_at
+        "SELECT id, role, content, addressed_to_bot, routed_to_agent, root_session_id, turn_id, created_at
          FROM conversation_messages
          WHERE platform='telegram' AND chat_id=?1 AND thread_id=?2
          ORDER BY created_at DESC
@@ -1097,7 +1191,9 @@ fn load_corpus_messages(
             content: row.get(2)?,
             addressed_to_bot: addressed_to_bot != 0,
             routed_to_agent: routed_to_agent != 0,
-            created_at: row.get(5)?,
+            root_session_id: row.get(5)?,
+            turn_id: row.get(6)?,
+            created_at: row.get(7)?,
         })
     })?
     .collect()
@@ -1110,31 +1206,55 @@ fn load_corpus_execution_events(
     invocation_id: Option<&str>,
     async_run_id: Option<&str>,
     cron_run_id: Option<&str>,
+    messages: &[CorpusMessage],
 ) -> Result<Vec<CorpusExecutionEvent>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
+    let turn_pairs: Vec<(&str, i64)> = messages
+        .iter()
+        .filter_map(|message| Some((message.root_session_id.as_deref()?, message.turn_id?)))
+        .collect();
+    let turn_clause = if turn_pairs.is_empty() {
+        String::new()
+    } else {
+        let placeholders = std::iter::repeat_n("(?, ?)", turn_pairs.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" OR (root_session_id, turn_id) IN ({placeholders})")
+    };
+    let sql = format!(
         "SELECT id, event_kind, trust_label, content_text
          FROM execution_events
-         WHERE agent_name=?1 AND (root_session_id=?2 OR invocation_id=?3 OR async_run_id=?4 OR cron_run_id=?5)
-         ORDER BY seq
-         LIMIT 120",
-    )?;
-    stmt.query_map(
-        rusqlite::params![
-            agent_name,
-            root_session_id,
-            invocation_id,
-            async_run_id,
-            cron_run_id
-        ],
-        |row| {
-            Ok(CorpusExecutionEvent {
-                id: row.get(0)?,
-                event_kind: parse_execution_event_kind(row.get::<_, String>(1)?.as_str()),
-                trust_label: row.get(2)?,
-                content_text: row.get(3)?,
-            })
-        },
-    )?
+         WHERE agent_name=? AND (root_session_id=? OR invocation_id=? OR async_run_id=? OR cron_run_id=?{turn_clause})
+         ORDER BY seq ASC, id ASC
+         LIMIT 120"
+    );
+    let mut params: Vec<rusqlite::types::Value> = vec![
+        rusqlite::types::Value::Text(agent_name.to_owned()),
+        root_session_id
+            .map(|value| rusqlite::types::Value::Text(value.to_owned()))
+            .unwrap_or(rusqlite::types::Value::Null),
+        invocation_id
+            .map(|value| rusqlite::types::Value::Text(value.to_owned()))
+            .unwrap_or(rusqlite::types::Value::Null),
+        async_run_id
+            .map(|value| rusqlite::types::Value::Text(value.to_owned()))
+            .unwrap_or(rusqlite::types::Value::Null),
+        cron_run_id
+            .map(|value| rusqlite::types::Value::Text(value.to_owned()))
+            .unwrap_or(rusqlite::types::Value::Null),
+    ];
+    for (root_session_id, turn_id) in &turn_pairs {
+        params.push(rusqlite::types::Value::Text((*root_session_id).to_owned()));
+        params.push(rusqlite::types::Value::Integer(*turn_id));
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_map(rusqlite::params_from_iter(params), |row| {
+        Ok(CorpusExecutionEvent {
+            id: row.get(0)?,
+            event_kind: parse_execution_event_kind(row.get::<_, String>(1)?.as_str()),
+            trust_label: row.get(2)?,
+            content_text: row.get(3)?,
+        })
+    })?
     .collect()
 }
 
@@ -1156,10 +1276,8 @@ async fn run_episode_selector(
         new_session_id: None,
         fork_session: false,
         allowed_tools: Vec::new(),
-        disallowed_tools: crate::cc::invocation::disallow_background_review_mutation_tools(
-            crate::cc::invocation::baseline_disallowed_tools(),
-        ),
-        extra_args: Vec::new(),
+        disallowed_tools: Vec::new(),
+        extra_args: crate::cc::invocation::disable_all_tools_args(),
         prompt: Some(prompt),
         debug_flag: Some(Arc::clone(&runtime.debug)),
     };
@@ -1198,6 +1316,7 @@ fn build_selector_prompt(corpus_json: &str) -> String {
     prompt.push_str(
         "Select the smallest useful learning episode from the corpus. \
          Use only refs present in the corpus. Thinking-only evidence is not observable. \
+         Message trust_label=low_trust is nearby unaddressed context, not primary evidence. \
          Return no_episode when there is no actionable learning evidence, and \
          insufficient_context when the boundary cannot be selected from available evidence.\n\n",
     );
@@ -1253,13 +1372,107 @@ fn requeue_episode_or_fail(
     episode_id: i64,
     now: chrono::DateTime<chrono::Utc>,
     settle_seconds: u64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     if let Err(e) = requeue_episode(conn, episode_id, now, settle_seconds) {
         let reason = format!("learning episode requeue failed: {e:#}");
         mark_claimed_episode_failed(conn, agent_name, episode_id, &reason, false)?;
         return Err(anyhow!(reason));
     }
-    Ok(())
+    Ok(true)
+}
+
+pub(crate) fn recover_stale_inflight_episodes(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+    now: &str,
+) -> Result<usize, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, status FROM learning_episodes
+         WHERE agent_name=?1 AND status IN ('selecting','selected','reviewing')
+         ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map([agent_name], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut episodes = Vec::new();
+    for row in rows {
+        episodes.push(row?);
+    }
+    drop(stmt);
+
+    let tx = conn.unchecked_transaction()?;
+    let mut recovered = 0;
+    for (episode_id, status) in episodes {
+        match status.as_str() {
+            "selecting" => {
+                recovered += tx.execute(
+                    "UPDATE learning_episodes
+                     SET status='pending', ready_after=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                     WHERE id=?1 AND status='selecting'",
+                    rusqlite::params![episode_id, now],
+                )?;
+            }
+            "selected" | "reviewing" => {
+                let report_status: Option<String> = tx
+                    .query_row(
+                        "SELECT status FROM skill_review_reports
+                         WHERE learning_episode_id=?1
+                         ORDER BY id DESC
+                         LIMIT 1",
+                        [episode_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let updated = match report_status.as_deref() {
+                    Some("failed") => tx.execute(
+                        "UPDATE learning_episodes
+                         SET status='failed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                         WHERE id=?1 AND status IN ('selected','reviewing')",
+                        [episode_id],
+                    )?,
+                    Some(_) => tx.execute(
+                        "UPDATE learning_episodes
+                         SET status='reviewed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                         WHERE id=?1 AND status IN ('selected','reviewing')",
+                        [episode_id],
+                    )?,
+                    None => tx.execute(
+                        "UPDATE learning_episodes
+                         SET status='pending', ready_after=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                         WHERE id=?1 AND status IN ('selected','reviewing')",
+                        rusqlite::params![episode_id, now],
+                    )?,
+                };
+                recovered += updated;
+            }
+            _ => {}
+        }
+    }
+    if recovered > 0 {
+        tx.execute(
+            "UPDATE skill_nudge_state SET review_running = 0 WHERE agent_name = ?1",
+            [agent_name],
+        )?;
+    }
+    tx.commit()?;
+    Ok(recovered)
+}
+
+pub(crate) fn has_ready_pending_episodes(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+    now: &str,
+) -> Result<bool, rusqlite::Error> {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM learning_episodes
+            WHERE agent_name=?1 AND status='pending' AND ready_after <= ?2
+            LIMIT 1
+        )",
+        rusqlite::params![agent_name, now],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value != 0)
 }
 
 fn review_trigger_for_episode(
@@ -1318,6 +1531,14 @@ fn selected_last_evidence_at(
                 .map(|message| message.created_at.clone())
         })
         .max()
+}
+
+fn message_trust_label(message: &CorpusMessage) -> &'static str {
+    if message.addressed_to_bot || message.routed_to_agent {
+        "primary"
+    } else {
+        "low_trust"
+    }
 }
 
 fn parse_episode_kind(value: &str) -> Result<LearningEpisodeKind, String> {

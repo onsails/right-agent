@@ -97,6 +97,7 @@ pub(crate) struct ReviewReportContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvidenceKind {
     Message,
+    LowTrustMessage,
     ObservableExecution,
     Thinking,
 }
@@ -211,7 +212,7 @@ impl ReviewOutput {
             Ok(())
         } else {
             Err(
-                "candidate evidence_refs must include at least one observable episode ref: msg:* or non-thinking exec:*"
+                "candidate evidence_refs must include at least one observable episode ref: primary msg:* or non-thinking exec:*"
                     .to_owned(),
             )
         }
@@ -380,8 +381,8 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
     );
     if bundle.learning_episode_id.is_some() {
         prompt.push_str(
-            "         - Thinking events are secondary context. They can guide wording, but candidate evidence_refs must include at least one observable ref: msg:* or non-thinking exec:*.\n\
-             - Thinking events cannot be the only evidence for a candidate.\n",
+            "         - Thinking events and low_trust messages are secondary context. They can guide wording, but candidate evidence_refs must include at least one primary msg:* or non-thinking exec:*.\n\
+             - Thinking events and low_trust-only messages cannot be the only evidence for a candidate.\n",
         );
     } else {
         prompt.push_str(

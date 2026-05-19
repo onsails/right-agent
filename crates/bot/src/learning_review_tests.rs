@@ -96,6 +96,40 @@ fn candidate_with_only_thinking_evidence_is_rejected() {
 }
 
 #[test]
+fn candidate_with_only_low_trust_message_evidence_is_rejected() {
+    let raw = serde_json::json!({
+        "status":"create_candidate",
+        "confidence":"high",
+        "candidate_skill_name":"rightx-context-window",
+        "candidate_summary":"Use context",
+        "evidence_refs":["msg:3"],
+        "user_notice":null
+    });
+    let output = ReviewOutput::parse(raw).unwrap();
+    let refs =
+        EpisodeEvidenceIndex::from_pairs(vec![("msg:3".to_owned(), EvidenceKind::LowTrustMessage)]);
+    assert!(output.validate_candidate_evidence(&refs).is_err());
+}
+
+#[test]
+fn candidate_with_primary_message_and_low_trust_message_is_allowed() {
+    let raw = serde_json::json!({
+        "status":"update_candidate",
+        "confidence":"high",
+        "candidate_skill_name":"rightx-context-window",
+        "candidate_summary":"Use context",
+        "evidence_refs":["msg:1", "msg:3"],
+        "user_notice":null
+    });
+    let output = ReviewOutput::parse(raw).unwrap();
+    let refs = EpisodeEvidenceIndex::from_pairs(vec![
+        ("msg:1".to_owned(), EvidenceKind::Message),
+        ("msg:3".to_owned(), EvidenceKind::LowTrustMessage),
+    ]);
+    output.validate_candidate_evidence(&refs).unwrap();
+}
+
+#[test]
 fn candidate_with_unknown_only_evidence_is_rejected() {
     let raw = serde_json::json!({
         "status":"create_candidate",

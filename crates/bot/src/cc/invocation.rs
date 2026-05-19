@@ -78,21 +78,8 @@ pub(crate) fn disallow_foreground_only_tools(tools: Vec<String>) -> Vec<String> 
     disallow_conversation_search(disallow_learning_tools(disallow_send_progress(tools)))
 }
 
-pub(crate) fn disallow_background_review_mutation_tools(tools: Vec<String>) -> Vec<String> {
-    let mut tools = disallow_foreground_only_tools(tools);
-    for tool_name in [
-        "Agent",
-        "Write",
-        "Edit",
-        "MultiEdit",
-        "NotebookEdit",
-        "Bash",
-    ] {
-        if !tools.iter().any(|tool| tool == tool_name) {
-            tools.push(tool_name.to_owned());
-        }
-    }
-    tools
+pub(crate) fn disable_all_tools_args() -> Vec<String> {
+    vec!["--tools".to_owned(), String::new()]
 }
 
 pub(crate) fn with_progress_invocation_header(
@@ -482,6 +469,17 @@ mod tests {
     }
 
     #[test]
+    fn disable_all_tools_args_emit_empty_tools_flag() {
+        let mut inv = minimal();
+        inv.extra_args = disable_all_tools_args();
+
+        let args = inv.into_args();
+
+        let pos = args.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(args[pos + 1], "");
+    }
+
+    #[test]
     fn baseline_disallowed_tools_blocks_harness_self_loops() {
         let baseline = baseline_disallowed_tools();
         for required in [
@@ -586,26 +584,6 @@ mod tests {
                 .filter(|tool| tool.as_str() == tool_name)
                 .count();
             assert_eq!(count, 1, "{tool_name} should be present once");
-        }
-    }
-
-    #[test]
-    fn disallow_background_review_mutation_tools_blocks_agent_and_writes() {
-        let tools = disallow_background_review_mutation_tools(vec!["Bash".to_owned()]);
-        for tool_name in [
-            "Agent",
-            "Write",
-            "Edit",
-            "MultiEdit",
-            "Bash",
-            right_mcp::internal_client::PROGRESS_MCP_TOOL,
-            right_mcp::internal_client::SKILL_LEARNING_START_MCP_TOOL,
-            right_mcp::internal_client::SKILL_LEARNING_FINISH_MCP_TOOL,
-        ] {
-            assert!(
-                tools.iter().any(|tool| tool == tool_name),
-                "missing {tool_name}"
-            );
         }
     }
 

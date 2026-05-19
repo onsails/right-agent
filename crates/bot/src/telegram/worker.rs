@@ -2647,9 +2647,6 @@ async fn run_background_learned_skill_review(
         learned_skills,
     };
     let prompt = crate::learning_review::build_review_prompt(&bundle);
-    let disallowed_tools = crate::cc::invocation::disallow_background_review_mutation_tools(
-        crate::cc::invocation::baseline_disallowed_tools(),
-    );
     let invocation = crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: None,
         json_schema: Some(crate::learning_review::REVIEW_SCHEMA_JSON.to_owned()),
@@ -2660,12 +2657,9 @@ async fn run_background_learned_skill_review(
         resume_session_id: None,
         new_session_id: None,
         fork_session: false,
-        allowed_tools: ["Read", "Glob", "Grep", "LS"]
-            .iter()
-            .map(|tool| (*tool).to_owned())
-            .collect(),
-        disallowed_tools,
-        extra_args: vec![],
+        allowed_tools: Vec::new(),
+        disallowed_tools: Vec::new(),
+        extra_args: crate::cc::invocation::disable_all_tools_args(),
         prompt: Some(prompt),
         debug_flag: Some(debug),
     };
