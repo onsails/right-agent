@@ -181,6 +181,20 @@ your final response.
     );
 
     if matches!(sandbox_mode, right_agent_config::SandboxMode::Openshell) {
+        prompt.push_str(
+            "
+User-installed CLI tools:
+- Put manually installed executables in `/sandbox/.local/bin`.
+- `/sandbox/.local/bin` is on PATH for your sandbox sessions.
+- Do not install tools into `~/bin`; use `/sandbox/.local/bin`.
+- Do not use sudo for tool installs.
+- npm global installs are configured with `NPM_CONFIG_PREFIX=/sandbox/.local`, so `npm install -g <pkg>` exposes bins in `/sandbox/.local/bin`.
+- npm cache is configured with `NPM_CONFIG_CACHE=/sandbox/.npm`.
+",
+        );
+    }
+
+    if matches!(sandbox_mode, right_agent_config::SandboxMode::Openshell) {
         prompt.push_str(&format!(
             "
 ## User SSH Access
