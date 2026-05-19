@@ -362,6 +362,7 @@ pub(crate) async fn run_delivery_loop(
     session_locks: crate::telegram::SessionLocks,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: right_agent::agent::types::LearningConfig,
+    learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
 ) {
     tracing::info!(agent = %agent_name, "async delivery loop started");
 
@@ -550,6 +551,7 @@ pub(crate) async fn run_delivery_loop(
                     &debug,
                     &learning,
                     crate::snapshot_model(&model),
+                    &learning_drain_scheduler,
                 );
                 let outbox_subdir = match to_deliver.kind.as_str() {
                     "background" => "background",
@@ -600,6 +602,7 @@ pub(crate) async fn run_delivery_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_async_delivery_seed(
     conn: &rusqlite::Connection,
     agent_dir: &Path,
@@ -610,34 +613,31 @@ fn capture_async_delivery_seed(
     debug: &Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent::agent::types::LearningConfig,
     inherited_model: Option<String>,
+    learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
 ) {
     if delivered.kind != "background" {
         return;
     }
     let seed_ref = format!("async:{}", delivered.id);
-    let runtime = crate::learning_episode::LearningEpisodeRuntime {
-        agent_dir: agent_dir.to_path_buf(),
-        agent_db_dir: agent_dir.to_path_buf(),
-        agent_name: agent_name.to_owned(),
+    let runtime = crate::learning_episode::LearningEpisodeRuntime::new(
+        agent_dir.to_path_buf(),
+        agent_dir.to_path_buf(),
+        agent_name.to_owned(),
         inherited_model,
-        ssh_config_path: ssh_config_path.map(Path::to_path_buf),
-        resolved_sandbox: resolved_sandbox.map(str::to_owned),
-        debug: Arc::clone(debug),
-        learning: learning.clone(),
-    };
-    let input = crate::learning_episode::EpisodeSeedInput {
-        agent_name,
-        kind: right_agent::learning_episodes::LearningEpisodeKind::AsyncContinuation,
-        seed_trigger_kind: right_agent::learning_episodes::EpisodeSeedTriggerKind::AsyncResult,
-        seed_ref: &seed_ref,
-        target_chat_id: delivered.target_chat_id,
-        target_thread_id: delivered.target_thread_id,
-        settle_seconds: learning.episode_settle_seconds,
-        now: &chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-    };
-    if let Err(e) =
-        crate::learning_episode::capture_episode_seed_and_spawn_drain(conn, input, runtime)
-    {
+        ssh_config_path.map(Path::to_path_buf),
+        resolved_sandbox.map(str::to_owned),
+        Arc::clone(debug),
+        learning.clone(),
+        Some(Arc::clone(learning_drain_scheduler)),
+    );
+    if let Err(e) = runtime.capture_completion_seed(
+        conn,
+        right_agent::learning_episodes::LearningEpisodeKind::AsyncContinuation,
+        right_agent::learning_episodes::EpisodeSeedTriggerKind::AsyncResult,
+        &seed_ref,
+        delivered.target_chat_id,
+        delivered.target_thread_id,
+    ) {
         tracing::warn!(
             agent = %agent_name,
             run_id = %delivered.id,

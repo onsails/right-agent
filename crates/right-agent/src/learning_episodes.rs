@@ -10,6 +10,11 @@ pub enum ExecutionEventKind {
     ToolError,
     InvocationResult,
     Other,
+    /// Legacy bot-side stream-derived event kind used by the legacy
+    /// foreground review path (event-* refs read from the NDJSON stream
+    /// log instead of the execution_events DB table). Never written to
+    /// `execution_events.event_kind`.
+    StreamEvent,
 }
 
 impl ExecutionEventKind {
@@ -22,6 +27,21 @@ impl ExecutionEventKind {
             Self::ToolError => "tool_error",
             Self::InvocationResult => "invocation_result",
             Self::Other => "other",
+            Self::StreamEvent => "stream_event",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Result<Self, InvalidDbValue> {
+        match value {
+            "assistant_text" => Ok(Self::AssistantText),
+            "thinking" => Ok(Self::Thinking),
+            "tool_call" => Ok(Self::ToolCall),
+            "tool_result" => Ok(Self::ToolResult),
+            "tool_error" => Ok(Self::ToolError),
+            "invocation_result" => Ok(Self::InvocationResult),
+            "other" => Ok(Self::Other),
+            "stream_event" => Ok(Self::StreamEvent),
+            _ => Err(InvalidDbValue::new("ExecutionEventKind", value.to_owned())),
         }
     }
 }
@@ -39,6 +59,15 @@ impl TrustLabel {
             Self::Primary => "primary",
             Self::Secondary => "secondary",
             Self::LowTrust => "low_trust",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Result<Self, InvalidDbValue> {
+        match value {
+            "primary" => Ok(Self::Primary),
+            "secondary" => Ok(Self::Secondary),
+            "low_trust" => Ok(Self::LowTrust),
+            _ => Err(InvalidDbValue::new("TrustLabel", value.to_owned())),
         }
     }
 }
@@ -414,6 +443,126 @@ pub fn mark_episode_failed(
     require_one_row_updated(updated)
 }
 
+pub fn mark_episode_reviewing(
+    conn: &rusqlite::Connection,
+    episode_id: i64,
+) -> Result<(), rusqlite::Error> {
+    let updated = conn.execute(
+        "UPDATE learning_episodes \
+         SET status='reviewing', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+         WHERE id=?1 AND status='selected'",
+        [episode_id],
+    )?;
+    require_one_row_updated(updated)
+}
+
+pub fn mark_episode_reviewed(
+    conn: &rusqlite::Connection,
+    episode_id: i64,
+) -> Result<(), rusqlite::Error> {
+    let updated = conn.execute(
+        "UPDATE learning_episodes \
+         SET status='reviewed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+         WHERE id=?1 AND status='reviewing'",
+        [episode_id],
+    )?;
+    require_one_row_updated(updated)
+}
+
+pub fn requeue_episode(
+    conn: &rusqlite::Connection,
+    episode_id: i64,
+    ready_after: &str,
+) -> Result<(), rusqlite::Error> {
+    let updated = conn.execute(
+        "UPDATE learning_episodes \
+         SET status='pending', ready_after=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+         WHERE id=?1 AND status='selecting'",
+        params![episode_id, ready_after],
+    )?;
+    require_one_row_updated(updated)
+}
+
+/// Only clears review_running when the gate is set with no prior review report (stranded case).
+/// Concurrent legitimate reviews are not affected.
+pub fn recover_stale_inflight_episodes(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+    now: &str,
+) -> Result<usize, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, status FROM learning_episodes \
+         WHERE agent_name=?1 AND status IN ('selecting','selected','reviewing') \
+         ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map([agent_name], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut episodes = Vec::new();
+    for row in rows {
+        episodes.push(row?);
+    }
+    drop(stmt);
+
+    let tx = conn.unchecked_transaction()?;
+    let mut recovered = 0;
+    for (episode_id, status) in episodes {
+        match status.as_str() {
+            "selecting" => {
+                recovered += tx.execute(
+                    "UPDATE learning_episodes \
+                     SET status='pending', ready_after=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+                     WHERE id=?1 AND status='selecting'",
+                    params![episode_id, now],
+                )?;
+            }
+            "selected" | "reviewing" => {
+                let report_status: Option<String> = tx
+                    .query_row(
+                        "SELECT status FROM skill_review_reports \
+                         WHERE learning_episode_id=?1 \
+                         ORDER BY id DESC \
+                         LIMIT 1",
+                        [episode_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let updated = match report_status.as_deref() {
+                    Some("failed") => tx.execute(
+                        "UPDATE learning_episodes \
+                         SET status='failed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+                         WHERE id=?1 AND status IN ('selected','reviewing')",
+                        [episode_id],
+                    )?,
+                    Some(_) => tx.execute(
+                        "UPDATE learning_episodes \
+                         SET status='reviewed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+                         WHERE id=?1 AND status IN ('selected','reviewing')",
+                        [episode_id],
+                    )?,
+                    None => tx.execute(
+                        "UPDATE learning_episodes \
+                         SET status='pending', ready_after=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+                         WHERE id=?1 AND status IN ('selected','reviewing')",
+                        params![episode_id, now],
+                    )?,
+                };
+                recovered += updated;
+            }
+            _ => {}
+        }
+    }
+    if recovered > 0 {
+        tx.execute(
+            "UPDATE skill_nudge_state SET review_running = 0 \
+             WHERE agent_name = ?1 AND review_running = 1 AND last_review_status IS NULL",
+            [agent_name],
+        )?;
+    }
+    tx.commit()?;
+    Ok(recovered)
+}
+
 fn require_one_row_updated(updated: usize) -> Result<(), rusqlite::Error> {
     if updated == 1 {
         Ok(())
@@ -491,7 +640,7 @@ fn to_sql_conversion_error(error: InvalidDbValue) -> rusqlite::Error {
 }
 
 #[derive(Debug)]
-struct InvalidDbValue {
+pub struct InvalidDbValue {
     type_name: &'static str,
     value: String,
 }

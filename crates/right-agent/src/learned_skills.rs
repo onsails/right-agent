@@ -576,7 +576,51 @@ pub fn mark_review_finished(
     reset_activity_counters: bool,
 ) -> Result<(), rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
-    ensure_nudge_state(&tx, agent_name)?;
+    mark_review_finished_in_tx(&tx, agent_name, trigger, status, reset_activity_counters)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Same as `mark_review_finished` but runs inside an existing transaction.
+/// Used when the caller is already coordinating multiple writes inside
+/// `conn.unchecked_transaction()` and cannot tolerate a nested BEGIN.
+///
+/// # Transaction contract
+///
+/// This function MUST be called from inside an outer transaction owned by
+/// the caller. It does NOT start its own transaction — that is the whole
+/// point of the `_in_tx` suffix: the caller owns commit/rollback so this
+/// function's writes can be atomic with the caller's surrounding writes.
+///
+/// Callers MUST NOT call `tx.commit()` between writes inside this
+/// function; commit (or implicit rollback on drop) is the caller's
+/// responsibility once all coordinated writes have run. A nested
+/// `BEGIN`/`COMMIT` here would break atomicity for the outer transaction.
+///
+/// # Implicit invariant on inner helpers
+///
+/// Every helper this function calls (currently `ensure_nudge_state` and
+/// the direct `tx.execute` UPDATE) accepts `&rusqlite::Connection` but
+/// receives `&rusqlite::Transaction<'_>` via `Transaction: Deref<Target =
+/// Connection>`. That is intentional — the connection-typed helpers reuse
+/// the active transaction without opening a savepoint. Any new helper
+/// introduced here that internally calls `conn.unchecked_transaction()`,
+/// `conn.transaction()`, or opens a SAVEPOINT would silently break the
+/// nested-tx contract and corrupt the caller's atomicity guarantees. If
+/// such a helper is needed, add an `_in_tx` variant that takes
+/// `&Transaction<'_>` directly and call that instead.
+///
+/// There is no runtime way to assert "we are inside a transaction" from a
+/// `&Connection`, so this contract is enforced by documentation and code
+/// review only.
+pub fn mark_review_finished_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    agent_name: &str,
+    trigger: ReviewTriggerKind,
+    status: ReviewStatus,
+    reset_activity_counters: bool,
+) -> Result<(), rusqlite::Error> {
+    ensure_nudge_state(tx, agent_name)?;
     let reset_activity_counters =
         reset_activity_counters && !matches!(status, ReviewStatus::Failed);
     let reset_issue_hints = !matches!(status, ReviewStatus::Failed)
@@ -598,7 +642,6 @@ pub fn mark_review_finished(
             if reset_issue_hints { 1_i64 } else { 0_i64 },
         ],
     )?;
-    tx.commit()?;
     Ok(())
 }
 

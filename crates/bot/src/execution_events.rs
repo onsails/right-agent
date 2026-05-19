@@ -22,11 +22,13 @@ pub(crate) fn persist_stream_line(
     if events.is_empty() {
         return Ok(None);
     };
+    let tx = conn.unchecked_transaction()?;
     let mut first_id = None;
     for (block_index, event) in events.into_iter().enumerate() {
-        let id = insert_stream_event(conn, scope, seq, block_index, event)?;
+        let id = insert_stream_event(&tx, scope, seq, block_index, event)?;
         first_id.get_or_insert(id);
     }
+    tx.commit()?;
     Ok(first_id)
 }
 
@@ -37,19 +39,27 @@ fn insert_stream_event(
     block_index: usize,
     event: crate::cc::stream::PersistedStreamEvent,
 ) -> Result<i64, rusqlite::Error> {
-    let event_kind = to_domain_kind(event.kind);
+    let crate::cc::stream::PersistedStreamEvent {
+        kind: raw_kind,
+        tool_name,
+        content_json,
+        content_text: fallback_content_text,
+    } = event;
+    let event_kind = to_domain_kind(raw_kind);
     let trust_label = if matches!(
-        event.kind,
+        raw_kind,
         crate::cc::stream::PersistedStreamEventKind::Thinking
     ) {
         right_agent::learning_episodes::TrustLabel::Secondary
     } else {
         right_agent::learning_episodes::TrustLabel::Primary
     };
-    let redacted_content_json = redact_sensitive_json(event.content_json.clone());
+    let redacted_content_json = redact_sensitive_json(content_json);
     let content_text = truncate_to_chars(
         &redact_sensitive_text(&content_text_from_redacted_event(
-            &event,
+            raw_kind,
+            tool_name.as_deref(),
+            &fallback_content_text,
             &redacted_content_json,
         )),
         MAX_CONTENT_TEXT_CHARS,
@@ -71,7 +81,7 @@ fn insert_stream_event(
             cron_run_id: scope.cron_run_id.map(str::to_owned),
             seq,
             event_kind,
-            tool_name: event.tool_name,
+            tool_name,
             content_json,
             content_text,
             trust_label,
@@ -80,37 +90,39 @@ fn insert_stream_event(
 }
 
 fn content_text_from_redacted_event(
-    event: &crate::cc::stream::PersistedStreamEvent,
+    kind: crate::cc::stream::PersistedStreamEventKind,
+    tool_name: Option<&str>,
+    fallback_content_text: &str,
     content_json: &serde_json::Value,
 ) -> String {
-    match event.kind {
+    match kind {
         crate::cc::stream::PersistedStreamEventKind::AssistantText => content_json
             .get("text")
             .and_then(|text| text.as_str())
-            .unwrap_or(&event.content_text)
+            .unwrap_or(fallback_content_text)
             .to_owned(),
         crate::cc::stream::PersistedStreamEventKind::Thinking => content_json
             .get("thinking")
             .and_then(|thinking| thinking.as_str())
-            .unwrap_or(&event.content_text)
+            .unwrap_or(fallback_content_text)
             .to_owned(),
         crate::cc::stream::PersistedStreamEventKind::ToolCall => {
-            let tool = event.tool_name.as_deref().unwrap_or("?");
+            let tool = tool_name.unwrap_or("?");
             let input = content_json
                 .get("input")
                 .unwrap_or(&serde_json::Value::Null);
             summarize_tool_input(tool, input)
         }
         crate::cc::stream::PersistedStreamEventKind::ToolResult
-        | crate::cc::stream::PersistedStreamEventKind::ToolError => value_text(
+        | crate::cc::stream::PersistedStreamEventKind::ToolError => crate::cc::stream::value_text(
             content_json
                 .get("content")
                 .unwrap_or(&serde_json::Value::Null),
         ),
         crate::cc::stream::PersistedStreamEventKind::InvocationResult => content_json
             .get("result")
-            .map(value_text)
-            .unwrap_or_else(|| event.content_text.clone()),
+            .map(crate::cc::stream::value_text)
+            .unwrap_or_else(|| fallback_content_text.to_owned()),
     }
 }
 
@@ -247,25 +259,6 @@ fn summarize_tool_input(tool: &str, input: &serde_json::Value) -> String {
             .unwrap_or("...")
             .to_string(),
         _ => input.to_string(),
-    }
-}
-
-fn value_text(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::String(value) => value.clone(),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .filter_map(|item| {
-                item.as_str().map(str::to_owned).or_else(|| {
-                    item.get("text")
-                        .and_then(|text| text.as_str())
-                        .map(str::to_owned)
-                })
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        other => other.to_string(),
     }
 }
 
@@ -521,6 +514,66 @@ mod tests {
             .unwrap();
         assert!(content_json.chars().count() <= 8_000, "{content_json}");
         assert_eq!(content_text.chars().count(), 2_000);
+    }
+
+    #[test]
+    fn persist_stream_line_rolls_back_on_partial_failure() {
+        let conn = conn();
+        // Force the second block (block_index=1, seq=9_001) to fail by creating
+        // a UNIQUE index on seq and pre-inserting a row at that seq. The first
+        // block (seq=9_000) would succeed if not transactional; with the fix it
+        // must roll back so no rows from this line remain.
+        conn.execute(
+            "CREATE UNIQUE INDEX test_unique_seq ON execution_events(seq)",
+            [],
+        )
+        .unwrap();
+        right_agent::learning_episodes::insert_execution_event(
+            &conn,
+            &right_agent::learning_episodes::NewExecutionEvent {
+                agent_name: "other".to_owned(),
+                root_session_id: None,
+                invocation_id: None,
+                turn_id: None,
+                async_run_id: None,
+                cron_job_name: None,
+                cron_run_id: None,
+                seq: 9_001,
+                event_kind: right_agent::learning_episodes::ExecutionEventKind::AssistantText,
+                tool_name: None,
+                content_json: serde_json::json!({}),
+                content_text: "sentinel".to_owned(),
+                trust_label: right_agent::learning_episodes::TrustLabel::Primary,
+            },
+        )
+        .unwrap();
+
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"First"},{"type":"thinking","thinking":"Second"},{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/file"}}]}}"#;
+
+        let err = persist_stream_line(&conn, &scope(), 9, line).unwrap_err();
+        assert!(
+            matches!(err, rusqlite::Error::SqliteFailure(_, _)),
+            "expected sqlite constraint failure, got {err:?}"
+        );
+
+        // Only the pre-existing sentinel remains; first-block insert (seq=9_000)
+        // must have been rolled back.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM execution_events WHERE agent_name='right'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "first block must roll back on partial failure");
+        let sentinel_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM execution_events WHERE agent_name='other'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sentinel_count, 1, "sentinel row must remain");
     }
 
     #[test]

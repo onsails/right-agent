@@ -306,6 +306,7 @@ async fn execute_job(
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: right_agent::agent::types::LearningConfig,
+    learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
 ) {
     use std::process::Stdio;
 
@@ -886,6 +887,7 @@ async fn execute_job(
         &debug,
         &learning,
         model.map(str::to_owned),
+        &learning_drain_scheduler,
     );
 
     if let Some(result_line) = find_last_result_line(&collected_lines) {
@@ -974,31 +976,28 @@ fn capture_cron_completion_seed(
     debug: &Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent::agent::types::LearningConfig,
     inherited_model: Option<String>,
+    learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
 ) {
     let seed_ref = format!("cron:{run_id}");
-    let runtime = crate::learning_episode::LearningEpisodeRuntime {
-        agent_dir: agent_dir.to_path_buf(),
-        agent_db_dir: agent_dir.to_path_buf(),
-        agent_name: agent_name.to_owned(),
+    let runtime = crate::learning_episode::LearningEpisodeRuntime::new(
+        agent_dir.to_path_buf(),
+        agent_dir.to_path_buf(),
+        agent_name.to_owned(),
         inherited_model,
-        ssh_config_path: ssh_config_path.map(std::path::Path::to_path_buf),
-        resolved_sandbox: resolved_sandbox.map(str::to_owned),
-        debug: Arc::clone(debug),
-        learning: learning.clone(),
-    };
-    let input = crate::learning_episode::EpisodeSeedInput {
-        agent_name,
-        kind: right_agent::learning_episodes::LearningEpisodeKind::CronRun,
-        seed_trigger_kind: right_agent::learning_episodes::EpisodeSeedTriggerKind::Cron,
-        seed_ref: &seed_ref,
-        target_chat_id: spec.target_chat_id,
-        target_thread_id: spec.target_thread_id,
-        settle_seconds: learning.episode_settle_seconds,
-        now: &chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-    };
-    if let Err(e) =
-        crate::learning_episode::capture_episode_seed_and_spawn_drain(conn, input, runtime)
-    {
+        ssh_config_path.map(std::path::Path::to_path_buf),
+        resolved_sandbox.map(str::to_owned),
+        Arc::clone(debug),
+        learning.clone(),
+        Some(Arc::clone(learning_drain_scheduler)),
+    );
+    if let Err(e) = runtime.capture_completion_seed(
+        conn,
+        right_agent::learning_episodes::LearningEpisodeKind::CronRun,
+        right_agent::learning_episodes::EpisodeSeedTriggerKind::Cron,
+        &seed_ref,
+        spec.target_chat_id,
+        spec.target_thread_id,
+    ) {
         tracing::warn!(
             agent = %agent_name,
             run_id,
@@ -1008,7 +1007,12 @@ fn capture_cron_completion_seed(
 }
 
 /// Timeout for waiting on in-flight execute_job tasks during shutdown.
-const SHUTDOWN_JOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+///
+/// Also reused by the learning-episode drain scheduler in `lib.rs` to bound
+/// the JoinHandle await — a mid-pass drain holds a CC selector/reviewer child
+/// that should observe cancellation and exit quickly, but the same upper
+/// bound applies if the child somehow hangs in `Drop`.
+pub(crate) const SHUTDOWN_JOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Bound on `child.wait()` after the cron stream loop exits — see the
 /// matching constant in `telegram::worker` for the rationale.
@@ -1043,6 +1047,7 @@ pub(crate) async fn run_cron_task(
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: right_agent::agent::types::LearningConfig,
+    learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
@@ -1075,12 +1080,13 @@ pub(crate) async fn run_cron_task(
         &upgrade_lock,
         &debug,
         &learning,
+        &learning_drain_scheduler,
     );
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock, &debug, &learning);
+                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock, &debug, &learning, &learning_drain_scheduler);
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
@@ -1183,6 +1189,7 @@ fn fire_one_shot_specs(
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent::agent::types::LearningConfig,
+    learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
 ) {
     for (name, spec) in specs {
         let lock_ttl = effective_lock_ttl(&spec);
@@ -1205,6 +1212,7 @@ fn fire_one_shot_specs(
         let ul = Arc::clone(upgrade_lock);
         let dbg = debug.clone();
         let lrn = learning.clone();
+        let lrn_scheduler = Arc::clone(learning_drain_scheduler);
         let handle = tokio::spawn(async move {
             execute_job(
                 &jn,
@@ -1218,6 +1226,7 @@ fn fire_one_shot_specs(
                 ul,
                 dbg,
                 lrn,
+                lrn_scheduler,
             )
             .await;
             delete_one_shot_spec(&ad, &jn);
@@ -1246,6 +1255,7 @@ fn reconcile_jobs(
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent::agent::types::LearningConfig,
+    learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
 ) {
     // Clean up finished triggered handles
     triggered_handles.retain(|h| !h.is_finished());
@@ -1279,6 +1289,7 @@ fn reconcile_jobs(
         upgrade_lock,
         debug,
         learning,
+        learning_drain_scheduler,
     );
 
     // Fire Immediate specs (every tick — they are one-shot)
@@ -1302,6 +1313,7 @@ fn reconcile_jobs(
         upgrade_lock,
         debug,
         learning,
+        learning_drain_scheduler,
     );
 
     // Abort handles for removed or changed jobs (CRON-06)
@@ -1339,6 +1351,7 @@ fn reconcile_jobs(
         let job_upgrade_lock = Arc::clone(upgrade_lock);
         let job_debug = debug.clone();
         let job_learning = learning.clone();
+        let job_learning_drain_scheduler = Arc::clone(learning_drain_scheduler);
 
         let handle = tokio::spawn(async move {
             run_job_loop(
@@ -1354,6 +1367,7 @@ fn reconcile_jobs(
                 job_upgrade_lock,
                 job_debug,
                 job_learning,
+                job_learning_drain_scheduler,
             )
             .await;
         });
@@ -1388,6 +1402,7 @@ fn reconcile_jobs(
             let ul = Arc::clone(upgrade_lock);
             let dbg = debug.clone();
             let lrn = learning.clone();
+            let lrn_scheduler = Arc::clone(learning_drain_scheduler);
             tracing::info!(job = %name, "executing triggered job");
             let trigger_name = name.clone();
             let handle = tokio::spawn(async move {
@@ -1403,6 +1418,7 @@ fn reconcile_jobs(
                     ul,
                     dbg,
                     lrn,
+                    lrn_scheduler,
                 )
                 .await;
             });
@@ -1434,6 +1450,7 @@ async fn run_job_loop(
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: right_agent::agent::types::LearningConfig,
+    learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
 ) {
     use cron::Schedule;
     use std::str::FromStr;
@@ -1484,6 +1501,7 @@ async fn run_job_loop(
         let ul = Arc::clone(&upgrade_lock);
         let dbg = debug.clone();
         let lrn = learning.clone();
+        let lrn_scheduler = Arc::clone(&learning_drain_scheduler);
         let handle = tokio::spawn(async move {
             execute_job(
                 &jn,
@@ -1497,6 +1515,7 @@ async fn run_job_loop(
                 ul,
                 dbg,
                 lrn,
+                lrn_scheduler,
             )
             .await;
         });
@@ -1848,6 +1867,22 @@ mod tests {
             "/nonexistent.sock",
         ));
         let model_cell = Arc::new(arc_swap::ArcSwap::from_pointee(None::<String>));
+        let drain_runtime = crate::learning_episode::LearningEpisodeRuntime::new(
+            agent_dir.clone(),
+            agent_dir.clone(),
+            "test-agent".to_string(),
+            None,
+            None,
+            None,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            right_agent::agent::types::LearningConfig::default(),
+            None,
+        );
+        let (drain_scheduler, _drain_handle) = crate::learning_episode::DrainScheduler::spawn(
+            drain_runtime,
+            std::time::Duration::from_secs(1),
+            shutdown.clone(),
+        );
         let cron_handle = tokio::spawn(run_cron_task(
             agent_dir,
             "test-agent".to_string(),
@@ -1859,6 +1894,7 @@ mod tests {
             Arc::new(tokio::sync::RwLock::new(())),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             right_agent::agent::types::LearningConfig::default(),
+            drain_scheduler,
         ));
 
         // Give cron engine time to reconcile and spawn the job loop

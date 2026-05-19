@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context as _, anyhow};
 use right_agent::learned_skills::{
     ReviewGateDecision, ReviewGateInput, ReviewSkipReason, ReviewStatus, ReviewTriggerKind,
-    clear_review_running, insert_skill_review_report, mark_review_finished,
+    clear_review_running, insert_skill_review_report, mark_review_finished_in_tx,
     try_mark_review_started,
 };
 use right_agent::learning_episodes::{
@@ -19,6 +19,8 @@ use right_agent::learning_episodes::{
 };
 use rusqlite::OptionalExtension as _;
 use sha2::{Digest as _, Sha256};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 const LEARNING_EPISODE_REVIEW_DAILY_LIMIT: i64 = 12;
 const EPISODE_SELECTOR_TIMEOUT_SECS: u64 = 120;
@@ -55,7 +57,99 @@ pub(crate) struct EpisodeSeedInput<'a> {
     pub(crate) now: &'a str,
 }
 
-#[derive(Debug, Clone)]
+/// Single per-agent debounced drain scheduler.
+///
+/// A `Notify`-style coalescing trigger backed by an unbounded `mpsc` channel.
+/// Each call to [`schedule_drain`](Self::schedule_drain) is a non-blocking
+/// `tx.send(())`; the spawned task collapses N rapid notifications into one
+/// drain pass after `settle` elapses. This replaces the previous per-seed
+/// `tokio::spawn(sleep + drain)` pattern which spawned a fresh timer (and a
+/// fresh `rusqlite::Connection`) for every seed captured in a burst.
+///
+/// Lifetime: spawned once at bot startup, cancelled via `CancellationToken`
+/// on shutdown. The `Arc<DrainScheduler>` is threaded through every callsite
+/// that captures an episode seed.
+#[derive(Debug)]
+pub(crate) struct DrainScheduler {
+    tx: mpsc::UnboundedSender<()>,
+}
+
+impl DrainScheduler {
+    /// Spawn the per-agent drain task. Returns the `Arc<DrainScheduler>` that
+    /// callers clone into runtimes plus the `JoinHandle<()>` for the spawned
+    /// task. The task exits when `shutdown` is cancelled or all senders are
+    /// dropped.
+    ///
+    /// The handle must be retained and awaited at shutdown — without it, the
+    /// drain task detaches and can keep a CC selector/reviewer child alive
+    /// past `run_telegram`'s return. Both the outer recv/sleep `select!`s and
+    /// the inner pass invocation race against `shutdown.cancelled()`, so a
+    /// mid-pass cancel drops the pass future and the in-flight
+    /// `ProcessGroupChild::Drop` kills the child's process group.
+    pub(crate) fn spawn(
+        runtime_factory: LearningEpisodeRuntime,
+        settle: Duration,
+        shutdown: CancellationToken,
+    ) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
+        let (tx, rx) = mpsc::unbounded_channel::<()>();
+        let scheduler = Arc::new(Self { tx: tx.clone() });
+        // The runtime used inside the task carries its own scheduler clone so
+        // that the reviewer's requeue path can re-notify on `Skip(AlreadyRunning)`.
+        let mut task_runtime = runtime_factory;
+        task_runtime.scheduler = Some(Arc::clone(&scheduler));
+        let handle = tokio::spawn(run_drain_scheduler_task(task_runtime, rx, settle, shutdown));
+        (scheduler, handle)
+    }
+
+    /// Non-blocking notify. Multiple calls before the next drain coalesce
+    /// into a single drain pass. Never blocks, never spawns.
+    pub(crate) fn schedule_drain(&self) {
+        // Unbounded send only fails when the receiver has been dropped (task
+        // exited at shutdown). Silently discard — there is nothing to do.
+        let _ = self.tx.send(());
+    }
+}
+
+async fn run_drain_scheduler_task(
+    runtime: LearningEpisodeRuntime,
+    mut rx: mpsc::UnboundedReceiver<()>,
+    settle: Duration,
+    shutdown: CancellationToken,
+) {
+    loop {
+        // Wait for the first notification (or shutdown).
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            recv = rx.recv() => {
+                if recv.is_none() {
+                    return;
+                }
+            }
+        }
+        // Debounce: sleep `settle` so subsequent rapid notifications collapse.
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(settle) => {}
+        }
+        // Drain any accumulated notifications so they collapse into this pass.
+        while rx.try_recv().is_ok() {}
+        // Race the pass against shutdown — on cancel we drop the pass future,
+        // which drops any in-flight `ProcessGroupChild` and kills the child's
+        // process group via the existing `Drop` impl. The selector/reviewer
+        // CC invocations otherwise hold this task for up to
+        // `EPISODE_SELECTOR_TIMEOUT_SECS + EPISODE_REVIEWER_TIMEOUT_SECS`.
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            result = drain_ready_learning_episodes_once(runtime.clone()) => {
+                if let Err(e) = result {
+                    tracing::warn!("learning episode drain failed: {e:#}");
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct LearningEpisodeRuntime {
     pub(crate) agent_dir: PathBuf,
     pub(crate) agent_db_dir: PathBuf,
@@ -65,25 +159,91 @@ pub(crate) struct LearningEpisodeRuntime {
     pub(crate) resolved_sandbox: Option<String>,
     pub(crate) debug: Arc<AtomicBool>,
     pub(crate) learning: right_agent::agent::types::LearningConfig,
+    /// Per-agent debounced drain trigger. `None` only for tests and for the
+    /// initial bootstrap runtime passed into [`DrainScheduler::spawn`] before
+    /// the scheduler exists. Production capture callsites must always carry
+    /// `Some(...)`.
+    pub(crate) scheduler: Option<Arc<DrainScheduler>>,
+}
+
+impl std::fmt::Debug for LearningEpisodeRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LearningEpisodeRuntime")
+            .field("agent_dir", &self.agent_dir)
+            .field("agent_db_dir", &self.agent_db_dir)
+            .field("agent_name", &self.agent_name)
+            .field("inherited_model", &self.inherited_model)
+            .field("ssh_config_path", &self.ssh_config_path)
+            .field("resolved_sandbox", &self.resolved_sandbox)
+            .field("learning", &self.learning)
+            .field("scheduler", &self.scheduler.is_some())
+            .finish()
+    }
 }
 
 impl LearningEpisodeRuntime {
-    pub(crate) fn drain_after(self, delay: Duration) {
-        std::mem::drop(tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            if let Err(e) = drain_ready_learning_episodes_once(self).await {
-                tracing::warn!("learning episode drain failed: {e:#}");
-            }
-        }));
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        agent_dir: PathBuf,
+        agent_db_dir: PathBuf,
+        agent_name: String,
+        inherited_model: Option<String>,
+        ssh_config_path: Option<PathBuf>,
+        resolved_sandbox: Option<String>,
+        debug: Arc<AtomicBool>,
+        learning: right_agent::agent::types::LearningConfig,
+        scheduler: Option<Arc<DrainScheduler>>,
+    ) -> Self {
+        Self {
+            agent_dir,
+            agent_db_dir,
+            agent_name,
+            inherited_model,
+            ssh_config_path,
+            resolved_sandbox,
+            debug,
+            learning,
+            scheduler,
+        }
     }
 
-    pub(crate) fn drain_soon(self) {
-        self.drain_after(Duration::from_secs(1));
+    /// Build an `EpisodeSeedInput` from this runtime + per-callsite fields,
+    /// insert the seed row, and notify the per-agent debounced drain task.
+    /// Centralises the `chrono::Utc::now()` formatting and `EpisodeSeedInput`
+    /// construction shared by every completion-seed callsite.
+    pub(crate) fn capture_completion_seed(
+        &self,
+        conn: &rusqlite::Connection,
+        kind: LearningEpisodeKind,
+        seed_trigger_kind: EpisodeSeedTriggerKind,
+        seed_ref: &str,
+        target_chat_id: Option<i64>,
+        target_thread_id: Option<i64>,
+    ) -> Result<i64, rusqlite::Error> {
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let input = EpisodeSeedInput {
+            agent_name: &self.agent_name,
+            kind,
+            seed_trigger_kind,
+            seed_ref,
+            target_chat_id,
+            target_thread_id,
+            settle_seconds: self.learning.episode_settle_seconds,
+            now: &now,
+        };
+        let episode_id = capture_episode_seed(conn, input)?;
+        if let Some(scheduler) = &self.scheduler {
+            scheduler.schedule_drain();
+        }
+        Ok(episode_id)
     }
 
-    pub(crate) fn delayed_drain(self) {
-        let delay = self.learning.episode_settle_seconds;
-        self.drain_after(Duration::from_secs(delay));
+    /// Trigger a debounced drain pass on the per-agent scheduler. No-op when
+    /// no scheduler is attached (tests, bootstrap runtime).
+    pub(crate) fn schedule_drain(&self) {
+        if let Some(scheduler) = &self.scheduler {
+            scheduler.schedule_drain();
+        }
     }
 }
 
@@ -107,16 +267,6 @@ pub(crate) fn capture_episode_seed(
             ready_after: ready_after.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         },
     )
-}
-
-pub(crate) fn capture_episode_seed_and_spawn_drain(
-    conn: &rusqlite::Connection,
-    input: EpisodeSeedInput<'_>,
-    runtime: LearningEpisodeRuntime,
-) -> Result<i64, rusqlite::Error> {
-    let episode_id = capture_episode_seed(conn, input)?;
-    runtime.delayed_drain();
-    Ok(episode_id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -473,15 +623,14 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
         ReviewGateDecision::Skip(
             ReviewSkipReason::AlreadyRunning | ReviewSkipReason::DailyLimit,
         ) => {
-            if requeue_episode_or_fail(
+            requeue_episode_or_fail(
                 &conn,
                 &runtime.agent_name,
                 episode.id,
                 now,
                 runtime.learning.episode_settle_seconds,
-            )? {
-                runtime.clone().delayed_drain();
-            }
+            )?;
+            runtime.schedule_drain();
             return Ok(());
         }
         ReviewGateDecision::Skip(ReviewSkipReason::BelowThreshold) => {
@@ -545,14 +694,14 @@ fn mark_claimed_episode_failed(
     reason: &str,
     clear_gate: bool,
 ) -> anyhow::Result<()> {
-    let mark_result = right_agent::learning_episodes::mark_episode_failed(conn, episode_id, reason);
-    let clear_result = if clear_gate {
-        clear_review_running(conn, agent_name)
-    } else {
-        Ok(())
-    };
-    mark_result.with_context(|| format!("mark learning episode {episode_id} failed"))?;
-    clear_result.with_context(|| format!("clear learning review running gate for {agent_name}"))?;
+    let tx = conn.unchecked_transaction()?;
+    right_agent::learning_episodes::mark_episode_failed(&tx, episode_id, reason)
+        .with_context(|| format!("mark learning episode {episode_id} failed"))?;
+    if clear_gate {
+        clear_review_running(&tx, agent_name)
+            .with_context(|| format!("clear learning review running gate for {agent_name}"))?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -577,13 +726,15 @@ fn record_selector_output(
                     "duplicate_status": status,
                     "episode_hash": episode_hash,
                 });
+                let tx = conn.unchecked_transaction()?;
                 right_agent::learning_episodes::mark_episode_terminal(
-                    conn,
+                    &tx,
                     episode.id,
                     LearningEpisodeStatus::NoEpisode,
                     &output_json,
                 )?;
-                clear_review_running(conn, &runtime.agent_name)?;
+                clear_review_running(&tx, &runtime.agent_name)?;
+                tx.commit()?;
                 return Ok(false);
             }
             let selection = SelectedEpisodeUpdate {
@@ -603,32 +754,38 @@ fn record_selector_output(
             Ok(true)
         }
         "no_episode" => {
+            let tx = conn.unchecked_transaction()?;
             right_agent::learning_episodes::mark_episode_terminal(
-                &conn,
+                &tx,
                 episode.id,
                 LearningEpisodeStatus::NoEpisode,
                 &output.raw,
             )?;
-            clear_review_running(conn, &runtime.agent_name)?;
+            clear_review_running(&tx, &runtime.agent_name)?;
+            tx.commit()?;
             Ok(false)
         }
         "insufficient_context" => {
+            let tx = conn.unchecked_transaction()?;
             right_agent::learning_episodes::mark_episode_terminal(
-                conn,
+                &tx,
                 episode.id,
                 LearningEpisodeStatus::InsufficientContext,
                 &output.raw,
             )?;
-            clear_review_running(conn, &runtime.agent_name)?;
+            clear_review_running(&tx, &runtime.agent_name)?;
+            tx.commit()?;
             Ok(false)
         }
         "failed" => {
+            let tx = conn.unchecked_transaction()?;
             right_agent::learning_episodes::mark_episode_failed(
-                conn,
+                &tx,
                 episode.id,
                 "selector returned failed status",
             )?;
-            clear_review_running(conn, &runtime.agent_name)?;
+            clear_review_running(&tx, &runtime.agent_name)?;
+            tx.commit()?;
             Ok(false)
         }
         status => return Err(anyhow!("selector returned invalid status {status:?}")),
@@ -770,29 +927,35 @@ async fn run_episode_reviewer_inner(
         telegram_notified: false,
     });
     let status = report.status;
-    insert_skill_review_report(&conn, &report)
-        .with_context(|| format!("insert learning episode {episode_id} review report"))?;
     if status == ReviewStatus::Failed {
+        let tx = conn.unchecked_transaction()?;
+        insert_skill_review_report(&tx, &report)
+            .with_context(|| format!("insert learning episode {episode_id} review report"))?;
         right_agent::learning_episodes::mark_episode_failed(
-            &conn,
+            &tx,
             episode_id,
             "reviewer returned failed status",
         )
         .with_context(|| format!("mark learning episode {episode_id} failed"))?;
-        mark_review_finished(&conn, &episode.agent_name, trigger_kind, status, false)
+        mark_review_finished_in_tx(&tx, &episode.agent_name, trigger_kind, status, false)
             .with_context(|| format!("finish failed learning episode {episode_id} review gate"))?;
+        tx.commit()?;
         return Ok(());
     }
-    mark_episode_reviewed(&conn, episode_id)
+    let tx = conn.unchecked_transaction()?;
+    insert_skill_review_report(&tx, &report)
+        .with_context(|| format!("insert learning episode {episode_id} review report"))?;
+    mark_episode_reviewed(&tx, episode_id)
         .with_context(|| format!("mark learning episode {episode_id} reviewed"))?;
-    mark_review_finished(
-        &conn,
+    mark_review_finished_in_tx(
+        &tx,
         &episode.agent_name,
         trigger_kind,
         status,
         status != ReviewStatus::Failed,
     )
     .with_context(|| format!("finish learning episode {episode_id} review gate"))?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -912,34 +1075,84 @@ fn load_selected_review_evidence(
     episode: &SelectedEpisodeForReview,
 ) -> anyhow::Result<SelectedReviewEvidence> {
     let mut evidence_index = crate::learning_review::EpisodeEvidenceIndex::default();
+
+    // Batch-load messages by id, preserving episode.message_refs order.
+    let message_ids: Vec<i64> = episode
+        .message_refs
+        .iter()
+        .map(|ref_id| parse_prefixed_ref_id(ref_id, "msg:"))
+        .collect::<anyhow::Result<_>>()?;
+    let message_rows = load_review_messages_batched(conn, &message_ids)?;
     let mut messages = Vec::with_capacity(episode.message_refs.len());
-    for ref_id in &episode.message_refs {
-        let id = parse_prefixed_ref_id(ref_id, "msg:")?;
-        let message = load_review_message(conn, id, ref_id)?;
-        let evidence_kind = if message.trust_label == "low_trust" {
-            crate::learning_review::EvidenceKind::LowTrustMessage
+    for (ref_id, id) in episode.message_refs.iter().zip(message_ids.iter()) {
+        let row = message_rows
+            .get(id)
+            .ok_or_else(|| anyhow!("selected message ref not found: {ref_id}"))?;
+        let trust_label = if row.addressed_to_bot != 0 || row.routed_to_agent != 0 {
+            right_agent::learning_episodes::TrustLabel::Primary
         } else {
-            crate::learning_review::EvidenceKind::Message
+            right_agent::learning_episodes::TrustLabel::LowTrust
+        };
+        let evidence_kind = match trust_label {
+            right_agent::learning_episodes::TrustLabel::LowTrust => {
+                crate::learning_review::EvidenceKind::LowTrustMessage
+            }
+            right_agent::learning_episodes::TrustLabel::Primary
+            | right_agent::learning_episodes::TrustLabel::Secondary => {
+                crate::learning_review::EvidenceKind::Message
+            }
         };
         evidence_index.insert(ref_id.clone(), evidence_kind);
-        messages.push(message);
+        messages.push(crate::learning_review::ReviewMessage {
+            ref_id: ref_id.clone(),
+            role: row.role.clone(),
+            trust_label,
+            content: row.content.clone(),
+        });
     }
 
+    // Batch-load execution events by id, preserving episode.execution_event_refs order.
+    let event_ids: Vec<i64> = episode
+        .execution_event_refs
+        .iter()
+        .map(|ref_id| parse_prefixed_ref_id(ref_id, "exec:"))
+        .collect::<anyhow::Result<_>>()?;
+    let event_rows = load_review_execution_events_batched(conn, &event_ids)?;
     let mut root_session_id = None;
     let mut execution_events = Vec::with_capacity(episode.execution_event_refs.len());
-    for ref_id in &episode.execution_event_refs {
-        let id = parse_prefixed_ref_id(ref_id, "exec:")?;
-        let event = load_review_execution_event(conn, id, ref_id)?;
+    for (ref_id, id) in episode.execution_event_refs.iter().zip(event_ids.iter()) {
+        let row = event_rows
+            .get(id)
+            .ok_or_else(|| anyhow!("selected execution event ref not found: {ref_id}"))?;
+        let event_kind =
+            right_agent::learning_episodes::ExecutionEventKind::from_db(&row.event_kind)
+                .map_err(|e| anyhow!("execution event {ref_id}: {e}"))?;
+        let trust_label = right_agent::learning_episodes::TrustLabel::from_db(&row.trust_label)
+            .map_err(|e| anyhow!("execution event {ref_id}: {e}"))?;
         if root_session_id.is_none() {
-            root_session_id.clone_from(&event.root_session_id);
+            root_session_id.clone_from(&row.root_session_id);
         }
-        let evidence_kind = if event.review_event.event_kind == "thinking" {
-            crate::learning_review::EvidenceKind::Thinking
-        } else {
-            crate::learning_review::EvidenceKind::ObservableExecution
+        let evidence_kind = match event_kind {
+            right_agent::learning_episodes::ExecutionEventKind::Thinking => {
+                crate::learning_review::EvidenceKind::Thinking
+            }
+            right_agent::learning_episodes::ExecutionEventKind::AssistantText
+            | right_agent::learning_episodes::ExecutionEventKind::ToolCall
+            | right_agent::learning_episodes::ExecutionEventKind::ToolResult
+            | right_agent::learning_episodes::ExecutionEventKind::ToolError
+            | right_agent::learning_episodes::ExecutionEventKind::InvocationResult
+            | right_agent::learning_episodes::ExecutionEventKind::Other
+            | right_agent::learning_episodes::ExecutionEventKind::StreamEvent => {
+                crate::learning_review::EvidenceKind::ObservableExecution
+            }
         };
         evidence_index.insert(ref_id.clone(), evidence_kind);
-        execution_events.push(event.review_event);
+        execution_events.push(crate::learning_review::ReviewExecutionEvent {
+            ref_id: ref_id.clone(),
+            event_kind,
+            trust_label,
+            content: row.content.clone(),
+        });
     }
 
     Ok(SelectedReviewEvidence {
@@ -950,62 +1163,96 @@ fn load_selected_review_evidence(
     })
 }
 
-struct LoadedReviewExecutionEvent {
-    review_event: crate::learning_review::ReviewExecutionEvent,
+struct BatchedReviewMessageRow {
+    role: String,
+    content: String,
+    addressed_to_bot: i64,
+    routed_to_agent: i64,
+}
+
+struct BatchedReviewExecutionEventRow {
+    event_kind: String,
+    trust_label: String,
+    content: String,
     root_session_id: Option<String>,
 }
 
-fn load_review_message(
+fn load_review_messages_batched(
     conn: &rusqlite::Connection,
-    id: i64,
-    ref_id: &str,
-) -> anyhow::Result<crate::learning_review::ReviewMessage> {
-    conn.query_row(
-        "SELECT role, content, addressed_to_bot, routed_to_agent FROM conversation_messages WHERE id=?1",
-        [id],
-        |row| {
-            let addressed_to_bot: i64 = row.get(2)?;
-            let routed_to_agent: i64 = row.get(3)?;
-            let trust_label = if addressed_to_bot != 0 || routed_to_agent != 0 {
-                "primary"
-            } else {
-                "low_trust"
-            };
-            Ok(crate::learning_review::ReviewMessage {
-                ref_id: ref_id.to_owned(),
-                role: row.get(0)?,
-                trust_label: trust_label.to_owned(),
-                content: row.get(1)?,
-            })
-        },
-    )
-    .optional()?
-    .ok_or_else(|| anyhow!("selected message ref not found: {ref_id}"))
+    ids: &[i64],
+) -> anyhow::Result<HashMap<i64, BatchedReviewMessageRow>> {
+    let mut rows: HashMap<i64, BatchedReviewMessageRow> = HashMap::with_capacity(ids.len());
+    if ids.is_empty() {
+        return Ok(rows);
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT id, role, content, addressed_to_bot, routed_to_agent \
+         FROM conversation_messages WHERE id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut mapped = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+        let id: i64 = row.get(0)?;
+        let role: String = row.get(1)?;
+        let content: String = row.get(2)?;
+        let addressed_to_bot: i64 = row.get(3)?;
+        let routed_to_agent: i64 = row.get(4)?;
+        Ok((
+            id,
+            BatchedReviewMessageRow {
+                role,
+                content,
+                addressed_to_bot,
+                routed_to_agent,
+            },
+        ))
+    })?;
+    while let Some(item) = mapped.next() {
+        let (id, row) = item?;
+        rows.insert(id, row);
+    }
+    Ok(rows)
 }
 
-fn load_review_execution_event(
+fn load_review_execution_events_batched(
     conn: &rusqlite::Connection,
-    id: i64,
-    ref_id: &str,
-) -> anyhow::Result<LoadedReviewExecutionEvent> {
-    conn.query_row(
-        "SELECT event_kind, trust_label, content_text, root_session_id \
-         FROM execution_events WHERE id=?1",
-        [id],
-        |row| {
-            Ok(LoadedReviewExecutionEvent {
-                review_event: crate::learning_review::ReviewExecutionEvent {
-                    ref_id: ref_id.to_owned(),
-                    event_kind: row.get(0)?,
-                    trust_label: row.get(1)?,
-                    content: row.get(2)?,
-                },
-                root_session_id: row.get(3)?,
-            })
-        },
-    )
-    .optional()?
-    .ok_or_else(|| anyhow!("selected execution event ref not found: {ref_id}"))
+    ids: &[i64],
+) -> anyhow::Result<HashMap<i64, BatchedReviewExecutionEventRow>> {
+    let mut rows: HashMap<i64, BatchedReviewExecutionEventRow> = HashMap::with_capacity(ids.len());
+    if ids.is_empty() {
+        return Ok(rows);
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT id, event_kind, trust_label, content_text, root_session_id \
+         FROM execution_events WHERE id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut mapped = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+        let id: i64 = row.get(0)?;
+        let event_kind: String = row.get(1)?;
+        let trust_label: String = row.get(2)?;
+        let content: String = row.get(3)?;
+        let root_session_id: Option<String> = row.get(4)?;
+        Ok((
+            id,
+            BatchedReviewExecutionEventRow {
+                event_kind,
+                trust_label,
+                content,
+                root_session_id,
+            },
+        ))
+    })?;
+    while let Some(item) = mapped.next() {
+        let (id, row) = item?;
+        rows.insert(id, row);
+    }
+    Ok(rows)
 }
 
 fn load_episode_review_learning_events(
@@ -1054,34 +1301,22 @@ async fn collect_episode_review_skill_index(
 }
 
 fn mark_episode_reviewing(conn: &rusqlite::Connection, episode_id: i64) -> anyhow::Result<()> {
-    let updated = conn.execute(
-        "UPDATE learning_episodes \
-         SET status='reviewing', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
-         WHERE id=?1 AND status='selected'",
-        [episode_id],
-    )?;
-    if updated == 1 {
-        Ok(())
-    } else {
-        Err(anyhow!(
+    match right_agent::learning_episodes::mark_episode_reviewing(conn, episode_id) {
+        Ok(()) => Ok(()),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(anyhow!(
             "learning episode {episode_id} could not enter reviewing"
-        ))
+        )),
+        Err(e) => Err(anyhow::Error::from(e)),
     }
 }
 
 fn mark_episode_reviewed(conn: &rusqlite::Connection, episode_id: i64) -> anyhow::Result<()> {
-    let updated = conn.execute(
-        "UPDATE learning_episodes \
-         SET status='reviewed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
-         WHERE id=?1 AND status='reviewing'",
-        [episode_id],
-    )?;
-    if updated == 1 {
-        Ok(())
-    } else {
-        Err(anyhow!(
+    match right_agent::learning_episodes::mark_episode_reviewed(conn, episode_id) {
+        Ok(()) => Ok(()),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(anyhow!(
             "learning episode {episode_id} could not be marked reviewed"
-        ))
+        )),
+        Err(e) => Err(anyhow::Error::from(e)),
     }
 }
 
@@ -1102,16 +1337,18 @@ fn mark_episode_review_failed_and_finish(
         .ok_or_else(|| anyhow!("learning episode {episode_id} missing during review failure"))?;
     let trigger_kind = review_trigger_for_episode(parse_seed_trigger_kind(&seed_trigger_kind)?)
         .ok_or_else(|| anyhow!("learning episode {episode_id} has no review trigger"))?;
-    right_agent::learning_episodes::mark_episode_failed(&conn, episode_id, reason)
+    let tx = conn.unchecked_transaction()?;
+    right_agent::learning_episodes::mark_episode_failed(&tx, episode_id, reason)
         .with_context(|| format!("mark learning episode {episode_id} failed"))?;
-    mark_review_finished(
-        &conn,
+    mark_review_finished_in_tx(
+        &tx,
         &runtime.agent_name,
         trigger_kind,
         ReviewStatus::Failed,
         false,
     )
     .with_context(|| format!("finish failed learning episode {episode_id} review gate"))?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1329,18 +1566,7 @@ fn build_selector_prompt(corpus_json: &str) -> String {
 }
 
 fn parse_selector_process_stdout(stdout: &str) -> Result<EpisodeSelectorOutput, String> {
-    let root: serde_json::Value =
-        serde_json::from_str(stdout).map_err(|e| format!("parse selector stdout JSON: {e}"))?;
-    let selected = root
-        .get("structured_output")
-        .filter(|value| !value.is_null())
-        .or_else(|| root.get("result").filter(|value| !value.is_null()))
-        .unwrap_or(&root);
-    let raw = match selected.as_str() {
-        Some(json) => serde_json::from_str(json)
-            .map_err(|e| format!("parse selector stdout wrapper JSON string: {e}"))?,
-        None => selected.clone(),
-    };
+    let raw = crate::learning_review::unwrap_structured_output_payload(stdout, "selector")?;
     EpisodeSelectorOutput::parse(raw)
 }
 
@@ -1353,17 +1579,7 @@ fn requeue_episode(
     let ready_after = (now + chrono::Duration::seconds(settle_seconds as i64))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    let updated = conn.execute(
-        "UPDATE learning_episodes
-         SET status='pending', ready_after=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
-         WHERE id=?1 AND status='selecting'",
-        rusqlite::params![episode_id, ready_after],
-    )?;
-    if updated == 1 {
-        Ok(())
-    } else {
-        Err(rusqlite::Error::QueryReturnedNoRows)
-    }
+    right_agent::learning_episodes::requeue_episode(conn, episode_id, &ready_after)
 }
 
 fn requeue_episode_or_fail(
@@ -1372,13 +1588,25 @@ fn requeue_episode_or_fail(
     episode_id: i64,
     now: chrono::DateTime<chrono::Utc>,
     settle_seconds: u64,
-) -> anyhow::Result<bool> {
-    if let Err(e) = requeue_episode(conn, episode_id, now, settle_seconds) {
-        let reason = format!("learning episode requeue failed: {e:#}");
-        mark_claimed_episode_failed(conn, agent_name, episode_id, &reason, false)?;
-        return Err(anyhow!(reason));
+) -> anyhow::Result<()> {
+    match requeue_episode(conn, episode_id, now, settle_seconds) {
+        Ok(()) => Ok(()),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            // Row moved out of 'selecting' under us. This helper is used after
+            // Skip(AlreadyRunning/DailyLimit), so we do not own the review gate
+            // and must leave it untouched.
+            tracing::debug!(
+                episode_id,
+                "learning episode requeue: no row in 'selecting' state"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let reason = format!("learning episode requeue failed: {e:#}");
+            mark_claimed_episode_failed(conn, agent_name, episode_id, &reason, false)?;
+            Err(anyhow!(reason))
+        }
     }
-    Ok(true)
 }
 
 pub(crate) fn recover_stale_inflight_episodes(
@@ -1386,76 +1614,7 @@ pub(crate) fn recover_stale_inflight_episodes(
     agent_name: &str,
     now: &str,
 ) -> Result<usize, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT id, status FROM learning_episodes
-         WHERE agent_name=?1 AND status IN ('selecting','selected','reviewing')
-         ORDER BY id ASC",
-    )?;
-    let rows = stmt.query_map([agent_name], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-    })?;
-    let mut episodes = Vec::new();
-    for row in rows {
-        episodes.push(row?);
-    }
-    drop(stmt);
-
-    let tx = conn.unchecked_transaction()?;
-    let mut recovered = 0;
-    for (episode_id, status) in episodes {
-        match status.as_str() {
-            "selecting" => {
-                recovered += tx.execute(
-                    "UPDATE learning_episodes
-                     SET status='pending', ready_after=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
-                     WHERE id=?1 AND status='selecting'",
-                    rusqlite::params![episode_id, now],
-                )?;
-            }
-            "selected" | "reviewing" => {
-                let report_status: Option<String> = tx
-                    .query_row(
-                        "SELECT status FROM skill_review_reports
-                         WHERE learning_episode_id=?1
-                         ORDER BY id DESC
-                         LIMIT 1",
-                        [episode_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                let updated = match report_status.as_deref() {
-                    Some("failed") => tx.execute(
-                        "UPDATE learning_episodes
-                         SET status='failed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
-                         WHERE id=?1 AND status IN ('selected','reviewing')",
-                        [episode_id],
-                    )?,
-                    Some(_) => tx.execute(
-                        "UPDATE learning_episodes
-                         SET status='reviewed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
-                         WHERE id=?1 AND status IN ('selected','reviewing')",
-                        [episode_id],
-                    )?,
-                    None => tx.execute(
-                        "UPDATE learning_episodes
-                         SET status='pending', ready_after=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')
-                         WHERE id=?1 AND status IN ('selected','reviewing')",
-                        rusqlite::params![episode_id, now],
-                    )?,
-                };
-                recovered += updated;
-            }
-            _ => {}
-        }
-    }
-    if recovered > 0 {
-        tx.execute(
-            "UPDATE skill_nudge_state SET review_running = 0 WHERE agent_name = ?1",
-            [agent_name],
-        )?;
-    }
-    tx.commit()?;
-    Ok(recovered)
+    right_agent::learning_episodes::recover_stale_inflight_episodes(conn, agent_name, now)
 }
 
 pub(crate) fn has_ready_pending_episodes(

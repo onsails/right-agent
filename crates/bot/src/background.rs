@@ -37,6 +37,7 @@ const INTERRUPTED_HANDOFF_REASON: &str =
     "background handoff interrupted while queued before startup recovery";
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_background_continuation(
     request: BackgroundRunRequest,
     agent_dir: PathBuf,
@@ -49,6 +50,7 @@ pub(crate) async fn spawn_background_continuation(
     _session_guard: tokio::sync::OwnedMutexGuard<()>,
     debug: Arc<std::sync::atomic::AtomicBool>,
     learning: right_agent::agent::types::LearningConfig,
+    learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
 ) -> HandoffStatus {
     let log_path = bg_log_path(&agent_dir, &request.run_id);
     if let Some(parent) = log_path.parent()
@@ -194,6 +196,7 @@ pub(crate) async fn spawn_background_continuation(
         child,
         reader_handle,
         stderr_handle,
+        learning_drain_scheduler,
     ));
     HandoffStatus::Spawned
 }
@@ -526,6 +529,7 @@ async fn kill_unconfirmed_child(
     await_stderr_reader(stderr_handle).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn complete_background_run(
     request: BackgroundRunRequest,
     agent_dir: PathBuf,
@@ -538,6 +542,7 @@ async fn complete_background_run(
     mut child: right_process::ProcessGroupChild,
     reader_handle: JoinHandle<Result<Vec<String>, String>>,
     stderr_handle: Option<JoinHandle<Result<String, String>>>,
+    learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
 ) {
     let lines = match reader_handle.await {
         Ok(Ok(lines)) => lines,
@@ -618,6 +623,7 @@ async fn complete_background_run(
                 inherited_model.clone(),
                 request.target_chat_id,
                 request.target_thread_id,
+                &learning_drain_scheduler,
             )
             .await
             {
@@ -660,6 +666,7 @@ fn append_stderr_to_reason(reason: &str, stderr: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn persist_successful_background_output(
     agent_dir: &Path,
     agent_name: &str,
@@ -673,6 +680,7 @@ async fn persist_successful_background_output(
     inherited_model: Option<String>,
     target_chat_id: i64,
     target_thread_id: Option<i64>,
+    learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
 ) -> Result<(), String> {
     let notify = output
         .notify
@@ -717,6 +725,7 @@ async fn persist_successful_background_output(
         inherited_model,
         target_chat_id,
         target_thread_id,
+        learning_drain_scheduler,
     );
     Ok(())
 }
@@ -734,31 +743,28 @@ fn capture_background_completion_seed(
     inherited_model: Option<String>,
     target_chat_id: i64,
     target_thread_id: Option<i64>,
+    learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
 ) {
     let seed_ref = format!("async:{run_id}");
-    let runtime = crate::learning_episode::LearningEpisodeRuntime {
-        agent_dir: agent_dir.to_path_buf(),
-        agent_db_dir: agent_dir.to_path_buf(),
-        agent_name: agent_name.to_owned(),
+    let runtime = crate::learning_episode::LearningEpisodeRuntime::new(
+        agent_dir.to_path_buf(),
+        agent_dir.to_path_buf(),
+        agent_name.to_owned(),
         inherited_model,
-        ssh_config_path: ssh_config_path.map(Path::to_path_buf),
-        resolved_sandbox: resolved_sandbox.map(str::to_owned),
-        debug: Arc::clone(debug),
-        learning: learning.clone(),
-    };
-    let input = crate::learning_episode::EpisodeSeedInput {
-        agent_name,
-        kind: right_agent::learning_episodes::LearningEpisodeKind::AsyncContinuation,
-        seed_trigger_kind: right_agent::learning_episodes::EpisodeSeedTriggerKind::AsyncResult,
-        seed_ref: &seed_ref,
-        target_chat_id: Some(target_chat_id),
+        ssh_config_path.map(Path::to_path_buf),
+        resolved_sandbox.map(str::to_owned),
+        Arc::clone(debug),
+        learning.clone(),
+        Some(Arc::clone(learning_drain_scheduler)),
+    );
+    if let Err(e) = runtime.capture_completion_seed(
+        conn,
+        right_agent::learning_episodes::LearningEpisodeKind::AsyncContinuation,
+        right_agent::learning_episodes::EpisodeSeedTriggerKind::AsyncResult,
+        &seed_ref,
+        Some(target_chat_id),
         target_thread_id,
-        settle_seconds: learning.episode_settle_seconds,
-        now: &chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-    };
-    if let Err(e) =
-        crate::learning_episode::capture_episode_seed_and_spawn_drain(conn, input, runtime)
-    {
+    ) {
         tracing::warn!(
             agent = %agent_name,
             run_id,
