@@ -2435,7 +2435,10 @@ fn sandbox_user_local_env_script() -> &'static str {
   . /sandbox/.right/env.sh
 else
   mkdir -p /sandbox/.local/bin /sandbox/.npm
-  export PATH="/sandbox/.local/bin:$PATH"
+  case ":$PATH:" in
+    *:/sandbox/.local/bin:*) ;;
+    *) export PATH="/sandbox/.local/bin:$PATH" ;;
+  esac
   export NPM_CONFIG_PREFIX=/sandbox/.local
   export NPM_CONFIG_CACHE=/sandbox/.npm
 fi
@@ -4449,6 +4452,7 @@ mod tests {
             "env setup must precede claude invocation"
         );
         assert!(script.contains("NPM_CONFIG_PREFIX=/sandbox/.local"));
+        assert!(script.contains("NPM_CONFIG_CACHE=/sandbox/.npm"));
         assert!(script.contains("/sandbox/.local/bin"));
     }
 
