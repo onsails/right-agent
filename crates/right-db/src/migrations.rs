@@ -25,8 +25,9 @@ const V20_SCHEMA: &str = include_str!("sql/v20_learned_skills.sql");
 const V21_SCHEMA: &str = include_str!("sql/v21_conversation_messages.sql");
 const V22_SCHEMA: &str = include_str!("sql/v22_skill_review_reports.sql");
 const V23_SCHEMA: &str = include_str!("sql/v23_async_runs.sql");
+const V24_SCHEMA: &str = include_str!("sql/v24_learning_episodes.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 23;
+pub const LATEST_SCHEMA_VERSION: u32 = 24;
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -367,6 +368,24 @@ fn v23_async_runs(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
+fn v24_learning_episodes(tx: &Transaction) -> Result<(), HookError> {
+    tx.execute_batch(V24_SCHEMA)?;
+    let has_column: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('skill_review_reports') WHERE name=?1",
+        ["learning_episode_id"],
+        |r| r.get(0),
+    )?;
+    if has_column == 0 {
+        tx.execute_batch(
+            "ALTER TABLE skill_review_reports ADD COLUMN learning_episode_id INTEGER",
+        )?;
+    }
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_skill_review_reports_episode ON skill_review_reports(learning_episode_id)",
+    )?;
+    Ok(())
+}
+
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::LazyLock::new(|| {
     Migrations::new(vec![
         M::up(V1_SCHEMA),
@@ -392,6 +411,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up(V21_SCHEMA),
         M::up_with_hook(V22_SCHEMA, v22_skill_review_reports),
         M::up_with_hook("", v23_async_runs),
+        M::up_with_hook("", v24_learning_episodes),
     ])
 });
 
@@ -481,6 +501,58 @@ mod tests {
         ] {
             assert!(cols.contains(&col.to_string()), "{col} column missing");
         }
+    }
+
+    #[test]
+    fn learning_episode_tables_exist() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let events: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='execution_events'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(events.contains("event_kind"));
+        assert!(events.contains("trust_label"));
+        let episodes: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='learning_episodes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(episodes.contains("ready_after"));
+        assert!(episodes.contains("episode_hash"));
+    }
+
+    #[test]
+    fn execution_events_do_not_create_fts() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'execution_events%fts%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn skill_review_reports_links_learning_episode() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('skill_review_reports') WHERE name='learning_episode_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

@@ -153,6 +153,7 @@ impl ReviewConfidence {
 pub struct SkillReviewReport {
     pub agent_name: String,
     pub source_invocation_id: String,
+    pub learning_episode_id: Option<i64>,
     pub root_session_id: Option<String>,
     pub chat_id: Option<i64>,
     pub thread_id: Option<i64>,
@@ -170,14 +171,12 @@ pub struct SkillReviewReport {
 pub struct ReviewGateInput<'a> {
     pub signal_trigger: Option<ReviewTriggerKind>,
     pub today: &'a str,
-    pub cooldown_cutoff: Option<&'a str>,
     pub daily_limit: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewSkipReason {
     AlreadyRunning,
-    Cooldown,
     DailyLimit,
     BelowThreshold,
 }
@@ -443,11 +442,12 @@ pub fn insert_skill_review_report(
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     conn.execute(
         "INSERT INTO skill_review_reports \
-         (agent_name, source_invocation_id, root_session_id, chat_id, thread_id, trigger_kind, status, confidence, candidate_skill_name, candidate_summary, evidence_refs_json, review_output_json, telegram_notified) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+         (agent_name, source_invocation_id, learning_episode_id, root_session_id, chat_id, thread_id, trigger_kind, status, confidence, candidate_skill_name, candidate_summary, evidence_refs_json, review_output_json, telegram_notified) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             report.agent_name.as_str(),
             report.source_invocation_id.as_str(),
+            report.learning_episode_id,
             report.root_session_id.as_deref(),
             report.chat_id,
             report.thread_id,
@@ -496,8 +496,8 @@ fn review_gate_decision_in_tx(
     agent_name: &str,
     input: ReviewGateInput<'_>,
 ) -> Result<ReviewGateDecision, rusqlite::Error> {
-    let row: (i64, i64, i64, Option<String>, i64, Option<String>) = tx.query_row(
-        "SELECT review_running, daily_review_count, tool_iters_since_review, daily_review_date, creation_review_interval, last_review_at \
+    let row: (i64, i64, i64, Option<String>, i64) = tx.query_row(
+        "SELECT review_running, daily_review_count, tool_iters_since_review, daily_review_date, creation_review_interval \
          FROM skill_nudge_state WHERE agent_name = ?1",
         [agent_name],
         |r| {
@@ -507,20 +507,16 @@ fn review_gate_decision_in_tx(
                 r.get(2)?,
                 r.get(3)?,
                 r.get(4)?,
-                r.get(5)?,
             ))
         },
     )?;
 
-    let (review_running, mut daily_count, tool_iters, daily_date, interval, last_review_at) = row;
+    let (review_running, mut daily_count, tool_iters, daily_date, interval) = row;
     if daily_date.as_deref() != Some(input.today) {
         daily_count = 0;
     }
     if review_running != 0 {
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::AlreadyRunning));
-    }
-    if cooldown_blocks(last_review_at.as_deref(), input.cooldown_cutoff) {
-        return Ok(ReviewGateDecision::Skip(ReviewSkipReason::Cooldown));
     }
     if daily_count >= input.daily_limit {
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::DailyLimit));
@@ -559,14 +555,8 @@ pub fn try_mark_review_started(
          WHERE agent_name = ?1 \
            AND review_running = 0 \
            AND daily_review_date = ?2 \
-           AND daily_review_count < ?3 \
-           AND (?4 IS NULL OR last_review_at IS NULL OR last_review_at <= ?4)",
-        rusqlite::params![
-            agent_name,
-            input.today,
-            input.daily_limit,
-            input.cooldown_cutoff,
-        ],
+           AND daily_review_count < ?3",
+        rusqlite::params![agent_name, input.today, input.daily_limit,],
     )?;
     if updated == 1 {
         tx.commit()?;
@@ -638,9 +628,7 @@ pub fn reset_stale_review_running(conn: &rusqlite::Connection) -> Result<usize, 
 /// Used by the bot shutdown path when a background review is aborted
 /// mid-flight: no review actually finished, so `last_review_at`,
 /// `last_review_status`, and counters must remain as the in-flight review
-/// left them. Calling `mark_review_finished` here would (incorrectly) rewrite
-/// `last_review_at = now()`, costing the full cooldown window on every
-/// restart cycle.
+/// left them.
 ///
 /// Single-statement write — no transaction needed.
 pub fn clear_review_running(
@@ -652,13 +640,6 @@ pub fn clear_review_running(
         [agent_name],
     )?;
     Ok(())
-}
-
-fn cooldown_blocks(last_review_at: Option<&str>, cooldown_cutoff: Option<&str>) -> bool {
-    match (last_review_at, cooldown_cutoff) {
-        (Some(last_review_at), Some(cooldown_cutoff)) => last_review_at > cooldown_cutoff,
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -675,7 +656,6 @@ mod tests {
         ReviewGateInput {
             signal_trigger,
             today: "2026-05-18",
-            cooldown_cutoff: None,
             daily_limit: 12,
         }
     }
@@ -686,6 +666,7 @@ mod tests {
         let report = SkillReviewReport {
             agent_name: "right".to_owned(),
             source_invocation_id: "inv-1".to_owned(),
+            learning_episode_id: None,
             root_session_id: Some("session-1".to_owned()),
             chat_id: Some(100),
             thread_id: Some(200),
@@ -741,7 +722,6 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::LearningSignal),
                 today: "2026-05-18",
-                cooldown_cutoff: None,
                 daily_limit: 12,
             },
         )
@@ -757,7 +737,6 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::SkillIssueSignal),
                 today: "2026-05-18",
-                cooldown_cutoff: None,
                 daily_limit: 12,
             },
         )
@@ -778,7 +757,6 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: None,
                 today: "2026-05-18",
-                cooldown_cutoff: None,
                 daily_limit: 12,
             },
         )
@@ -790,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn review_gate_blocks_running_cooldown_and_daily_limit() {
+    fn review_gate_blocks_running_and_daily_limit() {
         let conn = conn();
         ensure_nudge_state(&conn, "right").unwrap();
 
@@ -805,7 +783,6 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::LearningSignal),
                 today: "2026-05-18",
-                cooldown_cutoff: None,
                 daily_limit: 12,
             },
         )
@@ -827,7 +804,6 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::LearningSignal),
                 today: "2026-05-18",
-                cooldown_cutoff: None,
                 daily_limit: 12,
             },
         )
@@ -843,20 +819,19 @@ mod tests {
             [],
         )
         .unwrap();
-        let cooldown = review_gate_decision(
+        let recent_review = review_gate_decision(
             &conn,
             "right",
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::LearningSignal),
                 today: "2026-05-18",
-                cooldown_cutoff: Some("2026-05-18T12:00:00Z"),
                 daily_limit: 12,
             },
         )
         .unwrap();
         assert_eq!(
-            cooldown,
-            ReviewGateDecision::Skip(ReviewSkipReason::Cooldown)
+            recent_review,
+            ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
         );
     }
 
@@ -876,7 +851,6 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: None,
                 today: "2026-05-18",
-                cooldown_cutoff: None,
                 daily_limit: 12,
             },
         )
@@ -918,7 +892,7 @@ mod tests {
         let conn = conn();
         ensure_nudge_state(&conn, "stale").unwrap();
         // Seed a row that looks like a stranded review: running=1, with
-        // pre-existing counters, cooldown, and last_review_at/status that
+        // pre-existing counters and last_review_at/status that
         // the reaper MUST leave alone.
         conn.execute(
             "UPDATE skill_nudge_state \
@@ -1002,10 +976,9 @@ mod tests {
     fn clear_review_running_clears_flag_without_touching_other_fields() {
         let conn = conn();
         ensure_nudge_state(&conn, "agent-x").unwrap();
-        // Seed a mid-review row: running=1, with a prior cooldown timestamp,
+        // Seed a mid-review row: running=1, with a prior review timestamp,
         // counters, and last_review_status that the shutdown helper MUST
-        // leave alone (otherwise `last_review_at = now()` costs the full
-        // cooldown window on every restart).
+        // leave alone.
         conn.execute(
             "UPDATE skill_nudge_state \
              SET review_running = 1, \
@@ -1118,13 +1091,12 @@ mod tests {
     }
 
     #[test]
-    fn review_start_rechecks_cooldown_after_stale_gate() {
+    fn review_start_ignores_recent_last_review_at_after_stale_gate() {
         let conn = conn();
         ensure_nudge_state(&conn, "right").unwrap();
         let input = ReviewGateInput {
             signal_trigger: Some(ReviewTriggerKind::LearningSignal),
             today: "2026-05-18",
-            cooldown_cutoff: Some("2026-05-18T12:00:00Z"),
             daily_limit: 12,
         };
 
@@ -1143,7 +1115,7 @@ mod tests {
         let started = try_mark_review_started(&conn, "right", input).unwrap();
         assert_eq!(
             started,
-            ReviewGateDecision::Skip(ReviewSkipReason::Cooldown)
+            ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
         );
 
         let row: (i64, i64) = conn
@@ -1153,7 +1125,7 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(row, (0, 0));
+        assert_eq!(row, (1, 1));
     }
 
     #[test]
@@ -1343,7 +1315,7 @@ mod tests {
     }
 
     #[test]
-    fn review_failed_finish_preserves_counters_and_sets_cooldown() {
+    fn review_failed_finish_preserves_counters_and_sets_last_review_at() {
         let conn = conn();
         ensure_nudge_state(&conn, "right").unwrap();
         conn.execute(

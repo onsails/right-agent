@@ -1,0 +1,550 @@
+use rusqlite::{OptionalExtension, params};
+use std::fmt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionEventKind {
+    AssistantText,
+    Thinking,
+    ToolCall,
+    ToolResult,
+    ToolError,
+    InvocationResult,
+    Other,
+}
+
+impl ExecutionEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AssistantText => "assistant_text",
+            Self::Thinking => "thinking",
+            Self::ToolCall => "tool_call",
+            Self::ToolResult => "tool_result",
+            Self::ToolError => "tool_error",
+            Self::InvocationResult => "invocation_result",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustLabel {
+    Primary,
+    Secondary,
+    LowTrust,
+}
+
+impl TrustLabel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Secondary => "secondary",
+            Self::LowTrust => "low_trust",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LearningEpisodeKind {
+    ForegroundThread,
+    AsyncContinuation,
+    CronRun,
+}
+
+impl LearningEpisodeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ForegroundThread => "foreground_thread",
+            Self::AsyncContinuation => "async_continuation",
+            Self::CronRun => "cron_run",
+        }
+    }
+
+    fn from_db(value: String) -> Result<Self, InvalidDbValue> {
+        match value.as_str() {
+            "foreground_thread" => Ok(Self::ForegroundThread),
+            "async_continuation" => Ok(Self::AsyncContinuation),
+            "cron_run" => Ok(Self::CronRun),
+            _ => Err(InvalidDbValue::new("LearningEpisodeKind", value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpisodeSeedTriggerKind {
+    LearningSignal,
+    SkillIssueSignal,
+    EffortThreshold,
+    Cron,
+    AsyncResult,
+}
+
+impl EpisodeSeedTriggerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LearningSignal => "learning_signal",
+            Self::SkillIssueSignal => "skill_issue_signal",
+            Self::EffortThreshold => "effort_threshold",
+            Self::Cron => "cron",
+            Self::AsyncResult => "async_result",
+        }
+    }
+
+    fn from_db(value: String) -> Result<Self, InvalidDbValue> {
+        match value.as_str() {
+            "learning_signal" => Ok(Self::LearningSignal),
+            "skill_issue_signal" => Ok(Self::SkillIssueSignal),
+            "effort_threshold" => Ok(Self::EffortThreshold),
+            "cron" => Ok(Self::Cron),
+            "async_result" => Ok(Self::AsyncResult),
+            _ => Err(InvalidDbValue::new("EpisodeSeedTriggerKind", value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LearningEpisodeStatus {
+    Pending,
+    Selecting,
+    Selected,
+    Reviewing,
+    Reviewed,
+    NoEpisode,
+    InsufficientContext,
+    Failed,
+}
+
+impl LearningEpisodeStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Selecting => "selecting",
+            Self::Selected => "selected",
+            Self::Reviewing => "reviewing",
+            Self::Reviewed => "reviewed",
+            Self::NoEpisode => "no_episode",
+            Self::InsufficientContext => "insufficient_context",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_db(value: String) -> Result<Self, InvalidDbValue> {
+        match value.as_str() {
+            "pending" => Ok(Self::Pending),
+            "selecting" => Ok(Self::Selecting),
+            "selected" => Ok(Self::Selected),
+            "reviewing" => Ok(Self::Reviewing),
+            "reviewed" => Ok(Self::Reviewed),
+            "no_episode" => Ok(Self::NoEpisode),
+            "insufficient_context" => Ok(Self::InsufficientContext),
+            "failed" => Ok(Self::Failed),
+            _ => Err(InvalidDbValue::new("LearningEpisodeStatus", value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NewExecutionEvent {
+    pub agent_name: String,
+    pub root_session_id: Option<String>,
+    pub invocation_id: Option<String>,
+    pub turn_id: Option<i64>,
+    pub async_run_id: Option<String>,
+    pub cron_job_name: Option<String>,
+    pub cron_run_id: Option<String>,
+    pub seq: i64,
+    pub event_kind: ExecutionEventKind,
+    pub tool_name: Option<String>,
+    pub content_json: serde_json::Value,
+    pub content_text: String,
+    pub trust_label: TrustLabel,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewLearningEpisodeSeed {
+    pub agent_name: String,
+    pub kind: LearningEpisodeKind,
+    pub seed_trigger_kind: EpisodeSeedTriggerKind,
+    pub seed_ref: String,
+    pub target_chat_id: Option<i64>,
+    pub target_thread_id: Option<i64>,
+    pub ready_after: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectedEpisodeUpdate {
+    pub start_ref: Option<String>,
+    pub end_ref: Option<String>,
+    pub message_refs: Vec<String>,
+    pub execution_event_refs: Vec<String>,
+    pub selector_model: Option<String>,
+    pub selector_output_json: serde_json::Value,
+    pub boundary_rationale: Option<String>,
+    pub confidence: Option<String>,
+    pub context_incomplete: bool,
+    pub episode_hash: Option<String>,
+    pub last_evidence_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LearningEpisodeRow {
+    pub id: i64,
+    pub agent_name: String,
+    pub kind: LearningEpisodeKind,
+    pub seed_trigger_kind: EpisodeSeedTriggerKind,
+    pub seed_ref: String,
+    pub status: LearningEpisodeStatus,
+    pub target_chat_id: Option<i64>,
+    pub target_thread_id: Option<i64>,
+    pub start_ref: Option<String>,
+    pub end_ref: Option<String>,
+    pub message_refs: Vec<String>,
+    pub execution_event_refs: Vec<String>,
+    pub selector_model: Option<String>,
+    pub selector_output_json: Option<serde_json::Value>,
+    pub boundary_rationale: Option<String>,
+    pub confidence: Option<String>,
+    pub context_incomplete: bool,
+    pub episode_hash: Option<String>,
+    pub ready_after: String,
+    pub last_evidence_at: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub fn insert_execution_event(
+    conn: &rusqlite::Connection,
+    event: &NewExecutionEvent,
+) -> Result<i64, rusqlite::Error> {
+    let content_json = serde_json::to_string(&event.content_json)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let trust_label = if matches!(event.event_kind, ExecutionEventKind::Thinking) {
+        TrustLabel::Secondary
+    } else {
+        event.trust_label
+    };
+    conn.execute(
+        "INSERT INTO execution_events \
+         (agent_name, root_session_id, invocation_id, turn_id, async_run_id, cron_job_name, cron_run_id, seq, event_kind, tool_name, content_json, content_text, trust_label) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![
+            event.agent_name.as_str(),
+            event.root_session_id.as_deref(),
+            event.invocation_id.as_deref(),
+            event.turn_id,
+            event.async_run_id.as_deref(),
+            event.cron_job_name.as_deref(),
+            event.cron_run_id.as_deref(),
+            event.seq,
+            event.event_kind.as_str(),
+            event.tool_name.as_deref(),
+            content_json,
+            event.content_text.as_str(),
+            trust_label.as_str(),
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn insert_pending_episode(
+    conn: &rusqlite::Connection,
+    seed: &NewLearningEpisodeSeed,
+) -> Result<i64, rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    let inserted = tx.execute(
+        "INSERT OR IGNORE INTO learning_episodes \
+         (agent_name, kind, seed_trigger_kind, seed_ref, status, target_chat_id, target_thread_id, ready_after) \
+         VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7)",
+        params![
+            seed.agent_name.as_str(),
+            seed.kind.as_str(),
+            seed.seed_trigger_kind.as_str(),
+            seed.seed_ref.as_str(),
+            seed.target_chat_id,
+            seed.target_thread_id,
+            seed.ready_after.as_str(),
+        ],
+    )?;
+    let id = if inserted == 1 {
+        tx.last_insert_rowid()
+    } else {
+        tx.query_row(
+            "SELECT id FROM learning_episodes \
+             WHERE agent_name=?1 AND kind=?2 AND seed_trigger_kind=?3 AND seed_ref=?4",
+            params![
+                seed.agent_name.as_str(),
+                seed.kind.as_str(),
+                seed.seed_trigger_kind.as_str(),
+                seed.seed_ref.as_str(),
+            ],
+            |r| r.get(0),
+        )?
+    };
+    tx.commit()?;
+    Ok(id)
+}
+
+pub fn claim_ready_episode(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+    now: &str,
+) -> Result<Option<LearningEpisodeRow>, rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    let id = tx
+        .query_row(
+            "SELECT id FROM learning_episodes \
+             WHERE agent_name=?1 AND status='pending' AND ready_after <= ?2 \
+             ORDER BY ready_after ASC, id ASC \
+             LIMIT 1",
+            params![agent_name, now],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?;
+    let Some(id) = id else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    let updated = tx.execute(
+        "UPDATE learning_episodes \
+         SET status='selecting', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+         WHERE id=?1 AND status='pending'",
+        [id],
+    )?;
+    if updated != 1 {
+        tx.commit()?;
+        return Ok(None);
+    }
+    let episode = select_episode_in_tx(&tx, id)?;
+    tx.commit()?;
+    Ok(Some(episode))
+}
+
+pub fn mark_episode_selected(
+    conn: &rusqlite::Connection,
+    episode_id: i64,
+    selection: &SelectedEpisodeUpdate,
+) -> Result<(), rusqlite::Error> {
+    let message_refs_json = serde_json::to_string(&selection.message_refs)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let execution_event_refs_json = serde_json::to_string(&selection.execution_event_refs)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let selector_output_json = serde_json::to_string(&selection.selector_output_json)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        "UPDATE learning_episodes \
+         SET status='selected', \
+             start_ref=?2, \
+             end_ref=?3, \
+             message_refs_json=?4, \
+             execution_event_refs_json=?5, \
+             selector_model=?6, \
+             selector_output_json=?7, \
+             boundary_rationale=?8, \
+             confidence=?9, \
+             context_incomplete=?10, \
+             episode_hash=?11, \
+             last_evidence_at=COALESCE(?12, last_evidence_at), \
+             updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+         WHERE id=?1",
+        params![
+            episode_id,
+            selection.start_ref.as_deref(),
+            selection.end_ref.as_deref(),
+            message_refs_json,
+            execution_event_refs_json,
+            selection.selector_model.as_deref(),
+            selector_output_json,
+            selection.boundary_rationale.as_deref(),
+            selection.confidence.as_deref(),
+            if selection.context_incomplete {
+                1_i64
+            } else {
+                0_i64
+            },
+            selection.episode_hash.as_deref(),
+            selection.last_evidence_at.as_deref(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn mark_episode_terminal(
+    conn: &rusqlite::Connection,
+    episode_id: i64,
+    status: LearningEpisodeStatus,
+    output_json: &serde_json::Value,
+) -> Result<(), rusqlite::Error> {
+    let output_json = serde_json::to_string(output_json)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        "UPDATE learning_episodes \
+         SET status=?2, selector_output_json=?3, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+         WHERE id=?1",
+        params![episode_id, status.as_str(), output_json],
+    )?;
+    Ok(())
+}
+
+pub fn mark_episode_failed(
+    conn: &rusqlite::Connection,
+    episode_id: i64,
+    reason: &str,
+) -> Result<(), rusqlite::Error> {
+    let output_json = serde_json::json!({ "error": reason });
+    mark_episode_terminal(
+        conn,
+        episode_id,
+        LearningEpisodeStatus::Failed,
+        &output_json,
+    )
+}
+
+fn select_episode_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    episode_id: i64,
+) -> Result<LearningEpisodeRow, rusqlite::Error> {
+    tx.query_row(
+        "SELECT id, agent_name, kind, seed_trigger_kind, seed_ref, status, \
+                target_chat_id, target_thread_id, start_ref, end_ref, \
+                message_refs_json, execution_event_refs_json, selector_model, \
+                selector_output_json, boundary_rationale, confidence, \
+                context_incomplete, episode_hash, ready_after, last_evidence_at, \
+                created_at, updated_at \
+         FROM learning_episodes WHERE id=?1",
+        [episode_id],
+        learning_episode_from_row,
+    )
+}
+
+fn learning_episode_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<LearningEpisodeRow, rusqlite::Error> {
+    let kind = LearningEpisodeKind::from_db(row.get(2)?).map_err(to_sql_conversion_error)?;
+    let seed_trigger_kind =
+        EpisodeSeedTriggerKind::from_db(row.get(3)?).map_err(to_sql_conversion_error)?;
+    let status = LearningEpisodeStatus::from_db(row.get(5)?).map_err(to_sql_conversion_error)?;
+    let message_refs_json: String = row.get(10)?;
+    let execution_event_refs_json: String = row.get(11)?;
+    let selector_output_json: Option<String> = row.get(13)?;
+    let context_incomplete: i64 = row.get(16)?;
+    Ok(LearningEpisodeRow {
+        id: row.get(0)?,
+        agent_name: row.get(1)?,
+        kind,
+        seed_trigger_kind,
+        seed_ref: row.get(4)?,
+        status,
+        target_chat_id: row.get(6)?,
+        target_thread_id: row.get(7)?,
+        start_ref: row.get(8)?,
+        end_ref: row.get(9)?,
+        message_refs: parse_json_column(&message_refs_json)?,
+        execution_event_refs: parse_json_column(&execution_event_refs_json)?,
+        selector_model: row.get(12)?,
+        selector_output_json: parse_optional_json_column(selector_output_json)?,
+        boundary_rationale: row.get(14)?,
+        confidence: row.get(15)?,
+        context_incomplete: context_incomplete != 0,
+        episode_hash: row.get(17)?,
+        ready_after: row.get(18)?,
+        last_evidence_at: row.get(19)?,
+        created_at: row.get(20)?,
+        updated_at: row.get(21)?,
+    })
+}
+
+fn parse_json_column<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, rusqlite::Error> {
+    serde_json::from_str(value).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+fn parse_optional_json_column(
+    value: Option<String>,
+) -> Result<Option<serde_json::Value>, rusqlite::Error> {
+    value.map(|value| parse_json_column(&value)).transpose()
+}
+
+fn to_sql_conversion_error(error: InvalidDbValue) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+#[derive(Debug)]
+struct InvalidDbValue {
+    type_name: &'static str,
+    value: String,
+}
+
+impl InvalidDbValue {
+    fn new(type_name: &'static str, value: String) -> Self {
+        Self { type_name, value }
+    }
+}
+
+impl fmt::Display for InvalidDbValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid {} value {:?}", self.type_name, self.value)
+    }
+}
+
+impl std::error::Error for InvalidDbValue {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn execution_event_insert_round_trips_thinking_as_secondary() {
+        let conn = conn();
+        let id = insert_execution_event(
+            &conn,
+            &NewExecutionEvent {
+                agent_name: "right".to_owned(),
+                root_session_id: Some("session-1".to_owned()),
+                invocation_id: Some("inv-1".to_owned()),
+                turn_id: Some(7),
+                async_run_id: None,
+                cron_job_name: None,
+                cron_run_id: None,
+                seq: 3,
+                event_kind: ExecutionEventKind::Thinking,
+                tool_name: None,
+                content_json: serde_json::json!({"text":"considering route"}),
+                content_text: "considering route".to_owned(),
+                trust_label: TrustLabel::Secondary,
+            },
+        )
+        .unwrap();
+        let row: (String, String) = conn
+            .query_row(
+                "SELECT event_kind, trust_label FROM execution_events WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("thinking".to_owned(), "secondary".to_owned()));
+    }
+
+    #[test]
+    fn claim_ready_episode_moves_pending_to_selecting() {
+        let conn = conn();
+        let id = insert_pending_episode(
+            &conn,
+            &NewLearningEpisodeSeed {
+                agent_name: "right".to_owned(),
+                kind: LearningEpisodeKind::ForegroundThread,
+                seed_trigger_kind: EpisodeSeedTriggerKind::LearningSignal,
+                seed_ref: "inv:inv-1".to_owned(),
+                target_chat_id: Some(10),
+                target_thread_id: Some(20),
+                ready_after: "2026-05-19T00:00:00Z".to_owned(),
+            },
+        )
+        .unwrap();
+        let claimed = claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z").unwrap();
+        assert_eq!(claimed.map(|e| e.id), Some(id));
+    }
+}
