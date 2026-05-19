@@ -215,7 +215,8 @@ Content: agent name, Right Agent description, sandbox mode, home/working directo
 When an agent runs with `sandbox: mode: openshell`, the base prompt includes this user-local tool installation contract:
 
 ```markdown
-User-installed CLI tools:
+## User-Installed CLI Tools
+
 - Put manually installed executables in `/sandbox/.local/bin`.
 - `/sandbox/.local/bin` is on PATH for your sandbox sessions.
 - Do not install tools into `~/bin`; use `/sandbox/.local/bin`.
