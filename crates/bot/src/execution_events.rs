@@ -84,19 +84,13 @@ fn is_sensitive_key(key: &str) -> bool {
         .filter(|c| c.is_ascii_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect::<String>();
-    matches!(
-        normalized.as_str(),
-        "apikey"
-            | "accesstoken"
-            | "refreshtoken"
-            | "authtoken"
-            | "authorization"
-            | "password"
-            | "secret"
-            | "clientsecret"
-            | "privatekey"
-            | "bearertoken"
-    )
+    normalized.contains("token")
+        || normalized.contains("secret")
+        || normalized.contains("password")
+        || normalized.contains("apikey")
+        || normalized.contains("privatekey")
+        || normalized.contains("authorization")
+        || normalized.contains("bearer")
 }
 
 fn to_domain_kind(
@@ -148,10 +142,24 @@ mod tests {
 
     #[test]
     fn sensitive_json_keys_are_redacted() {
-        let input = serde_json::json!({"api_key":"abc","nested":{"refresh_token":"secret"},"safe":"visible"});
+        let input = serde_json::json!({
+            "api_key": "abc",
+            "nested": {
+                "refresh_token": "secret",
+                "token": "bare",
+                "secret_key": "key",
+                "github_token": "ghp_secret",
+                "anthropic_api_key": "sk-ant-secret"
+            },
+            "safe": "visible"
+        });
         let redacted = redact_sensitive_json(input);
         assert_eq!(redacted["api_key"], "[redacted]");
         assert_eq!(redacted["nested"]["refresh_token"], "[redacted]");
+        assert_eq!(redacted["nested"]["token"], "[redacted]");
+        assert_eq!(redacted["nested"]["secret_key"], "[redacted]");
+        assert_eq!(redacted["nested"]["github_token"], "[redacted]");
+        assert_eq!(redacted["nested"]["anthropic_api_key"], "[redacted]");
         assert_eq!(redacted["safe"], "visible");
     }
 }
