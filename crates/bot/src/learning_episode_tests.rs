@@ -112,6 +112,23 @@ fn thinking_only_review(
     })
 }
 
+fn failed_structured_review(
+    _: LearningEpisodeRuntime,
+    _: crate::learning_review::ReviewBundle,
+) -> EpisodeReviewInvocationFuture {
+    Box::pin(async move {
+        crate::learning_review::ReviewOutput::parse(serde_json::json!({
+            "status": "failed",
+            "confidence": "low",
+            "candidate_skill_name": null,
+            "candidate_summary": null,
+            "evidence_refs": [],
+            "user_notice": null
+        }))
+        .map_err(anyhow::Error::msg)
+    })
+}
+
 fn prepare_selected_episode(
     conn: &rusqlite::Connection,
     seed_ref: &str,
@@ -388,6 +405,45 @@ async fn episode_reviewer_inserts_report_and_marks_reviewed() {
         serde_json::json!([format!("msg:{message_id}")]).to_string()
     );
     assert_eq!(row.4, 0);
+}
+
+#[tokio::test]
+async fn episode_reviewer_failed_output_marks_episode_failed_and_clears_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = right_db::open_connection(temp.path(), true).unwrap();
+    let message_id = insert_review_message(&conn, "reviewer cannot decide");
+    let episode_id = prepare_selected_episode(
+        &conn,
+        "inv:inv-review-failed-output",
+        vec![format!("msg:{message_id}")],
+        Vec::new(),
+    );
+    drop(conn);
+
+    run_episode_reviewer_with_invocation(
+        runtime_for_dir(temp.path()),
+        episode_id,
+        failed_structured_review,
+    )
+    .await
+    .unwrap();
+
+    let conn = right_db::open_connection(temp.path(), false).unwrap();
+    let row: (String, String, i64, i64) = conn
+        .query_row(
+            "SELECT e.status, r.status, r.learning_episode_id, s.review_running
+             FROM learning_episodes e
+             JOIN skill_review_reports r ON r.learning_episode_id=e.id
+             JOIN skill_nudge_state s ON s.agent_name=e.agent_name
+             WHERE e.id=?1",
+            [episode_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        ("failed".to_owned(), "failed".to_owned(), episode_id, 0)
+    );
 }
 
 #[tokio::test]

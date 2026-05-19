@@ -96,6 +96,36 @@ fn candidate_with_only_thinking_evidence_is_rejected() {
 }
 
 #[test]
+fn candidate_with_unknown_only_evidence_is_rejected() {
+    let raw = serde_json::json!({
+        "status":"create_candidate",
+        "confidence":"high",
+        "candidate_skill_name":"rightx-context-window",
+        "candidate_summary":"Use context",
+        "evidence_refs":["exec:999999"],
+        "user_notice":null
+    });
+    let output = ReviewOutput::parse(raw).unwrap();
+    let refs = EpisodeEvidenceIndex::from_pairs(vec![("msg:1".to_owned(), EvidenceKind::Message)]);
+    assert!(output.validate_candidate_evidence(&refs).is_err());
+}
+
+#[test]
+fn candidate_with_mixed_known_and_unknown_evidence_is_rejected() {
+    let raw = serde_json::json!({
+        "status":"update_candidate",
+        "confidence":"high",
+        "candidate_skill_name":"rightx-context-window",
+        "candidate_summary":"Use context",
+        "evidence_refs":["msg:1", "exec:999999"],
+        "user_notice":null
+    });
+    let output = ReviewOutput::parse(raw).unwrap();
+    let refs = EpisodeEvidenceIndex::from_pairs(vec![("msg:1".to_owned(), EvidenceKind::Message)]);
+    assert!(output.validate_candidate_evidence(&refs).is_err());
+}
+
+#[test]
 fn output_converts_to_review_report() {
     let raw = serde_json::json!({
         "status": "create_candidate",
@@ -325,6 +355,36 @@ fn review_prompt_says_report_only_and_nothing_to_learn_is_normal() {
     assert!(prompt.contains("Do not make persistent negative claims from transient tool failures"));
     assert!(prompt.contains("Prefer update candidates for existing rightx-* skills"));
     assert!(prompt.contains("rightx-oauth-debugging"));
+}
+
+#[test]
+fn review_prompt_keeps_legacy_event_refs_compatible_without_episode_id() {
+    let bundle = ReviewBundle {
+        agent_name: "right".to_owned(),
+        source_invocation_id: "inv-legacy".to_owned(),
+        learning_episode_id: None,
+        root_session_id: Some("session-legacy".to_owned()),
+        trigger_kind: "learning_signal".to_owned(),
+        accepted_signal_json: None,
+        tool_iters_since_review: 3,
+        turns_since_review: 1,
+        skill_issue_hints_since_review: 0,
+        episode_messages: Vec::new(),
+        episode_execution_events: vec![ReviewExecutionEvent {
+            ref_id: "event-1".to_owned(),
+            event_kind: "stream_event".to_owned(),
+            trust_label: "primary".to_owned(),
+            content: "legacy stream evidence".to_owned(),
+        }],
+        learning_events: Vec::new(),
+        learned_skills: Vec::new(),
+    };
+
+    let prompt = build_review_prompt(&bundle);
+
+    assert!(prompt.contains("event-*"));
+    assert!(!prompt.contains("msg:* or non-thinking exec:*"));
+    assert!(prompt.contains("event-1 event_kind=stream_event"));
 }
 
 #[test]
