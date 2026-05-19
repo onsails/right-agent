@@ -17,6 +17,7 @@ pub mod oauth_callback;
 pub(crate) mod progress;
 pub mod session;
 pub mod shutdown_listener;
+pub(crate) mod tg;
 pub mod webhook;
 pub mod worker;
 
