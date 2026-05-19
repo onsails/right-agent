@@ -60,6 +60,9 @@ right bot --agent <name>  (spawned by process-compose)
   │   ├─ hourly Haiku probe for Claude OAuth keepalive + agent-facing MCP init
   │   └─ stale `right` MCP needs-auth cache repair when `system/init` is unhealthy
   ├─ Start cron engine, OAuth callback server, refresh scheduler
+  ├─ Clear stale Telegram per-chat command scopes for current allowlist ids
+  │   and legacy `allowed_chat_ids`, then register current command autocomplete
+  │   in Default, AllPrivateChats, and AllGroupChats scopes
   └─ Start teloxide long-polling dispatcher
 
 Per message:
