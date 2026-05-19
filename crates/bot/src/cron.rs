@@ -532,7 +532,31 @@ async fn execute_job(
     let mut lines = tokio::io::BufReader::new(stdout).lines();
 
     let mut collected_lines: Vec<String> = Vec::new();
+    let execution_event_scope = crate::execution_events::ExecutionEventScope {
+        agent_name,
+        root_session_id: Some(&run_id),
+        invocation_id: None,
+        turn_id: None,
+        async_run_id: Some(&run_id),
+        cron_job_name: Some(job_name),
+        cron_run_id: Some(&run_id),
+    };
+    let mut execution_event_seq = 0_i64;
     while let Ok(Some(line)) = lines.next_line().await {
+        if let Err(e) = crate::execution_events::persist_stream_line(
+            &conn,
+            &execution_event_scope,
+            execution_event_seq,
+            &line,
+        ) {
+            tracing::warn!(
+                job = %job_name,
+                run_id = %run_id,
+                seq = execution_event_seq,
+                "execution event persist failed: {e:#}"
+            );
+        }
+        execution_event_seq += 1;
         collected_lines.push(line);
     }
 

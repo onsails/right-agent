@@ -136,6 +136,8 @@ pub(crate) async fn spawn_background_continuation(
     let (init_tx, init_rx) = tokio::sync::oneshot::channel();
     let reader_handle = tokio::spawn(read_background_stdout(
         stdout,
+        agent_dir.clone(),
+        agent_name.clone(),
         log_path.clone(),
         request.run_id.clone(),
         init_tx,
@@ -310,6 +312,8 @@ fn build_background_command(
 
 async fn read_background_stdout(
     stdout: tokio::process::ChildStdout,
+    agent_dir: PathBuf,
+    agent_name: String,
     log_path: PathBuf,
     run_id: String,
     init_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
@@ -331,6 +335,26 @@ async fn read_background_stdout(
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut collected = Vec::new();
     let mut saw_init = false;
+    let conn = match right_db::open_connection(&agent_dir, false) {
+        Ok(conn) => Some(conn),
+        Err(e) => {
+            tracing::warn!(
+                run_id = %run_id,
+                "failed to open DB for background execution events: {e:#}"
+            );
+            None
+        }
+    };
+    let execution_event_scope = crate::execution_events::ExecutionEventScope {
+        agent_name: &agent_name,
+        root_session_id: Some(&run_id),
+        invocation_id: None,
+        turn_id: None,
+        async_run_id: Some(&run_id),
+        cron_job_name: None,
+        cron_run_id: None,
+    };
+    let mut execution_event_seq = 0_i64;
 
     loop {
         let line = match lines.next_line().await {
@@ -346,6 +370,21 @@ async fn read_background_stdout(
             send_init_failure(&mut init_tx, &reason);
             return Err(reason);
         }
+        if let Some(conn) = conn.as_ref()
+            && let Err(e) = crate::execution_events::persist_stream_line(
+                conn,
+                &execution_event_scope,
+                execution_event_seq,
+                &line,
+            )
+        {
+            tracing::warn!(
+                run_id = %run_id,
+                seq = execution_event_seq,
+                "execution event persist failed: {e:#}"
+            );
+        }
+        execution_event_seq += 1;
 
         if !saw_init && is_handoff_init_for_run(&line, &run_id) {
             saw_init = true;

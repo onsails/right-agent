@@ -13,6 +13,13 @@ For cron jobs, stdout is tee'd into an NDJSON log inside the sandbox at
 `/sandbox/crons/logs/{job_name}-{run_id}.ndjson` (agents can read these directly
 via `Read`). Per-job retention keeps the last 10 cron logs.
 
+Foreground, cron, and background-continuation stream loops also persist typed
+execution events into `execution_events` for learning episode selection.
+Persisted events cover assistant text/thinking, tool calls, tool results/errors,
+and invocation results; untyped stream lines are skipped. Thinking is secondary
+context, stream JSON is redacted before storage, and runtime DB write failures
+are logged without aborting the user-facing run.
+
 High-value foreground invocation logs include `chat_id`, `eff_thread_id`, the
 full `(chat_id, eff_thread_id)` key, `session_uuid`, and the per-invocation
 `turn_id`. The key disambiguates concurrent Telegram topics in the same group
