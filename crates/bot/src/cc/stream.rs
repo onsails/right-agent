@@ -488,6 +488,7 @@ fn summarize_tool_input(tool: &str, input: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use PersistedStreamEventKind::*;
 
     #[test]
     fn parse_result_event() {
@@ -531,7 +532,7 @@ mod tests {
     fn persisted_event_parses_thinking_text() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Need check Notion first"}]}}"#;
         let event = parse_persisted_stream_event(line).unwrap();
-        assert_eq!(event.kind, PersistedStreamEventKind::Thinking);
+        assert_eq!(event.kind, Thinking);
         assert_eq!(event.content_text, "Need check Notion first");
     }
 
@@ -539,34 +540,32 @@ mod tests {
     fn persisted_event_parses_tool_result_error() {
         let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":true,"content":"permission denied"}]}}"#;
         let event = parse_persisted_stream_event(line).unwrap();
-        assert_eq!(event.kind, PersistedStreamEventKind::ToolError);
+        assert_eq!(event.kind, ToolError);
     }
 
     #[test]
     fn persisted_events_parse_all_assistant_blocks_in_order() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"First"},{"type":"thinking","thinking":"Then think"},{"type":"tool_use","name":"Bash","input":{"command":"pwd"}}]}}"#;
         let events = parse_persisted_stream_events(line);
-        assert_eq!(
-            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
-            vec![
-                PersistedStreamEventKind::AssistantText,
-                PersistedStreamEventKind::Thinking,
-                PersistedStreamEventKind::ToolCall
-            ]
-        );
+        let kinds = events.iter().map(|event| event.kind).collect::<Vec<_>>();
+        assert_eq!(kinds, vec![AssistantText, Thinking, ToolCall]);
     }
 
     #[test]
     fn persisted_events_parse_all_user_tool_results_in_order() {
         let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},{"type":"tool_result","tool_use_id":"toolu_2","is_error":true,"content":"denied"}]}}"#;
         let events = parse_persisted_stream_events(line);
-        assert_eq!(
-            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
-            vec![
-                PersistedStreamEventKind::ToolResult,
-                PersistedStreamEventKind::ToolError
-            ]
-        );
+        let kinds = events.iter().map(|event| event.kind).collect::<Vec<_>>();
+        assert_eq!(kinds, vec![ToolResult, ToolError]);
+    }
+
+    #[test]
+    fn persisted_events_parse_invocation_result() {
+        let line = r#"{"type":"result","result":"done"}"#;
+        let events = parse_persisted_stream_events(line);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, InvocationResult);
+        assert_eq!(events[0].content_text, "done");
     }
 
     #[test]
