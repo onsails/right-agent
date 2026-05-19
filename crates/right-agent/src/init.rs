@@ -1,12 +1,22 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::agent::types::{MemoryProvider, NetworkPolicy, RecallBudget, SandboxMode, SttConfig};
+use crate::agent::types::{
+    LearningConfig, MemoryProvider, NetworkPolicy, RecallBudget, SandboxMode, SttConfig,
+};
 
 /// Default recall budget used when the user doesn't override it.
 pub const DEFAULT_RECALL_BUDGET: RecallBudget = RecallBudget::Mid;
 /// Default recall max tokens used when the user doesn't override it.
 pub const DEFAULT_RECALL_MAX_TOKENS: u32 = 4096;
+
+fn format_learning_budget_usd(value: f64) -> String {
+    if (value - LearningConfig::default().episode_selector_max_budget_usd).abs() < f64::EPSILON {
+        "0.10".to_owned()
+    } else {
+        value.to_string()
+    }
+}
 
 /// Preserved config from a previous agent, used during `--force-recreate` re-init.
 pub struct InitOverrides {
@@ -15,6 +25,7 @@ pub struct InitOverrides {
     pub telegram_token: Option<String>,
     pub allowed_chat_ids: Vec<i64>,
     pub model: Option<String>,
+    pub learning: LearningConfig,
     pub env: HashMap<String, String>,
     pub memory_provider: MemoryProvider,
     pub memory_api_key: Option<String>,
@@ -49,6 +60,7 @@ pub fn init_agent(
         telegram_token: None,
         allowed_chat_ids: vec![],
         model: None,
+        learning: LearningConfig::default(),
         env: HashMap::new(),
         memory_provider: MemoryProvider::File,
         memory_api_key: None,
@@ -143,6 +155,22 @@ pub fn init_agent(
         // Model — always written; defaults to "sonnet" when not overridden.
         let model = ov.model.as_deref().unwrap_or("sonnet");
         yaml.push_str(&format!("\nmodel: \"{model}\"\n"));
+
+        // Learning config (only written when non-default).
+        if ov.learning != LearningConfig::default() {
+            yaml.push_str("\nlearning:\n");
+            if let Some(model) = ov.learning.episode_selector_model.as_deref() {
+                yaml.push_str(&format!("  episode_selector_model: \"{model}\"\n"));
+            }
+            yaml.push_str(&format!(
+                "  episode_selector_max_budget_usd: {}\n",
+                format_learning_budget_usd(ov.learning.episode_selector_max_budget_usd)
+            ));
+            yaml.push_str(&format!(
+                "  episode_settle_seconds: {}\n",
+                ov.learning.episode_settle_seconds
+            ));
+        }
 
         // Environment variables (from overrides only).
         if !ov.env.is_empty() {
@@ -270,6 +298,7 @@ pub fn init_right_home(
         telegram_token: telegram_token.map(|t| t.to_string()),
         allowed_chat_ids: telegram_allowed_chat_ids.to_vec(),
         model: None,
+        learning: LearningConfig::default(),
         env: HashMap::new(),
         memory_provider,
         memory_api_key,
@@ -1087,6 +1116,7 @@ mod tests {
             telegram_token: Some("123456:ABCdef".to_string()),
             allowed_chat_ids: vec![],
             model: None,
+            learning: LearningConfig::default(),
             env: HashMap::new(),
             memory_provider: MemoryProvider::File,
             memory_api_key: None,
@@ -1117,6 +1147,7 @@ mod tests {
             telegram_token: None,
             allowed_chat_ids: vec![],
             model: None,
+            learning: LearningConfig::default(),
             env: HashMap::new(),
             memory_provider: MemoryProvider::File,
             memory_api_key: None,
@@ -1142,6 +1173,7 @@ mod tests {
             telegram_token: None,
             allowed_chat_ids: vec![],
             model: None,
+            learning: LearningConfig::default(),
             env: HashMap::new(),
             memory_provider: MemoryProvider::File,
             memory_api_key: None,
@@ -1168,6 +1200,7 @@ mod tests {
             telegram_token: Some("123:ABC".to_string()),
             allowed_chat_ids: vec![42, -1001234],
             model: None,
+            learning: LearningConfig::default(),
             env: HashMap::new(),
             memory_provider: MemoryProvider::File,
             memory_api_key: None,
@@ -1204,6 +1237,7 @@ mod tests {
             telegram_token: Some("t".into()),
             allowed_chat_ids: vec![1],
             model: None,
+            learning: LearningConfig::default(),
             env: HashMap::new(),
             memory_provider: MemoryProvider::File,
             memory_api_key: None,
@@ -1240,6 +1274,7 @@ mod tests {
             telegram_token: None,
             allowed_chat_ids: vec![],
             model: None,
+            learning: LearningConfig::default(),
             env: HashMap::new(),
             memory_provider: MemoryProvider::File,
             memory_api_key: None,
@@ -1285,6 +1320,7 @@ mod tests {
             telegram_token: Some("999888:XYZtoken".to_string()),
             allowed_chat_ids: vec![111, 222],
             model: Some("opus".to_string()),
+            learning: LearningConfig::default(),
             env,
             memory_provider: MemoryProvider::File,
             memory_api_key: None,

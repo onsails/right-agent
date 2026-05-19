@@ -260,6 +260,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             attachments: Default::default(),
             network_policy: Default::default(),
             show_thinking: true,
+            learning: Default::default(),
             memory: None,
             stt: Default::default(),
         });

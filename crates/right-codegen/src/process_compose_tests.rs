@@ -38,6 +38,7 @@ fn make_bot_agent(name: &str, token: &str) -> AgentDef {
         secret: None,
         attachments: Default::default(),
         show_thinking: true,
+        learning: Default::default(),
         memory: None,
         stt: Default::default(),
     });
@@ -74,6 +75,7 @@ fn make_agent_no_token(name: &str) -> AgentDef {
         secret: None,
         attachments: Default::default(),
         show_thinking: true,
+        learning: Default::default(),
         memory: None,
         stt: Default::default(),
     });
@@ -124,6 +126,7 @@ fn make_agent_with_restart(name: &str, token: &str, restart: RestartPolicy) -> A
         secret: None,
         attachments: Default::default(),
         show_thinking: true,
+        learning: Default::default(),
         memory: None,
         stt: Default::default(),
     });
@@ -417,6 +420,7 @@ fn make_agent_with_sandbox(
         secret: None,
         attachments: Default::default(),
         show_thinking: true,
+        learning: Default::default(),
         memory: None,
         stt: Default::default(),
     });
@@ -590,6 +594,7 @@ fn agent_without_sandbox_config_defaults_to_openshell_in_process_compose() {
         secret: None,
         attachments: Default::default(),
         show_thinking: true,
+        learning: Default::default(),
         memory: None,
         stt: Default::default(),
     });

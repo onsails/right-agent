@@ -91,6 +91,14 @@ fn default_show_thinking() -> bool {
     true
 }
 
+fn default_episode_selector_max_budget_usd() -> f64 {
+    0.10
+}
+
+fn default_episode_settle_seconds() -> u64 {
+    90
+}
+
 /// Network access policy for sandbox.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -253,6 +261,30 @@ impl Default for MemoryConfig {
     }
 }
 
+/// Learning-review configuration for an agent.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LearningConfig {
+    /// Optional selector model. None means inherit the agent model.
+    pub episode_selector_model: Option<String>,
+    /// Maximum spend for one episode-selection invocation.
+    #[serde(default = "default_episode_selector_max_budget_usd")]
+    pub episode_selector_max_budget_usd: f64,
+    /// Delay after seed evidence before selecting the episode boundary.
+    #[serde(default = "default_episode_settle_seconds")]
+    pub episode_settle_seconds: u64,
+}
+
+impl Default for LearningConfig {
+    fn default() -> Self {
+        Self {
+            episode_selector_model: None,
+            episode_selector_max_budget_usd: default_episode_selector_max_budget_usd(),
+            episode_settle_seconds: default_episode_settle_seconds(),
+        }
+    }
+}
+
 /// Parsed `agent.yaml` configuration for a single agent.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -315,6 +347,10 @@ pub struct AgentConfig {
     #[serde(default = "default_show_thinking")]
     pub show_thinking: bool,
 
+    /// Learning-review configuration.
+    #[serde(default)]
+    pub learning: LearningConfig,
+
     /// Memory configuration (optional; defaults to file-based MEMORY.md).
     #[serde(default)]
     pub memory: Option<MemoryConfig>,
@@ -340,6 +376,7 @@ impl Default for AgentConfig {
             secret: None,
             attachments: AttachmentsConfig::default(),
             show_thinking: default_show_thinking(),
+            learning: LearningConfig::default(),
             memory: None,
             stt: SttConfig::default(),
         }

@@ -173,6 +173,9 @@ where
     let identity_arc = Arc::new(identity);
 
     // Shared state
+    let learning = right_agent::agent::discovery::parse_agent_config(&agent_dir)?
+        .map(|config| config.learning)
+        .unwrap_or_default();
     let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> = Arc::new(DashMap::new());
     let agent_dir_arc: Arc<AgentDir> = Arc::new(AgentDir(agent_dir));
     let ssh_config_arc: Arc<SshConfigPath> = Arc::new(SshConfigPath(ssh_config_path));
@@ -203,6 +206,7 @@ where
         upgrade_lock,
         debug,
         stt,
+        learning,
         claude_health,
         shutdown: worker_shutdown.clone(),
     });
@@ -638,6 +642,7 @@ mod tests {
             upgrade_lock: Arc::new(RwLock::new(())),
             debug: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             stt: None,
+            learning: right_agent::agent::types::LearningConfig::default(),
             claude_health: crate::keepalive::ClaudeHealth::new(
                 "smoke".to_owned(),
                 PathBuf::from("/tmp/smoke"),
