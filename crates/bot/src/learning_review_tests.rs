@@ -72,6 +72,30 @@ fn nothing_to_learn_accepts_empty_candidate_fields() {
 }
 
 #[test]
+fn review_prompt_marks_thinking_secondary() {
+    let bundle = ReviewBundle::for_test_with_execution_event("exec:3", "thinking", "secondary");
+    let prompt = build_review_prompt(&bundle);
+    assert!(prompt.contains("secondary context"));
+    assert!(prompt.contains("cannot be the only evidence"));
+}
+
+#[test]
+fn candidate_with_only_thinking_evidence_is_rejected() {
+    let raw = serde_json::json!({
+        "status":"create_candidate",
+        "confidence":"high",
+        "candidate_skill_name":"rightx-context-window",
+        "candidate_summary":"Use context",
+        "evidence_refs":["exec:3"],
+        "user_notice":null
+    });
+    let output = ReviewOutput::parse(raw).unwrap();
+    let refs =
+        EpisodeEvidenceIndex::from_pairs(vec![("exec:3".to_owned(), EvidenceKind::Thinking)]);
+    assert!(output.validate_candidate_evidence(&refs).is_err());
+}
+
+#[test]
 fn output_converts_to_review_report() {
     let raw = serde_json::json!({
         "status": "create_candidate",
@@ -86,6 +110,7 @@ fn output_converts_to_review_report() {
     let report = output.to_report(ReviewReportContext {
         agent_name: "right".to_owned(),
         source_invocation_id: "inv-1".to_owned(),
+        learning_episode_id: Some(42),
         root_session_id: Some("session-1".to_owned()),
         chat_id: Some(10),
         thread_id: Some(20),
@@ -95,6 +120,7 @@ fn output_converts_to_review_report() {
 
     assert_eq!(report.agent_name, "right");
     assert_eq!(report.source_invocation_id, "inv-1");
+    assert_eq!(report.learning_episode_id, Some(42));
     assert_eq!(report.root_session_id.as_deref(), Some("session-1"));
     assert_eq!(report.chat_id, Some(10));
     assert_eq!(report.thread_id, Some(20));
@@ -266,13 +292,20 @@ fn review_prompt_says_report_only_and_nothing_to_learn_is_normal() {
     let bundle = ReviewBundle {
         agent_name: "right".to_owned(),
         source_invocation_id: "inv-1".to_owned(),
+        learning_episode_id: None,
         root_session_id: Some("session-1".to_owned()),
         trigger_kind: "effort_threshold".to_owned(),
         accepted_signal_json: None,
         tool_iters_since_review: 15,
         turns_since_review: 3,
         skill_issue_hints_since_review: 0,
-        event_timeline: vec!["event-1 user asked for OAuth setup".to_owned()],
+        episode_messages: vec![ReviewMessage {
+            ref_id: "msg:1".to_owned(),
+            role: "user".to_owned(),
+            trust_label: "primary".to_owned(),
+            content: "user asked for OAuth setup".to_owned(),
+        }],
+        episode_execution_events: Vec::new(),
         learning_events: vec!["start create rightx-oauth-debugging".to_owned()],
         learned_skills: vec![LearnedSkillSummary {
             name: "rightx-oauth-debugging".to_owned(),
@@ -303,13 +336,25 @@ fn review_prompt_wraps_external_sections() {
     let bundle = ReviewBundle {
         agent_name: "right".to_owned(),
         source_invocation_id: "inv-1".to_owned(),
+        learning_episode_id: None,
         root_session_id: Some("session-1".to_owned()),
         trigger_kind: "learning_signal".to_owned(),
         accepted_signal_json: Some(r#"{"summary":"signal body"}"#.to_owned()),
         tool_iters_since_review: 1,
         turns_since_review: 1,
         skill_issue_hints_since_review: 0,
-        event_timeline: vec!["event-1 user asked X".to_owned()],
+        episode_messages: vec![ReviewMessage {
+            ref_id: "msg:1".to_owned(),
+            role: "user".to_owned(),
+            trust_label: "primary".to_owned(),
+            content: "user asked X".to_owned(),
+        }],
+        episode_execution_events: vec![ReviewExecutionEvent {
+            ref_id: "exec:1".to_owned(),
+            event_kind: "tool_call".to_owned(),
+            trust_label: "primary".to_owned(),
+            content: "tool ran Y".to_owned(),
+        }],
         learning_events: vec!["start create rightx-foo".to_owned()],
         learned_skills: vec![LearnedSkillSummary {
             name: "rightx-foo".to_owned(),
@@ -324,7 +369,8 @@ fn review_prompt_wraps_external_sections() {
     // per external section.
     for label in [
         "accepted_signal_json",
-        "event_timeline",
+        "episode_messages",
+        "episode_execution_events",
         "learning_events",
         "rightx_skill_index",
     ] {
@@ -337,17 +383,18 @@ fn review_prompt_wraps_external_sections() {
     let begin_count = prompt.matches("--- BEGIN EXTERNAL CONTENT ---").count();
     let end_count = prompt.matches("--- END EXTERNAL CONTENT ---").count();
     assert_eq!(
-        begin_count, 4,
+        begin_count, 5,
         "expected one BEGIN marker per external section; prompt was:\n{prompt}"
     );
     assert_eq!(
-        end_count, 4,
+        end_count, 5,
         "expected one END marker per external section; prompt was:\n{prompt}"
     );
 
     // Sanity-check: agent-authored bodies are present inside the wrap.
     assert!(prompt.contains("signal body"));
     assert!(prompt.contains("user asked X"));
+    assert!(prompt.contains("tool ran Y"));
     assert!(prompt.contains("start create rightx-foo"));
     assert!(prompt.contains("description: foo skill"));
 }
@@ -357,13 +404,20 @@ fn review_prompt_omits_accepted_signal_wrap_when_signal_missing() {
     let bundle = ReviewBundle {
         agent_name: "right".to_owned(),
         source_invocation_id: "inv-1".to_owned(),
+        learning_episode_id: None,
         root_session_id: Some("session-1".to_owned()),
         trigger_kind: "learning_signal".to_owned(),
         accepted_signal_json: None,
         tool_iters_since_review: 1,
         turns_since_review: 1,
         skill_issue_hints_since_review: 0,
-        event_timeline: vec!["event-1 fine".to_owned()],
+        episode_messages: vec![ReviewMessage {
+            ref_id: "msg:1".to_owned(),
+            role: "user".to_owned(),
+            trust_label: "primary".to_owned(),
+            content: "fine".to_owned(),
+        }],
+        episode_execution_events: Vec::new(),
         learning_events: vec![],
         learned_skills: vec![],
     };
@@ -373,14 +427,17 @@ fn review_prompt_omits_accepted_signal_wrap_when_signal_missing() {
     assert!(!prompt.contains("accepted_signal_json"));
     assert!(!prompt.contains("learning-review/accepted_signal_json"));
     // Other wraps still emitted.
-    assert!(prompt.contains("UNTRUSTED source (learning-review/event_timeline)"));
+    assert!(prompt.contains("UNTRUSTED source (learning-review/episode_messages)"));
 }
 
 #[tokio::test]
 async fn run_review_with_output_builds_prompt_and_parses_json() {
     let output = run_review_with_output(runner_test_bundle(), |prompt| async move {
         assert!(prompt.contains("Report-only"));
-        assert!(prompt.contains("event-1 user corrected OAuth flow"));
+        assert!(
+            prompt
+                .contains("msg:1 role=user trust_label=primary content=user corrected OAuth flow")
+        );
         Ok(serde_json::json!({
             "status": "nothing_to_learn",
             "confidence": "low",
@@ -412,13 +469,20 @@ fn runner_test_bundle() -> ReviewBundle {
     ReviewBundle {
         agent_name: "right".to_owned(),
         source_invocation_id: "inv-1".to_owned(),
+        learning_episode_id: None,
         root_session_id: Some("session-1".to_owned()),
         trigger_kind: "learning_signal".to_owned(),
         accepted_signal_json: None,
         tool_iters_since_review: 2,
         turns_since_review: 1,
         skill_issue_hints_since_review: 0,
-        event_timeline: vec!["event-1 user corrected OAuth flow".to_owned()],
+        episode_messages: vec![ReviewMessage {
+            ref_id: "msg:1".to_owned(),
+            role: "user".to_owned(),
+            trust_label: "primary".to_owned(),
+            content: "user corrected OAuth flow".to_owned(),
+        }],
+        episode_execution_events: Vec::new(),
         learning_events: vec![],
         learned_skills: vec![],
     }
@@ -430,12 +494,24 @@ fn review_prompt_bounds_signal_lists_and_skills() {
         "{{\"summary\":\"signal-head{}SIGNAL_TAIL_MARKER\"}}",
         "s".repeat(9000)
     );
-    let mut event_timeline = vec![format!(
-        "event-head {} EVENT_ITEM_TAIL_MARKER",
-        "e".repeat(9000)
-    )];
-    event_timeline.extend((0..160).map(|i| format!("event-{i}")));
-    event_timeline.push("EVENT_COUNT_TAIL_MARKER".to_owned());
+    let mut episode_messages = vec![ReviewMessage {
+        ref_id: "msg:1".to_owned(),
+        role: "user".to_owned(),
+        trust_label: "primary".to_owned(),
+        content: format!("event-head {} EVENT_ITEM_TAIL_MARKER", "e".repeat(9000)),
+    }];
+    episode_messages.extend((0..160).map(|i| ReviewMessage {
+        ref_id: format!("msg:{i}"),
+        role: "user".to_owned(),
+        trust_label: "primary".to_owned(),
+        content: format!("event-{i}"),
+    }));
+    episode_messages.push(ReviewMessage {
+        ref_id: "msg:999".to_owned(),
+        role: "user".to_owned(),
+        trust_label: "primary".to_owned(),
+        content: "EVENT_COUNT_TAIL_MARKER".to_owned(),
+    });
 
     let mut learning_events = vec![format!(
         "learning-head {} LEARNING_ITEM_TAIL_MARKER",
@@ -463,13 +539,15 @@ fn review_prompt_bounds_signal_lists_and_skills() {
     let bundle = ReviewBundle {
         agent_name: "right".to_owned(),
         source_invocation_id: "inv-1".to_owned(),
+        learning_episode_id: None,
         root_session_id: Some("session-1".to_owned()),
         trigger_kind: "learning_signal".to_owned(),
         accepted_signal_json: Some(long_signal),
         tool_iters_since_review: 15,
         turns_since_review: 3,
         skill_issue_hints_since_review: 2,
-        event_timeline,
+        episode_messages,
+        episode_execution_events: Vec::new(),
         learning_events,
         learned_skills,
     };

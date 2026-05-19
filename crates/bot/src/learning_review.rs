@@ -86,11 +86,41 @@ pub(crate) const REVIEW_SCHEMA_JSON: &str = r#"{
 pub(crate) struct ReviewReportContext {
     pub(crate) agent_name: String,
     pub(crate) source_invocation_id: String,
+    pub(crate) learning_episode_id: Option<i64>,
     pub(crate) root_session_id: Option<String>,
     pub(crate) chat_id: Option<i64>,
     pub(crate) thread_id: Option<i64>,
     pub(crate) trigger_kind: right_agent::learned_skills::ReviewTriggerKind,
     pub(crate) telegram_notified: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvidenceKind {
+    Message,
+    ObservableExecution,
+    Thinking,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct EpisodeEvidenceIndex {
+    refs: std::collections::HashMap<String, EvidenceKind>,
+}
+
+impl EpisodeEvidenceIndex {
+    #[cfg(test)]
+    pub(crate) fn from_pairs(pairs: Vec<(String, EvidenceKind)>) -> Self {
+        Self {
+            refs: pairs.into_iter().collect(),
+        }
+    }
+
+    pub(crate) fn insert(&mut self, ref_id: String, kind: EvidenceKind) {
+        self.refs.insert(ref_id, kind);
+    }
+
+    fn get(&self, ref_id: &str) -> Option<EvidenceKind> {
+        self.refs.get(ref_id).copied()
+    }
 }
 
 impl ReviewOutput {
@@ -154,6 +184,33 @@ impl ReviewOutput {
             && self.user_notice.is_some()
     }
 
+    pub(crate) fn validate_candidate_evidence(
+        &self,
+        index: &EpisodeEvidenceIndex,
+    ) -> Result<(), String> {
+        if !matches!(
+            self.status,
+            ReviewOutputStatus::CreateCandidate | ReviewOutputStatus::UpdateCandidate
+        ) {
+            return Ok(());
+        }
+
+        let has_observable_evidence = self.evidence_refs.iter().any(|ref_id| {
+            matches!(
+                index.get(ref_id),
+                Some(EvidenceKind::Message | EvidenceKind::ObservableExecution)
+            )
+        });
+        if has_observable_evidence {
+            Ok(())
+        } else {
+            Err(
+                "candidate evidence_refs must include at least one observable episode ref: msg:* or non-thinking exec:*"
+                    .to_owned(),
+            )
+        }
+    }
+
     pub(crate) fn to_report(
         &self,
         ctx: ReviewReportContext,
@@ -161,7 +218,7 @@ impl ReviewOutput {
         right_agent::learned_skills::SkillReviewReport {
             agent_name: ctx.agent_name,
             source_invocation_id: ctx.source_invocation_id,
-            learning_episode_id: None,
+            learning_episode_id: ctx.learning_episode_id,
             root_session_id: ctx.root_session_id,
             chat_id: ctx.chat_id,
             thread_id: ctx.thread_id,
@@ -226,25 +283,76 @@ const SKILL_EXCERPT_MAX_LINES: usize = 120;
 pub(crate) struct ReviewBundle {
     pub(crate) agent_name: String,
     pub(crate) source_invocation_id: String,
+    pub(crate) learning_episode_id: Option<i64>,
     pub(crate) root_session_id: Option<String>,
     pub(crate) trigger_kind: String,
     pub(crate) accepted_signal_json: Option<String>,
     pub(crate) tool_iters_since_review: i64,
     pub(crate) turns_since_review: i64,
     pub(crate) skill_issue_hints_since_review: i64,
-    pub(crate) event_timeline: Vec<String>,
+    pub(crate) episode_messages: Vec<ReviewMessage>,
+    pub(crate) episode_execution_events: Vec<ReviewExecutionEvent>,
     pub(crate) learning_events: Vec<String>,
     pub(crate) learned_skills: Vec<LearnedSkillSummary>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewMessage {
+    pub(crate) ref_id: String,
+    pub(crate) role: String,
+    pub(crate) trust_label: String,
+    pub(crate) content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewExecutionEvent {
+    pub(crate) ref_id: String,
+    pub(crate) event_kind: String,
+    pub(crate) trust_label: String,
+    pub(crate) content: String,
+}
+
+impl ReviewBundle {
+    #[cfg(test)]
+    pub(crate) fn for_test_with_execution_event(
+        ref_id: &str,
+        event_kind: &str,
+        trust_label: &str,
+    ) -> Self {
+        Self {
+            agent_name: "right".to_owned(),
+            source_invocation_id: "episode:1".to_owned(),
+            learning_episode_id: Some(1),
+            root_session_id: None,
+            trigger_kind: "learning_signal".to_owned(),
+            accepted_signal_json: None,
+            tool_iters_since_review: 0,
+            turns_since_review: 0,
+            skill_issue_hints_since_review: 0,
+            episode_messages: Vec::new(),
+            episode_execution_events: vec![ReviewExecutionEvent {
+                ref_id: ref_id.to_owned(),
+                event_kind: event_kind.to_owned(),
+                trust_label: trust_label.to_owned(),
+                content: "test event".to_owned(),
+            }],
+            learning_events: Vec::new(),
+            learned_skills: Vec::new(),
+        }
+    }
+}
+
 const REVIEW_WRAP_LABEL_ACCEPTED_SIGNAL: &str = "learning-review/accepted_signal_json";
-const REVIEW_WRAP_LABEL_EVENT_TIMELINE: &str = "learning-review/event_timeline";
+const REVIEW_WRAP_LABEL_EPISODE_MESSAGES: &str = "learning-review/episode_messages";
+const REVIEW_WRAP_LABEL_EPISODE_EXECUTION_EVENTS: &str = "learning-review/episode_execution_events";
 const REVIEW_WRAP_LABEL_LEARNING_EVENTS: &str = "learning-review/learning_events";
 const REVIEW_WRAP_LABEL_SKILL_INDEX: &str = "learning-review/rightx_skill_index";
 
 const REVIEW_PROMPT_ACCEPTED_SIGNAL_MAX_CHARS: usize = 2_048;
-const REVIEW_PROMPT_EVENT_TIMELINE_MAX_ITEMS: usize = 24;
-const REVIEW_PROMPT_EVENT_TIMELINE_ITEM_MAX_CHARS: usize = 200;
+const REVIEW_PROMPT_EPISODE_MESSAGES_MAX_ITEMS: usize = 32;
+const REVIEW_PROMPT_EPISODE_MESSAGE_ITEM_MAX_CHARS: usize = 280;
+const REVIEW_PROMPT_EPISODE_EXECUTION_EVENTS_MAX_ITEMS: usize = 48;
+const REVIEW_PROMPT_EPISODE_EXECUTION_EVENT_ITEM_MAX_CHARS: usize = 280;
 const REVIEW_PROMPT_LEARNING_EVENTS_MAX_ITEMS: usize = 24;
 const REVIEW_PROMPT_LEARNING_EVENT_ITEM_MAX_CHARS: usize = 200;
 const REVIEW_PROMPT_LEARNED_SKILLS_MAX_ITEMS: usize = 16;
@@ -263,6 +371,8 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
          - Candidates must be reusable across future sessions, not a summary of this one task.\n\
          - Do not preserve one-off task narrative in candidate summaries.\n\
          - Do not make persistent negative claims from transient tool failures.\n\
+         - Thinking events are secondary context. They can guide wording, but candidate evidence_refs must include at least one observable ref: msg:* or non-thinking exec:*.\n\
+         - Thinking events cannot be the only evidence for a candidate.\n\
          - Prefer update candidates for existing rightx-* skills when the evidence refines an installed learned skill.\n\
          - Use create_candidate when repeated tool patterns or setup workflows are reusable and no existing rightx-* skill fits.\n\
          - Use nothing_to_learn when the evidence is only normal task progress, isolated facts, or one-time content.\n\n",
@@ -274,6 +384,9 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
     ));
     if let Some(root_session_id) = &bundle.root_session_id {
         prompt.push_str(&format!("root_session_id: {root_session_id}\n"));
+    }
+    if let Some(learning_episode_id) = bundle.learning_episode_id {
+        prompt.push_str(&format!("learning_episode_id: {learning_episode_id}\n"));
     }
     prompt.push_str(&format!("trigger_kind: {}\n", bundle.trigger_kind));
     prompt.push_str(&format!(
@@ -301,11 +414,19 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
 
     push_bounded_list(
         &mut prompt,
-        "event_timeline",
-        REVIEW_WRAP_LABEL_EVENT_TIMELINE,
-        &bundle.event_timeline,
-        REVIEW_PROMPT_EVENT_TIMELINE_MAX_ITEMS,
-        REVIEW_PROMPT_EVENT_TIMELINE_ITEM_MAX_CHARS,
+        "episode_messages",
+        REVIEW_WRAP_LABEL_EPISODE_MESSAGES,
+        &format_review_messages(&bundle.episode_messages),
+        REVIEW_PROMPT_EPISODE_MESSAGES_MAX_ITEMS,
+        REVIEW_PROMPT_EPISODE_MESSAGE_ITEM_MAX_CHARS,
+    );
+    push_bounded_list(
+        &mut prompt,
+        "episode_execution_events",
+        REVIEW_WRAP_LABEL_EPISODE_EXECUTION_EVENTS,
+        &format_review_execution_events(&bundle.episode_execution_events),
+        REVIEW_PROMPT_EPISODE_EXECUTION_EVENTS_MAX_ITEMS,
+        REVIEW_PROMPT_EPISODE_EXECUTION_EVENT_ITEM_MAX_CHARS,
     );
     push_bounded_list(
         &mut prompt,
@@ -349,6 +470,30 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
          evidence_refs, and user_notice. Use only rightx-* candidate skill names.\n",
     );
     prompt
+}
+
+fn format_review_messages(messages: &[ReviewMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .map(|message| {
+            format!(
+                "{} role={} trust_label={} content={}",
+                message.ref_id, message.role, message.trust_label, message.content
+            )
+        })
+        .collect()
+}
+
+fn format_review_execution_events(events: &[ReviewExecutionEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|event| {
+            format!(
+                "{} event_kind={} trust_label={} content={}",
+                event.ref_id, event.event_kind, event.trust_label, event.content
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
