@@ -25,8 +25,8 @@ use crate::reflection::FailureKind;
 use right_agent::learned_skills::{
     NudgeSignalKind, NudgeSignalRecord, ReviewGateDecision, ReviewGateInput, ReviewStatus,
     ReviewTriggerKind, SkillReviewReport, clear_review_running, increment_turn_nudge_counters,
-    insert_skill_review_report, mark_review_finished, record_nudge_signal, review_gate_decision,
-    select_reply_signal, try_mark_review_started,
+    insert_skill_review_report, mark_review_finished, record_nudge_signal, select_reply_signal,
+    try_mark_review_started,
 };
 
 use super::session::{
@@ -2166,6 +2166,19 @@ fn load_skill_review_gate_snapshot(
     )
 }
 
+fn load_learning_episode_effort_snapshot(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+) -> Result<(i64, i64), rusqlite::Error> {
+    right_agent::learned_skills::ensure_nudge_state(conn, agent_name)?;
+    conn.query_row(
+        "SELECT tool_iters_since_review, creation_review_interval \
+         FROM skill_nudge_state WHERE agent_name = ?1",
+        [agent_name],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
 #[derive(Debug)]
 struct BackgroundReviewFailure {
     error: String,
@@ -2398,6 +2411,37 @@ const _: fn(
     Option<(NudgeSignalKind, serde_json::Value)>,
 ) = maybe_spawn_learned_skill_review;
 
+fn foreground_episode_seed_trigger_kind(
+    accepted_signal: Option<&(NudgeSignalKind, serde_json::Value)>,
+    tool_iters_since_review: i64,
+    creation_review_interval: i64,
+) -> Option<right_agent::learning_episodes::EpisodeSeedTriggerKind> {
+    let has_learning_accepted = matches!(accepted_signal, Some((NudgeSignalKind::Learning, _)));
+    let has_skill_issue_accepted =
+        matches!(accepted_signal, Some((NudgeSignalKind::SkillIssue, _)));
+
+    match crate::learning_review::select_review_trigger(
+        has_learning_accepted,
+        has_skill_issue_accepted,
+    ) {
+        Some(ReviewTriggerKind::LearningSignal) => {
+            Some(right_agent::learning_episodes::EpisodeSeedTriggerKind::LearningSignal)
+        }
+        Some(ReviewTriggerKind::SkillIssueSignal) => {
+            Some(right_agent::learning_episodes::EpisodeSeedTriggerKind::SkillIssueSignal)
+        }
+        Some(ReviewTriggerKind::EffortThreshold) => {
+            Some(right_agent::learning_episodes::EpisodeSeedTriggerKind::EffortThreshold)
+        }
+        None if creation_review_interval > 0
+            && tool_iters_since_review >= creation_review_interval =>
+        {
+            Some(right_agent::learning_episodes::EpisodeSeedTriggerKind::EffortThreshold)
+        }
+        None => None,
+    }
+}
+
 fn maybe_capture_learning_episode_seed(
     conn: &rusqlite::Connection,
     ctx: &WorkerContext,
@@ -2409,47 +2453,28 @@ fn maybe_capture_learning_episode_seed(
     let Some(source_invocation_id) = source_invocation_id else {
         return;
     };
-    let has_learning_accepted = matches!(accepted_signal, Some((NudgeSignalKind::Learning, _)));
-    let has_skill_issue_accepted =
-        matches!(accepted_signal, Some((NudgeSignalKind::SkillIssue, _)));
-    let signal_trigger = crate::learning_review::select_review_trigger(
-        has_learning_accepted,
-        has_skill_issue_accepted,
-    );
-    let today = review_today_utc();
-    let decision = match review_gate_decision(
-        conn,
-        &ctx.agent_name,
-        ReviewGateInput {
-            signal_trigger,
-            today: &today,
-            daily_limit: LEARNED_SKILL_REVIEW_DAILY_LIMIT,
-        },
-    ) {
-        Ok(decision) => decision,
-        Err(e) => {
-            tracing::warn!(
-                agent = %ctx.agent_name,
-                invocation_id = %source_invocation_id,
-                "learning episode gate decision failed: {e:#}"
-            );
-            return;
-        }
-    };
-    let ReviewGateDecision::Start(trigger_kind) = decision else {
+
+    let (tool_iters_since_review, creation_review_interval) =
+        match load_learning_episode_effort_snapshot(conn, &ctx.agent_name) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                tracing::warn!(
+                    agent = %ctx.agent_name,
+                    invocation_id = %source_invocation_id,
+                    "learning episode effort snapshot load failed: {e:#}"
+                );
+                return;
+            }
+        };
+
+    let Some(seed_trigger_kind) = foreground_episode_seed_trigger_kind(
+        accepted_signal,
+        tool_iters_since_review,
+        creation_review_interval,
+    ) else {
         return;
     };
-    let seed_trigger_kind = match trigger_kind {
-        ReviewTriggerKind::LearningSignal => {
-            right_agent::learning_episodes::EpisodeSeedTriggerKind::LearningSignal
-        }
-        ReviewTriggerKind::SkillIssueSignal => {
-            right_agent::learning_episodes::EpisodeSeedTriggerKind::SkillIssueSignal
-        }
-        ReviewTriggerKind::EffortThreshold => {
-            right_agent::learning_episodes::EpisodeSeedTriggerKind::EffortThreshold
-        }
-    };
+
     let seed_ref = format!("inv:{source_invocation_id}");
     let runtime = crate::learning_episode::LearningEpisodeRuntime {
         agent_dir: ctx.agent_dir.clone(),
@@ -5017,6 +5042,24 @@ esac
         assert!(should_trigger_mcp_repair_from_init(bad));
         assert!(!should_trigger_mcp_repair_from_init(good));
         assert!(!should_trigger_mcp_repair_from_init(other));
+    }
+
+    #[test]
+    fn foreground_seed_trigger_derives_without_review_gate() {
+        let accepted_learning = (
+            NudgeSignalKind::Learning,
+            serde_json::json!({"kind": "create_candidate"}),
+        );
+
+        assert_eq!(
+            foreground_episode_seed_trigger_kind(Some(&accepted_learning), 0, 0),
+            Some(right_agent::learning_episodes::EpisodeSeedTriggerKind::LearningSignal)
+        );
+        assert_eq!(
+            foreground_episode_seed_trigger_kind(None, 15, 10),
+            Some(right_agent::learning_episodes::EpisodeSeedTriggerKind::EffortThreshold)
+        );
+        assert_eq!(foreground_episode_seed_trigger_kind(None, 9, 10), None);
     }
 
     #[test]
