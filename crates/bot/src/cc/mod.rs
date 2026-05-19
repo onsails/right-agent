@@ -8,5 +8,6 @@ pub(crate) mod attachments_dto;
 pub(crate) mod invocation;
 pub(crate) mod markdown_utils;
 pub(crate) mod prompt;
+pub(crate) mod sandbox_env;
 pub(crate) mod stream;
 pub(crate) mod worker_reply;

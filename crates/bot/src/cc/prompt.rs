@@ -29,20 +29,8 @@ pub(crate) fn shell_escape(s: &str) -> String {
 }
 
 fn sandbox_user_local_env_prelude(workdir: &str) -> &'static str {
-    if workdir == "/sandbox" {
-        r#"
-if [ -f /sandbox/.right/env.sh ]; then
-  . /sandbox/.right/env.sh
-else
-  mkdir -p /sandbox/.local/bin /sandbox/.npm
-  case ":$PATH:" in
-    *:/sandbox/.local/bin:*) ;;
-    *) export PATH="/sandbox/.local/bin:$PATH" ;;
-  esac
-  export NPM_CONFIG_PREFIX=/sandbox/.local
-  export NPM_CONFIG_CACHE=/sandbox/.npm
-fi
-"#
+    if workdir == super::sandbox_env::SANDBOX_ROOT {
+        super::sandbox_env::INLINE_FALLBACK_SCRIPT
     } else {
         ""
     }
