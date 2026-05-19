@@ -441,9 +441,10 @@ fn record_selector_output(
     corpus: &SelectorCorpus,
     output: EpisodeSelectorOutput,
 ) -> anyhow::Result<()> {
+    validate_selector_output(corpus, &output).map_err(anyhow::Error::msg)?;
+
     match output.status.as_str() {
         "selected" => {
-            validate_selector_output(corpus, &output).map_err(anyhow::Error::msg)?;
             let selection = SelectedEpisodeUpdate {
                 start_ref: output.start_ref.clone(),
                 end_ref: output.end_ref.clone(),
@@ -707,7 +708,9 @@ fn review_trigger_for_episode(
         EpisodeSeedTriggerKind::LearningSignal => Some(ReviewTriggerKind::LearningSignal),
         EpisodeSeedTriggerKind::SkillIssueSignal => Some(ReviewTriggerKind::SkillIssueSignal),
         EpisodeSeedTriggerKind::EffortThreshold => Some(ReviewTriggerKind::EffortThreshold),
-        EpisodeSeedTriggerKind::Cron | EpisodeSeedTriggerKind::AsyncResult => None,
+        EpisodeSeedTriggerKind::Cron | EpisodeSeedTriggerKind::AsyncResult => {
+            Some(ReviewTriggerKind::EffortThreshold)
+        }
     }
 }
 
@@ -819,60 +822,5 @@ fn execution_event_ref(id: i64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use right_agent::learning_episodes::{
-        EpisodeSeedTriggerKind, ExecutionEventKind, LearningEpisodeKind,
-    };
-
-    fn conn() -> rusqlite::Connection {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
-        conn
-    }
-
-    #[test]
-    fn accepted_signal_creates_pending_seed_without_cooldown() {
-        let conn = conn();
-        capture_episode_seed(
-            &conn,
-            EpisodeSeedInput {
-                agent_name: "right",
-                kind: LearningEpisodeKind::ForegroundThread,
-                seed_trigger_kind: EpisodeSeedTriggerKind::LearningSignal,
-                seed_ref: "inv:inv-1",
-                target_chat_id: Some(10),
-                target_thread_id: Some(20),
-                settle_seconds: 90,
-                now: "2026-05-19T10:00:00Z",
-            },
-        )
-        .unwrap();
-        let row: (String, String) = conn
-            .query_row(
-                "SELECT status, ready_after FROM learning_episodes WHERE seed_ref='inv:inv-1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            row,
-            ("pending".to_owned(), "2026-05-19T10:01:30Z".to_owned())
-        );
-    }
-
-    #[test]
-    fn selector_rejects_refs_outside_corpus() {
-        let corpus = SelectorCorpus::for_test(vec!["msg:1"], vec![]);
-        let output = EpisodeSelectorOutput::for_test_selected(vec!["msg:2"], vec![]);
-        assert!(validate_selector_output(&corpus, &output).is_err());
-    }
-
-    #[test]
-    fn selector_rejects_thinking_only_episode() {
-        let corpus =
-            SelectorCorpus::for_test(vec![], vec![("exec:10", ExecutionEventKind::Thinking)]);
-        let output = EpisodeSelectorOutput::for_test_selected(vec![], vec!["exec:10"]);
-        assert!(validate_selector_output(&corpus, &output).is_err());
-    }
-}
+#[path = "learning_episode_tests.rs"]
+mod tests;
