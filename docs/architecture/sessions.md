@@ -69,16 +69,23 @@ instructions. Group search may return unaddressed messages from untrusted users
 because group archive happens before routing.
 
 Background learned-skill review is separate from foreground progress. After a
-foreground turn completes, the bot may start a `BackgroundReview` Claude Code
-JSON invocation when a recorded/accepted learned-skill signal exists or the
-per-agent effort counter reaches the review interval. It is not run after every
-reply: `skill_nudge_state` gates it with an atomic `try_mark_review_started`
-check covering daily limit, concurrency (`review_running`), and the selected
-signal/threshold trigger. The invocation does not resume or fork the
-foreground session. It receives a bounded bundle from the foreground stream log,
-accepted signal JSON, learning events for the source invocation, and the
-`rightx-*` skill index; then it stores a structured report and sends Telegram
-only for high-confidence create/update candidates with `user_notice`. Reports that do not notify Telegram are still persisted in `skill_review_reports` and logged with trigger, status, confidence, candidate name, and `telegram_notified`; `nothing_to_learn` remains silent for users by default.
+foreground turn, async continuation, or cron run creates a learning-episode
+seed, the bot may run a selector once the seed settles. `skill_nudge_state`
+gates selection and review with an atomic `try_mark_review_started` check
+covering daily limit, concurrency (`review_running`), and the selected
+signal/threshold trigger. The selector persists the selected episode refs; the
+reviewer then runs as a `BackgroundReview` Claude Code JSON invocation that
+does not resume or fork the foreground session. It receives the selected
+conversation messages, selected execution events, learning events for the
+source invocation when available, and the `rightx-*` skill index. Thinking
+execution events are secondary context: they may guide wording, but candidate
+evidence must include at least one observable `msg:*` or non-thinking `exec:*`
+ref. The review stores a structured report linked to
+`skill_review_reports.learning_episode_id` and sends Telegram only for
+high-confidence create/update candidates with `user_notice`. Reports that do
+not notify Telegram are still persisted in `skill_review_reports` and logged
+with trigger, status, confidence, candidate name, and `telegram_notified`;
+`nothing_to_learn` remains silent for users by default.
 
 CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 2.0 for cron,
 per-message from agent.yaml). Process timeout (600s) is a safety net only.

@@ -2619,16 +2619,30 @@ async fn run_background_learned_skill_review(
     }
     let learning_events = load_review_learning_events(agent_db_dir, &source_invocation_id)
         .map_err(|e| BackgroundReviewFailure::new(format!("load review learning events: {e:#}")))?;
+    let episode_execution_events = event_timeline
+        .into_iter()
+        .enumerate()
+        .map(
+            |(idx, event)| crate::learning_review::ReviewExecutionEvent {
+                ref_id: format!("event-{}", idx + 1),
+                event_kind: "stream_event".to_owned(),
+                trust_label: "primary".to_owned(),
+                content: event,
+            },
+        )
+        .collect();
     let bundle = crate::learning_review::ReviewBundle {
         agent_name: agent_name.to_owned(),
         source_invocation_id: source_invocation_id.clone(),
+        learning_episode_id: None,
         root_session_id: Some(root_session_id.clone()),
         trigger_kind: trigger_kind.as_str().to_owned(),
         accepted_signal_json,
         tool_iters_since_review,
         turns_since_review,
         skill_issue_hints_since_review,
-        event_timeline,
+        episode_messages: Vec::new(),
+        episode_execution_events,
         learning_events,
         learned_skills,
     };
@@ -2711,6 +2725,7 @@ async fn run_background_learned_skill_review(
     let report = review_output.to_report(crate::learning_review::ReviewReportContext {
         agent_name: agent_name.to_owned(),
         source_invocation_id,
+        learning_episode_id: None,
         root_session_id: Some(root_session_id),
         chat_id: Some(chat_id),
         thread_id: Some(thread_id),
@@ -2885,7 +2900,7 @@ fn load_review_learning_events(
     Ok(events)
 }
 
-async fn collect_sandbox_review_skill_index(
+pub(crate) async fn collect_sandbox_review_skill_index(
     sandbox_name: Option<&str>,
 ) -> anyhow::Result<Vec<crate::learning_review::LearnedSkillSummary>> {
     let sandbox_name = sandbox_name.ok_or_else(|| anyhow::anyhow!("sandbox name unresolved"))?;

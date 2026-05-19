@@ -2,6 +2,8 @@ use super::*;
 use right_agent::learning_episodes::{
     EpisodeSeedTriggerKind, ExecutionEventKind, LearningEpisodeKind,
 };
+use right_agent::learning_episodes::{NewExecutionEvent, SelectedEpisodeUpdate, TrustLabel};
+use right_db::conversation::{ConversationMessage, ConversationRole};
 use std::sync::atomic::AtomicBool;
 
 fn conn() -> rusqlite::Connection {
@@ -67,6 +69,139 @@ fn panic_selector(
     _: SelectorCorpus,
 ) -> EpisodeSelectorFuture {
     Box::pin(async { panic!("selector should not run") })
+}
+
+fn successful_message_review(
+    _: LearningEpisodeRuntime,
+    bundle: crate::learning_review::ReviewBundle,
+) -> EpisodeReviewInvocationFuture {
+    Box::pin(async move {
+        assert_eq!(bundle.learning_episode_id, Some(1));
+        assert_eq!(bundle.source_invocation_id, "inv-review-success");
+        assert_eq!(bundle.episode_messages.len(), 1);
+        assert_eq!(bundle.episode_messages[0].content, "remember this workflow");
+        crate::learning_review::ReviewOutput::parse(serde_json::json!({
+            "status": "create_candidate",
+            "confidence": "high",
+            "candidate_skill_name": "rightx-review-success",
+            "candidate_summary": "Remember the workflow.",
+            "evidence_refs": [bundle.episode_messages[0].ref_id],
+            "user_notice": null
+        }))
+        .map_err(anyhow::Error::msg)
+    })
+}
+
+fn thinking_only_review(
+    _: LearningEpisodeRuntime,
+    bundle: crate::learning_review::ReviewBundle,
+) -> EpisodeReviewInvocationFuture {
+    Box::pin(async move {
+        assert_eq!(bundle.episode_execution_events.len(), 1);
+        assert_eq!(bundle.episode_execution_events[0].event_kind, "thinking");
+        assert_eq!(bundle.episode_execution_events[0].trust_label, "secondary");
+        crate::learning_review::ReviewOutput::parse(serde_json::json!({
+            "status": "create_candidate",
+            "confidence": "high",
+            "candidate_skill_name": "rightx-thinking-only",
+            "candidate_summary": "Thinking is not enough.",
+            "evidence_refs": [bundle.episode_execution_events[0].ref_id],
+            "user_notice": null
+        }))
+        .map_err(anyhow::Error::msg)
+    })
+}
+
+fn prepare_selected_episode(
+    conn: &rusqlite::Connection,
+    seed_ref: &str,
+    message_refs: Vec<String>,
+    execution_event_refs: Vec<String>,
+) -> i64 {
+    let episode = claimed_episode(
+        conn,
+        LearningEpisodeKind::ForegroundThread,
+        EpisodeSeedTriggerKind::LearningSignal,
+        seed_ref,
+    );
+    right_agent::learning_episodes::mark_episode_selected(
+        conn,
+        episode.id,
+        &SelectedEpisodeUpdate {
+            start_ref: message_refs
+                .first()
+                .or_else(|| execution_event_refs.first())
+                .cloned(),
+            end_ref: message_refs
+                .last()
+                .or_else(|| execution_event_refs.last())
+                .cloned(),
+            message_refs,
+            execution_event_refs,
+            selector_model: None,
+            selector_output_json: serde_json::json!({"status": "selected"}),
+            boundary_rationale: Some("test".to_owned()),
+            confidence: Some("high".to_owned()),
+            context_incomplete: false,
+            episode_hash: None,
+            last_evidence_at: None,
+        },
+    )
+    .unwrap();
+    right_agent::learned_skills::ensure_nudge_state(conn, "right").unwrap();
+    conn.execute(
+        "UPDATE skill_nudge_state SET review_running=1 WHERE agent_name='right'",
+        [],
+    )
+    .unwrap();
+    episode.id
+}
+
+fn insert_review_message(conn: &rusqlite::Connection, content: &str) -> i64 {
+    right_db::conversation::archive_message(
+        conn,
+        ConversationMessage {
+            platform: "telegram",
+            chat_id: 10,
+            thread_id: 20,
+            message_id: None,
+            sender_user_id: None,
+            sender_name: None,
+            addressed_to_bot: true,
+            routed_to_agent: true,
+            root_session_id: Some("session-review"),
+            turn_id: Some(1),
+            role: ConversationRole::User,
+            content,
+        },
+    )
+    .unwrap()
+}
+
+fn insert_review_execution_event(
+    conn: &rusqlite::Connection,
+    event_kind: ExecutionEventKind,
+    content: &str,
+) -> i64 {
+    right_agent::learning_episodes::insert_execution_event(
+        conn,
+        &NewExecutionEvent {
+            agent_name: "right".to_owned(),
+            root_session_id: Some("session-review".to_owned()),
+            invocation_id: Some("inv-review".to_owned()),
+            turn_id: Some(1),
+            async_run_id: None,
+            cron_job_name: None,
+            cron_run_id: None,
+            seq: 1,
+            event_kind,
+            tool_name: None,
+            content_json: serde_json::json!({ "text": content }),
+            content_text: content.to_owned(),
+            trust_label: TrustLabel::Primary,
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -210,6 +345,93 @@ fn selected_episode_persists_effective_selector_model() {
         )
         .unwrap();
     assert_eq!(selector_model, Some("claude-sonnet-inherited".to_owned()));
+}
+
+#[tokio::test]
+async fn episode_reviewer_inserts_report_and_marks_reviewed() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = right_db::open_connection(temp.path(), true).unwrap();
+    let message_id = insert_review_message(&conn, "remember this workflow");
+    let episode_id = prepare_selected_episode(
+        &conn,
+        "inv:inv-review-success",
+        vec![format!("msg:{message_id}")],
+        Vec::new(),
+    );
+    drop(conn);
+
+    run_episode_reviewer_with_invocation(
+        runtime_for_dir(temp.path()),
+        episode_id,
+        successful_message_review,
+    )
+    .await
+    .unwrap();
+
+    let conn = right_db::open_connection(temp.path(), false).unwrap();
+    let row: (String, i64, String, String, i64) = conn
+        .query_row(
+            "SELECT e.status, r.learning_episode_id, r.source_invocation_id, r.evidence_refs_json, s.review_running
+             FROM learning_episodes e
+             JOIN skill_review_reports r ON r.learning_episode_id=e.id
+             JOIN skill_nudge_state s ON s.agent_name=e.agent_name
+             WHERE e.id=?1",
+            [episode_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(row.0, "reviewed");
+    assert_eq!(row.1, episode_id);
+    assert_eq!(row.2, "inv-review-success");
+    assert_eq!(
+        row.3,
+        serde_json::json!([format!("msg:{message_id}")]).to_string()
+    );
+    assert_eq!(row.4, 0);
+}
+
+#[tokio::test]
+async fn episode_reviewer_rejects_thinking_only_candidate_and_clears_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = right_db::open_connection(temp.path(), true).unwrap();
+    let event_id = insert_review_execution_event(
+        &conn,
+        ExecutionEventKind::Thinking,
+        "private reasoning only",
+    );
+    let episode_id = prepare_selected_episode(
+        &conn,
+        "async:async-review-thinking",
+        Vec::new(),
+        vec![format!("exec:{event_id}")],
+    );
+    drop(conn);
+
+    let err = run_episode_reviewer_with_invocation(
+        runtime_for_dir(temp.path()),
+        episode_id,
+        thinking_only_review,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("observable episode ref"),
+        "{err:#}"
+    );
+
+    let conn = right_db::open_connection(temp.path(), false).unwrap();
+    let row: (String, i64, i64) = conn
+        .query_row(
+            "SELECT e.status, s.review_running, COUNT(r.id)
+             FROM learning_episodes e
+             JOIN skill_nudge_state s ON s.agent_name=e.agent_name
+             LEFT JOIN skill_review_reports r ON r.learning_episode_id=e.id
+             WHERE e.id=?1",
+            [episode_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(row, ("failed".to_owned(), 0, 0));
 }
 
 #[tokio::test]

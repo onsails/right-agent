@@ -9,16 +9,22 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use right_agent::learned_skills::{
-    ReviewGateDecision, ReviewGateInput, ReviewSkipReason, ReviewTriggerKind, clear_review_running,
+    ReviewGateDecision, ReviewGateInput, ReviewSkipReason, ReviewStatus, ReviewTriggerKind,
+    clear_review_running, insert_skill_review_report, mark_review_finished,
     try_mark_review_started,
 };
 use right_agent::learning_episodes::{
     EpisodeSeedTriggerKind, ExecutionEventKind, LearningEpisodeKind, LearningEpisodeRow,
     LearningEpisodeStatus, NewLearningEpisodeSeed, SelectedEpisodeUpdate,
 };
+use rusqlite::OptionalExtension as _;
 
 const LEARNING_EPISODE_REVIEW_DAILY_LIMIT: i64 = 12;
 const EPISODE_SELECTOR_TIMEOUT_SECS: u64 = 120;
+const EPISODE_REVIEWER_TIMEOUT_SECS: u64 = 180;
+const EPISODE_REVIEWER_MAX_BUDGET_USD: f64 = 0.50;
+const EPISODE_REVIEWER_MAX_TURNS: u32 = 8;
+const EPISODE_REVIEW_LEARNING_EVENTS_LIMIT: i64 = 20;
 
 pub(crate) const EPISODE_SELECTOR_SCHEMA_JSON: &str = r#"{
   "type": "object",
@@ -368,6 +374,14 @@ type EpisodeSelectorFuture =
     Pin<Box<dyn Future<Output = anyhow::Result<EpisodeSelectorOutput>> + Send>>;
 type EpisodeSelector =
     fn(LearningEpisodeRuntime, LearningEpisodeRow, SelectorCorpus) -> EpisodeSelectorFuture;
+type EpisodeReviewerFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
+type EpisodeReviewer = fn(LearningEpisodeRuntime, i64) -> EpisodeReviewerFuture;
+type EpisodeReviewInvocationFuture =
+    Pin<Box<dyn Future<Output = anyhow::Result<crate::learning_review::ReviewOutput>> + Send>>;
+type EpisodeReviewInvocation = fn(
+    LearningEpisodeRuntime,
+    crate::learning_review::ReviewBundle,
+) -> EpisodeReviewInvocationFuture;
 
 fn run_episode_selector_boxed(
     runtime: LearningEpisodeRuntime,
@@ -377,9 +391,36 @@ fn run_episode_selector_boxed(
     Box::pin(async move { run_episode_selector(&runtime, &episode, &corpus).await })
 }
 
+fn run_episode_reviewer_boxed(
+    runtime: LearningEpisodeRuntime,
+    episode_id: i64,
+) -> EpisodeReviewerFuture {
+    Box::pin(async move { run_episode_reviewer(runtime, episode_id).await })
+}
+
+fn run_episode_review_invocation_boxed(
+    runtime: LearningEpisodeRuntime,
+    bundle: crate::learning_review::ReviewBundle,
+) -> EpisodeReviewInvocationFuture {
+    Box::pin(async move { run_episode_review_invocation(&runtime, &bundle).await })
+}
+
 pub(crate) async fn drain_ready_learning_episodes_once_with_selector(
     runtime: LearningEpisodeRuntime,
     selector: EpisodeSelector,
+) -> anyhow::Result<()> {
+    drain_ready_learning_episodes_once_with_selector_and_reviewer(
+        runtime,
+        selector,
+        run_episode_reviewer_boxed,
+    )
+    .await
+}
+
+async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
+    runtime: LearningEpisodeRuntime,
+    selector: EpisodeSelector,
+    reviewer: EpisodeReviewer,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now();
     let now_str = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -446,9 +487,24 @@ pub(crate) async fn drain_ready_learning_episodes_once_with_selector(
     let output = selector(runtime.clone(), episode.clone(), corpus.clone()).await;
     match output {
         Ok(output) => {
-            if let Err(e) = record_selector_output(&conn, &runtime, &episode, &corpus, output) {
+            let selected = match record_selector_output(&conn, &runtime, &episode, &corpus, output)
+            {
+                Ok(selected) => selected,
+                Err(e) => {
+                    let reason = format!("{e:#}");
+                    mark_claimed_episode_failed(
+                        &conn,
+                        &runtime.agent_name,
+                        episode.id,
+                        &reason,
+                        true,
+                    )?;
+                    return Err(anyhow!(reason));
+                }
+            };
+            drop(conn);
+            if selected && let Err(e) = reviewer(runtime.clone(), episode.id).await {
                 let reason = format!("{e:#}");
-                mark_claimed_episode_failed(&conn, &runtime.agent_name, episode.id, &reason, true)?;
                 return Err(anyhow!(reason));
             }
         }
@@ -486,7 +542,7 @@ fn record_selector_output(
     episode: &LearningEpisodeRow,
     corpus: &SelectorCorpus,
     output: EpisodeSelectorOutput,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     validate_selector_output(corpus, &output).map_err(anyhow::Error::msg)?;
 
     match output.status.as_str() {
@@ -505,7 +561,7 @@ fn record_selector_output(
                 last_evidence_at: selected_last_evidence_at(corpus, &output),
             };
             right_agent::learning_episodes::mark_episode_selected(conn, episode.id, &selection)?;
-            call_episode_reviewer_bridge_placeholder(conn, &runtime.agent_name, episode.id)?;
+            Ok(true)
         }
         "no_episode" => {
             right_agent::learning_episodes::mark_episode_terminal(
@@ -515,6 +571,7 @@ fn record_selector_output(
                 &output.raw,
             )?;
             clear_review_running(conn, &runtime.agent_name)?;
+            Ok(false)
         }
         "insufficient_context" => {
             right_agent::learning_episodes::mark_episode_terminal(
@@ -524,6 +581,7 @@ fn record_selector_output(
                 &output.raw,
             )?;
             clear_review_running(conn, &runtime.agent_name)?;
+            Ok(false)
         }
         "failed" => {
             right_agent::learning_episodes::mark_episode_failed(
@@ -532,10 +590,10 @@ fn record_selector_output(
                 "selector returned failed status",
             )?;
             clear_review_running(conn, &runtime.agent_name)?;
+            Ok(false)
         }
         status => return Err(anyhow!("selector returned invalid status {status:?}")),
     }
-    Ok(())
 }
 
 fn effective_selector_model(runtime: &LearningEpisodeRuntime) -> Option<String> {
@@ -546,17 +604,440 @@ fn effective_selector_model(runtime: &LearningEpisodeRuntime) -> Option<String> 
         .or_else(|| runtime.inherited_model.clone())
 }
 
-fn call_episode_reviewer_bridge_placeholder(
-    conn: &rusqlite::Connection,
-    agent_name: &str,
+pub(crate) async fn run_episode_reviewer(
+    runtime: LearningEpisodeRuntime,
     episode_id: i64,
-) -> Result<(), rusqlite::Error> {
-    tracing::debug!(
-        agent = %agent_name,
-        episode_id,
-        "learning episode reviewer bridge placeholder reached; Task 6 replaces this call point"
+) -> anyhow::Result<()> {
+    run_episode_reviewer_with_invocation(runtime, episode_id, run_episode_review_invocation_boxed)
+        .await
+}
+
+async fn run_episode_reviewer_with_invocation(
+    runtime: LearningEpisodeRuntime,
+    episode_id: i64,
+    invoke_review: EpisodeReviewInvocation,
+) -> anyhow::Result<()> {
+    let result = run_episode_reviewer_inner(runtime.clone(), episode_id, invoke_review).await;
+    if let Err(e) = &result
+        && let Err(cleanup) =
+            mark_episode_review_failed_and_finish(&runtime, episode_id, &format!("{e:#}"))
+    {
+        tracing::warn!(
+            agent = %runtime.agent_name,
+            episode_id,
+            "learning episode review failure cleanup failed: {cleanup:#}"
+        );
+    }
+    result
+}
+
+async fn run_episode_reviewer_inner(
+    runtime: LearningEpisodeRuntime,
+    episode_id: i64,
+    invoke_review: EpisodeReviewInvocation,
+) -> anyhow::Result<()> {
+    let conn = right_db::open_connection(&runtime.agent_db_dir, false)
+        .with_context(|| format!("open {} data.db", runtime.agent_name))?;
+    let episode = load_selected_episode_for_review(&conn, episode_id)?;
+    let trigger_kind = review_trigger_for_episode(episode.seed_trigger_kind)
+        .ok_or_else(|| anyhow!("learning episode {episode_id} has no review trigger"))?;
+    mark_episode_reviewing(&conn, episode_id)?;
+    let selected = load_selected_review_evidence(&conn, &episode)?;
+    let learning_events =
+        load_episode_review_learning_events(&conn, &episode.source_invocation_id)?;
+    drop(conn);
+
+    let learned_skills = collect_episode_review_skill_index(&runtime).await?;
+    let bundle = crate::learning_review::ReviewBundle {
+        agent_name: episode.agent_name.clone(),
+        source_invocation_id: episode.source_invocation_id.clone(),
+        learning_episode_id: Some(episode.id),
+        root_session_id: selected.root_session_id.clone(),
+        trigger_kind: trigger_kind.as_str().to_owned(),
+        accepted_signal_json: None,
+        tool_iters_since_review: 0,
+        turns_since_review: 0,
+        skill_issue_hints_since_review: 0,
+        episode_messages: selected.messages,
+        episode_execution_events: selected.execution_events,
+        learning_events,
+        learned_skills,
+    };
+    let output = invoke_review(runtime.clone(), bundle).await?;
+    output
+        .validate_candidate_evidence(&selected.evidence_index)
+        .map_err(anyhow::Error::msg)?;
+
+    let conn = right_db::open_connection(&runtime.agent_db_dir, false)
+        .with_context(|| format!("reopen {} data.db", runtime.agent_name))?;
+    let report = output.to_report(crate::learning_review::ReviewReportContext {
+        agent_name: episode.agent_name.clone(),
+        source_invocation_id: episode.source_invocation_id,
+        learning_episode_id: Some(episode.id),
+        root_session_id: selected.root_session_id,
+        chat_id: episode.target_chat_id,
+        thread_id: episode.target_thread_id,
+        trigger_kind,
+        telegram_notified: false,
+    });
+    let status = report.status;
+    insert_skill_review_report(&conn, &report)
+        .with_context(|| format!("insert learning episode {episode_id} review report"))?;
+    mark_episode_reviewed(&conn, episode_id)
+        .with_context(|| format!("mark learning episode {episode_id} reviewed"))?;
+    mark_review_finished(
+        &conn,
+        &episode.agent_name,
+        trigger_kind,
+        status,
+        status != ReviewStatus::Failed,
+    )
+    .with_context(|| format!("finish learning episode {episode_id} review gate"))?;
+    Ok(())
+}
+
+async fn run_episode_review_invocation(
+    runtime: &LearningEpisodeRuntime,
+    bundle: &crate::learning_review::ReviewBundle,
+) -> anyhow::Result<crate::learning_review::ReviewOutput> {
+    let prompt = crate::learning_review::build_review_prompt(bundle);
+    let invocation = crate::cc::invocation::ClaudeInvocation {
+        mcp_config_path: None,
+        json_schema: Some(crate::learning_review::REVIEW_SCHEMA_JSON.to_owned()),
+        output_format: crate::cc::invocation::OutputFormat::Json,
+        model: runtime.inherited_model.clone(),
+        max_budget_usd: Some(EPISODE_REVIEWER_MAX_BUDGET_USD),
+        max_turns: Some(EPISODE_REVIEWER_MAX_TURNS),
+        resume_session_id: None,
+        new_session_id: None,
+        fork_session: false,
+        allowed_tools: ["Read", "Glob", "Grep", "LS"]
+            .iter()
+            .map(|tool| (*tool).to_owned())
+            .collect(),
+        disallowed_tools: crate::cc::invocation::disallow_background_review_mutation_tools(
+            crate::cc::invocation::baseline_disallowed_tools(),
+        ),
+        extra_args: Vec::new(),
+        prompt: Some(prompt),
+        debug_flag: Some(Arc::clone(&runtime.debug)),
+    };
+    let args = invocation.into_args();
+    let mut cmd = crate::cc::invocation::build_claude_command(
+        &args,
+        &runtime.agent_dir,
+        runtime.ssh_config_path.as_deref(),
+        runtime.resolved_sandbox.as_deref(),
     );
-    clear_review_running(conn, agent_name)
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
+        .context("spawn learning episode reviewer claude")?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(EPISODE_REVIEWER_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
+    .context("learning episode reviewer claude timed out")?
+    .context("wait for learning episode reviewer claude")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "learning episode reviewer claude exited {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout).context("reviewer stdout was not UTF-8")?;
+    crate::learning_review::parse_review_process_stdout(&stdout).map_err(anyhow::Error::msg)
+}
+
+#[derive(Debug, Clone)]
+struct SelectedEpisodeForReview {
+    id: i64,
+    agent_name: String,
+    seed_trigger_kind: EpisodeSeedTriggerKind,
+    source_invocation_id: String,
+    target_chat_id: Option<i64>,
+    target_thread_id: Option<i64>,
+    message_refs: Vec<String>,
+    execution_event_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SelectedReviewEvidence {
+    messages: Vec<crate::learning_review::ReviewMessage>,
+    execution_events: Vec<crate::learning_review::ReviewExecutionEvent>,
+    evidence_index: crate::learning_review::EpisodeEvidenceIndex,
+    root_session_id: Option<String>,
+}
+
+fn load_selected_episode_for_review(
+    conn: &rusqlite::Connection,
+    episode_id: i64,
+) -> anyhow::Result<SelectedEpisodeForReview> {
+    let row = conn
+        .query_row(
+            "SELECT id, agent_name, seed_trigger_kind, seed_ref, target_chat_id, target_thread_id, \
+                    message_refs_json, execution_event_refs_json \
+             FROM learning_episodes WHERE id=?1 AND status='selected'",
+            [episode_id],
+            |row| {
+                let seed_trigger_kind: String = row.get(2)?;
+                let seed_ref: String = row.get(3)?;
+                let message_refs_json: String = row.get(6)?;
+                let execution_event_refs_json: String = row.get(7)?;
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    seed_trigger_kind,
+                    seed_ref,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    message_refs_json,
+                    execution_event_refs_json,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("learning episode {episode_id} is not selected"))?;
+    Ok(SelectedEpisodeForReview {
+        id: row.0,
+        agent_name: row.1,
+        seed_trigger_kind: parse_seed_trigger_kind(&row.2)?,
+        source_invocation_id: source_invocation_id_for_episode(row.0, &row.3),
+        target_chat_id: row.4,
+        target_thread_id: row.5,
+        message_refs: parse_review_refs_json(&row.6)?,
+        execution_event_refs: parse_review_refs_json(&row.7)?,
+    })
+}
+
+fn load_selected_review_evidence(
+    conn: &rusqlite::Connection,
+    episode: &SelectedEpisodeForReview,
+) -> anyhow::Result<SelectedReviewEvidence> {
+    let mut evidence_index = crate::learning_review::EpisodeEvidenceIndex::default();
+    let mut messages = Vec::with_capacity(episode.message_refs.len());
+    for ref_id in &episode.message_refs {
+        let id = parse_prefixed_ref_id(ref_id, "msg:")?;
+        let message = load_review_message(conn, id, ref_id)?;
+        evidence_index.insert(
+            ref_id.clone(),
+            crate::learning_review::EvidenceKind::Message,
+        );
+        messages.push(message);
+    }
+
+    let mut root_session_id = None;
+    let mut execution_events = Vec::with_capacity(episode.execution_event_refs.len());
+    for ref_id in &episode.execution_event_refs {
+        let id = parse_prefixed_ref_id(ref_id, "exec:")?;
+        let event = load_review_execution_event(conn, id, ref_id)?;
+        if root_session_id.is_none() {
+            root_session_id.clone_from(&event.root_session_id);
+        }
+        let evidence_kind = if event.review_event.event_kind == "thinking" {
+            crate::learning_review::EvidenceKind::Thinking
+        } else {
+            crate::learning_review::EvidenceKind::ObservableExecution
+        };
+        evidence_index.insert(ref_id.clone(), evidence_kind);
+        execution_events.push(event.review_event);
+    }
+
+    Ok(SelectedReviewEvidence {
+        messages,
+        execution_events,
+        evidence_index,
+        root_session_id,
+    })
+}
+
+struct LoadedReviewExecutionEvent {
+    review_event: crate::learning_review::ReviewExecutionEvent,
+    root_session_id: Option<String>,
+}
+
+fn load_review_message(
+    conn: &rusqlite::Connection,
+    id: i64,
+    ref_id: &str,
+) -> anyhow::Result<crate::learning_review::ReviewMessage> {
+    conn.query_row(
+        "SELECT role, content FROM conversation_messages WHERE id=?1",
+        [id],
+        |row| {
+            Ok(crate::learning_review::ReviewMessage {
+                ref_id: ref_id.to_owned(),
+                role: row.get(0)?,
+                trust_label: "primary".to_owned(),
+                content: row.get(1)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| anyhow!("selected message ref not found: {ref_id}"))
+}
+
+fn load_review_execution_event(
+    conn: &rusqlite::Connection,
+    id: i64,
+    ref_id: &str,
+) -> anyhow::Result<LoadedReviewExecutionEvent> {
+    conn.query_row(
+        "SELECT event_kind, trust_label, content_text, root_session_id \
+         FROM execution_events WHERE id=?1",
+        [id],
+        |row| {
+            Ok(LoadedReviewExecutionEvent {
+                review_event: crate::learning_review::ReviewExecutionEvent {
+                    ref_id: ref_id.to_owned(),
+                    event_kind: row.get(0)?,
+                    trust_label: row.get(1)?,
+                    content: row.get(2)?,
+                },
+                root_session_id: row.get(3)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| anyhow!("selected execution event ref not found: {ref_id}"))
+}
+
+fn load_episode_review_learning_events(
+    conn: &rusqlite::Connection,
+    source_invocation_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    if source_invocation_id.starts_with("episode:") {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT action, skill_name, phase, COALESCE(status, ''), COALESCE(summary, '') \
+         FROM skill_learning_events WHERE invocation_id = ?1 ORDER BY id LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![source_invocation_id, EPISODE_REVIEW_LEARNING_EVENTS_LIMIT],
+        |row| {
+            let action: String = row.get(0)?;
+            let skill_name: String = row.get(1)?;
+            let phase: String = row.get(2)?;
+            let status: String = row.get(3)?;
+            let summary: String = row.get(4)?;
+            Ok(format!(
+                "{phase} {action} {skill_name} status={status} summary={summary}"
+            ))
+        },
+    )?;
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row?);
+    }
+    Ok(events)
+}
+
+async fn collect_episode_review_skill_index(
+    runtime: &LearningEpisodeRuntime,
+) -> anyhow::Result<Vec<crate::learning_review::LearnedSkillSummary>> {
+    if runtime.ssh_config_path.is_some() {
+        crate::telegram::worker::collect_sandbox_review_skill_index(
+            runtime.resolved_sandbox.as_deref(),
+        )
+        .await
+    } else {
+        crate::learning_review::collect_host_rightx_skill_index(&runtime.agent_dir)
+            .map_err(anyhow::Error::from)
+    }
+}
+
+fn mark_episode_reviewing(conn: &rusqlite::Connection, episode_id: i64) -> anyhow::Result<()> {
+    let updated = conn.execute(
+        "UPDATE learning_episodes \
+         SET status='reviewing', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+         WHERE id=?1 AND status='selected'",
+        [episode_id],
+    )?;
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "learning episode {episode_id} could not enter reviewing"
+        ))
+    }
+}
+
+fn mark_episode_reviewed(conn: &rusqlite::Connection, episode_id: i64) -> anyhow::Result<()> {
+    let updated = conn.execute(
+        "UPDATE learning_episodes \
+         SET status='reviewed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+         WHERE id=?1 AND status='reviewing'",
+        [episode_id],
+    )?;
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "learning episode {episode_id} could not be marked reviewed"
+        ))
+    }
+}
+
+fn mark_episode_review_failed_and_finish(
+    runtime: &LearningEpisodeRuntime,
+    episode_id: i64,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let conn = right_db::open_connection(&runtime.agent_db_dir, false)
+        .with_context(|| format!("open {} data.db for review failure", runtime.agent_name))?;
+    let seed_trigger_kind = conn
+        .query_row(
+            "SELECT seed_trigger_kind FROM learning_episodes WHERE id=?1",
+            [episode_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("learning episode {episode_id} missing during review failure"))?;
+    let trigger_kind = review_trigger_for_episode(parse_seed_trigger_kind(&seed_trigger_kind)?)
+        .ok_or_else(|| anyhow!("learning episode {episode_id} has no review trigger"))?;
+    right_agent::learning_episodes::mark_episode_failed(&conn, episode_id, reason)
+        .with_context(|| format!("mark learning episode {episode_id} failed"))?;
+    mark_review_finished(
+        &conn,
+        &runtime.agent_name,
+        trigger_kind,
+        ReviewStatus::Failed,
+        false,
+    )
+    .with_context(|| format!("finish failed learning episode {episode_id} review gate"))?;
+    Ok(())
+}
+
+fn parse_review_refs_json(raw: &str) -> anyhow::Result<Vec<String>> {
+    serde_json::from_str(raw).with_context(|| "parse selected learning episode refs")
+}
+
+fn parse_prefixed_ref_id(ref_id: &str, prefix: &str) -> anyhow::Result<i64> {
+    ref_id
+        .strip_prefix(prefix)
+        .and_then(|value| value.parse::<i64>().ok())
+        .ok_or_else(|| anyhow!("selected ref has invalid prefix or id: {ref_id}"))
+}
+
+fn source_invocation_id_for_episode(episode_id: i64, seed_ref: &str) -> String {
+    seed_ref
+        .strip_prefix("inv:")
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("episode:{episode_id}"))
+}
+
+fn parse_seed_trigger_kind(value: &str) -> anyhow::Result<EpisodeSeedTriggerKind> {
+    match value {
+        "learning_signal" => Ok(EpisodeSeedTriggerKind::LearningSignal),
+        "skill_issue_signal" => Ok(EpisodeSeedTriggerKind::SkillIssueSignal),
+        "effort_threshold" => Ok(EpisodeSeedTriggerKind::EffortThreshold),
+        "cron" => Ok(EpisodeSeedTriggerKind::Cron),
+        "async_result" => Ok(EpisodeSeedTriggerKind::AsyncResult),
+        _ => Err(anyhow!("invalid episode seed trigger kind: {value:?}")),
+    }
 }
 
 fn load_selector_corpus(
