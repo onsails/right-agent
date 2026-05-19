@@ -461,9 +461,8 @@ fn bootstrap_instructions_constant_is_non_empty() {
 fn bootstrap_instructions_do_not_invent_platform_soul_contract() {
     let bootstrap = crate::BOOTSTRAP_INSTRUCTIONS;
     for needle in [
-        "based on the user's bootstrap choices",
-        "If the user gave no signal, keep it minimal",
-        "do not invent a platform-default operating contract",
+        "Personality based on chosen vibe and the user's bootstrap choices. Use this structure:",
+        "If the user gave no signal for a section, keep it minimal. Do not invent a platform-default operating contract.",
     ] {
         assert!(
             bootstrap.contains(needle),

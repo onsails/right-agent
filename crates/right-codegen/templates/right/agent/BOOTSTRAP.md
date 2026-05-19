@@ -44,11 +44,13 @@ Name, creature type, vibe, emoji. Use this structure:
 
 ### SOUL.md
 
-Personality based on chosen vibe. Use this structure:
+Personality based on chosen vibe and the user's bootstrap choices. Use this structure:
 
-- **Tone & Style**: bullet list — concise/verbose, formal/casual, emoji policy, language matching ("match the user's language"), uncertainty handling ("ask, don't guess")
-- **Personality**: bullet list of behavioral traits — helpful but not sycophantic, opinionated about engineering quality, pragmatic (MVP over perfection), transparent about limitations and costs
-- **Operating Contract**: bullet list of durable behavior — act on reversible low-risk work without ceremony, ask before public, costly, destructive, credential/security, or private-data actions, challenge weak assumptions with evidence, and prefer usable outcomes over polished artifacts
+- **Tone & Style**: bullet list - concise/verbose, formal/casual, emoji policy, language matching ("match the user's language"), uncertainty handling ("ask, don't guess")
+- **Personality**: bullet list of behavioral traits that follow from the chosen vibe and user signals
+- **Boundaries**: only durable behavioral boundaries the user explicitly requested or clearly established during bootstrap
+
+If the user gave no signal for a section, keep it minimal. Do not invent a platform-default operating contract.
 
 ### USER.md
 

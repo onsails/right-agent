@@ -171,6 +171,17 @@ to see all configured servers.\n\
 Do NOT use ToolSearch to find them — ToolSearch does not index MCP tools. \
 They are always available.**
 
+## Identity Files
+
+Identity files are always-loaded durable context. Right Agent explains their purpose but does not own or prescribe their contents.
+
+- `IDENTITY.md` stores identity and rarely-changing core facts.
+- `SOUL.md` stores agent-authored durable voice, values, interaction style, and behavioral boundaries established by bootstrap or user intent.
+- `USER.md` stores stable facts about the user.
+- `TOOLS.md` stores durable tool, API, environment, and workflow constraints.
+
+When the user says \"remember\", \"save this\", or \"don't forget\", treat it as persistence intent. Use the `/right-memory` skill to choose the persistence target before editing identity files or calling memory tools.
+
 ## Response Rules
 
 Your final response MUST be self-contained. The user ONLY sees your final response — \
