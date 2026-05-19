@@ -175,6 +175,26 @@ backoff_seconds: 30
     }
 
     #[test]
+    fn learning_config_defaults_when_missing() {
+        let cfg: AgentConfig = serde_saphyr::from_str("restart: never\n").unwrap();
+        assert_eq!(cfg.learning.episode_selector_model, None);
+        assert_eq!(cfg.learning.episode_selector_max_budget_usd, 0.10);
+        assert_eq!(cfg.learning.episode_settle_seconds, 90);
+    }
+
+    #[test]
+    fn learning_config_explicit_yaml_roundtrip() {
+        let yaml = "learning:\n  episode_selector_model: \"claude-sonnet-4-6\"\n  episode_selector_max_budget_usd: 0.25\n  episode_settle_seconds: 180\n";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.learning.episode_selector_model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(cfg.learning.episode_selector_max_budget_usd, 0.25);
+        assert_eq!(cfg.learning.episode_settle_seconds, 180);
+    }
+
+    #[test]
     fn agent_config_rejects_unknown_fields() {
         let yaml = r#"
 restart: never

@@ -40,6 +40,9 @@ pub(crate) const PROMPT_LABELS: &[&str] = &[
     // agent_setting_menu sub-prompts
     "model (e.g. sonnet, opus, haiku — empty to clear):",
     "allowed chat ids (comma-separated, empty to clear):",
+    "episode selector model (empty to inherit agent model):",
+    "episode selector max budget usd:",
+    "episode settle seconds:",
     // sandbox mode — label + options (shared with init.rs)
     "sandbox mode:",
     "openshell — isolated container (recommended)",
@@ -724,6 +727,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         let sandbox_display = format!("{}", config.sandbox_mode());
         let network_policy_display = format!("{}", config.network_policy);
         let memory_display = format_memory_display(&config.memory, &chosen_name);
+        let learning_display = format_learning_display(&config.learning);
 
         let opt_token = format!("telegram token: {token_display}");
         let opt_model = format!("model: {model_display}");
@@ -731,6 +735,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         let opt_sandbox = format!("sandbox mode: {sandbox_display}");
         let opt_network_policy = format!("network policy: {network_policy_display}");
         let opt_memory = format!("memory: {memory_display}");
+        let opt_learning = format!("learning: {learning_display}");
         let stt_display = if config.stt.enabled {
             format!("on ({})", config.stt.model.yaml_str())
         } else {
@@ -754,6 +759,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         }
         options.push(opt_stt.clone());
         options.push(opt_memory.clone());
+        options.push(opt_learning.clone());
         options.push(opt_done.clone());
 
         let theme = right_ui::detect();
@@ -864,6 +870,17 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
                     None
                 }
             }
+        } else if selection == opt_learning {
+            match learning_setup(&config.learning)? {
+                Some(new_cfg) => {
+                    update_agent_yaml_learning(&agent_yaml_path, &new_cfg)?;
+                    Some("learning")
+                }
+                None => {
+                    // User cancelled — no change.
+                    None
+                }
+            }
         } else if selection == opt_stt {
             match stt_setup()? {
                 Some((enabled, model)) => {
@@ -907,6 +924,101 @@ fn format_memory_display(
             let bank = cfg.bank_id.as_deref().unwrap_or(agent_name);
             format!("hindsight (bank: {bank}, budget: {})", cfg.recall_budget)
         }
+    }
+}
+
+/// Compact one-line summary of learning config for the settings menu.
+fn format_learning_display(learning: &right_agent::agent::types::LearningConfig) -> String {
+    let model = learning
+        .episode_selector_model
+        .as_deref()
+        .unwrap_or("agent model");
+    format!(
+        "{model}, ${}, {}s",
+        format_learning_budget_usd(learning.episode_selector_max_budget_usd),
+        learning.episode_settle_seconds
+    )
+}
+
+/// Interactive learning config submenu. Empty selector model inherits the
+/// agent model; empty numeric fields keep their current values.
+fn learning_setup(
+    existing: &right_agent::agent::types::LearningConfig,
+) -> miette::Result<Option<right_agent::agent::types::LearningConfig>> {
+    let Some(model_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("episode selector model (empty to inherit agent model):").prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let model = match model_input.trim() {
+        "" => None,
+        value => Some(value.to_owned()),
+    };
+
+    let Some(budget_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("episode selector max budget usd:").prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let budget = parse_learning_budget_usd(
+        budget_input.trim(),
+        existing.episode_selector_max_budget_usd,
+    )?;
+
+    let Some(settle_input) =
+        right_agent::init::inquire_back(|| inquire::Text::new("episode settle seconds:").prompt())?
+    else {
+        return Ok(None);
+    };
+    let settle_seconds =
+        parse_learning_settle_seconds(settle_input.trim(), existing.episode_settle_seconds)?;
+
+    Ok(Some(right_agent::agent::types::LearningConfig {
+        episode_selector_model: model,
+        episode_selector_max_budget_usd: budget,
+        episode_settle_seconds: settle_seconds,
+    }))
+}
+
+fn parse_learning_budget_usd(input: &str, fallback: f64) -> miette::Result<f64> {
+    if input.is_empty() {
+        return Ok(fallback);
+    }
+    let value = input
+        .parse::<f64>()
+        .map_err(|e| miette::miette!("invalid learning budget \"{input}\": {e}"))?;
+    if !value.is_finite() || value <= 0.0 {
+        return Err(miette::miette!(
+            "learning budget must be a positive finite number"
+        ));
+    }
+    Ok(value)
+}
+
+fn parse_learning_settle_seconds(input: &str, fallback: u64) -> miette::Result<u64> {
+    if input.is_empty() {
+        return Ok(fallback);
+    }
+    let value = input
+        .parse::<u64>()
+        .map_err(|e| miette::miette!("invalid settle seconds \"{input}\": {e}"))?;
+    if value == 0 {
+        return Err(miette::miette!("settle seconds must be greater than zero"));
+    }
+    Ok(value)
+}
+
+fn format_learning_budget_usd(value: f64) -> String {
+    if (value
+        - right_agent::agent::types::LearningConfig::default().episode_selector_max_budget_usd)
+        .abs()
+        < f64::EPSILON
+    {
+        "0.10".to_owned()
+    } else {
+        value.to_string()
     }
 }
 
@@ -1470,6 +1582,111 @@ pub(crate) fn update_agent_yaml_memory(
         .map_err(|e| miette::miette!("write {}: {e:#}", path.display()))?;
 
     Ok(())
+}
+
+/// Replace the `learning:` block in an agent.yaml file.
+///
+/// Removes any existing `learning:` block (header + indented body), then
+/// appends the new block. `episode_selector_model` is omitted when absent so
+/// runtime selection inherits the agent model.
+fn update_agent_yaml_learning(
+    path: &Path,
+    learning: &right_agent::agent::types::LearningConfig,
+) -> miette::Result<()> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| miette::miette!("read {}: {e:#}", path.display()))?;
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_learning_block = false;
+    for line in content.lines() {
+        if line == "learning:" {
+            in_learning_block = true;
+            continue;
+        }
+        if in_learning_block {
+            if line.starts_with("  ") {
+                continue;
+            }
+            in_learning_block = false;
+        }
+        lines.push(line.to_string());
+    }
+
+    lines.push("learning:".to_string());
+    if let Some(model) = learning.episode_selector_model.as_deref() {
+        lines.push(format!("  episode_selector_model: \"{model}\""));
+    }
+    lines.push(format!(
+        "  episode_selector_max_budget_usd: {}",
+        format_learning_budget_usd(learning.episode_selector_max_budget_usd)
+    ));
+    lines.push(format!(
+        "  episode_settle_seconds: {}",
+        learning.episode_settle_seconds
+    ));
+
+    let mut output = lines.join("\n");
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    std::fs::write(path, &output)
+        .map_err(|e| miette::miette!("write {}: {e:#}", path.display()))?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod learning_yaml_tests {
+    use super::*;
+    use right_agent::agent::types::LearningConfig;
+    use tempfile::tempdir;
+
+    fn write_yaml(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
+        let path = dir.join("agent.yaml");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn update_agent_yaml_learning_full_block_roundtrips() {
+        let dir = tempdir().unwrap();
+        let path = write_yaml(dir.path(), "model: \"sonnet\"\n");
+        let learning = LearningConfig {
+            episode_selector_model: Some("claude-sonnet-4-6".to_owned()),
+            episode_selector_max_budget_usd: 0.25,
+            episode_settle_seconds: 180,
+        };
+        update_agent_yaml_learning(&path, &learning).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("model: \"sonnet\""),
+            "pre-existing field survives"
+        );
+        let parsed: right_agent::agent::AgentConfig = serde_saphyr::from_str(&content).unwrap();
+        assert_eq!(parsed.learning, learning);
+    }
+
+    #[test]
+    fn update_agent_yaml_learning_replaces_existing_and_omits_absent_model() {
+        let dir = tempdir().unwrap();
+        let initial = "model: \"sonnet\"\n\nlearning:\n  episode_selector_model: \"old\"\n  episode_selector_max_budget_usd: 0.25\n  episode_settle_seconds: 180\n\nnetwork_policy: permissive\n";
+        let path = write_yaml(dir.path(), initial);
+        let learning = LearningConfig {
+            episode_selector_model: None,
+            episode_selector_max_budget_usd: 0.10,
+            episode_settle_seconds: 90,
+        };
+        update_agent_yaml_learning(&path, &learning).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("episode_selector_model"));
+        assert!(content.contains("episode_selector_max_budget_usd: 0.10"));
+        assert!(content.contains("network_policy: permissive"));
+        let parsed: right_agent::agent::AgentConfig = serde_saphyr::from_str(&content).unwrap();
+        assert_eq!(parsed.learning, learning);
+    }
 }
 
 #[cfg(test)]

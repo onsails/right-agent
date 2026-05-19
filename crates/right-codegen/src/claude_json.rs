@@ -135,6 +135,7 @@ mod tests {
                 secret: None,
                 attachments: Default::default(),
                 show_thinking: true,
+                learning: Default::default(),
                 memory: None,
                 stt: Default::default(),
             }),

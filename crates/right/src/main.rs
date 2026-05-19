@@ -1885,6 +1885,7 @@ fn cmd_agent_init(
             telegram_token: config.telegram_token,
             allowed_chat_ids: config.allowed_chat_ids,
             model: config.model,
+            learning: config.learning,
             env: config.env,
             memory_provider: config
                 .memory
@@ -1957,6 +1958,7 @@ fn cmd_agent_init(
                 telegram_token: None,
                 allowed_chat_ids: vec![],
                 model: None,
+                learning: right_agent::agent::types::LearningConfig::default(),
                 env: std::collections::HashMap::new(),
                 memory_provider: right_agent::agent::types::MemoryProvider::Hindsight,
                 memory_api_key: None,
@@ -2082,6 +2084,7 @@ fn cmd_agent_init(
                 telegram_token: w_token,
                 allowed_chat_ids: w_chat_ids,
                 model: None,
+                learning: right_agent::agent::types::LearningConfig::default(),
                 env: std::collections::HashMap::new(),
                 memory_provider: w_mem.0,
                 memory_api_key: w_mem.1,

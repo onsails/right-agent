@@ -251,6 +251,13 @@ mod tests {
     }
 
     #[test]
+    fn diff_learning_change_requires_restart() {
+        let old = "restart: never\nlearning:\n  episode_settle_seconds: 90\n";
+        let new = "restart: never\nlearning:\n  episode_settle_seconds: 180\n";
+        assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
+    }
+
+    #[test]
     fn diff_model_and_other_field_is_restart_required() {
         let old = "restart: never\nmodel: \"claude-sonnet-4-6\"\n";
         let new = "restart: always\nmodel: \"claude-haiku-4-5\"\n";

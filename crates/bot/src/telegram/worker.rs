@@ -256,6 +256,8 @@ pub struct WorkerContext {
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     /// STT context — None when stt.enabled=false or whisper model not yet cached.
     pub stt: Option<std::sync::Arc<crate::stt::SttContext>>,
+    /// Learning-review configuration captured at bot startup. Changes require restart.
+    pub learning: right_agent::agent::types::LearningConfig,
     /// Shared Claude health state for MCP self-heal and one-shot repair notices.
     pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
     /// Process shutdown token used to cancel detached user-turn repair work.
