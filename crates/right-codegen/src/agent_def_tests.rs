@@ -479,6 +479,23 @@ fn operating_instructions_teach_sparse_progress_updates() {
 }
 
 #[test]
+fn operating_instructions_teach_agent_tool_delegation() {
+    let ops = crate::OPERATING_INSTRUCTIONS;
+
+    for needle in [
+        "`Agent` tool",
+        "independent workstream",
+        "main session remains accountable",
+        "synthesize the result",
+    ] {
+        assert!(
+            ops.contains(needle),
+            "OPERATING_INSTRUCTIONS must teach Agent-tool delegation: missing {needle:?}"
+        );
+    }
+}
+
+#[test]
 fn cron_instructions_forbid_progress_updates() {
     let cron = crate::CRON_INSTRUCTIONS;
 

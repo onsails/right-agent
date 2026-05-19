@@ -118,6 +118,9 @@ Per-callsite `--disallowedTools`:
 
 The baseline lives in `crates/bot/src/cc/invocation.rs::BASELINE_DISALLOWED_TOOLS`
 and explicitly excludes `Agent`.
+Right Agent does not add custom subagent definition files; when allowed,
+subagents are spawned by the main Claude Code session through the built-in
+`Agent` tool.
 
 ## Per-session mutex on --resume
 

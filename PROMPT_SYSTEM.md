@@ -113,6 +113,11 @@ fetched from the aggregator's internal API (non-fatal if unavailable). Memory se
 is appended last: file mode inlines MEMORY.md contents, Hindsight mode inlines
 prefetched recall results.
 
+Operating instructions include a `### Subagents` section that teaches use of the
+built-in Claude Code `Agent` tool for bounded independent workstreams. This is
+prompt guidance only; Right Agent does not create separate subagent definition
+files.
+
 ### Conversation and Memory Tiers
 
 Agents have three distinct sources for past context:
