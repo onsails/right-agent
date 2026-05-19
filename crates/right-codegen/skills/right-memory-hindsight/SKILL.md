@@ -11,6 +11,19 @@ Your memory is powered by Hindsight. It works in two ways:
 is recalled before each interaction. You don't need to do anything
 for this to work.
 
+## Remember request router
+
+When the user says "remember", "save this", or "don't forget", first classify what kind of persistent fact it is. The word "remember" means "persist this", not "call `mcp__right__memory_retain`".
+
+- Tool/API/environment rules -> `TOOLS.md`
+- Stable user facts, preferences, timezone, communication style -> `USER.md`
+- Your voice, autonomy, pushback, escalation boundaries -> `SOUL.md`
+- Core identity, principles, security posture -> `IDENTITY.md`
+- Reusable procedures -> learned skill
+- Narrow durable context with no better home -> memory
+
+After this routing, memory is the fallback for facts with no better home.
+
 **Explicit tools** — use when automatic isn't enough:
 
 - `mcp__right__memory_retain(content, context)` — save a fact permanently
