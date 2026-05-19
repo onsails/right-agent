@@ -363,7 +363,10 @@ fi
 }
 
 fn ensure_bashrc_sources_managed_env(existing: &str) -> String {
-    if let Some(start) = existing.find(MANAGED_ENV_START_MARKER)
+    let start_marker = existing.find(MANAGED_ENV_START_MARKER);
+    let end_marker = existing.find(MANAGED_ENV_END_MARKER);
+
+    if let Some(start) = start_marker
         && let Some(end_relative) = existing[start..].find(MANAGED_ENV_END_MARKER)
     {
         let end = start + end_relative + MANAGED_ENV_END_MARKER.len();
@@ -381,6 +384,19 @@ fn ensure_bashrc_sources_managed_env(existing: &str) -> String {
         out.push_str(&existing[..start]);
         out.push_str(managed_env_bashrc_block());
         out.push_str(&existing[end..]);
+        return out;
+    }
+
+    if let Some(marker_start) = start_marker.or(end_marker) {
+        let marker_end = existing[marker_start..]
+            .find('\n')
+            .map_or(existing.len(), |line_end| marker_start + line_end + 1);
+        let mut out = String::with_capacity(
+            existing.len() - (marker_end - marker_start) + managed_env_bashrc_block().len(),
+        );
+        out.push_str(&existing[..marker_start]);
+        out.push_str(managed_env_bashrc_block());
+        out.push_str(&existing[marker_end..]);
         return out;
     }
 
@@ -556,7 +572,7 @@ alias ll='ls -la'
     }
 
     #[test]
-    fn ensure_bashrc_sources_managed_env_preserves_partial_marker_content() {
+    fn ensure_bashrc_sources_managed_env_repairs_start_only_marker_idempotently() {
         let original = "\
 export PATH=\"/usr/bin:/bin\"
 # >>> RIGHT_AGENT managed env >>>
@@ -564,11 +580,45 @@ echo user-kept-this
 ";
         let updated = ensure_bashrc_sources_managed_env(original);
 
-        assert!(updated.contains("# >>> RIGHT_AGENT managed env >>>\necho user-kept-this"));
-        assert!(updated.ends_with(managed_env_bashrc_block()));
+        assert_eq!(
+            updated,
+            format!(
+                "export PATH=\"/usr/bin:/bin\"\n{}echo user-kept-this\n",
+                managed_env_bashrc_block()
+            )
+        );
+        assert_eq!(ensure_bashrc_sources_managed_env(&updated), updated);
         assert_eq!(
             updated.matches(">>> RIGHT_AGENT managed env >>>").count(),
-            2
+            1
+        );
+        assert_eq!(
+            updated.matches("<<< RIGHT_AGENT managed env <<<").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn ensure_bashrc_sources_managed_env_repairs_end_only_marker_idempotently() {
+        let original = "\
+export PATH=\"/usr/bin:/bin\"
+echo before
+# <<< RIGHT_AGENT managed env <<<
+alias ll='ls -la'
+";
+        let updated = ensure_bashrc_sources_managed_env(original);
+
+        assert_eq!(
+            updated,
+            format!(
+                "export PATH=\"/usr/bin:/bin\"\necho before\n{}alias ll='ls -la'\n",
+                managed_env_bashrc_block()
+            )
+        );
+        assert_eq!(ensure_bashrc_sources_managed_env(&updated), updated);
+        assert_eq!(
+            updated.matches(">>> RIGHT_AGENT managed env >>>").count(),
+            1
         );
         assert_eq!(
             updated.matches("<<< RIGHT_AGENT managed env <<<").count(),
