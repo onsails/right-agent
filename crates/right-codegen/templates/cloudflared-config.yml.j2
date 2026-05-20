@@ -6,6 +6,9 @@ ingress:
     path: ^/tg/{{ agent.name }}$
     service: unix:{{ agent.socket_path }}
   - hostname: {{ tunnel_hostname }}
+    path: /dashboard/{{ agent.name }}/.*
+    service: unix:{{ agent.socket_path }}
+  - hostname: {{ tunnel_hostname }}
     path: /oauth/{{ agent.name }}/callback
     service: unix:{{ agent.socket_path }}
 {% endfor %}

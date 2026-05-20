@@ -18,6 +18,17 @@ const REFRESH_INTERVAL_SECS: u64 = 5;
 const INIT_DATA_MAX_AGE_SECS: i64 = 86_400;
 const MAX_LOG_LINES: usize = 80;
 
+pub(crate) fn dashboard_url(hostname: &str, agent_name: &str) -> Result<url::Url, url::ParseError> {
+    url::Url::parse(&format!(
+        "https://{}/dashboard/{}/",
+        hostname
+            .trim_end_matches('/')
+            .trim_start_matches("https://")
+            .trim_start_matches("http://"),
+        agent_name
+    ))
+}
+
 #[derive(Clone)]
 pub(crate) struct DashboardState {
     pub agent_name: String,
@@ -390,6 +401,20 @@ mod tests {
             .await
             .expect("router response")
             .status()
+    }
+
+    #[test]
+    fn dashboard_url_strips_scheme_and_trailing_slash() {
+        let url = super::dashboard_url("https://right.example.com/", "alpha").unwrap();
+
+        assert_eq!(url.as_str(), "https://right.example.com/dashboard/alpha/");
+    }
+
+    #[test]
+    fn dashboard_url_uses_agent_path() {
+        let url = super::dashboard_url("right.example.com", "bot-one").unwrap();
+
+        assert_eq!(url.path(), "/dashboard/bot-one/");
     }
 
     #[tokio::test]
