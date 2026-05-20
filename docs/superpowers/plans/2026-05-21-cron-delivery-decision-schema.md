@@ -73,8 +73,8 @@ Run:
 devenv shell -- cargo test -p right-db migrations
 devenv shell -- cargo test -p right-agent async_runs
 devenv shell -- cargo test -p right-codegen --lib
-devenv shell -- cargo test -p bot cron::tests::parse_cron_output
-devenv shell -- cargo test -p bot async_delivery::tests
+devenv shell -- cargo test -p right-bot cron::tests::parse_cron_output
+devenv shell -- cargo test -p right-bot async_delivery::tests
 ```
 
 Expected: all pass before behavior changes. If a command fails before edits, record the exact failing test names and continue only if the failure is unrelated to this plan.
@@ -588,7 +588,7 @@ fn parse_cron_output_empty_silent_reason_is_invalid() {
 Run:
 
 ```bash
-devenv shell -- cargo test -p bot parse_cron_output
+devenv shell -- cargo test -p right-bot parse_cron_output
 ```
 
 Expected: fail because the parser still expects `notify`/`summary`.
@@ -707,8 +707,8 @@ where `delivery_json` is produced by serializing a notify delivery decision afte
 Run:
 
 ```bash
-devenv shell -- cargo test -p bot parse_cron_output
-devenv shell -- cargo test -p bot background
+devenv shell -- cargo test -p right-bot parse_cron_output
+devenv shell -- cargo test -p right-bot background
 ```
 
 Expected: pass.
@@ -770,7 +770,7 @@ fn format_async_yaml_rejects_silent_delivery_json() {
 Run:
 
 ```bash
-devenv shell -- cargo test -p bot async_delivery
+devenv shell -- cargo test -p right-bot async_delivery
 ```
 
 Expected: fail because code still names `notify_json`/`summary` and parses `CronNotify` directly.
@@ -860,9 +860,9 @@ In `crates/bot/src/telegram/worker.rs`, replace `notify_json IS NOT NULL` with `
 Run:
 
 ```bash
-devenv shell -- cargo test -p bot async_delivery
-devenv shell -- cargo test -p bot cron
-devenv shell -- cargo test -p bot telegram::worker::tests::build_bg_marker
+devenv shell -- cargo test -p right-bot async_delivery
+devenv shell -- cargo test -p right-bot cron
+devenv shell -- cargo test -p right-bot telegram::worker::tests::build_bg_marker
 ```
 
 Expected: pass.
@@ -957,8 +957,8 @@ Run:
 
 ```bash
 devenv shell -- cargo test -p right-agent cron_spec
-devenv shell -- cargo test -p bot background
-devenv shell -- cargo test -p bot telegram::worker::tests::build_bg_marker
+devenv shell -- cargo test -p right-bot background
+devenv shell -- cargo test -p right-bot telegram::worker::tests::build_bg_marker
 ```
 
 Expected: pass.
@@ -996,7 +996,7 @@ Run:
 devenv shell -- cargo test -p right-db
 devenv shell -- cargo test -p right-agent
 devenv shell -- cargo test -p right-codegen
-devenv shell -- cargo test -p bot cron async_delivery background
+devenv shell -- cargo test -p right-bot cron async_delivery background
 ```
 
 Expected: pass.
