@@ -1,79 +1,98 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { DashboardApiError, bootstrap, learningOverview, learningReportDetail, overview, runDetail } from './api'
+import {
+  DashboardApiError,
+  bootstrap,
+  dashboardOverview,
+  doctorStatus,
+  identityFile,
+  identityFiles,
+  learningEpisodeDetail,
+  learningEpisodes,
+  learningOverview,
+  learningReportDetail,
+  overview as activityOverview,
+  runDetail,
+  sandboxStats,
+  skillDetail,
+  skillsOverview,
+  usageOverview,
+} from './api'
+import AppShell from './components/AppShell.vue'
+import ActivityView from './views/ActivityView.vue'
+import HealthView from './views/HealthView.vue'
+import IdentityView from './views/IdentityView.vue'
+import KnowledgeView from './views/KnowledgeView.vue'
+import OverviewView from './views/OverviewView.vue'
+import UsageView from './views/UsageView.vue'
 import type {
-  BootstrapResponse,
-  CronCard,
-  LearningOverviewResponse,
-  LearningReportDetailResponse,
-  LearningReportSummary,
-  OverviewResponse,
-  RunDetailResponse,
-  RunSummary,
+  BootstrapResponse, DashboardOverviewResponse, DoctorResponse, IdentityFileSummary, IdentityResponse,
+  LearningEpisodeDetailResponse, LearningEpisodeSummary, LearningEpisodesResponse, LearningOverviewResponse,
+  LearningReportDetailResponse, LearningReportSummary, OverviewResponse, RunDetailResponse, RunSummary,
+  SandboxStatsResponse, SkillDetailResponse, SkillSummary, SkillsResponse, UsageOverviewResponse,
 } from './types'
 
 type ConnectionState = 'loading' | 'live' | 'stale' | 'offline' | 'locked'
-type DashboardView = 'cron' | 'learning'
+type DashboardTab = 'overview' | 'activity' | 'knowledge' | 'usage' | 'identity' | 'health'
+type KnowledgeTab = 'episodes' | 'reports' | 'skills'
 
 const bootstrapData = ref<BootstrapResponse | null>(null)
-const overviewData = ref<OverviewResponse | null>(null)
+const dashboardData = ref<DashboardOverviewResponse | null>(null)
+const activityData = ref<OverviewResponse | null>(null)
+const usageData = ref<UsageOverviewResponse | null>(null)
+const learningData = ref<LearningOverviewResponse | null>(null)
+const learningEpisodesData = ref<LearningEpisodesResponse | null>(null)
+const skillsData = ref<SkillsResponse | null>(null)
+const identityData = ref<IdentityResponse | null>(null)
+const doctorData = ref<DoctorResponse | null>(null)
+const sandboxData = ref<SandboxStatsResponse | null>(null)
+
 const selectedRun = ref<RunDetailResponse | null>(null)
 const selectedRunId = ref<string | null>(null)
-const activeView = ref<DashboardView>('cron')
-const learningData = ref<LearningOverviewResponse | null>(null)
 const selectedLearningReport = ref<LearningReportDetailResponse | null>(null)
 const selectedLearningReportId = ref<number | null>(null)
+const selectedEpisode = ref<LearningEpisodeDetailResponse | null>(null)
+const selectedEpisodeId = ref<number | null>(null)
+const selectedSkill = ref<SkillDetailResponse | null>(null)
+const selectedSkillName = ref<string | null>(null)
+const selectedIdentityFile = ref<IdentityFileSummary | null>(null)
+
+const activeTab = ref<DashboardTab>('overview')
+const activeKnowledgeTab = ref<KnowledgeTab>('episodes')
 const connectionState = ref<ConnectionState>('loading')
 const message = ref('Loading dashboard')
-const detailError = ref<string | null>(null)
-const learningDetailError = ref<string | null>(null)
 const lastUpdatedAt = ref<string | null>(null)
+
+const detailError = ref<string | null>(null)
+const reportError = ref<string | null>(null)
+const episodeError = ref<string | null>(null)
+const skillError = ref<string | null>(null)
+const identityError = ref<string | null>(null)
+const doctorError = ref<string | null>(null)
+const sandboxError = ref<string | null>(null)
+
 const loadingDetail = ref(false)
-const loadingLearningDetail = ref(false)
+const loadingReport = ref(false)
+const loadingEpisode = ref(false)
+const loadingSkill = ref(false)
+const loadingIdentity = ref(false)
+const loadingDoctor = ref(false)
+const loadingSandbox = ref(false)
+
 let pollTimer: number | undefined
 
-const refreshIntervalMs = computed(() => {
-  const seconds = overviewData.value?.refresh_interval_secs ?? bootstrapData.value?.refresh_interval_secs ?? 5
-  return Math.max(seconds, 1) * 1000
-})
-
-const shellTitle = computed(() => bootstrapData.value?.agent ?? overviewData.value?.agent ?? 'Dashboard')
-const summary = computed(() => overviewData.value?.summary)
-const crons = computed(() => overviewData.value?.crons ?? [])
-const activeForeground = computed(() => overviewData.value?.active.foreground.length ?? 0)
-const activeBackground = computed(() => overviewData.value?.active.background.length ?? 0)
-const activeTotal = computed(() => activeForeground.value + activeBackground.value)
-const learningEnabled = computed(() => bootstrapData.value?.features.learning_metrics === true)
-const learningReports = computed(() => learningData.value?.recent_reports ?? [])
-const learningEpisodeTotal = computed(() => {
-  const funnel = learningData.value?.funnel
-  if (!funnel) {
-    return 0
-  }
-  return (
-    funnel.episodes_pending_24h +
-    funnel.episodes_selecting_24h +
-    funnel.episodes_selected_24h +
-    funnel.episodes_reviewing_24h +
-    funnel.episodes_reviewed_24h +
-    funnel.episodes_no_episode_24h +
-    funnel.episodes_insufficient_context_24h +
-    funnel.episodes_failed_24h
-  )
-})
-const learningSelectedOrLater = computed(() => {
-  const funnel = learningData.value?.funnel
-  if (!funnel) {
-    return 0
-  }
-  return funnel.episodes_selected_24h + funnel.episodes_reviewing_24h + funnel.episodes_reviewed_24h
-})
-const learningCandidateTotal = computed(() => {
-  const funnel = learningData.value?.funnel
-  if (!funnel) {
-    return 0
-  }
-  return funnel.create_candidates_24h + funnel.update_candidates_24h
+const shellTitle = computed(() => bootstrapData.value?.agent ?? dashboardData.value?.agent ?? 'Dashboard')
+const refreshIntervalMs = computed(() => Math.max(bootstrapData.value?.refresh_interval_secs ?? 5, 1) * 1000)
+const tabs = computed(() => {
+  const features = bootstrapData.value?.features
+  return [
+    { key: 'overview', label: 'Overview', enabled: true },
+    { key: 'activity', label: 'Activity', enabled: features?.activity ?? true },
+    { key: 'knowledge', label: 'Knowledge', enabled: (features?.knowledge_learning ?? true) || (features?.knowledge_skills ?? true) },
+    { key: 'usage', label: 'Usage', enabled: features?.usage ?? true },
+    { key: 'identity', label: 'Identity', enabled: features?.identity ?? true },
+    { key: 'health', label: 'Health', enabled: (features?.doctor ?? true) || (features?.sandbox_stats ?? true) },
+  ]
 })
 
 onMounted(() => {
@@ -91,10 +110,8 @@ onBeforeUnmount(() => {
 async function loadInitial(): Promise<void> {
   try {
     bootstrapData.value = await bootstrap()
-    if (!bootstrapData.value.features.learning_metrics && activeView.value === 'learning') {
-      activeView.value = 'cron'
-    }
     await refreshOverview()
+    await refreshActivity()
     schedulePolling()
   } catch (error) {
     applyErrorState(error)
@@ -107,24 +124,65 @@ function schedulePolling(): void {
   }
   pollTimer = window.setInterval(() => {
     void refreshOverview()
+    if (activeTab.value === 'activity' || activeTab.value === 'overview') {
+      void refreshActivity()
+    }
   }, refreshIntervalMs.value)
 }
 
-async function refreshOverview(): Promise<void> {
+function setActiveTab(tab: string): void {
+  if (!isDashboardTab(tab)) {
+    return
+  }
+  activeTab.value = tab
+  void refreshActiveTab()
+}
+
+function setKnowledgeTab(tab: KnowledgeTab): void {
+  activeKnowledgeTab.value = tab
+  void refreshKnowledge()
+}
+
+function isDashboardTab(tab: string): tab is DashboardTab {
+  return ['overview', 'activity', 'knowledge', 'usage', 'identity', 'health'].includes(tab)
+}
+
+async function refreshActiveTab(): Promise<void> {
+  if (activeTab.value === 'overview') {
+    await refreshOverview()
+    await refreshActivity()
+  } else if (activeTab.value === 'activity') {
+    await refreshActivity()
+  } else if (activeTab.value === 'knowledge') {
+    await refreshKnowledge()
+  } else if (activeTab.value === 'usage') {
+    await refreshUsage()
+  } else if (activeTab.value === 'identity') {
+    await refreshIdentity()
+  }
+}
+
+async function guarded(load: () => Promise<void>): Promise<void> {
   try {
-    const wantLearning = learningEnabled.value && activeView.value === 'learning'
-    const [data, learning] = await Promise.all([
-      overview(),
-      wantLearning ? learningOverview() : Promise.resolve(null),
-    ])
-    overviewData.value = data
-    if (learning !== null) {
-      learningData.value = learning
-    }
+    await load()
     connectionState.value = 'live'
     message.value = 'Live'
     lastUpdatedAt.value = new Date().toISOString()
+  } catch (error) {
+    applyErrorState(error)
+  }
+}
 
+async function refreshOverview(): Promise<void> {
+  await guarded(async () => {
+    dashboardData.value = await dashboardOverview()
+  })
+}
+
+async function refreshActivity(): Promise<void> {
+  await guarded(async () => {
+    const data = await activityOverview()
+    activityData.value = data
     if (selectedRunId.value !== null) {
       const stillPresent = data.crons.some((cron) => cron.recent_runs.some((run) => run.id === selectedRunId.value))
       if (!stillPresent) {
@@ -133,17 +191,70 @@ async function refreshOverview(): Promise<void> {
         detailError.value = null
       }
     }
+  })
+}
 
-    if (selectedLearningReportId.value !== null && learningData.value !== null) {
-      const stillPresent = learningData.value.recent_reports.some((report) => report.id === selectedLearningReportId.value)
-      if (!stillPresent) {
-        selectedLearningReportId.value = null
-        selectedLearningReport.value = null
-        learningDetailError.value = null
-      }
+async function refreshUsage(): Promise<void> {
+  await guarded(async () => {
+    usageData.value = await usageOverview()
+  })
+}
+
+async function refreshKnowledge(): Promise<void> {
+  if (activeKnowledgeTab.value === 'skills') {
+    await refreshSkills()
+    return
+  }
+
+  await guarded(async () => {
+    if (activeKnowledgeTab.value === 'episodes') {
+      const [overviewData, episodes] = await Promise.all([learningOverview(), learningEpisodes()])
+      learningData.value = overviewData
+      learningEpisodesData.value = episodes
+    } else {
+      learningData.value = await learningOverview()
     }
+  })
+}
+
+async function refreshSkills(): Promise<void> {
+  await guarded(async () => {
+    skillsData.value = await skillsOverview()
+  })
+}
+
+async function refreshIdentity(): Promise<void> {
+  await guarded(async () => {
+    identityData.value = await identityFiles()
+    if (selectedIdentityFile.value === null) {
+      selectedIdentityFile.value = identityData.value.files[0] ?? null
+    }
+  })
+}
+
+async function refreshDoctor(): Promise<void> {
+  loadingDoctor.value = true
+  doctorError.value = null
+  try {
+    doctorData.value = await doctorStatus()
   } catch (error) {
+    doctorError.value = error instanceof Error ? error.message : 'Doctor unavailable'
     applyErrorState(error)
+  } finally {
+    loadingDoctor.value = false
+  }
+}
+
+async function refreshSandbox(): Promise<void> {
+  loadingSandbox.value = true
+  sandboxError.value = null
+  try {
+    sandboxData.value = await sandboxStats()
+  } catch (error) {
+    sandboxError.value = error instanceof Error ? error.message : 'Sandbox unavailable'
+    applyErrorState(error)
+  } finally {
+    loadingSandbox.value = false
   }
 }
 
@@ -153,8 +264,7 @@ function applyErrorState(error: unknown): void {
     message.value = error.message
     return
   }
-
-  connectionState.value = overviewData.value !== null ? 'stale' : 'offline'
+  connectionState.value = dashboardData.value !== null || activityData.value !== null ? 'stale' : 'offline'
   message.value = error instanceof Error ? error.message : 'Dashboard unavailable'
 }
 
@@ -164,7 +274,6 @@ async function selectRun(run: RunSummary): Promise<void> {
   selectedRun.value = null
   loadingDetail.value = true
   detailError.value = null
-
   try {
     const detail = await runDetail(runId)
     if (selectedRunId.value === runId) {
@@ -175,8 +284,7 @@ async function selectRun(run: RunSummary): Promise<void> {
       applyErrorState(error)
     }
     if (selectedRunId.value === runId) {
-      selectedRun.value = null
-      detailError.value = error instanceof Error ? error.message : 'Run detail unavailable'
+      detailError.value = error instanceof Error ? error.message : 'Run unavailable'
     }
   } finally {
     if (selectedRunId.value === runId) {
@@ -185,23 +293,12 @@ async function selectRun(run: RunSummary): Promise<void> {
   }
 }
 
-function setView(view: DashboardView): void {
-  if (view === 'learning' && !learningEnabled.value) {
-    return
-  }
-  activeView.value = view
-  if (view === 'learning') {
-    void refreshOverview()
-  }
-}
-
 async function selectLearningReport(report: LearningReportSummary): Promise<void> {
   const reportId = report.id
   selectedLearningReportId.value = reportId
   selectedLearningReport.value = null
-  loadingLearningDetail.value = true
-  learningDetailError.value = null
-
+  loadingReport.value = true
+  reportError.value = null
   try {
     const detail = await learningReportDetail(reportId)
     if (selectedLearningReportId.value === reportId) {
@@ -212,438 +309,156 @@ async function selectLearningReport(report: LearningReportSummary): Promise<void
       applyErrorState(error)
     }
     if (selectedLearningReportId.value === reportId) {
-      selectedLearningReport.value = null
-      learningDetailError.value = error instanceof Error ? error.message : 'Learning report unavailable'
+      reportError.value = error instanceof Error ? error.message : 'Report unavailable'
     }
   } finally {
     if (selectedLearningReportId.value === reportId) {
-      loadingLearningDetail.value = false
+      loadingReport.value = false
     }
   }
 }
 
-function cronStatus(cron: CronCard): string {
-  const active = cron.recent_runs.find((run) => isActive(run.status))
-  if (active) {
-    return active.status
-  }
-  return cron.last_run?.status ?? 'idle'
-}
-
-function isActive(status: string): boolean {
-  return status === 'queued' || status === 'running'
-}
-
-function statusClass(status: string): string {
-  if (status === 'success' || status === 'delivered' || status === 'create_candidate' || status === 'update_candidate') {
-    return 'ok'
-  }
-  if (status === 'failed' || status === 'error') {
-    return 'bad'
-  }
-  if (isActive(status) || status === 'pending') {
-    return 'active'
-  }
-  return 'muted'
-}
-
-function money(value: number | null | undefined): string {
-  return `$${(value ?? 0).toFixed(2)}`
-}
-
-function percent(value: number | null | undefined): string {
-  if (value === null || value === undefined) {
-    return 'none'
-  }
-  return `${Math.round(value * 100)}%`
-}
-
-function shortDate(value: string | null | undefined): string {
-  if (!value) {
-    return 'none'
-  }
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return value
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(date)
-}
-
-function shortId(id: string): string {
-  return id.length > 10 ? `${id.slice(0, 8)}...` : id
-}
-
-function notifyText(value: unknown): string | null {
-  if (value === null || value === undefined) {
-    return null
-  }
+async function selectEpisode(episode: LearningEpisodeSummary): Promise<void> {
+  selectedEpisodeId.value = episode.id
+  selectedEpisode.value = null
+  loadingEpisode.value = true
+  episodeError.value = null
   try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return String(value)
+    const detail = await learningEpisodeDetail(episode.id)
+    if (selectedEpisodeId.value === episode.id) {
+      selectedEpisode.value = detail
+    }
+  } catch (error) {
+    if (error instanceof DashboardApiError && error.isLocked) {
+      applyErrorState(error)
+    }
+    if (selectedEpisodeId.value === episode.id) {
+      episodeError.value = error instanceof Error ? error.message : 'Episode unavailable'
+    }
+  } finally {
+    if (selectedEpisodeId.value === episode.id) {
+      loadingEpisode.value = false
+    }
+  }
+}
+
+async function selectSkill(skill: SkillSummary): Promise<void> {
+  selectedSkillName.value = skill.name
+  selectedSkill.value = null
+  loadingSkill.value = true
+  skillError.value = null
+  try {
+    const detail = await skillDetail(skill.name)
+    if (selectedSkillName.value === skill.name) {
+      selectedSkill.value = detail
+    }
+  } catch (error) {
+    if (error instanceof DashboardApiError && error.isLocked) {
+      applyErrorState(error)
+    }
+    if (selectedSkillName.value === skill.name) {
+      skillError.value = error instanceof Error ? error.message : 'Skill unavailable'
+    }
+  } finally {
+    if (selectedSkillName.value === skill.name) {
+      loadingSkill.value = false
+    }
+  }
+}
+
+async function selectIdentityFile(name: string): Promise<void> {
+  loadingIdentity.value = true
+  identityError.value = null
+  try {
+    const response = await identityFile(name)
+    selectedIdentityFile.value = response.file
+    if (identityData.value !== null) {
+      identityData.value.warning = response.warning ?? identityData.value.warning
+      identityData.value.files = identityData.value.files.map((file) => file.name === name ? response.file : file)
+    }
+  } catch (error) {
+    if (error instanceof DashboardApiError && error.isLocked) {
+      applyErrorState(error)
+    }
+    identityError.value = error instanceof Error ? error.message : 'Identity file unavailable'
+  } finally {
+    loadingIdentity.value = false
   }
 }
 </script>
 
 <template>
-  <main class="app-shell">
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">Right Agent</p>
-        <h1>{{ shellTitle }}</h1>
-      </div>
-      <div class="state-pill" :class="connectionState">
-        {{ connectionState }}
-      </div>
-    </header>
-
-    <section v-if="connectionState !== 'live'" class="notice" :class="connectionState">
-      <strong>{{ message }}</strong>
-      <span v-if="lastUpdatedAt">Last update {{ shortDate(lastUpdatedAt) }}</span>
-    </section>
-
-    <nav class="view-tabs" aria-label="Dashboard views">
-      <button
-        type="button"
-        class="tab-button"
-        :class="{ active: activeView === 'cron' }"
-        @click="setView('cron')"
-      >
-        Cron
-      </button>
-      <button
-        v-if="learningEnabled"
-        type="button"
-        class="tab-button"
-        :class="{ active: activeView === 'learning' }"
-        @click="setView('learning')"
-      >
-        Learning
-      </button>
-    </nav>
-
-    <template v-if="activeView === 'cron'">
-      <section class="summary-grid" aria-label="Summary">
-        <article class="summary-card">
-          <span>Jobs</span>
-          <strong>{{ summary?.cron_count ?? 0 }}</strong>
-        </article>
-        <article class="summary-card">
-          <span>Running</span>
-          <strong>{{ summary?.active_cron_count ?? 0 }}</strong>
-        </article>
-        <article class="summary-card">
-          <span>Failures</span>
-          <strong>{{ summary?.failed_recent_cron_count ?? 0 }}</strong>
-        </article>
-        <article class="summary-card">
-          <span>Today</span>
-          <strong>{{ money(summary?.today_cost_usd) }}</strong>
-        </article>
-      </section>
-
-      <section class="active-strip" aria-label="Active activity">
-        <div>
-          <span>Foreground</span>
-          <strong>{{ activeForeground }}</strong>
-        </div>
-        <div>
-          <span>Background</span>
-          <strong>{{ activeBackground }}</strong>
-        </div>
-        <div>
-          <span>Total</span>
-          <strong>{{ activeTotal }}</strong>
-        </div>
-      </section>
-
-      <section class="content-grid">
-        <section class="cron-list" aria-label="Cron jobs">
-          <article v-if="crons.length === 0" class="empty-panel">
-            No cron jobs
-          </article>
-
-          <article v-for="cron in crons" :key="cron.job_name" class="cron-card">
-            <header class="cron-header">
-              <div>
-                <h2>{{ cron.job_name }}</h2>
-                <p>{{ cron.schedule }}</p>
-              </div>
-              <span class="status-pill" :class="statusClass(cronStatus(cron))">
-                {{ cronStatus(cron) }}
-              </span>
-            </header>
-
-            <dl class="meta-grid">
-              <div>
-                <dt>Type</dt>
-                <dd>{{ cron.recurring ? 'recurring' : 'one shot' }}</dd>
-              </div>
-              <div>
-                <dt>Next</dt>
-                <dd>{{ shortDate(cron.run_at) }}</dd>
-              </div>
-              <div>
-                <dt>Target</dt>
-                <dd>{{ cron.target_chat_id ?? 'default' }}<span v-if="cron.target_thread_id">/{{ cron.target_thread_id }}</span></dd>
-              </div>
-              <div>
-                <dt>Budget</dt>
-                <dd>{{ money(cron.max_budget_usd) }}</dd>
-              </div>
-            </dl>
-
-            <div class="runs">
-              <div class="runs-head">
-                <span>Recent runs</span>
-                <strong>{{ money(cron.recent_runs.reduce((total, run) => total + (run.cost_usd ?? 0), 0)) }}</strong>
-              </div>
-
-              <button
-                v-for="run in cron.recent_runs"
-                :key="run.id"
-                class="run-row"
-                :class="{ selected: selectedRunId === run.id }"
-                type="button"
-                @click="selectRun(run)"
-              >
-                <span class="run-main">
-                  <span class="status-dot" :class="statusClass(run.status)"></span>
-                  <span>{{ run.status }}</span>
-                  <small>{{ shortId(run.id) }}</small>
-                </span>
-                <span class="run-side">
-                  <span>{{ money(run.cost_usd) }}</span>
-                  <small>{{ shortDate(run.started_at) }}</small>
-                </span>
-              </button>
-
-              <p v-if="cron.recent_runs.length === 0" class="muted-line">No recent runs</p>
-            </div>
-          </article>
-        </section>
-
-        <aside class="detail-panel" aria-label="Run detail">
-          <header>
-            <p class="eyebrow">Run detail</p>
-            <h2>{{ selectedRun?.run.id ? shortId(selectedRun.run.id) : 'None selected' }}</h2>
-          </header>
-
-        <p v-if="loadingDetail" class="muted-line">Loading run detail</p>
-        <p v-else-if="detailError" class="notice inline">{{ detailError }}</p>
-        <p v-else-if="!selectedRun" class="muted-line">No run selected</p>
-
-        <template v-if="selectedRun">
-          <dl class="detail-meta">
-            <div>
-              <dt>Status</dt>
-              <dd><span class="status-pill" :class="statusClass(selectedRun.run.status)">{{ selectedRun.run.status }}</span></dd>
-            </div>
-            <div>
-              <dt>Kind</dt>
-              <dd>{{ selectedRun.run.kind }}</dd>
-            </div>
-            <div>
-              <dt>Delivery</dt>
-              <dd>{{ selectedRun.run.delivery_status }}</dd>
-            </div>
-            <div>
-              <dt>Exit</dt>
-              <dd>{{ selectedRun.run.exit_code ?? 'none' }}</dd>
-            </div>
-            <div>
-              <dt>Started</dt>
-              <dd>{{ shortDate(selectedRun.run.started_at) }}</dd>
-            </div>
-            <div>
-              <dt>Finished</dt>
-              <dd>{{ shortDate(selectedRun.run.finished_at) }}</dd>
-            </div>
-            <div>
-              <dt>Cost</dt>
-              <dd>{{ money(selectedRun.run.cost_usd) }}</dd>
-            </div>
-          </dl>
-
-          <section class="detail-block">
-            <h3>Summary</h3>
-            <p>{{ selectedRun.summary || selectedRun.no_notify_reason || 'No summary' }}</p>
-          </section>
-
-          <section v-if="notifyText(selectedRun.notify_json)" class="detail-block">
-            <h3>Notify</h3>
-            <pre>{{ notifyText(selectedRun.notify_json) }}</pre>
-          </section>
-
-          <section class="detail-block">
-            <h3>Log</h3>
-            <p v-if="!selectedRun.log.available" class="muted-line">Log unavailable</p>
-            <pre v-else>{{ selectedRun.log.lines.join('\n') }}<template v-if="selectedRun.log.truncated">
-... truncated
-</template></pre>
-          </section>
-        </template>
-        </aside>
-      </section>
-    </template>
-
-    <template v-else-if="activeView === 'learning'">
-      <section class="learning-funnel" aria-label="Learning funnel">
-        <article class="summary-card">
-          <span>Signals</span>
-          <strong>{{ learningData?.funnel.signals_accepted_24h ?? 0 }}</strong>
-        </article>
-        <article class="summary-card">
-          <span>Episodes</span>
-          <strong>{{ learningEpisodeTotal }}</strong>
-        </article>
-        <article class="summary-card">
-          <span>Selected</span>
-          <strong>{{ learningSelectedOrLater }}</strong>
-        </article>
-        <article class="summary-card">
-          <span>Reviewed</span>
-          <strong>{{ learningData?.funnel.episodes_reviewed_24h ?? 0 }}</strong>
-        </article>
-        <article class="summary-card">
-          <span>Candidates</span>
-          <strong>{{ learningCandidateTotal }}</strong>
-        </article>
-        <article class="summary-card">
-          <span>Created/updated</span>
-          <strong>{{ learningData?.funnel.foreground_created_or_updated_7d ?? 0 }}</strong>
-        </article>
-      </section>
-
-      <section class="learning-grid">
-        <section class="cron-list" aria-label="Learning reports">
-          <article v-if="learningReports.length === 0" class="empty-panel">
-            No learning reports
-          </article>
-
-          <button
-            v-for="report in learningReports"
-            :key="report.id"
-            class="learning-report-row"
-            :class="{ selected: selectedLearningReportId === report.id }"
-            type="button"
-            @click="selectLearningReport(report)"
-          >
-            <span class="run-main">
-              <span class="status-dot" :class="statusClass(report.status)"></span>
-              <span>{{ report.status }}</span>
-              <small>{{ report.confidence }} / {{ report.trigger_kind }}</small>
-            </span>
-            <span class="report-summary">
-              {{ report.candidate_skill_name || report.candidate_summary || 'No candidate' }}
-            </span>
-          </button>
-        </section>
-
-        <aside class="detail-panel" aria-label="Learning metrics">
-          <header>
-            <p class="eyebrow">Learning quality</p>
-            <h2>{{ percent(learningData?.quality.candidate_rate) }} candidates</h2>
-          </header>
-
-          <dl class="detail-meta">
-            <div>
-              <dt>Nothing</dt>
-              <dd>{{ percent(learningData?.quality.nothing_to_learn_rate) }}</dd>
-            </div>
-            <div>
-              <dt>High</dt>
-              <dd>{{ learningData?.quality.high_confidence_count_24h ?? 0 }}</dd>
-            </div>
-            <div>
-              <dt>Daily</dt>
-              <dd>{{ learningData?.health.daily_review_count ?? 0 }}/{{ learningData?.health.daily_limit ?? 12 }}</dd>
-            </div>
-            <div>
-              <dt>Gate</dt>
-              <dd>{{ learningData?.health.review_running ? 'running' : 'idle' }}</dd>
-            </div>
-          </dl>
-
-          <section class="detail-block">
-            <h3>Pipeline state</h3>
-            <dl class="detail-meta">
-              <div>
-                <dt>Pending</dt>
-                <dd>{{ learningData?.funnel.episodes_pending_24h ?? 0 }}</dd>
-              </div>
-              <div>
-                <dt>Selecting</dt>
-                <dd>{{ learningData?.funnel.episodes_selecting_24h ?? 0 }}</dd>
-              </div>
-              <div>
-                <dt>Reviewing</dt>
-                <dd>{{ learningData?.funnel.episodes_reviewing_24h ?? 0 }}</dd>
-              </div>
-              <div>
-                <dt>No episode</dt>
-                <dd>{{ learningData?.funnel.episodes_no_episode_24h ?? 0 }}</dd>
-              </div>
-              <div>
-                <dt>Insufficient</dt>
-                <dd>{{ learningData?.funnel.episodes_insufficient_context_24h ?? 0 }}</dd>
-              </div>
-              <div>
-                <dt>Episode failed</dt>
-                <dd>{{ learningData?.funnel.episodes_failed_24h ?? 0 }}</dd>
-              </div>
-              <div>
-                <dt>Review failed</dt>
-                <dd>{{ learningData?.funnel.failed_reviews_24h ?? 0 }}</dd>
-              </div>
-              <div>
-                <dt>Reports</dt>
-                <dd>{{ learningData?.funnel.reports_total_24h ?? 0 }}</dd>
-              </div>
-            </dl>
-          </section>
-
-          <section class="detail-block">
-            <h3>Report detail</h3>
-            <p v-if="loadingLearningDetail" class="muted-line">Loading learning report</p>
-            <p v-else-if="learningDetailError" class="notice inline">{{ learningDetailError }}</p>
-            <p v-else-if="!selectedLearningReport" class="muted-line">No report selected</p>
-
-            <template v-if="selectedLearningReport">
-              <p>{{ selectedLearningReport.report.candidate_summary || selectedLearningReport.report.status }}</p>
-              <p v-if="selectedLearningReport.selector?.boundary_rationale" class="muted-line">
-                {{ selectedLearningReport.selector.boundary_rationale }}
-              </p>
-              <div class="evidence-list">
-                <div
-                  v-for="snippet in selectedLearningReport.evidence"
-                  :key="snippet.ref_id"
-                  class="evidence-item"
-                >
-                  <strong>{{ snippet.ref_id }}</strong>
-                  <span>{{ snippet.available ? (snippet.event_kind || snippet.role || snippet.source) : 'unavailable' }}</span>
-                  <p>{{ snippet.text || 'Snippet unavailable' }}</p>
-                </div>
-              </div>
-            </template>
-          </section>
-        </aside>
-      </section>
-    </template>
-  </main>
+  <AppShell
+    :agent="shellTitle"
+    :connection-state="connectionState"
+    :message="message"
+    :last-updated-at="lastUpdatedAt"
+    :tabs="tabs"
+    :active-tab="activeTab"
+    @select="setActiveTab"
+  >
+    <OverviewView v-if="activeTab === 'overview'" :overview="dashboardData" :activity="activityData" />
+    <ActivityView
+      v-else-if="activeTab === 'activity'"
+      :overview="activityData"
+      :selected-run="selectedRun"
+      :selected-run-id="selectedRunId"
+      :loading-detail="loadingDetail"
+      :detail-error="detailError"
+      @select-run="selectRun"
+    />
+    <KnowledgeView
+      v-else-if="activeTab === 'knowledge'"
+      :active-subtab="activeKnowledgeTab"
+      :learning="learningData"
+      :episodes="learningEpisodesData"
+      :selected-episode="selectedEpisode"
+      :selected-episode-id="selectedEpisodeId"
+      :selected-report="selectedLearningReport"
+      :selected-report-id="selectedLearningReportId"
+      :selected-skill="selectedSkill"
+      :selected-skill-name="selectedSkillName"
+      :skills="skillsData"
+      :loading-episode="loadingEpisode"
+      :loading-report="loadingReport"
+      :loading-skill="loadingSkill"
+      :episode-error="episodeError"
+      :report-error="reportError"
+      :skill-error="skillError"
+      @set-subtab="setKnowledgeTab"
+      @select-episode="selectEpisode"
+      @select-report="selectLearningReport"
+      @select-skill="selectSkill"
+    />
+    <UsageView v-else-if="activeTab === 'usage'" :usage="usageData" />
+    <IdentityView
+      v-else-if="activeTab === 'identity'"
+      :identity="identityData"
+      :selected-file="selectedIdentityFile"
+      :loading="loadingIdentity"
+      :error="identityError"
+      @select-file="selectIdentityFile"
+    />
+    <HealthView
+      v-else
+      :doctor="doctorData"
+      :sandbox="sandboxData"
+      :loading-doctor="loadingDoctor"
+      :loading-sandbox="loadingSandbox"
+      :doctor-error="doctorError"
+      :sandbox-error="sandboxError"
+      @refresh-doctor="refreshDoctor"
+      @refresh-sandbox="refreshSandbox"
+    />
+  </AppShell>
 </template>
 
-<style scoped>
-:global(*) {
+<style>
+* {
   box-sizing: border-box;
 }
 
-:global(body) {
+body {
   margin: 0;
   min-width: 320px;
   color: var(--tg-theme-text-color, #17212b);
@@ -652,23 +467,22 @@ function notifyText(value: unknown): string | null {
   letter-spacing: 0;
 }
 
-:global(button) {
+button {
   font: inherit;
 }
 
 .app-shell {
-  width: min(1120px, 100%);
+  width: min(1160px, 100%);
   margin: 0 auto;
   padding: calc(14px + env(safe-area-inset-top)) 12px calc(20px + env(safe-area-inset-bottom));
 }
 
 .topbar,
-.cron-header,
-.runs-head,
-.run-row,
-.active-strip,
-.summary-grid,
-.content-grid {
+.panel-head,
+.data-row,
+.metric-grid,
+.two-column,
+.meta-grid {
   display: grid;
   gap: 8px;
 }
@@ -680,7 +494,9 @@ function notifyText(value: unknown): string | null {
 }
 
 .topbar > div,
-.cron-header > div {
+.panel-head > div,
+.row-main,
+.row-side {
   min-width: 0;
 }
 
@@ -702,27 +518,23 @@ p {
 h1 {
   font-size: 1.35rem;
   line-height: 1.15;
-}
-
-h1,
-.cron-header h2 {
   overflow-wrap: anywhere;
 }
 
 h2 {
   font-size: 1rem;
   line-height: 1.2;
+  overflow-wrap: anywhere;
 }
 
 h3 {
-  font-size: 0.82rem;
-  line-height: 1.2;
+  font-size: 0.84rem;
 }
 
-.state-pill,
 .status-pill {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   min-height: 24px;
   padding: 3px 8px;
   border-radius: 999px;
@@ -734,20 +546,16 @@ h3 {
   white-space: nowrap;
 }
 
-.state-pill.live,
 .status-pill.ok {
   color: #0d7a45;
   background: #dff5e8;
 }
 
-.state-pill.stale,
 .status-pill.active {
   color: #8a5a00;
   background: #fff0c2;
 }
 
-.state-pill.offline,
-.state-pill.locked,
 .status-pill.bad {
   color: #a42323;
   background: #ffe1de;
@@ -765,7 +573,11 @@ h3 {
   font-size: 0.82rem;
 }
 
-.notice span {
+.notice span,
+.muted-line,
+dt,
+.row-main small,
+.row-side small {
   color: var(--tg-theme-hint-color, #6b7b88);
 }
 
@@ -773,13 +585,18 @@ h3 {
   margin: 0;
 }
 
-.view-tabs {
+.view-tabs,
+.subtabs,
+.segmented {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 10px;
 }
 
-.tab-button {
+.tab-button,
+.segment-button,
+.tool-button {
   min-height: 32px;
   padding: 5px 10px;
   border: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.18));
@@ -789,122 +606,96 @@ h3 {
   cursor: pointer;
 }
 
-.tab-button.active {
+.tab-button.active,
+.segment-button.active {
   border-color: var(--tg-theme-button_color, #2481cc);
   color: var(--tg-theme-button_color, #2481cc);
   font-weight: 700;
 }
 
-.summary-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin-bottom: 8px;
+.metric-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin-bottom: 10px;
 }
 
-.summary-card,
-.cron-card,
-.detail-panel,
-.active-strip,
+.metric-card,
+.panel,
 .empty-panel {
   border: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.16));
   border-radius: 8px;
   background: var(--tg-theme-secondary-bg-color, #ffffff);
 }
 
-.summary-card {
+.metric-card {
   min-height: 70px;
   padding: 9px;
 }
 
-.summary-card span,
-.active-strip span,
-dt,
-.runs-head span,
-.muted-line {
+.metric-card span {
   color: var(--tg-theme-hint-color, #6b7b88);
   font-size: 0.75rem;
 }
 
-.summary-card strong {
+.metric-card strong {
   display: block;
   margin-top: 6px;
-  font-size: 1.18rem;
+  font-size: 1.16rem;
   line-height: 1.1;
+  overflow-wrap: anywhere;
 }
 
-.active-strip {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin-bottom: 10px;
-  padding: 9px 10px;
+.metric-card.ok strong {
+  color: #0d7a45;
 }
 
-.active-strip div {
-  min-width: 0;
+.metric-card.active strong {
+  color: #8a5a00;
 }
 
-.active-strip strong {
-  display: block;
-  margin-top: 2px;
-  font-size: 1rem;
+.metric-card.bad strong {
+  color: #a42323;
 }
 
-.content-grid {
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr);
+.two-column {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.85fr);
   align-items: start;
 }
 
-.learning-funnel {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 8px;
-  margin-bottom: 10px;
+.two-column.wide-main {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.72fr);
 }
 
-.learning-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr);
-  gap: 8px;
-  align-items: start;
-}
-
-.cron-list {
-  display: grid;
-  gap: 10px;
-}
-
-.cron-card,
-.detail-panel,
+.panel,
 .empty-panel {
   padding: 11px;
 }
 
-.cron-header {
+.panel-head {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
   margin-bottom: 10px;
 }
 
-.cron-header p {
-  margin-top: 3px;
-  color: var(--tg-theme-hint-color, #6b7b88);
-  font-size: 0.8rem;
-  overflow-wrap: anywhere;
+.list-stack,
+.row-list,
+.text-block,
+.evidence-list {
+  display: grid;
+  gap: 8px;
 }
 
-.meta-grid,
-.detail-meta {
-  display: grid;
+.meta-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
   margin: 0 0 10px;
 }
 
-.meta-grid div,
-.detail-meta div {
-  min-width: 0;
+.meta-grid.compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 dt {
   margin-bottom: 2px;
+  font-size: 0.75rem;
 }
 
 dd {
@@ -914,24 +705,11 @@ dd {
   overflow-wrap: anywhere;
 }
 
-.runs {
-  display: grid;
-  gap: 6px;
-}
-
-.runs-head,
-.run-row {
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-}
-
-.runs-head strong {
-  font-size: 0.82rem;
-}
-
-.run-row {
+.data-row {
   width: 100%;
   min-height: 42px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   padding: 7px 8px;
   border: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.14));
   border-radius: 7px;
@@ -941,56 +719,31 @@ dd {
   text-align: left;
 }
 
-.run-row.selected {
-  border-color: var(--tg-theme-button_color, #2481cc);
-  box-shadow: inset 0 0 0 1px var(--tg-theme-button_color, #2481cc);
-}
-
-.learning-report-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 5px;
-  width: 100%;
+.data-row.tall {
   min-height: 58px;
-  padding: 8px;
-  border: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.14));
-  border-radius: 7px;
-  background: var(--tg-theme-secondary-bg-color, #ffffff);
-  color: var(--tg-theme-text-color, #17212b);
-  cursor: pointer;
-  text-align: left;
 }
 
-.learning-report-row.selected {
+.data-row.static {
+  cursor: default;
+}
+
+.data-row.selected {
   border-color: var(--tg-theme-button_color, #2481cc);
   box-shadow: inset 0 0 0 1px var(--tg-theme-button_color, #2481cc);
 }
 
-.report-summary {
-  color: var(--tg-theme-hint-color, #6b7b88);
-  font-size: 0.78rem;
-  overflow-wrap: anywhere;
-}
-
-.run-main,
-.run-side {
+.row-main,
+.row-side {
   display: flex;
-  min-width: 0;
   gap: 6px;
   align-items: center;
 }
 
-.run-main span:nth-child(2) {
-  font-weight: 700;
+.row-main {
+  flex-wrap: wrap;
 }
 
-.run-main small,
-.run-side small {
-  color: var(--tg-theme-hint-color, #6b7b88);
-  font-size: 0.72rem;
-}
-
-.run-side {
+.row-side {
   flex-direction: column;
   align-items: flex-end;
   gap: 1px;
@@ -1025,27 +778,17 @@ dd {
   gap: 10px;
 }
 
-.detail-meta {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin-bottom: 0;
-}
-
-.detail-block {
-  display: grid;
-  gap: 6px;
+.text-block {
   padding-top: 9px;
   border-top: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.14));
 }
 
-.detail-block p {
+.text-block p,
+.evidence-item p {
   font-size: 0.82rem;
   line-height: 1.35;
   white-space: pre-wrap;
-}
-
-.evidence-list {
-  display: grid;
-  gap: 7px;
+  overflow-wrap: anywhere;
 }
 
 .evidence-item {
@@ -1062,18 +805,8 @@ dd {
   font-size: 0.74rem;
 }
 
-.evidence-item span {
-  color: var(--tg-theme-hint-color, #6b7b88);
-}
-
-.evidence-item p {
-  font-size: 0.78rem;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
 pre {
-  max-height: 260px;
+  max-height: 280px;
   margin: 0;
   padding: 9px;
   overflow: auto;
@@ -1085,14 +818,57 @@ pre {
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 820px) {
-  .content-grid,
-  .learning-grid {
-    grid-template-columns: minmax(0, 1fr);
+.table-wrap {
+  width: 100%;
+  overflow: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+th,
+td {
+  padding: 7px 6px;
+  border-bottom: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.14));
+  text-align: left;
+  white-space: nowrap;
+}
+
+.model-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.model-row {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 8px;
+  border-radius: 7px;
+  background: var(--tg-theme-bg-color, #f4f6f8);
+  font-size: 0.78rem;
+}
+
+.model-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .metric-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .learning-funnel {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .two-column,
+  .two-column.wide-main {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .detail-panel {
@@ -1101,12 +877,13 @@ pre {
 }
 
 @media (max-width: 560px) {
-  .summary-grid,
-  .learning-funnel {
+  .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .meta-grid {
+  .meta-grid,
+  .meta-grid.compact,
+  .model-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

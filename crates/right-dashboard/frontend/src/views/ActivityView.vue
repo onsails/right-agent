@@ -1,0 +1,160 @@
+<script setup lang="ts">
+import StatusPill from '../components/StatusPill.vue'
+import { money, notifyText, shortDate, shortId, statusTone } from '../format'
+import type { CronCard, OverviewResponse, RunDetailResponse, RunSummary } from '../types'
+
+defineProps<{
+  overview: OverviewResponse | null
+  selectedRun: RunDetailResponse | null
+  selectedRunId: string | null
+  loadingDetail: boolean
+  detailError: string | null
+}>()
+
+const emit = defineEmits<{
+  selectRun: [run: RunSummary]
+}>()
+
+function cronStatus(cron: CronCard): string {
+  const active = cron.recent_runs.find((run) => run.status === 'queued' || run.status === 'running')
+  return active?.status ?? cron.last_run?.status ?? 'idle'
+}
+</script>
+
+<template>
+  <section class="metric-grid">
+    <article class="metric-card default">
+      <span>Jobs</span>
+      <strong>{{ overview?.summary.cron_count ?? 0 }}</strong>
+    </article>
+    <article class="metric-card active">
+      <span>Running</span>
+      <strong>{{ overview?.summary.active_cron_count ?? 0 }}</strong>
+    </article>
+    <article class="metric-card bad">
+      <span>Failures</span>
+      <strong>{{ overview?.summary.failed_recent_cron_count ?? 0 }}</strong>
+    </article>
+    <article class="metric-card default">
+      <span>Today</span>
+      <strong>{{ money(overview?.summary.today_cost_usd) }}</strong>
+    </article>
+  </section>
+
+  <section class="two-column wide-main">
+    <section class="list-stack">
+      <article v-if="(overview?.crons.length ?? 0) === 0" class="empty-panel">No cron jobs</article>
+
+      <article v-for="cron in overview?.crons ?? []" :key="cron.job_name" class="panel">
+        <header class="panel-head">
+          <div>
+            <p class="eyebrow">{{ cron.recurring ? 'Recurring' : 'One shot' }}</p>
+            <h2>{{ cron.job_name }}</h2>
+            <p class="muted-line">{{ cron.schedule }}</p>
+          </div>
+          <StatusPill :status="cronStatus(cron)" />
+        </header>
+
+        <dl class="meta-grid">
+          <div>
+            <dt>Next</dt>
+            <dd>{{ shortDate(cron.run_at) }}</dd>
+          </div>
+          <div>
+            <dt>Target</dt>
+            <dd>{{ cron.target_chat_id ?? 'default' }}<span v-if="cron.target_thread_id">/{{ cron.target_thread_id }}</span></dd>
+          </div>
+          <div>
+            <dt>Budget</dt>
+            <dd>{{ money(cron.max_budget_usd) }}</dd>
+          </div>
+          <div>
+            <dt>Recent</dt>
+            <dd>{{ cron.recent_runs.length }}</dd>
+          </div>
+        </dl>
+
+        <div class="row-list">
+          <button
+            v-for="run in cron.recent_runs"
+            :key="run.id"
+            class="data-row"
+            :class="{ selected: selectedRunId === run.id }"
+            type="button"
+            @click="emit('selectRun', run)"
+          >
+            <span class="row-main">
+              <span class="status-dot" :class="statusTone(run.status)"></span>
+              <strong>{{ run.status }}</strong>
+              <small>{{ shortId(run.id) }}</small>
+            </span>
+            <span class="row-side">
+              <strong>{{ money(run.cost_usd) }}</strong>
+              <small>{{ shortDate(run.started_at) }}</small>
+            </span>
+          </button>
+          <p v-if="cron.recent_runs.length === 0" class="muted-line">No recent runs</p>
+        </div>
+      </article>
+    </section>
+
+    <aside class="panel detail-panel">
+      <header class="panel-head">
+        <div>
+          <p class="eyebrow">Run</p>
+          <h2>{{ selectedRun?.run.id ? shortId(selectedRun.run.id) : 'None selected' }}</h2>
+        </div>
+        <StatusPill v-if="selectedRun" :status="selectedRun.run.status" />
+      </header>
+
+      <p v-if="loadingDetail" class="muted-line">Loading</p>
+      <p v-else-if="detailError" class="notice inline">{{ detailError }}</p>
+      <p v-else-if="!selectedRun" class="muted-line">No run selected</p>
+
+      <template v-if="selectedRun">
+        <dl class="meta-grid compact">
+          <div>
+            <dt>Kind</dt>
+            <dd>{{ selectedRun.run.kind }}</dd>
+          </div>
+          <div>
+            <dt>Delivery</dt>
+            <dd>{{ selectedRun.run.delivery_status }}</dd>
+          </div>
+          <div>
+            <dt>Exit</dt>
+            <dd>{{ selectedRun.run.exit_code ?? 'none' }}</dd>
+          </div>
+          <div>
+            <dt>Cost</dt>
+            <dd>{{ money(selectedRun.run.cost_usd) }}</dd>
+          </div>
+          <div>
+            <dt>Started</dt>
+            <dd>{{ shortDate(selectedRun.run.started_at) }}</dd>
+          </div>
+          <div>
+            <dt>Finished</dt>
+            <dd>{{ shortDate(selectedRun.run.finished_at) }}</dd>
+          </div>
+        </dl>
+
+        <section class="text-block">
+          <h3>Summary</h3>
+          <p>{{ selectedRun.summary || selectedRun.no_notify_reason || 'No summary' }}</p>
+        </section>
+        <section v-if="notifyText(selectedRun.notify_json)" class="text-block">
+          <h3>Notify</h3>
+          <pre>{{ notifyText(selectedRun.notify_json) }}</pre>
+        </section>
+        <section class="text-block">
+          <h3>Log</h3>
+          <p v-if="!selectedRun.log.available" class="muted-line">Log unavailable</p>
+          <pre v-else>{{ selectedRun.log.lines.join('\n') }}<template v-if="selectedRun.log.truncated">
+... truncated
+</template></pre>
+        </section>
+      </template>
+    </aside>
+  </section>
+</template>
