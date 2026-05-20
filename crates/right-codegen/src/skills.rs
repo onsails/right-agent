@@ -633,6 +633,35 @@ mod tests {
     }
 
     #[test]
+    fn right_composio_skill_documents_workbench_discipline() {
+        let dir = tempdir().unwrap();
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude/skills/right-composio/SKILL.md"))
+                .unwrap();
+        // Frontmatter must declare the skill name CC's selector matches on.
+        assert!(
+            content.contains("name: right-composio"),
+            "SKILL.md must declare name: right-composio in frontmatter"
+        );
+        // Workbench discipline is the load-bearing reason the skill exists.
+        assert!(
+            content.contains("sync_response_to_workbench"),
+            "SKILL.md must document sync_response_to_workbench"
+        );
+        assert!(
+            content.contains("COMPOSIO_MULTI_EXECUTE_TOOL"),
+            "SKILL.md must reference the MULTI_EXECUTE tool by name"
+        );
+        // Auth pitfall must defer to the main MCP Error Diagnosis section,
+        // not duplicate /mcp auth advice (per the 2026-05-06 spec).
+        assert!(
+            content.contains("Do NOT suggest `/mcp auth composio`"),
+            "SKILL.md must steer the agent away from suggesting /mcp auth composio"
+        );
+    }
+
+    #[test]
     fn installs_right_reflect_skill() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
