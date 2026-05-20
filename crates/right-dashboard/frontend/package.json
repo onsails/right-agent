@@ -1,0 +1,17 @@
+{
+  "name": "right-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "vue-tsc --noEmit",
+    "build": "vue-tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "vue": "latest",
+    "vue-tsc": "latest"
+  },
+  "devDependencies": {}
+}
