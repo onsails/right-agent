@@ -282,6 +282,38 @@ pub struct LearningReportSummary {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LearningEpisodesResponse {
+    pub agent: String,
+    pub generated_at: String,
+    pub episodes: Vec<LearningEpisodeSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LearningEpisodeSummary {
+    pub id: i64,
+    pub kind: String,
+    pub seed_trigger_kind: String,
+    pub seed_ref: String,
+    pub status: String,
+    pub target_chat_id: Option<i64>,
+    pub target_thread_id: Option<i64>,
+    pub start_ref: Option<String>,
+    pub end_ref: Option<String>,
+    pub confidence: Option<String>,
+    pub context_incomplete: bool,
+    pub last_evidence_at: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub reports: Vec<LearningReportSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LearningEpisodeDetailResponse {
+    pub episode: LearningEpisodeSummary,
+    pub selector: Option<LearningSelectorDetail>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LearningReportDetailResponse {
     pub report: LearningReportSummary,
     pub episode: Option<LearningEpisodeDetail>,
