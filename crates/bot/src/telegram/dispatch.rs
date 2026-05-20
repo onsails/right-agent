@@ -17,7 +17,7 @@ use right_agent::agent::allowlist::AllowlistHandle;
 use teloxide::RequestError;
 use teloxide::dispatching::{DefaultKey, UpdateFilterExt};
 use teloxide::prelude::*;
-use teloxide::types::{ChatKind, Message, PublicChatKind};
+use teloxide::types::{BotCommand as TelegramBotCommand, ChatKind, Message, PublicChatKind};
 use teloxide::utils::command::BotCommands;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -78,6 +78,13 @@ enum BotCommand {
     DenyAll,
     #[command(description = "Show usage summary (add 'detail' for raw tokens)")]
     Usage(String),
+}
+
+fn visible_bot_commands() -> Vec<TelegramBotCommand> {
+    BotCommand::bot_commands()
+        .into_iter()
+        .filter(|command| command.command.trim_start_matches('/') != "usage")
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,7 +369,7 @@ where
     // groups. Setting only Default is not enough when another tool sharing this token has
     // previously written a narrower scope (e.g. AllPrivateChats) — that narrower scope wins
     // per Telegram's resolution order and shadows Default.
-    let commands = BotCommand::bot_commands();
+    let commands = visible_bot_commands();
     for scope in [
         teloxide::types::BotCommandScope::Default,
         teloxide::types::BotCommandScope::AllPrivateChats,
@@ -766,6 +773,22 @@ mod tests {
             chat_scope_cleanup_ids(&allowlist, &[42, 7, 0, -1001]),
             vec![-1001, 7, 42]
         );
+    }
+
+    #[test]
+    fn visible_commands_hide_usage_but_keep_dashboard() {
+        let commands = visible_bot_commands();
+        let names = commands
+            .iter()
+            .map(|command| command.command.trim_start_matches('/'))
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"dashboard"));
+        assert!(!names.contains(&"usage"));
+        assert!(matches!(
+            BotCommand::parse("/usage detail", "right_bot").unwrap(),
+            BotCommand::Usage(arg) if arg == "detail"
+        ));
     }
 
     #[test]
