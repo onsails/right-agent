@@ -18,6 +18,7 @@ use right_dashboard::read_model::{
     usage::{UsageOverviewInput, usage_overview},
 };
 
+mod identity;
 mod skills;
 
 const REFRESH_INTERVAL_SECS: u64 = 5;
@@ -117,6 +118,14 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
         .route(
             "/dashboard/{agent}/api/v1/knowledge/skills/{skill_name}",
             get(handle_skill_detail),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/identity",
+            get(handle_identity_files),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/identity/{file_name}",
+            get(handle_identity_file_detail),
         )
         .route("/dashboard/{agent}/{*asset}", get(handle_static_asset))
         .with_state(state)
@@ -459,6 +468,55 @@ async fn handle_skill_detail(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "skill_failed",
                 Some("failed to read skill"),
+            )
+        }
+    }
+}
+
+async fn handle_identity_files(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    match identity::identity_response(&state).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => {
+            tracing::error!(agent = %state.agent_name, "dashboard identity query failed: {error:#}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "identity_failed",
+                Some("failed to read identity files"),
+            )
+        }
+    }
+}
+
+async fn handle_identity_file_detail(
+    AxumPath((agent, file_name)): AxumPath<(String, String)>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    match identity::identity_file_response(&state, &file_name).await {
+        Ok(response) => Json(response).into_response(),
+        Err(right_dashboard::identity_files::IdentityFilesError::InvalidFileName(_)) => json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_identity_file",
+            Some("identity file name is invalid"),
+        ),
+        Err(error) => {
+            tracing::error!(agent = %state.agent_name, file = %file_name, "dashboard identity file query failed: {error:#}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "identity_file_failed",
+                Some("failed to read identity file"),
             )
         }
     }
@@ -1123,6 +1181,59 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid_skill_name");
+    }
+
+    #[tokio::test]
+    async fn identity_route_returns_host_files_without_sandbox() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("IDENTITY.md"), "# Identity\n").unwrap();
+        std::fs::write(temp.path().join("SOUL.md"), "# Soul\n").unwrap();
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/identity",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["source"], "host");
+        assert_eq!(body["files"][0]["name"], "IDENTITY.md");
+        assert_eq!(body["files"][0]["content_preview"], "# Identity\n");
+        assert_eq!(body["files"][1]["content_preview"], "# Soul\n");
+        assert_eq!(body["files"][2]["exists"], false);
+    }
+
+    #[tokio::test]
+    async fn identity_file_route_returns_host_file_without_sandbox() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("IDENTITY.md"), "# Identity\n").unwrap();
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/identity/IDENTITY.md",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["file"]["name"], "IDENTITY.md");
+        assert_eq!(body["file"]["content_preview"], "# Identity\n");
+    }
+
+    #[tokio::test]
+    async fn identity_file_route_rejects_invalid_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/identity/not-identity.md",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_identity_file");
     }
 
     #[tokio::test]

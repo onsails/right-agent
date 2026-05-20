@@ -1,6 +1,8 @@
 import type {
   ApiErrorBody,
+  IdentityFileResponse,
   BootstrapResponse,
+  IdentityResponse,
   LearningEpisodeDetailResponse,
   LearningEpisodesResponse,
   LearningOverviewResponse,
@@ -78,6 +80,14 @@ export function skillsOverview(): Promise<SkillsResponse> {
 
 export function skillDetail(skillName: string): Promise<SkillDetailResponse> {
   return requestJson<SkillDetailResponse>(`api/v1/knowledge/skills/${encodeURIComponent(skillName)}`)
+}
+
+export function identityFiles(): Promise<IdentityResponse> {
+  return requestJson<IdentityResponse>('api/v1/identity')
+}
+
+export function identityFile(fileName: string): Promise<IdentityFileResponse> {
+  return requestJson<IdentityFileResponse>(`api/v1/identity/${encodeURIComponent(fileName)}`)
 }
 
 async function requestJson<T>(path: string): Promise<T> {

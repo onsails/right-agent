@@ -397,6 +397,31 @@ pub struct SkillDetailResponse {
     pub truncated: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IdentityResponse {
+    pub agent: String,
+    pub source: String,
+    pub warning: Option<String>,
+    pub files: Vec<IdentityFileSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IdentityFileResponse {
+    pub agent: String,
+    pub warning: Option<String>,
+    pub file: IdentityFileSummary,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct IdentityFileSummary {
+    pub name: String,
+    pub source: String,
+    pub path: String,
+    pub exists: bool,
+    pub content_preview: Option<String>,
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod dashboard_v2_tests {
     use super::*;
