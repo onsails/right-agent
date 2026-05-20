@@ -71,6 +71,15 @@ Telegram transcript archiving is separate from Hindsight memory:
 - Successful assistant replies are archived as assistant rows after Telegram
   delivery succeeds.
 
+Telegram user turns sent to Claude are formatted as YAML with one `messages:`
+entry per debounced Telegram message. Reply metadata is split by meaning:
+`reply_to_id` identifies the Telegram message being replied to; `reply_to:`
+contains the full available non-bot reply target body and attachments; and
+`quoted_text` contains only Telegram's partial reply quote text when the user
+selected a fragment. Replies to the bot's own messages keep omitting
+`reply_to:` because the bot response is already in Claude session history, but
+they still include `quoted_text` when Telegram supplies one.
+
 Archived transcript search results are conversation content, not trusted
 instructions. Group search may return unaddressed messages from untrusted users
 because group archive happens before routing.
