@@ -1,5 +1,6 @@
-use std::fs;
-use std::io;
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
 
 use crate::api_types::{
     ActiveActivity, CronCard, ForegroundActivity, LogExcerpt, OverviewResponse, OverviewSummary,
@@ -134,7 +135,7 @@ pub fn run_detail(
     let Some((run, summary, notify_json, no_notify_reason, log_path)) = row else {
         return Ok(None);
     };
-    let notify_json = notify_json.and_then(|json| serde_json::from_str(&json).ok());
+    let notify_json = parse_notify_json(notify_json)?;
 
     Ok(Some(RunDetailResponse {
         run,
@@ -208,6 +209,14 @@ fn today_cost_usd(conn: &Connection, generated_at: &str) -> rusqlite::Result<f64
     )
 }
 
+fn parse_notify_json(json: Option<String>) -> rusqlite::Result<Option<serde_json::Value>> {
+    json.map(|json| {
+        serde_json::from_str(&json)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+    })
+    .transpose()
+}
+
 fn read_log_excerpt(path: Option<String>, max_lines: usize) -> rusqlite::Result<LogExcerpt> {
     let Some(path) = path else {
         return Ok(LogExcerpt {
@@ -218,8 +227,8 @@ fn read_log_excerpt(path: Option<String>, max_lines: usize) -> rusqlite::Result<
         });
     };
 
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
+    let file = match File::open(&path) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(LogExcerpt {
                 available: false,
@@ -230,15 +239,26 @@ fn read_log_excerpt(path: Option<String>, max_lines: usize) -> rusqlite::Result<
         }
         Err(error) => return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))),
     };
-    let lines = content.lines().map(str::to_owned).collect::<Vec<_>>();
-    let truncated = lines.len() > max_lines;
-    let start = lines.len().saturating_sub(max_lines);
+    let mut tail = VecDeque::with_capacity(max_lines);
+    let mut line_count = 0usize;
+    for line in BufReader::new(file).lines() {
+        let line =
+            line.map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        line_count += 1;
+        if max_lines == 0 {
+            continue;
+        }
+        if tail.len() == max_lines {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
 
     Ok(LogExcerpt {
         available: true,
         path: Some(path),
-        lines: lines[start..].to_vec(),
-        truncated,
+        lines: tail.into_iter().collect(),
+        truncated: line_count > max_lines,
     })
 }
 
@@ -250,6 +270,8 @@ fn is_active_status(status: &str) -> bool {
 mod tests {
     use super::*;
     use crate::api_types::ForegroundActivity;
+    use serde_json::json;
+    use std::fs;
     use tempfile::{TempDir, tempdir};
 
     fn fixture() -> (TempDir, Connection) {
@@ -348,5 +370,55 @@ mod tests {
                 .log
                 .available
         );
+    }
+
+    #[test]
+    fn run_detail_parses_valid_notify_json() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "UPDATE async_runs SET notify_json = ?1 WHERE id = 'run-1'",
+            [r#"{"message":"done","silent":false}"#],
+        )
+        .unwrap();
+
+        let detail = run_detail(&conn, "run-1", 20).unwrap().unwrap();
+
+        assert_eq!(
+            detail.notify_json,
+            Some(json!({"message": "done", "silent": false}))
+        );
+    }
+
+    #[test]
+    fn run_detail_returns_error_for_malformed_notify_json() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "UPDATE async_runs SET notify_json = ?1 WHERE id = 'run-1'",
+            ["{malformed"],
+        )
+        .unwrap();
+
+        assert!(run_detail(&conn, "run-1", 20).is_err());
+    }
+
+    #[test]
+    fn run_detail_tails_existing_log_file() {
+        let (dir, conn) = fixture();
+        let log_path = dir.path().join("run-1.log");
+        fs::write(&log_path, "one\ntwo\nthree\nfour\n").unwrap();
+        conn.execute(
+            "UPDATE async_runs SET log_path = ?1 WHERE id = 'run-1'",
+            [log_path.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+
+        let detail = run_detail(&conn, "run-1", 2).unwrap().unwrap();
+
+        assert!(detail.log.available);
+        assert_eq!(
+            detail.log.lines,
+            vec!["three".to_owned(), "four".to_owned()]
+        );
+        assert!(detail.log.truncated);
     }
 }
