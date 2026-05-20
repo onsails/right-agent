@@ -5,6 +5,7 @@ import type {
   LearningReportDetailResponse,
   OverviewResponse,
   RunDetailResponse,
+  UsageOverviewResponse,
 } from './types'
 
 declare global {
@@ -53,6 +54,10 @@ export function learningOverview(): Promise<LearningOverviewResponse> {
 
 export function learningReportDetail(reportId: number): Promise<LearningReportDetailResponse> {
   return requestJson<LearningReportDetailResponse>(`api/v1/learning/reports/${encodeURIComponent(String(reportId))}`)
+}
+
+export function usageOverview(): Promise<UsageOverviewResponse> {
+  return requestJson<UsageOverviewResponse>('api/v1/usage')
 }
 
 async function requestJson<T>(path: string): Promise<T> {

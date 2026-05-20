@@ -59,6 +59,55 @@ export interface OverviewSandboxStatus {
   detail: string | null
 }
 
+export interface UsageOverviewResponse {
+  agent: string
+  generated_at: string
+  windows: UsageWindow[]
+}
+
+export interface UsageWindow {
+  key: string
+  label: string
+  sources: UsageSourceSummary[]
+  total_cost_usd: number
+  subscription_cost_usd: number
+  api_cost_usd: number
+  turns: number
+  invocations: number
+  input_tokens: number
+  output_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
+  web_search_requests: number
+  web_fetch_requests: number
+  per_model: UsageModelSummary[]
+}
+
+export interface UsageSourceSummary {
+  source: string
+  cost_usd: number
+  subscription_cost_usd: number
+  api_cost_usd: number
+  turns: number
+  invocations: number
+  input_tokens: number
+  output_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
+  web_search_requests: number
+  web_fetch_requests: number
+  per_model: UsageModelSummary[]
+}
+
+export interface UsageModelSummary {
+  model: string
+  cost_usd: number
+  input_tokens: number
+  output_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
+}
+
 export interface OverviewSummary {
   cron_count: number
   active_cron_count: number
