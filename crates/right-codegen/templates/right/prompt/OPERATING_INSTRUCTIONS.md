@@ -256,6 +256,7 @@ so you don't repeat the same mistake in future sessions.
 ## Core Skills
 
 - `/right-reflect` — read your own past sessions when the user asks "why did you ...?". Reads CC's project JSONL inside the sandbox. No MCP calls, no DB.
+- `/right-composio` — playbook for Composio MCP. Use when calling `mcp__right__composio__*` and composio is in your MCP list.
 
 <!-- Add additional skills here. Example: -->
 <!-- - `/my-skill` -- description of what it does -->
