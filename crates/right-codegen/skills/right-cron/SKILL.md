@@ -128,9 +128,10 @@ The job is queued for the cron engine. Lock check still applies — if the job i
 
 **Triggering ≠ delivery.** Be honest with the user about two things:
 
-1. The cron itself decides whether to notify. If its structured output sets
-   `notify` to `null`, no message is sent and the run records a
-   `no_notify_reason` instead. Don't promise the user a message will arrive.
+1. The cron itself decides whether to notify. User-facing delivery requires
+   `delivery.kind = "notify"` with `delivery.content`; silent runs use
+   `delivery.kind = "silent"` with `delivery.reason`. Don't promise the user a
+   message will arrive.
 2. If the cron does produce a notification, delivery is held until the chat
    has been idle for **{{ idle_threshold_min }} minutes**. This is a
    UX-politeness gate — cron messages must not interrupt an active
@@ -138,7 +139,7 @@ The job is queued for the cron engine. Lock check still applies — if the job i
 
 If the user wants the result without waiting, suggest they call
 `mcp__right__cron_list_runs` after the job finishes — `delivery_status` and
-`no_notify_reason` tell the full story.
+`delivery` tell the full story.
 
 ## Listing Current Cron Jobs
 
@@ -206,11 +207,12 @@ Parameters:
 - `job_name` (optional string) — filter by job name; omit to return all jobs
 - `limit` (optional integer) — max runs to return; default 20
 
-Each run record contains: `id`, `job_name`, `started_at`, `finished_at`, `exit_code`, `status`, `log_path`, `summary`, `notify`, `delivered_at`, `delivery_status`, `no_notify_reason`
+Each run record contains: `id`, `job_name`, `started_at`, `finished_at`, `exit_code`, `status`, `log_path`, `run_note`, `delivery`, `delivered_at`, `delivery_status`
 
 **Delivery diagnostics:**
 - `delivery_status`: lifecycle state — `none` (CC decided nothing to report), `pending` (awaiting delivery), `retryable` (delivery failed and will retry), `delivered` (sent to Telegram), `superseded` (newer run replaced this one), `failed` (delivery gave up after retries)
-- `no_notify_reason`: CC's explanation when `notify` is null (e.g. "No changes since last run")
+- `delivery`: structured decision; `delivery.kind = "notify"` carries user-facing `delivery.content`, while `delivery.kind = "silent"` carries `delivery.reason`
+- `run_note`: technical run history/debug metadata; never delivered to Telegram
 - `delivered_at`: timestamp when the result was delivered, or null
 
 ### mcp__right__cron_show_run
@@ -245,12 +247,12 @@ User: "Why did morning-briefing fail?"
 
 ### Diagnosing missing notifications
 
-When the user asks "why wasn't I notified?", check `delivery_status` and `no_notify_reason`:
+When the user asks "why wasn't I notified?", check `delivery_status` and `delivery`:
 
 ```
 1. mcp__right__cron_list_runs(job_name="github-tracker", limit=5)
    -> Check delivery_status for each run:
-      - "none" + no_notify_reason → CC decided nothing to report, reason explains why
+      - "none" + delivery.kind = "silent" → CC decided nothing to report, delivery.reason explains why
       - "pending" → notification waiting for chat idle ({{ idle_threshold_min }} min threshold)
       - "retryable" → delivery failed and will retry
       - "superseded" → newer run replaced this one before delivery
@@ -283,4 +285,4 @@ The log is NDJSON (one JSON event per line) — look for `"type": "assistant"` e
 1. **UTC schedules**: Cron expressions are evaluated in UTC by the Rust runtime.
 2. **Continuous reconciliation**: The runtime reconciles specs continuously; create/update/delete take effect promptly. Don't quote a specific number of seconds to the user — the polling interval is an internal detail.
 3. **Manual triggers**: `mcp__right__cron_trigger` queues the job for the next reconciliation pass. If the job is locked (still running from a previous invocation), the trigger is skipped.
-4. **Conditional delivery**: A successful run does not guarantee a Telegram message. The cron's structured output decides via `notify` (set ⇒ deliver, null ⇒ silent + `no_notify_reason`). Pending notifications wait for {{ idle_threshold_min }} minutes of chat idle before they are sent.
+4. **Conditional delivery**: A successful run does not guarantee a Telegram message. The cron's structured output decides via `delivery.kind`: `"notify"` sends `delivery.content`, while `"silent"` records `delivery.reason`. Pending notifications wait for {{ idle_threshold_min }} minutes of chat idle before they are sent.

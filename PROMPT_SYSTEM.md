@@ -216,9 +216,10 @@ platform instructions, not live user queries; agents that need memory
 call `mcp__right__memory_recall` explicitly from the prompt.
 
 The `## Cron Delivery Contract` block tells the agent that its
-structured output is the Telegram delivery channel and that the turn
-has no live user. See [issue #48](https://github.com/onsails/right-agent/issues/48)
-for the production incidents that motivated this section.
+structured output is the Telegram delivery channel, normal assistant
+text in a cron turn is not delivered, and the turn has no live user.
+See [issue #48](https://github.com/onsails/right-agent/issues/48) for
+the production incidents that motivated this section.
 The operating instructions also define the cron idle UX rule: results are
 auto-delivered only after the chat has been idle for 2 minutes, and the
 agent must never promise delivery sooner than 2 minutes.
@@ -345,28 +346,23 @@ IDENTITY.md, SOUL.md, and USER.md are verified. For sandboxed agents, the worker
 first reconciles those files from `/sandbox` into the host mirror; no-sandbox
 agents are checked directly in `agent_dir/`.
 
-### CRON_SCHEMA_JSON (cron jobs — default)
-Defined in `crates/right-codegen/src/agent_def.rs`. Required:
-`summary` (string). Optional: `notify` (object | null) and
-`no_notify_reason` (string | null). When `notify` is non-null, its
-`content` field is required. `notify: null` is the silent-output path
-(cron ran but has nothing to report); `no_notify_reason` should then
-carry a short factual explanation.
+### CRON_SCHEMA_JSON (cron jobs)
+
+Required: `delivery` and `run_note`.
+
+Normal assistant text in a cron turn is not delivered to Telegram; only
+the final structured output is delivered.
+
+`delivery` is one of:
+
+- `{"kind":"notify","content":"...","attachments":null}` - user-facing Telegram delivery.
+- `{"kind":"silent","reason":"..."}` - explicit silent run for conditional checks with nothing to report.
+
+`run_note` is technical history/debug metadata and is never delivered.
 
 ### BG_CONTINUATION_SCHEMA_JSON (Telegram background continuation)
-Defined in `crates/right-codegen/src/agent_def.rs`. Selected by
-`background::spawn_background_continuation` for foreground turns the
-worker offloaded to a forked session. Differs from `CRON_SCHEMA_JSON`:
 
-- `notify` is REQUIRED and non-null — silent output is forbidden because
-  the user is waiting for the foreground answer that was sent to
-  background.
-- `notify.content` has `minLength: 1` (no empty replies).
-- `no_notify_reason` is absent from the schema — silence is not a valid
-  outcome for this job kind.
-
-`summary` remains required for log/analytics parity with
-`CRON_SCHEMA_JSON`.
+Required: `delivery` and `run_note`. `delivery.kind` is always `"notify"` and `delivery.content` has `minLength: 1`; silent output is forbidden.
 
 ## MCP Server Instructions
 
