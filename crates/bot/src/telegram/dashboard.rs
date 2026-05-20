@@ -61,7 +61,7 @@ async fn handle_bootstrap(
 ) -> Response {
     let user = match authenticate_api(&state, &agent, &headers) {
         Ok(user) => user,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
 
     Json(BootstrapResponse {
@@ -82,13 +82,13 @@ async fn handle_overview(
     State(state): State<DashboardState>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = authenticate_api(&state, &agent, &headers) {
-        return response;
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
     }
 
     let conn = match open_dashboard_read_connection(&state) {
         Ok(conn) => conn,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
     let input = OverviewInput {
         agent: state.agent_name.clone(),
@@ -115,13 +115,13 @@ async fn handle_run_detail(
     State(state): State<DashboardState>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = authenticate_api(&state, &agent, &headers) {
-        return response;
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
     }
 
     let conn = match open_dashboard_read_connection(&state) {
         Ok(conn) => conn,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
 
     match run_detail(&conn, &run_id, MAX_LOG_LINES) {
@@ -158,13 +158,13 @@ fn authenticate_api(
     state: &DashboardState,
     agent: &str,
     headers: &HeaderMap,
-) -> Result<DashboardUser, Response> {
+) -> Result<DashboardUser, DashboardRouteError> {
     let raw_init_data = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("tma "))
         .ok_or_else(|| {
-            json_error(
+            DashboardRouteError::new(
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
                 Some("missing Telegram Mini App authorization"),
@@ -179,7 +179,7 @@ fn authenticate_api(
     let user = validate_init_data(raw_init_data, &validation).map_err(auth_error_response)?;
     let trusted_user_ids = {
         let allowlist = state.allowlist.0.read().map_err(|_| {
-            json_error(
+            DashboardRouteError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "allowlist_unavailable",
                 Some("dashboard allowlist is unavailable"),
@@ -194,7 +194,7 @@ fn authenticate_api(
 
     let user = authorize_user(user, &trusted_user_ids).map_err(auth_error_response)?;
     if agent != state.agent_name {
-        return Err(json_error(
+        return Err(DashboardRouteError::new(
             StatusCode::FORBIDDEN,
             "agent_mismatch",
             Some("dashboard agent path does not match this bot"),
@@ -206,7 +206,7 @@ fn authenticate_api(
 
 fn open_dashboard_read_connection(
     state: &DashboardState,
-) -> Result<rusqlite::Connection, Response> {
+) -> Result<rusqlite::Connection, DashboardRouteError> {
     let db_path = state.agent_dir.join("data.db");
     if !db_path.exists() {
         tracing::error!(
@@ -214,7 +214,7 @@ fn open_dashboard_read_connection(
             path = %db_path.display(),
             "dashboard database missing"
         );
-        return Err(json_error(
+        return Err(DashboardRouteError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_open_failed",
             Some("dashboard database does not exist"),
@@ -223,7 +223,7 @@ fn open_dashboard_read_connection(
 
     right_db::open_connection(&state.agent_dir, false).map_err(|error| {
         tracing::error!(agent = %state.agent_name, "dashboard db open failed: {error:#}");
-        json_error(
+        DashboardRouteError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_open_failed",
             Some("failed to open dashboard database"),
@@ -231,9 +231,30 @@ fn open_dashboard_read_connection(
     })
 }
 
-fn auth_error_response(error: AuthError) -> Response {
+#[derive(Clone, Copy)]
+struct DashboardRouteError {
+    status: StatusCode,
+    error: &'static str,
+    detail: Option<&'static str>,
+}
+
+impl DashboardRouteError {
+    fn new(status: StatusCode, error: &'static str, detail: Option<&'static str>) -> Self {
+        Self {
+            status,
+            error,
+            detail,
+        }
+    }
+
+    fn into_response(self) -> Response {
+        json_error(self.status, self.error, self.detail)
+    }
+}
+
+fn auth_error_response(error: AuthError) -> DashboardRouteError {
     match error {
-        AuthError::UnauthorizedUser => json_error(
+        AuthError::UnauthorizedUser => DashboardRouteError::new(
             StatusCode::FORBIDDEN,
             "forbidden",
             Some("Telegram user is not trusted for this agent"),
@@ -242,7 +263,7 @@ fn auth_error_response(error: AuthError) -> Response {
         | AuthError::MalformedInitData
         | AuthError::InvalidHash
         | AuthError::Expired
-        | AuthError::MissingUser => json_error(
+        | AuthError::MissingUser => DashboardRouteError::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             Some("invalid Telegram Mini App authorization"),
