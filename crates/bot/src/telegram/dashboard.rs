@@ -1,5 +1,4 @@
-use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
@@ -18,15 +17,32 @@ const REFRESH_INTERVAL_SECS: u64 = 5;
 const INIT_DATA_MAX_AGE_SECS: i64 = 86_400;
 const MAX_LOG_LINES: usize = 80;
 
-pub(crate) fn dashboard_url(hostname: &str, agent_name: &str) -> Result<url::Url, url::ParseError> {
-    url::Url::parse(&format!(
-        "https://{}/dashboard/{}/",
-        hostname
-            .trim_end_matches('/')
-            .trim_start_matches("https://")
-            .trim_start_matches("http://"),
-        agent_name
-    ))
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DashboardUrlError {
+    #[error("invalid dashboard hostname: {0}")]
+    Parse(#[from] url::ParseError),
+    #[error("dashboard hostname must not contain a path, query, or fragment (got {0:?})")]
+    HostnameNotBare(String),
+}
+
+pub(crate) fn dashboard_url(
+    hostname: &str,
+    agent_name: &str,
+) -> Result<url::Url, DashboardUrlError> {
+    let stripped = hostname
+        .trim_end_matches('/')
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let base = url::Url::parse(&format!("https://{stripped}/"))?;
+    if base.path() != "/"
+        || base.query().is_some()
+        || base.fragment().is_some()
+        || !base.username().is_empty()
+        || base.password().is_some()
+    {
+        return Err(DashboardUrlError::HostnameNotBare(hostname.to_string()));
+    }
+    Ok(base.join(&format!("/dashboard/{agent_name}/"))?)
 }
 
 #[derive(Clone)]
@@ -232,7 +248,7 @@ fn open_dashboard_read_connection(
         ));
     }
 
-    right_db::open_connection(&state.agent_dir, false).map_err(|error| {
+    right_db::open_connection_readonly(&state.agent_dir).map_err(|error| {
         tracing::error!(agent = %state.agent_name, "dashboard db open failed: {error:#}");
         DashboardRouteError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -415,6 +431,53 @@ mod tests {
         let url = super::dashboard_url("right.example.com", "bot-one").unwrap();
 
         assert_eq!(url.path(), "/dashboard/bot-one/");
+    }
+
+    #[test]
+    fn dashboard_url_rejects_hostname_with_path() {
+        let err = super::dashboard_url("right.example.com/some-path", "alpha")
+            .expect_err("hostname with path must be rejected");
+
+        assert!(matches!(err, super::DashboardUrlError::HostnameNotBare(_)));
+    }
+
+    #[test]
+    fn dashboard_url_rejects_hostname_with_path_after_scheme() {
+        let err = super::dashboard_url("https://right.example.com/extra", "alpha")
+            .expect_err("hostname with path must be rejected");
+
+        assert!(matches!(err, super::DashboardUrlError::HostnameNotBare(_)));
+    }
+
+    #[test]
+    fn dashboard_url_rejects_hostname_with_query() {
+        let err = super::dashboard_url("right.example.com/?token=abc", "alpha")
+            .expect_err("hostname with query must be rejected");
+
+        assert!(matches!(err, super::DashboardUrlError::HostnameNotBare(_)));
+    }
+
+    #[test]
+    fn dashboard_url_rejects_hostname_with_fragment() {
+        let err = super::dashboard_url("right.example.com/#frag", "alpha")
+            .expect_err("hostname with fragment must be rejected");
+
+        assert!(matches!(err, super::DashboardUrlError::HostnameNotBare(_)));
+    }
+
+    #[test]
+    fn dashboard_url_rejects_hostname_with_userinfo() {
+        let err = super::dashboard_url("user@right.example.com", "alpha")
+            .expect_err("hostname with userinfo must be rejected");
+
+        assert!(matches!(err, super::DashboardUrlError::HostnameNotBare(_)));
+    }
+
+    #[test]
+    fn dashboard_url_accepts_scheme_prefix() {
+        let url = super::dashboard_url("https://right.example.com", "alpha").unwrap();
+
+        assert_eq!(url.as_str(), "https://right.example.com/dashboard/alpha/");
     }
 
     #[tokio::test]

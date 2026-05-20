@@ -56,7 +56,7 @@ pub fn validate_init_data(raw: &str, cfg: &InitDataValidation) -> Result<Dashboa
     let mut user = None;
     let mut auth_date = None;
     let mut seen_keys = BTreeSet::new();
-    let mut data_pairs = Vec::new();
+    let mut data_pairs: Vec<(String, String)> = Vec::new();
 
     for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
         let key = key.into_owned();
@@ -81,14 +81,7 @@ pub fn validate_init_data(raw: &str, cfg: &InitDataValidation) -> Result<Dashboa
     }
 
     let supplied_hash = hash.ok_or(AuthError::MalformedInitData)?;
-    if supplied_hash.len() != 64
-        || !supplied_hash
-            .as_bytes()
-            .iter()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(AuthError::InvalidHash);
-    }
+    let supplied_hash_bytes = decode_hex_hash(&supplied_hash).ok_or(AuthError::InvalidHash)?;
 
     let auth_date = auth_date
         .ok_or(AuthError::MalformedInitData)?
@@ -96,27 +89,24 @@ pub fn validate_init_data(raw: &str, cfg: &InitDataValidation) -> Result<Dashboa
         .map_err(|_| AuthError::MalformedInitData)?;
 
     data_pairs.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
-    let data_check_string = data_pairs
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join("\n");
 
     let secret_key = Hmac::<Sha256>::new_from_slice(b"WebAppData")
-        .map_err(|_| AuthError::MalformedInitData)?
+        .expect("HMAC accepts any key length")
         .chain_update(cfg.bot_token.as_bytes())
         .finalize()
         .into_bytes();
-    let expected_hash = Hmac::<Sha256>::new_from_slice(&secret_key)
-        .map_err(|_| AuthError::MalformedInitData)?
-        .chain_update(data_check_string.as_bytes())
-        .finalize()
-        .into_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+    let mut mac = Hmac::<Sha256>::new_from_slice(&secret_key).expect("HMAC accepts any key length");
+    for (idx, (key, value)) in data_pairs.iter().enumerate() {
+        if idx > 0 {
+            mac.update(b"\n");
+        }
+        mac.update(key.as_bytes());
+        mac.update(b"=");
+        mac.update(value.as_bytes());
+    }
+    let expected_hash = mac.finalize().into_bytes();
 
-    if !bool::from(expected_hash.as_bytes().ct_eq(supplied_hash.as_bytes())) {
+    if !bool::from(expected_hash.as_slice().ct_eq(&supplied_hash_bytes)) {
         return Err(AuthError::InvalidHash);
     }
 
@@ -125,7 +115,7 @@ pub fn validate_init_data(raw: &str, cfg: &InitDataValidation) -> Result<Dashboa
         .timestamp()
         .checked_sub(auth_date)
         .ok_or(AuthError::Expired)?;
-    if age_secs < 0 || age_secs > cfg.max_age_secs {
+    if !(0..=cfg.max_age_secs).contains(&age_secs) {
         return Err(AuthError::Expired);
     }
 
@@ -148,6 +138,29 @@ pub fn authorize_user(
         Ok(user)
     } else {
         Err(AuthError::UnauthorizedUser)
+    }
+}
+
+fn decode_hex_hash(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let bytes = hex.as_bytes();
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let high = hex_digit(bytes[i * 2])?;
+        let low = hex_digit(bytes[i * 2 + 1])?;
+        *byte = (high << 4) | low;
+    }
+    Some(out)
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 

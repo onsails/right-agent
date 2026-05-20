@@ -1,4 +1,4 @@
-use right_db::{MIGRATIONS, open_connection, open_db};
+use right_db::{MIGRATIONS, open_connection, open_connection_readonly, open_db};
 use tempfile::tempdir;
 
 #[test]
@@ -79,6 +79,37 @@ fn open_connection_sets_sqlite_pragmas() {
 
     assert_eq!(journal_mode.to_lowercase(), "wal");
     assert_eq!(busy_timeout_ms, 5000);
+}
+
+#[test]
+fn open_connection_readonly_requires_existing_db() {
+    let dir = tempdir().unwrap();
+
+    let err = open_connection_readonly(dir.path()).expect_err("missing db should not open");
+
+    assert!(err.to_string().contains("unable to open database file"));
+    assert!(
+        !dir.path().join("data.db").exists(),
+        "readonly open must not create data.db",
+    );
+}
+
+#[test]
+fn open_connection_readonly_rejects_writes() {
+    let dir = tempdir().unwrap();
+    open_db(dir.path(), true).unwrap();
+
+    let conn = open_connection_readonly(dir.path()).unwrap();
+    assert_eq!(
+        query_user_version(&conn),
+        right_db::migrations::LATEST_SCHEMA_VERSION as i64,
+    );
+
+    let err = conn
+        .execute("CREATE TABLE write_probe (id INTEGER)", [])
+        .expect_err("readonly connection should reject writes");
+
+    assert!(err.to_string().contains("readonly database"));
 }
 
 #[test]
