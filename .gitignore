@@ -11,3 +11,4 @@ devenv.local.yaml
 target/
 .claude/worktrees
 .claude
+.superpowers/
