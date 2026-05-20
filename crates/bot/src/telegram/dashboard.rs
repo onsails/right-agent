@@ -11,7 +11,11 @@ use right_dashboard::api_types::{
 use right_dashboard::auth::{
     AuthError, DashboardUser, InitDataValidation, authorize_user, validate_init_data,
 };
-use right_dashboard::read_model::{OverviewInput, overview, run_detail};
+use right_dashboard::read_model::{
+    OverviewInput,
+    learning::{LearningOverviewInput, learning_overview, learning_report_detail},
+    overview, run_detail,
+};
 
 const REFRESH_INTERVAL_SECS: u64 = 5;
 const INIT_DATA_MAX_AGE_SECS: i64 = 86_400;
@@ -63,6 +67,14 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
             "/dashboard/{agent}/api/v1/runs/{run_id}",
             get(handle_run_detail),
         )
+        .route(
+            "/dashboard/{agent}/api/v1/learning/overview",
+            get(handle_learning_overview),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/learning/reports/{report_id}",
+            get(handle_learning_report_detail),
+        )
         .route("/dashboard/{agent}/{*asset}", get(handle_static_asset))
         .with_state(state)
 }
@@ -99,6 +111,9 @@ async fn handle_bootstrap(
         features: DashboardFeatures {
             readonly: true,
             commands_enabled: false,
+            learning_metrics: true,
+            learning_evidence_snippets: true,
+            learning_commands: false,
         },
     })
     .into_response()
@@ -160,6 +175,81 @@ async fn handle_run_detail(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "run_detail_failed",
                 Some("failed to read dashboard run detail"),
+            )
+        }
+    }
+}
+
+async fn handle_learning_overview(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    let conn = match open_dashboard_read_connection(&state) {
+        Ok(conn) => conn,
+        Err(error) => return error.into_response(),
+    };
+    let input = LearningOverviewInput {
+        agent: state.agent_name.clone(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        refresh_interval_secs: REFRESH_INTERVAL_SECS,
+    };
+
+    match learning_overview(&conn, input) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => {
+            tracing::error!(agent = %state.agent_name, "dashboard learning overview query failed: {error:#}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "learning_overview_failed",
+                Some("failed to read learning overview"),
+            )
+        }
+    }
+}
+
+async fn handle_learning_report_detail(
+    AxumPath((agent, report_id)): AxumPath<(String, String)>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    let report_id = match report_id.parse::<i64>() {
+        Ok(report_id) => report_id,
+        Err(_) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_report_id",
+                Some("learning report id must be an integer"),
+            );
+        }
+    };
+
+    let conn = match open_dashboard_read_connection(&state) {
+        Ok(conn) => conn,
+        Err(error) => return error.into_response(),
+    };
+
+    match learning_report_detail(&conn, &state.agent_name, report_id) {
+        Ok(Some(response)) => Json(response).into_response(),
+        Ok(None) => json_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            Some("learning report not found"),
+        ),
+        Err(error) => {
+            tracing::error!(agent = %state.agent_name, report_id, "dashboard learning report query failed: {error:#}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "learning_report_failed",
+                Some("failed to read learning report"),
             )
         }
     }
@@ -419,6 +509,32 @@ mod tests {
             .status()
     }
 
+    async fn get_json(
+        path: &str,
+        auth: Option<String>,
+        agent_dir: std::path::PathBuf,
+    ) -> (StatusCode, serde_json::Value) {
+        let router = super::build_dashboard_router(test_state(agent_dir));
+        let mut builder = Request::builder().uri(path).method("GET");
+        if let Some(auth) = auth {
+            builder = builder.header(header::AUTHORIZATION, format!("tma {auth}"));
+        }
+        let response = router
+            .oneshot(builder.body(Body::empty()).expect("valid request"))
+            .await
+            .expect("router response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .expect("body bytes");
+        let value = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).expect("json response")
+        };
+        (status, value)
+    }
+
     #[test]
     fn dashboard_url_strips_scheme_and_trailing_slash() {
         let url = super::dashboard_url("https://right.example.com/", "alpha").unwrap();
@@ -487,6 +603,24 @@ mod tests {
         let status = get("/dashboard/alpha/", None, temp.path().to_path_buf()).await;
 
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_exposes_learning_capabilities() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/bootstrap",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["features"]["learning_metrics"], true);
+        assert_eq!(body["features"]["learning_evidence_snippets"], true);
+        assert_eq!(body["features"]["learning_commands"], false);
     }
 
     #[tokio::test]
@@ -561,6 +695,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn learning_overview_returns_data_for_authorized_user() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/learning/overview",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["capabilities"]["learning_metrics"], true);
+    }
+
+    #[tokio::test]
+    async fn learning_overview_rejects_missing_auth() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let status = get(
+            "/dashboard/alpha/api/v1/learning/overview",
+            None,
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn overview_on_missing_db_returns_500_without_creating_db() {
         let temp = tempfile::tempdir().expect("tempdir");
         let db_path = temp.path().join("data.db");
@@ -589,5 +753,81 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn learning_report_detail_returns_not_found_for_unknown_report() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+
+        let status = get(
+            "/dashboard/alpha/api/v1/learning/reports/999",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn learning_report_detail_rejects_malformed_id_after_auth() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/learning/reports/not-a-number",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_report_id");
+    }
+
+    #[tokio::test]
+    async fn learning_report_detail_rejects_missing_auth_before_malformed_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/learning/reports/not-a-number",
+            None,
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn learning_report_detail_returns_data_for_authorized_user() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                id, agent_name, source_invocation_id, trigger_kind, status,
+                confidence, evidence_refs_json, review_output_json, created_at
+             ) VALUES (
+                1, 'alpha', 'inv-1', 'effort_threshold', 'nothing_to_learn',
+                'medium', '[]',
+                '{\"status\":\"nothing_to_learn\",\"confidence\":\"medium\",\"evidence_refs\":[],\"user_notice\":null}',
+                '2026-05-20T11:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/learning/reports/1",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["report"]["id"], 1);
+        assert_eq!(body["report"]["status"], "nothing_to_learn");
     }
 }
