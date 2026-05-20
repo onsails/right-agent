@@ -70,9 +70,15 @@
 ### right-dashboard
 
 - `auth.rs` — Telegram Mini App `initData` validation and allowlist authorization helpers.
-- `api_types.rs` — cron and learned-skill dashboard DTOs, feature/capability flags, and error response bodies.
-- `read_model.rs` — read-only SQLite projections for cron overview/run detail and the public `read_model::learning` entry point.
+- `api_types.rs` — dashboard DTOs for bootstrap, overview, activity, knowledge, usage, identity, health, feature/capability flags, and error response bodies.
+- `read_model.rs` — read-only SQLite projection facade for activity overview/run detail and the public activity compatibility entry points.
+- `read_model/activity.rs` — activity projections over async runs, usage rows, cron specs, run notifications, and bounded run logs.
+- `read_model/dashboard_overview.rs` — top-level Mini App overview aggregation over active work, recent failures, today's usage, learning candidates, and injected runtime health summaries.
 - `read_model/learning.rs` — learned-skill metrics and report-detail projections over `learning_episodes`, `skill_review_reports`, `skill_learning_events`, `execution_events`, and trusted `messages`.
+- `read_model/learning_episodes.rs` — learning-episode list/detail projections with report links and selected evidence refs.
+- `read_model/usage.rs` — usage/cost projections over `usage_events`, including time-window totals, source splits, and model summaries.
+- `skill_inventory.rs` — bounded host-side skill inventory/detail helpers grouped as core, learned, and other.
+- `identity_files.rs` — bounded host-side identity-file summary/detail helpers for `IDENTITY.md`, `SOUL.md`, and `USER.md`.
 - `assets.rs` — embedded static dashboard asset lookup and content types.
 - `frontend/` — Vue/Vite source for the Mini App dashboard.
 - `static/dashboard/` — checked-in built dashboard assets served by the bot.
@@ -107,6 +113,9 @@
 - `cc/` — generic Claude Code subprocess plumbing: invocation builder, prompt assembly, stream parser, structured-reply parser, outbound DTOs, and shared markdown helpers.
 - `telegram/` — bot adaptor, dispatcher, handler, per-session worker, session table, chat-ID filter, OAuth callback server, Telegram markdown rendering/splitting, dashboard routes, and attachment delivery (with STT integration).
 - `telegram/dashboard.rs` — Axum route mounting for `/dashboard/<agent>/`, dashboard API handlers, Telegram menu/button setup, and injected bot-owned auth/runtime state.
+- `telegram/dashboard/health.rs` — explicit read-only `/health/*` probes for doctor output and bounded sandbox disk/memory/process snapshots.
+- `telegram/dashboard/identity.rs` — sandbox-first bounded identity file reads with host-mirror fallback.
+- `telegram/dashboard/skills.rs` — sandbox-first bounded skill inventory/detail reads with host-mirror fallback.
 - `login.rs` — token-based Claude login flow (setup-token, env var injection).
 - `sync.rs` — background `right-platform-store` sync to `/sandbox/.platform/`.
 - `cron.rs`, `async_delivery.rs` — cron engine and async delivery loop (resumes main session so cron/background results land in agent context).
