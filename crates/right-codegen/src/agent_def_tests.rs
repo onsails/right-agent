@@ -545,9 +545,9 @@ fn operating_instructions_teach_agent_tool_delegation() {
 
     for needle in [
         "`Agent` tool",
-        "independent workstream",
-        "main session remains accountable",
-        "synthesize the result",
+        "intermediate results",
+        "main session is accountable",
+        "synthesize for the user",
     ] {
         assert!(
             ops.contains(needle),
