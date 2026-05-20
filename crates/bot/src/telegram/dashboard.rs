@@ -12,9 +12,8 @@ use right_dashboard::auth::{
     AuthError, DashboardUser, InitDataValidation, authorize_user, validate_init_data,
 };
 use right_dashboard::read_model::{
-    OverviewInput,
+    activity::{ActivityOverviewInput, activity_overview, activity_run_detail},
     learning::{LearningOverviewInput, learning_overview, learning_report_detail},
-    overview, run_detail,
 };
 
 const REFRESH_INTERVAL_SECS: u64 = 5;
@@ -62,10 +61,21 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
     axum::Router::new()
         .route("/dashboard/{agent}/", get(handle_static_index))
         .route("/dashboard/{agent}/api/v1/bootstrap", get(handle_bootstrap))
-        .route("/dashboard/{agent}/api/v1/overview", get(handle_overview))
+        .route(
+            "/dashboard/{agent}/api/v1/activity/overview",
+            get(handle_activity_overview),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/activity/runs/{run_id}",
+            get(handle_activity_run_detail),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/overview",
+            get(handle_activity_overview),
+        )
         .route(
             "/dashboard/{agent}/api/v1/runs/{run_id}",
-            get(handle_run_detail),
+            get(handle_activity_run_detail),
         )
         .route(
             "/dashboard/{agent}/api/v1/learning/overview",
@@ -126,7 +136,7 @@ async fn handle_bootstrap(
     .into_response()
 }
 
-async fn handle_overview(
+async fn handle_activity_overview(
     AxumPath(agent): AxumPath<String>,
     State(state): State<DashboardState>,
     headers: HeaderMap,
@@ -139,14 +149,14 @@ async fn handle_overview(
         Ok(conn) => conn,
         Err(error) => return error.into_response(),
     };
-    let input = OverviewInput {
+    let input = ActivityOverviewInput {
         agent: state.agent_name.clone(),
         generated_at: chrono::Utc::now().to_rfc3339(),
         refresh_interval_secs: REFRESH_INTERVAL_SECS,
         foreground: foreground_activity(&state),
     };
 
-    match overview(&conn, input) {
+    match activity_overview(&conn, input) {
         Ok(response) => Json(response).into_response(),
         Err(error) => {
             tracing::error!(agent = %state.agent_name, "dashboard overview query failed: {error:#}");
@@ -159,7 +169,7 @@ async fn handle_overview(
     }
 }
 
-async fn handle_run_detail(
+async fn handle_activity_run_detail(
     AxumPath((agent, run_id)): AxumPath<(String, String)>,
     State(state): State<DashboardState>,
     headers: HeaderMap,
@@ -173,7 +183,7 @@ async fn handle_run_detail(
         Err(error) => return error.into_response(),
     };
 
-    match run_detail(&conn, &run_id, MAX_LOG_LINES) {
+    match activity_run_detail(&conn, &run_id, MAX_LOG_LINES) {
         Ok(Some(response)) => Json(response).into_response(),
         Ok(None) => json_error(StatusCode::NOT_FOUND, "not_found", Some("run not found")),
         Err(error) => {
@@ -688,6 +698,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn activity_overview_returns_current_cron_payload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        conn.execute(
+            "INSERT INTO cron_specs (
+                job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
+                recurring, target_chat_id, target_thread_id
+             ) VALUES (
+                'daily', '0 8 * * *', 'daily prompt', 2.5,
+                '2026-05-20T00:00:00Z', '2026-05-20T00:00:00Z',
+                1, 123, 456
+             )",
+            [],
+        )
+        .expect("insert cron spec");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/activity/overview",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["agent"], "alpha");
+        assert_eq!(body["refresh_interval_secs"], 5);
+        assert_eq!(body["summary"]["cron_count"], 1);
+        assert_eq!(body["crons"][0]["job_name"], "daily");
+        assert_eq!(body["crons"][0]["schedule"], "0 8 * * *");
+        assert_eq!(body["active"]["foreground"].as_array().unwrap().len(), 0);
+        assert_eq!(body["active"]["background"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
     async fn learning_overview_returns_data_for_authorized_user() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
@@ -746,6 +790,23 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn activity_run_detail_returns_not_found_for_unknown_run() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/activity/runs/missing-run",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "not_found");
+        assert_eq!(body["detail"], "run not found");
     }
 
     #[tokio::test]
