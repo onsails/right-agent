@@ -293,19 +293,10 @@ pub fn split_html_message(html: &str) -> Vec<String> {
     let mut buf = html.to_string();
 
     while buf.len() > TELEGRAM_LIMIT {
-        // Snap byte offsets to char boundaries (multi-byte UTF-8 safety).
-        let limit = snap_to_char_boundary(&buf, TELEGRAM_LIMIT);
-        let window_start = snap_to_char_boundary(&buf, limit.saturating_sub(400));
-        let split_pos = buf[window_start..limit]
-            .rfind('\n')
-            .map(|p| window_start + p + 1)
-            .unwrap_or(limit);
-
-        let chunk = &buf[..split_pos];
-        let open_tags = find_unclosed_tags(chunk);
+        let (split_pos, open_tags) = find_split_pos_with_tag_budget(&buf);
 
         // Close open tags at end of this chunk
-        let mut part = chunk.to_string();
+        let mut part = buf[..split_pos].to_string();
         for tag in open_tags.iter().rev() {
             part.push_str("</");
             part.push_str(tag);
@@ -328,6 +319,32 @@ pub fn split_html_message(html: &str) -> Vec<String> {
         parts.push(buf);
     }
     parts
+}
+
+fn find_split_pos_with_tag_budget(buf: &str) -> (usize, Vec<String>) {
+    let mut candidate_limit = TELEGRAM_LIMIT;
+
+    loop {
+        // Snap byte offsets to char boundaries (multi-byte UTF-8 safety).
+        let limit = snap_to_char_boundary(buf, candidate_limit);
+        let window_start = snap_to_char_boundary(buf, limit.saturating_sub(400));
+        let split_pos = buf[window_start..limit]
+            .rfind('\n')
+            .map(|p| window_start + p + 1)
+            .unwrap_or(limit);
+        let open_tags = find_unclosed_tags(&buf[..split_pos]);
+        let closing_len = closing_tags_len(&open_tags);
+
+        if split_pos + closing_len <= TELEGRAM_LIMIT {
+            return (split_pos, open_tags);
+        }
+
+        candidate_limit = TELEGRAM_LIMIT.saturating_sub(closing_len);
+    }
+}
+
+fn closing_tags_len(tags: &[String]) -> usize {
+    tags.iter().map(|tag| tag.len() + 3).sum()
 }
 
 /// Find tags that are opened but not closed in the given HTML fragment.

@@ -261,16 +261,26 @@ fn split_handles_pre_block_over_limit() {
 }
 
 #[test]
+fn split_pre_block_parts_stay_within_telegram_limit() {
+    let code = "x".repeat(5000);
+    let msg = format!("<pre>{code}</pre>");
+    let parts = split_html_message(&msg);
+
+    assert!(parts.len() >= 2);
+    for part in &parts {
+        assert!(part.len() <= 4096, "part too long: {} chars", part.len());
+    }
+}
+
+#[test]
 fn split_does_not_exceed_limit_with_closing_tags() {
-    // Even after appending closing tags, each part must stay under a reasonable size.
-    // The closing tags add at most ~50 chars for deeply nested Telegram tags.
+    // Even after appending closing tags, each part must stay under Telegram's limit.
     let inner = "a".repeat(4080);
     let msg = format!("<b><i><code>{inner}</code></i></b>");
     let parts = split_html_message(&msg);
     assert!(parts.len() >= 2);
-    // Allow some overflow for closing tags (up to ~60 chars beyond 4096)
     for part in &parts {
-        assert!(part.len() <= 4200, "part too long: {} chars", part.len());
+        assert!(part.len() <= 4096, "part too long: {} chars", part.len());
     }
 }
 
