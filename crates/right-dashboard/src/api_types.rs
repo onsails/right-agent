@@ -422,6 +422,65 @@ pub struct IdentityFileSummary {
     pub truncated: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct DoctorResponse {
+    pub agent: String,
+    pub generated_at: String,
+    pub pass_count: i64,
+    pub warn_count: i64,
+    pub fail_count: i64,
+    pub pass: Vec<DoctorCheckResponse>,
+    pub warn: Vec<DoctorCheckResponse>,
+    pub fail: Vec<DoctorCheckResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DoctorCheckResponse {
+    pub name: String,
+    pub status: String,
+    pub detail: String,
+    pub fix: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SandboxStatsResponse {
+    pub agent: String,
+    pub source: String,
+    pub warning: Option<String>,
+    pub disk: Option<SandboxDiskStats>,
+    pub memory: Option<SandboxMemoryStats>,
+    pub processes: Vec<SandboxProcess>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SandboxDiskStats {
+    pub mount: String,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub available_bytes: u64,
+    pub used_percent: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SandboxMemoryStats {
+    pub total_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+    pub used_bytes: Option<u64>,
+    pub load_average_1m: Option<f64>,
+    pub load_average_5m: Option<f64>,
+    pub load_average_15m: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SandboxProcess {
+    pub pid: i32,
+    pub ppid: i32,
+    pub cpu_percent: f64,
+    pub memory_percent: f64,
+    pub rss_bytes: u64,
+    pub command: String,
+}
+
 #[cfg(test)]
 mod dashboard_v2_tests {
     use super::*;

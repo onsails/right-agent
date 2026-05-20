@@ -1,5 +1,6 @@
 import type {
   ApiErrorBody,
+  DoctorResponse,
   IdentityFileResponse,
   BootstrapResponse,
   IdentityResponse,
@@ -11,6 +12,7 @@ import type {
   RunDetailResponse,
   SkillDetailResponse,
   SkillsResponse,
+  SandboxStatsResponse,
   UsageOverviewResponse,
 } from './types'
 
@@ -88,6 +90,14 @@ export function identityFiles(): Promise<IdentityResponse> {
 
 export function identityFile(fileName: string): Promise<IdentityFileResponse> {
   return requestJson<IdentityFileResponse>(`api/v1/identity/${encodeURIComponent(fileName)}`)
+}
+
+export function doctorStatus(): Promise<DoctorResponse> {
+  return requestJson<DoctorResponse>('api/v1/health/doctor')
+}
+
+export function sandboxStats(): Promise<SandboxStatsResponse> {
+  return requestJson<SandboxStatsResponse>('api/v1/health/sandbox')
 }
 
 async function requestJson<T>(path: string): Promise<T> {

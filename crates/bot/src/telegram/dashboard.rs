@@ -18,6 +18,7 @@ use right_dashboard::read_model::{
     usage::{UsageOverviewInput, usage_overview},
 };
 
+mod health;
 mod identity;
 mod skills;
 
@@ -57,10 +58,13 @@ pub(crate) fn dashboard_url(
 pub(crate) struct DashboardState {
     pub agent_name: String,
     pub bot_token: String,
+    pub home: PathBuf,
     pub agent_dir: PathBuf,
     pub resolved_sandbox: Option<String>,
     pub allowlist: right_agent::agent::allowlist::AllowlistHandle,
     pub foreground: super::StopTokens,
+    #[cfg(test)]
+    pub doctor_checks: Option<Vec<right_agent::doctor::DoctorCheck>>,
 }
 
 pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
@@ -126,6 +130,14 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
         .route(
             "/dashboard/{agent}/api/v1/identity/{file_name}",
             get(handle_identity_file_detail),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/health/doctor",
+            get(handle_health_doctor),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/health/sandbox",
+            get(handle_health_sandbox),
         )
         .route("/dashboard/{agent}/{*asset}", get(handle_static_asset))
         .with_state(state)
@@ -522,6 +534,45 @@ async fn handle_identity_file_detail(
     }
 }
 
+async fn handle_health_doctor(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    #[cfg(test)]
+    if let Some(checks) = state.doctor_checks.clone() {
+        return Json(health::doctor_response_from_checks(
+            &state.agent_name,
+            checks,
+        ))
+        .into_response();
+    }
+
+    let checks = right_agent::doctor::run_doctor(&state.home);
+    Json(health::doctor_response_from_checks(
+        &state.agent_name,
+        checks,
+    ))
+    .into_response()
+}
+
+async fn handle_health_sandbox(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    Json(health::sandbox_stats_response(&state.agent_name, state.resolved_sandbox.as_deref()).await)
+        .into_response()
+}
+
 fn serve_asset(state: &DashboardState, agent: &str, asset_path: &str) -> Response {
     if agent != state.agent_name {
         return StatusCode::FORBIDDEN.into_response();
@@ -701,10 +752,31 @@ mod tests {
         super::DashboardState {
             agent_name: "alpha".to_string(),
             bot_token: BOT_TOKEN.to_string(),
+            home: agent_dir.clone(),
             agent_dir,
             resolved_sandbox: None,
             allowlist,
             foreground: Arc::new(DashMap::new()),
+            doctor_checks: Some(vec![
+                right_agent::doctor::DoctorCheck {
+                    name: "right".to_string(),
+                    status: right_agent::doctor::CheckStatus::Pass,
+                    detail: "found".to_string(),
+                    fix: None,
+                },
+                right_agent::doctor::DoctorCheck {
+                    name: "openshell-gateway".to_string(),
+                    status: right_agent::doctor::CheckStatus::Warn,
+                    detail: "not running".to_string(),
+                    fix: Some("start gateway".to_string()),
+                },
+                right_agent::doctor::DoctorCheck {
+                    name: "agents/".to_string(),
+                    status: right_agent::doctor::CheckStatus::Fail,
+                    detail: "missing".to_string(),
+                    fix: None,
+                },
+            ]),
         }
     }
 
@@ -1234,6 +1306,49 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid_identity_file");
+    }
+
+    #[tokio::test]
+    async fn doctor_route_returns_grouped_checks_for_authorized_user() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/health/doctor",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["agent"], "alpha");
+        assert!(body["pass"].is_array());
+        assert!(body["warn"].is_array());
+        assert!(body["fail"].is_array());
+        assert!(
+            body["pass_count"].as_i64().unwrap()
+                + body["warn_count"].as_i64().unwrap()
+                + body["fail_count"].as_i64().unwrap()
+                > 0
+        );
+    }
+
+    #[tokio::test]
+    async fn sandbox_route_without_sandbox_returns_unavailable_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/health/sandbox",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["agent"], "alpha");
+        assert_eq!(body["source"], "unavailable");
+        assert!(body["disk"].is_null());
+        assert!(body["memory"].is_null());
+        assert_eq!(body["processes"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
