@@ -20,7 +20,8 @@ right init  /  right agent init <name>
   │   `right-config` owns global config loading, saving, and path helpers.
   ├─ Create ~/.right/agents/<name>/ with template files
   ├─ Write BOOTSTRAP.md, TOOLS.md, agent.yaml
-  │   (IDENTITY.md, SOUL.md, USER.md created later by bootstrap CC session)
+  │   (IDENTITY.md, USER.md created later by bootstrap CC session;
+  │   SOUL.md is created later by the bootstrap CC session from user choices)
   ├─ Generate .claude/settings.json, .claude.json
   └─ Symlink credentials from ~/.claude/
 
