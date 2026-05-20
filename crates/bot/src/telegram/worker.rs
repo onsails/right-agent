@@ -1120,6 +1120,7 @@ pub fn spawn_worker(
                     author: msg.author.clone(),
                     forward_info: msg.forward_info.clone(),
                     reply_to_id: msg.reply_to_id,
+                    quoted_text: None,
                     chat: msg.chat.clone(),
                     reply_to_body,
                 });

@@ -420,6 +420,7 @@ pub struct InputMessage {
     pub author: MessageAuthor,
     pub forward_info: Option<ForwardInfo>,
     pub reply_to_id: Option<i32>,
+    pub quoted_text: Option<String>,
     pub chat: ChatContext,
     pub reply_to_body: Option<ReplyToBody>,
 }
@@ -521,6 +522,13 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
         // Reply-to (only if reply)
         if let Some(reply_id) = m.reply_to_id {
             writeln!(out, "    reply_to_id: {reply_id}").expect("infallible");
+        }
+
+        // Telegram partial reply quote: the selected fragment from the
+        // triggering reply, distinct from the full reply_to body.
+        if let Some(ref quoted_text) = m.quoted_text {
+            let escaped = yaml_escape_string(quoted_text);
+            writeln!(out, "    quoted_text: \"{escaped}\"").expect("infallible");
         }
 
         // Reply-to body: present only when the user replied to a non-bot message.
@@ -1558,6 +1566,7 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: None,
+            quoted_text: None,
             chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
@@ -1582,6 +1591,7 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: None,
+            quoted_text: None,
             chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
@@ -1602,6 +1612,7 @@ mod tests {
                 author: test_author(),
                 forward_info: None,
                 reply_to_id: None,
+                quoted_text: None,
                 chat: ChatContext::Private { id: 99 },
                 reply_to_body: None,
             },
@@ -1613,6 +1624,7 @@ mod tests {
                 author: test_author(),
                 forward_info: None,
                 reply_to_id: None,
+                quoted_text: None,
                 chat: ChatContext::Private { id: 99 },
                 reply_to_body: None,
             },
@@ -1643,6 +1655,7 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: None,
+            quoted_text: None,
             chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
@@ -1671,6 +1684,7 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: None,
+            quoted_text: None,
             chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
@@ -1690,6 +1704,7 @@ mod tests {
                 author: test_author(),
                 forward_info: None,
                 reply_to_id: None,
+                quoted_text: None,
                 chat: ChatContext::Private { id: 99 },
                 reply_to_body: None,
             },
@@ -1701,6 +1716,7 @@ mod tests {
                 author: test_author(),
                 forward_info: None,
                 reply_to_id: None,
+                quoted_text: None,
                 chat: ChatContext::Private { id: 99 },
                 reply_to_body: None,
             },
@@ -1990,6 +2006,7 @@ mod tests {
             },
             forward_info: None,
             reply_to_id: None,
+            quoted_text: None,
             chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
@@ -2031,6 +2048,7 @@ mod tests {
                 date: fwd_date,
             }),
             reply_to_id: None,
+            quoted_text: None,
             chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
@@ -2057,11 +2075,91 @@ mod tests {
             },
             forward_info: None,
             reply_to_id: Some(3),
+            quoted_text: None,
             chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
         assert!(result.contains("    reply_to_id: 3\n"));
+    }
+
+    #[test]
+    fn format_cc_input_includes_quoted_text() {
+        let ts = Utc::now();
+        let msgs = vec![InputMessage {
+            message_id: 5,
+            text: Some("what do you mean here?".into()),
+            timestamp: ts,
+            attachments: vec![],
+            author: test_author(),
+            forward_info: None,
+            reply_to_id: Some(3),
+            quoted_text: Some("selected fragment".into()),
+            chat: ChatContext::Private { id: 99 },
+            reply_to_body: None,
+        }];
+
+        let result = format_cc_input(&msgs).unwrap();
+
+        assert!(result.contains("    reply_to_id: 3\n"));
+        assert!(result.contains("    quoted_text: \"selected fragment\"\n"));
+    }
+
+    #[test]
+    fn format_cc_input_can_include_reply_to_body_and_quoted_text() {
+        let ts = Utc::now();
+        let msgs = vec![InputMessage {
+            message_id: 5,
+            text: Some("what about this part?".into()),
+            timestamp: ts,
+            attachments: vec![],
+            author: test_author(),
+            forward_info: None,
+            reply_to_id: Some(3),
+            quoted_text: Some("only this sentence".into()),
+            chat: ChatContext::Private { id: 99 },
+            reply_to_body: Some(ReplyToBody {
+                author: MessageAuthor {
+                    name: "Sender".into(),
+                    username: None,
+                    user_id: Some(42),
+                },
+                text: Some("first sentence. only this sentence. last sentence.".into()),
+                attachments: vec![],
+            }),
+        }];
+
+        let result = format_cc_input(&msgs).unwrap();
+
+        assert!(
+            result.contains("    reply_to:\n"),
+            "missing reply_to block:\n{result}"
+        );
+        assert!(
+            result.contains("      text: \"first sentence. only this sentence. last sentence.\"\n")
+        );
+        assert!(result.contains("    quoted_text: \"only this sentence\"\n"));
+    }
+
+    #[test]
+    fn format_cc_input_escapes_quoted_text() {
+        let ts = Utc::now();
+        let msgs = vec![InputMessage {
+            message_id: 5,
+            text: Some("what?".into()),
+            timestamp: ts,
+            attachments: vec![],
+            author: test_author(),
+            forward_info: None,
+            reply_to_id: Some(3),
+            quoted_text: Some("line1\nline2\t\"quoted\"".into()),
+            chat: ChatContext::Private { id: 99 },
+            reply_to_body: None,
+        }];
+
+        let result = format_cc_input(&msgs).unwrap();
+
+        assert!(result.contains(r#"    quoted_text: "line1\nline2\t\"quoted\""#));
     }
 
     #[test]
@@ -2075,6 +2173,7 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: Some(3),
+            quoted_text: None,
             chat: ChatContext::Private { id: 99 },
             reply_to_body: Some(ReplyToBody {
                 author: MessageAuthor {
@@ -2411,6 +2510,7 @@ mod tests {
                 date: fwd_date,
             }),
             reply_to_id: None,
+            quoted_text: None,
             chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
@@ -2450,6 +2550,7 @@ mod group_format_tests {
             },
             forward_info: None,
             reply_to_id: None,
+            quoted_text: None,
             chat: ChatContext::Private { id: 42 },
             reply_to_body: None,
         };
@@ -2483,6 +2584,7 @@ mod group_format_tests {
             },
             forward_info: None,
             reply_to_id: None,
+            quoted_text: None,
             chat: ChatContext::Group {
                 id: -1001,
                 title: Some("Dev".into()),
@@ -2512,6 +2614,7 @@ mod group_format_tests {
             },
             forward_info: None,
             reply_to_id: Some(5),
+            quoted_text: None,
             chat: ChatContext::Group {
                 id: -1001,
                 title: None,
