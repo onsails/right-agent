@@ -11,7 +11,7 @@ const selectedRun = ref<RunDetailResponse | null>(null)
 const selectedRunId = ref<string | null>(null)
 const connectionState = ref<ConnectionState>('loading')
 const message = ref('Loading dashboard')
-const detailMessage = ref<string | null>(null)
+const detailError = ref<string | null>(null)
 const lastUpdatedAt = ref<string | null>(null)
 const loadingDetail = ref(false)
 let pollTimer: number | undefined
@@ -73,7 +73,7 @@ async function refreshOverview(): Promise<void> {
       if (!stillPresent) {
         selectedRunId.value = null
         selectedRun.value = null
-        detailMessage.value = null
+        detailError.value = null
       }
     }
   } catch (error) {
@@ -93,17 +93,29 @@ function applyErrorState(error: unknown): void {
 }
 
 async function selectRun(run: RunSummary): Promise<void> {
-  selectedRunId.value = run.id
+  const runId = run.id
+  selectedRunId.value = runId
+  selectedRun.value = null
   loadingDetail.value = true
-  detailMessage.value = null
+  detailError.value = null
 
   try {
-    selectedRun.value = await runDetail(run.id)
+    const detail = await runDetail(runId)
+    if (selectedRunId.value === runId) {
+      selectedRun.value = detail
+    }
   } catch (error) {
-    selectedRun.value = null
-    detailMessage.value = error instanceof Error ? error.message : 'Run detail unavailable'
+    if (error instanceof DashboardApiError && error.isLocked) {
+      applyErrorState(error)
+    }
+    if (selectedRunId.value === runId) {
+      selectedRun.value = null
+      detailError.value = error instanceof Error ? error.message : 'Run detail unavailable'
+    }
   } finally {
-    loadingDetail.value = false
+    if (selectedRunId.value === runId) {
+      loadingDetail.value = false
+    }
   }
 }
 
@@ -292,7 +304,7 @@ function notifyText(value: unknown): string | null {
         </header>
 
         <p v-if="loadingDetail" class="muted-line">Loading run detail</p>
-        <p v-else-if="detailMessage" class="notice inline">{{ detailMessage }}</p>
+        <p v-else-if="detailError" class="notice inline">{{ detailError }}</p>
         <p v-else-if="!selectedRun" class="muted-line">No run selected</p>
 
         <template v-if="selectedRun">
@@ -391,6 +403,11 @@ function notifyText(value: unknown): string | null {
   margin-bottom: 12px;
 }
 
+.topbar > div,
+.cron-header > div {
+  min-width: 0;
+}
+
 .eyebrow {
   margin: 0 0 2px;
   color: var(--tg-theme-hint-color, #6b7b88);
@@ -409,6 +426,11 @@ p {
 h1 {
   font-size: 1.35rem;
   line-height: 1.15;
+}
+
+h1,
+.cron-header h2 {
+  overflow-wrap: anywhere;
 }
 
 h2 {
