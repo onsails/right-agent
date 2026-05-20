@@ -518,6 +518,7 @@ pub(crate) async fn run_delivery_loop(
             target_chat_id,
             target_thread_id,
             ssh_config_path.as_deref(),
+            crate::snapshot_model(&model),
             session_id,
             &internal_client,
             resolved_sandbox.as_deref(),
@@ -667,6 +668,36 @@ pub(crate) fn ensure_delivery_send_report_non_empty(
     Ok(())
 }
 
+fn build_delivery_invocation_args(
+    mcp_config_path: String,
+    json_schema: String,
+    configured_model: Option<String>,
+    session_id: Option<String>,
+    debug_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Vec<String> {
+    crate::cc::invocation::ClaudeInvocation {
+        mcp_config_path: Some(mcp_config_path),
+        json_schema: Some(json_schema),
+        output_format: crate::cc::invocation::OutputFormat::Json,
+        model: configured_model,
+        max_budget_usd: None,
+        max_turns: None,
+        resume_session_id: session_id,
+        new_session_id: None,
+        fork_session: false,
+        allowed_tools: vec![],
+        // Delivery is a relay, but harness built-ins are still available — apply
+        // baseline so the relay can't self-loop or escape via TeamCreate etc.
+        disallowed_tools: crate::cc::invocation::disallow_foreground_only_tools(
+            crate::cc::invocation::baseline_disallowed_tools(),
+        ),
+        extra_args: vec![],
+        prompt: None, // stdin-piped
+        debug_flag,
+    }
+    .into_args()
+}
+
 /// Invoke the main CC session with async result YAML and send the reply to Telegram.
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
@@ -678,6 +709,7 @@ async fn deliver_through_session(
     target_chat_id: i64,
     target_thread_id: Option<i64>,
     ssh_config_path: Option<&Path>,
+    configured_model: Option<String>,
     session_id: Option<String>,
     internal_client: &right_mcp::internal_client::InternalClient,
     resolved_sandbox: Option<&str>,
@@ -704,36 +736,18 @@ async fn deliver_through_session(
         None => None,
     };
 
-    // Delivery always uses Haiku — cheap relay task.
-    const DELIVERY_MODEL: &str = "claude-haiku-4-5-20251001";
-
     let mcp_path = crate::cc::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
     let reply_schema_path = agent_dir.join(".claude").join("reply-schema.json");
     let json_schema = std::fs::read_to_string(&reply_schema_path).unwrap_or_default();
 
-    let invocation = crate::cc::invocation::ClaudeInvocation {
-        mcp_config_path: Some(mcp_path),
-        json_schema: Some(json_schema),
-        output_format: crate::cc::invocation::OutputFormat::Json,
-        model: Some(DELIVERY_MODEL.into()),
-        max_budget_usd: None,
-        max_turns: None,
-        resume_session_id: session_id,
-        new_session_id: None,
-        fork_session: false,
-        allowed_tools: vec![],
-        // Delivery is a relay, but harness built-ins are still available — apply
-        // baseline so the haiku relay can't self-loop or escape via TeamCreate etc.
-        disallowed_tools: crate::cc::invocation::disallow_foreground_only_tools(
-            crate::cc::invocation::baseline_disallowed_tools(),
-        ),
-        extra_args: vec![],
-        prompt: None, // stdin-piped
-        debug_flag: Some(debug),
-    };
-
-    let claude_args = invocation.into_args();
+    let claude_args = build_delivery_invocation_args(
+        mcp_path,
+        json_schema,
+        configured_model,
+        session_id,
+        Some(debug),
+    );
 
     // Derive sandbox_mode and home_dir from ssh_config_path.
     let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
@@ -1412,6 +1426,27 @@ mod tests {
         assert!(out.contains("background task below did not complete successfully"));
         assert!(out.contains("label: \"custom-bg\""));
         assert!(out.contains("Background work failed"));
+    }
+
+    #[test]
+    fn delivery_invocation_uses_configured_agent_model() {
+        let args = build_delivery_invocation_args(
+            "/sandbox/mcp.json".into(),
+            r#"{"type":"object"}"#.into(),
+            Some("claude-opus-4-7[1m]".into()),
+            Some("session-1".into()),
+            None,
+        );
+
+        let model_pos = args
+            .iter()
+            .position(|arg| arg == "--model")
+            .expect("configured model must be passed to Claude");
+        assert_eq!(args[model_pos + 1], "claude-opus-4-7[1m]");
+        assert!(
+            !args.iter().any(|arg| arg == "claude-haiku-4-5-20251001"),
+            "delivery must not override the configured agent model with Haiku"
+        );
     }
 
     #[test]

@@ -138,7 +138,7 @@ session would interleave or lose turns.
 
 A `SessionLocks` map (`Arc<DashMap<String, Arc<Mutex<()>>>>`) keyed by the main
 `root_session_id` serialises these accesses. Worker acquires before each
-foreground turn; delivery acquires before each Haiku-relayed delivery. Cron
+foreground turn; delivery acquires before each agent-model relay. Cron
 job execution itself does NOT acquire — it runs with a fresh `--session-id`
 and no `--resume`/`--fork-session`, so it does not race the main session JSONL.
 

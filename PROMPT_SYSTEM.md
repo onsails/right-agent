@@ -42,7 +42,7 @@ Composite-prompt CC invocation paths use `build_prompt_assembly_script()`:
 | Worker (Telegram messages) | `telegram/worker.rs` | `Normal` or `Bootstrap` | reply-schema.json / bootstrap-schema.json | agent config |
 | Cron (scheduled jobs) | `cron.rs` | `Cron` | CRON_SCHEMA_JSON | agent config |
 | Background continuation | `background.rs` | `Cron` | BG_CONTINUATION_SCHEMA_JSON | agent config |
-| Delivery (async cron/background results) | `async_delivery.rs` | `Normal` | reply-schema.json | claude-haiku-4-5-20251001 |
+| Delivery (async cron/background results) | `async_delivery.rs` | `Normal` | reply-schema.json | agent config |
 | Reflection (post-failure summary) | `reflection.rs` | `Normal` | reply-schema.json | agent config |
 
 Background learned-skill review is the exception: it is a separate
