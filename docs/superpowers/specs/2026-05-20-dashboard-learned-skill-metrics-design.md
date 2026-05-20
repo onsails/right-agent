@@ -172,6 +172,7 @@ episodes_selected_24h
 episodes_reviewing_24h
 episodes_reviewed_24h
 episodes_no_episode_24h
+episodes_insufficient_context_24h
 episodes_failed_24h
 reports_total_24h
 create_candidates_24h

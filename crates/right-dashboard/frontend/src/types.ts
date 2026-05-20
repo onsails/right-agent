@@ -109,6 +109,7 @@ export interface LearningFunnel {
   episodes_reviewing_24h: number
   episodes_reviewed_24h: number
   episodes_no_episode_24h: number
+  episodes_insufficient_context_24h: number
   episodes_failed_24h: number
   reports_total_24h: number
   create_candidates_24h: number

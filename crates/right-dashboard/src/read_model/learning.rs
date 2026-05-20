@@ -134,6 +134,7 @@ pub fn learning_overview(
     let episodes_reviewing_24h = episode_count("reviewing")?;
     let episodes_reviewed_24h = episode_count("reviewed")?;
     let episodes_no_episode_24h = episode_count("no_episode")?;
+    let episodes_insufficient_context_24h = episode_count("insufficient_context")?;
     let episodes_failed_24h = episode_count("failed")?;
 
     Ok(LearningOverviewResponse {
@@ -149,6 +150,7 @@ pub fn learning_overview(
             episodes_reviewing_24h,
             episodes_reviewed_24h,
             episodes_no_episode_24h,
+            episodes_insufficient_context_24h,
             episodes_failed_24h,
             reports_total_24h,
             create_candidates_24h,
@@ -316,6 +318,7 @@ fn candidate_skill_names(
          FROM skill_review_reports
          WHERE agent_name=?1
            AND candidate_skill_name IS NOT NULL
+           AND status IN ('create_candidate','update_candidate')
            AND created_at >= ?2
          GROUP BY candidate_skill_name
          ORDER BY MAX(created_at) DESC
@@ -878,6 +881,66 @@ mod tests {
 
         assert!(response.health.review_running);
         assert!(response.health.possibly_stuck);
+    }
+
+    #[test]
+    fn learning_overview_candidate_names_include_only_candidate_reports() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                agent_name, source_invocation_id, trigger_kind, status,
+                confidence, candidate_skill_name, evidence_refs_json,
+                review_output_json, created_at
+             ) VALUES (
+                'right', 'inv-1', 'learning_signal', 'create_candidate',
+                'high', 'rightx-valid-candidate', '[]', '{}',
+                '2026-05-20T11:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                agent_name, source_invocation_id, trigger_kind, status,
+                confidence, candidate_skill_name, evidence_refs_json,
+                review_output_json, created_at
+             ) VALUES (
+                'right', 'inv-2', 'effort_threshold', 'nothing_to_learn',
+                'medium', 'rightx-not-a-candidate', '[]', '{}',
+                '2026-05-20T11:30:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let response = learning_overview(&conn, input()).unwrap();
+
+        assert_eq!(
+            response.lifecycle.candidate_skill_names_7d,
+            vec!["rightx-valid-candidate"]
+        );
+    }
+
+    #[test]
+    fn learning_overview_counts_insufficient_context_episodes() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO learning_episodes (
+                agent_name, kind, seed_trigger_kind, seed_ref, status,
+                message_refs_json, execution_event_refs_json, ready_after,
+                created_at, updated_at
+             ) VALUES (
+                'right', 'foreground_thread', 'learning_signal', 'inv:context',
+                'insufficient_context', '[]', '[]', '2026-05-20T09:00:00Z',
+                '2026-05-20T09:00:00Z', '2026-05-20T09:05:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let response = learning_overview(&conn, input()).unwrap();
+
+        assert_eq!(response.funnel.episodes_insufficient_context_24h, 1);
     }
 
     #[test]
