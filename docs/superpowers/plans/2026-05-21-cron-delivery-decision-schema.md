@@ -708,10 +708,10 @@ Run:
 
 ```bash
 devenv shell -- cargo test -p right-bot parse_cron_output
-devenv shell -- cargo test -p right-bot background
+devenv shell -- cargo test -p right-bot background::
 ```
 
-Expected: pass.
+Expected: pass. Use the `background::` module filter so Task 3 does not also run `async_delivery` or `telegram::worker` tests whose names contain "background"; those are Task 4/5 surfaces.
 
 - [ ] **Step 7: Commit**
 
