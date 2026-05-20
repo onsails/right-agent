@@ -1,4 +1,11 @@
-import type { ApiErrorBody, BootstrapResponse, OverviewResponse, RunDetailResponse } from './types'
+import type {
+  ApiErrorBody,
+  BootstrapResponse,
+  LearningOverviewResponse,
+  LearningReportDetailResponse,
+  OverviewResponse,
+  RunDetailResponse,
+} from './types'
 
 declare global {
   interface Window {
@@ -38,6 +45,14 @@ export function overview(): Promise<OverviewResponse> {
 
 export function runDetail(runId: string): Promise<RunDetailResponse> {
   return requestJson<RunDetailResponse>(`api/v1/runs/${encodeURIComponent(runId)}`)
+}
+
+export function learningOverview(): Promise<LearningOverviewResponse> {
+  return requestJson<LearningOverviewResponse>('api/v1/learning/overview')
+}
+
+export function learningReportDetail(reportId: number): Promise<LearningReportDetailResponse> {
+  return requestJson<LearningReportDetailResponse>(`api/v1/learning/reports/${encodeURIComponent(String(reportId))}`)
 }
 
 async function requestJson<T>(path: string): Promise<T> {
