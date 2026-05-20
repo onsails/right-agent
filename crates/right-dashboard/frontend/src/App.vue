@@ -1,19 +1,35 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { DashboardApiError, bootstrap, overview, runDetail } from './api'
-import type { BootstrapResponse, CronCard, OverviewResponse, RunDetailResponse, RunSummary } from './types'
+import { DashboardApiError, bootstrap, learningOverview, learningReportDetail, overview, runDetail } from './api'
+import type {
+  BootstrapResponse,
+  CronCard,
+  LearningOverviewResponse,
+  LearningReportDetailResponse,
+  LearningReportSummary,
+  OverviewResponse,
+  RunDetailResponse,
+  RunSummary,
+} from './types'
 
 type ConnectionState = 'loading' | 'live' | 'stale' | 'offline' | 'locked'
+type DashboardView = 'cron' | 'learning'
 
 const bootstrapData = ref<BootstrapResponse | null>(null)
 const overviewData = ref<OverviewResponse | null>(null)
 const selectedRun = ref<RunDetailResponse | null>(null)
 const selectedRunId = ref<string | null>(null)
+const activeView = ref<DashboardView>('cron')
+const learningData = ref<LearningOverviewResponse | null>(null)
+const selectedLearningReport = ref<LearningReportDetailResponse | null>(null)
+const selectedLearningReportId = ref<number | null>(null)
 const connectionState = ref<ConnectionState>('loading')
 const message = ref('Loading dashboard')
 const detailError = ref<string | null>(null)
+const learningDetailError = ref<string | null>(null)
 const lastUpdatedAt = ref<string | null>(null)
 const loadingDetail = ref(false)
+const loadingLearningDetail = ref(false)
 let pollTimer: number | undefined
 
 const refreshIntervalMs = computed(() => {
@@ -28,6 +44,9 @@ const activeForeground = computed(() => overviewData.value?.active.foreground.le
 const activeBackground = computed(() => overviewData.value?.active.background.length ?? 0)
 const activeTotal = computed(() => activeForeground.value + activeBackground.value)
 const hasOverview = computed(() => overviewData.value !== null)
+const learningEnabled = computed(() => bootstrapData.value?.features.learning_metrics === true)
+const learningSummary = computed(() => learningData.value)
+const learningReports = computed(() => learningData.value?.recent_reports ?? [])
 
 onMounted(() => {
   window.Telegram?.WebApp?.ready?.()
@@ -44,6 +63,9 @@ onBeforeUnmount(() => {
 async function loadInitial(): Promise<void> {
   try {
     bootstrapData.value = await bootstrap()
+    if (!bootstrapData.value.features.learning_metrics && activeView.value === 'learning') {
+      activeView.value = 'cron'
+    }
     await refreshOverview()
     schedulePolling()
   } catch (error) {
@@ -64,6 +86,9 @@ async function refreshOverview(): Promise<void> {
   try {
     const data = await overview()
     overviewData.value = data
+    if (learningEnabled.value) {
+      learningData.value = await learningOverview()
+    }
     connectionState.value = 'live'
     message.value = 'Live'
     lastUpdatedAt.value = new Date().toISOString()
@@ -74,6 +99,15 @@ async function refreshOverview(): Promise<void> {
         selectedRunId.value = null
         selectedRun.value = null
         detailError.value = null
+      }
+    }
+
+    if (selectedLearningReportId.value !== null && learningData.value !== null) {
+      const stillPresent = learningData.value.recent_reports.some((report) => report.id === selectedLearningReportId.value)
+      if (!stillPresent) {
+        selectedLearningReportId.value = null
+        selectedLearningReport.value = null
+        learningDetailError.value = null
       }
     }
   } catch (error) {
@@ -119,6 +153,40 @@ async function selectRun(run: RunSummary): Promise<void> {
   }
 }
 
+function setView(view: DashboardView): void {
+  if (view === 'learning' && !learningEnabled.value) {
+    return
+  }
+  activeView.value = view
+}
+
+async function selectLearningReport(report: LearningReportSummary): Promise<void> {
+  const reportId = report.id
+  selectedLearningReportId.value = reportId
+  selectedLearningReport.value = null
+  loadingLearningDetail.value = true
+  learningDetailError.value = null
+
+  try {
+    const detail = await learningReportDetail(reportId)
+    if (selectedLearningReportId.value === reportId) {
+      selectedLearningReport.value = detail
+    }
+  } catch (error) {
+    if (error instanceof DashboardApiError && error.isLocked) {
+      applyErrorState(error)
+    }
+    if (selectedLearningReportId.value === reportId) {
+      selectedLearningReport.value = null
+      learningDetailError.value = error instanceof Error ? error.message : 'Learning report unavailable'
+    }
+  } finally {
+    if (selectedLearningReportId.value === reportId) {
+      loadingLearningDetail.value = false
+    }
+  }
+}
+
 function cronStatus(cron: CronCard): string {
   const active = cron.recent_runs.find((run) => isActive(run.status))
   if (active) {
@@ -132,7 +200,7 @@ function isActive(status: string): boolean {
 }
 
 function statusClass(status: string): string {
-  if (status === 'success' || status === 'delivered') {
+  if (status === 'success' || status === 'delivered' || status === 'create_candidate' || status === 'update_candidate') {
     return 'ok'
   }
   if (status === 'failed' || status === 'error') {
@@ -146,6 +214,13 @@ function statusClass(status: string): string {
 
 function money(value: number | null | undefined): string {
   return `$${(value ?? 0).toFixed(2)}`
+}
+
+function percent(value: number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return 'none'
+  }
+  return `${Math.round(value * 100)}%`
 }
 
 function shortDate(value: string | null | undefined): string {
@@ -197,111 +272,132 @@ function notifyText(value: unknown): string | null {
       <span v-if="lastUpdatedAt">Last update {{ shortDate(lastUpdatedAt) }}</span>
     </section>
 
-    <section class="summary-grid" aria-label="Summary">
-      <article class="summary-card">
-        <span>Jobs</span>
-        <strong>{{ summary?.cron_count ?? 0 }}</strong>
-      </article>
-      <article class="summary-card">
-        <span>Running</span>
-        <strong>{{ summary?.active_cron_count ?? 0 }}</strong>
-      </article>
-      <article class="summary-card">
-        <span>Failures</span>
-        <strong>{{ summary?.failed_recent_cron_count ?? 0 }}</strong>
-      </article>
-      <article class="summary-card">
-        <span>Today</span>
-        <strong>{{ money(summary?.today_cost_usd) }}</strong>
-      </article>
-    </section>
+    <nav class="view-tabs" aria-label="Dashboard views">
+      <button
+        type="button"
+        class="tab-button"
+        :class="{ active: activeView === 'cron' }"
+        @click="setView('cron')"
+      >
+        Cron
+      </button>
+      <button
+        v-if="learningEnabled"
+        type="button"
+        class="tab-button"
+        :class="{ active: activeView === 'learning' }"
+        @click="setView('learning')"
+      >
+        Learning
+      </button>
+    </nav>
 
-    <section class="active-strip" aria-label="Active activity">
-      <div>
-        <span>Foreground</span>
-        <strong>{{ activeForeground }}</strong>
-      </div>
-      <div>
-        <span>Background</span>
-        <strong>{{ activeBackground }}</strong>
-      </div>
-      <div>
-        <span>Total</span>
-        <strong>{{ activeTotal }}</strong>
-      </div>
-    </section>
-
-    <section class="content-grid">
-      <section class="cron-list" aria-label="Cron jobs">
-        <article v-if="crons.length === 0" class="empty-panel">
-          No cron jobs
+    <template v-if="activeView === 'cron'">
+      <section class="summary-grid" aria-label="Summary">
+        <article class="summary-card">
+          <span>Jobs</span>
+          <strong>{{ summary?.cron_count ?? 0 }}</strong>
         </article>
-
-        <article v-for="cron in crons" :key="cron.job_name" class="cron-card">
-          <header class="cron-header">
-            <div>
-              <h2>{{ cron.job_name }}</h2>
-              <p>{{ cron.schedule }}</p>
-            </div>
-            <span class="status-pill" :class="statusClass(cronStatus(cron))">
-              {{ cronStatus(cron) }}
-            </span>
-          </header>
-
-          <dl class="meta-grid">
-            <div>
-              <dt>Type</dt>
-              <dd>{{ cron.recurring ? 'recurring' : 'one shot' }}</dd>
-            </div>
-            <div>
-              <dt>Next</dt>
-              <dd>{{ shortDate(cron.run_at) }}</dd>
-            </div>
-            <div>
-              <dt>Target</dt>
-              <dd>{{ cron.target_chat_id ?? 'default' }}<span v-if="cron.target_thread_id">/{{ cron.target_thread_id }}</span></dd>
-            </div>
-            <div>
-              <dt>Budget</dt>
-              <dd>{{ money(cron.max_budget_usd) }}</dd>
-            </div>
-          </dl>
-
-          <div class="runs">
-            <div class="runs-head">
-              <span>Recent runs</span>
-              <strong>{{ money(cron.recent_runs.reduce((total, run) => total + (run.cost_usd ?? 0), 0)) }}</strong>
-            </div>
-
-            <button
-              v-for="run in cron.recent_runs"
-              :key="run.id"
-              class="run-row"
-              :class="{ selected: selectedRunId === run.id }"
-              type="button"
-              @click="selectRun(run)"
-            >
-              <span class="run-main">
-                <span class="status-dot" :class="statusClass(run.status)"></span>
-                <span>{{ run.status }}</span>
-                <small>{{ shortId(run.id) }}</small>
-              </span>
-              <span class="run-side">
-                <span>{{ money(run.cost_usd) }}</span>
-                <small>{{ shortDate(run.started_at) }}</small>
-              </span>
-            </button>
-
-            <p v-if="cron.recent_runs.length === 0" class="muted-line">No recent runs</p>
-          </div>
+        <article class="summary-card">
+          <span>Running</span>
+          <strong>{{ summary?.active_cron_count ?? 0 }}</strong>
+        </article>
+        <article class="summary-card">
+          <span>Failures</span>
+          <strong>{{ summary?.failed_recent_cron_count ?? 0 }}</strong>
+        </article>
+        <article class="summary-card">
+          <span>Today</span>
+          <strong>{{ money(summary?.today_cost_usd) }}</strong>
         </article>
       </section>
 
-      <aside class="detail-panel" aria-label="Run detail">
-        <header>
-          <p class="eyebrow">Run detail</p>
-          <h2>{{ selectedRun?.run.id ? shortId(selectedRun.run.id) : 'None selected' }}</h2>
-        </header>
+      <section class="active-strip" aria-label="Active activity">
+        <div>
+          <span>Foreground</span>
+          <strong>{{ activeForeground }}</strong>
+        </div>
+        <div>
+          <span>Background</span>
+          <strong>{{ activeBackground }}</strong>
+        </div>
+        <div>
+          <span>Total</span>
+          <strong>{{ activeTotal }}</strong>
+        </div>
+      </section>
+
+      <section class="content-grid">
+        <section class="cron-list" aria-label="Cron jobs">
+          <article v-if="crons.length === 0" class="empty-panel">
+            No cron jobs
+          </article>
+
+          <article v-for="cron in crons" :key="cron.job_name" class="cron-card">
+            <header class="cron-header">
+              <div>
+                <h2>{{ cron.job_name }}</h2>
+                <p>{{ cron.schedule }}</p>
+              </div>
+              <span class="status-pill" :class="statusClass(cronStatus(cron))">
+                {{ cronStatus(cron) }}
+              </span>
+            </header>
+
+            <dl class="meta-grid">
+              <div>
+                <dt>Type</dt>
+                <dd>{{ cron.recurring ? 'recurring' : 'one shot' }}</dd>
+              </div>
+              <div>
+                <dt>Next</dt>
+                <dd>{{ shortDate(cron.run_at) }}</dd>
+              </div>
+              <div>
+                <dt>Target</dt>
+                <dd>{{ cron.target_chat_id ?? 'default' }}<span v-if="cron.target_thread_id">/{{ cron.target_thread_id }}</span></dd>
+              </div>
+              <div>
+                <dt>Budget</dt>
+                <dd>{{ money(cron.max_budget_usd) }}</dd>
+              </div>
+            </dl>
+
+            <div class="runs">
+              <div class="runs-head">
+                <span>Recent runs</span>
+                <strong>{{ money(cron.recent_runs.reduce((total, run) => total + (run.cost_usd ?? 0), 0)) }}</strong>
+              </div>
+
+              <button
+                v-for="run in cron.recent_runs"
+                :key="run.id"
+                class="run-row"
+                :class="{ selected: selectedRunId === run.id }"
+                type="button"
+                @click="selectRun(run)"
+              >
+                <span class="run-main">
+                  <span class="status-dot" :class="statusClass(run.status)"></span>
+                  <span>{{ run.status }}</span>
+                  <small>{{ shortId(run.id) }}</small>
+                </span>
+                <span class="run-side">
+                  <span>{{ money(run.cost_usd) }}</span>
+                  <small>{{ shortDate(run.started_at) }}</small>
+                </span>
+              </button>
+
+              <p v-if="cron.recent_runs.length === 0" class="muted-line">No recent runs</p>
+            </div>
+          </article>
+        </section>
+
+        <aside class="detail-panel" aria-label="Run detail">
+          <header>
+            <p class="eyebrow">Run detail</p>
+            <h2>{{ selectedRun?.run.id ? shortId(selectedRun.run.id) : 'None selected' }}</h2>
+          </header>
 
         <p v-if="loadingDetail" class="muted-line">Loading run detail</p>
         <p v-else-if="detailError" class="notice inline">{{ detailError }}</p>
@@ -357,8 +453,107 @@ function notifyText(value: unknown): string | null {
 </template></pre>
           </section>
         </template>
-      </aside>
-    </section>
+        </aside>
+      </section>
+    </template>
+
+    <template v-else-if="activeView === 'learning'">
+      <section class="learning-funnel" aria-label="Learning funnel">
+        <article class="summary-card">
+          <span>Signals</span>
+          <strong>{{ learningSummary?.funnel.signals_accepted_24h ?? 0 }}</strong>
+        </article>
+        <article class="summary-card">
+          <span>Episodes</span>
+          <strong>{{ learningSummary?.funnel.episodes_reviewed_24h ?? 0 }}</strong>
+        </article>
+        <article class="summary-card">
+          <span>Candidates</span>
+          <strong>{{ (learningSummary?.funnel.create_candidates_24h ?? 0) + (learningSummary?.funnel.update_candidates_24h ?? 0) }}</strong>
+        </article>
+        <article class="summary-card">
+          <span>Created/updated</span>
+          <strong>{{ learningSummary?.funnel.foreground_created_or_updated_7d ?? 0 }}</strong>
+        </article>
+      </section>
+
+      <section class="learning-grid">
+        <section class="cron-list" aria-label="Learning reports">
+          <article v-if="learningReports.length === 0" class="empty-panel">
+            No learning reports
+          </article>
+
+          <button
+            v-for="report in learningReports"
+            :key="report.id"
+            class="learning-report-row"
+            :class="{ selected: selectedLearningReportId === report.id }"
+            type="button"
+            @click="selectLearningReport(report)"
+          >
+            <span class="run-main">
+              <span class="status-dot" :class="statusClass(report.status)"></span>
+              <span>{{ report.status }}</span>
+              <small>{{ report.confidence }} / {{ report.trigger_kind }}</small>
+            </span>
+            <span class="report-summary">
+              {{ report.candidate_skill_name || report.candidate_summary || 'No candidate' }}
+            </span>
+          </button>
+        </section>
+
+        <aside class="detail-panel" aria-label="Learning metrics">
+          <header>
+            <p class="eyebrow">Learning quality</p>
+            <h2>{{ percent(learningSummary?.quality.candidate_rate) }} candidates</h2>
+          </header>
+
+          <dl class="detail-meta">
+            <div>
+              <dt>Nothing</dt>
+              <dd>{{ percent(learningSummary?.quality.nothing_to_learn_rate) }}</dd>
+            </div>
+            <div>
+              <dt>High</dt>
+              <dd>{{ learningSummary?.quality.high_confidence_count_24h ?? 0 }}</dd>
+            </div>
+            <div>
+              <dt>Daily</dt>
+              <dd>{{ learningSummary?.health.daily_review_count ?? 0 }}/{{ learningSummary?.health.daily_limit ?? 12 }}</dd>
+            </div>
+            <div>
+              <dt>Gate</dt>
+              <dd>{{ learningSummary?.health.review_running ? 'running' : 'idle' }}</dd>
+            </div>
+          </dl>
+
+          <section class="detail-block">
+            <h3>Report detail</h3>
+            <p v-if="loadingLearningDetail" class="muted-line">Loading learning report</p>
+            <p v-else-if="learningDetailError" class="notice inline">{{ learningDetailError }}</p>
+            <p v-else-if="!selectedLearningReport" class="muted-line">No report selected</p>
+
+            <template v-if="selectedLearningReport">
+              <p>{{ selectedLearningReport.report.candidate_summary || selectedLearningReport.report.status }}</p>
+              <p v-if="selectedLearningReport.selector?.boundary_rationale" class="muted-line">
+                {{ selectedLearningReport.selector.boundary_rationale }}
+              </p>
+              <div class="evidence-list">
+                <div
+                  v-for="snippet in selectedLearningReport.evidence"
+                  :key="snippet.ref_id"
+                  class="evidence-item"
+                >
+                  <strong>{{ snippet.ref_id }}</strong>
+                  <span>{{ snippet.available ? (snippet.event_kind || snippet.role || snippet.source) : 'unavailable' }}</span>
+                  <p>{{ snippet.text || 'Snippet unavailable' }}</p>
+                </div>
+              </div>
+            </template>
+          </section>
+        </aside>
+      </section>
+    </template>
   </main>
 </template>
 
@@ -497,6 +692,28 @@ h3 {
   margin: 0;
 }
 
+.view-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.tab-button {
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.18));
+  border-radius: 7px;
+  background: var(--tg-theme-secondary-bg-color, #ffffff);
+  color: var(--tg-theme-text-color, #17212b);
+  cursor: pointer;
+}
+
+.tab-button.active {
+  border-color: var(--tg-theme-button_color, #2481cc);
+  color: var(--tg-theme-button_color, #2481cc);
+  font-weight: 700;
+}
+
 .summary-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-bottom: 8px;
@@ -551,6 +768,20 @@ dt,
 
 .content-grid {
   grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr);
+  align-items: start;
+}
+
+.learning-funnel {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.learning-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.7fr);
+  gap: 8px;
   align-items: start;
 }
 
@@ -634,6 +865,32 @@ dd {
   box-shadow: inset 0 0 0 1px var(--tg-theme-button_color, #2481cc);
 }
 
+.learning-report-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 5px;
+  width: 100%;
+  min-height: 58px;
+  padding: 8px;
+  border: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.14));
+  border-radius: 7px;
+  background: var(--tg-theme-secondary-bg-color, #ffffff);
+  color: var(--tg-theme-text-color, #17212b);
+  cursor: pointer;
+  text-align: left;
+}
+
+.learning-report-row.selected {
+  border-color: var(--tg-theme-button_color, #2481cc);
+  box-shadow: inset 0 0 0 1px var(--tg-theme-button_color, #2481cc);
+}
+
+.report-summary {
+  color: var(--tg-theme-hint-color, #6b7b88);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
 .run-main,
 .run-side {
   display: flex;
@@ -705,6 +962,35 @@ dd {
   white-space: pre-wrap;
 }
 
+.evidence-list {
+  display: grid;
+  gap: 7px;
+}
+
+.evidence-item {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  border: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.14));
+  border-radius: 7px;
+  background: var(--tg-theme-bg-color, #f4f6f8);
+}
+
+.evidence-item strong,
+.evidence-item span {
+  font-size: 0.74rem;
+}
+
+.evidence-item span {
+  color: var(--tg-theme-hint-color, #6b7b88);
+}
+
+.evidence-item p {
+  font-size: 0.78rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 pre {
   max-height: 260px;
   margin: 0;
@@ -719,7 +1005,8 @@ pre {
 }
 
 @media (max-width: 820px) {
-  .content-grid {
+  .content-grid,
+  .learning-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -729,7 +1016,8 @@ pre {
 }
 
 @media (max-width: 560px) {
-  .summary-grid {
+  .summary-grid,
+  .learning-funnel {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
