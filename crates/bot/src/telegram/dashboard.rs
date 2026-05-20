@@ -18,6 +18,8 @@ use right_dashboard::read_model::{
     usage::{UsageOverviewInput, usage_overview},
 };
 
+mod skills;
+
 const REFRESH_INTERVAL_SECS: u64 = 5;
 const INIT_DATA_MAX_AGE_SECS: i64 = 86_400;
 const MAX_LOG_LINES: usize = 80;
@@ -55,6 +57,7 @@ pub(crate) struct DashboardState {
     pub agent_name: String,
     pub bot_token: String,
     pub agent_dir: PathBuf,
+    pub resolved_sandbox: Option<String>,
     pub allowlist: right_agent::agent::allowlist::AllowlistHandle,
     pub foreground: super::StopTokens,
 }
@@ -106,6 +109,14 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
         .route(
             "/dashboard/{agent}/api/v1/knowledge/learning/reports/{report_id}",
             get(handle_learning_report_detail),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/knowledge/skills",
+            get(handle_skills_overview),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/knowledge/skills/{skill_name}",
+            get(handle_skill_detail),
         )
         .route("/dashboard/{agent}/{*asset}", get(handle_static_asset))
         .with_state(state)
@@ -399,6 +410,60 @@ async fn handle_learning_report_detail(
     }
 }
 
+async fn handle_skills_overview(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    match skills::skills_response(&state).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => {
+            tracing::error!(agent = %state.agent_name, "dashboard skills query failed: {error:#}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "skills_failed",
+                Some("failed to read skills"),
+            )
+        }
+    }
+}
+
+async fn handle_skill_detail(
+    AxumPath((agent, skill_name)): AxumPath<(String, String)>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    match skills::skill_detail_response(&state, &skill_name).await {
+        Ok(response) => Json(response).into_response(),
+        Err(skills::SkillDetailError::Inventory(
+            right_dashboard::skill_inventory::SkillInventoryError::InvalidSkillName(_),
+        )) => json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_skill_name",
+            Some("skill name is invalid"),
+        ),
+        Err(skills::SkillDetailError::Inventory(
+            right_dashboard::skill_inventory::SkillInventoryError::NotFound(_),
+        )) => json_error(StatusCode::NOT_FOUND, "not_found", Some("skill not found")),
+        Err(error) => {
+            tracing::error!(agent = %state.agent_name, skill = %skill_name, "dashboard skill detail query failed: {error:#}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "skill_failed",
+                Some("failed to read skill"),
+            )
+        }
+    }
+}
+
 fn serve_asset(state: &DashboardState, agent: &str, asset_path: &str) -> Response {
     if agent != state.agent_name {
         return StatusCode::FORBIDDEN.into_response();
@@ -579,6 +644,7 @@ mod tests {
             agent_name: "alpha".to_string(),
             bot_token: BOT_TOKEN.to_string(),
             agent_dir,
+            resolved_sandbox: None,
             allowlist,
             foreground: Arc::new(DashMap::new()),
         }
@@ -969,6 +1035,94 @@ mod tests {
         assert_eq!(body["episode"]["id"], 1);
         assert_eq!(body["selector"]["model"], "claude-sonnet-4-6");
         assert_eq!(body["selector"]["selected_message_refs"][0], "msg:1");
+    }
+
+    #[tokio::test]
+    async fn skills_route_groups_host_skills_when_no_sandbox() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = temp.path().join(".claude").join("skills");
+        std::fs::create_dir_all(skills_dir.join("right-cron")).unwrap();
+        std::fs::write(
+            skills_dir.join("right-cron").join("SKILL.md"),
+            "---\nname: right-cron\ndescription: Core cron control.\n---\n# Cron\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(skills_dir.join("rightx-oauth-debugging")).unwrap();
+        std::fs::write(
+            skills_dir.join("rightx-oauth-debugging").join("SKILL.md"),
+            "---\nname: rightx-oauth-debugging\ndescription: Learned OAuth flow.\n---\n# OAuth\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(skills_dir.join("hub-browser")).unwrap();
+        std::fs::write(
+            skills_dir.join("hub-browser").join("SKILL.md"),
+            "---\nname: hub-browser\ndescription: Browser automation.\n---\n# Browser\n",
+        )
+        .unwrap();
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/knowledge/skills",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["source"], "host");
+        assert_eq!(body["groups"]["core"][0]["name"], "right-cron");
+        assert_eq!(
+            body["groups"]["learned"][0]["name"],
+            "rightx-oauth-debugging"
+        );
+        assert_eq!(body["groups"]["other"][0]["name"], "hub-browser");
+    }
+
+    #[tokio::test]
+    async fn skill_detail_route_returns_host_skill_preview() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp
+            .path()
+            .join(".claude")
+            .join("skills")
+            .join("rightx-oauth-debugging");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: rightx-oauth-debugging\ndescription: Learned OAuth flow.\n---\n# OAuth\n",
+        )
+        .unwrap();
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["skill"]["name"], "rightx-oauth-debugging");
+        assert_eq!(body["skill"]["group"], "learned");
+        assert!(
+            body["content_preview"]
+                .as_str()
+                .unwrap()
+                .contains("# OAuth")
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_detail_route_rejects_invalid_skill_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/knowledge/skills/..secret",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_skill_name");
     }
 
     #[tokio::test]

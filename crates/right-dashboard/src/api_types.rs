@@ -366,6 +366,37 @@ pub struct LearningReviewerDetail {
     pub user_notice_present: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SkillsResponse {
+    pub agent: String,
+    pub source: String,
+    pub warning: Option<String>,
+    pub groups: SkillGroups,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SkillGroups {
+    pub core: Vec<SkillSummary>,
+    pub learned: Vec<SkillSummary>,
+    pub other: Vec<SkillSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SkillSummary {
+    pub name: String,
+    pub group: String,
+    pub path: String,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SkillDetailResponse {
+    pub agent: String,
+    pub skill: SkillSummary,
+    pub content_preview: String,
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod dashboard_v2_tests {
     use super::*;
