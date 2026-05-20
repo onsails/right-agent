@@ -161,8 +161,9 @@ summary of the failure instead of the raw ring-buffer dump.
 - `usage_events` rows for reflection use `source = "reflection"`, discriminated
   by `chat_id` (worker parent) vs `job_name` (cron parent). `/usage` shows them
   on a separate "🧠 Reflection" line per window.
-- Reflection never reflects on itself. Hindsight `memory_retain` is skipped for
-  reflection turns.
+- Reflection never reflects on itself. Hindsight retain
+  (`mcp__right__memory_retain` at the agent surface) is skipped for reflection
+  turns.
 - `async_runs.status` gates delivery: `'failed'` routes to
   `DELIVERY_INSTRUCTION_FAILURE`, any other status (currently `'success'`)
   routes to `DELIVERY_INSTRUCTION_SUCCESS` (verbatim relay).

@@ -4,7 +4,7 @@
 
 **Goal:** Keep identity-aware persistence routing while removing all platform-authored `SOUL.md` content.
 
-**Architecture:** `/right-memory` is the single detailed router for explicit persistence requests. System prompt surfaces explain identity-file ownership and direct agents to `/right-memory`, while memory tool/MCP descriptions only say `memory_retain` is residual fallback after routing.
+**Architecture:** `/right-memory` is the single detailed router for explicit persistence requests. System prompt surfaces explain identity-file ownership and direct agents to `/right-memory`, while memory tool/MCP descriptions only say `mcp__right__memory_retain` is residual fallback after routing.
 
 **Tech Stack:** Rust 2024, generated prompt templates, Markdown docs, MCP tool metadata, `devenv shell -- cargo`.
 
@@ -203,9 +203,11 @@ is the detailed router for persistence requests. Consult it before storing
 explicit "remember", "save this", or "don't forget" requests.
 ```
 
-Keep the `Use memory for facts that don't have a home in the files above:` and
-`Do NOT save to memory:` lists. They are useful guardrails, but the detailed
-file-routing table must live in `/right-memory`.
+Do not keep the `Use memory for facts that don't have a home in the files above:`
+or `Do NOT save to memory:` lists in operating instructions. `/right-memory`
+owns that detailed routing. Keep only the Hindsight fallback phrasing and the
+`/right-learn-skill` paragraph; do not mention `MEMORY.md` in always-loaded
+operating instructions because no-memory prompts must not include it.
 
 - [ ] **Step 3: Replace the bootstrap SOUL.md section**
 
@@ -214,13 +216,13 @@ In `crates/right-codegen/templates/right/agent/BOOTSTRAP.md`, replace the `### S
 ```markdown
 ### SOUL.md
 
-Personality based on chosen vibe and the user's bootstrap choices. Use this structure:
+Personality based only on chosen vibe and explicit bootstrap signals. Suggested headings when there is evidence:
 
-- **Tone & Style**: bullet list - concise/verbose, formal/casual, emoji policy, language matching ("match the user's language"), uncertainty handling ("ask, don't guess")
+- **Tone & Style**: concrete tone, verbosity, formality, emoji, or language preferences the user chose or clearly implied
 - **Personality**: bullet list of behavioral traits that follow from the chosen vibe and user signals
 - **Boundaries**: only durable behavioral boundaries the user explicitly requested or clearly established during bootstrap
 
-If the user gave no signal for a section, keep it minimal. Do not invent a platform-default operating contract.
+If the user gave no signal for a section, omit it or keep it minimal. Do not invent a platform-default operating contract.
 ```
 
 - [ ] **Step 4: Run Task 1 tests**
@@ -460,16 +462,18 @@ conversation evidence.
 
 For explicit "remember", "save this", or "don't forget" requests, the agent
 must use the `/right-memory` skill to choose the persistence target before
-editing identity files or calling memory tools.
+editing identity files or calling memory tools. Operating instructions do not
+embed the detailed target table; `mcp__right__memory_retain` is residual storage
+after `/right-memory` selects memory as the target.
 ```
 
 - [ ] **Step 3: Update MCP Server Instructions docs**
 
-In `PROMPT_SYSTEM.md`, replace the parenthetical `memory_retain` explanation with:
+In `PROMPT_SYSTEM.md`, document the agent-facing retain tool name as:
 
 ```markdown
-`memory_retain` is residual storage after `/right-memory` routing chooses
-memory as the fallback target
+`mcp__right__memory_retain` is residual storage after `/right-memory` routing
+chooses memory as the fallback target
 ```
 
 - [ ] **Step 4: Update memory architecture doc**
@@ -590,7 +594,7 @@ Replace the current PR body with:
 
 - Route explicit `remember` / `save this` requests through `/right-memory` before choosing a persistence target.
 - Keep the detailed identity-aware routing table in the `/right-memory` skill.
-- Mark `memory_retain` as residual fallback storage instead of the default destination for remember requests.
+- Mark `mcp__right__memory_retain` as residual fallback storage instead of the default destination for remember requests.
 - Clarify that `SOUL.md` is user/agent-authored durable identity context and Right Agent does not inject platform-default content into it.
 - Update prompt and architecture docs to match the ownership boundary.
 

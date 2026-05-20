@@ -142,7 +142,9 @@ conversation evidence.
 
 For explicit "remember", "save this", or "don't forget" requests, the agent
 must use the `/right-memory` skill to choose the persistence target before
-editing identity files or calling memory tools.
+editing identity files or calling memory tools. Operating instructions do not
+embed the detailed target table; `mcp__right__memory_retain` is residual storage
+after `/right-memory` selects memory as the target.
 
 ### Memory Status Marker
 

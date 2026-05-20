@@ -53,7 +53,7 @@ Memory is for facts that don't have a home in your files
 
 ## What does NOT belong in memory
 
-Route these to the correct file instead of calling `memory_retain`:
+Route these to the correct file instead of calling `mcp__right__memory_retain`:
 
 - "Use tool X for task Y" → `TOOLS.md` (static, always in prompt;
   semantic recall may miss it when the query doesn't name the tool)
