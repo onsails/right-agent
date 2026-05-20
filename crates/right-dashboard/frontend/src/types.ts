@@ -1,6 +1,6 @@
 export interface ApiErrorBody {
   error: string
-  detail?: string | null
+  detail: string | null
 }
 
 export interface BootstrapResponse {
@@ -36,11 +36,11 @@ export interface CronCard {
   job_name: string
   schedule: string
   recurring: boolean
-  run_at?: string | null
-  target_chat_id?: number | null
-  target_thread_id?: number | null
+  run_at: string | null
+  target_chat_id: number | null
+  target_thread_id: number | null
   max_budget_usd: number
-  last_run?: RunSummary | null
+  last_run: RunSummary | null
   recent_runs: RunSummary[]
 }
 
@@ -58,23 +58,23 @@ export interface ForegroundActivity {
 export interface RunSummary {
   id: string
   kind: string
-  producer_ref?: string | null
+  producer_ref: string | null
   status: string
-  started_at?: string | null
-  finished_at?: string | null
-  exit_code?: number | null
+  started_at: string | null
+  finished_at: string | null
+  exit_code: number | null
   delivery_status: string
-  cost_usd?: number | null
+  cost_usd: number | null
 }
 
 export interface RunDetailResponse {
   run: RunSummary
-  summary?: string | null
-  notify_json?: unknown
-  no_notify_reason?: string | null
+  summary: string | null
+  notify_json: unknown | null
+  no_notify_reason: string | null
   log: {
     available: boolean
-    path?: string | null
+    path: string | null
     lines: string[]
     truncated: boolean
   }
