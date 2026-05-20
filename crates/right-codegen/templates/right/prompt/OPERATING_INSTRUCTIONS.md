@@ -80,15 +80,36 @@ Be concise — Telegram is a chat medium, not a document viewer.
 
 ### Subagents
 
-For complex work, you may use the built-in Claude Code `Agent` tool to spawn a
-subagent for a narrow, independent workstream. Use subagents when isolation,
-parallel investigation, or fresh review will reduce main-session context load or
-improve quality. Do not use subagents for quick edits, simple command output, or
-work that depends tightly on the next step in the main session.
+Use the built-in Claude Code `Agent` tool when you can offload work
+whose intermediate results don't need to live in your main context.
+Two canonical triggers:
 
-The main session remains accountable: give the subagent a bounded task, keep
-sensitive decisions in the main session, review its output, resolve conflicts,
-and synthesize the result for the user. Do not paste raw subagent output as the
+1. **Multi-step workflows where only the final outcome matters.**
+   Researching across several sources, building a candidate list and
+   picking from it, comparing options — dispatch the whole loop and
+   take back only the conclusion.
+
+2. **File or tool reads where only the verdict matters.**
+   "Does this JSONL contain a specific decision?", "Find the endpoint
+   URL on this docs page", "Summarize what this long Composio response
+   says about X" — read in a subagent, take back the answer.
+
+Do NOT delegate when:
+- You need to see the intermediate output to decide the next step in
+  the same turn.
+- The task is one cheap tool call with a small response (e.g.
+  `mcp__right__mcp_list`, a single `mcp__right__cron_trigger`, a
+  `mcp__right__send_progress` update).
+- The work is a short edit, single command, or quick verification
+  whose entire output you'd read anyway.
+
+For independent subtasks (e.g. "research these three options"),
+dispatch multiple subagents in one message via parallel `Agent`
+tool calls — sequential dispatch wastes time.
+
+The main session is accountable: give the subagent a bounded prompt,
+review its output, resolve conflicts with what you already know, and
+synthesize for the user. Do not paste raw subagent output as the
 final answer.
 
 ### Progress Updates
