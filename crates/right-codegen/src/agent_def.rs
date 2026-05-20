@@ -113,20 +113,17 @@ pub const BOOTSTRAP_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"conte
 
 /// JSON schema for cron job structured output.
 ///
-/// `summary` is always required. `notify` is null when the cron ran silently
-/// (no user notification needed). When `notify` is present, `content` is required.
-/// `no_notify_reason` is required when `notify` is null — a short factual explanation
-/// of why there is nothing to report (e.g. "No changes since last run").
-pub const CRON_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"notify":{"type":["object","null"],"properties":{"content":{"type":"string"},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content"]},"summary":{"type":"string"},"no_notify_reason":{"type":["string","null"]}},"required":["summary"]}"#;
+/// `delivery` is always required and must choose either a notify branch with
+/// user-facing content or a silent branch with a factual reason. `run_note` is
+/// technical metadata for logs and run history.
+pub const CRON_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"delivery":{"oneOf":[{"type":"object","properties":{"kind":{"const":"notify"},"content":{"type":"string","minLength":1},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["kind","content"]},{"type":"object","properties":{"kind":{"const":"silent"},"reason":{"type":"string","minLength":1}},"required":["kind","reason"]}]},"run_note":{"type":"string"}},"required":["delivery","run_note"]}"#;
 
 /// Structured-output schema for background-continuation cron runs.
 ///
-/// `notify` is required and non-null; `notify.content` must be a non-empty
-/// string. `summary` is required (kept for log/analytics parity with
-/// `CRON_SCHEMA_JSON`). `no_notify_reason` is absent — silence is not a
-/// valid outcome for this job kind, since the user is waiting for the
-/// foreground answer that was sent to background.
-pub const BG_CONTINUATION_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"notify":{"type":"object","properties":{"content":{"type":"string","minLength":1},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content"]},"summary":{"type":"string"}},"required":["summary","notify"]}"#;
+/// `delivery` is required and must be a notify branch with non-empty
+/// user-facing content. Silent output is forbidden because the user is waiting
+/// for the foreground answer that was sent to background.
+pub const BG_CONTINUATION_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"delivery":{"type":"object","properties":{"kind":{"const":"notify"},"content":{"type":"string","minLength":1},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["kind","content"]},"run_note":{"type":"string"}},"required":["delivery","run_note"]}"#;
 
 /// Generate the base system prompt for all agent modes.
 ///

@@ -648,58 +648,105 @@ fn bootstrap_schema_attachments_item_has_media_group_id() {
 
 #[test]
 fn cron_schema_attachments_item_has_media_group_id() {
-    let items = attachments_item_schema(
-        CRON_SCHEMA_JSON,
-        &["properties", "notify", "properties", "attachments", "items"],
-    );
-    assert_has_nullable_media_group_id(&items);
+    let v: serde_json::Value = serde_json::from_str(CRON_SCHEMA_JSON).unwrap();
+    let branches = v["properties"]["delivery"]["oneOf"].as_array().unwrap();
+    let notify_branch = branches
+        .iter()
+        .find(|b| b["properties"]["kind"]["const"] == "notify")
+        .expect("notify delivery branch missing");
+    assert_has_nullable_media_group_id(&notify_branch["properties"]["attachments"]["items"]);
 }
 
 #[test]
-fn bg_continuation_schema_requires_notify() {
+fn cron_schema_requires_delivery_and_run_note() {
+    let v: serde_json::Value = serde_json::from_str(CRON_SCHEMA_JSON).unwrap();
+    let required = v["required"].as_array().unwrap();
+    let names: Vec<&str> = required.iter().filter_map(|x| x.as_str()).collect();
+    assert!(names.contains(&"delivery"), "delivery must be required");
+    assert!(names.contains(&"run_note"), "run_note must be required");
+}
+
+#[test]
+fn cron_schema_has_notify_and_silent_delivery_branches() {
+    let v: serde_json::Value = serde_json::from_str(CRON_SCHEMA_JSON).unwrap();
+    let branches = v["properties"]["delivery"]["oneOf"].as_array().unwrap();
+    assert_eq!(branches.len(), 2);
+    let kinds: Vec<&str> = branches
+        .iter()
+        .filter_map(|b| b["properties"]["kind"]["const"].as_str())
+        .collect();
+    assert!(kinds.contains(&"notify"));
+    assert!(kinds.contains(&"silent"));
+
+    let notify_branch = branches
+        .iter()
+        .find(|b| b["properties"]["kind"]["const"] == "notify")
+        .expect("notify delivery branch missing");
+    let notify_required = notify_branch["required"].as_array().unwrap();
+    let notify_required_names: Vec<&str> =
+        notify_required.iter().filter_map(|x| x.as_str()).collect();
+    assert!(notify_required_names.contains(&"kind"));
+    assert!(notify_required_names.contains(&"content"));
+    assert_eq!(
+        notify_branch["properties"]["content"]["minLength"].as_i64(),
+        Some(1)
+    );
+
+    let silent_branch = branches
+        .iter()
+        .find(|b| b["properties"]["kind"]["const"] == "silent")
+        .expect("silent delivery branch missing");
+    let silent_required = silent_branch["required"].as_array().unwrap();
+    let silent_required_names: Vec<&str> =
+        silent_required.iter().filter_map(|x| x.as_str()).collect();
+    assert!(silent_required_names.contains(&"kind"));
+    assert!(silent_required_names.contains(&"reason"));
+    assert_eq!(
+        silent_branch["properties"]["reason"]["minLength"].as_i64(),
+        Some(1)
+    );
+}
+
+#[test]
+fn bg_continuation_schema_requires_notify_delivery_and_run_note() {
     let v: serde_json::Value = serde_json::from_str(BG_CONTINUATION_SCHEMA_JSON).unwrap();
     let required = v["required"].as_array().unwrap();
     let names: Vec<&str> = required.iter().filter_map(|x| x.as_str()).collect();
-    assert!(names.contains(&"notify"), "notify must be required");
-    assert!(names.contains(&"summary"), "summary must be required");
-}
+    assert!(names.contains(&"delivery"), "delivery must be required");
+    assert!(names.contains(&"run_note"), "run_note must be required");
 
-#[test]
-fn bg_continuation_schema_notify_is_non_nullable_object() {
-    let v: serde_json::Value = serde_json::from_str(BG_CONTINUATION_SCHEMA_JSON).unwrap();
-    let notify_type = &v["properties"]["notify"]["type"];
-    assert_eq!(
-        notify_type.as_str(),
-        Some("object"),
-        "notify must be non-nullable; got {:?}",
-        notify_type
-    );
-}
-
-#[test]
-fn bg_continuation_schema_content_min_length_one() {
-    let v: serde_json::Value = serde_json::from_str(BG_CONTINUATION_SCHEMA_JSON).unwrap();
-    let min_len = &v["properties"]["notify"]["properties"]["content"]["minLength"];
-    assert_eq!(min_len.as_i64(), Some(1));
-}
-
-#[test]
-fn bg_continuation_schema_no_notify_reason_field_absent() {
-    let v: serde_json::Value = serde_json::from_str(BG_CONTINUATION_SCHEMA_JSON).unwrap();
-    let props = v["properties"].as_object().unwrap();
+    let delivery = &v["properties"]["delivery"];
     assert!(
-        !props.contains_key("no_notify_reason"),
-        "no_notify_reason must not be in bg schema"
+        delivery.get("oneOf").is_none(),
+        "background delivery must not have a silent oneOf branch"
     );
+    let kind = v["properties"]["delivery"]["properties"]["kind"]["const"]
+        .as_str()
+        .unwrap();
+    assert_eq!(kind, "notify");
+
+    let min_len = v["properties"]["delivery"]["properties"]["content"]["minLength"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(min_len, 1);
+}
+
+#[test]
+fn schemas_do_not_use_old_cron_output_names() {
+    for schema in [CRON_SCHEMA_JSON, BG_CONTINUATION_SCHEMA_JSON] {
+        let v: serde_json::Value = serde_json::from_str(schema).unwrap();
+        let props = v["properties"].as_object().unwrap();
+        assert!(!props.contains_key("summary"));
+        assert!(!props.contains_key("notify"));
+        assert!(!props.contains_key("no_notify_reason"));
+    }
 }
 
 #[test]
 fn bg_continuation_schema_attachments_item_has_media_group_id() {
-    let items = attachments_item_schema(
-        BG_CONTINUATION_SCHEMA_JSON,
-        &["properties", "notify", "properties", "attachments", "items"],
-    );
-    assert_has_nullable_media_group_id(&items);
+    let v: serde_json::Value = serde_json::from_str(BG_CONTINUATION_SCHEMA_JSON).unwrap();
+    let items = &v["properties"]["delivery"]["properties"]["attachments"]["items"];
+    assert_has_nullable_media_group_id(items);
 }
 
 #[test]
