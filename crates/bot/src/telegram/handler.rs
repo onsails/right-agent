@@ -168,10 +168,6 @@ async fn send_failed_reply(
     send_html_reply(bot, chat_id, eff_thread_id, &tg::error(&escaped)).await
 }
 
-fn telegram_quote_text(msg: &Message) -> Option<String> {
-    msg.quote().map(|quote| quote.text.clone())
-}
-
 /// Handle an incoming text message.
 ///
 /// 1. Compute effective_thread_id (normalise General topic).
@@ -272,7 +268,7 @@ pub async fn handle_message(
 
     // Extract reply-to message ID
     let reply_to_id = msg.reply_to_message().map(|m| m.id.0);
-    let quoted_text = telegram_quote_text(&msg);
+    let quoted_text = msg.quote().map(|q| q.text.clone());
 
     // Intercept auth code: if login flow is waiting for a code, forward this message.
     if let Some(ref text_val) = text {
@@ -2320,35 +2316,6 @@ mod tests {
         assert_eq!(agent.0, PathBuf::from("/agents/myagent"));
         assert_eq!(home.0, PathBuf::from("/home/user/.right"));
         assert_ne!(agent.0, home.0);
-    }
-
-    #[test]
-    fn telegram_quote_text_extracts_partial_reply_quote() {
-        let msg: Message = serde_json::from_value(serde_json::json!({
-            "message_id": 20,
-            "date": 0,
-            "chat": {"id": 99, "type": "private", "first_name": "User"},
-            "from": {"id": 42, "is_bot": false, "first_name": "User"},
-            "text": "what do you mean here?",
-            "reply_to_message": {
-                "message_id": 19,
-                "date": 0,
-                "chat": {"id": 99, "type": "private", "first_name": "Agent"},
-                "from": {"id": 100, "is_bot": true, "first_name": "Agent"},
-                "text": "first sentence. selected fragment. last sentence."
-            },
-            "quote": {
-                "text": "selected fragment",
-                "position": 16,
-                "is_manual": true
-            }
-        }))
-        .unwrap();
-
-        assert_eq!(
-            telegram_quote_text(&msg).as_deref(),
-            Some("selected fragment")
-        );
     }
 
     #[test]
