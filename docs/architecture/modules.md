@@ -39,7 +39,8 @@
 ### right-openshell
 
 - `openshell.rs` and `openshell_proto` - OpenShell gRPC mTLS client, generated proto types, sandbox lifecycle wrappers, SSH helpers, and policy helpers.
-- `sandbox_exec.rs` - clonable gRPC sandbox execution handle.
+- `sandbox_exec.rs` - clonable gRPC sandbox execution handle with a shared
+  lazy OpenShell client per handle family.
 - `test_cleanup.rs` and `test_support.rs` - live-sandbox test cleanup and `TestSandbox`.
 
 ### right-platform-store

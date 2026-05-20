@@ -89,10 +89,10 @@ non-`rightx-*` skill directories and do not copy skill files from sandbox to
 host.
 
 The dashboard may run explicit, read-only OpenShell probes when the user opens
-the Mini App Health tab and asks for sandbox stats. The probe is bounded by a
-short timeout and a fixed process row limit, and reads only disk usage, memory
-availability/load averages, and process summaries from inside the sandbox.
-Overview rendering does not run this probe.
+Mini App health, identity, or knowledge-skill views. These probes reuse the
+bot-owned `SandboxExec` handle, are bounded by short per-request timeouts, and
+read only the requested dashboard material: sandbox stats, identity files, or
+skill inventory/details. Overview rendering does not run these probes.
 
 ### User-Local CLI Environment
 
