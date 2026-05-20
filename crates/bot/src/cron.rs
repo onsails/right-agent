@@ -1834,6 +1834,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_cron_output_empty_stream_is_invalid() {
+        let err = parse_cron_output(&[]).unwrap_err();
+        assert!(err.contains("no result line"));
+    }
+
+    #[test]
+    fn parse_cron_output_without_result_line_is_invalid() {
+        let lines = vec![
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#
+                .to_string(),
+        ];
+        let err = parse_cron_output(&lines).unwrap_err();
+        assert!(err.contains("no result line"));
+    }
+
+    #[test]
     fn parse_cron_output_empty_notify_content_is_invalid() {
         let lines = vec![
             r#"{"type":"result","subtype":"success","structured_output":{"delivery":{"kind":"notify","content":"   "},"run_note":"bad"}}"#.to_string(),
