@@ -114,6 +114,13 @@ async fn handle_bootstrap(
             learning_metrics: true,
             learning_evidence_snippets: true,
             learning_commands: false,
+            activity: true,
+            knowledge_learning: true,
+            knowledge_skills: true,
+            usage: true,
+            identity: true,
+            doctor: true,
+            sandbox_stats: true,
         },
     })
     .into_response()

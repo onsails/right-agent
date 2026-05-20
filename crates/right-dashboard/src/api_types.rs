@@ -22,6 +22,13 @@ pub struct DashboardFeatures {
     pub learning_metrics: bool,
     pub learning_evidence_snippets: bool,
     pub learning_commands: bool,
+    pub activity: bool,
+    pub knowledge_learning: bool,
+    pub knowledge_skills: bool,
+    pub usage: bool,
+    pub identity: bool,
+    pub doctor: bool,
+    pub sandbox_stats: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -32,6 +39,33 @@ pub struct OverviewResponse {
     pub summary: OverviewSummary,
     pub crons: Vec<CronCard>,
     pub active: ActiveActivity,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct DashboardOverviewResponse {
+    pub agent: String,
+    pub generated_at: String,
+    pub active_runs: i64,
+    pub recent_failures: i64,
+    pub today_cost_usd: f64,
+    pub learning_candidates_24h: i64,
+    pub doctor: OverviewDoctorStatus,
+    pub sandbox: OverviewSandboxStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OverviewDoctorStatus {
+    pub state: String,
+    pub pass_count: i64,
+    pub warn_count: i64,
+    pub fail_count: i64,
+    pub generated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OverviewSandboxStatus {
+    pub state: String,
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -245,6 +279,96 @@ pub struct LearningReviewerDetail {
     pub candidate_summary: Option<String>,
     pub evidence_refs: Vec<String>,
     pub user_notice_present: bool,
+}
+
+#[cfg(test)]
+mod dashboard_v2_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn dashboard_v2_bootstrap_features_serialize() {
+        let features = DashboardFeatures {
+            readonly: true,
+            commands_enabled: false,
+            learning_metrics: true,
+            learning_evidence_snippets: true,
+            learning_commands: false,
+            activity: true,
+            knowledge_learning: true,
+            knowledge_skills: true,
+            usage: true,
+            identity: true,
+            doctor: true,
+            sandbox_stats: true,
+        };
+
+        let value = serde_json::to_value(&features).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "readonly": true,
+                "commands_enabled": false,
+                "learning_metrics": true,
+                "learning_evidence_snippets": true,
+                "learning_commands": false,
+                "activity": true,
+                "knowledge_learning": true,
+                "knowledge_skills": true,
+                "usage": true,
+                "identity": true,
+                "doctor": true,
+                "sandbox_stats": true,
+            })
+        );
+    }
+
+    #[test]
+    fn dashboard_overview_serializes_expected_shape() {
+        let response = DashboardOverviewResponse {
+            agent: "alpha".to_owned(),
+            generated_at: "2026-05-20T12:00:00Z".to_owned(),
+            active_runs: 2,
+            recent_failures: 1,
+            today_cost_usd: 0.42,
+            learning_candidates_24h: 3,
+            doctor: OverviewDoctorStatus {
+                state: "not_loaded".to_owned(),
+                pass_count: 0,
+                warn_count: 0,
+                fail_count: 0,
+                generated_at: None,
+            },
+            sandbox: OverviewSandboxStatus {
+                state: "unknown".to_owned(),
+                detail: None,
+            },
+        };
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "agent": "alpha",
+                "generated_at": "2026-05-20T12:00:00Z",
+                "active_runs": 2,
+                "recent_failures": 1,
+                "today_cost_usd": 0.42,
+                "learning_candidates_24h": 3,
+                "doctor": {
+                    "state": "not_loaded",
+                    "pass_count": 0,
+                    "warn_count": 0,
+                    "fail_count": 0,
+                    "generated_at": null,
+                },
+                "sandbox": {
+                    "state": "unknown",
+                    "detail": null,
+                },
+            })
+        );
+    }
 }
 
 #[cfg(test)]

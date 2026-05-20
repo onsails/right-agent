@@ -17,6 +17,13 @@ export interface DashboardFeatures {
   learning_metrics: boolean
   learning_evidence_snippets: boolean
   learning_commands: boolean
+  activity: boolean
+  knowledge_learning: boolean
+  knowledge_skills: boolean
+  usage: boolean
+  identity: boolean
+  doctor: boolean
+  sandbox_stats: boolean
 }
 
 export interface OverviewResponse {
@@ -26,6 +33,30 @@ export interface OverviewResponse {
   summary: OverviewSummary
   crons: CronCard[]
   active: ActiveActivity
+}
+
+export interface DashboardOverviewResponse {
+  agent: string
+  generated_at: string
+  active_runs: number
+  recent_failures: number
+  today_cost_usd: number
+  learning_candidates_24h: number
+  doctor: OverviewDoctorStatus
+  sandbox: OverviewSandboxStatus
+}
+
+export interface OverviewDoctorStatus {
+  state: string
+  pass_count: number
+  warn_count: number
+  fail_count: number
+  generated_at: string | null
+}
+
+export interface OverviewSandboxStatus {
+  state: string
+  detail: string | null
 }
 
 export interface OverviewSummary {
