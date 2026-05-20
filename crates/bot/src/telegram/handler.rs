@@ -18,7 +18,7 @@ use teloxide::prelude::*;
 use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message};
 use tokio::sync::mpsc;
 
-use crate::cc::markdown_utils::html_escape;
+use crate::cc::markdown_utils::{html_escape, strip_html_tags};
 
 use super::BotType;
 #[cfg(test)]
@@ -1904,9 +1904,30 @@ pub async fn handle_doctor(bot: BotType, msg: Message, home: Arc<RightHome>) -> 
     }
     tracing::info!("handle_doctor: running diagnostics");
     let checks = right_agent::doctor::run_doctor(&home.0);
+    for text in format_doctor_result_messages(&checks) {
+        if let Err(e) = bot
+            .send_message(msg.chat.id, &text)
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await
+        {
+            tracing::error!("handle_doctor: Telegram rejected HTML message: {e:#}");
+            bot.send_message(msg.chat.id, strip_html_tags(&text))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+fn format_doctor_result_messages(checks: &[right_agent::doctor::DoctorCheck]) -> Vec<String> {
+    let body = format_doctor_result_body(checks);
+    let text = format!("Doctor results:\n\n<pre>{}</pre>", html_escape(&body));
+    super::markdown::split_html_message(&text)
+}
+
+fn format_doctor_result_body(checks: &[right_agent::doctor::DoctorCheck]) -> String {
     let theme = right_ui::Theme::Mono;
     let mut block = right_ui::Block::new();
-    for check in &checks {
+    for check in checks {
         block.push(check.to_ui_line());
     }
     let pass_count = checks
@@ -1934,24 +1955,7 @@ pub async fn handle_doctor(bot: BotType, msg: Message, home: Arc<RightHome>) -> 
         }
         format!("{pass_count}/{total} checks passed ({})", parts.join(", "))
     };
-    let body = format!("{}\n\n{}", block.render(theme), summary);
-    // HTML-escape body before wrapping in <pre> -- doctor output may contain <, >, &
-    let escaped = body
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    let text = format!("Doctor results:\n\n<pre>{}</pre>", escaped);
-    if let Err(e) = bot
-        .send_message(msg.chat.id, &text)
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .await
-    {
-        tracing::error!("handle_doctor: Telegram rejected HTML message: {e:#}");
-        // Fallback: send as plain text without <pre> wrapper
-        bot.send_message(msg.chat.id, format!("Doctor results:\n\n{body}"))
-            .await?;
-    }
-    Ok(())
+    format!("{}\n\n{}", block.render(theme), summary)
 }
 
 // ---------------------------------------------------------------------------
@@ -2414,6 +2418,37 @@ mod tests {
             text,
             "✅ Added MCP server <b>obsidian</b>. 15 tools available.\n\n⚠️ Plain HTTP: trusted/encrypted networks only."
         );
+    }
+
+    #[test]
+    fn format_doctor_result_messages_splits_long_output_for_telegram() {
+        let checks: Vec<_> = (0..40)
+            .map(|i| right_agent::doctor::DoctorCheck {
+                name: format!("long-check-{i}"),
+                status: right_agent::doctor::CheckStatus::Warn,
+                detail: "x".repeat(180),
+                fix: Some("y".repeat(80)),
+            })
+            .collect();
+
+        let messages = format_doctor_result_messages(&checks);
+
+        assert!(messages.len() > 1);
+        for message in &messages {
+            assert!(
+                message.len() <= 4096,
+                "doctor message too long: {} chars",
+                message.len()
+            );
+            assert!(
+                message.contains("<pre>"),
+                "message missing <pre>: {message}"
+            );
+            assert!(
+                message.contains("</pre>"),
+                "message missing </pre>: {message}"
+            );
+        }
     }
 
     #[test]
