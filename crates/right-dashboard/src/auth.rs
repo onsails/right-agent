@@ -55,15 +55,19 @@ pub fn validate_init_data(raw: &str, cfg: &InitDataValidation) -> Result<Dashboa
     let mut hash = None;
     let mut user = None;
     let mut auth_date = None;
+    let mut seen_keys = BTreeSet::new();
     let mut data_pairs = Vec::new();
 
     for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
         let key = key.into_owned();
         let value = value.into_owned();
 
+        if !seen_keys.insert(key.clone()) {
+            return Err(AuthError::MalformedInitData);
+        }
+
         match key.as_str() {
             "hash" => hash = Some(value),
-            "signature" => {}
             "auth_date" => {
                 auth_date = Some(value.clone());
                 data_pairs.push((key, value));
@@ -77,6 +81,15 @@ pub fn validate_init_data(raw: &str, cfg: &InitDataValidation) -> Result<Dashboa
     }
 
     let supplied_hash = hash.ok_or(AuthError::MalformedInitData)?;
+    if supplied_hash.len() != 64
+        || !supplied_hash
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(AuthError::InvalidHash);
+    }
+
     let auth_date = auth_date
         .ok_or(AuthError::MalformedInitData)?
         .parse::<i64>()
@@ -107,7 +120,11 @@ pub fn validate_init_data(raw: &str, cfg: &InitDataValidation) -> Result<Dashboa
         return Err(AuthError::InvalidHash);
     }
 
-    let age_secs = cfg.now.timestamp() - auth_date;
+    let age_secs = cfg
+        .now
+        .timestamp()
+        .checked_sub(auth_date)
+        .ok_or(AuthError::Expired)?;
     if age_secs < 0 || age_secs > cfg.max_age_secs {
         return Err(AuthError::Expired);
     }
@@ -206,6 +223,21 @@ mod tests {
         )
     }
 
+    fn signed_user_init_data_with_pairs(bot_token: &str, extra_pairs: &[(&str, String)]) -> String {
+        let user = json!({
+            "id": 42,
+            "username": "forty_two",
+            "first_name": "Douglas",
+        })
+        .to_string();
+        let auth_date = "1779278300".to_string();
+
+        let mut pairs = vec![("auth_date", auth_date), ("user", user)];
+        pairs.extend_from_slice(extra_pairs);
+
+        signed_init_data(bot_token, &pairs)
+    }
+
     #[test]
     fn init_data_validation_debug_redacts_bot_token() {
         let token = "123456:secret-token";
@@ -253,11 +285,68 @@ mod tests {
     }
 
     #[test]
+    fn signature_is_included_in_bot_token_hash_validation() {
+        let bot_token = "123456:secret-token";
+        let raw =
+            signed_user_init_data_with_pairs(bot_token, &[("signature", "third-party-sig".into())]);
+
+        let user = validate_init_data(&raw, &cfg(bot_token)).expect("valid signed init data");
+
+        assert_eq!(user.id, 42);
+    }
+
+    #[test]
+    fn tampered_signature_is_rejected() {
+        let bot_token = "123456:secret-token";
+        let raw =
+            signed_user_init_data_with_pairs(bot_token, &[("signature", "third-party-sig".into())]);
+        let raw = raw.replace("third-party-sig", "tampered-sig");
+
+        let err = validate_init_data(&raw, &cfg(bot_token)).expect_err("tampered signature");
+
+        assert_eq!(err, AuthError::InvalidHash);
+    }
+
+    #[test]
+    fn duplicate_key_is_rejected() {
+        let bot_token = "123456:secret-token";
+        let raw = signed_user_init_data_with_pairs(
+            bot_token,
+            &[("query_id", "first".into()), ("query_id", "second".into())],
+        );
+
+        let err = validate_init_data(&raw, &cfg(bot_token)).expect_err("duplicate key");
+
+        assert_eq!(err, AuthError::MalformedInitData);
+    }
+
+    #[test]
+    fn malformed_hash_shape_is_rejected() {
+        let bot_token = "123456:secret-token";
+        let raw = signed_user_init_data(bot_token, 1_779_278_300);
+        let raw = raw.replace("hash=", "hash=not-hex");
+
+        let err = validate_init_data(&raw, &cfg(bot_token)).expect_err("malformed hash");
+
+        assert_eq!(err, AuthError::InvalidHash);
+    }
+
+    #[test]
     fn expired_auth_date_is_rejected() {
         let bot_token = "123456:secret-token";
         let raw = signed_user_init_data(bot_token, 1_779_277_999);
 
         let err = validate_init_data(&raw, &cfg(bot_token)).expect_err("expired auth_date");
+
+        assert_eq!(err, AuthError::Expired);
+    }
+
+    #[test]
+    fn future_auth_date_is_rejected() {
+        let bot_token = "123456:secret-token";
+        let raw = signed_user_init_data(bot_token, 1_779_278_401);
+
+        let err = validate_init_data(&raw, &cfg(bot_token)).expect_err("future auth_date");
 
         assert_eq!(err, AuthError::Expired);
     }
