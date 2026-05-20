@@ -23,13 +23,14 @@ pub(crate) struct CloudflaredCredentials {
     pub credentials_file: PathBuf,
 }
 
-/// Generate cloudflared ingress config YAML for Telegram webhook and
-/// OAuth callback routing.
+/// Generate cloudflared ingress config YAML for Telegram webhook,
+/// dashboard, and OAuth callback routing.
 ///
-/// Per agent the template emits two ingress rules — a `/tg/<agent>/.*`
-/// webhook rule and an `/oauth/<agent>/callback` rule — followed by a
-/// catch-all `service: http_status:404`. First match wins, so the
-/// webhook rule comes before the OAuth rule for the same agent.
+/// Per agent the template emits three ingress rules — a `/tg/<agent>`
+/// webhook rule, a `/dashboard/<agent>/.*` dashboard rule, and an
+/// `/oauth/<agent>/callback` rule — followed by a catch-all
+/// `service: http_status:404`. First match wins, so the webhook rule
+/// comes before the dashboard and OAuth rules for the same agent.
 ///
 /// # Arguments
 ///

@@ -158,6 +158,17 @@ fn webhook_ingress_rule_per_agent() {
 }
 
 #[test]
+fn dashboard_ingress_rule_per_agent() {
+    let creds = fixture_creds();
+    let agents = vec![("alpha".to_string(), PathBuf::from("/tmp/agents/alpha"))];
+    let yaml = generate_cloudflared_config(&agents, "t.example.com", &creds).unwrap();
+    assert!(
+        yaml.contains("path: /dashboard/alpha/.*"),
+        "missing dashboard ingress: {yaml}"
+    );
+}
+
+#[test]
 fn webhook_ingress_appears_before_oauth_for_same_agent() {
     let creds = fixture_creds();
     let agents = vec![("alpha".to_string(), PathBuf::from("/tmp/agents/alpha"))];

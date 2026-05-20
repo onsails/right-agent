@@ -27,9 +27,10 @@ use super::bot::build_bot;
 use super::filter::make_routing_filter;
 use super::handler::{
     AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot,
-    RightHome, SshConfigPath, handle_bg_callback, handle_cron, handle_doctor, handle_list,
-    handle_mcp, handle_mcp_auth_choice_callback, handle_message, handle_new, handle_start,
-    handle_stop_callback, handle_switch, handle_thinking_toggle_callback, handle_usage,
+    RightHome, SshConfigPath, handle_bg_callback, handle_cron, handle_dashboard, handle_doctor,
+    handle_list, handle_mcp, handle_mcp_auth_choice_callback, handle_message, handle_new,
+    handle_start, handle_stop_callback, handle_switch, handle_thinking_toggle_callback,
+    handle_usage,
 };
 use super::mcp_auth_choice::PendingMcpAuthChoiceSlot;
 use super::mention::BotIdentity;
@@ -54,6 +55,8 @@ enum BotCommand {
     Doctor,
     #[command(description = "Switch Claude model (menu)")]
     Model,
+    #[command(description = "Open dashboard")]
+    Dashboard,
     /// Toggle hot-reloadable debug mode. Use `/debug` for status, `/debug on`,
     /// `/debug off`. When on, claude -p runs with --debug --debug-file=...
     #[command(description = "Toggle debug mode (on/off/status)")]
@@ -509,6 +512,7 @@ fn build_dispatcher(
         .branch(dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp))
         .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor))
         .branch(dptree::case![BotCommand::Model].endpoint(handle_model))
+        .branch(dptree::case![BotCommand::Dashboard].endpoint(handle_dashboard))
         .branch(dptree::case![BotCommand::Debug(args)].endpoint(super::debug_command::handle_debug))
         .branch(dptree::case![BotCommand::Cron(args)].endpoint(handle_cron))
         .branch(dptree::case![BotCommand::Usage(arg)].endpoint(handle_usage))

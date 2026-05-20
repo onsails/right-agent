@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicBool;
 use dashmap::DashMap;
 use teloxide::RequestError;
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, Message};
+use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message};
 use tokio::sync::mpsc;
 
 use crate::cc::markdown_utils::html_escape;
@@ -444,6 +444,45 @@ pub async fn handle_start(bot: BotType, msg: Message) -> ResponseResult<()> {
     }
     bot.send_message(msg.chat.id, "Agent is running. Send a message to start.")
         .await?;
+    Ok(())
+}
+
+/// Handle the /dashboard command -- send a Telegram Mini App launch button.
+pub async fn handle_dashboard(
+    bot: BotType,
+    msg: Message,
+    home: Arc<RightHome>,
+    agent_dir: Arc<AgentDir>,
+) -> ResponseResult<()> {
+    let global_config = right_config::read_global_config(&home.0)
+        .map_err(|e| to_request_err(format!("dashboard: read config.yaml: {e:#}")))?;
+    let agent_name = agent_dir
+        .0
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            to_request_err(format!(
+                "dashboard: invalid agent directory name: {}",
+                agent_dir.0.display()
+            ))
+        })?;
+    let url = super::dashboard::dashboard_url(&global_config.tunnel.hostname, agent_name)
+        .map_err(|e| to_request_err(format!("dashboard: invalid URL: {e:#}")))?;
+    let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::web_app(
+        "Open dashboard",
+        teloxide::types::WebAppInfo { url },
+    )]]);
+
+    let mut send = bot
+        .send_message(msg.chat.id, "Dashboard")
+        .reply_markup(keyboard);
+    let eff_thread_id = effective_thread_id(&msg);
+    if eff_thread_id != 0 {
+        send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+            eff_thread_id as i32,
+        )));
+    }
+    send.await?;
     Ok(())
 }
 
