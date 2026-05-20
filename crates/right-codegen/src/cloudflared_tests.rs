@@ -163,8 +163,25 @@ fn dashboard_ingress_rule_per_agent() {
     let agents = vec![("alpha".to_string(), PathBuf::from("/tmp/agents/alpha"))];
     let yaml = generate_cloudflared_config(&agents, "t.example.com", &creds).unwrap();
     assert!(
-        yaml.contains("path: /dashboard/alpha/.*"),
+        yaml.contains("path: ^/dashboard/alpha/.*$"),
         "missing dashboard ingress: {yaml}"
+    );
+}
+
+#[test]
+fn dashboard_ingress_appears_before_oauth_for_same_agent() {
+    let creds = fixture_creds();
+    let agents = vec![("alpha".to_string(), PathBuf::from("/tmp/agents/alpha"))];
+    let yaml = generate_cloudflared_config(&agents, "t.example.com", &creds).unwrap();
+    let dashboard_pos = yaml
+        .find("^/dashboard/alpha/.*$")
+        .expect("missing /dashboard rule");
+    let oauth_pos = yaml
+        .find("/oauth/alpha/callback")
+        .expect("missing /oauth rule");
+    assert!(
+        dashboard_pos < oauth_pos,
+        "/dashboard rule must come before /oauth rule for same agent (first match wins). yaml:\n{yaml}"
     );
 }
 
