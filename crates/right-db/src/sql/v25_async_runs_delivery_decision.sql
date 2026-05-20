@@ -1,4 +1,6 @@
-CREATE TABLE IF NOT EXISTS async_runs (
+ALTER TABLE async_runs RENAME TO async_runs_old;
+
+CREATE TABLE async_runs (
     id                  TEXT PRIMARY KEY,
     kind                TEXT NOT NULL,
     producer_ref         TEXT,
@@ -23,6 +25,27 @@ CREATE TABLE IF NOT EXISTS async_runs (
     created_at           TEXT NOT NULL,
     updated_at           TEXT NOT NULL
 );
+
+INSERT INTO async_runs (
+    id, kind, producer_ref, source_session_id, run_session_id,
+    target_chat_id, target_thread_id, status, handoff_state,
+    started_at, finished_at, exit_code, log_path, run_note,
+    delivery_json, error_json, delivery_required, delivery_status,
+    delivery_attempts, delivered_at, last_delivery_error, created_at, updated_at
+)
+SELECT
+    id, kind, producer_ref, source_session_id, run_session_id,
+    target_chat_id, target_thread_id, status, handoff_state,
+    started_at, finished_at, exit_code, log_path, summary,
+    NULL, error_json, 0,
+    CASE
+      WHEN delivery_status IN ('delivered', 'superseded', 'failed') THEN delivery_status
+      ELSE 'none'
+    END,
+    delivery_attempts, delivered_at, last_delivery_error, created_at, updated_at
+FROM async_runs_old;
+
+DROP TABLE async_runs_old;
 
 CREATE INDEX IF NOT EXISTS idx_async_runs_kind_producer_started
     ON async_runs(kind, producer_ref, started_at DESC);

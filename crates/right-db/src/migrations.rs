@@ -24,10 +24,53 @@ const V19_SCHEMA: &str = include_str!("sql/v19_cron_runs_target_index.sql");
 const V20_SCHEMA: &str = include_str!("sql/v20_learned_skills.sql");
 const V21_SCHEMA: &str = include_str!("sql/v21_conversation_messages.sql");
 const V22_SCHEMA: &str = include_str!("sql/v22_skill_review_reports.sql");
+#[allow(dead_code)] // Canonical latest async_runs table shape; v23 hook keeps historical shape.
 const V23_SCHEMA: &str = include_str!("sql/v23_async_runs.sql");
 const V24_SCHEMA: &str = include_str!("sql/v24_learning_episodes.sql");
+const V25_SCHEMA: &str = include_str!("sql/v25_async_runs_delivery_decision.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 24;
+pub const LATEST_SCHEMA_VERSION: u32 = 25;
+
+const V23_LEGACY_ASYNC_RUNS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS async_runs (
+    id                  TEXT PRIMARY KEY,
+    kind                TEXT NOT NULL,
+    producer_ref         TEXT,
+    source_session_id    TEXT,
+    run_session_id       TEXT NOT NULL,
+    target_chat_id       INTEGER NOT NULL,
+    target_thread_id     INTEGER,
+    status              TEXT NOT NULL,
+    handoff_state        TEXT,
+    started_at           TEXT,
+    finished_at          TEXT,
+    exit_code            INTEGER,
+    log_path             TEXT,
+    summary              TEXT,
+    notify_json          TEXT,
+    no_notify_reason     TEXT,
+    error_json           TEXT,
+    delivery_required    INTEGER NOT NULL,
+    delivery_status      TEXT NOT NULL,
+    delivery_attempts    INTEGER NOT NULL DEFAULT 0,
+    delivered_at         TEXT,
+    last_delivery_error  TEXT,
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_async_runs_kind_producer_started
+    ON async_runs(kind, producer_ref, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_async_runs_delivery
+    ON async_runs(delivery_required, delivery_status, status, finished_at);
+
+CREATE INDEX IF NOT EXISTS idx_async_runs_target_status
+    ON async_runs(target_chat_id, target_thread_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_async_runs_run_session
+    ON async_runs(run_session_id);
+"#;
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -224,7 +267,7 @@ fn v22_skill_review_reports(tx: &Transaction) -> Result<(), HookError> {
 }
 
 fn v23_async_runs(tx: &Transaction) -> Result<(), HookError> {
-    tx.execute_batch(V23_SCHEMA)?;
+    tx.execute_batch(V23_LEGACY_ASYNC_RUNS_SCHEMA)?;
     tx.execute_batch(
         "INSERT INTO async_runs (
             id, kind, producer_ref, source_session_id, run_session_id,
@@ -412,6 +455,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up_with_hook(V22_SCHEMA, v22_skill_review_reports),
         M::up_with_hook("", v23_async_runs),
         M::up_with_hook("", v24_learning_episodes),
+        M::up(V25_SCHEMA),
     ])
 });
 
@@ -480,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn v23_async_runs_has_delivery_columns() {
+    fn async_runs_has_delivery_decision_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_latest(&mut conn).unwrap();
         let cols: Vec<String> = conn
@@ -490,17 +534,54 @@ mod tests {
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
+
         for col in [
-            "summary",
-            "notify_json",
-            "delivered_at",
+            "run_note",
+            "delivery_json",
+            "delivery_required",
             "delivery_status",
-            "no_notify_reason",
-            "target_chat_id",
-            "target_thread_id",
         ] {
             assert!(cols.contains(&col.to_string()), "{col} column missing");
         }
+        for col in ["summary", "notify_json", "no_notify_reason"] {
+            assert!(
+                !cols.contains(&col.to_string()),
+                "{col} column should be removed"
+            );
+        }
+    }
+
+    #[test]
+    fn v25_loses_old_pending_delivery_payloads() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 24).unwrap();
+        conn.execute(
+            "INSERT INTO async_runs (
+            id, kind, producer_ref, run_session_id, target_chat_id,
+            status, started_at, finished_at, summary, notify_json,
+            no_notify_reason, delivery_required, delivery_status,
+            created_at, updated_at
+         ) VALUES (
+            'run-1', 'cron', 'ping', 'run-1', -100,
+            'success', '2026-05-21T10:00:00Z', '2026-05-21T10:00:05Z',
+            'old summary', '{\"content\":\"old payload\"}', NULL,
+            1, 'pending', '2026-05-21T10:00:00Z', '2026-05-21T10:00:05Z'
+         )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let row: (Option<String>, Option<String>, i64, String) = conn
+            .query_row(
+                "SELECT run_note, delivery_json, delivery_required, delivery_status
+             FROM async_runs WHERE id = 'run-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (Some("old summary".into()), None, 0, "none".into()));
     }
 
     #[test]
@@ -1303,11 +1384,12 @@ mod tests {
             String,
             String,
             Option<String>,
+            Option<String>,
             Option<i64>,
             Option<i64>,
         ) = conn
             .query_row(
-                "SELECT kind, producer_ref, delivery_status, notify_json, target_chat_id, target_thread_id
+                "SELECT kind, producer_ref, delivery_status, run_note, delivery_json, target_chat_id, target_thread_id
              FROM async_runs WHERE id = 'run-1'",
                 [],
                 |r| {
@@ -1318,16 +1400,18 @@ mod tests {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
+                        r.get(6)?,
                     ))
                 },
             )
             .unwrap();
         assert_eq!(row.0, "cron");
         assert_eq!(row.1, "morning");
-        assert_eq!(row.2, "pending");
-        assert_eq!(row.3.as_deref(), Some("{\"content\":\"hi\"}"));
-        assert_eq!(row.4, Some(-100));
-        assert_eq!(row.5, Some(7));
+        assert_eq!(row.2, "none");
+        assert_eq!(row.3.as_deref(), Some("summary"));
+        assert!(row.4.is_none());
+        assert_eq!(row.5, Some(-100));
+        assert_eq!(row.6, Some(7));
     }
 
     #[test]
@@ -1595,7 +1679,7 @@ continue started background work',
         assert_eq!(row.0, 1);
         assert_eq!(row.1, "background");
         assert_eq!(row.2, "failed");
-        assert_eq!(row.3, "pending");
+        assert_eq!(row.3, "none");
         assert_eq!(
             row.4.as_deref(),
             Some("123e4567-e89b-12d3-a456-426614174001")
@@ -1653,7 +1737,7 @@ continue background work',
             .unwrap();
         assert_eq!(row.0, "background");
         assert_eq!(row.1, "failed");
-        assert_eq!(row.2, "pending");
+        assert_eq!(row.2, "none");
         assert_eq!(
             row.3.as_deref(),
             Some("123e4567-e89b-12d3-a456-426614174002")

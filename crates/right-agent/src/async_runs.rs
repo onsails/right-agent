@@ -24,9 +24,8 @@ pub struct NewBackgroundRun<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct RunOutput<'a> {
-    pub summary: Option<&'a str>,
-    pub notify_json: Option<&'a str>,
-    pub no_notify_reason: Option<&'a str>,
+    pub run_note: Option<&'a str>,
+    pub delivery_json: Option<&'a str>,
     pub error_json: Option<&'a str>,
     pub delivery_required: bool,
 }
@@ -40,11 +39,10 @@ pub struct CronRunJsonRow {
     pub exit_code: Option<i64>,
     pub status: String,
     pub log_path: Option<String>,
-    pub summary: Option<String>,
-    pub notify_json: Option<String>,
+    pub run_note: Option<String>,
+    pub delivery_json: Option<String>,
     pub delivered_at: Option<String>,
     pub delivery_status: Option<String>,
-    pub no_notify_reason: Option<String>,
 }
 
 fn require_updated(rows: usize) -> rusqlite::Result<()> {
@@ -134,9 +132,9 @@ pub fn persist_run_output(
     run_id: &str,
     output: RunOutput<'_>,
 ) -> rusqlite::Result<()> {
-    if output.delivery_required && output.notify_json.is_none() {
+    if output.delivery_required && output.delivery_json.is_none() {
         return Err(rusqlite::Error::InvalidParameterName(
-            "notify_json is required when delivery_required is true".into(),
+            "delivery_json is required when delivery_required is true".into(),
         ));
     }
 
@@ -149,19 +147,17 @@ pub fn persist_run_output(
 
     let rows = conn.execute(
         "UPDATE async_runs
-         SET summary = ?2,
-             notify_json = ?3,
-             no_notify_reason = ?4,
-             error_json = ?5,
-             delivery_required = ?6,
-             delivery_status = ?7,
-             updated_at = ?8
+         SET run_note = ?2,
+             delivery_json = ?3,
+             error_json = ?4,
+             delivery_required = ?5,
+             delivery_status = ?6,
+             updated_at = ?7
          WHERE id = ?1",
         params![
             run_id,
-            output.summary,
-            output.notify_json,
-            output.no_notify_reason,
+            output.run_note,
+            output.delivery_json,
             output.error_json,
             output.delivery_required,
             delivery_status,
@@ -203,17 +199,16 @@ pub fn cron_run_to_json(row: &CronRunJsonRow) -> serde_json::Value {
         "log_path": row.log_path,
         "delivered_at": row.delivered_at,
         "delivery_status": row.delivery_status,
-        "no_notify_reason": row.no_notify_reason,
     });
 
-    if let Some(summary) = &row.summary {
-        val["summary"] = serde_json::Value::String(summary.clone());
+    if let Some(run_note) = &row.run_note {
+        val["run_note"] = serde_json::Value::String(run_note.clone());
     }
 
-    if let Some(notify_json) = &row.notify_json
-        && let Ok(notify) = serde_json::from_str::<serde_json::Value>(notify_json)
+    if let Some(delivery_json) = &row.delivery_json
+        && let Ok(delivery) = serde_json::from_str::<serde_json::Value>(delivery_json)
     {
-        val["notify"] = notify;
+        val["delivery"] = delivery;
     }
 
     val
@@ -283,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_run_output_with_notify_makes_delivery_pending() {
+    fn mark_run_output_with_delivery_makes_delivery_pending() {
         let conn = setup();
         insert_running_cron_run(
             &conn,
@@ -302,9 +297,8 @@ mod tests {
             &conn,
             "run-1",
             RunOutput {
-                summary: Some("summary"),
-                notify_json: Some("{\"content\":\"hi\"}"),
-                no_notify_reason: None,
+                run_note: Some("summary"),
+                delivery_json: Some("{\"content\":\"hi\"}"),
                 error_json: None,
                 delivery_required: true,
             },
@@ -313,7 +307,7 @@ mod tests {
 
         let row: (i64, String, String) = conn
             .query_row(
-                "SELECT delivery_required, delivery_status, notify_json FROM async_runs WHERE id='run-1'",
+                "SELECT delivery_required, delivery_status, delivery_json FROM async_runs WHERE id='run-1'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -322,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn persist_run_output_requires_notify_when_delivery_required() {
+    fn persist_run_output_requires_delivery_json_when_delivery_required() {
         let conn = setup();
         insert_running_cron_run(
             &conn,
@@ -341,24 +335,23 @@ mod tests {
             &conn,
             "run-1",
             RunOutput {
-                summary: Some("summary"),
-                notify_json: None,
-                no_notify_reason: None,
+                run_note: Some("note"),
+                delivery_json: None,
                 error_json: None,
                 delivery_required: true,
             },
         )
-        .expect_err("delivery_required without notify_json should fail");
+        .expect_err("delivery_required without delivery_json should fail");
 
         assert!(matches!(
             err,
             rusqlite::Error::InvalidParameterName(ref name)
-                if name == "notify_json is required when delivery_required is true"
+                if name == "delivery_json is required when delivery_required is true"
         ));
 
         let row: (i64, String, Option<String>) = conn
             .query_row(
-                "SELECT delivery_required, delivery_status, notify_json FROM async_runs WHERE id='run-1'",
+                "SELECT delivery_required, delivery_status, delivery_json FROM async_runs WHERE id='run-1'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -367,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn cron_run_to_json_parses_notify() {
+    fn cron_run_to_json_parses_delivery() {
         let row = CronRunJsonRow {
             id: "run-1".into(),
             job_name: "job-a".into(),
@@ -376,16 +369,17 @@ mod tests {
             exit_code: None,
             status: "success".into(),
             log_path: Some("/log".into()),
-            summary: Some("summary".into()),
-            notify_json: Some("{\"content\":\"hello\"}".into()),
+            run_note: Some("summary".into()),
+            delivery_json: Some("{\"content\":\"hello\"}".into()),
             delivered_at: None,
             delivery_status: Some("pending".into()),
-            no_notify_reason: None,
         };
 
         let json = cron_run_to_json(&row);
         assert_eq!(json["job_name"], "job-a");
-        assert_eq!(json["notify"]["content"], "hello");
+        assert_eq!(json["run_note"], "summary");
+        assert_eq!(json["delivery"]["content"], "hello");
+        assert!(json.get("notify").is_none());
     }
 
     #[test]
@@ -400,9 +394,8 @@ mod tests {
             &conn,
             "missing",
             RunOutput {
-                summary: Some("summary"),
-                notify_json: Some("{\"content\":\"hi\"}"),
-                no_notify_reason: None,
+                run_note: Some("summary"),
+                delivery_json: Some("{\"content\":\"hi\"}"),
                 error_json: None,
                 delivery_required: true,
             },
