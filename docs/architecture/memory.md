@@ -10,8 +10,9 @@ Two modes, configured per-agent via `memory.provider` in agent.yaml:
 
 **Hindsight mode (primary):** Hindsight Cloud API (`api.hindsight.vectorize.io`),
 one bank per agent. Three MCP tools exposed via aggregator:
-`memory_retain`, `memory_recall`, `memory_reflect`. Prefetch cache is in-memory
-(lost on restart → blocking recall on first interaction).
+agent-facing `mcp__right__memory_retain`, `mcp__right__memory_recall`,
+`mcp__right__memory_reflect` (server-side slugs are `memory_*`). Prefetch cache
+is in-memory (lost on restart → blocking recall on first interaction).
 
 Auto-retain after each turn: content formatted as JSON role/content/timestamp
 array, `document_id` = CC session UUID (same as `--resume`), `update_mode:
@@ -22,11 +23,16 @@ Auto-recall before each `claude -p`: query truncated to 800 chars, tags
 `["chat:<chat_id>"]` with `tags_match: "any"` (returns per-chat + global untagged
 memories). Prefetch uses same parameters.
 
+Explicit retain is residual storage, not the default destination for every
+"remember" request. Agent-facing prompt text directs explicit persistence
+requests to the `/right-memory` skill, which owns the detailed routing between
+identity files, tool notes, learned skills, and memory fallback.
+
 **Cron jobs skip memory:** Cron and delivery sessions perform no auto-recall
 or auto-retain. Cron prompts are static instructions — recall results would be
 irrelevant and corrupt user memory representations (same approach as hermes-agent
-`skip_memory=True`). Crons can call `memory_recall` and `memory_retain` MCP tools
-explicitly when needed.
+`skip_memory=True`). Crons can call `mcp__right__memory_recall` and
+`mcp__right__memory_retain` explicitly when needed.
 
 **Backgrounded turns retain user message at fork time:** When a foreground turn
 is sent to background (auto-timeout at 10 min, or user clicks the Background
@@ -34,8 +40,9 @@ button), the worker's `Backgrounded` arm retains the user message *only* (no
 assistant text yet) keyed by the main `--resume` session UUID with
 `update_mode: "append"`. Without this, the background answer would arrive over
 a session whose user turn was never recorded in Hindsight. The assistant turn
-extends the same document later via either an explicit `memory_retain` MCP call
-from the background prompt or the next foreground turn's auto-retain.
+extends the same document later via either an explicit
+`mcp__right__memory_retain` call from the background prompt or the next
+foreground turn's auto-retain.
 
 **File mode (fallback):** Agent manages `MEMORY.md` via CC Edit/Write.
 Bot injects file contents into system prompt (truncated to 200 lines).
@@ -50,8 +57,9 @@ tools are removed from the surface; their backing tables (`memories`,
 Conversation transcript search is local SQLite FTS5 over archived Telegram
 messages, not Hindsight. `mcp__right__thread_search` and
 `mcp__right__chat_search` return archived transcript snippets scoped by the
-current foreground Telegram invocation. Use these tools, not `memory_recall`,
-when the user asks what was said or asks for past wording.
+current foreground Telegram invocation. Use these tools, not
+`mcp__right__memory_recall`, when the user asks what was said or asks for past
+wording.
 
 The archive records newly observed Telegram messages only. There is no backfill
 from older Telegram history or Claude session JSONL.

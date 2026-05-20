@@ -414,3 +414,36 @@ fn test_get_info_mentions_cron_and_mcp_tools() {
         "instructions should mention mcp_list: {instructions}"
     );
 }
+
+#[test]
+fn test_get_info_delegates_memory_routing_to_right_memory() {
+    let (server, _dir) = setup_server_with_dir();
+    let info = server.get_info();
+    let instructions = info.instructions.unwrap_or_default();
+    for needle in [
+        "remember",
+        "save this",
+        "don't forget",
+        "/right-memory",
+        "mcp__right__memory_retain",
+        "residual durable context",
+        "fallback target",
+    ] {
+        assert!(
+            instructions.contains(needle),
+            "instructions should delegate memory routing to /right-memory: missing {needle:?}; {instructions}"
+        );
+    }
+
+    for forbidden in [
+        "Route tool/API/environment rules",
+        "stable user facts/preferences to USER.md",
+        "agent voice or escalation boundaries to SOUL.md",
+        "core identity/security posture to IDENTITY.md",
+    ] {
+        assert!(
+            !instructions.contains(forbidden),
+            "instructions must not duplicate detailed /right-memory routing: found {forbidden:?}"
+        );
+    }
+}

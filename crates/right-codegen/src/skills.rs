@@ -604,8 +604,12 @@ mod tests {
             std::fs::read_to_string(dir.path().join(".claude/skills/right-memory/SKILL.md"))
                 .unwrap();
         assert!(
-            content.contains("memory_retain"),
-            "hindsight variant must reference MCP tools"
+            content.contains("mcp__right__memory_retain"),
+            "hindsight variant must reference the agent-facing MCP retain tool name"
+        );
+        assert!(
+            !content.contains("`memory_retain`"),
+            "hindsight variant must not teach the bare MCP retain tool name"
         );
         assert!(
             !content.contains("Edit and Write tools to manage MEMORY.md"),

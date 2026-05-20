@@ -164,6 +164,37 @@ fn system_prompt_mentions_right_mcp() {
 }
 
 #[test]
+fn system_prompt_delegates_remember_routing_to_right_memory_skill() {
+    let result = generate_system_prompt(
+        "test",
+        &right_agent_config::SandboxMode::Openshell,
+        "/sandbox",
+    );
+
+    for needle in [
+        "Identity files are always-loaded durable context",
+        "`SOUL.md`",
+        "agent-authored durable voice",
+        "/right-memory",
+    ] {
+        assert!(
+            result.contains(needle),
+            "system prompt must preserve identity ownership and right-memory delegation: missing {needle:?}"
+        );
+    }
+
+    for forbidden in [
+        concat!("compact ", "operating contract"),
+        "\"Remember\" requests are routed by semantic type before storage. Tool/API/env rules go to",
+    ] {
+        assert!(
+            !result.contains(forbidden),
+            "system prompt must not duplicate detailed routing or prescribe SOUL defaults: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
 fn system_prompt_contains_ssh_block_for_openshell() {
     let result = generate_system_prompt(
         "mybot",
@@ -242,18 +273,78 @@ fn operating_instructions_constant_is_non_empty() {
 }
 
 #[test]
+fn operating_instructions_keep_soul_agent_authored_and_delegate_remember_routing() {
+    let ops = crate::OPERATING_INSTRUCTIONS;
+    for needle in [
+        "`SOUL.md`",
+        "agent-authored durable voice",
+        "Do not invent platform-default content for this file",
+        "Use the `/right-memory` skill to classify the correct persistence target",
+        "smallest accurate edit",
+    ] {
+        assert!(
+            ops.contains(needle),
+            "OPERATING_INSTRUCTIONS must describe ownership-safe SOUL routing: missing {needle:?}"
+        );
+    }
+
+    for forbidden in [
+        concat!("compact ", "operating contract"),
+        "Edit the always-loaded file when the fact belongs in one",
+        "`TOOLS.md` for tool/API/environment rules",
+        "`USER.md` for user profile",
+        "`SOUL.md` for your voice",
+        "Tool-selection rules or integration quirks",
+        "Your identity, values, style",
+        "Stable user preferences",
+        "Procedures and reusable workflows",
+    ] {
+        assert!(
+            !ops.contains(forbidden),
+            "OPERATING_INSTRUCTIONS must not duplicate detailed routing or platform SOUL defaults: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
 fn operating_instructions_route_reusable_workflows_to_right_learn_skill() {
     let ops = crate::OPERATING_INSTRUCTIONS;
     for needle in [
         "/right-learn-skill",
-        "Procedures and reusable workflows",
-        "save as skills, not memory",
+        "When you discover a reusable procedure",
+        "needs repair",
         right_mcp::LEARNED_SKILL_PREFIX,
     ] {
         assert!(
             ops.contains(needle),
             "OPERATING_INSTRUCTIONS must mention {needle:?}"
         );
+    }
+}
+
+#[test]
+fn right_memory_skills_route_remember_requests_by_storage_layer() {
+    let hindsight = include_str!("../skills/right-memory-hindsight/SKILL.md");
+    let file = include_str!("../skills/right-memory-file/SKILL.md");
+
+    for (name, skill) in [
+        ("right-memory-hindsight", hindsight),
+        ("right-memory-file", file),
+    ] {
+        for needle in [
+            "When the user says \"remember\"",
+            "first classify what kind of persistent fact it is",
+            "`TOOLS.md`",
+            "`USER.md`",
+            "`SOUL.md`",
+            "`IDENTITY.md`",
+            "memory is the fallback",
+        ] {
+            assert!(
+                skill.contains(needle),
+                "{name} must route remember requests by storage layer: missing {needle:?}"
+            );
+        }
     }
 }
 
@@ -371,6 +462,35 @@ fn bootstrap_instructions_constant_is_non_empty() {
 }
 
 #[test]
+fn bootstrap_instructions_do_not_invent_platform_soul_contract() {
+    let bootstrap = crate::BOOTSTRAP_INSTRUCTIONS;
+    for needle in [
+        "Personality based only on chosen vibe and explicit bootstrap signals.",
+        "Suggested headings when there is evidence:",
+        "If the user gave no signal for a section, omit it or keep it minimal. Do not invent a platform-default operating contract.",
+    ] {
+        assert!(
+            bootstrap.contains(needle),
+            "BOOTSTRAP_INSTRUCTIONS must keep SOUL user/agent-authored: missing {needle:?}"
+        );
+    }
+
+    for forbidden in [
+        "**Operating Contract**",
+        "act on reversible low-risk work",
+        "credential/security, or private-data actions",
+        "usable outcomes over polished artifacts",
+        "match the user's language",
+        "ask, don't guess",
+    ] {
+        assert!(
+            !bootstrap.contains(forbidden),
+            "BOOTSTRAP_INSTRUCTIONS must not prescribe platform SOUL content: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
 fn cron_instructions_const_is_nonempty() {
     assert!(
         !crate::CRON_INSTRUCTIONS.is_empty(),
@@ -415,6 +535,23 @@ fn operating_instructions_teach_sparse_progress_updates() {
         assert!(
             ops.contains(needle),
             "OPERATING_INSTRUCTIONS must mention {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn operating_instructions_teach_agent_tool_delegation() {
+    let ops = crate::OPERATING_INSTRUCTIONS;
+
+    for needle in [
+        "`Agent` tool",
+        "independent workstream",
+        "main session remains accountable",
+        "synthesize the result",
+    ] {
+        assert!(
+            ops.contains(needle),
+            "OPERATING_INSTRUCTIONS must teach Agent-tool delegation: missing {needle:?}"
         );
     }
 }
