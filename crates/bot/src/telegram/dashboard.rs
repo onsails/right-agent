@@ -86,16 +86,9 @@ async fn handle_overview(
         return response;
     }
 
-    let conn = match right_db::open_connection(&state.agent_dir, true) {
+    let conn = match open_dashboard_read_connection(&state) {
         Ok(conn) => conn,
-        Err(error) => {
-            tracing::error!(agent = %state.agent_name, "dashboard overview db open failed: {error:#}");
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_open_failed",
-                Some("failed to open dashboard database"),
-            );
-        }
+        Err(response) => return response,
     };
     let input = OverviewInput {
         agent: state.agent_name.clone(),
@@ -126,16 +119,9 @@ async fn handle_run_detail(
         return response;
     }
 
-    let conn = match right_db::open_connection(&state.agent_dir, true) {
+    let conn = match open_dashboard_read_connection(&state) {
         Ok(conn) => conn,
-        Err(error) => {
-            tracing::error!(agent = %state.agent_name, run_id = %run_id, "dashboard run detail db open failed: {error:#}");
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_open_failed",
-                Some("failed to open dashboard database"),
-            );
-        }
+        Err(response) => return response,
     };
 
     match run_detail(&conn, &run_id, MAX_LOG_LINES) {
@@ -173,14 +159,6 @@ fn authenticate_api(
     agent: &str,
     headers: &HeaderMap,
 ) -> Result<DashboardUser, Response> {
-    if agent != state.agent_name {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "agent_mismatch",
-            Some("dashboard agent path does not match this bot"),
-        ));
-    }
-
     let raw_init_data = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -200,7 +178,13 @@ fn authenticate_api(
     };
     let user = validate_init_data(raw_init_data, &validation).map_err(auth_error_response)?;
     let trusted_user_ids = {
-        let allowlist = state.allowlist.0.read().expect("allowlist lock poisoned");
+        let allowlist = state.allowlist.0.read().map_err(|_| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "allowlist_unavailable",
+                Some("dashboard allowlist is unavailable"),
+            )
+        })?;
         allowlist
             .users()
             .iter()
@@ -208,7 +192,43 @@ fn authenticate_api(
             .collect::<BTreeSet<_>>()
     };
 
-    authorize_user(user, &trusted_user_ids).map_err(auth_error_response)
+    let user = authorize_user(user, &trusted_user_ids).map_err(auth_error_response)?;
+    if agent != state.agent_name {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "agent_mismatch",
+            Some("dashboard agent path does not match this bot"),
+        ));
+    }
+
+    Ok(user)
+}
+
+fn open_dashboard_read_connection(
+    state: &DashboardState,
+) -> Result<rusqlite::Connection, Response> {
+    let db_path = state.agent_dir.join("data.db");
+    if !db_path.exists() {
+        tracing::error!(
+            agent = %state.agent_name,
+            path = %db_path.display(),
+            "dashboard database missing"
+        );
+        return Err(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_open_failed",
+            Some("dashboard database does not exist"),
+        ));
+    }
+
+    right_db::open_connection(&state.agent_dir, false).map_err(|error| {
+        tracing::error!(agent = %state.agent_name, "dashboard db open failed: {error:#}");
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_open_failed",
+            Some("failed to open dashboard database"),
+        )
+    })
 }
 
 fn auth_error_response(error: AuthError) -> Response {
@@ -375,12 +395,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_rejects_missing_auth_before_agent_mismatch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let status = get(
+            "/dashboard/beta/api/v1/bootstrap",
+            None,
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn api_rejects_agent_mismatch() {
         let temp = tempfile::tempdir().expect("tempdir");
 
         let status = get(
             "/dashboard/beta/api/v1/bootstrap",
             Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn api_rejects_valid_non_allowlisted_user() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let status = get(
+            "/dashboard/alpha/api/v1/bootstrap",
+            Some(signed_init_data(7)),
             temp.path().to_path_buf(),
         )
         .await;
@@ -401,6 +449,22 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn overview_on_missing_db_returns_500_without_creating_db() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("data.db");
+
+        let status = get(
+            "/dashboard/alpha/api/v1/overview",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!db_path.exists(), "dashboard read must not create data.db");
     }
 
     #[tokio::test]
