@@ -629,44 +629,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         None
     };
 
-    let dashboard_router =
-        telegram::dashboard::build_dashboard_router(telegram::dashboard::DashboardState {
-            agent_name: args.agent.clone(),
-            bot_token: token.clone(),
-            home: home.clone(),
-            agent_dir: agent_dir.clone(),
-            resolved_sandbox: resolved_sandbox.clone(),
-            allowlist: allowlist.clone(),
-            foreground: Arc::clone(&dashboard_foreground),
-            #[cfg(test)]
-            doctor_checks: None,
-        });
-
     // Shared flag for healthz "webhook_set"; flipped by Task 10's register loop.
     let webhook_set_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-    let (axum_ready_tx, axum_ready_rx) = tokio::sync::oneshot::channel::<()>();
-    let axum_socket = socket_path.clone();
-    let agent_name_for_uds = args.agent.clone();
-    let webhook_set_for_axum = webhook_set_flag.clone();
-    let progress_state_for_uds = progress_state.clone();
-    let dashboard_router_for_uds = dashboard_router;
-    let axum_handle = tokio::spawn(async move {
-        run_bot_uds_server(
-            axum_socket,
-            oauth_state,
-            progress_state_for_uds,
-            dashboard_router_for_uds,
-            webhook_router,
-            agent_name_for_uds,
-            started_at,
-            webhook_set_for_axum,
-            Some(axum_ready_tx),
-        )
-        .await
-    });
-    // Wait for axum to bind before starting teloxide (ensures callback socket is ready)
-    let _ = axum_ready_rx.await;
 
     let menu_bot = telegram::bot::build_bot(token.clone());
     let menu_hostname = global_cfg.tunnel.hostname.clone();
@@ -929,6 +893,48 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         } else {
             (None, None)
         };
+
+    // Build the dashboard router AFTER health_sandbox_exec exists so the
+    // dashboard can reuse the long-lived SandboxExec instead of opening a
+    // fresh gRPC channel per request. Spawn axum here and wait for its UDS
+    // bind before continuing with the rest of startup.
+    let dashboard_sandbox_exec = health_sandbox_exec.clone();
+    let dashboard_router =
+        telegram::dashboard::build_dashboard_router(telegram::dashboard::DashboardState {
+            agent_name: args.agent.clone(),
+            bot_token: token.clone(),
+            home: home.clone(),
+            agent_dir: agent_dir.clone(),
+            resolved_sandbox: resolved_sandbox.clone(),
+            sandbox_exec: dashboard_sandbox_exec,
+            allowlist: allowlist.clone(),
+            foreground: Arc::clone(&dashboard_foreground),
+            #[cfg(test)]
+            doctor_checks: None,
+        });
+
+    let (axum_ready_tx, axum_ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let axum_socket = socket_path.clone();
+    let agent_name_for_uds = args.agent.clone();
+    let webhook_set_for_axum = webhook_set_flag.clone();
+    let progress_state_for_uds = progress_state.clone();
+    let dashboard_router_for_uds = dashboard_router;
+    let axum_handle = tokio::spawn(async move {
+        run_bot_uds_server(
+            axum_socket,
+            oauth_state,
+            progress_state_for_uds,
+            dashboard_router_for_uds,
+            webhook_router,
+            agent_name_for_uds,
+            started_at,
+            webhook_set_for_axum,
+            Some(axum_ready_tx),
+        )
+        .await
+    });
+    // Wait for axum to bind before starting teloxide (ensures callback socket is ready)
+    let _ = axum_ready_rx.await;
 
     // Spawn periodic attachment cleanup task
     {

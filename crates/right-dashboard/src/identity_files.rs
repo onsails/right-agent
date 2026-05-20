@@ -1,7 +1,7 @@
-use std::io::Read as _;
 use std::path::Path;
 
 use crate::api_types::{IdentityFileSummary, IdentityResponse};
+use crate::fs_safety::{is_regular_file_no_symlink, read_bounded_text};
 
 pub const IDENTITY_FILE_NAMES: [&str; 3] = ["IDENTITY.md", "SOUL.md", "USER.md"];
 
@@ -71,30 +71,6 @@ pub fn read_host_identity_file(
         content_preview,
         truncated,
     })
-}
-
-pub fn read_bounded_text(
-    path: &Path,
-    preview_limit_bytes: usize,
-) -> Result<(String, bool), IdentityFilesError> {
-    let mut file = std::fs::File::open(path)?;
-    let mut bytes = Vec::new();
-    let read_limit = preview_limit_bytes.saturating_add(1) as u64;
-    file.by_ref().take(read_limit).read_to_end(&mut bytes)?;
-    let truncated = bytes.len() > preview_limit_bytes;
-    if truncated {
-        bytes.truncate(preview_limit_bytes);
-    }
-    Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
-}
-
-fn is_regular_file_no_symlink(path: &Path) -> Result<bool, IdentityFilesError> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-    Ok(metadata.file_type().is_file())
 }
 
 fn missing_source_for(source: &str) -> &str {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import MetricCard from '../components/MetricCard.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { money, notifyText, shortDate, shortId, statusTone } from '../format'
 import type { CronCard, OverviewResponse, RunDetailResponse, RunSummary } from '../types'
@@ -23,22 +24,10 @@ function cronStatus(cron: CronCard): string {
 
 <template>
   <section class="metric-grid">
-    <article class="metric-card default">
-      <span>Jobs</span>
-      <strong>{{ overview?.summary.cron_count ?? 0 }}</strong>
-    </article>
-    <article class="metric-card active">
-      <span>Running</span>
-      <strong>{{ overview?.summary.active_cron_count ?? 0 }}</strong>
-    </article>
-    <article class="metric-card bad">
-      <span>Failures</span>
-      <strong>{{ overview?.summary.failed_recent_cron_count ?? 0 }}</strong>
-    </article>
-    <article class="metric-card default">
-      <span>Today</span>
-      <strong>{{ money(overview?.summary.today_cost_usd) }}</strong>
-    </article>
+    <MetricCard label="Jobs" :value="overview?.summary.cron_count ?? 0" />
+    <MetricCard label="Running" :value="overview?.summary.active_cron_count ?? 0" tone="active" />
+    <MetricCard label="Failures" :value="overview?.summary.failed_recent_cron_count ?? 0" tone="bad" />
+    <MetricCard label="Today" :value="money(overview?.summary.today_cost_usd)" />
   </section>
 
   <section class="two-column wide-main">

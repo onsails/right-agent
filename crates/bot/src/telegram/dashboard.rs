@@ -24,6 +24,7 @@ mod identity;
 mod skills;
 
 const REFRESH_INTERVAL_SECS: u64 = 5;
+pub(super) const DASHBOARD_SANDBOX_TIMEOUT_SECS: u64 = 4;
 const INIT_DATA_MAX_AGE_SECS: i64 = 86_400;
 const MAX_LOG_LINES: usize = 80;
 
@@ -62,6 +63,7 @@ pub(crate) struct DashboardState {
     pub home: PathBuf,
     pub agent_dir: PathBuf,
     pub resolved_sandbox: Option<String>,
+    pub sandbox_exec: Option<right_openshell::sandbox_exec::SandboxExec>,
     pub allowlist: right_agent::agent::allowlist::AllowlistHandle,
     pub foreground: super::StopTokens,
     #[cfg(test)]
@@ -211,7 +213,7 @@ async fn handle_activity_overview(
     match activity_overview(&conn, input) {
         Ok(response) => Json(response).into_response(),
         Err(error) => {
-            tracing::error!(agent = %state.agent_name, "dashboard overview query failed: {error:#}");
+            tracing::error!(agent = %state.agent_name, "dashboard activity overview query failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "overview_failed",
@@ -244,7 +246,7 @@ async fn handle_overview(
     match dashboard_overview(&conn, input) {
         Ok(response) => Json(response).into_response(),
         Err(error) => {
-            tracing::error!(agent = %state.agent_name, "dashboard v2 overview query failed: {error:#}");
+            tracing::error!(agent = %state.agent_name, "dashboard overview query failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "overview_failed",
@@ -583,7 +585,7 @@ async fn handle_health_doctor(
         .into_response();
     }
 
-    let checks = right_agent::doctor::run_doctor(&state.home);
+    let checks = tokio::task::block_in_place(|| right_agent::doctor::run_doctor(&state.home));
     Json(health::doctor_response_from_checks(
         &state.agent_name,
         checks,
@@ -600,7 +602,7 @@ async fn handle_health_sandbox(
         return error.into_response();
     }
 
-    Json(health::sandbox_stats_response(&state.agent_name, state.resolved_sandbox.as_deref()).await)
+    Json(health::sandbox_stats_response(&state.agent_name, state.sandbox_exec.as_ref()).await)
         .into_response()
 }
 
@@ -801,6 +803,7 @@ mod tests {
             home: agent_dir.clone(),
             agent_dir,
             resolved_sandbox: None,
+            sandbox_exec: None,
             allowlist,
             foreground: Arc::new(DashMap::new()),
             doctor_checks: Some(vec![

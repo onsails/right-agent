@@ -1,8 +1,9 @@
 use crate::api_types::{DashboardOverviewResponse, OverviewDoctorStatus, OverviewSandboxStatus};
-use chrono::{DateTime, Duration, Utc};
+use chrono::Duration;
 use rusqlite::{Connection, params};
 
 use super::ReadModelError;
+use super::learning::window_start;
 
 pub struct DashboardOverviewInput {
     pub agent: String,
@@ -50,7 +51,7 @@ fn active_async_run_count(conn: &Connection) -> Result<i64, ReadModelError> {
 }
 
 fn recent_failure_count(conn: &Connection, generated_at: &str) -> Result<i64, ReadModelError> {
-    let since = hours_before(generated_at, 24)?;
+    let since = window_start(generated_at, Duration::hours(24))?;
     Ok(conn.query_row(
         "SELECT COUNT(*)
          FROM async_runs
@@ -66,7 +67,7 @@ fn learning_candidate_count(
     agent: &str,
     generated_at: &str,
 ) -> Result<i64, ReadModelError> {
-    let since = hours_before(generated_at, 24)?;
+    let since = window_start(generated_at, Duration::hours(24))?;
     Ok(conn.query_row(
         "SELECT COUNT(*)
          FROM skill_review_reports
@@ -76,12 +77,6 @@ fn learning_candidate_count(
         params![agent, since],
         |row| row.get(0),
     )?)
-}
-
-fn hours_before(generated_at: &str, hours: i64) -> Result<String, ReadModelError> {
-    let generated_at_utc: DateTime<Utc> =
-        DateTime::parse_from_rfc3339(generated_at)?.with_timezone(&Utc);
-    Ok((generated_at_utc - Duration::hours(hours)).to_rfc3339())
 }
 
 #[cfg(test)]

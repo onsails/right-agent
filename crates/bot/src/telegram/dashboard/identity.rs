@@ -1,8 +1,11 @@
+use std::time::Duration;
+
 use right_dashboard::api_types::{IdentityFileResponse, IdentityFileSummary, IdentityResponse};
 use right_dashboard::identity_files::{
     IDENTITY_FILE_NAMES, IdentityFilesError, read_host_identity_file, read_host_identity_files,
     validate_identity_file_name,
 };
+use right_openshell::sandbox_exec::SandboxExec;
 
 use super::DashboardState;
 
@@ -16,8 +19,8 @@ head -c "$2" "$file""#;
 pub(super) async fn identity_response(
     state: &DashboardState,
 ) -> Result<IdentityResponse, IdentityFilesError> {
-    if let Some(sandbox) = state.resolved_sandbox.as_deref() {
-        match read_sandbox_identity_files(state, sandbox).await {
+    if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
+        match read_sandbox_identity_files(state, sandbox_exec).await {
             Ok(response) => return Ok(response),
             Err(error) => {
                 let warning = Some(format!(
@@ -48,8 +51,8 @@ pub(super) async fn identity_file_response(
     file_name: &str,
 ) -> Result<IdentityFileResponse, IdentityFilesError> {
     validate_identity_file_name(file_name)?;
-    if let Some(sandbox) = state.resolved_sandbox.as_deref() {
-        let (file, warning) = match read_sandbox_identity_file(sandbox, file_name).await {
+    if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
+        let (file, warning) = match read_sandbox_identity_file(sandbox_exec, file_name).await {
             Ok(Some(file)) => (file, None),
             Ok(None) => (
                 host_mirror_or_unavailable(&state.agent_dir, file_name)?,
@@ -86,13 +89,34 @@ pub(super) async fn identity_file_response(
 
 async fn read_sandbox_identity_files(
     state: &DashboardState,
-    sandbox: &str,
+    sandbox_exec: &SandboxExec,
 ) -> miette::Result<IdentityResponse> {
     let mut files = Vec::with_capacity(IDENTITY_FILE_NAMES.len());
     let mut warning_parts = Vec::new();
 
     for name in IDENTITY_FILE_NAMES {
-        match read_sandbox_identity_file(sandbox, name).await {
+        let sandbox_path = format!("/sandbox/{name}");
+        let limit = (IDENTITY_PREVIEW_LIMIT_BYTES + 1).to_string();
+        let command = [
+            "sh",
+            "-c",
+            SANDBOX_READ_IDENTITY_SCRIPT,
+            "dashboard-identity-read",
+            sandbox_path.as_str(),
+            limit.as_str(),
+        ];
+        let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
+        let result = match tokio::time::timeout(timeout, sandbox_exec.exec(&command)).await {
+            Ok(result) => result,
+            Err(_) => {
+                files.push(host_mirror_or_unavailable(&state.agent_dir, name).map_err(
+                    |error| miette::miette!("host mirror read failed for {name}: {error:#}"),
+                )?);
+                warning_parts.push(format!("{name} unavailable in sandbox"));
+                continue;
+            }
+        };
+        match summarize_sandbox_read(name, &sandbox_path, result) {
             Ok(Some(file)) => files.push(file),
             Ok(None) => {
                 files.push(host_mirror_or_unavailable(&state.agent_dir, name).map_err(
@@ -126,13 +150,10 @@ async fn read_sandbox_identity_files(
 }
 
 async fn read_sandbox_identity_file(
-    sandbox: &str,
+    sandbox_exec: &SandboxExec,
     name: &str,
 ) -> miette::Result<Option<IdentityFileSummary>> {
     validate_identity_file_name(name).map_err(|error| miette::miette!("{error:#}"))?;
-    let mtls_dir = openshell_mtls_dir()?;
-    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
     let sandbox_path = format!("/sandbox/{name}");
     let limit = (IDENTITY_PREVIEW_LIMIT_BYTES + 1).to_string();
     let command = [
@@ -143,13 +164,24 @@ async fn read_sandbox_identity_file(
         sandbox_path.as_str(),
         limit.as_str(),
     ];
-    let (mut content_preview, exit_code) = right_openshell::openshell::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
-        &command,
-        right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
-    )
-    .await?;
+    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
+    let result = match tokio::time::timeout(timeout, sandbox_exec.exec(&command)).await {
+        Ok(result) => result,
+        Err(_) => {
+            return Err(miette::miette!(
+                "sandbox identity read for {name} timed out"
+            ));
+        }
+    };
+    summarize_sandbox_read(name, &sandbox_path, result)
+}
+
+fn summarize_sandbox_read(
+    name: &str,
+    sandbox_path: &str,
+    result: miette::Result<(String, i32)>,
+) -> miette::Result<Option<IdentityFileSummary>> {
+    let (mut content_preview, exit_code) = result?;
     if exit_code == 3 {
         return Ok(None);
     }
@@ -160,12 +192,15 @@ async fn read_sandbox_identity_file(
     }
     let truncated = content_preview.len() > IDENTITY_PREVIEW_LIMIT_BYTES;
     if truncated {
-        truncate_to_char_boundary(&mut content_preview, IDENTITY_PREVIEW_LIMIT_BYTES);
+        right_dashboard::fs_safety::truncate_to_char_boundary(
+            &mut content_preview,
+            IDENTITY_PREVIEW_LIMIT_BYTES,
+        );
     }
     Ok(Some(IdentityFileSummary {
         name: name.to_owned(),
         source: "sandbox".to_owned(),
-        path: sandbox_path,
+        path: sandbox_path.to_owned(),
         exists: true,
         content_preview: Some(content_preview),
         truncated,
@@ -185,26 +220,6 @@ fn host_mirror_or_unavailable(
     )
 }
 
-fn truncate_to_char_boundary(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
-    }
-    let mut boundary = max_bytes;
-    while boundary > 0 && !value.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    value.truncate(boundary);
-}
-
-fn openshell_mtls_dir() -> miette::Result<std::path::PathBuf> {
-    match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(dir) => Ok(dir),
-        status => Err(miette::miette!(
-            "OpenShell is not ready for dashboard identity read: {status:?}"
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,7 +228,10 @@ mod tests {
     fn truncate_to_char_boundary_handles_split_multibyte_suffix() {
         let mut value = format!("{}é", "a".repeat(IDENTITY_PREVIEW_LIMIT_BYTES - 1));
 
-        truncate_to_char_boundary(&mut value, IDENTITY_PREVIEW_LIMIT_BYTES);
+        right_dashboard::fs_safety::truncate_to_char_boundary(
+            &mut value,
+            IDENTITY_PREVIEW_LIMIT_BYTES,
+        );
 
         assert_eq!(value.len(), IDENTITY_PREVIEW_LIMIT_BYTES - 1);
         assert!(value.ends_with('a'));
