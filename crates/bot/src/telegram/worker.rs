@@ -139,13 +139,11 @@ fn thinking_anchor_text(
     }
 }
 
-#[allow(dead_code)]
 struct ThinkingAnchorRender {
     text: String,
     keyboard: teloxide::types::InlineKeyboardMarkup,
 }
 
-#[allow(dead_code)]
 fn build_thinking_anchor_render(
     chat_id: i64,
     eff_thread_id: i64,
@@ -164,7 +162,6 @@ fn build_thinking_anchor_render(
     }
 }
 
-#[allow(dead_code)]
 async fn send_thinking_anchor(
     ctx: &WorkerContext,
     tg_chat_id: teloxide::types::ChatId,
@@ -3484,7 +3481,7 @@ async fn invoke_cc(
     let mut result_line: Option<String> = None;
     let mut api_key_source: Option<String> = None;
     let mut thinking_msg_id: Option<teloxide::types::MessageId> = None;
-    let mut last_edit = tokio::time::Instant::now();
+    let mut last_edit: tokio::time::Instant;
     let mut last_rendered_event_count: u32 = 0;
     let mut ui_tick = tokio::time::interval(Duration::from_millis(500));
     ui_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -3503,6 +3500,25 @@ async fn invoke_cc(
         cron_run_id: None,
     };
     let mut execution_event_seq = 0_i64;
+
+    let initial_expanded = read_expanded();
+    if let Some(msg_id) = send_thinking_anchor(
+        ctx,
+        tg_chat_id,
+        chat_id,
+        eff_thread_id,
+        initial_expanded,
+        is_group,
+        ring_buffer.events(),
+        &usage,
+    )
+    .await
+    {
+        thinking_msg_id = Some(msg_id);
+        last_rendered_expanded = initial_expanded;
+        last_rendered_event_count = total_assistant_events;
+    }
+    last_edit = tokio::time::Instant::now();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(CC_TIMEOUT_SECS);
     let mut timed_out = false;
@@ -3607,28 +3623,21 @@ async fn invoke_cc(
                         // Thinking message: always send (Stop button anchor).
                         if crate::cc::stream::format_event(&event).is_some() {
                             let expanded = read_expanded();
-                            let kb = working_keyboard(
-                                chat_id,
-                                eff_thread_id,
-                                thinking_keyboard_mode(expanded, is_group),
-                            );
 
                             if thinking_msg_id.is_none() {
-                                let text = thinking_anchor_text(
+                                if let Some(msg_id) = send_thinking_anchor(
+                                    ctx,
+                                    tg_chat_id,
+                                    chat_id,
+                                    eff_thread_id,
                                     expanded,
+                                    is_group,
                                     ring_buffer.events(),
                                     &usage,
-                                );
-                                let mut send = ctx.bot.send_message(tg_chat_id, &text)
-                                    .parse_mode(teloxide::types::ParseMode::Html)
-                                    .reply_markup(kb);
-                                if eff_thread_id != 0 {
-                                    send = send.message_thread_id(
-                                        ThreadId(MessageId(eff_thread_id as i32)),
-                                    );
-                                }
-                                if let Ok(msg) = send.await {
-                                    thinking_msg_id = Some(msg.id);
+                                )
+                                .await
+                                {
+                                    thinking_msg_id = Some(msg_id);
                                     last_rendered_expanded = expanded;
                                     last_rendered_event_count = total_assistant_events;
                                 }
@@ -5095,6 +5104,31 @@ esac
                 (
                     "\u{1f4ad} Show thinking".to_string(),
                     "think:12345:678:show".to_string()
+                ),
+                ("\u{1f6d1} Stop".to_string(), "stop:12345:678".to_string()),
+                (
+                    "\u{2699}\u{fe0f} Background it".to_string(),
+                    "bg:12345:678".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn thinking_anchor_render_empty_expanded_starts_without_stream_event() {
+        let events = VecDeque::new();
+        let usage = crate::cc::stream::StreamUsage::default();
+
+        let render = build_thinking_anchor_render(12345, 678, true, false, &events, &usage);
+
+        assert!(render.text.contains("starting..."));
+        assert!(render.text.contains("Turn 0"));
+        assert_eq!(
+            keyboard_row(render.keyboard),
+            vec![
+                (
+                    "\u{1f4ad} Hide thinking".to_string(),
+                    "think:12345:678:hide".to_string()
                 ),
                 ("\u{1f6d1} Stop".to_string(), "stop:12345:678".to_string()),
                 (
