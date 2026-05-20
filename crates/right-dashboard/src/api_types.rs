@@ -19,6 +19,9 @@ pub struct BootstrapResponse {
 pub struct DashboardFeatures {
     pub readonly: bool,
     pub commands_enabled: bool,
+    pub learning_metrics: bool,
+    pub learning_evidence_snippets: bool,
+    pub learning_commands: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -93,4 +96,300 @@ pub struct LogExcerpt {
     pub path: Option<String>,
     pub lines: Vec<String>,
     pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LearningCapabilities {
+    pub learning_metrics: bool,
+    pub learning_evidence_snippets: bool,
+    pub learning_commands: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LearningOverviewResponse {
+    pub agent: String,
+    pub generated_at: String,
+    pub refresh_interval_secs: u64,
+    pub capabilities: LearningCapabilities,
+    pub funnel: LearningFunnel,
+    pub quality: LearningQuality,
+    pub health: LearningHealth,
+    pub lifecycle: LearningLifecycle,
+    pub recent_reports: Vec<LearningReportSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LearningFunnel {
+    pub signals_accepted_24h: i64,
+    pub episodes_pending_24h: i64,
+    pub episodes_selecting_24h: i64,
+    pub episodes_selected_24h: i64,
+    pub episodes_reviewing_24h: i64,
+    pub episodes_reviewed_24h: i64,
+    pub episodes_no_episode_24h: i64,
+    pub episodes_failed_24h: i64,
+    pub reports_total_24h: i64,
+    pub create_candidates_24h: i64,
+    pub update_candidates_24h: i64,
+    pub nothing_to_learn_24h: i64,
+    pub failed_reviews_24h: i64,
+    pub foreground_created_or_updated_7d: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LearningQuality {
+    pub candidate_rate: Option<f64>,
+    pub nothing_to_learn_rate: Option<f64>,
+    pub create_count_24h: i64,
+    pub update_count_24h: i64,
+    pub high_confidence_count_24h: i64,
+    pub medium_confidence_count_24h: i64,
+    pub low_confidence_count_24h: i64,
+    pub failed_count_24h: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LearningHealth {
+    pub review_running: bool,
+    pub daily_review_count: i64,
+    pub daily_limit: i64,
+    pub creation_review_interval: i64,
+    pub tool_iters_since_review: i64,
+    pub turns_since_review: i64,
+    pub skill_issue_hints_since_review: i64,
+    pub last_review_status: Option<String>,
+    pub last_review_at: Option<String>,
+    pub possibly_stuck: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LearningLifecycle {
+    pub created_7d: i64,
+    pub updated_7d: i64,
+    pub failed_or_aborted_7d: i64,
+    pub recent_successful_events: Vec<LearningEventSummary>,
+    pub candidate_skill_names_7d: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LearningEventSummary {
+    pub skill_name: String,
+    pub action: String,
+    pub status: String,
+    pub message: Option<String>,
+    pub summary: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LearningReportSummary {
+    pub id: i64,
+    pub status: String,
+    pub confidence: String,
+    pub trigger_kind: String,
+    pub candidate_skill_name: Option<String>,
+    pub candidate_summary: Option<String>,
+    pub telegram_notified: bool,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LearningReportDetailResponse {
+    pub report: LearningReportSummary,
+    pub episode: Option<LearningEpisodeDetail>,
+    pub selector: Option<LearningSelectorDetail>,
+    pub evidence: Vec<LearningEvidenceSnippet>,
+    pub reviewer: LearningReviewerDetail,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LearningEpisodeDetail {
+    pub id: i64,
+    pub kind: String,
+    pub seed_trigger_kind: String,
+    pub status: String,
+    pub start_ref: Option<String>,
+    pub end_ref: Option<String>,
+    pub boundary_rationale: Option<String>,
+    pub confidence: Option<String>,
+    pub context_incomplete: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LearningSelectorDetail {
+    pub model: Option<String>,
+    pub boundary_rationale: Option<String>,
+    pub selected_message_refs: Vec<String>,
+    pub selected_execution_event_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LearningEvidenceSnippet {
+    pub ref_id: String,
+    pub source: String,
+    pub available: bool,
+    pub trust_label: Option<String>,
+    pub role: Option<String>,
+    pub event_kind: Option<String>,
+    pub tool_name: Option<String>,
+    pub created_at: Option<String>,
+    pub text: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LearningReviewerDetail {
+    pub status: String,
+    pub confidence: String,
+    pub candidate_skill_name: Option<String>,
+    pub candidate_summary: Option<String>,
+    pub evidence_refs: Vec<String>,
+    pub user_notice_present: bool,
+}
+
+#[cfg(test)]
+mod learning_tests {
+    use super::*;
+
+    #[test]
+    fn learning_overview_serializes_expected_shape() {
+        let response = LearningOverviewResponse {
+            agent: "right".to_owned(),
+            generated_at: "2026-05-20T12:00:00Z".to_owned(),
+            refresh_interval_secs: 5,
+            capabilities: LearningCapabilities {
+                learning_metrics: true,
+                learning_evidence_snippets: true,
+                learning_commands: false,
+            },
+            funnel: LearningFunnel {
+                signals_accepted_24h: 2,
+                episodes_pending_24h: 1,
+                episodes_selecting_24h: 0,
+                episodes_selected_24h: 0,
+                episodes_reviewing_24h: 0,
+                episodes_reviewed_24h: 1,
+                episodes_no_episode_24h: 0,
+                episodes_failed_24h: 0,
+                reports_total_24h: 1,
+                create_candidates_24h: 1,
+                update_candidates_24h: 0,
+                nothing_to_learn_24h: 0,
+                failed_reviews_24h: 0,
+                foreground_created_or_updated_7d: 1,
+            },
+            quality: LearningQuality {
+                candidate_rate: Some(1.0),
+                nothing_to_learn_rate: Some(0.0),
+                create_count_24h: 1,
+                update_count_24h: 0,
+                high_confidence_count_24h: 1,
+                medium_confidence_count_24h: 0,
+                low_confidence_count_24h: 0,
+                failed_count_24h: 0,
+            },
+            health: LearningHealth {
+                review_running: false,
+                daily_review_count: 1,
+                daily_limit: 12,
+                creation_review_interval: 15,
+                tool_iters_since_review: 3,
+                turns_since_review: 1,
+                skill_issue_hints_since_review: 0,
+                last_review_status: Some("create_candidate".to_owned()),
+                last_review_at: Some("2026-05-20T11:00:00Z".to_owned()),
+                possibly_stuck: false,
+            },
+            lifecycle: LearningLifecycle {
+                created_7d: 1,
+                updated_7d: 0,
+                failed_or_aborted_7d: 0,
+                recent_successful_events: vec![LearningEventSummary {
+                    skill_name: "rightx-oauth-debugging".to_owned(),
+                    action: "create".to_owned(),
+                    status: "created".to_owned(),
+                    message: Some("Learned OAuth callback verification.".to_owned()),
+                    summary: Some("Reusable OAuth setup workflow.".to_owned()),
+                    created_at: "2026-05-20T10:00:00Z".to_owned(),
+                }],
+                candidate_skill_names_7d: vec!["rightx-oauth-debugging".to_owned()],
+            },
+            recent_reports: vec![LearningReportSummary {
+                id: 7,
+                status: "create_candidate".to_owned(),
+                confidence: "high".to_owned(),
+                trigger_kind: "learning_signal".to_owned(),
+                candidate_skill_name: Some("rightx-oauth-debugging".to_owned()),
+                candidate_summary: Some("Verify OAuth callback setup.".to_owned()),
+                telegram_notified: true,
+                created_at: "2026-05-20T11:00:00Z".to_owned(),
+            }],
+        };
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["capabilities"]["learning_metrics"], true);
+        assert_eq!(value["capabilities"]["learning_commands"], false);
+        assert_eq!(value["funnel"]["create_candidates_24h"], 1);
+        assert_eq!(value["quality"]["candidate_rate"], 1.0);
+        assert_eq!(
+            value["recent_reports"][0]["candidate_skill_name"],
+            "rightx-oauth-debugging"
+        );
+    }
+
+    #[test]
+    fn learning_report_detail_serializes_missing_snippet() {
+        let response = LearningReportDetailResponse {
+            report: LearningReportSummary {
+                id: 9,
+                status: "nothing_to_learn".to_owned(),
+                confidence: "medium".to_owned(),
+                trigger_kind: "effort_threshold".to_owned(),
+                candidate_skill_name: None,
+                candidate_summary: None,
+                telegram_notified: false,
+                created_at: "2026-05-20T11:00:00Z".to_owned(),
+            },
+            episode: Some(LearningEpisodeDetail {
+                id: 4,
+                kind: "foreground_thread".to_owned(),
+                seed_trigger_kind: "effort_threshold".to_owned(),
+                status: "reviewed".to_owned(),
+                start_ref: Some("msg:1".to_owned()),
+                end_ref: Some("exec:2".to_owned()),
+                boundary_rationale: Some("Selected compact setup workflow.".to_owned()),
+                confidence: Some("medium".to_owned()),
+                context_incomplete: false,
+            }),
+            selector: Some(LearningSelectorDetail {
+                model: Some("claude-sonnet-4-6".to_owned()),
+                boundary_rationale: Some("Selected compact setup workflow.".to_owned()),
+                selected_message_refs: vec!["msg:1".to_owned()],
+                selected_execution_event_refs: vec!["exec:2".to_owned()],
+            }),
+            evidence: vec![LearningEvidenceSnippet {
+                ref_id: "msg:404".to_owned(),
+                source: "message".to_owned(),
+                available: false,
+                trust_label: None,
+                role: None,
+                event_kind: None,
+                tool_name: None,
+                created_at: None,
+                text: None,
+            }],
+            reviewer: LearningReviewerDetail {
+                status: "nothing_to_learn".to_owned(),
+                confidence: "medium".to_owned(),
+                candidate_skill_name: None,
+                candidate_summary: None,
+                evidence_refs: vec!["msg:404".to_owned()],
+                user_notice_present: false,
+            },
+        };
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["evidence"][0]["available"], false);
+        assert!(value["evidence"][0]["text"].is_null());
+        assert_eq!(value["reviewer"]["user_notice_present"], false);
+    }
 }
