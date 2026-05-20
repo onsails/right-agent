@@ -61,6 +61,7 @@ pub struct OAuthCallbackState {
 fn build_router(
     state: OAuthCallbackState,
     progress_state: super::progress::ProgressState,
+    dashboard_router: Router,
     webhook_router: Router,
     agent_name: String,
     started_at: std::time::Instant,
@@ -88,6 +89,7 @@ fn build_router(
         .merge(oauth_router)
         .merge(progress_router)
         .merge(healthz_router)
+        .merge(dashboard_router)
         .nest(&format!("/tg/{}", agent_name), webhook_router)
 }
 
@@ -330,6 +332,7 @@ pub(crate) async fn run_bot_uds_server(
     socket_path: PathBuf,
     state: OAuthCallbackState,
     progress_state: super::progress::ProgressState,
+    dashboard_router: Router,
     webhook_router: Router,
     agent_name: String,
     started_at: std::time::Instant,
@@ -353,6 +356,7 @@ pub(crate) async fn run_bot_uds_server(
     let router = build_router(
         state,
         progress_state,
+        dashboard_router,
         webhook_router,
         agent_name,
         started_at,
