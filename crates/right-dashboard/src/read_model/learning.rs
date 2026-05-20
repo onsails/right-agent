@@ -356,7 +356,9 @@ fn recent_reports(
     Ok(rows)
 }
 
-fn report_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningReportSummary> {
+pub(super) fn report_summary_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<LearningReportSummary> {
     Ok(LearningReportSummary {
         id: row.get(0)?,
         status: row.get(1)?,
@@ -689,7 +691,7 @@ fn load_execution_snippet(
     })
 }
 
-fn parse_string_array(raw: &str) -> Result<Vec<String>, ReadModelError> {
+pub(super) fn parse_string_array(raw: &str) -> Result<Vec<String>, ReadModelError> {
     Ok(serde_json::from_str(raw)?)
 }
 

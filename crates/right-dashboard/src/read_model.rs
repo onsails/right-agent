@@ -8,6 +8,8 @@ use thiserror::Error;
 pub mod activity;
 #[path = "read_model/learning.rs"]
 pub mod learning;
+#[path = "read_model/learning_episodes.rs"]
+pub mod learning_episodes;
 #[path = "read_model/usage.rs"]
 pub mod usage;
 

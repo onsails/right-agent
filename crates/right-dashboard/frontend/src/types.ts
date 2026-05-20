@@ -251,6 +251,35 @@ export interface LearningReportSummary {
   created_at: string
 }
 
+export interface LearningEpisodesResponse {
+  agent: string
+  generated_at: string
+  episodes: LearningEpisodeSummary[]
+}
+
+export interface LearningEpisodeSummary {
+  id: number
+  kind: string
+  seed_trigger_kind: string
+  seed_ref: string
+  status: string
+  target_chat_id: number | null
+  target_thread_id: number | null
+  start_ref: string | null
+  end_ref: string | null
+  confidence: string | null
+  context_incomplete: boolean
+  last_evidence_at: string
+  created_at: string
+  updated_at: string
+  reports: LearningReportSummary[]
+}
+
+export interface LearningEpisodeDetailResponse {
+  episode: LearningEpisodeSummary
+  selector: LearningSelectorDetail | null
+}
+
 export interface LearningReportDetailResponse {
   report: LearningReportSummary
   episode: LearningEpisodeDetail | null
