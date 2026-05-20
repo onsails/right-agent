@@ -25,13 +25,20 @@ full `(chat_id, eff_thread_id)` key, `session_uuid`, and the per-invocation
 `turn_id`. The key disambiguates concurrent Telegram topics in the same group
 chat; `session_uuid` maps the log event to `sessions.root_session_id` and to the
 host stream log filename.
+Foreground result timing logs also include `duration_ms`, `duration_api_ms`,
+`ttft_ms`, token counts, cache token counts, and any structured
+`cache_miss_reason` Claude exposes in stream diagnostics or the final result.
 
 Thinking messages in Telegram are per-run UI anchors with Stop and Background
-buttons. In direct chats, `show_thinking: true` starts expanded and shows the
-last 5 displayable stream events (tool calls, thinking, text) with turn counter
-and cost; `show_thinking: false` starts collapsed as `Working...`. Users can
-toggle the active run with `Show thinking` / `Hide thinking` without changing
-`agent.yaml`.
+buttons. The worker sends the anchor immediately after the foreground Claude
+process is started, stdin is written, stop handling is registered, visibility is
+initialized, and stdout is attached; it does not wait for Claude's first stream
+event. If that Telegram send fails, the first displayable stream event retries
+the anchor creation. In direct chats, `show_thinking: true` starts expanded and
+shows the last 5 displayable stream events (tool calls, thinking, text) with
+turn counter and cost; `show_thinking: false` starts collapsed as `Working...`.
+Users can toggle the active run with `Show thinking` / `Hide thinking` without
+changing `agent.yaml`.
 
 Group chats always start collapsed as `Working...` to keep shared rooms quiet.
 They include `Show thinking`; after expansion the run shows the same live event
