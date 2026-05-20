@@ -189,7 +189,7 @@ fn run_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary>
     })
 }
 
-fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f64, ReadModelError> {
+pub(super) fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f64, ReadModelError> {
     // Writers emit `chrono::Utc::now().to_rfc3339()` (e.g.
     // `2026-05-20T08:01:00.123456789+00:00`). SQLite compares timestamps as
     // strings, so the threshold must use the same format. A literal

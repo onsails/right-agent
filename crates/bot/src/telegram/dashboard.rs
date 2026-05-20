@@ -13,6 +13,7 @@ use right_dashboard::auth::{
 };
 use right_dashboard::read_model::{
     activity::{ActivityOverviewInput, activity_overview, activity_run_detail},
+    dashboard_overview::{DashboardOverviewInput, dashboard_overview},
     learning::{LearningOverviewInput, learning_overview, learning_report_detail},
     learning_episodes::{LearningEpisodesInput, learning_episode_detail, learning_episodes},
     usage::{UsageOverviewInput, usage_overview},
@@ -83,10 +84,7 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
             "/dashboard/{agent}/api/v1/usage",
             get(handle_usage_overview),
         )
-        .route(
-            "/dashboard/{agent}/api/v1/overview",
-            get(handle_activity_overview),
-        )
+        .route("/dashboard/{agent}/api/v1/overview", get(handle_overview))
         .route(
             "/dashboard/{agent}/api/v1/runs/{run_id}",
             get(handle_activity_run_detail),
@@ -214,6 +212,39 @@ async fn handle_activity_overview(
         Ok(response) => Json(response).into_response(),
         Err(error) => {
             tracing::error!(agent = %state.agent_name, "dashboard overview query failed: {error:#}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "overview_failed",
+                Some("failed to read dashboard overview"),
+            )
+        }
+    }
+}
+
+async fn handle_overview(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    let conn = match open_dashboard_read_connection(&state) {
+        Ok(conn) => conn,
+        Err(error) => return error.into_response(),
+    };
+    let input = DashboardOverviewInput {
+        agent: state.agent_name.clone(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        foreground_active_count: foreground_activity(&state).len() as i64,
+        sandbox: overview_sandbox_status(&state),
+    };
+
+    match dashboard_overview(&conn, input) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => {
+            tracing::error!(agent = %state.agent_name, "dashboard v2 overview query failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "overview_failed",
@@ -708,6 +739,21 @@ fn foreground_activity(state: &DashboardState) -> Vec<ForegroundActivity> {
         .collect()
 }
 
+fn overview_sandbox_status(
+    state: &DashboardState,
+) -> right_dashboard::api_types::OverviewSandboxStatus {
+    match state.resolved_sandbox.as_deref() {
+        Some(sandbox) => right_dashboard::api_types::OverviewSandboxStatus {
+            state: "configured".to_string(),
+            detail: Some(sandbox.to_string()),
+        },
+        None => right_dashboard::api_types::OverviewSandboxStatus {
+            state: "unavailable".to_string(),
+            detail: Some("agent is configured without a sandbox".to_string()),
+        },
+    }
+}
+
 fn json_error(status: StatusCode, error: &str, detail: Option<&str>) -> Response {
     (
         status,
@@ -947,6 +993,14 @@ mod tests {
         assert_eq!(body["features"]["learning_metrics"], true);
         assert_eq!(body["features"]["learning_evidence_snippets"], true);
         assert_eq!(body["features"]["learning_commands"], false);
+        assert_eq!(body["features"]["commands_enabled"], false);
+        assert_eq!(body["features"]["activity"], true);
+        assert_eq!(body["features"]["knowledge_learning"], true);
+        assert_eq!(body["features"]["knowledge_skills"], true);
+        assert_eq!(body["features"]["usage"], true);
+        assert_eq!(body["features"]["identity"], true);
+        assert_eq!(body["features"]["doctor"], true);
+        assert_eq!(body["features"]["sandbox_stats"], true);
     }
 
     #[tokio::test]
@@ -1010,7 +1064,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
 
-        let status = get(
+        let (status, body) = get_json(
             "/dashboard/alpha/api/v1/overview",
             Some(signed_init_data(42)),
             temp.path().to_path_buf(),
@@ -1018,6 +1072,12 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["agent"], "alpha");
+        assert_eq!(body["active_runs"], 0);
+        assert_eq!(body["recent_failures"], 0);
+        assert_eq!(body["today_cost_usd"], 0.0);
+        assert_eq!(body["doctor"]["state"], "not_loaded");
+        assert_eq!(body["sandbox"]["state"], "unavailable");
     }
 
     #[tokio::test]
