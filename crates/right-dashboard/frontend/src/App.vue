@@ -47,6 +47,36 @@ const hasOverview = computed(() => overviewData.value !== null)
 const learningEnabled = computed(() => bootstrapData.value?.features.learning_metrics === true)
 const learningSummary = computed(() => learningData.value)
 const learningReports = computed(() => learningData.value?.recent_reports ?? [])
+const learningEpisodeTotal = computed(() => {
+  const funnel = learningData.value?.funnel
+  if (!funnel) {
+    return 0
+  }
+  return (
+    funnel.episodes_pending_24h +
+    funnel.episodes_selecting_24h +
+    funnel.episodes_selected_24h +
+    funnel.episodes_reviewing_24h +
+    funnel.episodes_reviewed_24h +
+    funnel.episodes_no_episode_24h +
+    funnel.episodes_insufficient_context_24h +
+    funnel.episodes_failed_24h
+  )
+})
+const learningSelectedOrLater = computed(() => {
+  const funnel = learningData.value?.funnel
+  if (!funnel) {
+    return 0
+  }
+  return funnel.episodes_selected_24h + funnel.episodes_reviewing_24h + funnel.episodes_reviewed_24h
+})
+const learningCandidateTotal = computed(() => {
+  const funnel = learningData.value?.funnel
+  if (!funnel) {
+    return 0
+  }
+  return funnel.create_candidates_24h + funnel.update_candidates_24h
+})
 
 onMounted(() => {
   window.Telegram?.WebApp?.ready?.()
@@ -465,11 +495,19 @@ function notifyText(value: unknown): string | null {
         </article>
         <article class="summary-card">
           <span>Episodes</span>
+          <strong>{{ learningEpisodeTotal }}</strong>
+        </article>
+        <article class="summary-card">
+          <span>Selected</span>
+          <strong>{{ learningSelectedOrLater }}</strong>
+        </article>
+        <article class="summary-card">
+          <span>Reviewed</span>
           <strong>{{ learningSummary?.funnel.episodes_reviewed_24h ?? 0 }}</strong>
         </article>
         <article class="summary-card">
           <span>Candidates</span>
-          <strong>{{ (learningSummary?.funnel.create_candidates_24h ?? 0) + (learningSummary?.funnel.update_candidates_24h ?? 0) }}</strong>
+          <strong>{{ learningCandidateTotal }}</strong>
         </article>
         <article class="summary-card">
           <span>Created/updated</span>
@@ -526,6 +564,44 @@ function notifyText(value: unknown): string | null {
               <dd>{{ learningSummary?.health.review_running ? 'running' : 'idle' }}</dd>
             </div>
           </dl>
+
+          <section class="detail-block">
+            <h3>Pipeline state</h3>
+            <dl class="detail-meta">
+              <div>
+                <dt>Pending</dt>
+                <dd>{{ learningSummary?.funnel.episodes_pending_24h ?? 0 }}</dd>
+              </div>
+              <div>
+                <dt>Selecting</dt>
+                <dd>{{ learningSummary?.funnel.episodes_selecting_24h ?? 0 }}</dd>
+              </div>
+              <div>
+                <dt>Reviewing</dt>
+                <dd>{{ learningSummary?.funnel.episodes_reviewing_24h ?? 0 }}</dd>
+              </div>
+              <div>
+                <dt>No episode</dt>
+                <dd>{{ learningSummary?.funnel.episodes_no_episode_24h ?? 0 }}</dd>
+              </div>
+              <div>
+                <dt>Insufficient</dt>
+                <dd>{{ learningSummary?.funnel.episodes_insufficient_context_24h ?? 0 }}</dd>
+              </div>
+              <div>
+                <dt>Episode failed</dt>
+                <dd>{{ learningSummary?.funnel.episodes_failed_24h ?? 0 }}</dd>
+              </div>
+              <div>
+                <dt>Review failed</dt>
+                <dd>{{ learningSummary?.funnel.failed_reviews_24h ?? 0 }}</dd>
+              </div>
+              <div>
+                <dt>Reports</dt>
+                <dd>{{ learningSummary?.funnel.reports_total_24h ?? 0 }}</dd>
+              </div>
+            </dl>
+          </section>
 
           <section class="detail-block">
             <h3>Report detail</h3>
@@ -773,7 +849,7 @@ dt,
 
 .learning-funnel {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 10px;
 }
@@ -1008,6 +1084,10 @@ pre {
   .content-grid,
   .learning-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .learning-funnel {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .detail-panel {

@@ -127,6 +127,7 @@ pub struct LearningFunnel {
     pub episodes_reviewing_24h: i64,
     pub episodes_reviewed_24h: i64,
     pub episodes_no_episode_24h: i64,
+    pub episodes_insufficient_context_24h: i64,
     pub episodes_failed_24h: i64,
     pub reports_total_24h: i64,
     pub create_candidates_24h: i64,
@@ -269,6 +270,7 @@ mod learning_tests {
                 episodes_reviewing_24h: 0,
                 episodes_reviewed_24h: 1,
                 episodes_no_episode_24h: 0,
+                episodes_insufficient_context_24h: 0,
                 episodes_failed_24h: 0,
                 reports_total_24h: 1,
                 create_candidates_24h: 1,
@@ -329,6 +331,7 @@ mod learning_tests {
         assert_eq!(value["capabilities"]["learning_metrics"], true);
         assert_eq!(value["capabilities"]["learning_commands"], false);
         assert_eq!(value["funnel"]["create_candidates_24h"], 1);
+        assert_eq!(value["funnel"]["episodes_insufficient_context_24h"], 0);
         assert_eq!(value["quality"]["candidate_rate"], 1.0);
         assert_eq!(
             value["recent_reports"][0]["candidate_skill_name"],
