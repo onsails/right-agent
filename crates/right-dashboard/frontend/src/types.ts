@@ -354,3 +354,25 @@ export interface SkillDetailResponse {
   content_preview: string
   truncated: boolean
 }
+
+export interface IdentityResponse {
+  agent: string
+  source: string
+  warning: string | null
+  files: IdentityFileSummary[]
+}
+
+export interface IdentityFileResponse {
+  agent: string
+  warning: string | null
+  file: IdentityFileSummary
+}
+
+export interface IdentityFileSummary {
+  name: string
+  source: string
+  path: string
+  exists: boolean
+  content_preview: string | null
+  truncated: boolean
+}
