@@ -23,13 +23,9 @@ Auto-recall before each `claude -p`: query truncated to 800 chars, tags
 memories). Prefetch uses same parameters.
 
 Explicit retain is residual storage, not the default destination for every
-"remember" request. Agent-facing prompt text, the `/right-memory` skill, and
-the Hindsight `memory_retain` schema all tell the agent to route persistent
-facts by type first: tool/API/environment rules to `TOOLS.md`, user
-facts/preferences to `USER.md`, agent voice/escalation boundaries to `SOUL.md`,
-core identity/security posture to `IDENTITY.md`, and reusable procedures to
-learned skills. Only durable context without a better always-loaded home should
-reach Hindsight.
+"remember" request. Agent-facing prompt text directs explicit persistence
+requests to the `/right-memory` skill, which owns the detailed routing between
+identity files, tool notes, learned skills, and memory fallback.
 
 **Cron jobs skip memory:** Cron and delivery sessions perform no auto-recall
 or auto-retain. Cron prompts are static instructions — recall results would be

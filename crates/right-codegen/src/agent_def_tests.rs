@@ -184,7 +184,7 @@ fn system_prompt_delegates_remember_routing_to_right_memory_skill() {
     }
 
     for forbidden in [
-        "compact operating contract",
+        concat!("compact ", "operating contract"),
         "\"Remember\" requests are routed by semantic type before storage. Tool/API/env rules go to",
     ] {
         assert!(
@@ -289,7 +289,7 @@ fn operating_instructions_keep_soul_agent_authored_and_delegate_remember_routing
     }
 
     for forbidden in [
-        "compact operating contract",
+        concat!("compact ", "operating contract"),
         "Edit the always-loaded file when the fact belongs in one",
         "`TOOLS.md` for tool/API/environment rules",
         "`USER.md` for user profile",

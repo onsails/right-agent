@@ -61,7 +61,7 @@ Remove the managed SOUL migration helper and tests from `identity_mirror.rs`:
 - `SOUL_OPERATING_CONTRACT_BLOCK`
 - `with_soul_operating_contract`
 - `migrate_host_soul_operating_contract`
-- tests that assert managed operating-contract insertion
+- tests that assert platform-authored SOUL default insertion
 
 Keep existing identity mirror behavior: `IDENTITY.md`, `SOUL.md`, and `USER.md` are mirrored between sandbox and host, but their contents remain agent-authored.
 
@@ -77,7 +77,8 @@ Update tests to enforce the new boundary:
 Run targeted tests for changed prompt/codegen and MCP instructions, then final verification:
 
 - `devenv shell -- cargo test -p right-codegen`
-- `devenv shell -- cargo test -p right memory_retain_schema_marks_memory_as_residual_storage test_get_info_routes_memory_before_retain`
+- `devenv shell -- cargo test -p right memory_retain_schema_marks_memory_as_residual_storage`
+- `devenv shell -- cargo test -p right test_get_info_delegates_memory_routing_to_right_memory`
 - `devenv shell -- cargo test -p right-agent identity_mirror`
 - `devenv shell -- cargo test --workspace`
 - `devenv shell -- cargo build --workspace`
