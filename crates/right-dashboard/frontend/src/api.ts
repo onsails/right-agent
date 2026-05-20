@@ -1,5 +1,6 @@
 import type {
   ApiErrorBody,
+  DashboardOverviewResponse,
   DoctorResponse,
   IdentityFileResponse,
   BootstrapResponse,
@@ -48,8 +49,12 @@ export function bootstrap(): Promise<BootstrapResponse> {
   return requestJson<BootstrapResponse>('api/v1/bootstrap')
 }
 
+export function dashboardOverview(): Promise<DashboardOverviewResponse> {
+  return requestJson<DashboardOverviewResponse>('api/v1/overview')
+}
+
 export function overview(): Promise<OverviewResponse> {
-  return requestJson<OverviewResponse>('api/v1/overview')
+  return requestJson<OverviewResponse>('api/v1/activity/overview')
 }
 
 export function runDetail(runId: string): Promise<RunDetailResponse> {
