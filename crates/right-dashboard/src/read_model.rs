@@ -11,6 +11,9 @@ use rusqlite::Connection;
 use rusqlite::{OptionalExtension, params};
 use thiserror::Error;
 
+#[path = "read_model/learning.rs"]
+pub mod learning;
+
 #[derive(Debug, Error)]
 pub enum ReadModelError {
     #[error(transparent)]
