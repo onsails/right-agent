@@ -67,6 +67,15 @@
 - `agent_def.rs`, `settings.rs`, `claude_json.rs`, `mcp_config.rs`, `mcp_instructions.rs`, `policy.rs`, `process_compose.rs`, `cloudflared.rs`, `telegram.rs`, `plugin.rs`, `skills.rs` — generated artifacts and bundled skill/template installation.
 - `templates/` and `skills/` — compiled codegen-owned prompt, process-compose, cloudflared, and skill assets.
 
+### right-dashboard
+
+- `auth.rs` — Telegram Mini App `initData` validation and allowlist authorization helpers.
+- `api_types.rs` — dashboard API DTOs and error response bodies.
+- `read_model.rs` — read-only SQLite projections for dashboard views.
+- `assets.rs` — embedded static dashboard asset lookup and content types.
+- `frontend/` — Vue/Vite source for the Mini App dashboard.
+- `static/dashboard/` — checked-in built dashboard assets served by the bot.
+
 ### right-memory
 
 - `hindsight.rs` — Hindsight Cloud API client and DTOs.
@@ -95,7 +104,8 @@
 
 - `lib.rs` — entry: resolve agent dir, open `data.db`, sandbox lifecycle, start teloxide.
 - `cc/` — generic Claude Code subprocess plumbing: invocation builder, prompt assembly, stream parser, structured-reply parser, outbound DTOs, and shared markdown helpers.
-- `telegram/` — bot adaptor, dispatcher, handler, per-session worker, session table, chat-ID filter, OAuth callback server, Telegram markdown rendering/splitting, and attachment delivery (with STT integration).
+- `telegram/` — bot adaptor, dispatcher, handler, per-session worker, session table, chat-ID filter, OAuth callback server, Telegram markdown rendering/splitting, dashboard routes, and attachment delivery (with STT integration).
+- `telegram/dashboard.rs` — Axum route mounting for `/dashboard/<agent>/`, dashboard API handlers, Telegram menu/button setup, and injected bot-owned auth/runtime state.
 - `login.rs` — token-based Claude login flow (setup-token, env var injection).
 - `sync.rs` — background `right-platform-store` sync to `/sandbox/.platform/`.
 - `cron.rs`, `async_delivery.rs` — cron engine and async delivery loop (resumes main session so cron/background results land in agent context).

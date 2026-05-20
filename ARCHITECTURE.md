@@ -2,7 +2,7 @@
 
 ## Workspace
 
-Seventeen crates in a Cargo workspace:
+Eighteen crates in a Cargo workspace:
 
 | Crate | Path | Role |
 |-------|------|------|
@@ -19,6 +19,7 @@ Seventeen crates in a Cargo workspace:
 | **right-db** | `crates/right-db/` | Per-agent SQLite plumbing: `open_connection`, central migration registry, `sql/v*.sql` |
 | **right-mcp** | `crates/right-mcp/` | MCP aggregator backend, proxy, reconnect, credentials, token derivation, auth tokens |
 | **right-codegen** | `crates/right-codegen/` | Per-agent codegen: settings.json, .mcp.json, prompts, process-compose, cloudflared, sandbox policy, bundled skills |
+| **right-dashboard** | `crates/right-dashboard/` | Telegram Mini App dashboard DTOs, auth validation, read models, and static assets |
 | **right-memory** | `crates/right-memory/` | Hindsight-resilience layer and retain queue |
 | **right-agent** | `crates/right-agent/` | Slim orchestrator: agent discovery, runtime, init, doctor, rebootstrap, cron_spec, tunnel, usage |
 | **right** | `crates/right/` | CLI binary (`right`) + MCP Aggregator (HTTP) |
@@ -39,6 +40,13 @@ Every other crate has a single responsibility (see workspace table).
 New code that doesn't fit an existing crate's charter gets its own
 crate, not a misfit addition. Default placement for new code is the
 most-specific leaf crate.
+
+`right-dashboard` owns Telegram Mini App dashboard DTOs, Telegram `initData`
+validation, read models, and static asset lookup. `right-bot` owns runtime route
+mounting, Telegram menu/button integration, allowlist injection, and bot token
+injection. Dashboard writes are not exposed in the read-only MVP; future write
+routes must go through bot-owned control-plane services instead of direct file
+or credential edits.
 
 Global configuration lives in `right-config`: RIGHT_HOME resolution, global
 config YAML IO, and agents/backups directory helpers.
