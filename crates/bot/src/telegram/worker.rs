@@ -949,6 +949,25 @@ fn log_claude_finished(
     );
 }
 
+fn log_result_timing(ctx: &InvocationLogContext, timing: &crate::cc::stream::ResultTiming) {
+    tracing::info!(
+        chat_id = ctx.chat_id,
+        eff_thread_id = ctx.eff_thread_id,
+        key = ?ctx.key(),
+        session_uuid = %ctx.session_uuid,
+        turn_id = ctx.turn_id,
+        duration_ms = ?timing.duration_ms,
+        duration_api_ms = ?timing.duration_api_ms,
+        ttft_ms = ?timing.ttft_ms,
+        input_tokens = ?timing.input_tokens,
+        output_tokens = ?timing.output_tokens,
+        cache_creation_input_tokens = ?timing.cache_creation_input_tokens,
+        cache_read_input_tokens = ?timing.cache_read_input_tokens,
+        cache_miss_reason = ?timing.cache_miss_reason.as_deref(),
+        "claude result timing"
+    );
+}
+
 /// Spawn a per-session worker task.
 ///
 /// Called by the message handler when no sender exists for the session key.
@@ -3480,6 +3499,7 @@ async fn invoke_cc(
     let mut usage = crate::cc::stream::StreamUsage::default();
     let mut result_line: Option<String> = None;
     let mut api_key_source: Option<String> = None;
+    let mut cache_miss_reason: Option<String> = None;
     let mut thinking_msg_id: Option<teloxide::types::MessageId> = None;
     let mut last_edit: tokio::time::Instant;
     let mut last_rendered_event_count: u32 = 0;
@@ -3557,6 +3577,9 @@ async fn invoke_cc(
                         {
                             api_key_source = Some(src);
                         }
+                        if cache_miss_reason.is_none() {
+                            cache_miss_reason = crate::cc::stream::parse_cache_miss_reason(&line);
+                        }
 
                         if should_trigger_mcp_repair_from_init(&line) {
                             schedule_user_turn_mcp_repair(
@@ -3571,6 +3594,14 @@ async fn invoke_cc(
                             crate::cc::stream::StreamEvent::Result(json) => {
                                 usage = crate::cc::stream::parse_usage(json);
                                 result_line = Some(json.clone());
+                                if let Some(mut timing) =
+                                    crate::cc::stream::parse_result_timing(json)
+                                {
+                                    if timing.cache_miss_reason.is_none() {
+                                        timing.cache_miss_reason = cache_miss_reason.clone();
+                                    }
+                                    log_result_timing(&log_ctx, &timing);
+                                }
 
                                 match crate::cc::stream::parse_usage_full(json) {
                                     Some(mut breakdown) => {

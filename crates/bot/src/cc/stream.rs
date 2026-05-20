@@ -47,7 +47,6 @@ pub(crate) struct StreamUsage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct ResultTiming {
     pub(crate) duration_ms: Option<u64>,
     pub(crate) duration_api_ms: Option<u64>,
@@ -299,7 +298,6 @@ pub(crate) fn parse_usage_full(result_json: &str) -> Option<UsageBreakdown> {
     })
 }
 
-#[allow(dead_code)]
 pub(crate) fn parse_result_timing(result_json: &str) -> Option<ResultTiming> {
     let v: serde_json::Value = serde_json::from_str(result_json).ok()?;
     if v.get("type")?.as_str()? != "result" {
@@ -318,14 +316,32 @@ pub(crate) fn parse_result_timing(result_json: &str) -> Option<ResultTiming> {
     })
 }
 
-#[allow(dead_code)]
 pub(crate) fn parse_cache_miss_reason(line: &str) -> Option<String> {
+    if !has_cache_diagnostic_key(line) {
+        return None;
+    }
+
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     if v.get("type")?.as_str()? != "assistant" {
         return None;
     }
 
     cache_miss_reason_from_event_diagnostics(&v)
+}
+
+fn has_cache_diagnostic_key(line: &str) -> bool {
+    [
+        "cache_miss_reason",
+        "cacheMissReason",
+        "cache_miss",
+        "cacheMiss",
+        "prompt_cache",
+        "promptCache",
+        "cache_diagnostics",
+        "cacheDiagnostics",
+    ]
+    .into_iter()
+    .any(|key| line.contains(key))
 }
 
 fn optional_u64(v: &serde_json::Value, ptr: &str) -> Option<u64> {
@@ -1138,5 +1154,29 @@ mod tests {
         }"#;
 
         assert_eq!(parse_cache_miss_reason(line), None);
+    }
+
+    #[test]
+    fn cache_diagnostic_key_prefilter_covers_supported_shapes() {
+        for key in [
+            "cache_miss_reason",
+            "cacheMissReason",
+            "cache_miss",
+            "cacheMiss",
+            "prompt_cache",
+            "promptCache",
+            "cache_diagnostics",
+            "cacheDiagnostics",
+        ] {
+            let line = format!(r#"{{"type":"assistant","diagnostics":{{"{key}":{{}}}}}}"#);
+            assert!(
+                has_cache_diagnostic_key(&line),
+                "{key} should pass prefilter"
+            );
+        }
+
+        assert!(!has_cache_diagnostic_key(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#
+        ));
     }
 }
