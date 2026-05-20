@@ -20,7 +20,7 @@
 - Modify `crates/right/src/memory_server.rs`: make MCP instructions delegate routing to `/right-memory`.
 - Modify `crates/right/src/memory_server_mcp_tests.rs`: update MCP instruction tests for delegation.
 - Modify `PROMPT_SYSTEM.md`: keep docs synchronized with generated prompt behavior.
-- Modify `docs/architecture/memory.md` and `docs/architecture/lifecycle.md`: remove managed operating-contract language and document ownership.
+- Modify `docs/architecture/memory.md` and `docs/architecture/lifecycle.md`: remove platform-authored SOUL contract language and document ownership.
 - Update PR #71 body after code lands.
 
 ---
@@ -52,7 +52,7 @@ fn operating_instructions_keep_soul_agent_authored_and_delegate_remember_routing
     }
 
     for forbidden in [
-        "compact operating contract",
+        concat!("compact ", "operating contract"),
         "Edit the always-loaded file when the fact belongs in one",
         "`TOOLS.md` for tool/API/environment rules",
         "`USER.md` for user profile",
@@ -125,7 +125,7 @@ fn system_prompt_delegates_remember_routing_to_right_memory_skill() {
     }
 
     for forbidden in [
-        "compact operating contract",
+        concat!("compact ", "operating contract"),
         "\"Remember\" requests are routed by semantic type before storage. Tool/API/env rules go to",
     ] {
         assert!(
@@ -141,10 +141,12 @@ fn system_prompt_delegates_remember_routing_to_right_memory_skill() {
 Run:
 
 ```bash
-devenv shell -- cargo test -p right-codegen operating_instructions_keep_soul_agent_authored_and_delegate_remember_routing bootstrap_instructions_do_not_invent_platform_soul_contract system_prompt_delegates_remember_routing_to_right_memory_skill
+devenv shell -- cargo test -p right-codegen operating_instructions_keep_soul_agent_authored_and_delegate_remember_routing
+devenv shell -- cargo test -p right-codegen bootstrap_instructions_do_not_invent_platform_soul_contract
+devenv shell -- cargo test -p right-codegen system_prompt_delegates_remember_routing_to_right_memory_skill
 ```
 
-Expected: all three tests fail before prompt/template changes because current text still says `compact operating contract`, includes `**Operating Contract**`, and duplicates the detailed routing table.
+Expected: all three tests fail before prompt/template changes because current text still prescribes a platform-authored SOUL contract, includes `**Operating Contract**`, and duplicates the detailed routing table.
 
 - [ ] **Step 5: Commit red tests**
 
@@ -226,7 +228,9 @@ If the user gave no signal for a section, keep it minimal. Do not invent a platf
 Run:
 
 ```bash
-devenv shell -- cargo test -p right-codegen operating_instructions_keep_soul_agent_authored_and_delegate_remember_routing bootstrap_instructions_do_not_invent_platform_soul_contract system_prompt_delegates_remember_routing_to_right_memory_skill
+devenv shell -- cargo test -p right-codegen operating_instructions_keep_soul_agent_authored_and_delegate_remember_routing
+devenv shell -- cargo test -p right-codegen bootstrap_instructions_do_not_invent_platform_soul_contract
+devenv shell -- cargo test -p right-codegen system_prompt_delegates_remember_routing_to_right_memory_skill
 ```
 
 Expected: PASS.
@@ -318,10 +322,13 @@ Keep the `context` property description unchanged.
 
 - [ ] **Step 2: Update aggregator instructions**
 
-In `crates/right/src/aggregator.rs`, replace the `memory_retain` line inside `with_instructions()` with:
+In `crates/right/src/aggregator.rs`, replace the memory tools list inside `with_instructions()` with:
 
 ```rust
-- memory_retain: Store residual durable context to long-term memory only after `/right-memory` routing chooses memory as the fallback target\n\
+memory (`mcp__right__memory_retain`, `mcp__right__memory_recall`, and
+`mcp__right__memory_reflect` — Hindsight mode only;
+`mcp__right__memory_retain` is residual storage after `/right-memory` routing
+chooses memory as the fallback target),
 ```
 
 - [ ] **Step 3: Update aggregator test**
@@ -356,12 +363,13 @@ In `crates/right/src/memory_server.rs`, replace the `## Memory Routing` paragrap
 
 ```rust
                  ## Memory Routing\n\
-                 When the user says \"remember\", \"save this\", or \"don't forget\", treat it as persistence intent and use the /right-memory skill to classify the correct target before calling memory_retain or editing files. memory_retain is only for residual durable context after /right-memory routing chooses memory as the fallback target.\n\n\
+                 When the user says \"remember\", \"save this\", or \"don't forget\", treat it as persistence intent and use the /right-memory skill to classify the correct target before calling mcp__right__memory_retain or editing files. mcp__right__memory_retain is only for residual durable context after /right-memory routing chooses memory as the fallback target.\n\n\
 ```
 
 - [ ] **Step 5: Update memory server MCP test**
 
-In `crates/right/src/memory_server_mcp_tests.rs`, replace `test_get_info_routes_memory_before_retain` with:
+In `crates/right/src/memory_server_mcp_tests.rs`, replace the old
+detailed-routing MCP info test with:
 
 ```rust
 #[test]
@@ -371,8 +379,10 @@ fn test_get_info_delegates_memory_routing_to_right_memory() {
     let instructions = info.instructions.unwrap_or_default();
     for needle in [
         "remember",
+        "save this",
+        "don't forget",
         "/right-memory",
-        "memory_retain",
+        "mcp__right__memory_retain",
         "residual durable context",
         "fallback target",
     ] {
@@ -383,10 +393,10 @@ fn test_get_info_delegates_memory_routing_to_right_memory() {
     }
 
     for forbidden in [
-        "Route tool/API/environment rules",
-        "stable user facts/preferences to USER.md",
-        "agent voice or escalation boundaries to SOUL.md",
-        "core identity/security posture to IDENTITY.md",
+        concat!("Route tool/API/environment ", "rules"),
+        concat!("stable user facts/preferences to ", "USER.md"),
+        concat!("agent voice or escalation boundaries to ", "SOUL.md"),
+        concat!("core identity/security posture to ", "IDENTITY.md"),
     ] {
         assert!(
             !instructions.contains(forbidden),
@@ -401,7 +411,9 @@ fn test_get_info_delegates_memory_routing_to_right_memory() {
 Run:
 
 ```bash
-devenv shell -- cargo test -p right memory_retain_schema_marks_memory_as_residual_storage test_get_info_delegates_memory_routing_to_right_memory
+devenv shell -- cargo test -p right memory_retain_schema_marks_memory_as_residual_storage
+devenv shell -- cargo test -p right test_get_info_delegates_memory_routing_to_right_memory
+devenv shell -- cargo test -p right get_info_memory_tools_use_prefixed_agent_names
 ```
 
 Expected: PASS.
@@ -424,14 +436,9 @@ git commit -m "fix(memory): keep retain as residual fallback"
 
 - [ ] **Step 1: Update `PROMPT_SYSTEM.md` prompt structure**
 
-In `PROMPT_SYSTEM.md`, replace:
-
-```markdown
-{SOUL.md - compact operating contract: core values, communication style,
- autonomy, pushback, escalation boundaries}
-```
-
-with:
+In `PROMPT_SYSTEM.md`, replace the stale `SOUL.md` prompt-structure line
+that described a platform-authored contract for values, style, autonomy,
+pushback, and escalation boundaries with:
 
 ```markdown
 {SOUL.md - agent-authored durable voice, values, interaction style, and
@@ -442,7 +449,8 @@ Use the exact dash style already present in the file if the surrounding block us
 
 - [ ] **Step 2: Replace detailed remember-routing paragraph**
 
-In `PROMPT_SYSTEM.md`, replace the paragraph beginning `"Remember" requests are routed by semantic type before storage.` with:
+In `PROMPT_SYSTEM.md`, replace the paragraph beginning with the old detailed
+remember-routing sentence with:
 
 ```markdown
 Identity files are always-loaded durable context. Right Agent explains their
@@ -477,7 +485,7 @@ identity files, tool notes, learned skills, and memory fallback.
 
 - [ ] **Step 5: Update lifecycle architecture doc**
 
-In `docs/architecture/lifecycle.md`, replace the bootstrap note that says `SOUL.md includes the compact operating contract` with:
+In `docs/architecture/lifecycle.md`, replace the bootstrap note that says `SOUL.md` is created with a platform-authored SOUL contract with:
 
 ```text
 SOUL.md is created later by the bootstrap CC session from user choices)
@@ -490,10 +498,10 @@ Keep the diagram formatting coherent after the replacement.
 Run:
 
 ```bash
-devenv shell -- rg -n "compact operating contract|RIGHT_AGENT:SOUL_OPERATING_CONTRACT|managed operating-contract|platform-default operating contract" PROMPT_SYSTEM.md docs/architecture crates/right-codegen crates/right-agent crates/right/src
+devenv shell -- rg -n "compact[ ]operating[ ]contract|RIGHT_AGENT:SOUL[_]OPERATING[_]CONTRACT|managed operating[-]contract|platform-default[ ]operating[ ]contract" PROMPT_SYSTEM.md docs crates/right-codegen crates/right-agent crates/right/src
 ```
 
-Expected: no matches except the approved phrase `do not invent a platform-default operating contract` in bootstrap/spec/plan files. If `rg` prints only approved docs/spec/plan references, verify no production code or generated prompt template contains stale managed-contract language.
+Expected: no matches except the approved phrase `do not invent a platform-default operating contract` in bootstrap/spec/plan files. If `rg` prints only approved docs/spec/plan references, verify no production code or generated prompt template contains stale platform-authored SOUL contract language.
 
 - [ ] **Step 7: Commit docs**
 
@@ -523,7 +531,9 @@ Expected: exit 0.
 ```bash
 devenv shell -- cargo test -p right-codegen
 devenv shell -- cargo test -p right-agent identity_mirror
-devenv shell -- cargo test -p right memory_retain_schema_marks_memory_as_residual_storage test_get_info_delegates_memory_routing_to_right_memory
+devenv shell -- cargo test -p right memory_retain_schema_marks_memory_as_residual_storage
+devenv shell -- cargo test -p right test_get_info_delegates_memory_routing_to_right_memory
+devenv shell -- cargo test -p right get_info_memory_tools_use_prefixed_agent_names
 ```
 
 Expected: each command exits 0.
@@ -593,7 +603,9 @@ Tool rules, user profile facts, identity/voice rules, and reusable procedures ar
 - `devenv shell -- cargo fmt --all`
 - `devenv shell -- cargo test -p right-codegen`
 - `devenv shell -- cargo test -p right-agent identity_mirror`
-- `devenv shell -- cargo test -p right memory_retain_schema_marks_memory_as_residual_storage test_get_info_delegates_memory_routing_to_right_memory`
+- `devenv shell -- cargo test -p right memory_retain_schema_marks_memory_as_residual_storage`
+- `devenv shell -- cargo test -p right test_get_info_delegates_memory_routing_to_right_memory`
+- `devenv shell -- cargo test -p right get_info_memory_tools_use_prefixed_agent_names`
 - `devenv shell -- cargo test --workspace`
 - `devenv shell -- cargo build --workspace`
 ```
