@@ -236,6 +236,7 @@ pub struct DebounceMsg {
     pub author: super::attachments::MessageAuthor,
     pub forward_info: Option<super::attachments::ForwardInfo>,
     pub reply_to_id: Option<i32>,
+    pub quoted_text: Option<String>,
     pub address: Option<super::mention::AddressKind>,
     pub group_open: bool,
     pub chat: super::attachments::ChatContext,
@@ -866,6 +867,26 @@ fn batch_is_addressed(batch: &[DebounceMsg]) -> bool {
     batch.iter().any(|m| m.address.is_some())
 }
 
+fn build_input_message_from_debounce(
+    msg: &DebounceMsg,
+    resolved: Vec<super::attachments::ResolvedAttachment>,
+    voice_markers: &[String],
+    reply_to_body: Option<super::attachments::ReplyToBody>,
+) -> super::attachments::InputMessage {
+    super::attachments::InputMessage {
+        message_id: msg.message_id,
+        text: crate::stt::combine_markers_with_text(voice_markers, msg.text.as_deref()),
+        timestamp: msg.timestamp,
+        attachments: resolved,
+        author: msg.author.clone(),
+        forward_info: msg.forward_info.clone(),
+        reply_to_id: msg.reply_to_id,
+        quoted_text: msg.quoted_text.clone(),
+        chat: msg.chat.clone(),
+        reply_to_body,
+    }
+}
+
 fn routed_message_ids(batch: &[DebounceMsg]) -> Vec<i32> {
     batch.iter().map(|message| message.message_id).collect()
 }
@@ -1109,21 +1130,12 @@ pub fn spawn_worker(
                     body
                 });
 
-                input_messages.push(super::attachments::InputMessage {
-                    message_id: msg.message_id,
-                    text: crate::stt::combine_markers_with_text(
-                        &voice_markers,
-                        msg.text.as_deref(),
-                    ),
-                    timestamp: msg.timestamp,
-                    attachments: resolved,
-                    author: msg.author.clone(),
-                    forward_info: msg.forward_info.clone(),
-                    reply_to_id: msg.reply_to_id,
-                    quoted_text: None,
-                    chat: msg.chat.clone(),
+                input_messages.push(build_input_message_from_debounce(
+                    msg,
+                    resolved,
+                    &voice_markers,
                     reply_to_body,
-                });
+                ));
             }
             if skip_batch {
                 continue;
@@ -5317,6 +5329,7 @@ esac
             },
             forward_info: None,
             reply_to_id: None,
+            quoted_text: None,
             address: None,
             group_open: true,
             chat: super::super::attachments::ChatContext::Group {
@@ -5328,6 +5341,19 @@ esac
             reply_to_attachments: vec![],
             media_group_id: media_group_id.map(|s| s.to_string()),
         }
+    }
+
+    #[test]
+    fn build_input_message_passes_quoted_text() {
+        let mut msg = debug_msg(7, None);
+        msg.text = Some("what do you mean?".into());
+        msg.reply_to_id = Some(6);
+        msg.quoted_text = Some("selected fragment".into());
+
+        let input = build_input_message_from_debounce(&msg, vec![], &[], None);
+
+        assert_eq!(input.reply_to_id, Some(6));
+        assert_eq!(input.quoted_text.as_deref(), Some("selected fragment"));
     }
 
     #[test]
