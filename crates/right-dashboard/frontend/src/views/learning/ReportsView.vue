@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import MetricCard from '../../components/MetricCard.vue'
 import StatusPill from '../../components/StatusPill.vue'
 import { percent, shortDate } from '../../format'
 import type { LearningOverviewResponse, LearningReportDetailResponse, LearningReportSummary } from '../../types'
@@ -18,22 +19,14 @@ const emit = defineEmits<{
 
 <template>
   <section class="metric-grid">
-    <article class="metric-card default">
-      <span>Signals</span>
-      <strong>{{ learning?.funnel.signals_accepted_24h ?? 0 }}</strong>
-    </article>
-    <article class="metric-card active">
-      <span>Reports</span>
-      <strong>{{ learning?.funnel.reports_total_24h ?? 0 }}</strong>
-    </article>
-    <article class="metric-card ok">
-      <span>Candidates</span>
-      <strong>{{ (learning?.funnel.create_candidates_24h ?? 0) + (learning?.funnel.update_candidates_24h ?? 0) }}</strong>
-    </article>
-    <article class="metric-card default">
-      <span>Rate</span>
-      <strong>{{ percent(learning?.quality.candidate_rate) }}</strong>
-    </article>
+    <MetricCard label="Signals" :value="learning?.funnel.signals_accepted_24h ?? 0" />
+    <MetricCard label="Reports" :value="learning?.funnel.reports_total_24h ?? 0" tone="active" />
+    <MetricCard
+      label="Candidates"
+      :value="(learning?.funnel.create_candidates_24h ?? 0) + (learning?.funnel.update_candidates_24h ?? 0)"
+      tone="ok"
+    />
+    <MetricCard label="Rate" :value="percent(learning?.quality.candidate_rate)" />
   </section>
 
   <section class="two-column wide-main">

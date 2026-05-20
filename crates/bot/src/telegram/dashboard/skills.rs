@@ -1,15 +1,17 @@
+use std::time::Duration;
+
 use right_dashboard::api_types::{SkillDetailResponse, SkillGroups, SkillSummary, SkillsResponse};
 use right_dashboard::skill_inventory::{
     SkillInventoryError, classify_skill_group, parse_skill_description, read_host_skill_detail,
     scan_host_skills, sort_skill_groups, validate_skill_name,
 };
+use right_openshell::sandbox_exec::SandboxExec;
 
 use super::DashboardState;
 
 const SKILL_PREVIEW_LIMIT_BYTES: usize = 64 * 1024;
 const SKILL_DESCRIPTION_PREVIEW_LIMIT_BYTES: usize = 8 * 1024;
 const SANDBOX_SKILL_LIMIT_STR: &str = "200";
-const SANDBOX_EXEC_TIMEOUT_SECS: u32 = 10;
 const SANDBOX_SKILLS_PATH: &str = "/sandbox/.claude/skills";
 const SANDBOX_LIST_SKILLS_SCRIPT: &str = r#"cd "$1" 2>/dev/null || exit 0
 limit="$2"
@@ -40,8 +42,8 @@ pub(super) enum SkillDetailError {
 pub(super) async fn skills_response(
     state: &DashboardState,
 ) -> Result<SkillsResponse, SkillInventoryError> {
-    if let Some(sandbox) = state.resolved_sandbox.as_deref() {
-        match scan_sandbox_skills(&state.agent_name, sandbox).await {
+    if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
+        match scan_sandbox_skills(&state.agent_name, sandbox_exec).await {
             Ok(response) => return Ok(response),
             Err(error) => {
                 let mut response = scan_host_skills(
@@ -73,8 +75,8 @@ pub(super) async fn skill_detail_response(
     skill_name: &str,
 ) -> Result<SkillDetailResponse, SkillDetailError> {
     validate_skill_name(skill_name)?;
-    if let Some(sandbox) = state.resolved_sandbox.as_deref() {
-        return read_sandbox_skill_detail(&state.agent_name, sandbox, skill_name).await;
+    if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
+        return read_sandbox_skill_detail(&state.agent_name, sandbox_exec, skill_name).await;
     }
 
     Ok(read_host_skill_detail(
@@ -86,10 +88,10 @@ pub(super) async fn skill_detail_response(
     )?)
 }
 
-async fn scan_sandbox_skills(agent: &str, sandbox: &str) -> miette::Result<SkillsResponse> {
-    let mtls_dir = openshell_mtls_dir()?;
-    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
+async fn scan_sandbox_skills(
+    agent: &str,
+    sandbox_exec: &SandboxExec,
+) -> miette::Result<SkillsResponse> {
     let list_command = [
         "sh",
         "-c",
@@ -98,13 +100,14 @@ async fn scan_sandbox_skills(agent: &str, sandbox: &str) -> miette::Result<Skill
         SANDBOX_SKILLS_PATH,
         SANDBOX_SKILL_LIMIT_STR,
     ];
-    let (stdout, exit_code) = right_openshell::openshell::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
-        &list_command,
-        SANDBOX_EXEC_TIMEOUT_SECS,
-    )
-    .await?;
+    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
+    let (stdout, exit_code) =
+        match tokio::time::timeout(timeout, sandbox_exec.exec(&list_command)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(miette::miette!("sandbox skill list timed out"));
+            }
+        };
     if exit_code != 0 {
         return Err(miette::miette!(
             "sandbox skill list exited with code {exit_code}"
@@ -126,13 +129,11 @@ async fn scan_sandbox_skills(agent: &str, sandbox: &str) -> miette::Result<Skill
             skill_name,
             limit.as_str(),
         ];
-        let (preview, exit_code) = right_openshell::openshell::exec_in_sandbox(
-            &mut client,
-            &sandbox_id,
-            &read_command,
-            SANDBOX_EXEC_TIMEOUT_SECS,
-        )
-        .await?;
+        let (preview, exit_code) =
+            match tokio::time::timeout(timeout, sandbox_exec.exec(&read_command)).await {
+                Ok(result) => result?,
+                Err(_) => continue,
+            };
         if exit_code != 0 {
             continue;
         }
@@ -150,17 +151,10 @@ async fn scan_sandbox_skills(agent: &str, sandbox: &str) -> miette::Result<Skill
 
 async fn read_sandbox_skill_detail(
     agent: &str,
-    sandbox: &str,
+    sandbox_exec: &SandboxExec,
     skill_name: &str,
 ) -> Result<SkillDetailResponse, SkillDetailError> {
     validate_skill_name(skill_name)?;
-    let mtls_dir = openshell_mtls_dir().map_err(sandbox_error)?;
-    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
-        .await
-        .map_err(sandbox_error)?;
-    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox)
-        .await
-        .map_err(sandbox_error)?;
     let limit = (SKILL_PREVIEW_LIMIT_BYTES + 1).to_string();
     let read_command = [
         "sh",
@@ -171,14 +165,17 @@ async fn read_sandbox_skill_detail(
         skill_name,
         limit.as_str(),
     ];
-    let (mut content_preview, exit_code) = right_openshell::openshell::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
-        &read_command,
-        SANDBOX_EXEC_TIMEOUT_SECS,
-    )
-    .await
-    .map_err(sandbox_error)?;
+    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
+    let (mut content_preview, exit_code) =
+        match tokio::time::timeout(timeout, sandbox_exec.exec(&read_command)).await {
+            Ok(result) => result.map_err(sandbox_error)?,
+            Err(_) => {
+                return Err(SkillDetailError::Sandbox(format!(
+                    "sandbox skill read timed out after {}s",
+                    super::DASHBOARD_SANDBOX_TIMEOUT_SECS
+                )));
+            }
+        };
     if exit_code == 3 {
         return Err(SkillInventoryError::NotFound(skill_name.to_owned()).into());
     }
@@ -189,7 +186,10 @@ async fn read_sandbox_skill_detail(
     }
     let truncated = content_preview.len() > SKILL_PREVIEW_LIMIT_BYTES;
     if truncated {
-        content_preview.truncate(SKILL_PREVIEW_LIMIT_BYTES);
+        right_dashboard::fs_safety::truncate_to_char_boundary(
+            &mut content_preview,
+            SKILL_PREVIEW_LIMIT_BYTES,
+        );
     }
     let group = classify_skill_group(skill_name, right_codegen::BUILTIN_SKILL_NAMES).to_owned();
     let skill = SkillSummary {
@@ -228,14 +228,5 @@ fn push_skill_summary(
         "core" => groups.core.push(summary),
         "learned" => groups.learned.push(summary),
         _ => groups.other.push(summary),
-    }
-}
-
-fn openshell_mtls_dir() -> miette::Result<std::path::PathBuf> {
-    match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(dir) => Ok(dir),
-        status => Err(miette::miette!(
-            "OpenShell is not ready for dashboard skill scan: {status:?}"
-        )),
     }
 }

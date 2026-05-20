@@ -24,11 +24,14 @@ pub struct LearningOverviewInput {
     pub refresh_interval_secs: u64,
 }
 
-fn parse_generated_at(value: &str) -> Result<DateTime<Utc>, ReadModelError> {
+pub(super) fn parse_generated_at(value: &str) -> Result<DateTime<Utc>, ReadModelError> {
     Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
 }
 
-fn window_start(generated_at: &str, duration: Duration) -> Result<String, ReadModelError> {
+pub(super) fn window_start(
+    generated_at: &str,
+    duration: Duration,
+) -> Result<String, ReadModelError> {
     Ok((parse_generated_at(generated_at)? - duration).to_rfc3339())
 }
 

@@ -1,7 +1,7 @@
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use crate::api_types::{SkillDetailResponse, SkillGroups, SkillSummary, SkillsResponse};
+use crate::fs_safety::{is_directory_no_symlink, is_regular_file_no_symlink, read_bounded_text};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SkillInventoryError {
@@ -80,9 +80,6 @@ pub fn read_host_skill_detail(
         return Err(SkillInventoryError::NotFound(skill_name.to_owned()));
     }
     let path = skill_dir.join("SKILL.md");
-    if !path.exists() {
-        return Err(SkillInventoryError::NotFound(skill_name.to_owned()));
-    }
     if !is_regular_file_no_symlink(&path)? {
         return Err(SkillInventoryError::NotFound(skill_name.to_owned()));
     }
@@ -138,39 +135,6 @@ pub fn classify_skill_group<'a>(name: &str, core_skill_names: &'a [&'a str]) -> 
     } else {
         "other"
     }
-}
-
-fn read_bounded_text(
-    path: &Path,
-    preview_limit_bytes: usize,
-) -> Result<(String, bool), SkillInventoryError> {
-    let mut file = std::fs::File::open(path)?;
-    let mut bytes = Vec::new();
-    let read_limit = preview_limit_bytes.saturating_add(1) as u64;
-    file.by_ref().take(read_limit).read_to_end(&mut bytes)?;
-    let truncated = bytes.len() > preview_limit_bytes;
-    if truncated {
-        bytes.truncate(preview_limit_bytes);
-    }
-    Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
-}
-
-fn is_regular_file_no_symlink(path: &Path) -> Result<bool, SkillInventoryError> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-    Ok(metadata.file_type().is_file())
-}
-
-fn is_directory_no_symlink(path: &Path) -> Result<bool, SkillInventoryError> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-    Ok(metadata.file_type().is_dir())
 }
 
 pub fn parse_skill_description(content: &str) -> Option<String> {

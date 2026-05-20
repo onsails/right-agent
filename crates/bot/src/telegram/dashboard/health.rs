@@ -1,12 +1,14 @@
+use std::time::Duration;
+
 use right_agent::doctor::{CheckStatus, DoctorCheck};
 use right_dashboard::api_types::{
     DoctorCheckResponse, DoctorResponse, SandboxDiskStats, SandboxMemoryStats, SandboxProcess,
     SandboxStatsResponse,
 };
+use right_openshell::sandbox_exec::SandboxExec;
 
 const SANDBOX_PROCESS_LIMIT: usize = 50;
 const SANDBOX_COMMAND_LIMIT_CHARS: usize = 160;
-const SANDBOX_EXEC_TIMEOUT_SECS: u32 = 10;
 const SANDBOX_STATS_SCRIPT: &str = r#"limit="$1"
 printf '__DISK__\n'
 (df -Pk /sandbox 2>/dev/null || df -Pk / 2>/dev/null) | awk 'NR==2 {print $2 " " $3 " " $4 " " $5 " " $6}'
@@ -51,13 +53,13 @@ pub(super) fn doctor_response_from_checks(agent: &str, checks: Vec<DoctorCheck>)
 
 pub(super) async fn sandbox_stats_response(
     agent: &str,
-    resolved_sandbox: Option<&str>,
+    sandbox_exec: Option<&SandboxExec>,
 ) -> SandboxStatsResponse {
-    let Some(sandbox) = resolved_sandbox else {
+    let Some(sandbox_exec) = sandbox_exec else {
         return unavailable_sandbox_stats(agent, "agent is configured without a sandbox");
     };
 
-    match read_sandbox_stats(agent, sandbox).await {
+    match read_sandbox_stats(agent, sandbox_exec).await {
         Ok(response) => response,
         Err(error) => unavailable_sandbox_stats(agent, &format!("{error:#}")),
     }
@@ -79,10 +81,10 @@ fn doctor_status(status: &CheckStatus) -> &'static str {
     }
 }
 
-async fn read_sandbox_stats(agent: &str, sandbox: &str) -> miette::Result<SandboxStatsResponse> {
-    let mtls_dir = openshell_mtls_dir()?;
-    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
+async fn read_sandbox_stats(
+    agent: &str,
+    sandbox_exec: &SandboxExec,
+) -> miette::Result<SandboxStatsResponse> {
     let limit = SANDBOX_PROCESS_LIMIT.to_string();
     let command = [
         "sh",
@@ -91,13 +93,17 @@ async fn read_sandbox_stats(agent: &str, sandbox: &str) -> miette::Result<Sandbo
         "dashboard-sandbox-stats",
         limit.as_str(),
     ];
-    let (stdout, exit_code) = right_openshell::openshell::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
-        &command,
-        SANDBOX_EXEC_TIMEOUT_SECS,
-    )
-    .await?;
+    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
+    let (stdout, exit_code) = match tokio::time::timeout(timeout, sandbox_exec.exec(&command)).await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(miette::miette!(
+                "sandbox probe timed out after {}s",
+                super::DASHBOARD_SANDBOX_TIMEOUT_SECS
+            ));
+        }
+    };
     if exit_code != 0 {
         return Err(miette::miette!(
             "sandbox stats probe exited with code {exit_code}"
@@ -233,15 +239,6 @@ fn unavailable_sandbox_stats(agent: &str, detail: &str) -> SandboxStatsResponse 
         disk: None,
         memory: None,
         processes: Vec::new(),
-    }
-}
-
-fn openshell_mtls_dir() -> miette::Result<std::path::PathBuf> {
-    match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(dir) => Ok(dir),
-        status => Err(miette::miette!(
-            "OpenShell is not ready for dashboard sandbox stats: {status:?}"
-        )),
     }
 }
 
