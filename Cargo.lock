@@ -2912,6 +2912,7 @@ dependencies = [
  "dashmap",
  "dirs",
  "futures",
+ "hmac",
  "miette",
  "notify",
  "notify-debouncer-mini",
@@ -2922,6 +2923,7 @@ dependencies = [
  "right-agent-config",
  "right-codegen",
  "right-config",
+ "right-dashboard",
  "right-db",
  "right-mcp",
  "right-memory",
@@ -2992,6 +2994,24 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+]
+
+[[package]]
+name = "right-dashboard"
+version = "0.2.15"
+dependencies = [
+ "chrono",
+ "hmac",
+ "include_dir",
+ "right-db",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
