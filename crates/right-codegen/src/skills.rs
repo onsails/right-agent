@@ -19,6 +19,7 @@ const SKILL_RIGHT_MEMORY_HINDSIGHT: Dir =
     include_dir!("$CARGO_MANIFEST_DIR/skills/right-memory-hindsight");
 const SKILL_RIGHT_REFLECT: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/right-reflect");
 const SKILL_RIGHT_LEARN_SKILL: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/right-learn-skill");
+const SKILL_RIGHT_COMPOSIO: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/right-composio");
 
 /// Canonical names of Right Agent built-in skills under `.claude/skills/`.
 ///
@@ -34,6 +35,7 @@ pub const BUILTIN_SKILL_NAMES: &[&str] = &[
     "right-learn-skill",
     "right-memory",
     "right-reflect",
+    "right-composio",
 ];
 
 /// Legacy built-in skill directory names removed during host and sandbox upgrade.
@@ -60,6 +62,7 @@ fn builtin_skill_dir(
             &SKILL_RIGHT_MEMORY_FILE
         }),
         "right-reflect" => Ok(&SKILL_RIGHT_REFLECT),
+        "right-composio" => Ok(&SKILL_RIGHT_COMPOSIO),
         _ => Err(miette::miette!(
             "unknown builtin skill {name:?} — add an arm to builtin_skill_dir"
         )),
@@ -614,6 +617,18 @@ mod tests {
         assert!(
             !content.contains("Edit and Write tools to manage MEMORY.md"),
             "hindsight variant must NOT reference Edit/Write for MEMORY.md"
+        );
+    }
+
+    #[test]
+    fn installs_right_composio_skill() {
+        let dir = tempdir().unwrap();
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+        assert!(
+            dir.path()
+                .join(".claude/skills/right-composio/SKILL.md")
+                .exists(),
+            "right-composio/SKILL.md should exist"
         );
     }
 
