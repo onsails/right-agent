@@ -556,6 +556,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     )?;
 
     // Build shared OAuth PendingAuth map
+    use dashmap::DashMap;
     use std::collections::HashMap;
     use std::sync::Arc;
     use telegram::oauth_callback::{
@@ -564,6 +565,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     let pending_auth: PendingAuthMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let progress_state = telegram::progress::ProgressState::default();
+    let dashboard_foreground: telegram::StopTokens = Arc::new(DashMap::new());
 
     let notify_bot = teloxide::Bot::new(token.clone());
     let agent_name = args.agent.clone();
@@ -581,6 +583,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         allowlist: allowlist.clone(),
         internal_client: Arc::clone(&internal_client),
     };
+    let dashboard_router =
+        telegram::dashboard::build_dashboard_router(telegram::dashboard::DashboardState {
+            agent_name: args.agent.clone(),
+            bot_token: token.clone(),
+            agent_dir: agent_dir.clone(),
+            allowlist: allowlist.clone(),
+            foreground: Arc::clone(&dashboard_foreground),
+        });
 
     // Spawn cleanup task
     tokio::spawn(run_pending_auth_cleanup(Arc::clone(&pending_auth)));
@@ -624,11 +634,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let agent_name_for_uds = args.agent.clone();
     let webhook_set_for_axum = webhook_set_flag.clone();
     let progress_state_for_uds = progress_state.clone();
+    let dashboard_router_for_uds = dashboard_router;
     let axum_handle = tokio::spawn(async move {
         run_bot_uds_server(
             axum_socket,
             oauth_state,
             progress_state_for_uds,
+            dashboard_router_for_uds,
             webhook_router,
             agent_name_for_uds,
             started_at,
@@ -1124,6 +1136,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             Arc::clone(&claude_health),
             Arc::clone(&session_locks),
             Arc::clone(&bg_requests),
+            Arc::clone(&dashboard_foreground),
             progress_state,
             Arc::clone(&learning_drain_scheduler),
             update_listener,

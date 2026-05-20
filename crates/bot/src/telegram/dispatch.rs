@@ -151,6 +151,7 @@ pub(crate) async fn run_telegram<L>(
     claude_health: Arc<crate::keepalive::ClaudeHealth>,
     session_locks: super::SessionLocks,
     bg_requests: super::BgRequests,
+    stop_tokens: super::StopTokens,
     progress_state: super::progress::ProgressState,
     learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
     update_listener: L,
@@ -214,7 +215,6 @@ where
         claude_health,
         shutdown: worker_shutdown.clone(),
     });
-    let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
     let thinking_visibility: super::ThinkingVisibility = Arc::new(DashMap::new());
     let bg_handoff_gates: super::BgHandoffGates = Arc::new(DashMap::new());
 
