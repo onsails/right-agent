@@ -481,10 +481,17 @@ mod tests {
     }
 
     fn wrap(url: &str) -> ResilientHindsight {
+        setup_crypto();
         let dir = tempdir().unwrap().keep();
         let _ = open_connection(&dir, true).unwrap();
         let client = HindsightClient::new("hs_x", "bank-1", "high", 1024, Some(url));
         ResilientHindsight::new(client, dir, "bot")
+    }
+
+    fn setup_crypto() {
+        // reqwest is built with rustls-no-provider; installing the process-level
+        // provider here keeps these tests independent of cross-module test order.
+        let _ = rustls::crypto::ring::default_provider().install_default();
     }
 
     #[tokio::test]
