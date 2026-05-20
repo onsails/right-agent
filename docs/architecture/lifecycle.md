@@ -65,8 +65,9 @@ right bot --agent <name>  (spawned by process-compose)
   ├─ Start bot-owned UDS server with OAuth callback, progress, healthz,
   │   dashboard, and nested Telegram webhook routes; dashboard serves
   │   `/dashboard/<agent>/` static assets and explicit read-only v1 API endpoints
-  │   for bootstrap, cron overview/run detail, and learned-skill metrics/report
-  │   detail
+  │   for bootstrap, overview, activity, knowledge, usage, identity, and health.
+  │   Health endpoints are explicit probes: overview reports injected status and
+  │   never runs doctor or sandbox commands implicitly.
   ├─ Clear stale Telegram per-chat command scopes for current allowlist ids
   │   and legacy `allowed_chat_ids`, then register current command autocomplete
   │   in Default, AllPrivateChats, and AllGroupChats scopes

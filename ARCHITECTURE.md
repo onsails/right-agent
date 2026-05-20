@@ -45,7 +45,10 @@ most-specific leaf crate.
 validation logic, read models, and static asset lookup. `right-bot` owns runtime
 route mounting, Telegram menu/button integration, allowlist lookup, and custody
 of the bot token used for server-side `initData` validation. The current v1
-dashboard API is read-only and covers cron state plus learned-skill metrics.
+dashboard API is read-only and covers overview, activity, knowledge, usage,
+identity, and health surfaces. Explicit health routes may run bounded
+bot-owned probes; overview must use injected runtime state and must not run
+doctor or sandbox commands implicitly.
 Future write routes must call bot-owned control-plane services instead of
 directly editing agent files, credentials, or aggregator state.
 
