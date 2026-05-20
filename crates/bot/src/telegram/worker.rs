@@ -139,6 +139,56 @@ fn thinking_anchor_text(
     }
 }
 
+#[allow(dead_code)]
+struct ThinkingAnchorRender {
+    text: String,
+    keyboard: teloxide::types::InlineKeyboardMarkup,
+}
+
+#[allow(dead_code)]
+fn build_thinking_anchor_render(
+    chat_id: i64,
+    eff_thread_id: i64,
+    expanded: bool,
+    is_group: bool,
+    events: &VecDeque<crate::cc::stream::StreamEvent>,
+    usage: &crate::cc::stream::StreamUsage,
+) -> ThinkingAnchorRender {
+    ThinkingAnchorRender {
+        text: thinking_anchor_text(expanded, events, usage),
+        keyboard: working_keyboard(
+            chat_id,
+            eff_thread_id,
+            thinking_keyboard_mode(expanded, is_group),
+        ),
+    }
+}
+
+#[allow(dead_code)]
+async fn send_thinking_anchor(
+    ctx: &WorkerContext,
+    tg_chat_id: teloxide::types::ChatId,
+    chat_id: i64,
+    eff_thread_id: i64,
+    expanded: bool,
+    is_group: bool,
+    events: &VecDeque<crate::cc::stream::StreamEvent>,
+    usage: &crate::cc::stream::StreamUsage,
+) -> Option<teloxide::types::MessageId> {
+    let render =
+        build_thinking_anchor_render(chat_id, eff_thread_id, expanded, is_group, events, usage);
+    let mut send = ctx
+        .bot
+        .send_message(tg_chat_id, &render.text)
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .reply_markup(render.keyboard);
+    if eff_thread_id != 0 {
+        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
+    }
+
+    send.await.ok().map(|msg| msg.id)
+}
+
 fn append_repair_notice_to_system_prompt(
     mut base_prompt: String,
     repair_notice: Option<&str>,
@@ -5023,6 +5073,65 @@ esac
         let text = thinking_anchor_text(true, &events, &usage);
         assert!(text.contains("thinking..."));
         assert!(text.contains("Turn 1"));
+    }
+
+    #[test]
+    fn thinking_anchor_render_collapsed_uses_working_text_and_keyboard() {
+        let mut events = VecDeque::new();
+        events.push_back(crate::cc::stream::StreamEvent::Text(
+            "hidden while collapsed".into(),
+        ));
+        let usage = crate::cc::stream::StreamUsage {
+            num_turns: 7,
+            cost_usd: 0.42,
+        };
+
+        let render = build_thinking_anchor_render(12345, 678, false, false, &events, &usage);
+
+        assert_eq!(render.text, "\u{23f3} Working...");
+        assert_eq!(
+            keyboard_row(render.keyboard),
+            vec![
+                (
+                    "\u{1f4ad} Show thinking".to_string(),
+                    "think:12345:678:show".to_string()
+                ),
+                ("\u{1f6d1} Stop".to_string(), "stop:12345:678".to_string()),
+                (
+                    "\u{2699}\u{fe0f} Background it".to_string(),
+                    "bg:12345:678".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn thinking_anchor_render_expanded_group_uses_preview_and_group_keyboard() {
+        let mut events = VecDeque::new();
+        events.push_back(crate::cc::stream::StreamEvent::ToolUse {
+            tool: "Bash".into(),
+            input_summary: "cargo test".into(),
+        });
+        let usage = crate::cc::stream::StreamUsage {
+            num_turns: 2,
+            cost_usd: 0.05,
+        };
+
+        let render = build_thinking_anchor_render(-100123, 456, true, true, &events, &usage);
+
+        assert!(render.text.contains("Bash <code>cargo test</code>"));
+        assert!(render.text.contains("Turn 2"));
+        assert!(render.text.contains("$0.05"));
+        assert_eq!(
+            keyboard_row(render.keyboard),
+            vec![
+                ("\u{1f6d1} Stop".to_string(), "stop:-100123:456".to_string()),
+                (
+                    "\u{2699}\u{fe0f} Background it".to_string(),
+                    "bg:-100123:456".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]
