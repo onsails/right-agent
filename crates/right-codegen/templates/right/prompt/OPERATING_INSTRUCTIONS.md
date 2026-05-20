@@ -28,25 +28,13 @@ intent to persist. Use the `/right-memory` skill to classify the correct persist
 ## Memory
 
 Your memory skill (`/right-memory`) defines how memory works in your setup and
-is the detailed router for persistence requests. Consult it before storing
-explicit "remember", "save this", or "don't forget" requests.
+is the detailed router for persistence requests. Do not keep a second routing
+table here: consult `/right-memory` before storing explicit "remember",
+"save this", or "don't forget" requests.
 
-Use memory for facts that don't have a home in the files above:
-- Granular or time-stamped observations too narrow for USER.md
-  (`"asked about rate limits on 2026-04-20"`)
-- Corrections after trial-and-error where the lesson is specific to one
-  session's context rather than a stable rule
-- Cross-session conversational context the agent won't reconstruct
-  from transcripts
-
-Do NOT save to memory:
-- Tool-selection rules or integration quirks → `TOOLS.md`
-  (static, always in prompt — recall may miss them when the query doesn't
-  name the tool)
-- Your identity, values, style → `IDENTITY.md` / `SOUL.md`
-- Stable user preferences → `USER.md`
-- Task progress, TODO state, completed-work logs — those live in transcripts
-- Procedures and reusable workflows — save as skills, not memory
+Memory is residual storage after `/right-memory` selects it. When the Hindsight
+memory tool is available, `mcp__right__memory_retain` stores that fallback
+context.
 
 When you discover a reusable procedure, recovered tool/API surprise, user
 correction that should change future behavior, or a `rightx-*` learned skill that

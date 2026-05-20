@@ -294,6 +294,10 @@ fn operating_instructions_keep_soul_agent_authored_and_delegate_remember_routing
         "`TOOLS.md` for tool/API/environment rules",
         "`USER.md` for user profile",
         "`SOUL.md` for your voice",
+        "Tool-selection rules or integration quirks",
+        "Your identity, values, style",
+        "Stable user preferences",
+        "Procedures and reusable workflows",
     ] {
         assert!(
             !ops.contains(forbidden),
@@ -307,8 +311,8 @@ fn operating_instructions_route_reusable_workflows_to_right_learn_skill() {
     let ops = crate::OPERATING_INSTRUCTIONS;
     for needle in [
         "/right-learn-skill",
-        "Procedures and reusable workflows",
-        "save as skills, not memory",
+        "When you discover a reusable procedure",
+        "needs repair",
         right_mcp::LEARNED_SKILL_PREFIX,
     ] {
         assert!(
@@ -461,8 +465,9 @@ fn bootstrap_instructions_constant_is_non_empty() {
 fn bootstrap_instructions_do_not_invent_platform_soul_contract() {
     let bootstrap = crate::BOOTSTRAP_INSTRUCTIONS;
     for needle in [
-        "Personality based on chosen vibe and the user's bootstrap choices. Use this structure:",
-        "If the user gave no signal for a section, keep it minimal. Do not invent a platform-default operating contract.",
+        "Personality based only on chosen vibe and explicit bootstrap signals.",
+        "Suggested headings when there is evidence:",
+        "If the user gave no signal for a section, omit it or keep it minimal. Do not invent a platform-default operating contract.",
     ] {
         assert!(
             bootstrap.contains(needle),
@@ -475,6 +480,8 @@ fn bootstrap_instructions_do_not_invent_platform_soul_contract() {
         "act on reversible low-risk work",
         "credential/security, or private-data actions",
         "usable outcomes over polished artifacts",
+        "match the user's language",
+        "ask, don't guess",
     ] {
         assert!(
             !bootstrap.contains(forbidden),
