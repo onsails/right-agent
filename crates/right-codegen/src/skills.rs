@@ -554,6 +554,7 @@ mod tests {
         // (source_dir_name, installed_dir_name)
         let skills: &[(&str, &str)] = &[
             ("right-skills", "right-skills"),
+            ("right-composio", "right-composio"),
             ("right-cron", "right-cron"),
             ("right-mcp", "right-mcp"),
             ("right-learn-skill", "right-learn-skill"),
