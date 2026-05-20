@@ -683,14 +683,11 @@ async fn persist_successful_background_output(
     learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
 ) -> Result<(), String> {
     let notify = output
-        .notify
-        .as_ref()
-        .ok_or_else(|| "background continuation returned notify: null".to_string())?;
-    if notify.content.trim().is_empty() {
-        return Err("background continuation returned empty notify.content".to_string());
-    }
-    let notify_json =
-        serialize_notify_for_host(agent_dir, run_id, notify, resolved_sandbox).await?;
+        .delivery
+        .as_notify()
+        .ok_or_else(|| "background continuation returned non-notify delivery".to_string())?;
+    let delivery_json =
+        serialize_notify_delivery_for_host(agent_dir, run_id, &notify, resolved_sandbox).await?;
 
     let conn = right_db::open_connection(agent_dir, false)
         .map_err(|e| format!("open DB to persist background output: {e:#}"))?;
@@ -701,9 +698,8 @@ async fn persist_successful_background_output(
         &tx,
         run_id,
         right_agent::async_runs::RunOutput {
-            summary: Some(&output.summary),
-            notify_json: Some(&notify_json),
-            no_notify_reason: output.no_notify_reason.as_deref(),
+            run_note: Some(&output.run_note),
+            delivery_json: Some(&delivery_json),
             error_json: None,
             delivery_required: true,
         },
@@ -773,19 +769,19 @@ fn capture_background_completion_seed(
     }
 }
 
-async fn serialize_notify_for_host(
+async fn serialize_notify_delivery_for_host(
     agent_dir: &Path,
     run_id: &str,
     notify: &crate::cron::CronNotify,
     resolved_sandbox: Option<&str>,
 ) -> Result<String, String> {
     let Some(attachments) = notify.attachments.as_ref() else {
-        return serde_json::to_string(notify)
-            .map_err(|e| format!("serialize background notify_json: {e:#}"));
+        return crate::cron::notify_delivery_json(notify)
+            .map_err(|e| format!("serialize background delivery_json: {e:#}"));
     };
     if attachments.is_empty() || resolved_sandbox.is_none() {
-        return serde_json::to_string(notify)
-            .map_err(|e| format!("serialize background notify_json: {e:#}"));
+        return crate::cron::notify_delivery_json(notify)
+            .map_err(|e| format!("serialize background delivery_json: {e:#}"));
     }
 
     let sandbox = resolved_sandbox.expect("checked above");
@@ -818,8 +814,8 @@ async fn serialize_notify_for_host(
         content: notify.content.clone(),
         attachments: Some(host_attachments),
     };
-    serde_json::to_string(&host_notify)
-        .map_err(|e| format!("serialize background host notify_json: {e:#}"))
+    crate::cron::notify_delivery_json(&host_notify)
+        .map_err(|e| format!("serialize background host delivery_json: {e:#}"))
 }
 
 fn persist_background_failure_notify(
@@ -827,14 +823,13 @@ fn persist_background_failure_notify(
     run_id: &str,
     reason: &str,
 ) -> Result<(), rusqlite::Error> {
-    let (summary, notify_json, error_json) = background_failure_payload(run_id, reason)?;
+    let (run_note, delivery_json, error_json) = background_failure_payload(run_id, reason)?;
     right_agent::async_runs::persist_run_output(
         conn,
         run_id,
         right_agent::async_runs::RunOutput {
-            summary: Some(&summary),
-            notify_json: Some(&notify_json),
-            no_notify_reason: None,
+            run_note: Some(&run_note),
+            delivery_json: Some(&delivery_json),
             error_json: Some(&error_json),
             delivery_required: true,
         },
@@ -849,16 +844,16 @@ fn background_failure_payload(
         content: BACKGROUND_FAILURE_NOTIFY_CONTENT.to_string(),
         attachments: None,
     };
-    let notify_json = serde_json::to_string(&notify)
+    let delivery_json = crate::cron::notify_delivery_json(&notify)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    let summary = format!("Background run `{run_id}` failed before producing a result");
+    let run_note = format!("Background run `{run_id}` failed before producing a result");
     let error_json = serde_json::json!({
         "kind": "background_result_unavailable",
         "run_id": run_id,
         "reason": reason,
     })
     .to_string();
-    Ok((summary, notify_json, error_json))
+    Ok((run_note, delivery_json, error_json))
 }
 
 fn mark_handoff_failed(
@@ -910,14 +905,13 @@ fn mark_interrupted_handoff_failed_if_still_queued(
     conn: &rusqlite::Connection,
     run_id: &str,
 ) -> Result<bool, rusqlite::Error> {
-    let (summary, notify_json, error_json) =
+    let (run_note, delivery_json, error_json) =
         background_failure_payload(run_id, INTERRUPTED_HANDOFF_REASON)?;
     let now = chrono::Utc::now().to_rfc3339();
     let rows = conn.execute(
         "UPDATE async_runs
-         SET summary = ?2,
-             notify_json = ?3,
-             no_notify_reason = NULL,
+         SET run_note = ?2,
+             delivery_json = ?3,
              error_json = ?4,
              delivery_required = 1,
              delivery_status = 'pending',
@@ -930,7 +924,7 @@ fn mark_interrupted_handoff_failed_if_still_queued(
            AND kind = 'background'
            AND status = 'queued'
            AND handoff_state = 'queued'",
-        rusqlite::params![run_id, summary, notify_json, error_json, now],
+        rusqlite::params![run_id, run_note, delivery_json, error_json, now],
     )?;
     Ok(rows > 0)
 }
@@ -1070,7 +1064,7 @@ mod tests {
 
         let row: (String, String, i64, String, String, String) = conn
             .query_row(
-                "SELECT status, handoff_state, delivery_required, delivery_status, notify_json, error_json \
+                "SELECT status, handoff_state, delivery_required, delivery_status, delivery_json, error_json \
                  FROM async_runs WHERE id = 'run-1'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
@@ -1140,7 +1134,7 @@ mod tests {
         assert_eq!(converted, 1);
         let bg: (String, String, i64, String, String, String) = conn
             .query_row(
-                "SELECT status, handoff_state, delivery_required, delivery_status, notify_json, error_json \
+                "SELECT status, handoff_state, delivery_required, delivery_status, delivery_json, error_json \
                  FROM async_runs WHERE id = 'bg-queued'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
@@ -1205,7 +1199,7 @@ mod tests {
         assert!(!converted);
         let row: (String, String, i64, String, Option<String>, Option<String>) = conn
             .query_row(
-                "SELECT status, handoff_state, delivery_required, delivery_status, notify_json, error_json \
+                "SELECT status, handoff_state, delivery_required, delivery_status, delivery_json, error_json \
                  FROM async_runs WHERE id = 'bg-raced'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
