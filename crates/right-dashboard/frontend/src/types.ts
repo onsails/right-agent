@@ -327,3 +327,30 @@ export interface LearningReviewerDetail {
   evidence_refs: string[]
   user_notice_present: boolean
 }
+
+export interface SkillsResponse {
+  agent: string
+  source: string
+  warning: string | null
+  groups: SkillGroups
+}
+
+export interface SkillGroups {
+  core: SkillSummary[]
+  learned: SkillSummary[]
+  other: SkillSummary[]
+}
+
+export interface SkillSummary {
+  name: string
+  group: string
+  path: string
+  description: string | null
+}
+
+export interface SkillDetailResponse {
+  agent: string
+  skill: SkillSummary
+  content_preview: string
+  truncated: boolean
+}

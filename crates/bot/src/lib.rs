@@ -583,15 +583,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         allowlist: allowlist.clone(),
         internal_client: Arc::clone(&internal_client),
     };
-    let dashboard_router =
-        telegram::dashboard::build_dashboard_router(telegram::dashboard::DashboardState {
-            agent_name: args.agent.clone(),
-            bot_token: token.clone(),
-            agent_dir: agent_dir.clone(),
-            allowlist: allowlist.clone(),
-            foreground: Arc::clone(&dashboard_foreground),
-        });
-
     // Spawn cleanup task
     tokio::spawn(run_pending_auth_cleanup(Arc::clone(&pending_auth)));
 
@@ -625,6 +616,28 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // on the bot.sock UDS axum app so cloudflared can POST updates.
     let (update_listener, _webhook_stop, webhook_router) =
         telegram::webhook::build_webhook_router(webhook_secret.clone(), webhook_url.clone());
+
+    // Resolve sandbox name once — used throughout the bot lifetime.
+    // None when running without sandbox (mode: none).
+    let resolved_sandbox: Option<String> = if is_sandboxed {
+        let explicit_sandbox_name = config.sandbox.as_ref().and_then(|s| s.name.as_deref());
+        Some(right_openshell::openshell::resolve_sandbox_name(
+            &args.agent,
+            explicit_sandbox_name,
+        ))
+    } else {
+        None
+    };
+
+    let dashboard_router =
+        telegram::dashboard::build_dashboard_router(telegram::dashboard::DashboardState {
+            agent_name: args.agent.clone(),
+            bot_token: token.clone(),
+            agent_dir: agent_dir.clone(),
+            resolved_sandbox: resolved_sandbox.clone(),
+            allowlist: allowlist.clone(),
+            foreground: Arc::clone(&dashboard_foreground),
+        });
 
     // Shared flag for healthz "webhook_set"; flipped by Task 10's register loop.
     let webhook_set_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -697,18 +710,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // One-time migration: oauth-state.json → SQLite
     migrate_oauth_state_to_db(&agent_dir);
-
-    // Resolve sandbox name once — used throughout the bot lifetime.
-    // None when running without sandbox (mode: none).
-    let resolved_sandbox: Option<String> = if is_sandboxed {
-        let explicit_sandbox_name = config.sandbox.as_ref().and_then(|s| s.name.as_deref());
-        Some(right_openshell::openshell::resolve_sandbox_name(
-            &args.agent,
-            explicit_sandbox_name,
-        ))
-    } else {
-        None
-    };
 
     // --- OpenShell sandbox lifecycle (when sandbox mode is active) ---
     let (ssh_config_path, sandbox_ctx): (

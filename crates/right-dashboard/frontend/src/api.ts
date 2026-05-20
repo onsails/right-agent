@@ -7,6 +7,8 @@ import type {
   LearningReportDetailResponse,
   OverviewResponse,
   RunDetailResponse,
+  SkillDetailResponse,
+  SkillsResponse,
   UsageOverviewResponse,
 } from './types'
 
@@ -68,6 +70,14 @@ export function learningReportDetail(reportId: number): Promise<LearningReportDe
 
 export function usageOverview(): Promise<UsageOverviewResponse> {
   return requestJson<UsageOverviewResponse>('api/v1/usage')
+}
+
+export function skillsOverview(): Promise<SkillsResponse> {
+  return requestJson<SkillsResponse>('api/v1/knowledge/skills')
+}
+
+export function skillDetail(skillName: string): Promise<SkillDetailResponse> {
+  return requestJson<SkillDetailResponse>(`api/v1/knowledge/skills/${encodeURIComponent(skillName)}`)
 }
 
 async function requestJson<T>(path: string): Promise<T> {
