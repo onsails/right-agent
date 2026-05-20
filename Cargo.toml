@@ -8,6 +8,7 @@ members = [
     "crates/right-codegen",
     "crates/right",
     "crates/bot",
+    "crates/right-dashboard",
     "crates/right-platform-knobs",
     "crates/right-prompt-safety",
     "crates/right-runtime-state",
