@@ -9,6 +9,7 @@ right-agent = { path = "../right-agent", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }
 right-config = { path = "../right-config", version = "*" }
+right-dashboard = { path = "../right-dashboard", version = "*" }
 right-openshell = { path = "../right-openshell", version = "*" }
 right-process = { path = "../right-process", version = "*" }
 right-db = { path = "../right-db", version = "*" }
@@ -50,6 +51,7 @@ rand = { workspace = true }
 futures = { workspace = true }
 subtle = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 whisper-rs = { version = "0.16", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]

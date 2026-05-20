@@ -11,6 +11,7 @@
     cmake            # required by whisper-rs-sys build script
     sccache
     actionlint
+    nodejs
   ] ++ lib.optionals pkgs.stdenv.isLinux [
     pkgs.bubblewrap
   ];
