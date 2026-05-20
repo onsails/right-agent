@@ -30,7 +30,8 @@ right up [--agents x,y] [--detach] [--no-sandbox]
   ├─ Per agent: resolve secret for token map (generate if missing)
   ├─ Generate agent-tokens.json
   ├─ Generate process-compose.yaml (minijinja)
-  ├─ Generate cloudflared config and record whether content changed
+  ├─ Generate cloudflared config, including `/dashboard/<agent>/.*` rules,
+  │   and record whether content changed
   └─ Launch process-compose (TUI or detached)
 
 right reload / running agent register / running agent destroy
@@ -61,6 +62,8 @@ right bot --agent <name>  (spawned by process-compose)
   │   ├─ hourly Haiku probe for Claude OAuth keepalive + agent-facing MCP init
   │   └─ stale `right` MCP needs-auth cache repair when `system/init` is unhealthy
   ├─ Start cron engine, OAuth callback server, refresh scheduler
+  ├─ Mount dashboard routes on the bot-owned UDS server:
+  │   `/dashboard/<agent>/` static assets plus `/dashboard/<agent>/api/v1/*`
   ├─ Clear stale Telegram per-chat command scopes for current allowlist ids
   │   and legacy `allowed_chat_ids`, then register current command autocomplete
   │   in Default, AllPrivateChats, and AllGroupChats scopes
