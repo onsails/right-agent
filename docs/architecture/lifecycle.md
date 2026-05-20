@@ -62,8 +62,9 @@ right bot --agent <name>  (spawned by process-compose)
   │   ├─ hourly Haiku probe for Claude OAuth keepalive + agent-facing MCP init
   │   └─ stale `right` MCP needs-auth cache repair when `system/init` is unhealthy
   ├─ Start cron engine, OAuth callback server, refresh scheduler
-  ├─ Mount dashboard routes on the bot-owned UDS server:
-  │   `/dashboard/<agent>/` static assets plus `/dashboard/<agent>/api/v1/*`
+  ├─ Start bot-owned UDS server with OAuth callback, progress, healthz,
+  │   dashboard, and nested Telegram webhook routes; dashboard serves
+  │   `/dashboard/<agent>/` static assets and explicit read-only v1 API endpoints
   ├─ Clear stale Telegram per-chat command scopes for current allowlist ids
   │   and legacy `allowed_chat_ids`, then register current command autocomplete
   │   in Default, AllPrivateChats, and AllGroupChats scopes

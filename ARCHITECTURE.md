@@ -42,11 +42,12 @@ crate, not a misfit addition. Default placement for new code is the
 most-specific leaf crate.
 
 `right-dashboard` owns Telegram Mini App dashboard DTOs, Telegram `initData`
-validation, read models, and static asset lookup. `right-bot` owns runtime route
-mounting, Telegram menu/button integration, allowlist injection, and bot token
-injection. Dashboard writes are not exposed in the read-only MVP; future write
-routes must go through bot-owned control-plane services instead of direct file
-or credential edits.
+validation logic, read models, and static asset lookup. `right-bot` owns runtime
+route mounting, Telegram menu/button integration, allowlist lookup, and custody
+of the bot token used for server-side `initData` validation. Dashboard writes are
+not exposed in the read-only MVP; future write routes must call bot-owned
+control-plane services instead of directly editing agent files, credentials, or
+aggregator state.
 
 Global configuration lives in `right-config`: RIGHT_HOME resolution, global
 config YAML IO, and agents/backups directory helpers.
