@@ -28,16 +28,78 @@ pub(crate) enum CronError {
 /// Structured output from a cron CC invocation.
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct CronReplyOutput {
-    pub notify: Option<CronNotify>,
-    pub summary: String,
-    pub no_notify_reason: Option<String>,
+    pub delivery: CronDeliveryDecision,
+    pub run_note: String,
 }
 
 /// User-facing notification from a cron job.
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 pub(crate) struct CronNotify {
     pub content: String,
     pub attachments: Option<Vec<OutboundAttachment>>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum CronDeliveryDecision {
+    Notify {
+        content: String,
+        attachments: Option<Vec<OutboundAttachment>>,
+    },
+    Silent {
+        reason: String,
+    },
+}
+
+impl CronDeliveryDecision {
+    pub(crate) fn as_notify(&self) -> Option<CronNotify> {
+        match self {
+            Self::Notify {
+                content,
+                attachments,
+            } => Some(CronNotify {
+                content: content.clone(),
+                attachments: attachments.clone(),
+            }),
+            Self::Silent { .. } => None,
+        }
+    }
+
+    pub(crate) fn silent_reason(&self) -> Option<&str> {
+        match self {
+            Self::Silent { reason } => Some(reason),
+            Self::Notify { .. } => None,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Notify { content, .. } if content.trim().is_empty() => {
+                Err("empty notify content".to_string())
+            }
+            Self::Silent { reason } if reason.trim().is_empty() => {
+                Err("empty silent reason".to_string())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+pub(crate) fn notify_delivery_json(notify: &CronNotify) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&CronDeliveryDecision::Notify {
+        content: notify.content.clone(),
+        attachments: notify.attachments.clone(),
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn notify_from_delivery_json(raw: &str) -> Result<CronNotify, String> {
+    let decision: CronDeliveryDecision =
+        serde_json::from_str(raw).map_err(|e| format!("parse delivery_json: {e}"))?;
+    decision.validate()?;
+    decision
+        .as_notify()
+        .ok_or_else(|| "delivery_json is not a notify decision".to_string())
 }
 
 /// Extract the filename component from a sandbox attachment path.
@@ -252,17 +314,16 @@ fn persist_successful_cron_output(
     conn: &rusqlite::Connection,
     run_id: &str,
     cron_output: &CronReplyOutput,
-    notify_json: Option<&str>,
+    delivery_json: &str,
 ) -> Result<&'static str, rusqlite::Error> {
-    let delivery_required = cron_output.notify.is_some();
+    let delivery_required = cron_output.delivery.as_notify().is_some();
     let delivery_status = if delivery_required { "pending" } else { "none" };
     right_agent::async_runs::persist_run_output(
         conn,
         run_id,
         right_agent::async_runs::RunOutput {
-            summary: Some(&cron_output.summary),
-            notify_json,
-            no_notify_reason: cron_output.no_notify_reason.as_deref(),
+            run_note: Some(&cron_output.run_note),
+            delivery_json: Some(delivery_json),
             error_json: None,
             delivery_required,
         },
@@ -290,7 +351,7 @@ fn is_run_job_loop_skip_kind(kind: &right_agent::cron_spec::ScheduleKind) -> boo
 /// Execute one cron job: lock check → DB insert → subprocess → log write → DB update → lock delete.
 ///
 /// Per D-02: subprocess failures log `tracing::error` only, do not propagate.
-/// Results are persisted to the `async_runs` table (summary + notify_json).
+/// Results are persisted to the `async_runs` table (`run_note` + `delivery_json`).
 /// A separate Telegram delivery loop reads pending rows and sends notifications.
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
@@ -684,7 +745,7 @@ async fn execute_job(
         match parse_cron_output(&collected_lines) {
             Ok(cron_output) => {
                 // Download attachments from sandbox to host outbox
-                let notify_json = if let Some(ref notify) = cron_output.notify {
+                let delivery_json = if let Some(notify) = cron_output.delivery.as_notify() {
                     if let Some(ref atts) = notify.attachments {
                         let outbox_dir = agent_dir.join("outbox").join("cron").join(&run_id);
                         if let Err(e) = std::fs::create_dir_all(&outbox_dir) {
@@ -726,60 +787,74 @@ async fn execute_job(
                                     .collect(),
                             ),
                         };
-                        match serde_json::to_string(&host_notify) {
+                        match notify_delivery_json(&host_notify) {
                             Ok(json) => Some(json),
                             Err(e) => {
-                                tracing::error!(job = %job_name, "failed to serialize notify_json: {e:#}");
+                                tracing::error!(job = %job_name, "failed to serialize delivery_json: {e:#}");
                                 None
                             }
                         }
                     } else {
-                        match serde_json::to_string(notify) {
+                        match notify_delivery_json(&notify) {
                             Ok(json) => Some(json),
                             Err(e) => {
-                                tracing::error!(job = %job_name, "failed to serialize notify_json: {e:#}");
+                                tracing::error!(job = %job_name, "failed to serialize delivery_json: {e:#}");
                                 None
                             }
                         }
                     }
                 } else {
-                    None
+                    match serde_json::to_string(&cron_output.delivery) {
+                        Ok(json) => Some(json),
+                        Err(e) => {
+                            tracing::error!(job = %job_name, "failed to serialize delivery_json: {e:#}");
+                            None
+                        }
+                    }
                 };
 
                 // Persist output and flip status='success' atomically. If either
                 // write fails, roll back and mark the row 'failed' so the operator
                 // sees the run as broken instead of stuck at 'success' with no
                 // delivery payload.
-                let tx_result: Result<&'static str, rusqlite::Error> = (|| {
-                    let tx = conn.unchecked_transaction()?;
-                    let delivery_status = persist_successful_cron_output(
-                        &tx,
-                        &run_id,
-                        &cron_output,
-                        notify_json.as_deref(),
-                    )?;
-                    right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "success")?;
-                    tx.commit()?;
-                    Ok(delivery_status)
-                })();
+                if let Some(delivery_json) = delivery_json {
+                    let tx_result: Result<&'static str, rusqlite::Error> = (|| {
+                        let tx = conn.unchecked_transaction()?;
+                        let delivery_status = persist_successful_cron_output(
+                            &tx,
+                            &run_id,
+                            &cron_output,
+                            &delivery_json,
+                        )?;
+                        right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "success")?;
+                        tx.commit()?;
+                        Ok(delivery_status)
+                    })();
 
-                match tx_result {
-                    Ok(delivery_status) => {
-                        tracing::info!(
-                            job = %job_name,
-                            has_notify = cron_output.notify.is_some(),
-                            delivery_status,
-                            no_notify_reason = cron_output.no_notify_reason.as_deref().unwrap_or("-"),
-                            "cron output persisted to DB"
-                        );
+                    match tx_result {
+                        Ok(delivery_status) => {
+                            tracing::info!(
+                                job = %job_name,
+                                has_notify = cron_output.delivery.as_notify().is_some(),
+                                delivery_status,
+                                silent_reason = cron_output.delivery.silent_reason().unwrap_or("-"),
+                                "cron output persisted to DB"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                job = %job_name,
+                                "failed to persist cron output atomically; marking run failed: {e:#}"
+                            );
+                            update_failed_run_record(&conn, &run_id, exit_code);
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            job = %job_name,
-                            "failed to persist cron output atomically; marking run failed: {e:#}"
-                        );
-                        update_failed_run_record(&conn, &run_id, exit_code);
-                    }
+                } else {
+                    tracing::error!(
+                        job = %job_name,
+                        "failed to produce delivery_json; marking run failed"
+                    );
+                    update_failed_run_record(&conn, &run_id, exit_code);
                 }
             }
             Err(reason) => {
@@ -854,15 +929,14 @@ async fn execute_job(
             content: reflected_content,
             attachments: None,
         };
-        match serde_json::to_string(&notify) {
+        match notify_delivery_json(&notify) {
             Ok(json) => {
                 if let Err(e) = right_agent::async_runs::persist_run_output(
                     &conn,
                     &run_id,
                     right_agent::async_runs::RunOutput {
-                        summary: Some("failed"),
-                        notify_json: Some(&json),
-                        no_notify_reason: None,
+                        run_note: Some("failed"),
+                        delivery_json: Some(&json),
                         error_json: None,
                         delivery_required: true,
                     },
@@ -949,8 +1023,10 @@ pub(crate) fn parse_cron_output(lines: &[String]) -> Result<CronReplyOutput, Str
         return Err("result line has neither 'structured_output' nor 'result' field".into());
     };
 
-    serde_json::from_value(payload.clone())
-        .map_err(|e| format!("failed to parse CronReplyOutput: {e}"))
+    let output: CronReplyOutput = serde_json::from_value(payload.clone())
+        .map_err(|e| format!("failed to parse CronReplyOutput: {e}"))?;
+    output.delivery.validate()?;
+    Ok(output)
 }
 
 fn update_run_record(
@@ -1703,98 +1779,82 @@ mod tests {
     // -- CronReplyOutput parser tests (stream-json NDJSON format) --
 
     #[test]
-    fn parse_cron_output_full_notify() {
+    fn parse_cron_output_notify_delivery() {
         let lines = vec![
-            r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#.to_string(),
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"notify":{"content":"BTC broke 100k","attachments":null},"summary":"Checked 5 pairs"}}"#.to_string(),
+            r#"{"type":"result","subtype":"success","structured_output":{"delivery":{"kind":"notify","content":"BTC broke 100k","attachments":null},"run_note":"Checked 5 pairs"}}"#.to_string(),
         ];
         let out = parse_cron_output(&lines).unwrap();
-        assert_eq!(out.summary, "Checked 5 pairs");
-        let notify = out.notify.unwrap();
+        assert_eq!(out.run_note, "Checked 5 pairs");
+        let notify = out.delivery.as_notify().unwrap();
         assert_eq!(notify.content, "BTC broke 100k");
         assert!(notify.attachments.is_none());
     }
 
     #[test]
-    fn parse_cron_output_silent_null_notify() {
+    fn parse_cron_output_silent_delivery() {
         let lines = vec![
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"notify":null,"summary":"Nothing interesting"}}"#.to_string(),
+            r#"{"type":"result","subtype":"success","structured_output":{"delivery":{"kind":"silent","reason":"No changes since last run"},"run_note":"Checked feed"}}"#.to_string(),
         ];
         let out = parse_cron_output(&lines).unwrap();
-        assert!(out.notify.is_none());
-        assert_eq!(out.summary, "Nothing interesting");
-    }
-
-    #[test]
-    fn parse_cron_output_silent_with_reason() {
-        let lines = vec![
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"notify":null,"summary":"Nothing interesting","no_notify_reason":"No changes since last run"}}"#.to_string(),
-        ];
-        let out = parse_cron_output(&lines).unwrap();
-        assert!(out.notify.is_none());
-        assert_eq!(out.summary, "Nothing interesting");
+        assert!(matches!(out.delivery, CronDeliveryDecision::Silent { .. }));
         assert_eq!(
-            out.no_notify_reason.as_deref(),
+            out.delivery.silent_reason(),
             Some("No changes since last run")
-        );
-    }
-
-    #[test]
-    fn parse_cron_output_notify_present_no_reason() {
-        let lines = vec![
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"notify":{"content":"BTC broke 100k"},"summary":"Checked pairs","no_notify_reason":null}}"#.to_string(),
-        ];
-        let out = parse_cron_output(&lines).unwrap();
-        assert!(out.notify.is_some());
-        assert!(out.no_notify_reason.is_none());
-    }
-
-    #[test]
-    fn parse_cron_output_with_attachments() {
-        let lines = vec![
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"notify":{"content":"Chart","attachments":[{"type":"photo","path":"/sandbox/outbox/chart.png"}]},"summary":"Generated chart"}}"#.to_string(),
-        ];
-        let out = parse_cron_output(&lines).unwrap();
-        let notify = out.notify.unwrap();
-        assert_eq!(notify.attachments.as_ref().unwrap().len(), 1);
-        assert_eq!(
-            notify.attachments.unwrap()[0].path,
-            "/sandbox/outbox/chart.png"
         );
     }
 
     #[test]
     fn parse_cron_output_structured_output_preferred() {
         let lines = vec![
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"ignored","structured_output":{"notify":null,"summary":"from structured"}}"#.to_string(),
+            r#"{"type":"result","subtype":"success","result":{"delivery":{"kind":"notify","content":"ignored"},"run_note":"ignored"},"structured_output":{"delivery":{"kind":"silent","reason":"from structured"},"run_note":"structured note"}}"#.to_string(),
         ];
         let out = parse_cron_output(&lines).unwrap();
-        assert_eq!(out.summary, "from structured");
+        assert_eq!(out.run_note, "structured note");
+        assert_eq!(out.delivery.silent_reason(), Some("from structured"));
     }
 
     #[test]
     fn parse_cron_output_falls_back_to_result() {
         let lines = vec![
-            r#"{"type":"result","subtype":"success","is_error":false,"result":{"notify":null,"summary":"from result field"}}"#.to_string(),
+            r#"{"type":"result","subtype":"success","result":{"delivery":{"kind":"silent","reason":"from result field"},"run_note":"result note"}}"#.to_string(),
         ];
         let out = parse_cron_output(&lines).unwrap();
-        assert_eq!(out.summary, "from result field");
+        assert_eq!(out.run_note, "result note");
+        assert_eq!(out.delivery.silent_reason(), Some("from result field"));
     }
 
     #[test]
-    fn parse_cron_output_no_result_line_returns_err() {
+    fn parse_cron_output_missing_delivery_is_invalid() {
         let lines = vec![
-            r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#.to_string(),
-            "not json".to_string(),
+            r#"{"type":"result","subtype":"success","structured_output":{"run_note":"note only"}}"#
+                .to_string(),
         ];
-        let result = parse_cron_output(&lines);
-        assert!(result.is_err());
+        let err = parse_cron_output(&lines).unwrap_err();
+        assert!(err.contains("delivery"));
     }
 
     #[test]
-    fn parse_cron_output_empty_returns_err() {
-        let result = parse_cron_output(&[]);
-        assert!(result.is_err());
+    fn parse_cron_output_empty_notify_content_is_invalid() {
+        let lines = vec![
+            r#"{"type":"result","subtype":"success","structured_output":{"delivery":{"kind":"notify","content":"   "},"run_note":"bad"}}"#.to_string(),
+        ];
+        let err = parse_cron_output(&lines).unwrap_err();
+        assert!(err.contains("empty notify content"));
+    }
+
+    #[test]
+    fn parse_cron_output_notify_from_delivery_json_empty_notify_content_is_invalid() {
+        let err = notify_from_delivery_json(r#"{"kind":"notify","content":"   "}"#).unwrap_err();
+        assert!(err.contains("empty notify content"));
+    }
+
+    #[test]
+    fn parse_cron_output_empty_silent_reason_is_invalid() {
+        let lines = vec![
+            r#"{"type":"result","subtype":"success","structured_output":{"delivery":{"kind":"silent","reason":" "},"run_note":"bad"}}"#.to_string(),
+        ];
+        let err = parse_cron_output(&lines).unwrap_err();
+        assert!(err.contains("empty silent reason"));
     }
 
     #[test]
