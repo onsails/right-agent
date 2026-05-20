@@ -14,6 +14,9 @@ export interface BootstrapResponse {
 export interface DashboardFeatures {
   readonly: boolean
   commands_enabled: boolean
+  learning_metrics: boolean
+  learning_evidence_snippets: boolean
+  learning_commands: boolean
 }
 
 export interface OverviewResponse {
@@ -78,4 +81,139 @@ export interface RunDetailResponse {
     lines: string[]
     truncated: boolean
   }
+}
+
+export interface LearningCapabilities {
+  learning_metrics: boolean
+  learning_evidence_snippets: boolean
+  learning_commands: boolean
+}
+
+export interface LearningOverviewResponse {
+  agent: string
+  generated_at: string
+  refresh_interval_secs: number
+  capabilities: LearningCapabilities
+  funnel: LearningFunnel
+  quality: LearningQuality
+  health: LearningHealth
+  lifecycle: LearningLifecycle
+  recent_reports: LearningReportSummary[]
+}
+
+export interface LearningFunnel {
+  signals_accepted_24h: number
+  episodes_pending_24h: number
+  episodes_selecting_24h: number
+  episodes_selected_24h: number
+  episodes_reviewing_24h: number
+  episodes_reviewed_24h: number
+  episodes_no_episode_24h: number
+  episodes_failed_24h: number
+  reports_total_24h: number
+  create_candidates_24h: number
+  update_candidates_24h: number
+  nothing_to_learn_24h: number
+  failed_reviews_24h: number
+  foreground_created_or_updated_7d: number
+}
+
+export interface LearningQuality {
+  candidate_rate: number | null
+  nothing_to_learn_rate: number | null
+  create_count_24h: number
+  update_count_24h: number
+  high_confidence_count_24h: number
+  medium_confidence_count_24h: number
+  low_confidence_count_24h: number
+  failed_count_24h: number
+}
+
+export interface LearningHealth {
+  review_running: boolean
+  daily_review_count: number
+  daily_limit: number
+  creation_review_interval: number
+  tool_iters_since_review: number
+  turns_since_review: number
+  skill_issue_hints_since_review: number
+  last_review_status: string | null
+  last_review_at: string | null
+  possibly_stuck: boolean
+}
+
+export interface LearningLifecycle {
+  created_7d: number
+  updated_7d: number
+  failed_or_aborted_7d: number
+  recent_successful_events: LearningEventSummary[]
+  candidate_skill_names_7d: string[]
+}
+
+export interface LearningEventSummary {
+  skill_name: string
+  action: string
+  status: string
+  message: string | null
+  summary: string | null
+  created_at: string
+}
+
+export interface LearningReportSummary {
+  id: number
+  status: string
+  confidence: string
+  trigger_kind: string
+  candidate_skill_name: string | null
+  candidate_summary: string | null
+  telegram_notified: boolean
+  created_at: string
+}
+
+export interface LearningReportDetailResponse {
+  report: LearningReportSummary
+  episode: LearningEpisodeDetail | null
+  selector: LearningSelectorDetail | null
+  evidence: LearningEvidenceSnippet[]
+  reviewer: LearningReviewerDetail
+}
+
+export interface LearningEpisodeDetail {
+  id: number
+  kind: string
+  seed_trigger_kind: string
+  status: string
+  start_ref: string | null
+  end_ref: string | null
+  boundary_rationale: string | null
+  confidence: string | null
+  context_incomplete: boolean
+}
+
+export interface LearningSelectorDetail {
+  model: string | null
+  boundary_rationale: string | null
+  selected_message_refs: string[]
+  selected_execution_event_refs: string[]
+}
+
+export interface LearningEvidenceSnippet {
+  ref_id: string
+  source: string
+  available: boolean
+  trust_label: string | null
+  role: string | null
+  event_kind: string | null
+  tool_name: string | null
+  created_at: string | null
+  text: string | null
+}
+
+export interface LearningReviewerDetail {
+  status: string
+  confidence: string
+  candidate_skill_name: string | null
+  candidate_summary: string | null
+  evidence_refs: string[]
+  user_notice_present: boolean
 }
