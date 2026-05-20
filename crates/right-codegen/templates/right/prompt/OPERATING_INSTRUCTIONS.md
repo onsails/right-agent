@@ -153,6 +153,21 @@ YAML schema:
 messages:
   - id: <telegram_message_id>
     ts: <ISO 8601 timestamp>
+    author:
+      name: <sender display name>
+      username: <@username, optional>
+      user_id: <telegram user id, optional>
+    chat:
+      kind: dm|group
+      id: <telegram chat id>
+      title: <group title, groups only>
+      topic_id: <forum topic id, groups only>
+    reply_to_id: <telegram message id being replied to, optional>
+    quoted_text: <selected Telegram partial reply quote text, optional>
+    reply_to:
+      author: <full author block for replied-to non-bot message>
+      text: <full replied-to text or caption, optional>
+      attachments: <same shape as attachments below, optional>
     text: <message text or caption>
     attachments:
       - type: photo|document|video|audio|voice|video_note|sticker|animation

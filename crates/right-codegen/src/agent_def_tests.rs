@@ -273,6 +273,22 @@ fn operating_instructions_constant_is_non_empty() {
 }
 
 #[test]
+fn operating_instructions_document_inbound_reply_metadata() {
+    let ops = crate::OPERATING_INSTRUCTIONS;
+    for needle in [
+        "reply_to_id: <telegram message id being replied to, optional>",
+        "quoted_text: <selected Telegram partial reply quote text, optional>",
+        "reply_to:",
+        "author: <full author block for replied-to non-bot message>",
+    ] {
+        assert!(
+            ops.contains(needle),
+            "OPERATING_INSTRUCTIONS must document inbound reply metadata: missing {needle:?}"
+        );
+    }
+}
+
+#[test]
 fn operating_instructions_keep_soul_agent_authored_and_delegate_remember_routing() {
     let ops = crate::OPERATING_INSTRUCTIONS;
     for needle in [
