@@ -46,6 +46,19 @@ pub(crate) struct StreamUsage {
     pub cost_usd: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct ResultTiming {
+    pub(crate) duration_ms: Option<u64>,
+    pub(crate) duration_api_ms: Option<u64>,
+    pub(crate) ttft_ms: Option<u64>,
+    pub(crate) input_tokens: Option<u64>,
+    pub(crate) output_tokens: Option<u64>,
+    pub(crate) cache_creation_input_tokens: Option<u64>,
+    pub(crate) cache_read_input_tokens: Option<u64>,
+    pub(crate) cache_miss_reason: Option<String>,
+}
+
 /// Parse a single NDJSON line from CC stream-json output.
 pub(crate) fn parse_stream_event(line: &str) -> StreamEvent {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -284,6 +297,110 @@ pub(crate) fn parse_usage_full(result_json: &str) -> Option<UsageBreakdown> {
         model_usage_json,
         api_key_source: "none".into(),
     })
+}
+
+#[allow(dead_code)]
+pub(crate) fn parse_result_timing(result_json: &str) -> Option<ResultTiming> {
+    let v: serde_json::Value = serde_json::from_str(result_json).ok()?;
+    if v.get("type")?.as_str()? != "result" {
+        return None;
+    }
+
+    Some(ResultTiming {
+        duration_ms: optional_u64(&v, "/duration_ms"),
+        duration_api_ms: optional_u64(&v, "/duration_api_ms"),
+        ttft_ms: optional_u64(&v, "/ttft_ms"),
+        input_tokens: optional_u64(&v, "/usage/input_tokens"),
+        output_tokens: optional_u64(&v, "/usage/output_tokens"),
+        cache_creation_input_tokens: optional_u64(&v, "/usage/cache_creation_input_tokens"),
+        cache_read_input_tokens: optional_u64(&v, "/usage/cache_read_input_tokens"),
+        cache_miss_reason: cache_miss_reason_from_event_diagnostics(&v),
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn parse_cache_miss_reason(line: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "assistant" {
+        return None;
+    }
+
+    cache_miss_reason_from_event_diagnostics(&v)
+}
+
+fn optional_u64(v: &serde_json::Value, ptr: &str) -> Option<u64> {
+    v.pointer(ptr).and_then(|n| n.as_u64())
+}
+
+fn cache_miss_reason_from_event_diagnostics(v: &serde_json::Value) -> Option<String> {
+    v.get("diagnostics")
+        .and_then(cache_miss_reason_from_value)
+        .or_else(|| {
+            v.pointer("/message/diagnostics")
+                .and_then(cache_miss_reason_from_value)
+        })
+        .or_else(|| v.get("prompt_cache").and_then(cache_miss_reason_from_value))
+        .or_else(|| v.get("promptCache").and_then(cache_miss_reason_from_value))
+        .or_else(|| {
+            v.get("cache_diagnostics")
+                .and_then(cache_miss_reason_from_value)
+        })
+        .or_else(|| {
+            v.get("cacheDiagnostics")
+                .and_then(cache_miss_reason_from_value)
+        })
+}
+
+fn cache_miss_reason_from_value(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Null => None,
+        serde_json::Value::Array(_) => None,
+        serde_json::Value::Object(map) => {
+            for key in ["cache_miss_reason", "cacheMissReason"] {
+                if let Some(reason) = map.get(key).and_then(cache_miss_reason_leaf) {
+                    return Some(reason);
+                }
+            }
+
+            for key in [
+                "cache_miss",
+                "cacheMiss",
+                "prompt_cache",
+                "promptCache",
+                "cache_diagnostics",
+                "cacheDiagnostics",
+            ] {
+                if let Some(cache_info) = map.get(key) {
+                    if let Some(reason) = cache_miss_reason_from_value(cache_info) {
+                        return Some(reason);
+                    }
+                }
+            }
+
+            None
+        }
+    }
+}
+
+fn cache_miss_reason_leaf(v: &serde_json::Value) -> Option<String> {
+    if let Some(reason) = v.as_str() {
+        let reason = reason.trim();
+        return (!reason.is_empty()).then(|| reason.to_owned());
+    }
+
+    let map = v.as_object()?;
+    for key in ["type", "reason", "message"] {
+        if let Some(reason) = map.get(key).and_then(|value| value.as_str()) {
+            let reason = reason.trim();
+            if !reason.is_empty() {
+                return Some(reason.to_owned());
+            }
+        }
+    }
+    None
 }
 
 /// Parse `apiKeySource` from the CC `system/init` NDJSON line.
@@ -921,5 +1038,105 @@ mod tests {
     #[test]
     fn parse_usage_full_invalid_json_returns_none() {
         assert!(parse_usage_full("not json").is_none());
+    }
+
+    #[test]
+    fn parse_result_timing_extracts_optional_fields() {
+        let line = r#"{
+            "type":"result",
+            "duration_ms":1234,
+            "duration_api_ms":987,
+            "ttft_ms":321,
+            "usage":{
+                "input_tokens":10,
+                "output_tokens":20,
+                "cache_creation_input_tokens":30,
+                "cache_read_input_tokens":40
+            },
+            "diagnostics":{
+                "cache_miss_reason":{
+                    "type":"previous_message_not_found"
+                }
+            }
+        }"#;
+
+        assert_eq!(
+            parse_result_timing(line),
+            Some(ResultTiming {
+                duration_ms: Some(1234),
+                duration_api_ms: Some(987),
+                ttft_ms: Some(321),
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                cache_creation_input_tokens: Some(30),
+                cache_read_input_tokens: Some(40),
+                cache_miss_reason: Some("previous_message_not_found".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_result_timing_ignores_non_result_lines() {
+        let assistant_line =
+            r#"{"type":"assistant","duration_ms":1234,"usage":{"input_tokens":10}}"#;
+        let malformed_line = "not json";
+
+        assert_eq!(parse_result_timing(assistant_line), None);
+        assert_eq!(parse_result_timing(malformed_line), None);
+    }
+
+    #[test]
+    fn parse_result_timing_ignores_unrelated_cache_miss_reason() {
+        let line = r#"{
+            "type":"result",
+            "duration_ms":1234,
+            "result":{
+                "content":"{\"cache_miss_reason\":\"not a diagnostic\"}"
+            },
+            "metadata":{
+                "nested":{
+                    "cache_miss_reason":"unrelated metadata"
+                }
+            }
+        }"#;
+
+        let timing = parse_result_timing(line).expect("result timing should parse");
+        assert_eq!(timing.duration_ms, Some(1234));
+        assert_eq!(timing.cache_miss_reason, None);
+    }
+
+    #[test]
+    fn parse_cache_miss_reason_extracts_from_assistant_diagnostics() {
+        let line = r#"{
+            "type":"assistant",
+            "message":{
+                "content":[{"type":"text","text":"Working..."}],
+                "diagnostics":{
+                    "cache_miss_reason":{
+                        "type":"previous_message_not_found"
+                    }
+                }
+            }
+        }"#;
+
+        assert_eq!(
+            parse_cache_miss_reason(line).as_deref(),
+            Some("previous_message_not_found")
+        );
+    }
+
+    #[test]
+    fn parse_cache_miss_reason_ignores_unexpected_diagnostic_shapes() {
+        let line = r#"{
+            "type":"assistant",
+            "diagnostics":{
+                "prompt_cache":{
+                    "message":"generic cache message",
+                    "reason":"generic cache reason"
+                }
+            }
+        }"#;
+
+        assert_eq!(parse_cache_miss_reason(line), None);
     }
 }
