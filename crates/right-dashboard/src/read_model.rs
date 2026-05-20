@@ -6,8 +6,24 @@ use crate::api_types::{
     ActiveActivity, CronCard, ForegroundActivity, LogExcerpt, OverviewResponse, OverviewSummary,
     RunDetailResponse, RunSummary,
 };
+use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, params};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ReadModelError {
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    ParseTimestamp(#[from] chrono::ParseError),
+    #[error("invalid start-of-day for timestamp {0}")]
+    InvalidStartOfDay(String),
+}
 
 pub struct OverviewInput {
     pub agent: String,
@@ -16,11 +32,23 @@ pub struct OverviewInput {
     pub foreground: Vec<ForegroundActivity>,
 }
 
-pub fn smoke_read_model(_conn: &Connection) -> usize {
-    0
-}
+const ACTIVE_BACKGROUND_RUN_LIMIT: usize = 50;
 
-pub fn overview(conn: &Connection, input: OverviewInput) -> rusqlite::Result<OverviewResponse> {
+const RUN_SUMMARY_COLUMNS: &str =
+    "ar.id, ar.kind, ar.producer_ref, ar.status, ar.started_at, ar.finished_at,
+        ar.exit_code, ar.delivery_status, costs.cost_usd";
+
+const RUN_SUMMARY_FROM: &str = "FROM async_runs ar
+ LEFT JOIN (
+    SELECT session_uuid, SUM(total_cost_usd) AS cost_usd
+    FROM usage_events
+    GROUP BY session_uuid
+ ) costs ON costs.session_uuid = ar.run_session_id";
+
+pub fn overview(
+    conn: &Connection,
+    input: OverviewInput,
+) -> Result<OverviewResponse, ReadModelError> {
     let mut crons_stmt = conn.prepare(
         "SELECT job_name, schedule, recurring, run_at, target_chat_id, target_thread_id,
                 max_budget_usd
@@ -96,40 +124,22 @@ pub fn run_detail(
     conn: &Connection,
     run_id: &str,
     max_lines: usize,
-) -> rusqlite::Result<Option<RunDetailResponse>> {
+) -> Result<Option<RunDetailResponse>, ReadModelError> {
+    let sql = format!(
+        "SELECT {RUN_SUMMARY_COLUMNS}, ar.summary, ar.notify_json, ar.no_notify_reason, ar.log_path
+         {RUN_SUMMARY_FROM}
+         WHERE ar.id = ?1"
+    );
     let row = conn
-        .query_row(
-            "SELECT ar.id, ar.kind, ar.producer_ref, ar.status, ar.started_at, ar.finished_at,
-                    ar.exit_code, ar.delivery_status, costs.cost_usd, ar.summary,
-                    ar.notify_json, ar.no_notify_reason, ar.log_path
-             FROM async_runs ar
-             LEFT JOIN (
-                SELECT session_uuid, SUM(total_cost_usd) AS cost_usd
-                FROM usage_events
-                GROUP BY session_uuid
-             ) costs ON costs.session_uuid = ar.run_session_id
-             WHERE ar.id = ?1",
-            params![run_id],
-            |row| {
-                Ok((
-                    RunSummary {
-                        id: row.get(0)?,
-                        kind: row.get(1)?,
-                        producer_ref: row.get(2)?,
-                        status: row.get(3)?,
-                        started_at: row.get(4)?,
-                        finished_at: row.get(5)?,
-                        exit_code: row.get(6)?,
-                        delivery_status: row.get(7)?,
-                        cost_usd: row.get(8)?,
-                    },
-                    row.get::<_, Option<String>>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                    row.get::<_, Option<String>>(12)?,
-                ))
-            },
-        )
+        .query_row(&sql, params![run_id], |row| {
+            Ok((
+                run_summary_from_row(row)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+            ))
+        })
         .optional()?;
 
     let Some((run, summary, notify_json, no_notify_reason, log_path)) = row else {
@@ -146,38 +156,37 @@ pub fn run_detail(
     }))
 }
 
-fn cron_runs(conn: &Connection, job_name: &str) -> rusqlite::Result<Vec<RunSummary>> {
-    let mut stmt = conn.prepare(
-        "SELECT ar.id, ar.kind, ar.producer_ref, ar.status, ar.started_at, ar.finished_at,
-                ar.exit_code, ar.delivery_status, costs.cost_usd
-         FROM async_runs ar
-         LEFT JOIN (
-            SELECT session_uuid, SUM(total_cost_usd) AS cost_usd
-            FROM usage_events
-            GROUP BY session_uuid
-         ) costs ON costs.session_uuid = ar.run_session_id
+fn cron_runs(conn: &Connection, job_name: &str) -> Result<Vec<RunSummary>, ReadModelError> {
+    let sql = format!(
+        "SELECT {RUN_SUMMARY_COLUMNS}
+         {RUN_SUMMARY_FROM}
          WHERE ar.kind = 'cron' AND ar.producer_ref = ?1
          ORDER BY COALESCE(ar.started_at, ar.created_at) DESC, ar.created_at DESC
-         LIMIT 5",
-    )?;
-    stmt.query_map(params![job_name], run_summary_from_row)?
-        .collect()
+         LIMIT 5"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![job_name], run_summary_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
-fn active_background_runs(conn: &Connection) -> rusqlite::Result<Vec<RunSummary>> {
-    let mut stmt = conn.prepare(
-        "SELECT ar.id, ar.kind, ar.producer_ref, ar.status, ar.started_at, ar.finished_at,
-                ar.exit_code, ar.delivery_status, costs.cost_usd
-         FROM async_runs ar
-         LEFT JOIN (
-            SELECT session_uuid, SUM(total_cost_usd) AS cost_usd
-            FROM usage_events
-            GROUP BY session_uuid
-         ) costs ON costs.session_uuid = ar.run_session_id
+fn active_background_runs(conn: &Connection) -> Result<Vec<RunSummary>, ReadModelError> {
+    let sql = format!(
+        "SELECT {RUN_SUMMARY_COLUMNS}
+         {RUN_SUMMARY_FROM}
          WHERE ar.kind = 'background' AND ar.status IN ('queued', 'running')
-         ORDER BY ar.started_at DESC, ar.created_at DESC",
-    )?;
-    stmt.query_map([], run_summary_from_row)?.collect()
+         ORDER BY COALESCE(ar.started_at, ar.created_at) DESC, ar.created_at DESC
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(
+            params![ACTIVE_BACKGROUND_RUN_LIMIT as i64],
+            run_summary_from_row,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 fn run_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary> {
@@ -194,30 +203,34 @@ fn run_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary>
     })
 }
 
-fn today_cost_usd(conn: &Connection, generated_at: &str) -> rusqlite::Result<f64> {
-    let since = if let Some((date, _)) = generated_at.split_once('T') {
-        format!("{date}T00:00:00Z")
-    } else {
-        generated_at.to_owned()
-    };
-    conn.query_row(
+fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f64, ReadModelError> {
+    // Writers emit `chrono::Utc::now().to_rfc3339()` (e.g.
+    // `2026-05-20T08:01:00.123456789+00:00`). SQLite compares timestamps as
+    // strings, so the threshold must use the same format. A literal
+    // `YYYY-MM-DDT00:00:00Z` excludes rows at start-of-day because `.` < `Z`.
+    let generated_at_utc: DateTime<Utc> =
+        DateTime::parse_from_rfc3339(generated_at)?.with_timezone(&Utc);
+    let date = generated_at_utc.date_naive();
+    let start_of_day = date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| ReadModelError::InvalidStartOfDay(generated_at.to_owned()))?;
+    let since = Utc.from_utc_datetime(&start_of_day).to_rfc3339();
+    let cost = conn.query_row(
         "SELECT COALESCE(SUM(total_cost_usd), 0.0)
          FROM usage_events
          WHERE ts >= ?1",
         params![since],
         |row| row.get(0),
-    )
+    )?;
+    Ok(cost)
 }
 
-fn parse_notify_json(json: Option<String>) -> rusqlite::Result<Option<serde_json::Value>> {
-    json.map(|json| {
-        serde_json::from_str(&json)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-    })
-    .transpose()
+fn parse_notify_json(json: Option<String>) -> Result<Option<serde_json::Value>, ReadModelError> {
+    json.map(|json| serde_json::from_str(&json).map_err(ReadModelError::from))
+        .transpose()
 }
 
-fn read_log_excerpt(path: Option<String>, max_lines: usize) -> rusqlite::Result<LogExcerpt> {
+fn read_log_excerpt(path: Option<String>, max_lines: usize) -> Result<LogExcerpt, ReadModelError> {
     let Some(path) = path else {
         return Ok(LogExcerpt {
             available: false,
@@ -226,6 +239,16 @@ fn read_log_excerpt(path: Option<String>, max_lines: usize) -> rusqlite::Result<
             truncated: false,
         });
     };
+
+    if max_lines == 0 {
+        let available = std::fs::metadata(&path).is_ok();
+        return Ok(LogExcerpt {
+            available,
+            path: Some(path),
+            lines: Vec::new(),
+            truncated: false,
+        });
+    }
 
     let file = match File::open(&path) {
         Ok(file) => file,
@@ -237,17 +260,13 @@ fn read_log_excerpt(path: Option<String>, max_lines: usize) -> rusqlite::Result<
                 truncated: false,
             });
         }
-        Err(error) => return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))),
+        Err(error) => return Err(ReadModelError::from(error)),
     };
     let mut tail = VecDeque::with_capacity(max_lines);
     let mut line_count = 0usize;
     for line in BufReader::new(file).lines() {
-        let line =
-            line.map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let line = line?;
         line_count += 1;
-        if max_lines == 0 {
-            continue;
-        }
         if tail.len() == max_lines {
             tail.pop_front();
         }
@@ -355,7 +374,46 @@ mod tests {
         assert_eq!(response.summary.cron_count, 1);
         assert_eq!(response.summary.today_cost_usd, 0.25);
         assert_eq!(response.crons[0].last_run.as_ref().unwrap().id, "run-1");
+        assert_eq!(response.crons[0].recent_runs[0].id, "run-1");
         assert_eq!(response.active.background[0].id, "bg-1");
+    }
+
+    #[test]
+    fn today_cost_includes_events_at_midnight_in_writer_format() {
+        // Regression: the writer emits `chrono::Utc::now().to_rfc3339()`
+        // (e.g. `2026-05-20T00:00:00.123456789+00:00`). A naive
+        // `YYYY-MM-DDT00:00:00Z` threshold compares `.` < `Z` at position 19
+        // and excludes start-of-day rows.
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO usage_events (
+                ts, source, chat_id, thread_id, job_name, session_uuid,
+                total_cost_usd, num_turns, model_usage_json
+             ) VALUES (
+                '2026-05-20T00:00:00.123456789+00:00', 'cron', 123, 456, 'daily', 'run-midnight',
+                0.50, 1, '{}'
+             )",
+            [],
+        )
+        .expect("insert midnight usage event");
+
+        let response = overview(
+            &conn,
+            OverviewInput {
+                agent: "agent-a".to_owned(),
+                generated_at: "2026-05-20T10:00:00+00:00".to_owned(),
+                refresh_interval_secs: 30,
+                foreground: vec![],
+            },
+        )
+        .unwrap();
+
+        // 0.25 (fixture) + 0.50 (midnight) = 0.75
+        assert!(
+            (response.summary.today_cost_usd - 0.75).abs() < 1e-9,
+            "today_cost_usd = {}",
+            response.summary.today_cost_usd
+        );
     }
 
     #[test]
