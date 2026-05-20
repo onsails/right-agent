@@ -376,3 +376,56 @@ export interface IdentityFileSummary {
   content_preview: string | null
   truncated: boolean
 }
+
+export interface DoctorResponse {
+  agent: string
+  generated_at: string
+  pass_count: number
+  warn_count: number
+  fail_count: number
+  pass: DoctorCheckResponse[]
+  warn: DoctorCheckResponse[]
+  fail: DoctorCheckResponse[]
+}
+
+export interface DoctorCheckResponse {
+  name: string
+  status: string
+  detail: string
+  fix: string | null
+}
+
+export interface SandboxStatsResponse {
+  agent: string
+  source: string
+  warning: string | null
+  disk: SandboxDiskStats | null
+  memory: SandboxMemoryStats | null
+  processes: SandboxProcess[]
+}
+
+export interface SandboxDiskStats {
+  mount: string
+  total_bytes: number
+  used_bytes: number
+  available_bytes: number
+  used_percent: number
+}
+
+export interface SandboxMemoryStats {
+  total_bytes: number | null
+  available_bytes: number | null
+  used_bytes: number | null
+  load_average_1m: number | null
+  load_average_5m: number | null
+  load_average_15m: number | null
+}
+
+export interface SandboxProcess {
+  pid: number
+  ppid: number
+  cpu_percent: number
+  memory_percent: number
+  rss_bytes: number
+  command: string
+}

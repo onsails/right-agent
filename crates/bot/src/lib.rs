@@ -633,10 +633,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         telegram::dashboard::build_dashboard_router(telegram::dashboard::DashboardState {
             agent_name: args.agent.clone(),
             bot_token: token.clone(),
+            home: home.clone(),
             agent_dir: agent_dir.clone(),
             resolved_sandbox: resolved_sandbox.clone(),
             allowlist: allowlist.clone(),
             foreground: Arc::clone(&dashboard_foreground),
+            #[cfg(test)]
+            doctor_checks: None,
         });
 
     // Shared flag for healthz "webhook_set"; flipped by Task 10's register loop.
