@@ -70,8 +70,9 @@
 ### right-dashboard
 
 - `auth.rs` — Telegram Mini App `initData` validation and allowlist authorization helpers.
-- `api_types.rs` — dashboard API DTOs and error response bodies.
-- `read_model.rs` — read-only SQLite projections for dashboard views.
+- `api_types.rs` — cron and learned-skill dashboard DTOs, feature/capability flags, and error response bodies.
+- `read_model.rs` — read-only SQLite projections for cron overview/run detail and the public `read_model::learning` entry point.
+- `read_model/learning.rs` — learned-skill metrics and report-detail projections over `learning_episodes`, `skill_review_reports`, `skill_learning_events`, `execution_events`, and trusted `messages`.
 - `assets.rs` — embedded static dashboard asset lookup and content types.
 - `frontend/` — Vue/Vite source for the Mini App dashboard.
 - `static/dashboard/` — checked-in built dashboard assets served by the bot.
