@@ -69,12 +69,12 @@ fn insert_async_cron_run(
     delivery_status: &str,
 ) {
     let delivery_required = i64::from(delivery_status != "none");
-    let notify_json = (delivery_status != "none").then_some("{}");
+    let delivery_json = (delivery_status != "none").then_some("{}");
     let delivered_at = (delivery_status == "delivered").then_some("2026-01-01T00:05:00Z");
     conn.execute(
         "INSERT INTO async_runs (
             id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
-            started_at, finished_at, exit_code, status, log_path, notify_json,
+            started_at, finished_at, exit_code, status, log_path, delivery_json,
             delivery_required, delivery_status, delivered_at, created_at, updated_at
          ) VALUES (
             ?1, 'cron', ?2, ?1, ?3, ?4,
@@ -91,7 +91,7 @@ fn insert_async_cron_run(
             exit_code,
             status,
             format!("/tmp/{id}.log"),
-            notify_json,
+            delivery_json,
             delivery_required,
             delivery_status,
             delivered_at,
