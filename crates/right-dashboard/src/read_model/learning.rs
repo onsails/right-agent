@@ -4,6 +4,8 @@ use crate::api_types::{
     LearningReportDetailResponse, LearningReportSummary, LearningReviewerDetail,
     LearningSelectorDetail,
 };
+use std::collections::HashSet;
+
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension as _, params};
 
@@ -239,7 +241,11 @@ fn possibly_stuck(
     let cutoff = (parse_generated_at(generated_at)? - Duration::minutes(10)).to_rfc3339();
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM learning_episodes
-         WHERE agent_name=?1 AND status='reviewing' AND updated_at < ?2",
+         WHERE agent_name=?1 AND status='reviewing' AND updated_at < ?2
+           AND COALESCE(
+                 (SELECT review_running FROM skill_nudge_state WHERE agent_name=?1),
+                 0
+               ) = 0",
         params![agent, cutoff],
         |row| row.get(0),
     )?;
@@ -515,12 +521,11 @@ fn load_episode_detail_row(
             message_refs_json,
             execution_event_refs_json,
             selector_model,
-            selector_output_json,
+            _selector_output_json,
             boundary_rationale,
             confidence,
             context_incomplete,
         )| {
-            let _selector_output = optional_json(selector_output_json)?;
             let message_refs = parse_string_array(&message_refs_json)?;
             let execution_event_refs = parse_string_array(&execution_event_refs_json)?;
             Ok(EpisodeDetailRow {
@@ -573,16 +578,19 @@ fn load_evidence_snippets(
     allowed_message_refs: &[String],
     allowed_execution_refs: &[String],
 ) -> Result<Vec<LearningEvidenceSnippet>, ReadModelError> {
+    let allowed_messages: HashSet<&str> = allowed_message_refs.iter().map(String::as_str).collect();
+    let allowed_executions: HashSet<&str> =
+        allowed_execution_refs.iter().map(String::as_str).collect();
     let mut snippets = Vec::with_capacity(refs.len());
     for ref_id in refs {
         if ref_id.starts_with("msg:") {
-            if !allowed_message_refs.contains(ref_id) {
+            if !allowed_messages.contains(ref_id.as_str()) {
                 snippets.push(unavailable_snippet(ref_id.clone(), "message"));
                 continue;
             }
             snippets.push(load_message_snippet(conn, ref_id)?);
         } else if ref_id.starts_with("exec:") {
-            if !allowed_execution_refs.contains(ref_id) {
+            if !allowed_executions.contains(ref_id.as_str()) {
                 snippets.push(unavailable_snippet(ref_id.clone(), "execution_event"));
                 continue;
             }
@@ -683,11 +691,6 @@ fn load_execution_snippet(
 
 fn parse_string_array(raw: &str) -> Result<Vec<String>, ReadModelError> {
     Ok(serde_json::from_str(raw)?)
-}
-
-fn optional_json(raw: Option<String>) -> Result<Option<serde_json::Value>, ReadModelError> {
-    raw.map(|value| serde_json::from_str(&value).map_err(ReadModelError::from))
-        .transpose()
 }
 
 fn bounded_text(value: String) -> String {
@@ -859,6 +862,37 @@ mod tests {
             "INSERT INTO skill_nudge_state (
                 agent_name, review_running, creation_review_interval,
                 daily_review_count
+             ) VALUES ('right', 0, 15, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO learning_episodes (
+                agent_name, kind, seed_trigger_kind, seed_ref, status,
+                message_refs_json, execution_event_refs_json, ready_after,
+                created_at, updated_at
+             ) VALUES (
+                'right', 'foreground_thread', 'learning_signal', 'inv:stuck',
+                'reviewing', '[]', '[]', '2026-05-20T09:00:00Z',
+                '2026-05-20T09:00:00Z', '2026-05-20T09:05:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let response = learning_overview(&conn, input()).unwrap();
+
+        assert!(!response.health.review_running);
+        assert!(response.health.possibly_stuck);
+    }
+
+    #[test]
+    fn learning_overview_does_not_flag_stuck_while_reviewer_running() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO skill_nudge_state (
+                agent_name, review_running, creation_review_interval,
+                daily_review_count
              ) VALUES ('right', 1, 15, 1)",
             [],
         )
@@ -880,7 +914,7 @@ mod tests {
         let response = learning_overview(&conn, input()).unwrap();
 
         assert!(response.health.review_running);
-        assert!(response.health.possibly_stuck);
+        assert!(!response.health.possibly_stuck);
     }
 
     #[test]

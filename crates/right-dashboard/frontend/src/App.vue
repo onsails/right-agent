@@ -43,9 +43,7 @@ const crons = computed(() => overviewData.value?.crons ?? [])
 const activeForeground = computed(() => overviewData.value?.active.foreground.length ?? 0)
 const activeBackground = computed(() => overviewData.value?.active.background.length ?? 0)
 const activeTotal = computed(() => activeForeground.value + activeBackground.value)
-const hasOverview = computed(() => overviewData.value !== null)
 const learningEnabled = computed(() => bootstrapData.value?.features.learning_metrics === true)
-const learningSummary = computed(() => learningData.value)
 const learningReports = computed(() => learningData.value?.recent_reports ?? [])
 const learningEpisodeTotal = computed(() => {
   const funnel = learningData.value?.funnel
@@ -114,10 +112,14 @@ function schedulePolling(): void {
 
 async function refreshOverview(): Promise<void> {
   try {
-    const data = await overview()
+    const wantLearning = learningEnabled.value && activeView.value === 'learning'
+    const [data, learning] = await Promise.all([
+      overview(),
+      wantLearning ? learningOverview() : Promise.resolve(null),
+    ])
     overviewData.value = data
-    if (learningEnabled.value) {
-      learningData.value = await learningOverview()
+    if (learning !== null) {
+      learningData.value = learning
     }
     connectionState.value = 'live'
     message.value = 'Live'
@@ -152,7 +154,7 @@ function applyErrorState(error: unknown): void {
     return
   }
 
-  connectionState.value = hasOverview.value ? 'stale' : 'offline'
+  connectionState.value = overviewData.value !== null ? 'stale' : 'offline'
   message.value = error instanceof Error ? error.message : 'Dashboard unavailable'
 }
 
@@ -188,6 +190,9 @@ function setView(view: DashboardView): void {
     return
   }
   activeView.value = view
+  if (view === 'learning') {
+    void refreshOverview()
+  }
 }
 
 async function selectLearningReport(report: LearningReportSummary): Promise<void> {
@@ -491,7 +496,7 @@ function notifyText(value: unknown): string | null {
       <section class="learning-funnel" aria-label="Learning funnel">
         <article class="summary-card">
           <span>Signals</span>
-          <strong>{{ learningSummary?.funnel.signals_accepted_24h ?? 0 }}</strong>
+          <strong>{{ learningData?.funnel.signals_accepted_24h ?? 0 }}</strong>
         </article>
         <article class="summary-card">
           <span>Episodes</span>
@@ -503,7 +508,7 @@ function notifyText(value: unknown): string | null {
         </article>
         <article class="summary-card">
           <span>Reviewed</span>
-          <strong>{{ learningSummary?.funnel.episodes_reviewed_24h ?? 0 }}</strong>
+          <strong>{{ learningData?.funnel.episodes_reviewed_24h ?? 0 }}</strong>
         </article>
         <article class="summary-card">
           <span>Candidates</span>
@@ -511,7 +516,7 @@ function notifyText(value: unknown): string | null {
         </article>
         <article class="summary-card">
           <span>Created/updated</span>
-          <strong>{{ learningSummary?.funnel.foreground_created_or_updated_7d ?? 0 }}</strong>
+          <strong>{{ learningData?.funnel.foreground_created_or_updated_7d ?? 0 }}</strong>
         </article>
       </section>
 
@@ -543,25 +548,25 @@ function notifyText(value: unknown): string | null {
         <aside class="detail-panel" aria-label="Learning metrics">
           <header>
             <p class="eyebrow">Learning quality</p>
-            <h2>{{ percent(learningSummary?.quality.candidate_rate) }} candidates</h2>
+            <h2>{{ percent(learningData?.quality.candidate_rate) }} candidates</h2>
           </header>
 
           <dl class="detail-meta">
             <div>
               <dt>Nothing</dt>
-              <dd>{{ percent(learningSummary?.quality.nothing_to_learn_rate) }}</dd>
+              <dd>{{ percent(learningData?.quality.nothing_to_learn_rate) }}</dd>
             </div>
             <div>
               <dt>High</dt>
-              <dd>{{ learningSummary?.quality.high_confidence_count_24h ?? 0 }}</dd>
+              <dd>{{ learningData?.quality.high_confidence_count_24h ?? 0 }}</dd>
             </div>
             <div>
               <dt>Daily</dt>
-              <dd>{{ learningSummary?.health.daily_review_count ?? 0 }}/{{ learningSummary?.health.daily_limit ?? 12 }}</dd>
+              <dd>{{ learningData?.health.daily_review_count ?? 0 }}/{{ learningData?.health.daily_limit ?? 12 }}</dd>
             </div>
             <div>
               <dt>Gate</dt>
-              <dd>{{ learningSummary?.health.review_running ? 'running' : 'idle' }}</dd>
+              <dd>{{ learningData?.health.review_running ? 'running' : 'idle' }}</dd>
             </div>
           </dl>
 
@@ -570,35 +575,35 @@ function notifyText(value: unknown): string | null {
             <dl class="detail-meta">
               <div>
                 <dt>Pending</dt>
-                <dd>{{ learningSummary?.funnel.episodes_pending_24h ?? 0 }}</dd>
+                <dd>{{ learningData?.funnel.episodes_pending_24h ?? 0 }}</dd>
               </div>
               <div>
                 <dt>Selecting</dt>
-                <dd>{{ learningSummary?.funnel.episodes_selecting_24h ?? 0 }}</dd>
+                <dd>{{ learningData?.funnel.episodes_selecting_24h ?? 0 }}</dd>
               </div>
               <div>
                 <dt>Reviewing</dt>
-                <dd>{{ learningSummary?.funnel.episodes_reviewing_24h ?? 0 }}</dd>
+                <dd>{{ learningData?.funnel.episodes_reviewing_24h ?? 0 }}</dd>
               </div>
               <div>
                 <dt>No episode</dt>
-                <dd>{{ learningSummary?.funnel.episodes_no_episode_24h ?? 0 }}</dd>
+                <dd>{{ learningData?.funnel.episodes_no_episode_24h ?? 0 }}</dd>
               </div>
               <div>
                 <dt>Insufficient</dt>
-                <dd>{{ learningSummary?.funnel.episodes_insufficient_context_24h ?? 0 }}</dd>
+                <dd>{{ learningData?.funnel.episodes_insufficient_context_24h ?? 0 }}</dd>
               </div>
               <div>
                 <dt>Episode failed</dt>
-                <dd>{{ learningSummary?.funnel.episodes_failed_24h ?? 0 }}</dd>
+                <dd>{{ learningData?.funnel.episodes_failed_24h ?? 0 }}</dd>
               </div>
               <div>
                 <dt>Review failed</dt>
-                <dd>{{ learningSummary?.funnel.failed_reviews_24h ?? 0 }}</dd>
+                <dd>{{ learningData?.funnel.failed_reviews_24h ?? 0 }}</dd>
               </div>
               <div>
                 <dt>Reports</dt>
-                <dd>{{ learningSummary?.funnel.reports_total_24h ?? 0 }}</dd>
+                <dd>{{ learningData?.funnel.reports_total_24h ?? 0 }}</dd>
               </div>
             </dl>
           </section>

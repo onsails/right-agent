@@ -324,20 +324,6 @@ fn authenticate_api(
 fn open_dashboard_read_connection(
     state: &DashboardState,
 ) -> Result<rusqlite::Connection, DashboardRouteError> {
-    let db_path = state.agent_dir.join("data.db");
-    if !db_path.exists() {
-        tracing::error!(
-            agent = %state.agent_name,
-            path = %db_path.display(),
-            "dashboard database missing"
-        );
-        return Err(DashboardRouteError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_open_failed",
-            Some("dashboard database does not exist"),
-        ));
-    }
-
     right_db::open_connection_readonly(&state.agent_dir).map_err(|error| {
         tracing::error!(agent = %state.agent_name, "dashboard db open failed: {error:#}");
         DashboardRouteError::new(
