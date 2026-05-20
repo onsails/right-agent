@@ -1,6 +1,8 @@
 use crate::api_types::{
-    LearningCapabilities, LearningEventSummary, LearningFunnel, LearningHealth, LearningLifecycle,
-    LearningOverviewResponse, LearningQuality, LearningReportSummary,
+    LearningCapabilities, LearningEpisodeDetail, LearningEventSummary, LearningEvidenceSnippet,
+    LearningFunnel, LearningHealth, LearningLifecycle, LearningOverviewResponse, LearningQuality,
+    LearningReportDetailResponse, LearningReportSummary, LearningReviewerDetail,
+    LearningSelectorDetail,
 };
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension as _, params};
@@ -11,6 +13,8 @@ pub const LEARNING_REVIEW_DAILY_LIMIT: i64 = 12;
 const RECENT_REPORT_LIMIT: i64 = 20;
 const RECENT_EVENT_LIMIT: i64 = 10;
 const CANDIDATE_NAME_LIMIT: i64 = 20;
+const EVIDENCE_SNIPPET_TEXT_MAX_CHARS: usize = 320;
+const EVIDENCE_SNIPPET_LIMIT: usize = 24;
 
 pub struct LearningOverviewInput {
     pub agent: String,
@@ -356,6 +360,363 @@ fn report_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Learning
     })
 }
 
+struct ReportDetailRow {
+    report: LearningReportSummary,
+    learning_episode_id: Option<i64>,
+    evidence_refs: Vec<String>,
+    review_output_json: serde_json::Value,
+}
+
+struct EpisodeDetailRow {
+    episode: LearningEpisodeDetail,
+    selector: LearningSelectorDetail,
+    message_refs: Vec<String>,
+    execution_event_refs: Vec<String>,
+}
+
+pub fn learning_report_detail(
+    conn: &Connection,
+    agent: &str,
+    report_id: i64,
+) -> Result<Option<LearningReportDetailResponse>, ReadModelError> {
+    let Some(report_row) = load_report_detail_row(conn, agent, report_id)? else {
+        return Ok(None);
+    };
+    let episode_row = match report_row.learning_episode_id {
+        Some(episode_id) => load_episode_detail_row(conn, agent, episode_id)?,
+        None => None,
+    };
+    let allowed_message_refs = episode_row
+        .as_ref()
+        .map(|row| row.message_refs.as_slice())
+        .unwrap_or(&[]);
+    let allowed_execution_refs = episode_row
+        .as_ref()
+        .map(|row| row.execution_event_refs.as_slice())
+        .unwrap_or(&[]);
+    let evidence_refs = if report_row.evidence_refs.is_empty() {
+        episode_row
+            .as_ref()
+            .map(|row| {
+                row.message_refs
+                    .iter()
+                    .chain(row.execution_event_refs.iter())
+                    .take(EVIDENCE_SNIPPET_LIMIT)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        report_row
+            .evidence_refs
+            .iter()
+            .take(EVIDENCE_SNIPPET_LIMIT)
+            .cloned()
+            .collect()
+    };
+    let evidence = load_evidence_snippets(
+        conn,
+        agent,
+        &evidence_refs,
+        allowed_message_refs,
+        allowed_execution_refs,
+    )?;
+    let reviewer = reviewer_detail(&report_row);
+
+    Ok(Some(LearningReportDetailResponse {
+        report: report_row.report,
+        episode: episode_row.as_ref().map(|row| row.episode.clone()),
+        selector: episode_row.map(|row| row.selector),
+        evidence,
+        reviewer,
+    }))
+}
+
+fn load_report_detail_row(
+    conn: &Connection,
+    agent: &str,
+    report_id: i64,
+) -> Result<Option<ReportDetailRow>, ReadModelError> {
+    let row = conn
+        .query_row(
+            "SELECT id, status, confidence, trigger_kind, candidate_skill_name,
+                    candidate_summary, telegram_notified, created_at,
+                    learning_episode_id, evidence_refs_json, review_output_json
+             FROM skill_review_reports
+             WHERE agent_name=?1 AND id=?2",
+            params![agent, report_id],
+            |row| {
+                Ok((
+                    report_summary_from_row(row)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(
+        |(report, learning_episode_id, evidence_refs_json, review_output_json)| {
+            Ok(ReportDetailRow {
+                report,
+                learning_episode_id,
+                evidence_refs: parse_string_array(&evidence_refs_json)?,
+                review_output_json: serde_json::from_str(&review_output_json)?,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn load_episode_detail_row(
+    conn: &Connection,
+    agent: &str,
+    episode_id: i64,
+) -> Result<Option<EpisodeDetailRow>, ReadModelError> {
+    let row = conn
+        .query_row(
+            "SELECT id, kind, seed_trigger_kind, status, start_ref, end_ref,
+                    message_refs_json, execution_event_refs_json, selector_model,
+                    selector_output_json, boundary_rationale, confidence,
+                    context_incomplete
+             FROM learning_episodes
+             WHERE agent_name=?1 AND id=?2",
+            params![agent, episode_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, i64>(12)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(
+        |(
+            id,
+            kind,
+            seed_trigger_kind,
+            status,
+            start_ref,
+            end_ref,
+            message_refs_json,
+            execution_event_refs_json,
+            selector_model,
+            selector_output_json,
+            boundary_rationale,
+            confidence,
+            context_incomplete,
+        )| {
+            let _selector_output = optional_json(selector_output_json)?;
+            let message_refs = parse_string_array(&message_refs_json)?;
+            let execution_event_refs = parse_string_array(&execution_event_refs_json)?;
+            Ok(EpisodeDetailRow {
+                episode: LearningEpisodeDetail {
+                    id,
+                    kind,
+                    seed_trigger_kind,
+                    status,
+                    start_ref,
+                    end_ref,
+                    boundary_rationale: boundary_rationale.clone(),
+                    confidence: confidence.clone(),
+                    context_incomplete: context_incomplete != 0,
+                },
+                selector: LearningSelectorDetail {
+                    model: selector_model,
+                    boundary_rationale,
+                    selected_message_refs: message_refs.clone(),
+                    selected_execution_event_refs: execution_event_refs.clone(),
+                },
+                message_refs,
+                execution_event_refs,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn reviewer_detail(row: &ReportDetailRow) -> LearningReviewerDetail {
+    let user_notice_present = row
+        .review_output_json
+        .get("user_notice")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    LearningReviewerDetail {
+        status: row.report.status.clone(),
+        confidence: row.report.confidence.clone(),
+        candidate_skill_name: row.report.candidate_skill_name.clone(),
+        candidate_summary: row.report.candidate_summary.clone(),
+        evidence_refs: row.evidence_refs.clone(),
+        user_notice_present,
+    }
+}
+
+fn load_evidence_snippets(
+    conn: &Connection,
+    agent: &str,
+    refs: &[String],
+    allowed_message_refs: &[String],
+    allowed_execution_refs: &[String],
+) -> Result<Vec<LearningEvidenceSnippet>, ReadModelError> {
+    let mut snippets = Vec::with_capacity(refs.len());
+    for ref_id in refs {
+        if ref_id.starts_with("msg:") {
+            if !allowed_message_refs.contains(ref_id) {
+                snippets.push(unavailable_snippet(ref_id.clone(), "message"));
+                continue;
+            }
+            snippets.push(load_message_snippet(conn, ref_id)?);
+        } else if ref_id.starts_with("exec:") {
+            if !allowed_execution_refs.contains(ref_id) {
+                snippets.push(unavailable_snippet(ref_id.clone(), "execution_event"));
+                continue;
+            }
+            snippets.push(load_execution_snippet(conn, agent, ref_id)?);
+        } else {
+            snippets.push(unavailable_snippet(ref_id.clone(), "unknown"));
+        }
+    }
+    Ok(snippets)
+}
+
+fn load_message_snippet(
+    conn: &Connection,
+    ref_id: &str,
+) -> Result<LearningEvidenceSnippet, ReadModelError> {
+    let Some(id) = parse_ref_id(ref_id, "msg:") else {
+        return Ok(unavailable_snippet(ref_id.to_owned(), "message"));
+    };
+    let row = conn
+        .query_row(
+            "SELECT role, content, created_at, addressed_to_bot, routed_to_agent
+             FROM conversation_messages
+             WHERE id=?1 AND role IN ('user','assistant')",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((role, content, created_at, addressed_to_bot, routed_to_agent)) = row else {
+        return Ok(unavailable_snippet(ref_id.to_owned(), "message"));
+    };
+    if addressed_to_bot == 0 && routed_to_agent == 0 {
+        return Ok(unavailable_snippet(ref_id.to_owned(), "message"));
+    }
+    Ok(LearningEvidenceSnippet {
+        ref_id: ref_id.to_owned(),
+        source: "message".to_owned(),
+        available: true,
+        trust_label: Some("primary".to_owned()),
+        role: Some(role),
+        event_kind: None,
+        tool_name: None,
+        created_at: Some(created_at),
+        text: Some(bounded_text(content)),
+    })
+}
+
+fn load_execution_snippet(
+    conn: &Connection,
+    agent: &str,
+    ref_id: &str,
+) -> Result<LearningEvidenceSnippet, ReadModelError> {
+    let Some(id) = parse_ref_id(ref_id, "exec:") else {
+        return Ok(unavailable_snippet(ref_id.to_owned(), "execution_event"));
+    };
+    let row = conn
+        .query_row(
+            "SELECT event_kind, tool_name, content_text, trust_label, created_at
+             FROM execution_events
+             WHERE agent_name=?1 AND id=?2",
+            params![agent, id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((event_kind, tool_name, content_text, trust_label, created_at)) = row else {
+        return Ok(unavailable_snippet(ref_id.to_owned(), "execution_event"));
+    };
+    if event_kind == "thinking" || trust_label == "low_trust" {
+        return Ok(unavailable_snippet(ref_id.to_owned(), "execution_event"));
+    }
+    Ok(LearningEvidenceSnippet {
+        ref_id: ref_id.to_owned(),
+        source: "execution_event".to_owned(),
+        available: true,
+        trust_label: Some(trust_label),
+        role: None,
+        event_kind: Some(event_kind),
+        tool_name,
+        created_at: Some(created_at),
+        text: Some(bounded_text(content_text)),
+    })
+}
+
+fn parse_string_array(raw: &str) -> Result<Vec<String>, ReadModelError> {
+    Ok(serde_json::from_str(raw)?)
+}
+
+fn optional_json(raw: Option<String>) -> Result<Option<serde_json::Value>, ReadModelError> {
+    raw.map(|value| serde_json::from_str(&value).map_err(ReadModelError::from))
+        .transpose()
+}
+
+fn bounded_text(value: String) -> String {
+    let mut chars = value.chars();
+    let mut out = chars
+        .by_ref()
+        .take(EVIDENCE_SNIPPET_TEXT_MAX_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        out.push_str("... [truncated]");
+    }
+    out
+}
+
+fn parse_ref_id(reference: &str, prefix: &str) -> Option<i64> {
+    reference.strip_prefix(prefix)?.parse::<i64>().ok()
+}
+
+fn unavailable_snippet(ref_id: String, source: &str) -> LearningEvidenceSnippet {
+    LearningEvidenceSnippet {
+        ref_id,
+        source: source.to_owned(),
+        available: false,
+        trust_label: None,
+        role: None,
+        event_kind: None,
+        tool_name: None,
+        created_at: None,
+        text: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,5 +878,217 @@ mod tests {
 
         assert!(response.health.review_running);
         assert!(response.health.possibly_stuck);
+    }
+
+    #[test]
+    fn learning_report_detail_returns_message_and_execution_snippets() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO conversation_messages (
+                id, platform, chat_id, thread_id, message_id, role, content,
+                root_session_id, turn_id, routed_to_agent, created_at
+             ) VALUES (
+                101, 'telegram', 10, 20, 77, 'user',
+                'Verify the OAuth callback URL before retrying auth.',
+                'session-1', 3, 1, '2026-05-20T10:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO execution_events (
+                id, agent_name, root_session_id, invocation_id, turn_id, seq,
+                event_kind, tool_name, content_json, content_text, trust_label,
+                created_at
+             ) VALUES (
+                202, 'right', 'session-1', 'inv-1', 3, 9,
+                'tool_result', 'shell', '{}', 'callback verified', 'primary',
+                '2026-05-20T10:01:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO learning_episodes (
+                id, agent_name, kind, seed_trigger_kind, seed_ref, status,
+                target_chat_id, target_thread_id, start_ref, end_ref,
+                message_refs_json, execution_event_refs_json, selector_model,
+                selector_output_json, boundary_rationale, confidence,
+                context_incomplete, ready_after, created_at, updated_at
+             ) VALUES (
+                4, 'right', 'foreground_thread', 'learning_signal', 'inv:inv-1',
+                'reviewed', 10, 20, 'msg:101', 'exec:202',
+                '[\"msg:101\"]', '[\"exec:202\"]', 'claude-sonnet-4-6',
+                '{\"status\":\"selected\"}', 'Selected OAuth setup correction.',
+                'high', 0, '2026-05-20T10:01:30Z',
+                '2026-05-20T10:00:00Z', '2026-05-20T10:02:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                id, agent_name, source_invocation_id, learning_episode_id,
+                root_session_id, chat_id, thread_id, trigger_kind, status,
+                confidence, candidate_skill_name, candidate_summary,
+                evidence_refs_json, review_output_json, telegram_notified,
+                created_at
+             ) VALUES (
+                9, 'right', 'inv-1', 4, 'session-1', 10, 20,
+                'learning_signal', 'create_candidate', 'high',
+                'rightx-oauth-debugging', 'Verify OAuth callback setup.',
+                '[\"msg:101\",\"exec:202\"]',
+                '{\"status\":\"create_candidate\",\"confidence\":\"high\",\"candidate_skill_name\":\"rightx-oauth-debugging\",\"candidate_summary\":\"Verify OAuth callback setup.\",\"evidence_refs\":[\"msg:101\",\"exec:202\"],\"user_notice\":\"notice\"}',
+                1, '2026-05-20T11:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let detail = learning_report_detail(&conn, "right", 9).unwrap().unwrap();
+
+        assert_eq!(detail.report.id, 9);
+        assert_eq!(detail.episode.as_ref().unwrap().id, 4);
+        assert_eq!(
+            detail.selector.as_ref().unwrap().selected_message_refs,
+            vec!["msg:101"]
+        );
+        assert_eq!(detail.evidence.len(), 2);
+        assert_eq!(detail.evidence[0].source, "message");
+        assert_eq!(
+            detail.evidence[0].text.as_deref(),
+            Some("Verify the OAuth callback URL before retrying auth.")
+        );
+        assert_eq!(detail.evidence[1].source, "execution_event");
+        assert_eq!(
+            detail.evidence[1].event_kind.as_deref(),
+            Some("tool_result")
+        );
+        assert!(detail.reviewer.user_notice_present);
+    }
+
+    #[test]
+    fn learning_report_detail_marks_missing_refs_unavailable_and_hides_thinking() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO execution_events (
+                id, agent_name, root_session_id, invocation_id, turn_id, seq,
+                event_kind, content_json, content_text, trust_label, created_at
+             ) VALUES (
+                303, 'right', 'session-1', 'inv-2', 5, 1,
+                'thinking', '{}', 'private reasoning', 'secondary',
+                '2026-05-20T10:01:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO learning_episodes (
+                id, agent_name, kind, seed_trigger_kind, seed_ref, status,
+                message_refs_json, execution_event_refs_json, selector_output_json,
+                ready_after, created_at, updated_at
+             ) VALUES (
+                5, 'right', 'foreground_thread', 'effort_threshold', 'inv:inv-2',
+                'reviewed', '[\"msg:404\"]', '[\"exec:303\"]', '{}',
+                '2026-05-20T10:01:30Z', '2026-05-20T10:00:00Z',
+                '2026-05-20T10:02:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                id, agent_name, source_invocation_id, learning_episode_id,
+                trigger_kind, status, confidence, evidence_refs_json,
+                review_output_json, telegram_notified, created_at
+             ) VALUES (
+                10, 'right', 'inv-2', 5, 'effort_threshold',
+                'nothing_to_learn', 'medium', '[\"msg:404\",\"exec:303\"]',
+                '{\"status\":\"nothing_to_learn\",\"confidence\":\"medium\",\"evidence_refs\":[\"msg:404\",\"exec:303\"],\"user_notice\":null}',
+                0, '2026-05-20T11:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let detail = learning_report_detail(&conn, "right", 10).unwrap().unwrap();
+
+        assert_eq!(detail.evidence.len(), 2);
+        assert!(!detail.evidence[0].available);
+        assert_eq!(detail.evidence[0].ref_id, "msg:404");
+        assert!(!detail.evidence[1].available);
+        assert_eq!(detail.evidence[1].ref_id, "exec:303");
+        assert_eq!(detail.evidence[1].text, None);
+    }
+
+    #[test]
+    fn learning_report_detail_hides_low_trust_messages() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO conversation_messages (
+                id, platform, chat_id, thread_id, message_id, role, content,
+                addressed_to_bot, routed_to_agent, created_at
+             ) VALUES (
+                102, 'telegram', 10, 20, 78, 'user',
+                'Ambient chat that was not routed to the agent.',
+                0, 0, '2026-05-20T10:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO learning_episodes (
+                id, agent_name, kind, seed_trigger_kind, seed_ref, status,
+                message_refs_json, execution_event_refs_json, selector_output_json,
+                ready_after, created_at, updated_at
+             ) VALUES (
+                6, 'right', 'foreground_thread', 'effort_threshold', 'inv:inv-4',
+                'reviewed', '[\"msg:102\"]', '[]', '{}',
+                '2026-05-20T10:01:30Z', '2026-05-20T10:00:00Z',
+                '2026-05-20T10:02:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                id, agent_name, source_invocation_id, learning_episode_id,
+                trigger_kind, status, confidence, evidence_refs_json,
+                review_output_json, telegram_notified, created_at
+             ) VALUES (
+                12, 'right', 'inv-4', 6, 'effort_threshold',
+                'nothing_to_learn', 'low', '[\"msg:102\"]',
+                '{\"status\":\"nothing_to_learn\",\"confidence\":\"low\",\"evidence_refs\":[\"msg:102\"],\"user_notice\":null}',
+                0, '2026-05-20T11:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let detail = learning_report_detail(&conn, "right", 12).unwrap().unwrap();
+
+        assert_eq!(detail.evidence.len(), 1);
+        assert_eq!(detail.evidence[0].ref_id, "msg:102");
+        assert_eq!(detail.evidence[0].source, "message");
+        assert!(!detail.evidence[0].available);
+        assert_eq!(detail.evidence[0].text, None);
+    }
+
+    #[test]
+    fn learning_report_detail_errors_on_malformed_report_json() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                id, agent_name, source_invocation_id, trigger_kind, status,
+                confidence, evidence_refs_json, review_output_json, created_at
+             ) VALUES (
+                11, 'right', 'inv-3', 'effort_threshold', 'failed',
+                'low', '[]', '{malformed', '2026-05-20T11:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        assert!(learning_report_detail(&conn, "right", 11).is_err());
     }
 }
