@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use dashmap::DashMap;
+use right_agent::agent::allowlist::AllowlistHandle;
 use teloxide::RequestError;
 use teloxide::prelude::*;
 use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message};
@@ -453,7 +454,19 @@ pub async fn handle_dashboard(
     msg: Message,
     home: Arc<RightHome>,
     agent_dir: Arc<AgentDir>,
+    allowlist: AllowlistHandle,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind)
+        && !super::allowlist_commands::sender_is_trusted(&msg, &allowlist)
+    {
+        tracing::debug!(
+            chat_id = msg.chat.id.0,
+            user_id = msg.from.as_ref().map(|user| user.id.0),
+            "/dashboard ignored: non-trusted sender in group"
+        );
+        return Ok(());
+    }
+
     let global_config = right_config::read_global_config(&home.0)
         .map_err(|e| to_request_err(format!("dashboard: read config.yaml: {e:#}")))?;
     let agent_name = agent_dir

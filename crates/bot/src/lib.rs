@@ -613,31 +613,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     ))
     .map_err(|e| miette::miette!("invalid webhook URL: {e:#}"))?;
 
-    let menu_bot = telegram::bot::build_bot(token.clone());
-    let menu_hostname = global_cfg.tunnel.hostname.clone();
-    let menu_agent = args.agent.clone();
-    tokio::spawn(async move {
-        use teloxide::payloads::SetChatMenuButtonSetters as _;
-        use teloxide::prelude::Requester as _;
-        use teloxide::types::{MenuButton, WebAppInfo};
-
-        match telegram::dashboard::dashboard_url(&menu_hostname, &menu_agent) {
-            Ok(url) => {
-                if let Err(e) = menu_bot
-                    .set_chat_menu_button()
-                    .menu_button(MenuButton::WebApp {
-                        text: "Dashboard".to_string(),
-                        web_app: WebAppInfo { url },
-                    })
-                    .await
-                {
-                    tracing::warn!("set_chat_menu_button failed: {e:#}");
-                }
-            }
-            Err(e) => tracing::warn!("dashboard menu URL invalid: {e:#}"),
-        }
-    });
-
     // Derive webhook secret from the agent secret.
     let agent_secret = config
         .secret
@@ -676,6 +651,31 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     });
     // Wait for axum to bind before starting teloxide (ensures callback socket is ready)
     let _ = axum_ready_rx.await;
+
+    let menu_bot = telegram::bot::build_bot(token.clone());
+    let menu_hostname = global_cfg.tunnel.hostname.clone();
+    let menu_agent = args.agent.clone();
+    tokio::spawn(async move {
+        use teloxide::payloads::SetChatMenuButtonSetters as _;
+        use teloxide::prelude::Requester as _;
+        use teloxide::types::{MenuButton, WebAppInfo};
+
+        match telegram::dashboard::dashboard_url(&menu_hostname, &menu_agent) {
+            Ok(url) => {
+                if let Err(e) = menu_bot
+                    .set_chat_menu_button()
+                    .menu_button(MenuButton::WebApp {
+                        text: "Dashboard".to_string(),
+                        web_app: WebAppInfo { url },
+                    })
+                    .await
+                {
+                    tracing::warn!("set_chat_menu_button failed: {e:#}");
+                }
+            }
+            Err(e) => tracing::warn!("dashboard menu URL invalid: {e:#}"),
+        }
+    });
 
     // Register Telegram webhook in the background. Retries with backoff;
     // flips webhook_set_flag (visible via /healthz) on first success.
