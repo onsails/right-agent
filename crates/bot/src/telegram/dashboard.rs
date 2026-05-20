@@ -14,6 +14,7 @@ use right_dashboard::auth::{
 use right_dashboard::read_model::{
     activity::{ActivityOverviewInput, activity_overview, activity_run_detail},
     learning::{LearningOverviewInput, learning_overview, learning_report_detail},
+    usage::{UsageOverviewInput, usage_overview},
 };
 
 const REFRESH_INTERVAL_SECS: u64 = 5;
@@ -68,6 +69,10 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
         .route(
             "/dashboard/{agent}/api/v1/activity/runs/{run_id}",
             get(handle_activity_run_detail),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/usage",
+            get(handle_usage_overview),
         )
         .route(
             "/dashboard/{agent}/api/v1/overview",
@@ -192,6 +197,37 @@ async fn handle_activity_run_detail(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "run_detail_failed",
                 Some("failed to read dashboard run detail"),
+            )
+        }
+    }
+}
+
+async fn handle_usage_overview(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    let conn = match open_dashboard_read_connection(&state) {
+        Ok(conn) => conn,
+        Err(error) => return error.into_response(),
+    };
+    let input = UsageOverviewInput {
+        agent: state.agent_name.clone(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    match usage_overview(&conn, input) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => {
+            tracing::error!(agent = %state.agent_name, "dashboard usage query failed: {error:#}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "usage_failed",
+                Some("failed to read usage"),
             )
         }
     }
@@ -729,6 +765,38 @@ mod tests {
         assert_eq!(body["crons"][0]["schedule"], "0 8 * * *");
         assert_eq!(body["active"]["foreground"].as_array().unwrap().len(), 0);
         assert_eq!(body["active"]["background"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn usage_returns_structured_windows_for_authorized_user() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        conn.execute(
+            "INSERT INTO usage_events (
+                ts, source, chat_id, thread_id, job_name, session_uuid,
+                total_cost_usd, num_turns, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, web_search_requests,
+                web_fetch_requests, model_usage_json, api_key_source
+             ) VALUES (
+                '2026-05-20T08:00:00Z', 'interactive', 1, 0, NULL, 's1',
+                0.15, 1, 10, 20, 0, 0, 0, 0,
+                '{\"sonnet\":{\"costUSD\":0.15}}', 'none'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/usage",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["agent"], "alpha");
+        assert!(body["windows"].is_array());
+        assert_eq!(body["windows"][0]["key"], "today");
     }
 
     #[tokio::test]

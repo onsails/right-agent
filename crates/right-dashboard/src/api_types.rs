@@ -69,6 +69,59 @@ pub struct OverviewSandboxStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct UsageOverviewResponse {
+    pub agent: String,
+    pub generated_at: String,
+    pub windows: Vec<UsageWindow>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct UsageWindow {
+    pub key: String,
+    pub label: String,
+    pub sources: Vec<UsageSourceSummary>,
+    pub total_cost_usd: f64,
+    pub subscription_cost_usd: f64,
+    pub api_cost_usd: f64,
+    pub turns: u64,
+    pub invocations: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub web_search_requests: u64,
+    pub web_fetch_requests: u64,
+    pub per_model: Vec<UsageModelSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct UsageSourceSummary {
+    pub source: String,
+    pub cost_usd: f64,
+    pub subscription_cost_usd: f64,
+    pub api_cost_usd: f64,
+    pub turns: u64,
+    pub invocations: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub web_search_requests: u64,
+    pub web_fetch_requests: u64,
+    pub per_model: Vec<UsageModelSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct UsageModelSummary {
+    pub model: String,
+    pub cost_usd: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct OverviewSummary {
     pub cron_count: usize,
     pub active_cron_count: usize,
