@@ -2575,8 +2575,7 @@ fn maybe_capture_learning_episode_seed(
         Arc::clone(&ctx.debug),
         ctx.learning.clone(),
         Some(Arc::clone(&ctx.learning_drain_scheduler)),
-        // Seed-only runtime: the drain task's own runtime carries the real bot.
-        Arc::new(ctx.bot.inner().inner().clone()),
+        None,
     );
     if let Err(e) = runtime.capture_completion_seed(
         conn,
@@ -2895,25 +2894,15 @@ async fn record_successful_background_review<F, Fut, E>(
         ) {
             Ok((_count, opened)) => {
                 if opened {
-                    let bot = Arc::clone(&alert_bot);
-                    let db = agent_db_dir.to_owned();
-                    let name = agent_name.to_owned();
-                    let dir = agent_dir.to_owned();
-                    tokio::spawn(async move {
-                        if let Err(e) = crate::telegram::learning_alerts::maybe_alert_circuit_open(
-                            bot,
-                            &db,
-                            &name,
-                            &dir,
-                            "reviewer returned status=failed",
-                            cooldown_minutes,
-                            failure_threshold,
-                        )
-                        .await
-                        {
-                            tracing::warn!("maybe_alert_circuit_open failed: {e:#}");
-                        }
-                    });
+                    crate::telegram::learning_alerts::spawn_circuit_open_alert(
+                        Arc::clone(&alert_bot),
+                        agent_db_dir.to_owned(),
+                        agent_name.to_owned(),
+                        agent_dir.to_owned(),
+                        "reviewer returned status=failed".to_owned(),
+                        failure_threshold,
+                        cooldown_minutes,
+                    );
                 }
             }
             Err(e) => tracing::warn!(
@@ -3003,26 +2992,15 @@ fn record_failed_background_review(
     ) {
         Ok((_count, opened)) => {
             if opened {
-                let bot = Arc::clone(&alert_bot);
-                let db = agent_db_dir.to_owned();
-                let name = agent_name.clone();
-                let dir = agent_dir.to_owned();
-                let reason = error.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = crate::telegram::learning_alerts::maybe_alert_circuit_open(
-                        bot,
-                        &db,
-                        &name,
-                        &dir,
-                        &reason,
-                        cooldown_minutes,
-                        failure_threshold,
-                    )
-                    .await
-                    {
-                        tracing::warn!("maybe_alert_circuit_open failed: {e:#}");
-                    }
-                });
+                crate::telegram::learning_alerts::spawn_circuit_open_alert(
+                    Arc::clone(&alert_bot),
+                    agent_db_dir.to_owned(),
+                    agent_name.clone(),
+                    agent_dir.to_owned(),
+                    error.clone(),
+                    failure_threshold,
+                    cooldown_minutes,
+                );
             }
         }
         Err(e) => tracing::warn!(

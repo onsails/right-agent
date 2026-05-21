@@ -12,10 +12,6 @@ fn conn() -> rusqlite::Connection {
     conn
 }
 
-fn stub_bot() -> std::sync::Arc<teloxide::Bot> {
-    std::sync::Arc::new(teloxide::Bot::new("ignored-token-for-tests"))
-}
-
 fn runtime() -> LearningEpisodeRuntime {
     LearningEpisodeRuntime {
         agent_dir: std::path::PathBuf::from("/tmp/right-agent-test-agent"),
@@ -27,7 +23,7 @@ fn runtime() -> LearningEpisodeRuntime {
         debug: std::sync::Arc::new(AtomicBool::new(false)),
         learning: right_agent::agent::types::LearningConfig::default(),
         scheduler: None,
-        bot: stub_bot(),
+        bot: None,
     }
 }
 
@@ -42,7 +38,7 @@ fn runtime_for_dir(path: &std::path::Path) -> LearningEpisodeRuntime {
         debug: std::sync::Arc::new(AtomicBool::new(false)),
         learning: right_agent::agent::types::LearningConfig::default(),
         scheduler: None,
-        bot: stub_bot(),
+        bot: None,
     }
 }
 

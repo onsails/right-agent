@@ -516,8 +516,21 @@ fn review_gate_decision_in_tx(
         )?;
     }
 
-    // Daily budget check: SUM(total_cost_usd) for today UTC across learning sources.
-    let today_start = format!("{}T00:00:00Z", &input.now_utc[..10]);
+    let prospective = if let Some(trigger) = input.signal_trigger {
+        trigger
+    } else if interval > 0 && tool_iters >= interval {
+        ReviewTriggerKind::EffortThreshold
+    } else {
+        return Ok(ReviewGateDecision::Skip(ReviewSkipReason::BelowThreshold));
+    };
+
+    // Only query usage_events when a trigger would otherwise fire. The index
+    // scan is cheap but pointless for the common no-trigger branch.
+    let date_part = input
+        .now_utc
+        .split_once('T')
+        .map_or(input.now_utc, |(d, _)| d);
+    let today_start = format!("{date_part}T00:00:00Z");
     let placeholders = (0..crate::usage::LEARNING_SOURCES.len())
         .map(|i| format!("?{}", i + 2))
         .collect::<Vec<_>>()
@@ -536,15 +549,7 @@ fn review_gate_decision_in_tx(
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::DailyBudget));
     }
 
-    if let Some(trigger) = input.signal_trigger {
-        return Ok(ReviewGateDecision::Start(trigger));
-    }
-    if interval > 0 && tool_iters >= interval {
-        return Ok(ReviewGateDecision::Start(
-            ReviewTriggerKind::EffortThreshold,
-        ));
-    }
-    Ok(ReviewGateDecision::Skip(ReviewSkipReason::BelowThreshold))
+    Ok(ReviewGateDecision::Start(prospective))
 }
 
 pub fn try_mark_review_started(
