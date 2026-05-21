@@ -67,9 +67,15 @@ pub(crate) struct EpisodeSeedInput<'a> {
 /// Lifetime: spawned once at bot startup, cancelled via `CancellationToken`
 /// on shutdown. The `Arc<DrainScheduler>` is threaded through every callsite
 /// that captures an episode seed.
+///
+/// A `noop()` variant carries `tx = None` and short-circuits
+/// `schedule_drain`. This is used when `learning.background_review_enabled =
+/// false` so the legacy Stage 2 selector/reviewer pipeline never runs;
+/// per-seed captures and reviewer requeues still call into this struct, they
+/// just do nothing.
 #[derive(Debug)]
 pub(crate) struct DrainScheduler {
-    tx: mpsc::UnboundedSender<()>,
+    tx: Option<mpsc::UnboundedSender<()>>,
 }
 
 impl DrainScheduler {
@@ -90,7 +96,7 @@ impl DrainScheduler {
         shutdown: CancellationToken,
     ) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
         let (tx, rx) = mpsc::unbounded_channel::<()>();
-        let scheduler = Arc::new(Self { tx: tx.clone() });
+        let scheduler = Arc::new(Self { tx: Some(tx) });
         // The runtime used inside the task carries its own scheduler clone so
         // that the reviewer's requeue path can re-notify on `Skip(AlreadyRunning)`.
         let mut task_runtime = runtime_factory;
@@ -99,12 +105,22 @@ impl DrainScheduler {
         (scheduler, handle)
     }
 
+    /// Inactive scheduler. `schedule_drain` is a cheap no-op; no task is
+    /// spawned. Use when `learning.background_review_enabled = false`.
+    pub(crate) fn noop() -> Self {
+        Self { tx: None }
+    }
+
     /// Non-blocking notify. Multiple calls before the next drain coalesce
-    /// into a single drain pass. Never blocks, never spawns.
+    /// into a single drain pass. Never blocks, never spawns. No-op for the
+    /// `noop()` variant.
     pub(crate) fn schedule_drain(&self) {
-        // Unbounded send only fails when the receiver has been dropped (task
-        // exited at shutdown). Silently discard — there is nothing to do.
-        let _ = self.tx.send(());
+        if let Some(tx) = self.tx.as_ref() {
+            // Unbounded send only fails when the receiver has been dropped
+            // (task exited at shutdown). Silently discard — there is nothing
+            // to do.
+            let _ = tx.send(());
+        }
     }
 }
 

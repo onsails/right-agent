@@ -1173,3 +1173,16 @@ async fn drain_scheduler_joins_within_timeout_after_shutdown() {
         .expect("drain task did not exit within 1s of shutdown")
         .expect("drain task panicked");
 }
+
+#[tokio::test]
+async fn drain_scheduler_noop_when_background_disabled() {
+    use crate::learning_episode::DrainScheduler;
+    use tokio_util::sync::CancellationToken;
+
+    let cancel = CancellationToken::new();
+    let scheduler = DrainScheduler::noop();
+    scheduler.schedule_drain();
+    // No panic, no work — the noop variant must be cheap.
+    drop(scheduler);
+    cancel.cancel();
+}
