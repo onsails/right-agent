@@ -1004,6 +1004,9 @@ fn learning_setup(
         max_daily_budget_usd,
         circuit_failure_threshold,
         circuit_cooldown_minutes,
+        probe_model: existing.probe_model.clone(),
+        fork_probe_enabled: existing.fork_probe_enabled,
+        background_review_enabled: existing.background_review_enabled,
     }))
 }
 

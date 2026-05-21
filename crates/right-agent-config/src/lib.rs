@@ -107,6 +107,14 @@ fn default_circuit_cooldown_minutes() -> u32 {
     60
 }
 
+fn default_fork_probe_enabled() -> bool {
+    true
+}
+
+fn default_background_review_enabled() -> bool {
+    false
+}
+
 fn deserialize_positive_finite_f64_max_daily<'de, D>(deserializer: D) -> Result<f64, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -349,6 +357,20 @@ pub struct LearningConfig {
         deserialize_with = "deserialize_positive_u32"
     )]
     pub circuit_cooldown_minutes: u32,
+
+    /// Model used by the fork-probe. `None` = inherit `AgentConfig.model`.
+    pub probe_model: Option<String>,
+
+    /// Master switch for the fork-probe. Defaults `true`; set `false` to
+    /// disable post-turn signal-classification probes for an agent.
+    #[serde(default = "default_fork_probe_enabled")]
+    pub fork_probe_enabled: bool,
+
+    /// Deprecated Stage 2 background pipeline opt-in. Defaults `false`.
+    /// When `true`, the legacy `DrainScheduler` + selector + reviewer
+    /// run alongside fork-probe; daily budget covers both.
+    #[serde(default = "default_background_review_enabled")]
+    pub background_review_enabled: bool,
 }
 
 impl Default for LearningConfig {
@@ -360,6 +382,9 @@ impl Default for LearningConfig {
             max_daily_budget_usd: default_max_daily_budget_usd(),
             circuit_failure_threshold: default_circuit_failure_threshold(),
             circuit_cooldown_minutes: default_circuit_cooldown_minutes(),
+            probe_model: None,
+            fork_probe_enabled: default_fork_probe_enabled(),
+            background_review_enabled: default_background_review_enabled(),
         }
     }
 }
@@ -609,5 +634,64 @@ mod tests {
         let yaml = "debug: false";
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.debug, Some(false));
+    }
+
+    #[test]
+    fn learning_config_defaults_set_fork_probe_on_and_background_off() {
+        let cfg = LearningConfig::default();
+        assert!(cfg.fork_probe_enabled, "fork_probe must default ON");
+        assert!(
+            !cfg.background_review_enabled,
+            "background_review must default OFF"
+        );
+        assert!(
+            cfg.probe_model.is_none(),
+            "probe_model must default to None (inherit agent.model)"
+        );
+    }
+
+    #[test]
+    fn learning_config_deserialises_minimal_yaml_with_new_defaults() {
+        let yaml = "{}";
+        let cfg: LearningConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(cfg.fork_probe_enabled);
+        assert!(!cfg.background_review_enabled);
+        assert!(cfg.probe_model.is_none());
+    }
+
+    #[test]
+    fn learning_config_deserialises_pre_v27_yaml_without_new_fields() {
+        let yaml = "
+episode_selector_model: claude-sonnet-4-6
+episode_settle_seconds: 60
+max_daily_budget_usd: 2.50
+circuit_failure_threshold: 3
+circuit_cooldown_minutes: 30
+";
+        let cfg: LearningConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.episode_selector_model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+        assert!(cfg.fork_probe_enabled);
+        assert!(!cfg.background_review_enabled);
+        assert_eq!(cfg.max_daily_budget_usd, 2.50);
+    }
+
+    #[test]
+    fn learning_config_accepts_probe_model_override() {
+        let yaml = "probe_model: claude-haiku-4-5-20251001\n";
+        let cfg: LearningConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.probe_model.as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
+    }
+
+    #[test]
+    fn learning_config_accepts_background_review_opt_in() {
+        let yaml = "background_review_enabled: true\n";
+        let cfg: LearningConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(cfg.background_review_enabled);
     }
 }
