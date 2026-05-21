@@ -970,26 +970,39 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // `Arc<DrainScheduler>` is what production callers clone into their runtimes.
     // The returned JoinHandle is awaited at shutdown so the drain task does not
     // outlive `run_telegram` while still holding a CC selector/reviewer child.
-    let (learning_drain_scheduler, learning_drain_handle) = {
-        let learning_bot = Arc::new(telegram::bot::build_bot(token.clone()));
-        let bootstrap_runtime = crate::learning_episode::LearningEpisodeRuntime::new(
-            agent_dir.clone(),
-            agent_dir.clone(),
-            args.agent.clone(),
-            config.model.clone(),
-            ssh_config_path.clone(),
-            resolved_sandbox.clone(),
-            Arc::clone(&debug_flag),
-            config.learning.clone(),
-            None,
-            Some(learning_bot),
-        );
-        crate::learning_episode::DrainScheduler::spawn(
-            bootstrap_runtime,
-            std::time::Duration::from_secs(config.learning.episode_settle_seconds),
-            shutdown.clone(),
-        )
-    };
+    //
+    // Gated on `learning.background_review_enabled`. When disabled (the
+    // default), the legacy Stage 2 selector/reviewer pipeline must not run —
+    // the post-turn fork-probe replaces it. Capture callsites still notify
+    // this scheduler via `schedule_drain`; the noop variant swallows the
+    // notifications cheaply.
+    let (learning_drain_scheduler, learning_drain_handle) =
+        if config.learning.background_review_enabled {
+            let learning_bot = Arc::new(telegram::bot::build_bot(token.clone()));
+            let bootstrap_runtime = crate::learning_episode::LearningEpisodeRuntime::new(
+                agent_dir.clone(),
+                agent_dir.clone(),
+                args.agent.clone(),
+                config.model.clone(),
+                ssh_config_path.clone(),
+                resolved_sandbox.clone(),
+                Arc::clone(&debug_flag),
+                config.learning.clone(),
+                None,
+                Some(learning_bot),
+            );
+            let (scheduler, handle) = crate::learning_episode::DrainScheduler::spawn(
+                bootstrap_runtime,
+                std::time::Duration::from_secs(config.learning.episode_settle_seconds),
+                shutdown.clone(),
+            );
+            (scheduler, Some(handle))
+        } else {
+            (
+                Arc::new(crate::learning_episode::DrainScheduler::noop()),
+                None,
+            )
+        };
 
     {
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -1191,17 +1204,19 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     tracing::info!("waiting for cron to finish");
     let _ = cron_handle.await;
-    tracing::info!("waiting for learning-episode drain to finish");
-    match tokio::time::timeout(crate::cron::SHUTDOWN_JOB_TIMEOUT, learning_drain_handle).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            tracing::warn!("learning-episode drain task panicked: {e}");
-        }
-        Err(_) => {
-            tracing::warn!(
-                timeout_secs = crate::cron::SHUTDOWN_JOB_TIMEOUT.as_secs(),
-                "learning-episode drain task did not finish in time"
-            );
+    if let Some(handle) = learning_drain_handle {
+        tracing::info!("waiting for learning-episode drain to finish");
+        match tokio::time::timeout(crate::cron::SHUTDOWN_JOB_TIMEOUT, handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!("learning-episode drain task panicked: {e}");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout_secs = crate::cron::SHUTDOWN_JOB_TIMEOUT.as_secs(),
+                    "learning-episode drain task did not finish in time"
+                );
+            }
         }
     }
     tracing::info!("waiting for async delivery to finish");
