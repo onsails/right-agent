@@ -12,6 +12,19 @@ pub mod pricing;
 
 use std::collections::BTreeMap;
 
+/// Canonical list of `usage_events.source` values produced by the learning
+/// pipeline (Stage 2 episode selector + reviewer + worker-side skill review).
+///
+/// Single source of truth shared between the review gate's daily-budget query
+/// (`right_agent::learned_skills`) and the dashboard's `SOURCES` array
+/// (`right_dashboard::read_model::usage`). New learning-adjacent sources must
+/// be added here; the dashboard test asserts every entry is rendered.
+pub const LEARNING_SOURCES: &[&str] = &[
+    "learning_selector",
+    "learning_reviewer",
+    "learning_skill_review",
+];
+
 pub use error::UsageError;
 
 /// Parsed `result` event payload used to write one row.
@@ -64,6 +77,18 @@ pub struct WindowSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn learning_sources_contains_expected_three_entries() {
+        assert_eq!(
+            LEARNING_SOURCES,
+            &[
+                "learning_selector",
+                "learning_reviewer",
+                "learning_skill_review"
+            ]
+        );
+    }
 
     #[test]
     fn usage_breakdown_has_api_key_source_field() {
