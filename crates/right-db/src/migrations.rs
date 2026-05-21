@@ -390,7 +390,7 @@ fn v24_learning_episodes(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
-/// v25: Add circuit-breaker columns to skill_nudge_state.
+/// v26: Add circuit-breaker columns to skill_nudge_state.
 ///
 /// Idempotent — checks pragma_table_info before each ALTER. SQLite has no
 /// `ADD COLUMN IF NOT EXISTS`.

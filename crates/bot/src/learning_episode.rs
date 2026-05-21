@@ -164,7 +164,7 @@ pub(crate) struct LearningEpisodeRuntime {
     pub(crate) scheduler: Option<Arc<DrainScheduler>>,
     /// Bot for sending circuit-open alerts. `None` for seed-only runtimes;
     /// the drain task that fires alerts always carries `Some`.
-    pub(crate) bot: Option<Arc<teloxide::Bot>>,
+    pub(crate) bot: Option<Arc<crate::telegram::BotType>>,
 }
 
 impl std::fmt::Debug for LearningEpisodeRuntime {
@@ -195,7 +195,7 @@ impl LearningEpisodeRuntime {
         debug: Arc<AtomicBool>,
         learning: right_agent::agent::types::LearningConfig,
         scheduler: Option<Arc<DrainScheduler>>,
-        bot: Option<Arc<teloxide::Bot>>,
+        bot: Option<Arc<crate::telegram::BotType>>,
     ) -> Self {
         Self {
             agent_dir,

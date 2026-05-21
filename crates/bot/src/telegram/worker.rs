@@ -2392,7 +2392,7 @@ fn maybe_spawn_learned_skill_review(
     let agent_dir = ctx.agent_dir.clone();
     let agent_db_dir = ctx.agent_db_dir.clone();
     let bot = ctx.bot.clone();
-    let alert_bot = Arc::new(ctx.bot.inner().inner().clone());
+    let alert_bot = Arc::new(ctx.bot.clone());
     let model = crate::snapshot_model(&ctx.model);
     let ssh_config_path = ctx.ssh_config_path.clone();
     let resolved_sandbox = ctx.resolved_sandbox.clone();
@@ -2842,7 +2842,7 @@ async fn record_successful_background_review<F, Fut, E>(
     notice: Option<String>,
     failure_threshold: u32,
     cooldown_minutes: u32,
-    alert_bot: Arc<teloxide::Bot>,
+    alert_bot: Arc<super::BotType>,
     send_notice: F,
 ) where
     F: FnOnce(String) -> Fut,
@@ -2940,7 +2940,7 @@ fn record_failed_background_review(
     trigger_kind: right_agent::learned_skills::ReviewTriggerKind,
     failure_threshold: u32,
     cooldown_minutes: u32,
-    alert_bot: Arc<teloxide::Bot>,
+    alert_bot: Arc<super::BotType>,
     error: String,
     stdout: Option<String>,
     stderr: Option<String>,
@@ -4461,8 +4461,8 @@ mod tests {
         String::from_utf8(bytes).unwrap()
     }
 
-    #[test]
-    fn record_failed_background_review_persists_failure_and_finishes_gate() {
+    #[tokio::test]
+    async fn record_failed_background_review_persists_failure_and_finishes_gate() {
         let temp = tempfile::tempdir().unwrap();
         let conn = right_db::open_connection(temp.path(), true).unwrap();
         right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
@@ -4484,7 +4484,7 @@ mod tests {
             right_agent::learned_skills::ReviewTriggerKind::SkillIssueSignal,
             3,
             60,
-            Arc::new(teloxide::Bot::new("test")),
+            Arc::new(crate::telegram::bot::build_bot("test".to_owned())),
             format!(
                 "background review claude exited Some(1): stderr-head{}STDERR-TAIL",
                 "z".repeat(9000)
@@ -4601,7 +4601,7 @@ mod tests {
             Some("notice".to_owned()),
             3,
             60,
-            Arc::new(teloxide::Bot::new("test")),
+            Arc::new(crate::telegram::bot::build_bot("test".to_owned())),
             |_notice| async { Err("send failed") },
         )
         .await;
@@ -4667,7 +4667,7 @@ mod tests {
             Some("notice".to_owned()),
             3,
             60,
-            Arc::new(teloxide::Bot::new("test")),
+            Arc::new(crate::telegram::bot::build_bot("test".to_owned())),
             move |notice| {
                 let sent_for_future = std::sync::Arc::clone(&sent_for_closure);
                 async move {

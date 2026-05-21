@@ -9,10 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use teloxide::Bot;
 use teloxide::prelude::*;
 
-use super::alerts;
+use super::{BotType, alerts};
 
 const ALERT_TYPE: &str = "learning_circuit_open";
 
@@ -20,7 +19,7 @@ const ALERT_TYPE: &str = "learning_circuit_open";
 /// receives `opened_circuit = true` from `record_review_failure`. Errors are
 /// logged inside the spawned task; the caller never awaits.
 pub(crate) fn spawn_circuit_open_alert(
-    bot: Arc<Bot>,
+    bot: Arc<BotType>,
     agent_db_dir: PathBuf,
     agent_name: String,
     agent_dir: PathBuf,
@@ -49,7 +48,7 @@ pub(crate) fn spawn_circuit_open_alert(
 /// the 24-hour dedup window allows. No-op if the dedup window blocks the
 /// alert or if no recipient can be resolved.
 pub(crate) async fn maybe_alert_circuit_open(
-    bot: Arc<Bot>,
+    bot: Arc<BotType>,
     db: &Path,
     agent_name: &str,
     agent_dir: &Path,
