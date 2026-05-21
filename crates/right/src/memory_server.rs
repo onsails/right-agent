@@ -179,7 +179,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "List recent cron job runs with results. Returns runs sorted by started_at descending. Optionally filter by job_name and/or limit the count. Each result includes summary and notify (the structured output produced by the cron session)."
+        description = "List recent cron job runs with results. Returns runs sorted by started_at descending. Optionally filter by job_name and/or limit the count. Each result includes run_note and delivery (the structured output produced by the cron session)."
     )]
     async fn cron_list_runs(
         &self,
@@ -193,7 +193,7 @@ impl MemoryServer {
         let mut stmt = conn
             .prepare(
                 "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
-                        summary, notify_json, delivered_at, delivery_status, no_notify_reason
+                        run_note, delivery_json, delivered_at, delivery_status
                  FROM async_runs
                  WHERE kind = 'cron'
                    AND (?1 IS NULL OR producer_ref = ?1)
@@ -215,7 +215,6 @@ impl MemoryServer {
                     row.get::<_, Option<String>>(8)?.as_deref(),
                     row.get::<_, Option<String>>(9)?.as_deref(),
                     row.get::<_, Option<String>>(10)?.as_deref(),
-                    row.get::<_, Option<String>>(11)?.as_deref(),
                 ))
             })
             .map_err(|e| McpError::internal_error(format!("query failed: {e:#}"), None))?
@@ -227,7 +226,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Get full details for a single cron job run by its run_id (UUID). Returns status, summary, and notify (the structured output with content and optional attachments)."
+        description = "Get full details for a single cron job run by its run_id (UUID). Returns status, run_note, and delivery (the structured output with notify or silent decision)."
     )]
     async fn cron_show_run(
         &self,
@@ -239,7 +238,7 @@ impl MemoryServer {
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
         let result = conn.query_row(
             "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
-                    summary, notify_json, delivered_at, delivery_status, no_notify_reason
+                    run_note, delivery_json, delivered_at, delivery_status
              FROM async_runs
              WHERE kind = 'cron' AND id = ?1",
             rusqlite::params![params.run_id],
@@ -256,7 +255,6 @@ impl MemoryServer {
                     row.get::<_, Option<String>>(8)?.as_deref(),
                     row.get::<_, Option<String>>(9)?.as_deref(),
                     row.get::<_, Option<String>>(10)?.as_deref(),
-                    row.get::<_, Option<String>>(11)?.as_deref(),
                 ))
             },
         );
@@ -372,7 +370,7 @@ impl MemoryServer {
     // must stay byte-for-byte equal to that constant — the
     // `cron_trigger_description_matches_const` test in this file enforces it.
     #[tool(
-        description = "Trigger a cron job for immediate execution. Lock check applies — if the job is currently running, the trigger is skipped. Delivery is conditional: the cron itself decides whether to notify (sets `notify` in its structured output), and any notification is held until the chat has been idle for 2 minutes. Use `cron_list_runs` to inspect `delivery_status` and `no_notify_reason`."
+        description = "Trigger a cron job for immediate execution. Lock check applies — if the job is currently running, the trigger is skipped. Delivery is conditional: the cron itself decides whether to notify (sets `delivery` in its structured output), and any notification is held until the chat has been idle for 2 minutes. Use `cron_list_runs` to inspect `delivery_status` and `delivery`."
     )]
     async fn cron_trigger(
         &self,
@@ -563,11 +561,10 @@ pub(crate) fn cron_run_to_json(
     exit_code: Option<i64>,
     status: &str,
     log_path: Option<&str>,
-    summary: Option<&str>,
-    notify_json: Option<&str>,
+    run_note: Option<&str>,
+    delivery_json: Option<&str>,
     delivered_at: Option<&str>,
     delivery_status: Option<&str>,
-    no_notify_reason: Option<&str>,
 ) -> serde_json::Value {
     right_agent::async_runs::cron_run_to_json(&CronRunJsonRow {
         id: id.to_owned(),
@@ -577,11 +574,10 @@ pub(crate) fn cron_run_to_json(
         exit_code,
         status: status.to_owned(),
         log_path: log_path.map(str::to_owned),
-        summary: summary.map(str::to_owned),
-        notify_json: notify_json.map(str::to_owned),
+        run_note: run_note.map(str::to_owned),
+        delivery_json: delivery_json.map(str::to_owned),
         delivered_at: delivered_at.map(str::to_owned),
         delivery_status: delivery_status.map(str::to_owned),
-        no_notify_reason: no_notify_reason.map(str::to_owned),
     })
 }
 

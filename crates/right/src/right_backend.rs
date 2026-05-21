@@ -96,12 +96,12 @@ impl RightBackend {
             ),
             Tool::new(
                 "cron_list_runs",
-                "List recent cron job runs with results. Returns runs sorted by started_at descending. Optionally filter by job_name and/or limit the count. Each result includes summary and notify (the structured output produced by the cron session).",
+                "List recent cron job runs with results. Returns runs sorted by started_at descending. Optionally filter by job_name and/or limit the count. Each result includes run_note and delivery (the structured output produced by the cron session).",
                 schema_for_type::<CronListRunsParams>(),
             ),
             Tool::new(
                 "cron_show_run",
-                "Get full details for a single cron job run by its run_id (UUID). Returns status, summary, and notify (the structured output with content and optional attachments).",
+                "Get full details for a single cron job run by its run_id (UUID). Returns status, run_note, and delivery (the structured output with notify or silent decision).",
                 schema_for_type::<CronShowRunParams>(),
             ),
             Tool::new(
@@ -336,7 +336,7 @@ impl RightBackend {
         let limit = params.limit.unwrap_or(20);
         let mut stmt = conn.prepare(
             "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
-                    summary, notify_json, delivered_at, delivery_status, no_notify_reason
+                    run_note, delivery_json, delivered_at, delivery_status
              FROM async_runs
              WHERE kind = 'cron'
                AND (?1 IS NULL OR producer_ref = ?1)
@@ -357,7 +357,6 @@ impl RightBackend {
                     row.get::<_, Option<String>>(8)?.as_deref(),
                     row.get::<_, Option<String>>(9)?.as_deref(),
                     row.get::<_, Option<String>>(10)?.as_deref(),
-                    row.get::<_, Option<String>>(11)?.as_deref(),
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -376,7 +375,7 @@ impl RightBackend {
         let conn = Self::lock_conn(&conn_arc)?;
         let result = conn.query_row(
             "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
-                    summary, notify_json, delivered_at, delivery_status, no_notify_reason
+                    run_note, delivery_json, delivered_at, delivery_status
              FROM async_runs
              WHERE kind = 'cron' AND id = ?1",
             rusqlite::params![params.run_id],
@@ -393,7 +392,6 @@ impl RightBackend {
                     row.get::<_, Option<String>>(8)?.as_deref(),
                     row.get::<_, Option<String>>(9)?.as_deref(),
                     row.get::<_, Option<String>>(10)?.as_deref(),
-                    row.get::<_, Option<String>>(11)?.as_deref(),
                 ))
             },
         );

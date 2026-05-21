@@ -14,14 +14,14 @@ pub(crate) struct PendingAsyncResult {
     pub id: String,
     pub kind: String,
     pub producer_ref: Option<String>,
-    pub notify_json: String,
-    pub summary: String,
+    pub delivery_json: String,
+    pub run_note: String,
     pub status: String,
     pub target_chat_id: Option<i64>,
     pub target_thread_id: Option<i64>,
 }
 
-/// Query the oldest undelivered async result with a non-null notify_json.
+/// Query the oldest undelivered async result with a non-null delivery_json.
 #[cfg(test)]
 pub(crate) fn fetch_pending(
     conn: &rusqlite::Connection,
@@ -34,13 +34,13 @@ fn fetch_pending_batch(
     limit: usize,
 ) -> Result<Vec<PendingAsyncResult>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, kind, producer_ref, notify_json, COALESCE(summary, ''), status, \
+        "SELECT id, kind, producer_ref, delivery_json, COALESCE(run_note, ''), status, \
                 NULLIF(target_chat_id, 0), target_thread_id \
          FROM async_runs \
          WHERE delivery_required = 1 \
            AND delivery_status IN ('pending', 'retryable') \
            AND status IN ('success', 'failed') \
-           AND notify_json IS NOT NULL \
+           AND delivery_json IS NOT NULL \
          ORDER BY finished_at ASC \
          LIMIT ?1",
     )?;
@@ -53,8 +53,8 @@ fn pending_from_row(row: &rusqlite::Row<'_>) -> Result<PendingAsyncResult, rusql
         id: row.get(0)?,
         kind: row.get(1)?,
         producer_ref: row.get(2)?,
-        notify_json: row.get(3)?,
-        summary: row.get(4)?,
+        delivery_json: row.get(3)?,
+        run_note: row.get(4)?,
         status: row.get(5)?,
         target_chat_id: row.get(6)?,
         target_thread_id: row.get(7)?,
@@ -120,7 +120,7 @@ pub(crate) fn deduplicate_job(
 ) -> Result<Option<(PendingAsyncResult, u32)>, rusqlite::Error> {
     let latest = conn
         .query_row(
-            "SELECT id, kind, producer_ref, notify_json, COALESCE(summary, ''), status, \
+            "SELECT id, kind, producer_ref, delivery_json, COALESCE(run_note, ''), status, \
                     NULLIF(target_chat_id, 0), target_thread_id \
              FROM async_runs \
              WHERE kind = 'cron' \
@@ -128,22 +128,11 @@ pub(crate) fn deduplicate_job(
                AND delivery_required = 1 \
                AND delivery_status IN ('pending', 'retryable') \
                AND status IN ('success', 'failed') \
-               AND notify_json IS NOT NULL \
+               AND delivery_json IS NOT NULL \
              ORDER BY finished_at DESC \
              LIMIT 1",
             rusqlite::params![producer_ref],
-            |row| {
-                Ok(PendingAsyncResult {
-                    id: row.get(0)?,
-                    kind: row.get(1)?,
-                    producer_ref: row.get(2)?,
-                    notify_json: row.get(3)?,
-                    summary: row.get(4)?,
-                    status: row.get(5)?,
-                    target_chat_id: row.get(6)?,
-                    target_thread_id: row.get(7)?,
-                })
-            },
+            pending_from_row,
         )
         .optional()?;
 
@@ -237,7 +226,7 @@ Here is the YAML report of the background task:
 pub(crate) fn format_async_yaml(
     pending: &PendingAsyncResult,
     skipped: u32,
-) -> Result<String, serde_json::Error> {
+) -> Result<String, String> {
     let total = skipped + 1;
     let instruction = match (pending.kind.as_str(), pending.status.as_str()) {
         ("background", "failed") => BACKGROUND_DELIVERY_INSTRUCTION_FAILURE,
@@ -267,7 +256,7 @@ pub(crate) fn format_async_yaml(
         }
     }
 
-    let notify = serde_json::from_str::<crate::cron::CronNotify>(&pending.notify_json)?;
+    let notify = crate::cron::notify_from_delivery_json(&pending.delivery_json)?;
     output.push_str("  result:\n");
     output.push_str("    notify:\n");
     output.push_str(&format!(
@@ -300,8 +289,8 @@ pub(crate) fn format_async_yaml(
         }
     }
     output.push_str(&format!(
-        "    summary: \"{}\"\n",
-        crate::telegram::attachments::yaml_escape_string(&pending.summary)
+        "    run_note: \"{}\"\n",
+        crate::telegram::attachments::yaml_escape_string(&pending.run_note)
     ));
 
     Ok(output)
@@ -491,10 +480,10 @@ pub(crate) async fn run_delivery_loop(
                     kind = %to_deliver.kind,
                     label = %pending_label(&to_deliver),
                     run_id = %to_deliver.id,
-                    "async delivery: notify_json deserialization failed, marking delivery failed: {e:#}"
+                    "async delivery: delivery_json deserialization failed, marking delivery failed: {e:#}"
                 );
                 if let Err(db_err) = mark_delivery_outcome(&conn, &to_deliver.id, "failed") {
-                    tracing::error!(run_id = %to_deliver.id, "mark failed for malformed notify_json failed: {db_err:#}");
+                    tracing::error!(run_id = %to_deliver.id, "mark failed for malformed delivery_json failed: {db_err:#}");
                     delivered_in_memory.insert(to_deliver.id.clone());
                 }
                 continue;
@@ -983,8 +972,8 @@ mod tests {
         finished_at: Option<&'static str>,
         status: &'static str,
         log_path: &'static str,
-        summary: Option<&'static str>,
-        notify_json: Option<&'static str>,
+        run_note: Option<&'static str>,
+        delivery_json: Option<&'static str>,
         delivered_at: Option<&'static str>,
         delivery_status: Option<&'static str>,
         delivery_required: Option<bool>,
@@ -1001,8 +990,8 @@ mod tests {
                 finished_at: Some("2026-01-01T00:01:00Z"),
                 status: "success",
                 log_path: "/log",
-                summary: Some("sum"),
-                notify_json: None,
+                run_note: Some("sum"),
+                delivery_json: None,
                 delivered_at: None,
                 delivery_status: None,
                 delivery_required: None,
@@ -1013,7 +1002,7 @@ mod tests {
     }
 
     fn insert_async_cron_run(conn: &rusqlite::Connection, run: TestCronRun) {
-        let delivery_required = run.delivery_required.unwrap_or(run.notify_json.is_some());
+        let delivery_required = run.delivery_required.unwrap_or(run.delivery_json.is_some());
         let delivery_status =
             run.delivery_status
                 .unwrap_or(if delivery_required { "pending" } else { "none" });
@@ -1021,7 +1010,7 @@ mod tests {
         conn.execute(
             "INSERT INTO async_runs (
                 id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
-                status, started_at, finished_at, log_path, summary, notify_json,
+                status, started_at, finished_at, log_path, run_note, delivery_json,
                 delivery_required, delivery_status, delivered_at, created_at, updated_at
              ) VALUES (
                 ?1, 'cron', ?2, ?1, ?3, ?4,
@@ -1037,8 +1026,8 @@ mod tests {
                 run.started_at,
                 run.finished_at,
                 run.log_path,
-                run.summary,
-                run.notify_json,
+                run.run_note,
+                run.delivery_json,
                 if delivery_required { 1 } else { 0 },
                 delivery_status,
                 run.delivered_at,
@@ -1053,14 +1042,14 @@ mod tests {
         id: &str,
         started_at: &str,
         status: &str,
-        notify_json: &str,
+        delivery_json: &str,
         target_chat_id: i64,
     ) {
         let finished_at = (status == "success" || status == "failed").then_some(started_at);
         conn.execute(
             "INSERT INTO async_runs (
                 id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
-                status, started_at, finished_at, log_path, summary, notify_json,
+                status, started_at, finished_at, log_path, run_note, delivery_json,
                 delivery_required, delivery_status, delivered_at, created_at, updated_at
              ) VALUES (
                 ?1, 'background', NULL, ?1, ?2, NULL,
@@ -1073,7 +1062,7 @@ mod tests {
                 status,
                 started_at,
                 finished_at,
-                notify_json,
+                delivery_json,
             ],
         )
         .unwrap();
@@ -1092,8 +1081,8 @@ mod tests {
             &conn,
             TestCronRun {
                 id: "a",
-                summary: Some("sum1"),
-                notify_json: Some("{\"content\":\"first\"}"),
+                run_note: Some("sum1"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"first\"}"),
                 ..Default::default()
             },
         );
@@ -1103,8 +1092,8 @@ mod tests {
                 id: "b",
                 started_at: "2026-01-01T00:05:00Z",
                 finished_at: Some("2026-01-01T00:06:00Z"),
-                summary: Some("sum2"),
-                notify_json: Some("{\"content\":\"second\"}"),
+                run_note: Some("sum2"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"second\"}"),
                 ..Default::default()
             },
         );
@@ -1119,8 +1108,8 @@ mod tests {
             &conn,
             TestCronRun {
                 id: "a",
-                summary: Some("sum1"),
-                notify_json: Some("{\"content\":\"first\"}"),
+                run_note: Some("sum1"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"first\"}"),
                 ..Default::default()
             },
         );
@@ -1130,8 +1119,8 @@ mod tests {
                 id: "b",
                 started_at: "2026-01-01T00:05:00Z",
                 finished_at: Some("2026-01-01T00:06:00Z"),
-                summary: Some("sum2"),
-                notify_json: Some("{\"content\":\"second\"}"),
+                run_note: Some("sum2"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"second\"}"),
                 ..Default::default()
             },
         );
@@ -1144,13 +1133,30 @@ mod tests {
     }
 
     #[test]
-    fn fetch_pending_skips_null_notify() {
+    fn fetch_pending_skips_null_delivery() {
         let (_dir, conn) = setup_db();
         insert_async_cron_run(
             &conn,
             TestCronRun {
                 id: "a",
-                summary: Some("silent"),
+                run_note: Some("silent"),
+                ..Default::default()
+            },
+        );
+        assert!(fetch_pending(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn fetch_pending_ignores_silent_delivery_decision() {
+        let (_dir, conn) = setup_db();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "silent",
+                run_note: Some("no changes"),
+                delivery_json: Some("{\"kind\":\"silent\",\"reason\":\"No changes\"}"),
+                delivery_required: Some(false),
+                delivery_status: Some("none"),
                 ..Default::default()
             },
         );
@@ -1164,7 +1170,7 @@ mod tests {
             &conn,
             TestCronRun {
                 id: "a",
-                notify_json: Some("{\"content\":\"done\"}"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"done\"}"),
                 delivered_at: Some("2026-01-01T00:10:00Z"),
                 delivery_status: Some("delivered"),
                 ..Default::default()
@@ -1180,7 +1186,7 @@ mod tests {
             &conn,
             TestCronRun {
                 id: "silent",
-                notify_json: Some("{\"content\":\"silent\"}"),
+                delivery_json: Some("{\"kind\":\"silent\",\"reason\":\"quiet\"}"),
                 delivery_required: Some(false),
                 delivery_status: Some("none"),
                 ..Default::default()
@@ -1192,7 +1198,7 @@ mod tests {
                 id: "pending",
                 started_at: "2026-01-01T00:05:00Z",
                 finished_at: Some("2026-01-01T00:06:00Z"),
-                notify_json: Some("{\"content\":\"deliver\"}"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"deliver\"}"),
                 ..Default::default()
             },
         );
@@ -1210,8 +1216,8 @@ mod tests {
             &conn,
             TestCronRun {
                 id: "a",
-                summary: Some("sum1"),
-                notify_json: Some("{\"content\":\"old\"}"),
+                run_note: Some("sum1"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"old\"}"),
                 ..Default::default()
             },
         );
@@ -1221,8 +1227,8 @@ mod tests {
                 id: "b",
                 started_at: "2026-01-01T00:05:00Z",
                 finished_at: Some("2026-01-01T00:06:00Z"),
-                summary: Some("sum2"),
-                notify_json: Some("{\"content\":\"new\"}"),
+                run_note: Some("sum2"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"new\"}"),
                 ..Default::default()
             },
         );
@@ -1254,7 +1260,7 @@ mod tests {
             &conn,
             TestCronRun {
                 id: "a",
-                notify_json: Some("{\"content\":\"x\"}"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
                 ..Default::default()
             },
         );
@@ -1263,7 +1269,7 @@ mod tests {
             TestCronRun {
                 id: "b",
                 job_name: "job2",
-                notify_json: Some("{\"content\":\"y\"}"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"y\"}"),
                 ..Default::default()
             },
         );
@@ -1279,8 +1285,8 @@ mod tests {
             &conn,
             TestCronRun {
                 id: "a",
-                summary: Some("sum1"),
-                notify_json: Some("{\"content\":\"old\"}"),
+                run_note: Some("sum1"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"old\"}"),
                 delivery_status: Some("pending"),
                 ..Default::default()
             },
@@ -1291,8 +1297,8 @@ mod tests {
                 id: "b",
                 started_at: "2026-01-01T00:05:00Z",
                 finished_at: Some("2026-01-01T00:06:00Z"),
-                summary: Some("sum2"),
-                notify_json: Some("{\"content\":\"new\"}"),
+                run_note: Some("sum2"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"new\"}"),
                 delivery_status: Some("pending"),
                 ..Default::default()
             },
@@ -1317,8 +1323,8 @@ mod tests {
             id: "abc".into(),
             kind: "cron".into(),
             producer_ref: Some("health-check".into()),
-            notify_json: r#"{"content":"BTC up 2%"}"#.into(),
-            summary: "Checked 5 pairs".into(),
+            delivery_json: r#"{"kind":"notify","content":"BTC up 2%"}"#.into(),
+            run_note: "Checked 5 pairs".into(),
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,
@@ -1343,8 +1349,8 @@ mod tests {
             id: "abc".into(),
             kind: "cron".into(),
             producer_ref: Some("job1".into()),
-            notify_json: r#"{"content":"hello"}"#.into(),
-            summary: "done".into(),
+            delivery_json: r#"{"kind":"notify","content":"hello"}"#.into(),
+            run_note: "done".into(),
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,
@@ -1361,8 +1367,9 @@ mod tests {
             id: "r1".into(),
             kind: "cron".into(),
             producer_ref: Some("watcher".into()),
-            notify_json: r#"{"content":"Partial data fetched then hit budget"}"#.into(),
-            summary: "failed".into(),
+            delivery_json: r#"{"kind":"notify","content":"Partial data fetched then hit budget"}"#
+                .into(),
+            run_note: "failed".into(),
             status: "failed".into(),
             target_chat_id: None,
             target_thread_id: None,
@@ -1378,8 +1385,8 @@ mod tests {
             id: "r2".into(),
             kind: "cron".into(),
             producer_ref: Some("watcher".into()),
-            notify_json: r#"{"content":"BTC up 2%"}"#.into(),
-            summary: "ok".into(),
+            delivery_json: r#"{"kind":"notify","content":"BTC up 2%"}"#.into(),
+            run_note: "ok".into(),
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,
@@ -1389,13 +1396,33 @@ mod tests {
     }
 
     #[test]
+    fn format_async_yaml_rejects_silent_delivery_json() {
+        let pending = PendingAsyncResult {
+            id: "r-silent".into(),
+            kind: "cron".into(),
+            producer_ref: Some("watcher".into()),
+            delivery_json: r#"{"kind":"silent","reason":"No changes"}"#.into(),
+            run_note: "quiet".into(),
+            status: "success".into(),
+            target_chat_id: None,
+            target_thread_id: None,
+        };
+        let err = format_async_yaml(&pending, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("not a notify decision"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn format_async_yaml_background_includes_background_instruction_and_content() {
         let pending = PendingAsyncResult {
             id: "bg-1".into(),
             kind: "background".into(),
             producer_ref: None,
-            notify_json: r#"{"content":"Finished the answer in background"}"#.into(),
-            summary: "background summary".into(),
+            delivery_json: r#"{"kind":"notify","content":"Finished the answer in background"}"#
+                .into(),
+            run_note: "background summary".into(),
             status: "success".into(),
             target_chat_id: Some(-100),
             target_thread_id: None,
@@ -1415,8 +1442,8 @@ mod tests {
             id: "bg-2".into(),
             kind: "background".into(),
             producer_ref: Some("custom-bg".into()),
-            notify_json: r#"{"content":"Background work failed"}"#.into(),
-            summary: "background failed".into(),
+            delivery_json: r#"{"kind":"notify","content":"Background work failed"}"#.into(),
+            run_note: "background failed".into(),
             status: "failed".into(),
             target_chat_id: Some(-100),
             target_thread_id: None,
@@ -1471,7 +1498,7 @@ mod tests {
                 job_name: "one-shot",
                 started_at: "2026-05-05T12:36:00Z",
                 finished_at: Some("2026-05-05T12:41:00Z"),
-                notify_json: Some("{\"content\":\"x\"}"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
                 target_chat_id: Some(-4996137249),
                 ..Default::default()
             },
@@ -1498,7 +1525,7 @@ mod tests {
             &conn,
             TestCronRun {
                 id: "a",
-                notify_json: Some("{\"content\":\"x\"}"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
                 target_chat_id: Some(-555),
                 target_thread_id: Some(9),
                 ..Default::default()
@@ -1517,7 +1544,7 @@ mod tests {
             TestCronRun {
                 id: "a",
                 job_name: "legacy",
-                notify_json: Some("{\"content\":\"x\"}"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
                 ..Default::default()
             },
         );
@@ -1534,7 +1561,7 @@ mod tests {
             TestCronRun {
                 id: "a",
                 job_name: "legacy",
-                notify_json: Some("{\"content\":\"x\"}"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
                 ..Default::default()
             },
         );
@@ -1554,7 +1581,7 @@ mod tests {
             TestCronRun {
                 id: "zero-target",
                 job_name: "targetless",
-                notify_json: Some("{\"content\":\"x\"}"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
                 target_chat_id: Some(0),
                 ..Default::default()
             },
@@ -1577,7 +1604,7 @@ mod tests {
             TestCronRun {
                 id: "a",
                 job_name: "agenda",
-                notify_json: Some("{\"content\":\"x\"}"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
                 target_chat_id: Some(-777),
                 ..Default::default()
             },
@@ -1598,7 +1625,7 @@ mod tests {
             TestCronRun {
                 id: "a",
                 job_name: "agenda",
-                notify_json: Some("{\"content\":\"x\"}"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
                 target_chat_id: Some(-200),
                 target_thread_id: Some(5),
                 ..Default::default()
@@ -1651,8 +1678,8 @@ mod tests {
             &conn,
             TestCronRun {
                 id: "a",
-                summary: Some("sum1"),
-                notify_json: Some("{\"content\":\"x\"}"),
+                run_note: Some("sum1"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
                 target_chat_id: Some(-100),
                 ..Default::default()
             },
@@ -1663,8 +1690,8 @@ mod tests {
                 id: "b",
                 started_at: "2026-01-01T00:05:00Z",
                 finished_at: Some("2026-01-01T00:06:00Z"),
-                summary: Some("sum2"),
-                notify_json: Some("{\"content\":\"y\"}"),
+                run_note: Some("sum2"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"y\"}"),
                 target_chat_id: Some(-100),
                 ..Default::default()
             },
@@ -1683,7 +1710,7 @@ mod tests {
             "bg-old",
             "2026-01-01T00:00:00Z",
             "success",
-            "{\"content\":\"old\"}",
+            "{\"kind\":\"notify\",\"content\":\"old\"}",
             -100,
         );
         insert_async_background_run(
@@ -1691,7 +1718,7 @@ mod tests {
             "bg-new",
             "2026-01-01T00:05:00Z",
             "success",
-            "{\"content\":\"new\"}",
+            "{\"kind\":\"notify\",\"content\":\"new\"}",
             -100,
         );
 

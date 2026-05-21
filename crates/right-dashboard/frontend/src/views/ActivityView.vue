@@ -129,12 +129,12 @@ function cronStatus(cron: CronCard): string {
         </dl>
 
         <section class="text-block">
-          <h3>Summary</h3>
-          <p>{{ selectedRun.summary || selectedRun.no_notify_reason || 'No summary' }}</p>
+          <h3>Run note</h3>
+          <p>{{ selectedRun.run_note || 'No run note' }}</p>
         </section>
-        <section v-if="notifyText(selectedRun.notify_json)" class="text-block">
-          <h3>Notify</h3>
-          <pre>{{ notifyText(selectedRun.notify_json) }}</pre>
+        <section v-if="notifyText(selectedRun.delivery)" class="text-block">
+          <h3>Delivery</h3>
+          <pre>{{ notifyText(selectedRun.delivery) }}</pre>
         </section>
         <section class="text-block">
           <h3>Log</h3>
