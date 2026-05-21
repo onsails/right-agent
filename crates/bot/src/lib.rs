@@ -270,6 +270,28 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     config.learning.warn_on_deprecated(&args.agent);
 
+    if !config.learning.background_review_enabled {
+        match right_db::open_connection(&agent_dir, false) {
+            Ok(conn) => match crate::learning_episode::has_recent_legacy_activity(&conn) {
+                Ok(true) => {
+                    tracing::warn!(
+                        "{}",
+                        crate::learning_episode::deprecation_warn_message(&args.agent)
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    agent = %args.agent,
+                    "deprecation activity check failed: {e:#}"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                agent = %args.agent,
+                "deprecation activity check could not open data.db: {e:#}"
+            ),
+        }
+    }
+
     // Load (or migrate from legacy) the bot-managed allowlist, and spawn a
     // notify-based watcher so external edits hot-reload into the in-memory
     // handle without requiring a bot restart.
