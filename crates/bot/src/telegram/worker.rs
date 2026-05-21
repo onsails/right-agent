@@ -2834,6 +2834,7 @@ async fn run_background_learned_skill_review(
     Ok((report, notice))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn record_successful_background_review<F, Fut, E>(
     agent_db_dir: &Path,
     agent_dir: &Path,

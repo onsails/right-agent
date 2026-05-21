@@ -2898,6 +2898,7 @@ dependencies = [
  "miette",
  "serde",
  "serde-saphyr",
+ "tracing",
 ]
 
 [[package]]
@@ -3003,6 +3004,7 @@ dependencies = [
  "chrono",
  "hmac",
  "include_dir",
+ "right-agent",
  "right-db",
  "rusqlite",
  "serde",

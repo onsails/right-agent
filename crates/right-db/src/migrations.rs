@@ -1348,6 +1348,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::type_complexity)]
     fn v23_migrates_cron_runs_to_async_runs() {
         let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_version(&mut conn, 21).unwrap();
