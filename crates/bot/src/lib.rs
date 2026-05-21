@@ -267,6 +267,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             stt: Default::default(),
         });
 
+    config.learning.warn_on_deprecated(&args.agent);
+
     // Load (or migrate from legacy) the bot-managed allowlist, and spawn a
     // notify-based watcher so external edits hot-reload into the in-memory
     // handle without requiring a bot restart.

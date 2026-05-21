@@ -178,8 +178,11 @@ backoff_seconds: 30
     fn learning_config_defaults_when_missing() {
         let cfg: AgentConfig = serde_saphyr::from_str("restart: never\n").unwrap();
         assert_eq!(cfg.learning.episode_selector_model, None);
-        assert_eq!(cfg.learning.episode_selector_max_budget_usd, 0.10);
+        assert_eq!(cfg.learning.episode_selector_max_budget_usd, None);
         assert_eq!(cfg.learning.episode_settle_seconds, 90);
+        assert!((cfg.learning.max_daily_budget_usd - 5.00).abs() < f64::EPSILON);
+        assert_eq!(cfg.learning.circuit_failure_threshold, 5);
+        assert_eq!(cfg.learning.circuit_cooldown_minutes, 60);
     }
 
     #[test]
@@ -190,22 +193,53 @@ backoff_seconds: 30
             cfg.learning.episode_selector_model.as_deref(),
             Some("claude-sonnet-4-6")
         );
-        assert_eq!(cfg.learning.episode_selector_max_budget_usd, 0.25);
+        assert_eq!(cfg.learning.episode_selector_max_budget_usd, Some(0.25));
         assert_eq!(cfg.learning.episode_settle_seconds, 180);
     }
 
     #[test]
-    fn learning_config_rejects_zero_budget() {
-        let yaml = "learning:\n  episode_selector_max_budget_usd: 0\n";
+    fn learning_config_rejects_zero_daily_budget() {
+        let yaml = "learning:\n  max_daily_budget_usd: 0\n";
         let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
     }
 
     #[test]
-    fn learning_config_rejects_negative_budget() {
-        let yaml = "learning:\n  episode_selector_max_budget_usd: -0.01\n";
+    fn learning_config_rejects_negative_daily_budget() {
+        let yaml = "learning:\n  max_daily_budget_usd: -1.0\n";
         let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn learning_config_rejects_zero_failure_threshold() {
+        let yaml = "learning:\n  circuit_failure_threshold: 0\n";
+        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn learning_config_rejects_zero_circuit_cooldown_minutes() {
+        let yaml = "learning:\n  circuit_cooldown_minutes: 0\n";
+        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn learning_config_accepts_yaml_with_overrides() {
+        let yaml = "learning:\n  max_daily_budget_usd: 12.5\n  circuit_failure_threshold: 8\n  circuit_cooldown_minutes: 30\n";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!((cfg.learning.max_daily_budget_usd - 12.5).abs() < f64::EPSILON);
+        assert_eq!(cfg.learning.circuit_failure_threshold, 8);
+        assert_eq!(cfg.learning.circuit_cooldown_minutes, 30);
+    }
+
+    #[test]
+    fn learning_config_accepts_legacy_episode_selector_max_budget_usd() {
+        let yaml = "learning:\n  episode_selector_max_budget_usd: 0.10\n";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(cfg.learning.episode_selector_max_budget_usd, Some(0.10));
+        assert!((cfg.learning.max_daily_budget_usd - 5.00).abs() < f64::EPSILON);
     }
 
     #[test]
