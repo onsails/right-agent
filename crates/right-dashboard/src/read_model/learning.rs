@@ -171,6 +171,43 @@ pub fn learning_overview(
     })
 }
 
+pub fn signals_by_source_24h(
+    conn: &Connection,
+    agent: &str,
+    now_utc: &str,
+) -> Result<crate::api_types::SignalsBySourceResponse, ReadModelError> {
+    let now = DateTime::parse_from_rfc3339(now_utc)?.with_timezone(&Utc);
+    let cutoff = (now - Duration::hours(24)).to_rfc3339();
+
+    let reply_field: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM skill_nudge_signals \
+         WHERE agent_name = ?1 AND accepted_at >= ?2 AND source = 'reply_field'",
+        params![agent, cutoff.as_str()],
+        |r| r.get(0),
+    )?;
+    let fork_probe: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM skill_nudge_signals \
+         WHERE agent_name = ?1 AND accepted_at >= ?2 AND source = 'fork_probe'",
+        params![agent, cutoff.as_str()],
+        |r| r.get(0),
+    )?;
+    let background_review: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM skill_review_reports \
+         WHERE agent_name = ?1 AND created_at >= ?2 \
+           AND status IN ('create_candidate','update_candidate')",
+        params![agent, cutoff.as_str()],
+        |r| r.get(0),
+    )?;
+
+    Ok(crate::api_types::SignalsBySourceResponse {
+        agent: agent.to_owned(),
+        window_label: "24h".to_owned(),
+        reply_field,
+        fork_probe,
+        background_review,
+    })
+}
+
 fn confidence_count(
     conn: &Connection,
     agent: &str,
@@ -1192,5 +1229,55 @@ mod tests {
         .unwrap();
 
         assert!(learning_report_detail(&conn, "right", 11).is_err());
+    }
+
+    #[test]
+    fn signals_by_source_24h_returns_three_buckets_with_correct_counts() {
+        let (_dir, conn) = fixture();
+
+        let now = "2026-05-21T12:00:00Z";
+        // 2 reply_field, 1 fork_probe, all within 24h.
+        for (inv, src) in [
+            ("inv-a", "reply_field"),
+            ("inv-b", "reply_field"),
+            ("inv-c", "fork_probe"),
+        ] {
+            conn.execute(
+                "INSERT INTO skill_nudge_signals \
+                 (invocation_id, agent_name, root_session_id, chat_id, thread_id, signal_kind, payload_json, accepted_at, source) \
+                 VALUES (?1, 'right', 's', 1, 0, 'learning', '{}', ?2, ?3)",
+                rusqlite::params![inv, "2026-05-21T11:00:00Z", src],
+            )
+            .unwrap();
+        }
+        // 1 background-review-equivalent report within 24h.
+        conn.execute(
+            "INSERT INTO skill_review_reports \
+             (agent_name, source_invocation_id, root_session_id, chat_id, thread_id, trigger_kind, status, confidence, candidate_skill_name, candidate_summary, evidence_refs_json, review_output_json, telegram_notified, created_at) \
+             VALUES ('right', 'inv-x', 's', 1, 0, 'learning_signal', 'create_candidate', 'medium', 'rightx-foo', NULL, '[]', '{}', 0, '2026-05-21T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let result = signals_by_source_24h(&conn, "right", now).unwrap();
+        assert_eq!(result.reply_field, 2);
+        assert_eq!(result.fork_probe, 1);
+        assert_eq!(result.background_review, 1);
+    }
+
+    #[test]
+    fn signals_by_source_24h_window_excludes_old_rows() {
+        let (_dir, conn) = fixture();
+
+        conn.execute(
+            "INSERT INTO skill_nudge_signals \
+             (invocation_id, agent_name, root_session_id, chat_id, thread_id, signal_kind, payload_json, accepted_at, source) \
+             VALUES ('old', 'right', 's', 1, 0, 'learning', '{}', '2026-05-19T00:00:00Z', 'fork_probe')",
+            [],
+        )
+        .unwrap();
+
+        let result = signals_by_source_24h(&conn, "right", "2026-05-21T12:00:00Z").unwrap();
+        assert_eq!(result.fork_probe, 0);
     }
 }
