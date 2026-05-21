@@ -45,6 +45,46 @@ pub fn insert_reflection_cron(
     insert_row(conn, b, "reflection", None, None, Some(job_name))
 }
 
+/// Insert a row for a Stage 2 learning-episode selector invocation.
+/// `episode_id` is stored in `job_name` so the dashboard can link the usage
+/// row back to the episode detail view without a separate column.
+pub fn insert_learning_selector(
+    conn: &Connection,
+    b: &UsageBreakdown,
+    episode_id: i64,
+) -> Result<(), UsageError> {
+    let job = episode_id.to_string();
+    insert_row(conn, b, "learning_selector", None, None, Some(job.as_str()))
+}
+
+/// Insert a row for a Stage 2 learning-episode reviewer invocation.
+/// `episode_id` is stored in `job_name` (see `insert_learning_selector`).
+pub fn insert_learning_reviewer(
+    conn: &Connection,
+    b: &UsageBreakdown,
+    episode_id: i64,
+) -> Result<(), UsageError> {
+    let job = episode_id.to_string();
+    insert_row(conn, b, "learning_reviewer", None, None, Some(job.as_str()))
+}
+
+/// Insert a row for a worker-side learned-skill review invocation.
+pub fn insert_learning_skill_review(
+    conn: &Connection,
+    b: &UsageBreakdown,
+    chat_id: i64,
+    thread_id: i64,
+) -> Result<(), UsageError> {
+    insert_row(
+        conn,
+        b,
+        "learning_skill_review",
+        Some(chat_id),
+        Some(thread_id),
+        None,
+    )
+}
+
 fn insert_row(
     conn: &Connection,
     b: &UsageBreakdown,
@@ -237,5 +277,54 @@ mod tests {
         assert_eq!(source, "reflection");
         assert_eq!(chat_id, None);
         assert_eq!(job_name, Some("my-job".to_string()));
+    }
+
+    #[test]
+    fn insert_learning_selector_writes_row_with_correct_source_and_job_name() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_learning_selector(&conn, &sample_breakdown(), 42).unwrap();
+        let (source, job_name): (String, Option<String>) = conn
+            .query_row(
+                "SELECT source, job_name FROM usage_events LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "learning_selector");
+        assert_eq!(job_name.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn insert_learning_reviewer_writes_row_with_correct_source_and_job_name() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_learning_reviewer(&conn, &sample_breakdown(), 99).unwrap();
+        let (source, job_name): (String, Option<String>) = conn
+            .query_row(
+                "SELECT source, job_name FROM usage_events LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "learning_reviewer");
+        assert_eq!(job_name.as_deref(), Some("99"));
+    }
+
+    #[test]
+    fn insert_learning_skill_review_writes_row_with_correct_source_chat_thread() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_learning_skill_review(&conn, &sample_breakdown(), -1001, 7).unwrap();
+        let (source, chat_id, thread_id): (String, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT source, chat_id, thread_id FROM usage_events LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "learning_skill_review");
+        assert_eq!(chat_id, Some(-1001));
+        assert_eq!(thread_id, Some(7));
     }
 }
