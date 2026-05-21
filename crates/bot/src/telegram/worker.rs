@@ -52,6 +52,7 @@ const MEDIA_GROUP_HARD_CAP_MS: u64 = 2500;
 /// Maximum time to wait for a CC subprocess to complete.
 const CC_TIMEOUT_SECS: u64 = 600;
 
+#[allow(dead_code)] // TODO Task 10: remove after wiring usage events
 const LEARNED_SKILL_REVIEW_DAILY_LIMIT: i64 = 12;
 const BACKGROUND_REVIEW_MAX_BUDGET_USD: f64 = 0.50;
 const BACKGROUND_REVIEW_MAX_TURNS: u32 = 8;
@@ -2232,6 +2233,7 @@ async fn remove_sandbox_progress_config_file(
     }
 }
 
+#[allow(dead_code)] // TODO Task 10: remove after wiring usage events
 fn review_today_utc() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
@@ -2369,14 +2371,14 @@ fn maybe_spawn_learned_skill_review(
         has_learning_accepted,
         has_skill_issue_accepted,
     );
-    let today = review_today_utc();
+    let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let gate = match try_mark_review_started(
         conn,
         &ctx.agent_name,
         ReviewGateInput {
             signal_trigger,
-            today: &today,
-            daily_limit: LEARNED_SKILL_REVIEW_DAILY_LIMIT,
+            now_utc: &now_utc,
+            daily_budget_usd: ctx.learning.max_daily_budget_usd,
         },
     ) {
         Ok(gate) => gate,

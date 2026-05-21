@@ -22,6 +22,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[allow(dead_code)] // TODO Task 9: remove after wiring usage events
 const LEARNING_EPISODE_REVIEW_DAILY_LIMIT: i64 = 12;
 const EPISODE_SELECTOR_TIMEOUT_SECS: u64 = 120;
 const EPISODE_REVIEWER_TIMEOUT_SECS: u64 = 180;
@@ -592,7 +593,6 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now();
     let now_str = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let today = now.format("%Y-%m-%d").to_string();
     let conn = right_db::open_connection(&runtime.agent_db_dir, false)
         .with_context(|| format!("open {} data.db", runtime.agent_name))?;
     let Some(episode) =
@@ -606,8 +606,8 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
         &runtime.agent_name,
         ReviewGateInput {
             signal_trigger: review_trigger_for_episode(episode.seed_trigger_kind),
-            today: &today,
-            daily_limit: LEARNING_EPISODE_REVIEW_DAILY_LIMIT,
+            now_utc: &now_str,
+            daily_budget_usd: runtime.learning.max_daily_budget_usd,
         },
     ) {
         Ok(gate) => gate,
@@ -621,7 +621,9 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
     match gate {
         ReviewGateDecision::Start(_) => {}
         ReviewGateDecision::Skip(
-            ReviewSkipReason::AlreadyRunning | ReviewSkipReason::DailyLimit,
+            ReviewSkipReason::AlreadyRunning
+            | ReviewSkipReason::DailyBudget
+            | ReviewSkipReason::CircuitOpen,
         ) => {
             requeue_episode_or_fail(
                 &conn,
@@ -1593,7 +1595,7 @@ fn requeue_episode_or_fail(
         Ok(()) => Ok(()),
         Err(rusqlite::Error::QueryReturnedNoRows) => {
             // Row moved out of 'selecting' under us. This helper is used after
-            // Skip(AlreadyRunning/DailyLimit), so we do not own the review gate
+            // Skip(AlreadyRunning/DailyBudget/CircuitOpen), so we do not own the review gate
             // and must leave it untouched.
             tracing::debug!(
                 episode_id,

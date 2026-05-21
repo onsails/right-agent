@@ -167,17 +167,20 @@ pub struct SkillReviewReport {
     pub telegram_notified: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReviewGateInput<'a> {
     pub signal_trigger: Option<ReviewTriggerKind>,
-    pub today: &'a str,
-    pub daily_limit: i64,
+    /// Current UTC time in RFC3339 strict format (e.g. "2026-05-21T03:14:15Z").
+    /// Used for the daily-budget date filter and the circuit-window comparison.
+    pub now_utc: &'a str,
+    pub daily_budget_usd: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewSkipReason {
     AlreadyRunning,
-    DailyLimit,
+    CircuitOpen,
+    DailyBudget,
     BelowThreshold,
 }
 
@@ -471,24 +474,9 @@ pub fn review_gate_decision(
 ) -> Result<ReviewGateDecision, rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
     ensure_nudge_state(&tx, agent_name)?;
-    roll_over_daily_count_if_stale(&tx, agent_name, input.today)?;
     let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
     tx.commit()?;
     Ok(decision)
-}
-
-fn roll_over_daily_count_if_stale(
-    tx: &rusqlite::Transaction<'_>,
-    agent_name: &str,
-    today: &str,
-) -> Result<(), rusqlite::Error> {
-    tx.execute(
-        "UPDATE skill_nudge_state \
-         SET daily_review_date = ?2, daily_review_count = 0 \
-         WHERE agent_name = ?1 AND (daily_review_date IS NULL OR daily_review_date <> ?2)",
-        rusqlite::params![agent_name, today],
-    )?;
-    Ok(())
 }
 
 fn review_gate_decision_in_tx(
@@ -496,31 +484,58 @@ fn review_gate_decision_in_tx(
     agent_name: &str,
     input: ReviewGateInput<'_>,
 ) -> Result<ReviewGateDecision, rusqlite::Error> {
-    let row: (i64, i64, i64, Option<String>, i64) = tx.query_row(
-        "SELECT review_running, daily_review_count, tool_iters_since_review, daily_review_date, creation_review_interval \
-         FROM skill_nudge_state WHERE agent_name = ?1",
+    let (review_running, circuit_open_until, tool_iters, interval): (
+        i64,
+        Option<String>,
+        i64,
+        i64,
+    ) = tx.query_row(
+        "SELECT review_running, review_circuit_open_until, \
+                    tool_iters_since_review, creation_review_interval \
+             FROM skill_nudge_state WHERE agent_name = ?1",
         [agent_name],
-        |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-            ))
-        },
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
 
-    let (review_running, mut daily_count, tool_iters, daily_date, interval) = row;
-    if daily_date.as_deref() != Some(input.today) {
-        daily_count = 0;
-    }
     if review_running != 0 {
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::AlreadyRunning));
     }
-    if daily_count >= input.daily_limit {
-        return Ok(ReviewGateDecision::Skip(ReviewSkipReason::DailyLimit));
+    if let Some(until) = circuit_open_until {
+        if until.as_str() > input.now_utc {
+            return Ok(ReviewGateDecision::Skip(ReviewSkipReason::CircuitOpen));
+        }
+        // Window expired. Clear both fields so the next attempt has a fresh
+        // failure budget. Otherwise consecutive_review_failures stays elevated
+        // and the next failure immediately reopens the circuit.
+        tx.execute(
+            "UPDATE skill_nudge_state SET \
+                review_circuit_open_until = NULL, \
+                consecutive_review_failures = 0 \
+             WHERE agent_name = ?1",
+            [agent_name],
+        )?;
     }
+
+    // Daily budget check: SUM(total_cost_usd) for today UTC across learning sources.
+    let today_start = format!("{}T00:00:00Z", &input.now_utc[..10]);
+    let placeholders = (0..crate::usage::LEARNING_SOURCES.len())
+        .map(|i| format!("?{}", i + 2))
+        .collect::<Vec<_>>()
+        .join(",");
+    let query = format!(
+        "SELECT COALESCE(SUM(total_cost_usd), 0.0) FROM usage_events \
+         WHERE ts >= ?1 AND source IN ({placeholders})"
+    );
+    let mut stmt = tx.prepare(&query)?;
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&today_start];
+    for source in crate::usage::LEARNING_SOURCES {
+        params.push(source);
+    }
+    let spent: f64 = stmt.query_row(params.as_slice(), |r| r.get(0))?;
+    if spent >= input.daily_budget_usd {
+        return Ok(ReviewGateDecision::Skip(ReviewSkipReason::DailyBudget));
+    }
+
     if let Some(trigger) = input.signal_trigger {
         return Ok(ReviewGateDecision::Start(trigger));
     }
@@ -539,7 +554,6 @@ pub fn try_mark_review_started(
 ) -> Result<ReviewGateDecision, rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
     ensure_nudge_state(&tx, agent_name)?;
-    roll_over_daily_count_if_stale(&tx, agent_name, input.today)?;
 
     let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
     let ReviewGateDecision::Start(trigger) = decision else {
@@ -547,22 +561,20 @@ pub fn try_mark_review_started(
         return Ok(decision);
     };
 
+    // Only flip `review_running`. The daily-budget guard is enforced by the
+    // SUM query above — no counter to increment.
     let updated = tx.execute(
         "UPDATE skill_nudge_state \
-         SET review_running = 1, \
-             daily_review_date = ?2, \
-             daily_review_count = daily_review_count + 1 \
-         WHERE agent_name = ?1 \
-           AND review_running = 0 \
-           AND daily_review_date = ?2 \
-           AND daily_review_count < ?3",
-        rusqlite::params![agent_name, input.today, input.daily_limit,],
+         SET review_running = 1 \
+         WHERE agent_name = ?1 AND review_running = 0",
+        [agent_name],
     )?;
     if updated == 1 {
         tx.commit()?;
         return Ok(ReviewGateDecision::Start(trigger));
     }
 
+    // Lost the race — another caller marked it running. Re-read.
     let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
     tx.commit()?;
     Ok(decision)
@@ -698,9 +710,28 @@ mod tests {
     fn review_gate_input(signal_trigger: Option<ReviewTriggerKind>) -> ReviewGateInput<'static> {
         ReviewGateInput {
             signal_trigger,
-            today: "2026-05-18",
-            daily_limit: 12,
+            now_utc: "2026-05-18T12:00:00Z",
+            daily_budget_usd: 5.00,
         }
+    }
+
+    fn insert_usage(conn: &rusqlite::Connection, ts: &str, source: &str, cost: f64) {
+        conn.execute(
+            "INSERT INTO usage_events (
+                ts, source, chat_id, thread_id, job_name, session_uuid,
+                total_cost_usd, num_turns, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, web_search_requests,
+                web_fetch_requests, model_usage_json, api_key_source
+             ) VALUES (?1, ?2, NULL, NULL, NULL, 's', ?3, 1, 0, 0, 0, 0, 0, 0, '{}', 'none')",
+            rusqlite::params![ts, source, cost],
+        )
+        .unwrap();
+    }
+
+    fn ensure_agent_nudge_state(conn: &rusqlite::Connection, agent: &str) {
+        let tx = conn.unchecked_transaction().unwrap();
+        ensure_nudge_state(&tx, agent).unwrap();
+        tx.commit().unwrap();
     }
 
     #[test]
@@ -764,8 +795,8 @@ mod tests {
             "right",
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::LearningSignal),
-                today: "2026-05-18",
-                daily_limit: 12,
+                now_utc: "2026-05-18T12:00:00Z",
+                daily_budget_usd: 5.00,
             },
         )
         .unwrap();
@@ -779,8 +810,8 @@ mod tests {
             "right",
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::SkillIssueSignal),
-                today: "2026-05-18",
-                daily_limit: 12,
+                now_utc: "2026-05-18T12:00:00Z",
+                daily_budget_usd: 5.00,
             },
         )
         .unwrap();
@@ -799,8 +830,8 @@ mod tests {
             "right",
             ReviewGateInput {
                 signal_trigger: None,
-                today: "2026-05-18",
-                daily_limit: 12,
+                now_utc: "2026-05-18T12:00:00Z",
+                daily_budget_usd: 5.00,
             },
         )
         .unwrap();
@@ -811,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn review_gate_blocks_running_and_daily_limit() {
+    fn review_gate_blocks_running() {
         let conn = conn();
         ensure_nudge_state(&conn, "right").unwrap();
 
@@ -825,8 +856,8 @@ mod tests {
             "right",
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::LearningSignal),
-                today: "2026-05-18",
-                daily_limit: 12,
+                now_utc: "2026-05-18T12:00:00Z",
+                daily_budget_usd: 5.00,
             },
         )
         .unwrap();
@@ -835,45 +866,24 @@ mod tests {
             ReviewGateDecision::Skip(ReviewSkipReason::AlreadyRunning)
         );
 
+        // Clearing review_running allows a start again.
         conn.execute(
-            "UPDATE skill_nudge_state SET review_running = 0, daily_review_count = 12, daily_review_date = '2026-05-18' \
-             WHERE agent_name='right'",
+            "UPDATE skill_nudge_state SET review_running = 0 WHERE agent_name='right'",
             [],
         )
         .unwrap();
-        let limited = review_gate_decision(
+        let started = review_gate_decision(
             &conn,
             "right",
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::LearningSignal),
-                today: "2026-05-18",
-                daily_limit: 12,
+                now_utc: "2026-05-18T12:00:00Z",
+                daily_budget_usd: 5.00,
             },
         )
         .unwrap();
         assert_eq!(
-            limited,
-            ReviewGateDecision::Skip(ReviewSkipReason::DailyLimit)
-        );
-
-        conn.execute(
-            "UPDATE skill_nudge_state SET daily_review_count = 0, last_review_at = '2026-05-18T12:05:00Z' \
-             WHERE agent_name='right'",
-            [],
-        )
-        .unwrap();
-        let recent_review = review_gate_decision(
-            &conn,
-            "right",
-            ReviewGateInput {
-                signal_trigger: Some(ReviewTriggerKind::LearningSignal),
-                today: "2026-05-18",
-                daily_limit: 12,
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            recent_review,
+            started,
             ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
         );
     }
@@ -893,8 +903,8 @@ mod tests {
             "right",
             ReviewGateInput {
                 signal_trigger: None,
-                today: "2026-05-18",
-                daily_limit: 12,
+                now_utc: "2026-05-18T12:00:00Z",
+                daily_budget_usd: 5.00,
             },
         )
         .unwrap();
@@ -1076,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn review_start_rechecks_running_and_daily_limit_after_stale_gate() {
+    fn review_start_rechecks_running_after_stale_gate() {
         let conn = conn();
         ensure_nudge_state(&conn, "right").unwrap();
         let stale_decision = review_gate_decision(
@@ -1106,31 +1116,22 @@ mod tests {
             ReviewGateDecision::Skip(ReviewSkipReason::AlreadyRunning)
         );
 
+        // After clearing running, a budget-within-limit signal starts.
         conn.execute(
-            "UPDATE skill_nudge_state SET review_running = 0, daily_review_count = 12, daily_review_date = '2026-05-18' \
-             WHERE agent_name='right'",
+            "UPDATE skill_nudge_state SET review_running = 0 WHERE agent_name='right'",
             [],
         )
         .unwrap();
-        let limited = try_mark_review_started(
+        let started = try_mark_review_started(
             &conn,
             "right",
             review_gate_input(Some(ReviewTriggerKind::LearningSignal)),
         )
         .unwrap();
         assert_eq!(
-            limited,
-            ReviewGateDecision::Skip(ReviewSkipReason::DailyLimit)
+            started,
+            ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
         );
-
-        let row: (i64, i64) = conn
-            .query_row(
-                "SELECT review_running, daily_review_count FROM skill_nudge_state WHERE agent_name='right'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(row, (0, 12));
     }
 
     #[test]
@@ -1139,8 +1140,8 @@ mod tests {
         ensure_nudge_state(&conn, "right").unwrap();
         let input = ReviewGateInput {
             signal_trigger: Some(ReviewTriggerKind::LearningSignal),
-            today: "2026-05-18",
-            daily_limit: 12,
+            now_utc: "2026-05-18T12:00:00Z",
+            daily_budget_usd: 5.00,
         };
 
         let stale_decision = review_gate_decision(&conn, "right", input).unwrap();
@@ -1161,104 +1162,14 @@ mod tests {
             ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
         );
 
-        let row: (i64, i64) = conn
+        let running: i64 = conn
             .query_row(
-                "SELECT review_running, daily_review_count FROM skill_nudge_state WHERE agent_name='right'",
+                "SELECT review_running FROM skill_nudge_state WHERE agent_name='right'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(row, (1, 1));
-    }
-
-    #[test]
-    fn review_gate_rolls_over_saturated_old_daily_count() {
-        let conn = conn();
-        ensure_nudge_state(&conn, "right").unwrap();
-        conn.execute(
-            "UPDATE skill_nudge_state SET daily_review_count = 12, daily_review_date = '2026-05-17' \
-             WHERE agent_name='right'",
-            [],
-        )
-        .unwrap();
-
-        let decision = review_gate_decision(
-            &conn,
-            "right",
-            review_gate_input(Some(ReviewTriggerKind::LearningSignal)),
-        )
-        .unwrap();
-        assert_eq!(
-            decision,
-            ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
-        );
-
-        let row: (i64, String) = conn
-            .query_row(
-                "SELECT daily_review_count, daily_review_date FROM skill_nudge_state WHERE agent_name='right'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(row, (0, "2026-05-18".to_owned()));
-    }
-
-    #[test]
-    fn review_start_increments_same_day_and_rollover_counts() {
-        let conn = conn();
-        ensure_nudge_state(&conn, "same-day").unwrap();
-        conn.execute(
-            "UPDATE skill_nudge_state SET daily_review_count = 2, daily_review_date = '2026-05-18' \
-             WHERE agent_name='same-day'",
-            [],
-        )
-        .unwrap();
-
-        let same_day = try_mark_review_started(
-            &conn,
-            "same-day",
-            review_gate_input(Some(ReviewTriggerKind::LearningSignal)),
-        )
-        .unwrap();
-        assert_eq!(
-            same_day,
-            ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
-        );
-        let same_day_row: (i64, String) = conn
-            .query_row(
-                "SELECT daily_review_count, daily_review_date FROM skill_nudge_state WHERE agent_name='same-day'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(same_day_row, (3, "2026-05-18".to_owned()));
-
-        ensure_nudge_state(&conn, "rollover").unwrap();
-        conn.execute(
-            "UPDATE skill_nudge_state SET daily_review_count = 7, daily_review_date = '2026-05-17' \
-             WHERE agent_name='rollover'",
-            [],
-        )
-        .unwrap();
-
-        let rollover = try_mark_review_started(
-            &conn,
-            "rollover",
-            review_gate_input(Some(ReviewTriggerKind::SkillIssueSignal)),
-        )
-        .unwrap();
-        assert_eq!(
-            rollover,
-            ReviewGateDecision::Start(ReviewTriggerKind::SkillIssueSignal)
-        );
-        let rollover_row: (i64, String) = conn
-            .query_row(
-                "SELECT daily_review_count, daily_review_date FROM skill_nudge_state WHERE agent_name='rollover'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(rollover_row, (1, "2026-05-18".to_owned()));
+        assert_eq!(running, 1);
     }
 
     #[test]
@@ -1334,15 +1245,14 @@ mod tests {
             assert_eq!(count, 1, "{agent_name} row should exist");
         }
 
-        let started: (i64, i64, String) = conn
+        let started: i64 = conn
             .query_row(
-                "SELECT review_running, daily_review_count, daily_review_date \
-                 FROM skill_nudge_state WHERE agent_name='start-missing'",
+                "SELECT review_running FROM skill_nudge_state WHERE agent_name='start-missing'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(started, (1, 1, "2026-05-18".to_owned()));
+        assert_eq!(started, 1);
 
         let finished: (i64, String, Option<String>) = conn
             .query_row(
@@ -1950,5 +1860,96 @@ mod tests {
         )
         .unwrap();
         assert!(invalid_observed_effect.is_none());
+    }
+
+    #[test]
+    fn gate_skips_when_daily_budget_exceeded() {
+        let conn = conn();
+        ensure_agent_nudge_state(&conn, "him");
+        insert_usage(&conn, "2026-05-21T01:00:00Z", "learning_selector", 2.50);
+        insert_usage(&conn, "2026-05-21T02:00:00Z", "learning_reviewer", 3.00);
+
+        let input = ReviewGateInput {
+            signal_trigger: Some(ReviewTriggerKind::EffortThreshold),
+            now_utc: "2026-05-21T03:00:00Z",
+            daily_budget_usd: 5.00,
+        };
+        let decision = try_mark_review_started(&conn, "him", input).unwrap();
+        assert_eq!(
+            decision,
+            ReviewGateDecision::Skip(ReviewSkipReason::DailyBudget)
+        );
+    }
+
+    #[test]
+    fn gate_ignores_non_learning_sources_and_yesterdays_spend() {
+        let conn = conn();
+        ensure_agent_nudge_state(&conn, "him");
+        insert_usage(&conn, "2026-05-20T23:59:00Z", "learning_selector", 10.00);
+        insert_usage(&conn, "2026-05-21T01:00:00Z", "interactive", 10.00);
+        insert_usage(&conn, "2026-05-21T02:00:00Z", "learning_selector", 1.00);
+
+        let input = ReviewGateInput {
+            signal_trigger: Some(ReviewTriggerKind::EffortThreshold),
+            now_utc: "2026-05-21T03:00:00Z",
+            daily_budget_usd: 5.00,
+        };
+        let decision = try_mark_review_started(&conn, "him", input).unwrap();
+        assert!(matches!(decision, ReviewGateDecision::Start(_)));
+    }
+
+    #[test]
+    fn gate_skips_when_circuit_open() {
+        let conn = conn();
+        ensure_agent_nudge_state(&conn, "him");
+        conn.execute(
+            "UPDATE skill_nudge_state SET review_circuit_open_until = ?1 WHERE agent_name = 'him'",
+            ["2026-05-21T04:00:00Z"],
+        )
+        .unwrap();
+
+        let input = ReviewGateInput {
+            signal_trigger: Some(ReviewTriggerKind::EffortThreshold),
+            now_utc: "2026-05-21T03:00:00Z",
+            daily_budget_usd: 5.00,
+        };
+        let decision = try_mark_review_started(&conn, "him", input).unwrap();
+        assert_eq!(
+            decision,
+            ReviewGateDecision::Skip(ReviewSkipReason::CircuitOpen)
+        );
+    }
+
+    #[test]
+    fn gate_clears_expired_circuit_and_resets_failure_count() {
+        let conn = conn();
+        ensure_agent_nudge_state(&conn, "him");
+        conn.execute(
+            "UPDATE skill_nudge_state SET \
+                review_circuit_open_until = '2026-05-21T02:30:00Z', \
+                consecutive_review_failures = 5 \
+             WHERE agent_name = 'him'",
+            [],
+        )
+        .unwrap();
+
+        let input = ReviewGateInput {
+            signal_trigger: Some(ReviewTriggerKind::EffortThreshold),
+            now_utc: "2026-05-21T03:00:00Z",
+            daily_budget_usd: 5.00,
+        };
+        let decision = try_mark_review_started(&conn, "him", input).unwrap();
+        assert!(matches!(decision, ReviewGateDecision::Start(_)));
+
+        let (open_until, count): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT review_circuit_open_until, consecutive_review_failures \
+                 FROM skill_nudge_state WHERE agent_name = 'him'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(open_until, None);
+        assert_eq!(count, 0);
     }
 }
