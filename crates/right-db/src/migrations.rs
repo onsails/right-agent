@@ -30,8 +30,10 @@ const V24_SCHEMA: &str = include_str!("sql/v24_learning_episodes.sql");
 const V25_SCHEMA: &str = include_str!("sql/v25_async_runs_delivery_decision.sql");
 #[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
 const V26_SCHEMA: &str = include_str!("sql/v26_skill_nudge_circuit_breaker.sql");
+#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
+const V27_SCHEMA: &str = include_str!("sql/v27_skill_nudge_signals_source.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 26;
+pub const LATEST_SCHEMA_VERSION: u32 = 27;
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -417,6 +419,28 @@ fn v26_skill_nudge_circuit_breaker(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
+/// v27: Add `source` column + index to `skill_nudge_signals`.
+///
+/// Idempotent — checks pragma_table_info before ALTER. SQLite has no
+/// `ADD COLUMN IF NOT EXISTS`. The CREATE INDEX uses `IF NOT EXISTS`.
+fn v27_skill_nudge_signals_source(tx: &Transaction) -> Result<(), HookError> {
+    let has_column: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('skill_nudge_signals') WHERE name = ?1",
+        ["source"],
+        |r| r.get(0),
+    )?;
+    if has_column == 0 {
+        tx.execute_batch(
+            "ALTER TABLE skill_nudge_signals ADD COLUMN source TEXT NOT NULL DEFAULT 'reply_field'",
+        )?;
+    }
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_skill_nudge_signals_source \
+         ON skill_nudge_signals(source)",
+    )?;
+    Ok(())
+}
+
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::LazyLock::new(|| {
     Migrations::new(vec![
         M::up(V1_SCHEMA),
@@ -445,6 +469,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up_with_hook("", v24_learning_episodes),
         M::up(V25_SCHEMA),
         M::up_with_hook("", v26_skill_nudge_circuit_breaker),
+        M::up_with_hook("", v27_skill_nudge_signals_source),
     ])
 });
 
@@ -2066,5 +2091,50 @@ continue background work',
             )
             .unwrap();
         assert_eq!(post_count_again, 2);
+    }
+
+    #[test]
+    fn v27_adds_source_column_to_skill_nudge_signals() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let has_column: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('skill_nudge_signals') WHERE name = ?1",
+                ["source"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 1, "source column must exist");
+        let not_null: i64 = conn
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('skill_nudge_signals') WHERE name = ?1",
+                ["source"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(not_null, 1, "source column must be NOT NULL");
+    }
+
+    #[test]
+    fn v27_is_idempotent_on_databases_already_at_v27() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        // Re-run by calling the migration registry again should not error.
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+    }
+
+    #[test]
+    fn v27_index_on_source_column_exists() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='index' AND name='idx_skill_nudge_signals_source'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "idx_skill_nudge_signals_source must exist");
     }
 }
