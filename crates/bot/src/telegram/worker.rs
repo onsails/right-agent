@@ -23,10 +23,10 @@ pub use crate::cc::worker_reply::{ReplyOutput, parse_reply_output};
 use crate::cc::worker_reply::{append_used_skill_receipts, should_accept_bootstrap};
 use crate::reflection::FailureKind;
 use right_agent::learned_skills::{
-    NudgeSignalKind, NudgeSignalRecord, ReviewGateDecision, ReviewGateInput, ReviewStatus,
-    ReviewTriggerKind, SkillReviewReport, clear_review_running, increment_turn_nudge_counters,
-    insert_skill_review_report, mark_review_finished, record_nudge_signal, select_reply_signal,
-    try_mark_review_started,
+    NudgeSignalKind, NudgeSignalRecord, NudgeSignalSource, ReviewGateDecision, ReviewGateInput,
+    ReviewStatus, ReviewTriggerKind, SkillReviewReport, clear_review_running,
+    increment_turn_nudge_counters, insert_skill_review_report, mark_review_finished,
+    record_nudge_signal, select_reply_signal, try_mark_review_started,
 };
 
 use super::session::{
@@ -4332,6 +4332,7 @@ async fn invoke_cc(
                             thread_id: Some(eff_thread_id),
                             signal_kind,
                             payload_json,
+                            source: NudgeSignalSource::ReplyField,
                         };
                         if let Err(e) = record_nudge_signal(&conn, &record) {
                             tracing::warn!(
