@@ -1180,7 +1180,14 @@ pub fn spawn_worker(
             // Pass first message text for session label (truncated 60 chars).
             let first_text = batch.first().and_then(|m| m.text.as_deref());
             let routed_message_ids = routed_message_ids(&batch);
-            let (reply_result, session_uuid, turn_id, is_first_call) = match invoke_cc(
+            let (
+                reply_result,
+                session_uuid,
+                turn_id,
+                is_first_call,
+                reply_has_accepted_signal,
+                cc_prompt_mode,
+            ) = match invoke_cc(
                 &input,
                 first_text,
                 chat_id,
@@ -1196,7 +1203,16 @@ pub fn spawn_worker(
                     session_uuid,
                     turn_id,
                     is_first_call,
-                }) => (Ok(output), session_uuid, Some(turn_id), is_first_call),
+                    reply_has_accepted_signal,
+                    prompt_mode,
+                }) => (
+                    Ok(output),
+                    session_uuid,
+                    Some(turn_id),
+                    is_first_call,
+                    reply_has_accepted_signal,
+                    Some(prompt_mode),
+                ),
                 Err(failure) => {
                     let uuid = match &failure {
                         InvokeCcFailure::Reflectable { session_uuid, .. } => session_uuid.clone(),
@@ -1209,7 +1225,7 @@ pub fn spawn_worker(
                     // reply, so the bootstrap welcome photo should not fire.
                     // Auth-error recovery deactivates the session, so a
                     // subsequent retry sees is_first_call=true again.
-                    (Err(failure), uuid, None, false)
+                    (Err(failure), uuid, None, false, false, None)
                 }
             };
 
@@ -1423,6 +1439,65 @@ pub fn spawn_worker(
                                 &format!("Failed to send attachments: {e}"),
                             )
                             .await;
+                        }
+                    }
+
+                    // Fire-and-forget post-turn fork-probe. Must run after
+                    // Telegram send so it never blocks user-visible latency.
+                    // All failure paths log a warning and skip — best-effort.
+                    if ctx.learning.fork_probe_enabled
+                        && matches!(cc_prompt_mode, Some(crate::cc::prompt::PromptMode::Normal))
+                        && !reply_has_accepted_signal
+                    {
+                        let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                        let today_spend = match right_db::open_connection(&ctx.agent_db_dir, false)
+                        {
+                            Ok(conn) => {
+                                match crate::learning_probe::today_spend_usd(&conn, &now_utc) {
+                                    Ok(spend) => spend,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            ?key,
+                                            "fork-probe today_spend_usd failed: {e:#}"
+                                        );
+                                        0.0
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(?key, "fork-probe db open failed: {e:#}");
+                                0.0
+                            }
+                        };
+                        let decision = crate::learning_probe::should_run_probe(
+                            crate::learning_probe::ProbeGateInput {
+                                fork_probe_enabled: ctx.learning.fork_probe_enabled,
+                                is_foreground: true,
+                                reply_has_signal: reply_has_accepted_signal,
+                                today_spend_usd: today_spend,
+                                daily_budget_usd: ctx.learning.max_daily_budget_usd,
+                            },
+                        );
+                        if matches!(decision, crate::learning_probe::ProbeDecision::Run) {
+                            let probe_ctx = crate::learning_probe::ProbeContext {
+                                agent_dir: ctx.agent_dir.clone(),
+                                agent_db_dir: ctx.agent_db_dir.clone(),
+                                agent_name: ctx.agent_name.clone(),
+                                main_session_id: session_uuid.clone(),
+                                chat_id,
+                                thread_id: eff_thread_id,
+                                probe_model: ctx
+                                    .learning
+                                    .probe_model
+                                    .clone()
+                                    .or_else(|| ctx.model.load().as_ref().clone()),
+                                ssh_config_path: ctx.ssh_config_path.clone(),
+                                resolved_sandbox: ctx.resolved_sandbox.clone(),
+                                debug_flag: Arc::clone(&ctx.debug),
+                            };
+                            tokio::spawn(async move {
+                                crate::learning_probe::run_probe(probe_ctx).await;
+                            });
                         }
                     }
                 }
@@ -1977,6 +2052,11 @@ pub(crate) struct CcReply {
     /// `true` if this invocation created a brand-new CC session
     /// (i.e. the worker's first turn in this chat/thread).
     pub(crate) is_first_call: bool,
+    /// `true` if the reply produced an accepted nudge signal (reply_field source).
+    /// Drives the post-turn fork-probe gate (skip when reply already self-emitted).
+    pub(crate) reply_has_accepted_signal: bool,
+    /// Prompt mode used for this invocation. Fork-probe runs only for `Normal`.
+    pub(crate) prompt_mode: crate::cc::prompt::PromptMode,
 }
 
 #[derive(Debug)]
@@ -4081,6 +4161,8 @@ async fn invoke_cc(
             session_uuid,
             turn_id,
             is_first_call,
+            reply_has_accepted_signal: false,
+            prompt_mode,
         });
     }
 
@@ -4163,6 +4245,8 @@ async fn invoke_cc(
                         session_uuid,
                         turn_id,
                         is_first_call,
+                        reply_has_accepted_signal: false,
+                        prompt_mode,
                     });
                 } else {
                     // Token request already running — silent, don't spam.
@@ -4171,6 +4255,8 @@ async fn invoke_cc(
                         session_uuid,
                         turn_id,
                         is_first_call,
+                        reply_has_accepted_signal: false,
+                        prompt_mode,
                     });
                 }
             } else {
@@ -4200,6 +4286,8 @@ async fn invoke_cc(
                         session_uuid,
                         turn_id,
                         is_first_call,
+                        reply_has_accepted_signal: false,
+                        prompt_mode,
                     });
                 } else {
                     return Ok(CcReply {
@@ -4207,6 +4295,8 @@ async fn invoke_cc(
                         session_uuid,
                         turn_id,
                         is_first_call,
+                        reply_has_accepted_signal: false,
+                        prompt_mode,
                     });
                 }
             }
@@ -4363,11 +4453,14 @@ async fn invoke_cc(
                 accepted_review_signal.as_ref(),
             );
 
+            let reply_has_accepted_signal = accepted_review_signal.is_some();
             Ok(CcReply {
                 output: Some(reply_output),
                 session_uuid,
                 turn_id,
                 is_first_call,
+                reply_has_accepted_signal,
+                prompt_mode,
             })
         }
         Err(reason) => {
