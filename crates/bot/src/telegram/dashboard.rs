@@ -14,7 +14,9 @@ use right_dashboard::auth::{
 use right_dashboard::read_model::{
     activity::{ActivityOverviewInput, activity_overview, activity_run_detail},
     dashboard_overview::{DashboardOverviewInput, dashboard_overview},
-    learning::{LearningOverviewInput, learning_overview, learning_report_detail},
+    learning::{
+        LearningOverviewInput, learning_overview, learning_report_detail, signals_by_source_24h,
+    },
     learning_episodes::{LearningEpisodesInput, learning_episode_detail, learning_episodes},
     usage::{UsageOverviewInput, usage_overview},
 };
@@ -114,6 +116,10 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
         .route(
             "/dashboard/{agent}/api/v1/knowledge/learning/reports/{report_id}",
             get(handle_learning_report_detail),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/learning/signals_by_source",
+            get(handle_learning_signals_by_source),
         )
         .route(
             "/dashboard/{agent}/api/v1/knowledge/skills",
@@ -459,6 +465,34 @@ async fn handle_learning_report_detail(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "learning_report_failed",
                 Some("failed to read learning report"),
+            )
+        }
+    }
+}
+
+async fn handle_learning_signals_by_source(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    let conn = match open_dashboard_read_connection(&state) {
+        Ok(conn) => conn,
+        Err(error) => return error.into_response(),
+    };
+
+    let now_utc = chrono::Utc::now().to_rfc3339();
+    match signals_by_source_24h(&conn, &state.agent_name, &now_utc) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => {
+            tracing::error!(agent = %state.agent_name, "dashboard signals_by_source query failed: {error:#}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "signals_by_source_failed",
+                Some("failed to read signals_by_source"),
             )
         }
     }

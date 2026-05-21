@@ -482,6 +482,15 @@ pub struct SandboxProcess {
     pub command: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SignalsBySourceResponse {
+    pub agent: String,
+    pub window_label: String,
+    pub reply_field: i64,
+    pub fork_probe: i64,
+    pub background_review: i64,
+}
+
 #[cfg(test)]
 mod dashboard_v2_tests {
     use super::*;
