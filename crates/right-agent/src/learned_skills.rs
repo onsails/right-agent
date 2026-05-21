@@ -85,6 +85,25 @@ impl NudgeSignalKind {
     }
 }
 
+/// Where an accepted learning signal originated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NudgeSignalSource {
+    /// Agent emitted the signal in its structured `learning_signal`
+    /// or `skill_issue_signal` reply field.
+    ReplyField,
+    /// Post-turn fork-classifier identified the signal.
+    ForkProbe,
+}
+
+impl NudgeSignalSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReplyField => "reply_field",
+            Self::ForkProbe => "fork_probe",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NudgeSignalRecord {
     pub invocation_id: String,
@@ -94,6 +113,7 @@ pub struct NudgeSignalRecord {
     pub thread_id: Option<i64>,
     pub signal_kind: NudgeSignalKind,
     pub payload_json: serde_json::Value,
+    pub source: NudgeSignalSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,8 +431,8 @@ pub fn record_nudge_signal(
     )?;
     tx.execute(
         "INSERT INTO skill_nudge_signals \
-         (invocation_id, agent_name, root_session_id, chat_id, thread_id, signal_kind, payload_json) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         (invocation_id, agent_name, root_session_id, chat_id, thread_id, signal_kind, payload_json, source) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             record.invocation_id,
             record.agent_name,
@@ -421,6 +441,7 @@ pub fn record_nudge_signal(
             record.thread_id,
             record.signal_kind.as_str(),
             payload,
+            record.source.as_str(),
         ],
     )?;
     if matches!(record.signal_kind, NudgeSignalKind::SkillIssue) {
@@ -1600,6 +1621,7 @@ mod tests {
                 thread_id: Some(20),
                 signal_kind: NudgeSignalKind::SkillIssue,
                 payload_json: serde_json::json!({"kind":"update_candidate"}),
+                source: NudgeSignalSource::ReplyField,
             },
         )
         .unwrap();
@@ -1629,6 +1651,66 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hints, 1);
+    }
+
+    #[test]
+    fn nudge_signal_source_as_str_returns_kebab_case_literals() {
+        assert_eq!(NudgeSignalSource::ReplyField.as_str(), "reply_field");
+        assert_eq!(NudgeSignalSource::ForkProbe.as_str(), "fork_probe");
+    }
+
+    #[test]
+    fn record_nudge_signal_persists_source_reply_field() {
+        let conn = conn();
+        record_nudge_signal(
+            &conn,
+            &NudgeSignalRecord {
+                invocation_id: "inv-reply".to_owned(),
+                agent_name: "right".to_owned(),
+                root_session_id: Some("s-1".to_owned()),
+                chat_id: Some(10),
+                thread_id: Some(0),
+                signal_kind: NudgeSignalKind::Learning,
+                payload_json: serde_json::json!({"kind":"create_candidate"}),
+                source: NudgeSignalSource::ReplyField,
+            },
+        )
+        .unwrap();
+        let source: String = conn
+            .query_row(
+                "SELECT source FROM skill_nudge_signals WHERE invocation_id=?1",
+                ["inv-reply"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, "reply_field");
+    }
+
+    #[test]
+    fn record_nudge_signal_persists_source_fork_probe() {
+        let conn = conn();
+        record_nudge_signal(
+            &conn,
+            &NudgeSignalRecord {
+                invocation_id: "inv-probe".to_owned(),
+                agent_name: "right".to_owned(),
+                root_session_id: Some("s-2".to_owned()),
+                chat_id: Some(20),
+                thread_id: Some(0),
+                signal_kind: NudgeSignalKind::SkillIssue,
+                payload_json: serde_json::json!({"kind":"update_candidate"}),
+                source: NudgeSignalSource::ForkProbe,
+            },
+        )
+        .unwrap();
+        let source: String = conn
+            .query_row(
+                "SELECT source FROM skill_nudge_signals WHERE invocation_id=?1",
+                ["inv-probe"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, "fork_probe");
     }
 
     fn learning_signal(trigger: &str, event_refs: Vec<&str>, summary: &str) -> serde_json::Value {
