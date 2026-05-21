@@ -23,6 +23,7 @@ pub const LEARNING_SOURCES: &[&str] = &[
     "learning_selector",
     "learning_reviewer",
     "learning_skill_review",
+    "learning_fork_probe",
 ];
 
 pub use error::UsageError;
@@ -79,13 +80,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn learning_sources_contains_expected_three_entries() {
+    fn learning_sources_contains_expected_four_entries() {
         assert_eq!(
             LEARNING_SOURCES,
             &[
                 "learning_selector",
                 "learning_reviewer",
-                "learning_skill_review"
+                "learning_skill_review",
+                "learning_fork_probe",
             ]
         );
     }
