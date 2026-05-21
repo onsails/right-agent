@@ -302,6 +302,33 @@ path — in-flight CC subprocesses keep their old flags; the next invocation
 in any chat picks up the new value. Adding more hot-reloadable fields
 requires extending the diff in `crates/bot/src/config_watcher.rs::diff_classify`.
 
+### Learning review gate
+
+`try_mark_review_started` (`crates/right-agent/src/learned_skills.rs`) is the
+shared gate for two learning flows: Stage 2 episode selector/reviewer
+(`crates/bot/src/learning_episode.rs`) and worker-side skill review
+(`crates/bot/src/telegram/worker.rs`). The gate enforces, in order:
+
+- `Skip(AlreadyRunning)` — `skill_nudge_state.review_running = 1`.
+- `Skip(CircuitOpen)` — `consecutive_review_failures >= circuit_failure_threshold`
+  opened `review_circuit_open_until` in the future. Window auto-clears
+  (`consecutive_review_failures = 0`, `review_circuit_open_until = NULL`)
+  before the budget check when the open-until time is now in the past.
+- `Skip(DailyBudget)` — `SUM(usage_events.total_cost_usd)` for today UTC
+  across `right_agent::usage::LEARNING_SOURCES`
+  (`learning_selector`, `learning_reviewer`, `learning_skill_review`) is at
+  or above `LearningConfig.max_daily_budget_usd` (default $5).
+
+Failure paths call `record_review_failure` which increments the counter and
+opens the circuit on the threshold-crossing call. The bot fires a one-shot
+`learning_circuit_open` Telegram alert (24h dedup via the shared
+`memory_alerts` table) only on the closed→open transition. Success path
+(`mark_review_finished`) resets both columns. Adding a new learning-adjacent
+invocation requires extending `LEARNING_SOURCES` so both the gate query and
+the dashboard `SOURCES` array pick it up; the dashboard test
+(`usage_overview_sources_match_learning_sources_constant`) enforces sync via
+a dev-dep cross-crate assertion.
+
 ### Memory
 
 Two modes, configured per-agent via `memory.provider` in `agent.yaml`:
