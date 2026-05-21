@@ -173,13 +173,22 @@ Session-bearing `claude -p` invocations get a composite system prompt via
 Prompt caching is critical — avoid per-message tool calls to read
 identity files.
 
-Stage 2 learning selector and reviewer invocations are explicit exceptions:
-they are report-only JSON invocations with no session resume/fork, no MCP
-config, no composite system prompt, and `--tools ""` so Claude Code exposes no
-tools. They receive only prompt-supplied selected context and the prebuilt
-`rightx-*` skill index. Candidate evidence must cite at least one selected
-primary `msg:*` or non-thinking `exec:*` ref; thinking-only and low-trust-only
-evidence is rejected.
+Post-turn fork-probe (`crates/bot/src/learning_probe.rs`) is the primary
+mechanism for learning-signal detection. After each foreground reply, the
+worker spawns a fire-and-forget `claude -p --resume <main> --fork-session
+--tools "" --max-turns 1 --output-format json --json-schema FORK_PROBE_SCHEMA_JSON`
+invocation that classifies whether the just-finished turn contains a
+learnable signal the agent failed to self-emit. Non-null outputs are persisted
+to `skill_nudge_signals` with `source = 'fork_probe'`.
+
+Stage 2 background selector/reviewer (`crates/bot/src/learning_episode.rs`,
+`crates/bot/src/learning_review.rs`) is deprecated behind
+`learning.background_review_enabled` (default `false`). When enabled, those
+invocations remain explicit exceptions: report-only JSON with no session
+resume/fork, no MCP config, no composite system prompt, and `--tools ""`. They
+receive only prompt-supplied selected context and the prebuilt `rightx-*` skill
+index. Candidate evidence must cite at least one selected primary `msg:*` or
+non-thinking `exec:*` ref; thinking-only and low-trust-only evidence is rejected.
 
 See `PROMPT_SYSTEM.md` for full documentation.
 
@@ -196,10 +205,16 @@ omitted):
 - `--output-format <stream-json|json>` (`--verbose` auto-added for `stream-json` only)
 - `--json-schema <schema>` — structured output
 
-Stage 2 learning selector and reviewer calls are not session-bearing and
+The post-turn fork-probe IS session-bearing — it forks the main session
+(`--fork-session --resume <main>`) so it can preserve `--mcp-config` +
+`--strict-mcp-config` and inherit the transcript via prompt cache. Tools are
+neutralised at runtime via `--tools ""`.
+
+Deprecated Stage 2 selector/reviewer calls are not session-bearing and
 intentionally omit `--mcp-config` / `--strict-mcp-config`; they pass
 `--tools ""` to disable every Claude Code tool and depend only on
-prompt-supplied context.
+prompt-supplied context. They run only when
+`learning.background_review_enabled = true`.
 
 **Optional per-callsite:**
 - `--model` — override default model
@@ -305,9 +320,10 @@ requires extending the diff in `crates/bot/src/config_watcher.rs::diff_classify`
 ### Learning review gate
 
 `try_mark_review_started` (`crates/right-agent/src/learned_skills.rs`) is the
-shared gate for two learning flows: Stage 2 episode selector/reviewer
+shared gate for the deprecated Stage 2 selector/reviewer
 (`crates/bot/src/learning_episode.rs`) and worker-side skill review
-(`crates/bot/src/telegram/worker.rs`). The gate enforces, in order:
+(`crates/bot/src/telegram/worker.rs`). Only active when
+`learning.background_review_enabled = true`. The gate enforces, in order:
 
 - `Skip(AlreadyRunning)` — `skill_nudge_state.review_running = 1`.
 - `Skip(CircuitOpen)` — `consecutive_review_failures >= circuit_failure_threshold`
@@ -316,8 +332,14 @@ shared gate for two learning flows: Stage 2 episode selector/reviewer
   before the budget check when the open-until time is now in the past.
 - `Skip(DailyBudget)` — `SUM(usage_events.total_cost_usd)` for today UTC
   across `right_agent::usage::LEARNING_SOURCES`
-  (`learning_selector`, `learning_reviewer`, `learning_skill_review`) is at
-  or above `LearningConfig.max_daily_budget_usd` (default $5).
+  (`learning_selector`, `learning_reviewer`, `learning_skill_review`,
+  `learning_fork_probe`) is at or above `LearningConfig.max_daily_budget_usd`
+  (default $5).
+
+The fork-probe path uses its own gate (`learning_probe::should_run_probe`,
+pure logic): `fork_probe_enabled` + foreground-only + `reply_has_signal == false`
++ today's spend across `LEARNING_SOURCES` below budget. The two gates share the
+same daily-budget pool but are otherwise independent.
 
 Failure paths call `record_review_failure` which increments the counter and
 opens the circuit on the threshold-crossing call. The bot fires a one-shot
@@ -328,6 +350,14 @@ invocation requires extending `LEARNING_SOURCES` so both the gate query and
 the dashboard `SOURCES` array pick it up; the dashboard test
 (`usage_overview_sources_match_learning_sources_constant`) enforces sync via
 a dev-dep cross-crate assertion.
+
+`skill_nudge_signals.source` records where each accepted learning signal
+originated: `reply_field` (agent emitted in structured reply) or `fork_probe`
+(post-turn classifier emitted). The dashboard widget
+`signals_by_source_24h` reads both and additionally counts
+`skill_review_reports` rows with `status IN ('create_candidate',
+'update_candidate')` as `background_review` so legacy-path counts remain
+visible while the Stage 2 deprecation lands.
 
 ### Memory
 

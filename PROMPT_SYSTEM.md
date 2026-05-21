@@ -364,6 +364,21 @@ the final structured output is delivered.
 
 Required: `delivery` and `run_note`. `delivery.kind` is always `"notify"` and `delivery.content` has `minLength: 1`; silent output is forbidden.
 
+### FORK_PROBE_SCHEMA_JSON (post-turn fork-probe)
+
+Required: `workflow_complete` (boolean). Optional nullable `learning_signal`
+and `skill_issue_signal` mirror the `reply-schema.json` shapes verbatim
+(same enum values, same required nested fields, `event_refs.minItems: 1`).
+
+The fork-probe is a `claude -p --resume <main> --fork-session --tools ""
+--max-turns 1 --output-format json` invocation fired async after each
+foreground reply when the agent did not self-emit a signal in its
+structured reply. Non-null signals are persisted to `skill_nudge_signals`
+with `source = 'fork_probe'`. The probe inherits the main session
+transcript via fork (cache-read pricing) and never invokes a tool.
+Constants are `right_codegen::FORK_PROBE_SCHEMA_JSON` and
+`right_codegen::FORK_PROBE_PROMPT`.
+
 ## MCP Server Instructions
 
 The `right` MCP server provides `with_instructions()` describing all tools:
@@ -427,12 +442,23 @@ move skill files from sandbox to host. The active agent writes skill package
 files under `.claude/skills/<skill_name>/`. Create and update both require
 `rightx-*` skill package names.
 
-Background learned-skill review is report-only in Stage 2. The selector and
-reviewer invocations pass `--tools ""`, omit MCP config, and receive only
-prompt-supplied selected context plus the prebuilt `rightx-*` skill index. The
-reviewer may record high-confidence create/update candidates from a selected
-learning episode, but it must not create, patch, archive, or delete skill
-package files. It does not expose or call
+Post-turn fork-probe is the primary learning-signal detector. After every
+successful foreground reply, the worker spawns a fork of the main session that
+classifies the just-finished turn against `FORK_PROBE_SCHEMA_JSON` and persists
+any non-null `learning_signal` / `skill_issue_signal` to `skill_nudge_signals`
+with `source = 'fork_probe'`. The probe runs only when the agent did NOT
+self-emit a signal in its structured reply (`source = 'reply_field'` covers
+the self-emit case). Probe uses the agent's main model by default
+(`learning.probe_model: ~`) to keep prompt cache warm; override is available
+per agent.
+
+Deprecated Stage 2 background learned-skill review is report-only and OFF by
+default (`learning.background_review_enabled: false`). When enabled, the
+selector and reviewer invocations pass `--tools ""`, omit MCP config, and
+receive only prompt-supplied selected context plus the prebuilt `rightx-*`
+skill index. The reviewer may record high-confidence create/update candidates
+from a selected learning episode, but it must not create, patch, archive, or
+delete skill package files. It does not expose or call
 `mcp__right__skill_learning_start` or
 `mcp__right__skill_learning_finish`. The reviewer prompt explicitly prefers
 reusable future-session workflows, rejects one-off task narrative, avoids
