@@ -1,0 +1,9 @@
+-- v26: Add circuit-breaker columns to skill_nudge_state.
+--
+-- This file is a doc-only placeholder; the actual migration uses a Rust hook
+-- (see `v26_skill_nudge_circuit_breaker` in migrations.rs) so that the column
+-- additions can be guarded by `pragma_table_info` for idempotency. SQLite
+-- has no `ADD COLUMN IF NOT EXISTS`.
+--
+-- ALTER TABLE skill_nudge_state ADD COLUMN consecutive_review_failures INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE skill_nudge_state ADD COLUMN review_circuit_open_until TEXT;

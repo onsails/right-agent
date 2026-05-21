@@ -28,8 +28,10 @@ const V22_SCHEMA: &str = include_str!("sql/v22_skill_review_reports.sql");
 const V23_SCHEMA: &str = include_str!("sql/v23_async_runs.sql");
 const V24_SCHEMA: &str = include_str!("sql/v24_learning_episodes.sql");
 const V25_SCHEMA: &str = include_str!("sql/v25_async_runs_delivery_decision.sql");
+#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
+const V26_SCHEMA: &str = include_str!("sql/v26_skill_nudge_circuit_breaker.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 25;
+pub const LATEST_SCHEMA_VERSION: u32 = 26;
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -388,6 +390,33 @@ fn v24_learning_episodes(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
+/// v25: Add circuit-breaker columns to skill_nudge_state.
+///
+/// Idempotent — checks pragma_table_info before each ALTER. SQLite has no
+/// `ADD COLUMN IF NOT EXISTS`.
+fn v26_skill_nudge_circuit_breaker(tx: &Transaction) -> Result<(), HookError> {
+    let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('skill_nudge_state') WHERE name = ?1",
+            [col],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    };
+
+    if !has_column("consecutive_review_failures")? {
+        tx.execute_batch(
+            "ALTER TABLE skill_nudge_state ADD COLUMN consecutive_review_failures INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
+    if !has_column("review_circuit_open_until")? {
+        tx.execute_batch(
+            "ALTER TABLE skill_nudge_state ADD COLUMN review_circuit_open_until TEXT",
+        )?;
+    }
+    Ok(())
+}
+
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::LazyLock::new(|| {
     Migrations::new(vec![
         M::up(V1_SCHEMA),
@@ -415,6 +444,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up_with_hook("", v23_async_runs),
         M::up_with_hook("", v24_learning_episodes),
         M::up(V25_SCHEMA),
+        M::up_with_hook("", v26_skill_nudge_circuit_breaker),
     ])
 });
 
@@ -1997,5 +2027,43 @@ continue background work',
             )
             .unwrap();
         assert_eq!(row, (15, 0, None, None));
+    }
+
+    #[test]
+    fn migration_v26_adds_circuit_breaker_columns_idempotently() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 25).unwrap();
+        let pre_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('skill_nudge_state') \
+                 WHERE name IN ('consecutive_review_failures', 'review_circuit_open_until')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pre_count, 0, "preconditions: columns not yet present");
+
+        MIGRATIONS.to_version(&mut conn, 26).unwrap();
+        let post_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('skill_nudge_state') \
+                 WHERE name IN ('consecutive_review_failures', 'review_circuit_open_until')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(post_count, 2, "both columns present after v26");
+
+        // Re-running v26 is a no-op — verifies idempotency.
+        MIGRATIONS.to_version(&mut conn, 26).unwrap();
+        let post_count_again: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('skill_nudge_state') \
+                 WHERE name IN ('consecutive_review_failures', 'review_circuit_open_until')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(post_count_again, 2);
     }
 }
