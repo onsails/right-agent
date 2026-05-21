@@ -6,7 +6,14 @@ use rusqlite::{Connection, params};
 
 use super::ReadModelError;
 
-const SOURCES: [&str; 3] = ["interactive", "cron", "reflection"];
+const SOURCES: [&str; 6] = [
+    "interactive",
+    "cron",
+    "reflection",
+    "learning_selector",
+    "learning_reviewer",
+    "learning_skill_review",
+];
 
 pub struct UsageOverviewInput {
     pub agent: String,
@@ -281,6 +288,64 @@ mod tests {
             params![ts, source, format!("{source}-{model}"), cost, model_json],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn usage_overview_includes_learning_sources() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_usage(
+            &conn,
+            "2026-05-21T01:00:00Z",
+            "learning_selector",
+            0.10,
+            "sonnet",
+        );
+        insert_usage(
+            &conn,
+            "2026-05-21T02:00:00Z",
+            "learning_reviewer",
+            0.20,
+            "sonnet",
+        );
+        insert_usage(
+            &conn,
+            "2026-05-21T03:00:00Z",
+            "learning_skill_review",
+            0.30,
+            "sonnet",
+        );
+
+        let response = usage_overview(
+            &conn,
+            UsageOverviewInput {
+                agent: "him".to_owned(),
+                generated_at: "2026-05-21T05:00:00Z".to_owned(),
+            },
+        )
+        .unwrap();
+        let today = response.windows.iter().find(|w| w.key == "today").unwrap();
+        let names: Vec<&str> = today.sources.iter().map(|s| s.source.as_str()).collect();
+        assert!(names.contains(&"learning_selector"));
+        assert!(names.contains(&"learning_reviewer"));
+        assert!(names.contains(&"learning_skill_review"));
+
+        let selector = today
+            .sources
+            .iter()
+            .find(|s| s.source == "learning_selector")
+            .unwrap();
+        assert!((selector.cost_usd - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn usage_overview_sources_match_learning_sources_constant() {
+        for source in right_agent::usage::LEARNING_SOURCES {
+            assert!(
+                SOURCES.contains(source),
+                "dashboard SOURCES is missing learning source `{source}`"
+            );
+        }
     }
 
     #[test]
