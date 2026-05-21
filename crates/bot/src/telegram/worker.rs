@@ -52,8 +52,6 @@ const MEDIA_GROUP_HARD_CAP_MS: u64 = 2500;
 /// Maximum time to wait for a CC subprocess to complete.
 const CC_TIMEOUT_SECS: u64 = 600;
 
-#[allow(dead_code)] // TODO Task 10: remove after wiring usage events
-const LEARNED_SKILL_REVIEW_DAILY_LIMIT: i64 = 12;
 const BACKGROUND_REVIEW_MAX_BUDGET_USD: f64 = 0.50;
 const BACKGROUND_REVIEW_MAX_TURNS: u32 = 8;
 const BACKGROUND_REVIEW_TIMEOUT_SECS: u64 = 180;
@@ -2233,11 +2231,6 @@ async fn remove_sandbox_progress_config_file(
     }
 }
 
-#[allow(dead_code)] // TODO Task 10: remove after wiring usage events
-fn review_today_utc() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
-}
-
 fn load_skill_review_gate_snapshot(
     conn: &rusqlite::Connection,
     agent_name: &str,
@@ -2407,6 +2400,8 @@ fn maybe_spawn_learned_skill_review(
     let source_invocation_id = source_invocation_id.to_owned();
     let root_session_id = root_session_id.to_owned();
     let tg_chat_id = teloxide::types::ChatId(chat_id);
+    let failure_threshold = ctx.learning.circuit_failure_threshold;
+    let cooldown_minutes = ctx.learning.circuit_cooldown_minutes;
 
     std::mem::drop(tokio::spawn(async move {
         let review_future = run_background_learned_skill_review(
@@ -2449,6 +2444,8 @@ fn maybe_spawn_learned_skill_review(
                     &agent_name,
                     report,
                     notice,
+                    failure_threshold,
+                    cooldown_minutes,
                     move |notice| {
                         let bot = bot.clone();
                         async move {
@@ -2476,6 +2473,8 @@ fn maybe_spawn_learned_skill_review(
                     Some(chat_id),
                     Some(eff_thread_id),
                     trigger_kind,
+                    failure_threshold,
+                    cooldown_minutes,
                     error,
                     stdout,
                     stderr,
@@ -2797,6 +2796,24 @@ async fn run_background_learned_skill_review(
             "I found a reusable workflow candidate and recorded it for review.".to_owned()
         })
     });
+    if let Some(breakdown) = crate::cc::stream::parse_usage_full(&stdout) {
+        match right_db::open_connection(agent_db_dir, false) {
+            Ok(conn) => {
+                if let Err(e) = right_agent::usage::insert::insert_learning_skill_review(
+                    &conn, &breakdown, chat_id, thread_id,
+                ) {
+                    tracing::warn!(
+                        agent = %agent_name,
+                        "insert_learning_skill_review failed: {e:#}"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                agent = %agent_name,
+                "insert_learning_skill_review: open db failed: {e:#}"
+            ),
+        }
+    }
     let report = review_output.to_report(crate::learning_review::ReviewReportContext {
         agent_name: agent_name.to_owned(),
         source_invocation_id,
@@ -2815,6 +2832,8 @@ async fn record_successful_background_review<F, Fut, E>(
     agent_name: &str,
     mut report: SkillReviewReport,
     notice: Option<String>,
+    failure_threshold: u32,
+    cooldown_minutes: u32,
     send_notice: F,
 ) where
     F: FnOnce(String) -> Fut,
@@ -2855,13 +2874,24 @@ async fn record_successful_background_review<F, Fut, E>(
             "learned-skill review report insert failed: {e:#}"
         );
     }
-    if let Err(e) = mark_review_finished(
-        &conn,
-        agent_name,
-        trigger_kind,
-        status,
-        status != ReviewStatus::Failed,
-    ) {
+    if status == ReviewStatus::Failed {
+        let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        match right_agent::learned_skills::record_review_failure(
+            &conn,
+            agent_name,
+            &now_utc,
+            failure_threshold,
+            cooldown_minutes,
+        ) {
+            Ok((_count, _opened)) => {
+                // Task 13 will read this tuple to fire the circuit-open alert.
+            }
+            Err(e) => tracing::warn!(
+                agent = %agent_name,
+                "learned-skill review record_review_failure failed: {e:#}"
+            ),
+        }
+    } else if let Err(e) = mark_review_finished(&conn, agent_name, trigger_kind, status, true) {
         tracing::warn!(
             agent = %agent_name,
             "learned-skill review finish mark failed: {e:#}"
@@ -2888,6 +2918,8 @@ fn record_failed_background_review(
     chat_id: Option<i64>,
     thread_id: Option<i64>,
     trigger_kind: right_agent::learned_skills::ReviewTriggerKind,
+    failure_threshold: u32,
+    cooldown_minutes: u32,
     error: String,
     stdout: Option<String>,
     stderr: Option<String>,
@@ -2929,17 +2961,21 @@ fn record_failed_background_review(
             "learned-skill failed review report insert failed: {e:#}"
         );
     }
-    if let Err(e) = mark_review_finished(
+    let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    match right_agent::learned_skills::record_review_failure(
         &conn,
         &agent_name,
-        trigger_kind,
-        ReviewStatus::Failed,
-        false,
+        &now_utc,
+        failure_threshold,
+        cooldown_minutes,
     ) {
-        tracing::warn!(
+        Ok((_count, _opened)) => {
+            // Task 13 will read this tuple to fire the circuit-open alert.
+        }
+        Err(e) => tracing::warn!(
             agent = %agent_name,
-            "learned-skill failed review finish mark failed: {e:#}"
-        );
+            "learned-skill failed review record_review_failure failed: {e:#}"
+        ),
     }
 }
 
@@ -4414,6 +4450,8 @@ mod tests {
             Some(10),
             Some(20),
             right_agent::learned_skills::ReviewTriggerKind::SkillIssueSignal,
+            3,
+            60,
             format!(
                 "background review claude exited Some(1): stderr-head{}STDERR-TAIL",
                 "z".repeat(9000)
@@ -4473,15 +4511,17 @@ mod tests {
                 .contains("STDERR-TAIL")
         );
 
-        let state: (i64, String) = conn
+        let state: (i64, i64) = conn
             .query_row(
-                "SELECT review_running, last_review_status \
+                "SELECT review_running, consecutive_review_failures \
                  FROM skill_nudge_state WHERE agent_name = 'right'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(state, (0, "failed".to_owned()));
+        // record_review_failure clears the running gate and increments the
+        // failure counter; it intentionally does NOT update last_review_status.
+        assert_eq!(state, (0, 1));
     }
 
     #[tokio::test]
@@ -4525,6 +4565,8 @@ mod tests {
             "right",
             report,
             Some("notice".to_owned()),
+            3,
+            60,
             |_notice| async { Err("send failed") },
         )
         .await;
@@ -4587,6 +4629,8 @@ mod tests {
             "right",
             report,
             Some("notice".to_owned()),
+            3,
+            60,
             move |notice| {
                 let sent_for_future = std::sync::Arc::clone(&sent_for_closure);
                 async move {
