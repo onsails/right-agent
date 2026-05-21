@@ -2392,6 +2392,7 @@ fn maybe_spawn_learned_skill_review(
     let agent_dir = ctx.agent_dir.clone();
     let agent_db_dir = ctx.agent_db_dir.clone();
     let bot = ctx.bot.clone();
+    let alert_bot = Arc::new(ctx.bot.inner().inner().clone());
     let model = crate::snapshot_model(&ctx.model);
     let ssh_config_path = ctx.ssh_config_path.clone();
     let resolved_sandbox = ctx.resolved_sandbox.clone();
@@ -2441,11 +2442,13 @@ fn maybe_spawn_learned_skill_review(
             Ok((report, notice)) => {
                 record_successful_background_review(
                     &agent_db_dir,
+                    &agent_dir,
                     &agent_name,
                     report,
                     notice,
                     failure_threshold,
                     cooldown_minutes,
+                    Arc::clone(&alert_bot),
                     move |notice| {
                         let bot = bot.clone();
                         async move {
@@ -2467,6 +2470,7 @@ fn maybe_spawn_learned_skill_review(
                 );
                 record_failed_background_review(
                     &agent_db_dir,
+                    &agent_dir,
                     agent_name,
                     source_invocation_id,
                     Some(root_session_id),
@@ -2475,6 +2479,7 @@ fn maybe_spawn_learned_skill_review(
                     trigger_kind,
                     failure_threshold,
                     cooldown_minutes,
+                    alert_bot,
                     error,
                     stdout,
                     stderr,
@@ -2570,6 +2575,8 @@ fn maybe_capture_learning_episode_seed(
         Arc::clone(&ctx.debug),
         ctx.learning.clone(),
         Some(Arc::clone(&ctx.learning_drain_scheduler)),
+        // Seed-only runtime: the drain task's own runtime carries the real bot.
+        Arc::new(ctx.bot.inner().inner().clone()),
     );
     if let Err(e) = runtime.capture_completion_seed(
         conn,
@@ -2829,11 +2836,13 @@ async fn run_background_learned_skill_review(
 
 async fn record_successful_background_review<F, Fut, E>(
     agent_db_dir: &Path,
+    agent_dir: &Path,
     agent_name: &str,
     mut report: SkillReviewReport,
     notice: Option<String>,
     failure_threshold: u32,
     cooldown_minutes: u32,
+    alert_bot: Arc<teloxide::Bot>,
     send_notice: F,
 ) where
     F: FnOnce(String) -> Fut,
@@ -2883,8 +2892,28 @@ async fn record_successful_background_review<F, Fut, E>(
             failure_threshold,
             cooldown_minutes,
         ) {
-            Ok((_count, _opened)) => {
-                // Task 13 will read this tuple to fire the circuit-open alert.
+            Ok((_count, opened)) => {
+                if opened {
+                    let bot = Arc::clone(&alert_bot);
+                    let db = agent_db_dir.to_owned();
+                    let name = agent_name.to_owned();
+                    let dir = agent_dir.to_owned();
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::telegram::learning_alerts::maybe_alert_circuit_open(
+                            bot,
+                            &db,
+                            &name,
+                            &dir,
+                            "reviewer returned status=failed",
+                            cooldown_minutes,
+                            failure_threshold,
+                        )
+                        .await
+                        {
+                            tracing::warn!("maybe_alert_circuit_open failed: {e:#}");
+                        }
+                    });
+                }
             }
             Err(e) => tracing::warn!(
                 agent = %agent_name,
@@ -2912,6 +2941,7 @@ async fn record_successful_background_review<F, Fut, E>(
 #[allow(clippy::too_many_arguments)]
 fn record_failed_background_review(
     agent_db_dir: &Path,
+    agent_dir: &Path,
     agent_name: String,
     source_invocation_id: String,
     root_session_id: Option<String>,
@@ -2920,6 +2950,7 @@ fn record_failed_background_review(
     trigger_kind: right_agent::learned_skills::ReviewTriggerKind,
     failure_threshold: u32,
     cooldown_minutes: u32,
+    alert_bot: Arc<teloxide::Bot>,
     error: String,
     stdout: Option<String>,
     stderr: Option<String>,
@@ -2969,8 +3000,29 @@ fn record_failed_background_review(
         failure_threshold,
         cooldown_minutes,
     ) {
-        Ok((_count, _opened)) => {
-            // Task 13 will read this tuple to fire the circuit-open alert.
+        Ok((_count, opened)) => {
+            if opened {
+                let bot = Arc::clone(&alert_bot);
+                let db = agent_db_dir.to_owned();
+                let name = agent_name.clone();
+                let dir = agent_dir.to_owned();
+                let reason = error.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::telegram::learning_alerts::maybe_alert_circuit_open(
+                        bot,
+                        &db,
+                        &name,
+                        &dir,
+                        &reason,
+                        cooldown_minutes,
+                        failure_threshold,
+                    )
+                    .await
+                    {
+                        tracing::warn!("maybe_alert_circuit_open failed: {e:#}");
+                    }
+                });
+            }
         }
         Err(e) => tracing::warn!(
             agent = %agent_name,
@@ -4444,6 +4496,7 @@ mod tests {
 
         record_failed_background_review(
             temp.path(),
+            temp.path(),
             "right".to_owned(),
             "inv-1".to_owned(),
             Some("session-1".to_owned()),
@@ -4452,6 +4505,7 @@ mod tests {
             right_agent::learned_skills::ReviewTriggerKind::SkillIssueSignal,
             3,
             60,
+            Arc::new(teloxide::Bot::new("test")),
             format!(
                 "background review claude exited Some(1): stderr-head{}STDERR-TAIL",
                 "z".repeat(9000)
@@ -4562,11 +4616,13 @@ mod tests {
 
         record_successful_background_review(
             temp.path(),
+            temp.path(),
             "right",
             report,
             Some("notice".to_owned()),
             3,
             60,
+            Arc::new(teloxide::Bot::new("test")),
             |_notice| async { Err("send failed") },
         )
         .await;
@@ -4626,11 +4682,13 @@ mod tests {
 
         record_successful_background_review(
             temp.path(),
+            temp.path(),
             "right",
             report,
             Some("notice".to_owned()),
             3,
             60,
+            Arc::new(teloxide::Bot::new("test")),
             move |notice| {
                 let sent_for_future = std::sync::Arc::clone(&sent_for_closure);
                 async move {

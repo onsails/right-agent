@@ -970,6 +970,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // The returned JoinHandle is awaited at shutdown so the drain task does not
     // outlive `run_telegram` while still holding a CC selector/reviewer child.
     let (learning_drain_scheduler, learning_drain_handle) = {
+        let learning_bot = Arc::new(teloxide::Bot::new(token.clone()));
         let bootstrap_runtime = crate::learning_episode::LearningEpisodeRuntime::new(
             agent_dir.clone(),
             agent_dir.clone(),
@@ -980,6 +981,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             Arc::clone(&debug_flag),
             config.learning.clone(),
             None,
+            learning_bot,
         );
         crate::learning_episode::DrainScheduler::spawn(
             bootstrap_runtime,
