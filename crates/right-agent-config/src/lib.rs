@@ -91,15 +91,23 @@ fn default_show_thinking() -> bool {
     true
 }
 
-fn default_episode_selector_max_budget_usd() -> f64 {
-    0.10
-}
-
 fn default_episode_settle_seconds() -> u64 {
     90
 }
 
-fn deserialize_positive_finite_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+fn default_max_daily_budget_usd() -> f64 {
+    5.00
+}
+
+fn default_circuit_failure_threshold() -> u32 {
+    5
+}
+
+fn default_circuit_cooldown_minutes() -> u32 {
+    60
+}
+
+fn deserialize_positive_finite_f64_max_daily<'de, D>(deserializer: D) -> Result<f64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -108,7 +116,7 @@ where
         Ok(value)
     } else {
         Err(serde::de::Error::custom(
-            "episode_selector_max_budget_usd must be finite and > 0.0",
+            "max_daily_budget_usd must be finite and > 0.0",
         ))
     }
 }
@@ -124,6 +132,18 @@ where
         Err(serde::de::Error::custom(
             "episode_settle_seconds must be greater than 0",
         ))
+    }
+}
+
+fn deserialize_positive_u32<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if value > 0 {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom("value must be greater than 0"))
     }
 }
 
@@ -295,26 +315,67 @@ impl Default for MemoryConfig {
 pub struct LearningConfig {
     /// Optional selector model. None means inherit the agent model.
     pub episode_selector_model: Option<String>,
-    /// Maximum spend for one episode-selection invocation.
-    #[serde(
-        default = "default_episode_selector_max_budget_usd",
-        deserialize_with = "deserialize_positive_finite_f64"
-    )]
-    pub episode_selector_max_budget_usd: f64,
+
+    /// Soft-deprecated. Kept for backward-compatibility with existing
+    /// agent.yaml files. Not read by any code. A warn-log is emitted at
+    /// agent load time when present (see `warn_on_deprecated`). Slated for
+    /// removal in a future release.
+    pub episode_selector_max_budget_usd: Option<f64>,
+
     /// Delay after seed evidence before selecting the episode boundary.
     #[serde(
         default = "default_episode_settle_seconds",
         deserialize_with = "deserialize_positive_u64"
     )]
     pub episode_settle_seconds: u64,
+
+    /// Daily $ budget across all learning invocations.
+    #[serde(
+        default = "default_max_daily_budget_usd",
+        deserialize_with = "deserialize_positive_finite_f64_max_daily"
+    )]
+    pub max_daily_budget_usd: f64,
+
+    /// Consecutive failures that trip the circuit breaker.
+    #[serde(
+        default = "default_circuit_failure_threshold",
+        deserialize_with = "deserialize_positive_u32"
+    )]
+    pub circuit_failure_threshold: u32,
+
+    /// How long the circuit stays open after tripping (minutes).
+    #[serde(
+        default = "default_circuit_cooldown_minutes",
+        deserialize_with = "deserialize_positive_u32"
+    )]
+    pub circuit_cooldown_minutes: u32,
 }
 
 impl Default for LearningConfig {
     fn default() -> Self {
         Self {
             episode_selector_model: None,
-            episode_selector_max_budget_usd: default_episode_selector_max_budget_usd(),
+            episode_selector_max_budget_usd: None,
             episode_settle_seconds: default_episode_settle_seconds(),
+            max_daily_budget_usd: default_max_daily_budget_usd(),
+            circuit_failure_threshold: default_circuit_failure_threshold(),
+            circuit_cooldown_minutes: default_circuit_cooldown_minutes(),
+        }
+    }
+}
+
+impl LearningConfig {
+    /// Emit a deprecation warning if the obsolete `episode_selector_max_budget_usd`
+    /// field is set in agent.yaml. Call once at agent load time.
+    pub fn warn_on_deprecated(&self, agent_name: &str) {
+        if let Some(value) = self.episode_selector_max_budget_usd {
+            tracing::warn!(
+                agent = %agent_name,
+                value,
+                "agent.yaml: `episode_selector_max_budget_usd` is deprecated and ignored; \
+                 use `max_daily_budget_usd` instead. The deprecated field will be removed \
+                 in a future release."
+            );
         }
     }
 }

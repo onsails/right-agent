@@ -934,9 +934,8 @@ fn format_learning_display(learning: &right_agent::agent::types::LearningConfig)
         .as_deref()
         .unwrap_or("agent model");
     format!(
-        "{model}, ${}, {}s",
-        format_learning_budget_usd(learning.episode_selector_max_budget_usd),
-        learning.episode_settle_seconds
+        "{model}, daily ${}, {}s",
+        learning.max_daily_budget_usd, learning.episode_settle_seconds
     )
 }
 
@@ -956,16 +955,13 @@ fn learning_setup(
         value => Some(value.to_owned()),
     };
 
-    let Some(budget_input) = right_agent::init::inquire_back(|| {
-        inquire::Text::new("episode selector max budget usd:").prompt()
-    })?
+    let Some(budget_input) =
+        right_agent::init::inquire_back(|| inquire::Text::new("max daily budget usd:").prompt())?
     else {
         return Ok(None);
     };
-    let budget = parse_learning_budget_usd(
-        budget_input.trim(),
-        existing.episode_selector_max_budget_usd,
-    )?;
+    let max_daily_budget_usd =
+        parse_learning_budget_usd(budget_input.trim(), existing.max_daily_budget_usd)?;
 
     let Some(settle_input) =
         right_agent::init::inquire_back(|| inquire::Text::new("episode settle seconds:").prompt())?
@@ -977,8 +973,11 @@ fn learning_setup(
 
     Ok(Some(right_agent::agent::types::LearningConfig {
         episode_selector_model: model,
-        episode_selector_max_budget_usd: budget,
+        episode_selector_max_budget_usd: existing.episode_selector_max_budget_usd,
         episode_settle_seconds: settle_seconds,
+        max_daily_budget_usd,
+        circuit_failure_threshold: existing.circuit_failure_threshold,
+        circuit_cooldown_minutes: existing.circuit_cooldown_minutes,
     }))
 }
 
@@ -1008,18 +1007,6 @@ fn parse_learning_settle_seconds(input: &str, fallback: u64) -> miette::Result<u
         return Err(miette::miette!("settle seconds must be greater than zero"));
     }
     Ok(value)
-}
-
-fn format_learning_budget_usd(value: f64) -> String {
-    if (value
-        - right_agent::agent::types::LearningConfig::default().episode_selector_max_budget_usd)
-        .abs()
-        < f64::EPSILON
-    {
-        "0.10".to_owned()
-    } else {
-        value.to_string()
-    }
 }
 
 /// Interactive memory config submenu. Returns `Ok(None)` when the user
@@ -1617,12 +1604,20 @@ fn update_agent_yaml_learning(
         lines.push(format!("  episode_selector_model: \"{model}\""));
     }
     lines.push(format!(
-        "  episode_selector_max_budget_usd: {}",
-        format_learning_budget_usd(learning.episode_selector_max_budget_usd)
+        "  max_daily_budget_usd: {}",
+        learning.max_daily_budget_usd
     ));
     lines.push(format!(
         "  episode_settle_seconds: {}",
         learning.episode_settle_seconds
+    ));
+    lines.push(format!(
+        "  circuit_failure_threshold: {}",
+        learning.circuit_failure_threshold
+    ));
+    lines.push(format!(
+        "  circuit_cooldown_minutes: {}",
+        learning.circuit_cooldown_minutes
     ));
 
     let mut output = lines.join("\n");
@@ -1654,8 +1649,11 @@ mod learning_yaml_tests {
         let path = write_yaml(dir.path(), "model: \"sonnet\"\n");
         let learning = LearningConfig {
             episode_selector_model: Some("claude-sonnet-4-6".to_owned()),
-            episode_selector_max_budget_usd: 0.25,
+            episode_selector_max_budget_usd: None,
             episode_settle_seconds: 180,
+            max_daily_budget_usd: 12.5,
+            circuit_failure_threshold: 8,
+            circuit_cooldown_minutes: 30,
         };
         update_agent_yaml_learning(&path, &learning).unwrap();
 
@@ -1665,27 +1663,56 @@ mod learning_yaml_tests {
             "pre-existing field survives"
         );
         let parsed: right_agent::agent::AgentConfig = serde_saphyr::from_str(&content).unwrap();
-        assert_eq!(parsed.learning, learning);
+        assert_eq!(
+            parsed.learning.episode_selector_model,
+            learning.episode_selector_model
+        );
+        assert!(
+            (parsed.learning.max_daily_budget_usd - learning.max_daily_budget_usd).abs()
+                < f64::EPSILON
+        );
+        assert_eq!(
+            parsed.learning.episode_settle_seconds,
+            learning.episode_settle_seconds
+        );
+        assert_eq!(
+            parsed.learning.circuit_failure_threshold,
+            learning.circuit_failure_threshold
+        );
+        assert_eq!(
+            parsed.learning.circuit_cooldown_minutes,
+            learning.circuit_cooldown_minutes
+        );
     }
 
     #[test]
     fn update_agent_yaml_learning_replaces_existing_and_omits_absent_model() {
         let dir = tempdir().unwrap();
-        let initial = "model: \"sonnet\"\n\nlearning:\n  episode_selector_model: \"old\"\n  episode_selector_max_budget_usd: 0.25\n  episode_settle_seconds: 180\n\nnetwork_policy: permissive\n";
+        let initial = "model: \"sonnet\"\n\nlearning:\n  episode_selector_model: \"old\"\n  max_daily_budget_usd: 7.5\n  episode_settle_seconds: 180\n\nnetwork_policy: permissive\n";
         let path = write_yaml(dir.path(), initial);
         let learning = LearningConfig {
             episode_selector_model: None,
-            episode_selector_max_budget_usd: 0.10,
+            episode_selector_max_budget_usd: None,
             episode_settle_seconds: 90,
+            max_daily_budget_usd: 5.0,
+            circuit_failure_threshold: 5,
+            circuit_cooldown_minutes: 60,
         };
         update_agent_yaml_learning(&path, &learning).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(!content.contains("episode_selector_model"));
-        assert!(content.contains("episode_selector_max_budget_usd: 0.10"));
+        assert!(content.contains("max_daily_budget_usd: 5"));
         assert!(content.contains("network_policy: permissive"));
         let parsed: right_agent::agent::AgentConfig = serde_saphyr::from_str(&content).unwrap();
-        assert_eq!(parsed.learning, learning);
+        assert!(
+            (parsed.learning.max_daily_budget_usd - learning.max_daily_budget_usd).abs()
+                < f64::EPSILON
+        );
+        assert_eq!(
+            parsed.learning.episode_settle_seconds,
+            learning.episode_settle_seconds
+        );
     }
 }
 

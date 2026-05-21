@@ -1507,7 +1507,7 @@ async fn run_episode_selector(
         json_schema: Some(EPISODE_SELECTOR_SCHEMA_JSON.to_owned()),
         output_format: crate::cc::invocation::OutputFormat::Json,
         model: effective_selector_model(runtime),
-        max_budget_usd: Some(runtime.learning.episode_selector_max_budget_usd),
+        max_budget_usd: None, // Per-call budget removed; replaced by max_daily_budget_usd gate.
         max_turns: Some(3),
         resume_session_id: None,
         new_session_id: None,

@@ -10,14 +10,6 @@ pub const DEFAULT_RECALL_BUDGET: RecallBudget = RecallBudget::Mid;
 /// Default recall max tokens used when the user doesn't override it.
 pub const DEFAULT_RECALL_MAX_TOKENS: u32 = 4096;
 
-fn format_learning_budget_usd(value: f64) -> String {
-    if (value - LearningConfig::default().episode_selector_max_budget_usd).abs() < f64::EPSILON {
-        "0.10".to_owned()
-    } else {
-        value.to_string()
-    }
-}
-
 /// Preserved config from a previous agent, used during `--force-recreate` re-init.
 pub struct InitOverrides {
     pub sandbox_mode: SandboxMode,
@@ -162,14 +154,39 @@ pub fn init_agent(
             if let Some(model) = ov.learning.episode_selector_model.as_deref() {
                 yaml.push_str(&format!("  episode_selector_model: \"{model}\"\n"));
             }
-            yaml.push_str(&format!(
-                "  episode_selector_max_budget_usd: {}\n",
-                format_learning_budget_usd(ov.learning.episode_selector_max_budget_usd)
-            ));
-            yaml.push_str(&format!(
-                "  episode_settle_seconds: {}\n",
-                ov.learning.episode_settle_seconds
-            ));
+            if ov.learning.episode_settle_seconds
+                != LearningConfig::default().episode_settle_seconds
+            {
+                yaml.push_str(&format!(
+                    "  episode_settle_seconds: {}\n",
+                    ov.learning.episode_settle_seconds
+                ));
+            }
+            if (ov.learning.max_daily_budget_usd - LearningConfig::default().max_daily_budget_usd)
+                .abs()
+                > f64::EPSILON
+            {
+                yaml.push_str(&format!(
+                    "  max_daily_budget_usd: {}\n",
+                    ov.learning.max_daily_budget_usd
+                ));
+            }
+            if ov.learning.circuit_failure_threshold
+                != LearningConfig::default().circuit_failure_threshold
+            {
+                yaml.push_str(&format!(
+                    "  circuit_failure_threshold: {}\n",
+                    ov.learning.circuit_failure_threshold
+                ));
+            }
+            if ov.learning.circuit_cooldown_minutes
+                != LearningConfig::default().circuit_cooldown_minutes
+            {
+                yaml.push_str(&format!(
+                    "  circuit_cooldown_minutes: {}\n",
+                    ov.learning.circuit_cooldown_minutes
+                ));
+            }
         }
 
         // Environment variables (from overrides only).
