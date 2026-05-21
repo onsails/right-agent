@@ -269,7 +269,7 @@ fn record_probe_result(ctx: &ProbeContext, probe_session_id: &str, stdout: &str)
         thread_id: Some(ctx.thread_id),
         signal_kind,
         payload_json,
-        source: NudgeSignalSource::ForkProbe,
+        source: probe_signal_source(),
     };
     if let Err(e) = right_agent::learned_skills::record_nudge_signal(&conn, &record) {
         tracing::warn!(
