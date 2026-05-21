@@ -1085,6 +1085,8 @@ fn capture_cron_completion_seed(
         Arc::clone(debug),
         learning.clone(),
         Some(Arc::clone(learning_drain_scheduler)),
+        // Seed-only runtime: the drain task's own runtime carries the real bot.
+        Arc::new(teloxide::Bot::new("")),
     );
     if let Err(e) = runtime.capture_completion_seed(
         conn,
@@ -2069,6 +2071,7 @@ mod tests {
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             right_agent::agent::types::LearningConfig::default(),
             None,
+            Arc::new(teloxide::Bot::new("test")),
         );
         let (drain_scheduler, _drain_handle) = crate::learning_episode::DrainScheduler::spawn(
             drain_runtime,

@@ -162,6 +162,9 @@ pub(crate) struct LearningEpisodeRuntime {
     /// the scheduler exists. Production capture callsites must always carry
     /// `Some(...)`.
     pub(crate) scheduler: Option<Arc<DrainScheduler>>,
+    /// Bot for sending circuit-open alerts. Seed-only runtimes may carry a
+    /// stub bot that is never called (alerts fire only from the drain task).
+    pub(crate) bot: Arc<teloxide::Bot>,
 }
 
 impl std::fmt::Debug for LearningEpisodeRuntime {
@@ -175,6 +178,7 @@ impl std::fmt::Debug for LearningEpisodeRuntime {
             .field("resolved_sandbox", &self.resolved_sandbox)
             .field("learning", &self.learning)
             .field("scheduler", &self.scheduler.is_some())
+            .field("bot", &"<Bot>")
             .finish()
     }
 }
@@ -191,6 +195,7 @@ impl LearningEpisodeRuntime {
         debug: Arc<AtomicBool>,
         learning: right_agent::agent::types::LearningConfig,
         scheduler: Option<Arc<DrainScheduler>>,
+        bot: Arc<teloxide::Bot>,
     ) -> Self {
         Self {
             agent_dir,
@@ -202,6 +207,7 @@ impl LearningEpisodeRuntime {
             debug,
             learning,
             scheduler,
+            bot,
         }
     }
 
@@ -650,9 +656,11 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
         Ok(corpus) => corpus,
         Err(e) => {
             let reason = format!("learning episode corpus load failed: {e:#}");
-            let _outcome =
+            let outcome =
                 mark_claimed_episode_failed(&conn, &runtime, episode.id, &reason, &now_str, true)?;
-            // Task 13 will read _outcome to fire the circuit-open alert.
+            if let Some((_, true)) = outcome {
+                spawn_circuit_open_alert(&runtime, &reason);
+            }
             return Err(anyhow!(reason));
         }
     };
@@ -665,10 +673,12 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
                 Ok(selected) => selected,
                 Err(e) => {
                     let reason = format!("{e:#}");
-                    let _outcome = mark_claimed_episode_failed(
+                    let outcome = mark_claimed_episode_failed(
                         &conn, &runtime, episode.id, &reason, &now_str, true,
                     )?;
-                    // Task 13 will read _outcome to fire the circuit-open alert.
+                    if let Some((_, true)) = outcome {
+                        spawn_circuit_open_alert(&runtime, &reason);
+                    }
                     return Err(anyhow!(reason));
                 }
             };
@@ -680,9 +690,11 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
         }
         Err(e) => {
             let reason = format!("{e:#}");
-            let _outcome =
+            let outcome =
                 mark_claimed_episode_failed(&conn, &runtime, episode.id, &reason, &now_str, true)?;
-            // Task 13 will read _outcome to fire the circuit-open alert.
+            if let Some((_, true)) = outcome {
+                spawn_circuit_open_alert(&runtime, &reason);
+            }
             return Err(anyhow!(reason));
         }
     }
@@ -731,6 +743,33 @@ fn mark_claimed_episode_failed(
     )
     .with_context(|| format!("record review failure for {}", runtime.agent_name))?;
     Ok(Some((count, opened)))
+}
+
+/// Spawn a fire-and-forget task to send the circuit-open Telegram alert.
+/// Called whenever `record_review_failure` returns `opened_circuit = true`.
+fn spawn_circuit_open_alert(runtime: &LearningEpisodeRuntime, reason: &str) {
+    let bot = Arc::clone(&runtime.bot);
+    let db = runtime.agent_db_dir.clone();
+    let agent_name = runtime.agent_name.clone();
+    let agent_dir = runtime.agent_dir.clone();
+    let reason = reason.to_owned();
+    let failure_threshold = runtime.learning.circuit_failure_threshold;
+    let cooldown = runtime.learning.circuit_cooldown_minutes;
+    tokio::spawn(async move {
+        if let Err(e) = crate::telegram::learning_alerts::maybe_alert_circuit_open(
+            bot,
+            &db,
+            &agent_name,
+            &agent_dir,
+            &reason,
+            cooldown,
+            failure_threshold,
+        )
+        .await
+        {
+            tracing::warn!("maybe_alert_circuit_open failed: {e:#}");
+        }
+    });
 }
 
 fn record_selector_output(
@@ -893,9 +932,12 @@ async fn run_episode_reviewer_with_invocation(
 ) -> anyhow::Result<()> {
     let result = run_episode_reviewer_inner(runtime.clone(), episode_id, invoke_review).await;
     if let Err(e) = &result {
-        match mark_episode_review_failed_and_finish(&runtime, episode_id, &format!("{e:#}")) {
-            Ok(_outcome) => {
-                // Task 13 will read _outcome to fire the circuit-open alert.
+        let reason = format!("{e:#}");
+        match mark_episode_review_failed_and_finish(&runtime, episode_id, &reason) {
+            Ok(outcome) => {
+                if let Some((_, true)) = outcome {
+                    spawn_circuit_open_alert(&runtime, &reason);
+                }
             }
             Err(cleanup) => {
                 tracing::warn!(
@@ -977,7 +1019,7 @@ async fn run_episode_reviewer_inner(
             tx.commit()?;
         }
         let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let _outcome = record_review_failure(
+        let (_, opened) = record_review_failure(
             &conn,
             &episode.agent_name,
             &now_utc,
@@ -990,7 +1032,9 @@ async fn run_episode_reviewer_inner(
                 episode.agent_name
             )
         })?;
-        // Task 13 will read _outcome to fire the circuit-open alert.
+        if opened {
+            spawn_circuit_open_alert(&runtime, "reviewer returned status=failed");
+        }
         return Ok(());
     }
     let tx = conn.unchecked_transaction()?;

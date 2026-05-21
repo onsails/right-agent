@@ -619,6 +619,8 @@ fn capture_async_delivery_seed(
         Arc::clone(debug),
         learning.clone(),
         Some(Arc::clone(learning_drain_scheduler)),
+        // Seed-only runtime: the drain task's own runtime carries the real bot.
+        Arc::new(teloxide::Bot::new("")),
     );
     if let Err(e) = runtime.capture_completion_seed(
         conn,
