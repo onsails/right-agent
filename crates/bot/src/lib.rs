@@ -8,6 +8,7 @@ pub(crate) mod cron;
 pub(crate) mod execution_events;
 mod keepalive;
 pub(crate) mod learning_episode;
+pub(crate) mod learning_probe;
 pub(crate) mod learning_review;
 pub(crate) mod login;
 pub(crate) mod reflection;
