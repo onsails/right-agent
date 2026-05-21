@@ -125,6 +125,74 @@ pub const CRON_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"delivery":
 /// for the foreground answer that was sent to background.
 pub const BG_CONTINUATION_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"delivery":{"type":"object","properties":{"kind":{"const":"notify"},"content":{"type":"string","minLength":1},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["kind","content"]},"run_note":{"type":"string"}},"required":["delivery","run_note"]}"#;
 
+/// JSON schema for the fork-probe classifier output.
+///
+/// Mirrors `learning_signal` and `skill_issue_signal` shapes from
+/// `REPLY_SCHEMA_JSON`. `workflow_complete` is captured for telemetry
+/// but does not gate signal ingestion in v1.
+pub const FORK_PROBE_SCHEMA_JSON: &str = r#"{
+  "type": "object",
+  "properties": {
+    "workflow_complete": { "type": "boolean" },
+    "learning_signal": {
+      "type": ["object", "null"],
+      "properties": {
+        "kind": { "const": "create_candidate" },
+        "package_name_hint": { "type": "string" },
+        "trigger": {
+          "enum": ["explicit_user_request", "multi_step_workflow", "recovered_surprise", "user_correction", "repeated_tool_pattern"]
+        },
+        "reason_not_written": {
+          "enum": ["conversation_still_evolving", "needs_full_context_review", "write_or_publish_failed", "needs_existing_skill_diff"]
+        },
+        "event_refs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "summary": { "type": "string" }
+      },
+      "required": ["kind", "package_name_hint", "trigger", "reason_not_written", "event_refs", "summary"]
+    },
+    "skill_issue_signal": {
+      "type": ["object", "null"],
+      "properties": {
+        "kind": { "const": "update_candidate" },
+        "skill_name": { "type": "string" },
+        "issue": {
+          "enum": ["missing_step", "stale_command", "wrong_api_assumption", "overbroad_activation", "broken_script", "unsafe_instruction"]
+        },
+        "reason_not_patched": {
+          "enum": ["conversation_still_evolving", "needs_full_context_review", "write_or_publish_failed", "needs_existing_skill_diff"]
+        },
+        "observed_effect": {
+          "enum": ["retry_after_tool_error", "retry_after_user_correction", "manual_override", "verified_alternative"]
+        },
+        "event_refs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "patch_hint": { "type": "string" }
+      },
+      "required": ["kind", "skill_name", "issue", "reason_not_patched", "observed_effect", "event_refs", "patch_hint"]
+    }
+  },
+  "required": ["workflow_complete"]
+}"#;
+
+/// Prompt sent to the fork-probe classifier.
+///
+/// The probe inherits the foreground turn's transcript via
+/// `claude -p --resume <main> --fork-session` and emits JSON per
+/// `FORK_PROBE_SCHEMA_JSON`. Set signal fields to null when nothing qualifies.
+pub const FORK_PROBE_PROMPT: &str = "\
+Review the just-finished turn. \
+Decide whether the workflow is complete and whether a reusable learning candidate \
+(`learning_signal`) or a skill-issue worth recording (`skill_issue_signal`) exists. \
+Emit JSON matching the provided schema. Set `learning_signal` and `skill_issue_signal` \
+to null if nothing qualifies. Do not invoke any tool.";
+
 /// Generate the base system prompt for all agent modes.
 ///
 /// This replaces CC's default system prompt via `--system-prompt-file`.
