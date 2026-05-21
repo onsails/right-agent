@@ -682,6 +682,70 @@ pub fn reset_stale_review_running(conn: &rusqlite::Connection) -> Result<usize, 
 /// Clear `review_running` for a single agent without touching any other
 /// field.
 ///
+/// Record a learning review failure: increment `consecutive_review_failures`,
+/// open the circuit if the threshold is reached. Atomic.
+///
+/// Returns `(new_failure_count, opened_circuit_now)`:
+/// - `new_failure_count` is the updated counter value.
+/// - `opened_circuit_now` is `true` iff this call transitioned the circuit
+///   from closed to open. Useful for callers that need to emit a one-shot
+///   Telegram alert without re-alerting on every subsequent failure while
+///   the circuit stays open.
+///
+/// `now_utc` must be RFC3339 strict (e.g. "2026-05-21T03:14:15Z").
+pub fn record_review_failure(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+    now_utc: &str,
+    threshold: u32,
+    cooldown_minutes: u32,
+) -> Result<(i64, bool), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    ensure_nudge_state(&tx, agent_name)?;
+
+    let (prev_count, prev_open_until): (i64, Option<String>) = tx.query_row(
+        "SELECT consecutive_review_failures, review_circuit_open_until \
+         FROM skill_nudge_state WHERE agent_name = ?1",
+        [agent_name],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    let new_count = prev_count + 1;
+    let circuit_already_open = prev_open_until
+        .as_deref()
+        .map(|s| s > now_utc)
+        .unwrap_or(false);
+    let should_open = new_count >= i64::from(threshold) && !circuit_already_open;
+    let opened_now = should_open;
+
+    let new_open_until: Option<String> = if should_open {
+        // Compute now_utc + cooldown_minutes in Rust to avoid SQLite datetime
+        // round-trips that drop the 'Z' suffix.
+        let parsed = chrono::DateTime::parse_from_rfc3339(now_utc).map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid now_utc {now_utc:?}: {e}"),
+            )))
+        })?;
+        let until = parsed.with_timezone(&chrono::Utc)
+            + chrono::Duration::minutes(i64::from(cooldown_minutes));
+        Some(until.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    } else {
+        prev_open_until
+    };
+
+    tx.execute(
+        "UPDATE skill_nudge_state SET \
+            review_running = 0, \
+            consecutive_review_failures = ?2, \
+            review_circuit_open_until = ?3 \
+         WHERE agent_name = ?1",
+        rusqlite::params![agent_name, new_count, new_open_until],
+    )?;
+    tx.commit()?;
+    Ok((new_count, opened_now))
+}
+
 /// Used by the bot shutdown path when a background review is aborted
 /// mid-flight: no review actually finished, so `last_review_at`,
 /// `last_review_status`, and counters must remain as the in-flight review
@@ -1989,5 +2053,85 @@ mod tests {
         assert_eq!(running, 0);
         assert_eq!(failures, 0);
         assert_eq!(open_until, None);
+    }
+
+    #[test]
+    fn record_review_failure_increments_and_returns_opened_false_below_threshold() {
+        let conn = conn();
+        ensure_agent_nudge_state(&conn, "him");
+        conn.execute(
+            "UPDATE skill_nudge_state SET review_running = 1, consecutive_review_failures = 2 WHERE agent_name = 'him'",
+            [],
+        )
+        .unwrap();
+
+        let (count, opened) =
+            record_review_failure(&conn, "him", "2026-05-21T03:00:00Z", 5, 60).unwrap();
+        assert_eq!(count, 3);
+        assert!(!opened);
+
+        let (running, open_until): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT review_running, review_circuit_open_until FROM skill_nudge_state WHERE agent_name = 'him'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(running, 0);
+        assert_eq!(open_until, None);
+    }
+
+    #[test]
+    fn record_review_failure_opens_circuit_exactly_at_threshold() {
+        let conn = conn();
+        ensure_agent_nudge_state(&conn, "him");
+        conn.execute(
+            "UPDATE skill_nudge_state SET review_running = 1, consecutive_review_failures = 4 WHERE agent_name = 'him'",
+            [],
+        )
+        .unwrap();
+
+        let (count, opened) =
+            record_review_failure(&conn, "him", "2026-05-21T03:00:00Z", 5, 60).unwrap();
+        assert_eq!(count, 5);
+        assert!(opened);
+
+        let open_until: Option<String> = conn
+            .query_row(
+                "SELECT review_circuit_open_until FROM skill_nudge_state WHERE agent_name = 'him'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open_until.as_deref(), Some("2026-05-21T04:00:00Z"));
+    }
+
+    #[test]
+    fn record_review_failure_does_not_reopen_already_open_circuit() {
+        let conn = conn();
+        ensure_agent_nudge_state(&conn, "him");
+        conn.execute(
+            "UPDATE skill_nudge_state SET \
+                review_running = 1, \
+                consecutive_review_failures = 7, \
+                review_circuit_open_until = '2026-05-21T05:00:00Z' \
+             WHERE agent_name = 'him'",
+            [],
+        )
+        .unwrap();
+
+        let (count, opened) =
+            record_review_failure(&conn, "him", "2026-05-21T03:00:00Z", 5, 60).unwrap();
+        assert_eq!(count, 8);
+        assert!(!opened);
+
+        let open_until: Option<String> = conn
+            .query_row(
+                "SELECT review_circuit_open_until FROM skill_nudge_state WHERE agent_name = 'him'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open_until.as_deref(), Some("2026-05-21T05:00:00Z"));
     }
 }
