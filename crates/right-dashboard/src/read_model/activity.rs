@@ -130,12 +130,13 @@ pub fn activity_run_detail(
     let Some((run, run_note, delivery_json, log_path)) = row else {
         return Ok(None);
     };
-    let delivery = parse_delivery_json(delivery_json)?;
+    let (delivery, delivery_error) = parse_delivery_json(delivery_json);
 
     Ok(Some(RunDetailResponse {
         run,
         run_note,
         delivery,
+        delivery_error,
         log: read_log_excerpt(log_path, max_lines)?,
     }))
 }
@@ -209,9 +210,17 @@ pub(super) fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f6
     Ok(cost)
 }
 
-fn parse_delivery_json(json: Option<String>) -> Result<Option<serde_json::Value>, ReadModelError> {
-    json.map(|json| serde_json::from_str(&json).map_err(ReadModelError::from))
-        .transpose()
+fn parse_delivery_json(json: Option<String>) -> (Option<serde_json::Value>, Option<String>) {
+    let Some(json) = json else {
+        return (None, None);
+    };
+    match serde_json::from_str(&json) {
+        Ok(delivery) => (Some(delivery), None),
+        Err(error) => (
+            None,
+            Some(format!("failed to parse delivery_json: {error}")),
+        ),
+    }
 }
 
 fn read_log_excerpt(path: Option<String>, max_lines: usize) -> Result<LogExcerpt, ReadModelError> {
@@ -429,18 +438,36 @@ mod tests {
             detail.delivery,
             Some(json!({"kind": "notify", "content": "done"}))
         );
+        assert!(detail.delivery_error.is_none());
     }
 
     #[test]
-    fn activity_run_detail_returns_error_for_malformed_delivery_json() {
-        let (_dir, conn) = fixture();
+    fn activity_run_detail_preserves_logs_for_malformed_delivery_json() {
+        let (dir, conn) = fixture();
+        let log_path = dir.path().join("run-1.log");
+        fs::write(&log_path, "first\nsecond\n").unwrap();
         conn.execute(
-            "UPDATE async_runs SET delivery_json = ?1 WHERE id = 'run-1'",
-            ["{malformed"],
+            "UPDATE async_runs SET delivery_json = ?1, log_path = ?2 WHERE id = 'run-1'",
+            (r#"{malformed"#, log_path.to_string_lossy().as_ref()),
         )
         .unwrap();
 
-        assert!(activity_run_detail(&conn, "run-1", 20).is_err());
+        let detail = activity_run_detail(&conn, "run-1", 20).unwrap().unwrap();
+
+        assert!(detail.delivery.is_none());
+        assert!(
+            detail
+                .delivery_error
+                .as_deref()
+                .is_some_and(|error| error.contains("failed to parse delivery_json")),
+            "unexpected delivery_error: {:?}",
+            detail.delivery_error
+        );
+        assert!(detail.log.available);
+        assert_eq!(
+            detail.log.lines,
+            vec!["first".to_owned(), "second".to_owned()]
+        );
     }
 
     #[test]

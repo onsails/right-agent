@@ -173,6 +173,7 @@ pub struct RunDetailResponse {
     pub run: RunSummary,
     pub run_note: Option<String>,
     pub delivery: Option<serde_json::Value>,
+    pub delivery_error: Option<String>,
     pub log: LogExcerpt,
 }
 
