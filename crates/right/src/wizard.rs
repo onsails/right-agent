@@ -997,6 +997,46 @@ fn learning_setup(
         existing.circuit_cooldown_minutes,
     )?;
 
+    let Some(probe_model_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("fork-probe model (empty to inherit agent model):").prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let probe_model = parse_probe_model(&probe_model_input).map_err(|e| miette::miette!(e))?;
+
+    let fork_probe_default = if existing.fork_probe_enabled {
+        "yes"
+    } else {
+        "no"
+    };
+    let Some(fork_probe_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("enable fork-probe (post-turn signal classifier)?")
+            .with_default(fork_probe_default)
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let fork_probe_enabled =
+        parse_fork_probe_enabled(&fork_probe_input).map_err(|e| miette::miette!(e))?;
+
+    let background_review_default = if existing.background_review_enabled {
+        "yes"
+    } else {
+        "no"
+    };
+    let Some(background_review_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("enable deprecated background learning (advanced; off by default)?")
+            .with_default(background_review_default)
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let background_review_enabled = parse_background_review_enabled(&background_review_input)
+        .map_err(|e| miette::miette!(e))?;
+
     Ok(Some(right_agent::agent::types::LearningConfig {
         episode_selector_model: model,
         episode_selector_max_budget_usd: existing.episode_selector_max_budget_usd,
@@ -1004,9 +1044,9 @@ fn learning_setup(
         max_daily_budget_usd,
         circuit_failure_threshold,
         circuit_cooldown_minutes,
-        probe_model: existing.probe_model.clone(),
-        fork_probe_enabled: existing.fork_probe_enabled,
-        background_review_enabled: existing.background_review_enabled,
+        probe_model,
+        fork_probe_enabled,
+        background_review_enabled,
     }))
 }
 
@@ -1066,6 +1106,30 @@ fn parse_learning_circuit_cooldown_minutes(input: &str, fallback: u32) -> miette
         ));
     }
     Ok(value)
+}
+
+pub(crate) fn parse_probe_model(input: &str) -> Result<Option<String>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_owned()))
+    }
+}
+
+pub(crate) fn parse_fork_probe_enabled(input: &str) -> Result<bool, String> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "yes" | "y" | "true" | "on" => Ok(true),
+        "no" | "n" | "false" | "off" => Ok(false),
+        other => Err(format!("invalid boolean: '{other}'")),
+    }
+}
+
+pub(crate) fn parse_background_review_enabled(input: &str) -> Result<bool, String> {
+    if input.trim().is_empty() {
+        return Ok(false);
+    }
+    parse_fork_probe_enabled(input)
 }
 
 /// Interactive memory config submenu. Returns `Ok(None)` when the user
@@ -1713,6 +1777,9 @@ mod learning_yaml_tests {
             max_daily_budget_usd: 12.5,
             circuit_failure_threshold: 8,
             circuit_cooldown_minutes: 30,
+            probe_model: None,
+            fork_probe_enabled: true,
+            background_review_enabled: false,
         };
         update_agent_yaml_learning(&path, &learning).unwrap();
 
@@ -1756,6 +1823,9 @@ mod learning_yaml_tests {
             max_daily_budget_usd: 5.0,
             circuit_failure_threshold: 5,
             circuit_cooldown_minutes: 60,
+            probe_model: None,
+            fork_probe_enabled: true,
+            background_review_enabled: false,
         };
         update_agent_yaml_learning(&path, &learning).unwrap();
 
@@ -1772,6 +1842,35 @@ mod learning_yaml_tests {
             parsed.learning.episode_settle_seconds,
             learning.episode_settle_seconds
         );
+    }
+
+    #[test]
+    fn parse_probe_model_blank_returns_none() {
+        assert_eq!(parse_probe_model(""), Ok(None));
+    }
+
+    #[test]
+    fn parse_probe_model_string_returns_some() {
+        assert_eq!(
+            parse_probe_model("claude-haiku-4-5-20251001"),
+            Ok(Some("claude-haiku-4-5-20251001".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_fork_probe_enabled_accepts_yes_no_true_false() {
+        assert_eq!(parse_fork_probe_enabled("yes"), Ok(true));
+        assert_eq!(parse_fork_probe_enabled("no"), Ok(false));
+        assert_eq!(parse_fork_probe_enabled("true"), Ok(true));
+        assert_eq!(parse_fork_probe_enabled("false"), Ok(false));
+        assert!(parse_fork_probe_enabled("maybe").is_err());
+    }
+
+    #[test]
+    fn parse_background_review_enabled_defaults_off() {
+        assert_eq!(parse_background_review_enabled("no"), Ok(false));
+        assert_eq!(parse_background_review_enabled(""), Ok(false));
+        assert_eq!(parse_background_review_enabled("yes"), Ok(true));
     }
 }
 
