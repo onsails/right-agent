@@ -298,7 +298,7 @@ mod tests {
             "run-1",
             RunOutput {
                 run_note: Some("summary"),
-                delivery_json: Some("{\"content\":\"hi\"}"),
+                delivery_json: Some(r#"{"kind":"notify","content":"hi"}"#),
                 error_json: None,
                 delivery_required: true,
             },
@@ -312,7 +312,14 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(row, (1, "pending".into(), "{\"content\":\"hi\"}".into()));
+        assert_eq!(
+            row,
+            (
+                1,
+                "pending".into(),
+                r#"{"kind":"notify","content":"hi"}"#.into()
+            )
+        );
     }
 
     #[test]
@@ -370,7 +377,7 @@ mod tests {
             status: "success".into(),
             log_path: Some("/log".into()),
             run_note: Some("summary".into()),
-            delivery_json: Some("{\"content\":\"hello\"}".into()),
+            delivery_json: Some(r#"{"kind":"notify","content":"hello"}"#.into()),
             delivered_at: None,
             delivery_status: Some("pending".into()),
         };
@@ -395,7 +402,7 @@ mod tests {
             "missing",
             RunOutput {
                 run_note: Some("summary"),
-                delivery_json: Some("{\"content\":\"hi\"}"),
+                delivery_json: Some(r#"{"kind":"notify","content":"hi"}"#),
                 error_json: None,
                 delivery_required: true,
             },

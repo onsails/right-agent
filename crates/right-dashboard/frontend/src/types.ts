@@ -155,6 +155,7 @@ export interface RunDetailResponse {
   run_note: string | null
   delivery: unknown | null
   delivery_error: string | null
+  error_message: string | null
   log: {
     available: boolean
     path: string | null

@@ -776,11 +776,11 @@ async fn serialize_notify_delivery_for_host(
     resolved_sandbox: Option<&str>,
 ) -> Result<String, String> {
     let Some(attachments) = notify.attachments.as_ref() else {
-        return crate::cron::notify_delivery_json(notify)
+        return crate::cron::notify_delivery_json(&notify.content, notify.attachments.as_deref())
             .map_err(|e| format!("serialize background delivery_json: {e:#}"));
     };
     if attachments.is_empty() || resolved_sandbox.is_none() {
-        return crate::cron::notify_delivery_json(notify)
+        return crate::cron::notify_delivery_json(&notify.content, notify.attachments.as_deref())
             .map_err(|e| format!("serialize background delivery_json: {e:#}"));
     }
 
@@ -810,11 +810,7 @@ async fn serialize_notify_delivery_for_host(
         });
     }
 
-    let host_notify = crate::cron::CronNotify {
-        content: notify.content.clone(),
-        attachments: Some(host_attachments),
-    };
-    crate::cron::notify_delivery_json(&host_notify)
+    crate::cron::notify_delivery_json(&notify.content, Some(&host_attachments))
         .map_err(|e| format!("serialize background host delivery_json: {e:#}"))
 }
 
@@ -840,11 +836,7 @@ fn background_failure_payload(
     run_id: &str,
     reason: &str,
 ) -> Result<(String, String, String), rusqlite::Error> {
-    let notify = crate::cron::CronNotify {
-        content: BACKGROUND_FAILURE_NOTIFY_CONTENT.to_string(),
-        attachments: None,
-    };
-    let delivery_json = crate::cron::notify_delivery_json(&notify)
+    let delivery_json = crate::cron::notify_delivery_json(BACKGROUND_FAILURE_NOTIFY_CONTENT, None)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     let run_note = format!("Background run `{run_id}` failed before producing a result");
     let error_json = serde_json::json!({

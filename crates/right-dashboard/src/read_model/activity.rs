@@ -112,7 +112,7 @@ pub fn activity_run_detail(
     max_lines: usize,
 ) -> Result<Option<RunDetailResponse>, ReadModelError> {
     let sql = format!(
-        "SELECT {RUN_SUMMARY_COLUMNS}, ar.run_note, ar.delivery_json, ar.log_path
+        "SELECT {RUN_SUMMARY_COLUMNS}, ar.run_note, ar.delivery_json, ar.error_json, ar.log_path
          {RUN_SUMMARY_FROM}
          WHERE ar.id = ?1"
     );
@@ -123,20 +123,23 @@ pub fn activity_run_detail(
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
             ))
         })
         .optional()?;
 
-    let Some((run, run_note, delivery_json, log_path)) = row else {
+    let Some((run, run_note, delivery_json, error_json, log_path)) = row else {
         return Ok(None);
     };
     let (delivery, delivery_error) = parse_delivery_json(delivery_json);
+    let error_message = extract_error_message(error_json);
 
     Ok(Some(RunDetailResponse {
         run,
         run_note,
         delivery,
         delivery_error,
+        error_message,
         log: read_log_excerpt(log_path, max_lines)?,
     }))
 }
@@ -216,10 +219,29 @@ fn parse_delivery_json(json: Option<String>) -> (Option<serde_json::Value>, Opti
     };
     match serde_json::from_str(&json) {
         Ok(delivery) => (Some(delivery), None),
-        Err(error) => (
-            None,
-            Some(format!("failed to parse delivery_json: {error}")),
-        ),
+        Err(error) => {
+            tracing::warn!(error = %error, "dashboard: malformed delivery_json");
+            (
+                None,
+                Some(format!("failed to parse delivery_json: {error}")),
+            )
+        }
+    }
+}
+
+/// Extract a human-readable error message from an `async_runs.error_json`
+/// row. Returns `None` when there is no error_json. When the value parses as
+/// JSON with a string `reason` field, returns that reason; otherwise returns
+/// the raw stored text so debuggability is preserved.
+fn extract_error_message(json: Option<String>) -> Option<String> {
+    let json = json?;
+    match serde_json::from_str::<serde_json::Value>(&json) {
+        Ok(value) => value
+            .get("reason")
+            .and_then(|reason| reason.as_str())
+            .map(|reason| reason.to_owned())
+            .or(Some(json)),
+        Err(_) => Some(json),
     }
 }
 
@@ -468,6 +490,48 @@ mod tests {
             detail.log.lines,
             vec!["first".to_owned(), "second".to_owned()]
         );
+    }
+
+    #[test]
+    fn activity_run_detail_surfaces_error_message_from_error_json() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "UPDATE async_runs SET error_json = ?1 WHERE id = 'run-1'",
+            [r#"{"kind":"cron_parse_failed","reason":"missing result stream"}"#],
+        )
+        .unwrap();
+
+        let detail = activity_run_detail(&conn, "run-1", 20).unwrap().unwrap();
+
+        assert_eq!(
+            detail.error_message.as_deref(),
+            Some("missing result stream")
+        );
+        assert!(detail.delivery.is_none());
+        assert!(detail.delivery_error.is_none());
+    }
+
+    #[test]
+    fn activity_run_detail_surfaces_raw_error_json_when_no_reason() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "UPDATE async_runs SET error_json = ?1 WHERE id = 'run-1'",
+            [r#"not-json"#],
+        )
+        .unwrap();
+
+        let detail = activity_run_detail(&conn, "run-1", 20).unwrap().unwrap();
+
+        assert_eq!(detail.error_message.as_deref(), Some("not-json"));
+    }
+
+    #[test]
+    fn activity_run_detail_omits_error_message_when_error_json_null() {
+        let (_dir, conn) = fixture();
+
+        let detail = activity_run_detail(&conn, "run-1", 20).unwrap().unwrap();
+
+        assert!(detail.error_message.is_none());
     }
 
     #[test]

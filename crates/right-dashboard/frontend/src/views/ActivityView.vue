@@ -140,6 +140,10 @@ function cronStatus(cron: CronCard): string {
           <h3>Delivery error</h3>
           <p>{{ selectedRun.delivery_error }}</p>
         </section>
+        <section v-if="selectedRun.error_message" class="text-block">
+          <h3>Error</h3>
+          <p>{{ selectedRun.error_message }}</p>
+        </section>
         <section class="text-block">
           <h3>Log</h3>
           <p v-if="!selectedRun.log.available" class="muted-line">Log unavailable</p>
