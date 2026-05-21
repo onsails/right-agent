@@ -1105,29 +1105,26 @@ async fn run_episode_review_invocation(
         crate::learning_review::parse_review_process_stdout(&stdout).map_err(anyhow::Error::msg)?;
 
     // Record usage — best-effort, never fail the reviewer over this.
-    if let Some(breakdown) = crate::cc::stream::parse_usage_full(&stdout) {
-        if let Some(episode_id) = bundle.learning_episode_id {
-            let conn = right_db::open_connection(&runtime.agent_db_dir, false);
-            match conn {
-                Ok(conn) => {
-                    if let Err(e) = right_agent::usage::insert::insert_learning_reviewer(
-                        &conn, &breakdown, episode_id,
-                    ) {
-                        tracing::warn!(
-                            agent = %runtime.agent_name,
-                            episode_id,
-                            "failed to record reviewer usage event: {e:#}"
-                        );
-                    }
-                }
-                Err(e) => {
+    if let Some(breakdown) = crate::cc::stream::parse_usage_full(&stdout)
+        && let Some(episode_id) = bundle.learning_episode_id
+    {
+        match right_db::open_connection(&runtime.agent_db_dir, false) {
+            Ok(conn) => {
+                if let Err(e) = right_agent::usage::insert::insert_learning_reviewer(
+                    &conn, &breakdown, episode_id,
+                ) {
                     tracing::warn!(
                         agent = %runtime.agent_name,
                         episode_id,
-                        "failed to open db for reviewer usage event: {e:#}"
+                        "failed to record reviewer usage event: {e:#}"
                     );
                 }
             }
+            Err(e) => tracing::warn!(
+                agent = %runtime.agent_name,
+                episode_id,
+                "failed to open db for reviewer usage event: {e:#}"
+            ),
         }
     }
 
