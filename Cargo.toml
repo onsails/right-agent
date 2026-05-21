@@ -33,7 +33,7 @@ serde-saphyr = "0.0"
 serde_json = "1.0"
 thiserror = "2.0"
 miette = { version = "7.6", features = ["fancy"] }
-minijinja = "2.19"
+minijinja = "2.20"
 include_dir = "0.7"
 walkdir = "2.5"
 dirs = "6.0"
