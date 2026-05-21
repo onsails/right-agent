@@ -786,12 +786,13 @@ fn requeue_episode_or_fail_requests_follow_up_drain() {
 
     requeue_episode_or_fail(
         &conn,
-        "right",
+        &runtime(),
         episode.id,
         chrono::DateTime::parse_from_rfc3339("2026-05-19T10:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc),
         90,
+        "2026-05-19T10:00:00Z",
     )
     .unwrap();
 
@@ -831,12 +832,13 @@ fn requeue_episode_or_fail_preserves_gate_when_no_row_matched() {
 
     requeue_episode_or_fail(
         &conn,
-        "right",
+        &runtime(),
         episode.id,
         chrono::DateTime::parse_from_rfc3339("2026-05-19T10:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc),
         90,
+        "2026-05-19T10:00:00Z",
     )
     .unwrap();
 
