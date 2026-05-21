@@ -27,7 +27,7 @@ The dashboard also needs to surface where each accepted learning signal came fro
 ## Goals
 
 - Replace background `episode_selector` + `episode_reviewer` LLM pipeline with one synchronous fork-probe per foreground user turn.
-- Attribute each `skill_nudge_signals` row to its source: `reply_field` (agent self-emit), `fork_probe`, `retain_tool`, `background_review` (deprecated).
+- Attribute each `skill_nudge_signals` row to its source: `reply_field` (agent self-emit), `fork_probe`, `background_review` (deprecated).
 - Expose source breakdown in the dashboard signals widget and add `learning_fork_probe` to `usage_events.source`.
 - Deprecate the background pipeline behind a per-agent opt-in flag without deleting code or tables yet.
 - Reuse the existing daily $ budget primitive; one budget covers fork-probe and the legacy background path summed.
@@ -123,10 +123,6 @@ If parsing fails or the probe exits non-zero, log a `tracing::warn!` with main s
 
 When the agent's structured reply already contains `learning_signal`/`skill_issue_signal`, the worker writes the signal row with `source = 'reply_field'` (this is the existing path; we just add the source value). No probe runs.
 
-### Memory-retain attribution
-
-`record_nudge_signal` called from `mcp__right__memory_retain` ingestion (in `crates/bot/src/telegram/worker.rs:4336`) writes `source = 'retain_tool'`.
-
 ### Deprecated background path
 
 When `learning.background_review_enabled = true` (opt-in, off by default), the existing pipeline runs in parallel with the fork-probe. Selector + reviewer continue to write `skill_nudge_signals` with `source = 'background_review'` (new constant for the existing insert sites). Daily budget gate covers both `learning_fork_probe` and the existing `learning_selector` + `learning_reviewer` + `learning_skill_review` sources summed. Operators can compare the two paths in the dashboard for one release cycle before the cleanup spec drops the background code.
@@ -150,12 +146,11 @@ Source enum (string at DB level):
 
 | Value | When written |
 |---|---|
-| `reply_field` | Agent's structured reply contained the signal; bot worker ingested it. |
+| `reply_field` | Agent's structured reply contained the signal; bot worker ingested it (current sole production path). |
 | `fork_probe` | Post-turn fork classifier returned a non-null signal. |
-| `retain_tool` | `mcp__right__memory_retain` was called with `learning` / `skill_issue` signal payload. |
 | `background_review` | Deprecated Stage 2 selector/reviewer wrote it; only present when `background_review_enabled = true`. |
 
-The default `reply_field` for the column is a deliberate choice: pre-existing rows came from the structured-reply ingestion path (the retain-tool path also wrote via `record_nudge_signal` but its caller will be updated to pass the new source value, so post-migration rows get correct source attribution).
+The default `reply_field` for the column matches the only current production path; pre-existing rows are accurately backfilled.
 
 ### `usage_events.source` value
 
@@ -262,7 +257,7 @@ WHERE agent_name = ?1 AND accepted_at >= ?2
 GROUP BY source
 ```
 
-Render in the mini-app as a 4-bar bar-chart (`reply_field` / `fork_probe` / `retain_tool` / `background_review`). Empty bars allowed.
+Render in the mini-app as a 3-bar bar-chart (`reply_field` / `fork_probe` / `background_review`). Empty bars allowed.
 
 ### Cost surface
 
@@ -278,7 +273,7 @@ New read-model entry: `fork_probe_signal_rate_24h` = `count(source='fork_probe')
 
 - `learning_probe::should_run_probe` truth table: foreground turn, kind != foreground, reply has signal, reply lacks signal, budget exceeded, fork_probe_enabled = false.
 - `learning_probe::parse_fork_probe_output` accepts non-null signals, null signals, malformed JSON, extra fields.
-- `learning_probe::compute_signal_source` returns `reply_field` when structured reply has it, `fork_probe` when probe emits it, `retain_tool` for retain ingestion, `background_review` for legacy insert sites.
+- `learning_probe::compute_signal_source` returns `reply_field` when structured reply has it, `fork_probe` when probe emits it, `background_review` for legacy insert sites.
 - `record_nudge_signal` accepts and persists the new `source` argument; existing callers updated.
 - `LearningConfig` deserializes pre-v27 `agent.yaml` (no `fork_probe_enabled` / `background_review_enabled` fields) to the new defaults.
 - v27 migration idempotency: re-run twice on a database that already has the `source` column.
@@ -316,7 +311,7 @@ The implementation plan derived from this spec must encode:
 - v27 migration as the first task, with the idempotency test.
 - New `crates/bot/src/learning_probe.rs` module with strict LoC budget (target ≤500).
 - `LearningConfig` field additions with backward-compatible deserialization.
-- `record_nudge_signal` source-argument refactor across the four insert sites.
+- `record_nudge_signal` source-argument refactor across the existing insert site plus two new ones (fork-probe, background-review legacy).
 - Dashboard read-model and widget updates.
 - Wizard prompt updates.
 - Bot-startup deprecation WARN.
