@@ -68,11 +68,7 @@ pub(crate) async fn maybe_alert_circuit_open(
         return Ok(());
     };
 
-    let truncated = if last_failure_reason.len() > 200 {
-        format!("{}…", &last_failure_reason[..200])
-    } else {
-        last_failure_reason.to_owned()
-    };
+    let truncated = truncate_with_ellipsis(last_failure_reason, 200);
     let body = format!(
         "❌ <b>Learning review circuit opened</b>\n\n\
          Selector failed {failure_threshold}× in a row. New reviews paused for {cooldown_minutes} minutes.\n\n\
@@ -87,6 +83,18 @@ pub(crate) async fn maybe_alert_circuit_open(
         .context("send learning_circuit_open alert")?;
     alerts::record_fire(db, ALERT_TYPE);
     Ok(())
+}
+
+/// Truncate `s` to at most `max_chars` characters (Unicode scalar values),
+/// appending `…` when truncation occurred. Character-safe — never panics on
+/// multi-byte UTF-8 sequences (Cyrillic, CJK, emoji).
+fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
+    let collected: String = s.chars().take(max_chars).collect();
+    if collected.len() < s.len() {
+        format!("{collected}…")
+    } else {
+        collected
+    }
 }
 
 /// Return the first chat id in the agent's allowlist (users first, then
@@ -156,5 +164,33 @@ mod tests {
         let dir = tempdir().unwrap();
         let id = first_allowlist_chat(dir.path()).unwrap();
         assert_eq!(id, None);
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_does_not_panic_on_cyrillic() {
+        // 300 Cyrillic chars (2 bytes each in UTF-8). Byte 200 lies inside a
+        // codepoint, so byte-slicing at 200 would panic. The char-safe path
+        // must return a 200-char prefix plus the ellipsis.
+        let input: String = "я".repeat(300);
+        let out = truncate_with_ellipsis(&input, 200);
+        assert_eq!(out.chars().count(), 201);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().take(200).collect::<String>(), "я".repeat(200));
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_no_ellipsis_when_within_limit() {
+        let input = "hello";
+        let out = truncate_with_ellipsis(input, 200);
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_handles_emoji_boundary() {
+        // Each 😀 is 4 bytes; 60 of them = 240 bytes, 60 chars.
+        let input: String = "😀".repeat(60);
+        let out = truncate_with_ellipsis(&input, 50);
+        assert_eq!(out.chars().count(), 51);
+        assert!(out.ends_with('…'));
     }
 }

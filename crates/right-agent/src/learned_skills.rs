@@ -484,6 +484,20 @@ fn review_gate_decision_in_tx(
     agent_name: &str,
     input: ReviewGateInput<'_>,
 ) -> Result<ReviewGateDecision, rusqlite::Error> {
+    // Parse now_utc once into a typed DateTime. A malformed string would
+    // otherwise silently produce a junk `today_start` (via `split_once('T')`
+    // falling back to the whole string) and the daily-budget SUM would
+    // return 0.0, bypassing the guard. Match the existing error pattern in
+    // record_review_failure.
+    let parsed_now = chrono::DateTime::parse_from_rfc3339(input.now_utc)
+        .map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid now_utc {:?}: {e}", input.now_utc),
+            )))
+        })?
+        .with_timezone(&chrono::Utc);
+
     let (review_running, circuit_open_until, tool_iters, interval): (
         i64,
         Option<String>,
@@ -501,6 +515,9 @@ fn review_gate_decision_in_tx(
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::AlreadyRunning));
     }
     if let Some(until) = circuit_open_until {
+        // RFC3339-Z strings are lexicographically orderable, so a string
+        // compare matches the typed DateTime comparison by construction
+        // (both sides are produced as "%Y-%m-%dT%H:%M:%SZ").
         if until.as_str() > input.now_utc {
             return Ok(ReviewGateDecision::Skip(ReviewSkipReason::CircuitOpen));
         }
@@ -526,11 +543,12 @@ fn review_gate_decision_in_tx(
 
     // Only query usage_events when a trigger would otherwise fire. The index
     // scan is cheap but pointless for the common no-trigger branch.
-    let date_part = input
-        .now_utc
-        .split_once('T')
-        .map_or(input.now_utc, |(d, _)| d);
-    let today_start = format!("{date_part}T00:00:00Z");
+    let today_start = parsed_now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("00:00:00 is a valid time")
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
     let placeholders = (0..crate::usage::LEARNING_SOURCES.len())
         .map(|i| format!("?{}", i + 2))
         .collect::<Vec<_>>()
@@ -684,9 +702,6 @@ pub fn reset_stale_review_running(conn: &rusqlite::Connection) -> Result<usize, 
     )
 }
 
-/// Clear `review_running` for a single agent without touching any other
-/// field.
-///
 /// Record a learning review failure: increment `consecutive_review_failures`,
 /// open the circuit if the threshold is reached. Atomic.
 ///
@@ -705,6 +720,19 @@ pub fn record_review_failure(
     threshold: u32,
     cooldown_minutes: u32,
 ) -> Result<(i64, bool), rusqlite::Error> {
+    // Parse now_utc once up front so the open-window comparison and the
+    // cooldown computation share a single validation point. Otherwise the
+    // open-window branch silently accepts a malformed string while only
+    // the should_open branch would have caught it.
+    let parsed_now = chrono::DateTime::parse_from_rfc3339(now_utc)
+        .map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid now_utc {now_utc:?}: {e}"),
+            )))
+        })?
+        .with_timezone(&chrono::Utc);
+
     let tx = conn.unchecked_transaction()?;
     ensure_nudge_state(&tx, agent_name)?;
 
@@ -716,6 +744,8 @@ pub fn record_review_failure(
     )?;
 
     let new_count = prev_count + 1;
+    // RFC3339-Z strings are lexicographically orderable; both sides are
+    // produced as "%Y-%m-%dT%H:%M:%SZ" by construction.
     let circuit_already_open = prev_open_until
         .as_deref()
         .map(|s| s > now_utc)
@@ -726,14 +756,7 @@ pub fn record_review_failure(
     let new_open_until: Option<String> = if should_open {
         // Compute now_utc + cooldown_minutes in Rust to avoid SQLite datetime
         // round-trips that drop the 'Z' suffix.
-        let parsed = chrono::DateTime::parse_from_rfc3339(now_utc).map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid now_utc {now_utc:?}: {e}"),
-            )))
-        })?;
-        let until = parsed.with_timezone(&chrono::Utc)
-            + chrono::Duration::minutes(i64::from(cooldown_minutes));
+        let until = parsed_now + chrono::Duration::minutes(i64::from(cooldown_minutes));
         Some(until.format("%Y-%m-%dT%H:%M:%SZ").to_string())
     } else {
         prev_open_until
@@ -751,6 +774,9 @@ pub fn record_review_failure(
     Ok((new_count, opened_now))
 }
 
+/// Clear `review_running` for a single agent without touching any other
+/// field.
+///
 /// Used by the bot shutdown path when a background review is aborted
 /// mid-flight: no review actually finished, so `last_review_at`,
 /// `last_review_status`, and counters must remain as the in-flight review
@@ -2138,5 +2164,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(open_until.as_deref(), Some("2026-05-21T05:00:00Z"));
+    }
+
+    #[test]
+    fn record_review_failure_rejects_invalid_now_utc() {
+        let conn = conn();
+        ensure_agent_nudge_state(&conn, "him");
+        let result = record_review_failure(&conn, "him", "not-a-timestamp", 5, 60);
+        assert!(
+            matches!(result, Err(_)),
+            "expected Err for malformed now_utc, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn gate_decision_rejects_invalid_now_utc() {
+        let conn = conn();
+        ensure_nudge_state(&conn, "right").unwrap();
+        let result = review_gate_decision(
+            &conn,
+            "right",
+            ReviewGateInput {
+                signal_trigger: Some(ReviewTriggerKind::LearningSignal),
+                now_utc: "not-a-timestamp",
+                daily_budget_usd: 5.00,
+            },
+        );
+        assert!(
+            matches!(result, Err(_)),
+            "expected Err for malformed now_utc, got {result:?}"
+        );
     }
 }
