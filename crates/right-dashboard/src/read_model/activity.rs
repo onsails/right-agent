@@ -112,7 +112,7 @@ pub fn activity_run_detail(
     max_lines: usize,
 ) -> Result<Option<RunDetailResponse>, ReadModelError> {
     let sql = format!(
-        "SELECT {RUN_SUMMARY_COLUMNS}, ar.summary, ar.notify_json, ar.no_notify_reason, ar.log_path
+        "SELECT {RUN_SUMMARY_COLUMNS}, ar.run_note, ar.delivery_json, ar.log_path
          {RUN_SUMMARY_FROM}
          WHERE ar.id = ?1"
     );
@@ -123,21 +123,19 @@ pub fn activity_run_detail(
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, Option<String>>(11)?,
-                row.get::<_, Option<String>>(12)?,
             ))
         })
         .optional()?;
 
-    let Some((run, summary, notify_json, no_notify_reason, log_path)) = row else {
+    let Some((run, run_note, delivery_json, log_path)) = row else {
         return Ok(None);
     };
-    let notify_json = parse_notify_json(notify_json)?;
+    let delivery = parse_delivery_json(delivery_json)?;
 
     Ok(Some(RunDetailResponse {
         run,
-        summary,
-        notify_json,
-        no_notify_reason,
+        run_note,
+        delivery,
         log: read_log_excerpt(log_path, max_lines)?,
     }))
 }
@@ -211,7 +209,7 @@ pub(super) fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f6
     Ok(cost)
 }
 
-fn parse_notify_json(json: Option<String>) -> Result<Option<serde_json::Value>, ReadModelError> {
+fn parse_delivery_json(json: Option<String>) -> Result<Option<serde_json::Value>, ReadModelError> {
     json.map(|json| serde_json::from_str(&json).map_err(ReadModelError::from))
         .transpose()
 }
@@ -417,27 +415,27 @@ mod tests {
     }
 
     #[test]
-    fn activity_run_detail_parses_valid_notify_json() {
+    fn activity_run_detail_parses_valid_delivery_json() {
         let (_dir, conn) = fixture();
         conn.execute(
-            "UPDATE async_runs SET notify_json = ?1 WHERE id = 'run-1'",
-            [r#"{"message":"done","silent":false}"#],
+            "UPDATE async_runs SET delivery_json = ?1 WHERE id = 'run-1'",
+            [r#"{"kind":"notify","content":"done"}"#],
         )
         .unwrap();
 
         let detail = activity_run_detail(&conn, "run-1", 20).unwrap().unwrap();
 
         assert_eq!(
-            detail.notify_json,
-            Some(json!({"message": "done", "silent": false}))
+            detail.delivery,
+            Some(json!({"kind": "notify", "content": "done"}))
         );
     }
 
     #[test]
-    fn activity_run_detail_returns_error_for_malformed_notify_json() {
+    fn activity_run_detail_returns_error_for_malformed_delivery_json() {
         let (_dir, conn) = fixture();
         conn.execute(
-            "UPDATE async_runs SET notify_json = ?1 WHERE id = 'run-1'",
+            "UPDATE async_runs SET delivery_json = ?1 WHERE id = 'run-1'",
             ["{malformed"],
         )
         .unwrap();

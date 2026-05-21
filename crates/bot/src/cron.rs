@@ -85,8 +85,14 @@ impl CronDeliveryDecision {
     }
 }
 
+pub(crate) fn delivery_decision_json(
+    delivery: &CronDeliveryDecision,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(delivery)
+}
+
 pub(crate) fn notify_delivery_json(notify: &CronNotify) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&CronDeliveryDecision::Notify {
+    delivery_decision_json(&CronDeliveryDecision::Notify {
         content: notify.content.clone(),
         attachments: notify.attachments.clone(),
     })
@@ -316,8 +322,10 @@ fn persist_successful_cron_output(
     cron_output: &CronReplyOutput,
     delivery_json: &str,
 ) -> Result<&'static str, rusqlite::Error> {
-    let delivery_required = cron_output.delivery.as_notify().is_some();
-    let delivery_status = if delivery_required { "pending" } else { "none" };
+    let (delivery_required, delivery_status) = match cron_output.delivery {
+        CronDeliveryDecision::Notify { .. } => (true, "pending"),
+        CronDeliveryDecision::Silent { .. } => (false, "none"),
+    };
     right_agent::async_runs::persist_run_output(
         conn,
         run_id,
@@ -745,66 +753,56 @@ async fn execute_job(
         match parse_cron_output(&collected_lines) {
             Ok(cron_output) => {
                 // Download attachments from sandbox to host outbox
-                let delivery_json = if let Some(notify) = cron_output.delivery.as_notify() {
-                    if let Some(ref atts) = notify.attachments {
-                        let outbox_dir = agent_dir.join("outbox").join("cron").join(&run_id);
-                        if let Err(e) = std::fs::create_dir_all(&outbox_dir) {
-                            tracing::error!(job = %job_name, "failed to create cron outbox dir: {e:#}");
-                        } else if ssh_config_path.is_some() {
-                            let sandbox = resolved_sandbox.unwrap();
-                            for att in atts {
-                                let dest = outbox_dir.join(attachment_filename(&att.path));
-                                if let Err(e) = right_openshell::openshell::download_file(
-                                    sandbox, &att.path, &dest,
-                                )
-                                .await
-                                {
-                                    tracing::error!(
-                                        job = %job_name,
-                                        path = %att.path,
-                                        "failed to download cron attachment: {e:#}"
-                                    );
+                let delivery_json = {
+                    let delivery = match &cron_output.delivery {
+                        CronDeliveryDecision::Notify {
+                            content,
+                            attachments: Some(atts),
+                        } => {
+                            let outbox_dir = agent_dir.join("outbox").join("cron").join(&run_id);
+                            if let Err(e) = std::fs::create_dir_all(&outbox_dir) {
+                                tracing::error!(job = %job_name, "failed to create cron outbox dir: {e:#}");
+                            } else if ssh_config_path.is_some() {
+                                let sandbox = resolved_sandbox.unwrap();
+                                for att in atts {
+                                    let dest = outbox_dir.join(attachment_filename(&att.path));
+                                    if let Err(e) = right_openshell::openshell::download_file(
+                                        sandbox, &att.path, &dest,
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(
+                                            job = %job_name,
+                                            path = %att.path,
+                                            "failed to download cron attachment: {e:#}"
+                                        );
+                                    }
                                 }
                             }
-                        }
 
-                        // Rewrite paths to host-side
-                        let outbox_dir = agent_dir.join("outbox").join("cron").join(&run_id);
-                        let host_notify = CronNotify {
-                            content: notify.content.clone(),
-                            attachments: Some(
-                                atts.iter()
-                                    .map(|att| OutboundAttachment {
-                                        kind: att.kind,
-                                        path: outbox_dir
-                                            .join(attachment_filename(&att.path))
-                                            .to_string_lossy()
-                                            .into_owned(),
-                                        filename: att.filename.clone(),
-                                        caption: att.caption.clone(),
-                                        media_group_id: att.media_group_id.clone(),
-                                    })
-                                    .collect(),
-                            ),
-                        };
-                        match notify_delivery_json(&host_notify) {
-                            Ok(json) => Some(json),
-                            Err(e) => {
-                                tracing::error!(job = %job_name, "failed to serialize delivery_json: {e:#}");
-                                None
+                            // Rewrite paths to host-side
+                            let outbox_dir = agent_dir.join("outbox").join("cron").join(&run_id);
+                            CronDeliveryDecision::Notify {
+                                content: content.clone(),
+                                attachments: Some(
+                                    atts.iter()
+                                        .map(|att| OutboundAttachment {
+                                            kind: att.kind,
+                                            path: outbox_dir
+                                                .join(attachment_filename(&att.path))
+                                                .to_string_lossy()
+                                                .into_owned(),
+                                            filename: att.filename.clone(),
+                                            caption: att.caption.clone(),
+                                            media_group_id: att.media_group_id.clone(),
+                                        })
+                                        .collect(),
+                                ),
                             }
                         }
-                    } else {
-                        match notify_delivery_json(&notify) {
-                            Ok(json) => Some(json),
-                            Err(e) => {
-                                tracing::error!(job = %job_name, "failed to serialize delivery_json: {e:#}");
-                                None
-                            }
-                        }
-                    }
-                } else {
-                    match serde_json::to_string(&cron_output.delivery) {
+                        _ => cron_output.delivery.clone(),
+                    };
+                    match delivery_decision_json(&delivery) {
                         Ok(json) => Some(json),
                         Err(e) => {
                             tracing::error!(job = %job_name, "failed to serialize delivery_json: {e:#}");
@@ -1871,6 +1869,102 @@ mod tests {
         ];
         let err = parse_cron_output(&lines).unwrap_err();
         assert!(err.contains("empty silent reason"));
+    }
+
+    #[test]
+    fn persist_successful_cron_output_notify_sets_pending_delivery() {
+        let dir = tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        let spec = right_agent::cron_spec::CronSpec {
+            schedule_kind: right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".into()),
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: Some(-100),
+            target_thread_id: Some(3),
+        };
+        insert_running_run(
+            &conn,
+            "run-notify",
+            "job",
+            "2026-01-01T00:00:00Z",
+            "/log",
+            &spec,
+        )
+        .unwrap();
+        let output = CronReplyOutput {
+            delivery: CronDeliveryDecision::Notify {
+                content: "done".into(),
+                attachments: None,
+            },
+            run_note: "checked".into(),
+        };
+        let json = delivery_decision_json(&output.delivery).unwrap();
+
+        let status = persist_successful_cron_output(&conn, "run-notify", &output, &json).unwrap();
+
+        assert_eq!(status, "pending");
+        let row: (String, String, i64, String) = conn
+            .query_row(
+                "SELECT run_note, delivery_json, delivery_required, delivery_status FROM async_runs WHERE id = 'run-notify'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "checked");
+        assert_eq!(
+            row.1,
+            r#"{"kind":"notify","content":"done","attachments":null}"#
+        );
+        assert_eq!(row.2, 1);
+        assert_eq!(row.3, "pending");
+    }
+
+    #[test]
+    fn persist_successful_cron_output_silent_sets_none_delivery() {
+        let dir = tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        let spec = right_agent::cron_spec::CronSpec {
+            schedule_kind: right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".into()),
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: Some(-100),
+            target_thread_id: None,
+        };
+        insert_running_run(
+            &conn,
+            "run-silent",
+            "job",
+            "2026-01-01T00:00:00Z",
+            "/log",
+            &spec,
+        )
+        .unwrap();
+        let output = CronReplyOutput {
+            delivery: CronDeliveryDecision::Silent {
+                reason: "no changes".into(),
+            },
+            run_note: "checked".into(),
+        };
+        let json = delivery_decision_json(&output.delivery).unwrap();
+
+        let status = persist_successful_cron_output(&conn, "run-silent", &output, &json).unwrap();
+
+        assert_eq!(status, "none");
+        let row: (String, String, i64, String) = conn
+            .query_row(
+                "SELECT run_note, delivery_json, delivery_required, delivery_status FROM async_runs WHERE id = 'run-silent'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "checked");
+        assert_eq!(row.1, r#"{"kind":"silent","reason":"no changes"}"#);
+        assert_eq!(row.2, 0);
+        assert_eq!(row.3, "none");
     }
 
     #[test]

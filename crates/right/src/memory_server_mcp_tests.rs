@@ -286,12 +286,13 @@ async fn test_cron_list_runs_includes_diagnostics_fields() {
     conn.execute(
         "INSERT INTO async_runs (
             id, kind, producer_ref, run_session_id, target_chat_id,
-            started_at, status, log_path, summary, delivery_required,
-            delivery_status, no_notify_reason, created_at, updated_at
+            started_at, status, log_path, run_note, delivery_json, delivery_required,
+            delivery_status, created_at, updated_at
          ) VALUES (
             'diag-1', 'cron', 'tracker', 'diag-1', -100,
-            '2026-04-01T10:00:00Z', 'success', '/log', 'quiet', 0,
-            'silent', 'No changes since last run', '2026-04-01T10:00:00Z', '2026-04-01T10:00:00Z'
+            '2026-04-01T10:00:00Z', 'success', '/log', 'quiet',
+            '{\"kind\":\"silent\",\"reason\":\"No changes since last run\"}', 0,
+            'none', '2026-04-01T10:00:00Z', '2026-04-01T10:00:00Z'
          )",
         [],
     )
@@ -299,15 +300,17 @@ async fn test_cron_list_runs_includes_diagnostics_fields() {
     conn.execute(
         "INSERT INTO async_runs (
             id, kind, producer_ref, run_session_id, target_chat_id,
-            started_at, status, log_path, summary, notify_json,
+            started_at, status, log_path, run_note, delivery_json,
             delivery_required, delivery_status, delivered_at, created_at, updated_at
          ) VALUES (
             'diag-2', 'cron', 'tracker', 'diag-2', -100,
-            '2026-04-01T11:00:00Z', 'success', '/log', 'found stuff', '{\"content\":\"new release\"}',
+            '2026-04-01T11:00:00Z', 'success', '/log', 'found stuff',
+            '{\"kind\":\"notify\",\"content\":\"new release\"}',
             1, 'delivered', '2026-04-01T11:05:00Z', '2026-04-01T11:00:00Z', '2026-04-01T11:00:00Z'
          )",
         [],
-    ).expect("insert");
+    )
+    .expect("insert");
     drop(conn);
 
     let result = server
@@ -324,11 +327,15 @@ async fn test_cron_list_runs_includes_diagnostics_fields() {
     // diag-2 is first (DESC order)
     assert_eq!(parsed[0]["delivery_status"], "delivered");
     assert_eq!(parsed[0]["delivered_at"], "2026-04-01T11:05:00Z");
-    assert!(parsed[0]["no_notify_reason"].is_null());
+    assert_eq!(parsed[0]["run_note"], "found stuff");
+    assert_eq!(parsed[0]["delivery"]["kind"], "notify");
+    assert_eq!(parsed[0]["delivery"]["content"], "new release");
 
     // diag-1 is second
-    assert_eq!(parsed[1]["delivery_status"], "silent");
-    assert_eq!(parsed[1]["no_notify_reason"], "No changes since last run");
+    assert_eq!(parsed[1]["delivery_status"], "none");
+    assert_eq!(parsed[1]["run_note"], "quiet");
+    assert_eq!(parsed[1]["delivery"]["kind"], "silent");
+    assert_eq!(parsed[1]["delivery"]["reason"], "No changes since last run");
     assert!(parsed[1]["delivered_at"].is_null());
 }
 

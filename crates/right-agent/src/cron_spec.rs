@@ -38,10 +38,10 @@ pub(crate) const BG_SENTINEL_PREFIX: &str = "@bg:";
 pub const TRIGGER_TOOL_DESC: &str = const_format::formatcp!(
     "Trigger a cron job for immediate execution. Lock check applies — if the \
      job is currently running, the trigger is skipped. Delivery is conditional: \
-     the cron itself decides whether to notify (sets `notify` in its structured \
+     the cron itself decides whether to notify (sets `delivery` in its structured \
      output), and any notification is held until the chat has been idle for {} \
      minutes. Use `cron_list_runs` to inspect `delivery_status` and \
-     `no_notify_reason`.",
+     `delivery`.",
     IDLE_THRESHOLD_MIN,
 );
 

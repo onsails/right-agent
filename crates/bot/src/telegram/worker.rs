@@ -754,7 +754,7 @@ fn build_bg_marker_for_chat(agent_dir: &std::path::Path, target_chat_id: i64) ->
              status = 'running' \
              OR (status IN ('success', 'failed') \
                  AND delivery_status IN ('pending', 'retryable') \
-                 AND notify_json IS NOT NULL) \
+                 AND delivery_json IS NOT NULL) \
            ) \
          ORDER BY COALESCE(started_at, created_at) DESC \
          LIMIT 5",
@@ -5576,7 +5576,7 @@ mod background_continuation_tests {
         status: &'a str,
         target_chat_id: i64,
         delivered_at: Option<&'a str>,
-        notify_json: Option<&'a str>,
+        delivery_json: Option<&'a str>,
     }
 
     impl<'a> MarkerRun<'a> {
@@ -5608,8 +5608,8 @@ mod background_continuation_tests {
             target_chat_id: i64,
             delivered_at: Option<&'a str>,
         ) -> Self {
-            let notify_json = if matches!(status, "success" | "failed") {
-                Some("{\"content\":\"done\"}")
+            let delivery_json = if matches!(status, "success" | "failed") {
+                Some("{\"kind\":\"notify\",\"content\":\"done\"}")
             } else {
                 None
             };
@@ -5621,12 +5621,12 @@ mod background_continuation_tests {
                 status,
                 target_chat_id,
                 delivered_at,
-                notify_json,
+                delivery_json,
             }
         }
 
-        fn with_notify_json(mut self, notify_json: Option<&'a str>) -> Self {
-            self.notify_json = notify_json;
+        fn with_delivery_json(mut self, delivery_json: Option<&'a str>) -> Self {
+            self.delivery_json = delivery_json;
             self
         }
     }
@@ -5644,7 +5644,7 @@ mod background_continuation_tests {
         conn.execute(
             "INSERT INTO async_runs (
                 id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
-                status, started_at, finished_at, log_path, notify_json, delivery_required,
+                status, started_at, finished_at, log_path, delivery_json, delivery_required,
                 delivery_status, delivered_at, created_at, updated_at
              ) VALUES (
                 ?1, ?2, ?3, ?1, ?4, NULL,
@@ -5659,7 +5659,7 @@ mod background_continuation_tests {
                 run.status,
                 run.started_at,
                 finished_at,
-                run.notify_json,
+                run.delivery_json,
                 if delivery_required { 1 } else { 0 },
                 delivery_status,
                 run.delivered_at,
@@ -5780,7 +5780,7 @@ mod background_continuation_tests {
     }
 
     #[test]
-    fn build_bg_marker_excludes_finished_pending_without_notify_json() {
+    fn build_bg_marker_excludes_finished_pending_without_delivery_json() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
@@ -5794,14 +5794,14 @@ mod background_continuation_tests {
                 -100,
                 None,
             )
-            .with_notify_json(None),
+            .with_delivery_json(None),
         );
         drop(conn);
 
         let m = build_bg_marker_for_chat(tmp.path(), -100);
         assert!(
             m.is_none(),
-            "finished background row without notify_json is not delivery-eligible; got {m:?}"
+            "finished background row without delivery_json is not delivery-eligible; got {m:?}"
         );
     }
 

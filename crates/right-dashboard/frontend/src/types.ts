@@ -152,9 +152,8 @@ export interface RunSummary {
 
 export interface RunDetailResponse {
   run: RunSummary
-  summary: string | null
-  notify_json: unknown | null
-  no_notify_reason: string | null
+  run_note: string | null
+  delivery: unknown | null
   log: {
     available: boolean
     path: string | null

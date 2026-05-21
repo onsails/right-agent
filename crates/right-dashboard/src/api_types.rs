@@ -171,9 +171,8 @@ pub struct RunSummary {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct RunDetailResponse {
     pub run: RunSummary,
-    pub summary: Option<String>,
-    pub notify_json: Option<serde_json::Value>,
-    pub no_notify_reason: Option<String>,
+    pub run_note: Option<String>,
+    pub delivery: Option<serde_json::Value>,
     pub log: LogExcerpt,
 }
 
