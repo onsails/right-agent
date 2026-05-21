@@ -22,7 +22,7 @@ A simpler primitive exists in Claude Code: after a foreground turn ends, fork th
 
 This collapses selector + reviewer + drain + episode state machine into one fork. The result is one new module (`crates/bot/src/learning_probe.rs`, target ≤ 500 LoC) plus a source-tracking column on the signals table; the existing background pipeline is gated behind a deprecated `learning.background_review_enabled: false` opt-in flag and remains intact for one release cycle.
 
-The dashboard also needs to surface where each accepted learning signal came from — foreground self-emission vs fork-probe vs `memory_retain` tool vs the deprecated background path — so users can see whether the probe is actually doing work and whether the foreground agent is improving over time.
+The dashboard also needs to surface where each accepted learning signal came from — foreground self-emission vs fork-probe vs the deprecated background path — so users can see whether the probe is actually doing work and whether the foreground agent is improving over time.
 
 ## Goals
 
@@ -36,7 +36,6 @@ The dashboard also needs to surface where each accepted learning signal came fro
 
 - Removing `crates/bot/src/learning_episode.rs`, `crates/bot/src/learning_review.rs`, or the `learning_episodes` / `skill_review_reports` tables. They stay through this release and are dropped by a follow-up cleanup spec after probe-only is validated in production.
 - Modifying the agent's structured reply schema. The `learning_signal` / `skill_issue_signal` field shapes stay identical; the probe emits JSON in the same shape.
-- Changing `mcp__right__memory_retain` ingestion. The retain-tool path continues to write `skill_nudge_signals` rows independently.
 - Worker-side `learning_skill_review` (reviews of skill RECEIPTS after publication) — separate concern, stays as is.
 - Surfacing the probe result to the user inside the original turn. The agent's reply is already sent to Telegram before the probe fires; nudges accrue in the dashboard, not as inline messages.
 
