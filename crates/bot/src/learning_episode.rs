@@ -11,7 +11,7 @@ use anyhow::{Context as _, anyhow};
 use right_agent::learned_skills::{
     ReviewGateDecision, ReviewGateInput, ReviewSkipReason, ReviewStatus, ReviewTriggerKind,
     clear_review_running, insert_skill_review_report, mark_review_finished_in_tx,
-    try_mark_review_started,
+    record_review_failure, try_mark_review_started,
 };
 use right_agent::learning_episodes::{
     EpisodeSeedTriggerKind, ExecutionEventKind, LearningEpisodeKind, LearningEpisodeRow,
@@ -21,9 +21,6 @@ use rusqlite::OptionalExtension as _;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
-#[allow(dead_code)] // TODO Task 9: remove after wiring usage events
-const LEARNING_EPISODE_REVIEW_DAILY_LIMIT: i64 = 12;
 const EPISODE_SELECTOR_TIMEOUT_SECS: u64 = 120;
 const EPISODE_REVIEWER_TIMEOUT_SECS: u64 = 180;
 const EPISODE_REVIEWER_MAX_BUDGET_USD: f64 = 0.50;
@@ -613,7 +610,9 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
         Ok(gate) => gate,
         Err(e) => {
             let reason = format!("learning episode review gate failed: {e:#}");
-            mark_claimed_episode_failed(&conn, &runtime.agent_name, episode.id, &reason, false)?;
+            // Gate acquisition failed — we never entered the gate, so do not
+            // record a failure against the circuit breaker.
+            mark_claimed_episode_failed(&conn, &runtime, episode.id, &reason, &now_str, false)?;
             return Err(anyhow!(reason));
         }
     };
@@ -627,10 +626,11 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
         ) => {
             requeue_episode_or_fail(
                 &conn,
-                &runtime.agent_name,
+                &runtime,
                 episode.id,
                 now,
                 runtime.learning.episode_settle_seconds,
+                &now_str,
             )?;
             runtime.schedule_drain();
             return Ok(());
@@ -650,7 +650,9 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
         Ok(corpus) => corpus,
         Err(e) => {
             let reason = format!("learning episode corpus load failed: {e:#}");
-            mark_claimed_episode_failed(&conn, &runtime.agent_name, episode.id, &reason, true)?;
+            let _outcome =
+                mark_claimed_episode_failed(&conn, &runtime, episode.id, &reason, &now_str, true)?;
+            // Task 13 will read _outcome to fire the circuit-open alert.
             return Err(anyhow!(reason));
         }
     };
@@ -663,13 +665,10 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
                 Ok(selected) => selected,
                 Err(e) => {
                     let reason = format!("{e:#}");
-                    mark_claimed_episode_failed(
-                        &conn,
-                        &runtime.agent_name,
-                        episode.id,
-                        &reason,
-                        true,
+                    let _outcome = mark_claimed_episode_failed(
+                        &conn, &runtime, episode.id, &reason, &now_str, true,
                     )?;
+                    // Task 13 will read _outcome to fire the circuit-open alert.
                     return Err(anyhow!(reason));
                 }
             };
@@ -681,7 +680,9 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
         }
         Err(e) => {
             let reason = format!("{e:#}");
-            mark_claimed_episode_failed(&conn, &runtime.agent_name, episode.id, &reason, true)?;
+            let _outcome =
+                mark_claimed_episode_failed(&conn, &runtime, episode.id, &reason, &now_str, true)?;
+            // Task 13 will read _outcome to fire the circuit-open alert.
             return Err(anyhow!(reason));
         }
     }
@@ -689,22 +690,47 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
     Ok(())
 }
 
+/// Mark a claimed episode as failed and optionally drive the circuit-breaker.
+///
+/// When `record_failure = false` the episode is marked failed but the gate is
+/// left untouched (used when we never entered the gate, e.g. gate-acquisition
+/// itself errored out, or the requeue fallback failed after a Skip decision).
+///
+/// When `record_failure = true` the episode write is committed first, then
+/// `record_review_failure` is called in its own transaction.  Atomicity between
+/// the two writes is intentionally lost — the rows live in different tables and
+/// a crash between them leaves the episode failed but the circuit counter
+/// untouched, which is self-healing: the next failure will still increment the
+/// counter.  Returns `Some((new_count, opened_now))` when `record_failure =
+/// true`, `None` otherwise.
 fn mark_claimed_episode_failed(
     conn: &rusqlite::Connection,
-    agent_name: &str,
+    runtime: &LearningEpisodeRuntime,
     episode_id: i64,
     reason: &str,
-    clear_gate: bool,
-) -> anyhow::Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    right_agent::learning_episodes::mark_episode_failed(&tx, episode_id, reason)
-        .with_context(|| format!("mark learning episode {episode_id} failed"))?;
-    if clear_gate {
-        clear_review_running(&tx, agent_name)
-            .with_context(|| format!("clear learning review running gate for {agent_name}"))?;
+    now_utc: &str,
+    record_failure: bool,
+) -> anyhow::Result<Option<(i64, bool)>> {
+    // First write: mark the episode row failed.
+    {
+        let tx = conn.unchecked_transaction()?;
+        right_agent::learning_episodes::mark_episode_failed(&tx, episode_id, reason)
+            .with_context(|| format!("mark learning episode {episode_id} failed"))?;
+        tx.commit()?;
     }
-    tx.commit()?;
-    Ok(())
+    if !record_failure {
+        return Ok(None);
+    }
+    // Second write: drive the circuit-breaker gate (its own transaction).
+    let (count, opened) = record_review_failure(
+        conn,
+        &runtime.agent_name,
+        now_utc,
+        runtime.learning.circuit_failure_threshold,
+        runtime.learning.circuit_cooldown_minutes,
+    )
+    .with_context(|| format!("record review failure for {}", runtime.agent_name))?;
+    Ok(Some((count, opened)))
 }
 
 fn record_selector_output(
@@ -866,15 +892,19 @@ async fn run_episode_reviewer_with_invocation(
     invoke_review: EpisodeReviewInvocation,
 ) -> anyhow::Result<()> {
     let result = run_episode_reviewer_inner(runtime.clone(), episode_id, invoke_review).await;
-    if let Err(e) = &result
-        && let Err(cleanup) =
-            mark_episode_review_failed_and_finish(&runtime, episode_id, &format!("{e:#}"))
-    {
-        tracing::warn!(
-            agent = %runtime.agent_name,
-            episode_id,
-            "learning episode review failure cleanup failed: {cleanup:#}"
-        );
+    if let Err(e) = &result {
+        match mark_episode_review_failed_and_finish(&runtime, episode_id, &format!("{e:#}")) {
+            Ok(_outcome) => {
+                // Task 13 will read _outcome to fire the circuit-open alert.
+            }
+            Err(cleanup) => {
+                tracing::warn!(
+                    agent = %runtime.agent_name,
+                    episode_id,
+                    "learning episode review failure cleanup failed: {cleanup:#}"
+                );
+            }
+        }
     }
     result
 }
@@ -930,18 +960,37 @@ async fn run_episode_reviewer_inner(
     });
     let status = report.status;
     if status == ReviewStatus::Failed {
-        let tx = conn.unchecked_transaction()?;
-        insert_skill_review_report(&tx, &report)
-            .with_context(|| format!("insert learning episode {episode_id} review report"))?;
-        right_agent::learning_episodes::mark_episode_failed(
-            &tx,
-            episode_id,
-            "reviewer returned failed status",
+        // Reviewer ran successfully but produced a Failed verdict — still a
+        // failure-to-learn, so drive the circuit breaker.  Commit the episode /
+        // report writes first, then record_review_failure in its own tx.
+        // Atomicity loss is acceptable (independent tables, self-healing).
+        {
+            let tx = conn.unchecked_transaction()?;
+            insert_skill_review_report(&tx, &report)
+                .with_context(|| format!("insert learning episode {episode_id} review report"))?;
+            right_agent::learning_episodes::mark_episode_failed(
+                &tx,
+                episode_id,
+                "reviewer returned failed status",
+            )
+            .with_context(|| format!("mark learning episode {episode_id} failed"))?;
+            tx.commit()?;
+        }
+        let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let _outcome = record_review_failure(
+            &conn,
+            &episode.agent_name,
+            &now_utc,
+            runtime.learning.circuit_failure_threshold,
+            runtime.learning.circuit_cooldown_minutes,
         )
-        .with_context(|| format!("mark learning episode {episode_id} failed"))?;
-        mark_review_finished_in_tx(&tx, &episode.agent_name, trigger_kind, status, false)
-            .with_context(|| format!("finish failed learning episode {episode_id} review gate"))?;
-        tx.commit()?;
+        .with_context(|| {
+            format!(
+                "record review failure for {} (reviewer returned Failed, episode {episode_id})",
+                episode.agent_name
+            )
+        })?;
+        // Task 13 will read _outcome to fire the circuit-open alert.
         return Ok(());
     }
     let tx = conn.unchecked_transaction()?;
@@ -1008,7 +1057,37 @@ async fn run_episode_review_invocation(
         ));
     }
     let stdout = String::from_utf8(output.stdout).context("reviewer stdout was not UTF-8")?;
-    crate::learning_review::parse_review_process_stdout(&stdout).map_err(anyhow::Error::msg)
+    let result =
+        crate::learning_review::parse_review_process_stdout(&stdout).map_err(anyhow::Error::msg)?;
+
+    // Record usage — best-effort, never fail the reviewer over this.
+    if let Some(breakdown) = crate::cc::stream::parse_usage_full(&stdout) {
+        if let Some(episode_id) = bundle.learning_episode_id {
+            let conn = right_db::open_connection(&runtime.agent_db_dir, false);
+            match conn {
+                Ok(conn) => {
+                    if let Err(e) = right_agent::usage::insert::insert_learning_reviewer(
+                        &conn, &breakdown, episode_id,
+                    ) {
+                        tracing::warn!(
+                            agent = %runtime.agent_name,
+                            episode_id,
+                            "failed to record reviewer usage event: {e:#}"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %runtime.agent_name,
+                        episode_id,
+                        "failed to open db for reviewer usage event: {e:#}"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 #[derive(Debug, Clone)]
@@ -1326,32 +1405,34 @@ fn mark_episode_review_failed_and_finish(
     runtime: &LearningEpisodeRuntime,
     episode_id: i64,
     reason: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<(i64, bool)>> {
+    let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let conn = right_db::open_connection(&runtime.agent_db_dir, false)
         .with_context(|| format!("open {} data.db for review failure", runtime.agent_name))?;
-    let seed_trigger_kind = conn
-        .query_row(
-            "SELECT seed_trigger_kind FROM learning_episodes WHERE id=?1",
-            [episode_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .ok_or_else(|| anyhow!("learning episode {episode_id} missing during review failure"))?;
-    let trigger_kind = review_trigger_for_episode(parse_seed_trigger_kind(&seed_trigger_kind)?)
-        .ok_or_else(|| anyhow!("learning episode {episode_id} has no review trigger"))?;
-    let tx = conn.unchecked_transaction()?;
-    right_agent::learning_episodes::mark_episode_failed(&tx, episode_id, reason)
-        .with_context(|| format!("mark learning episode {episode_id} failed"))?;
-    mark_review_finished_in_tx(
-        &tx,
+    // First write: mark the episode row failed (its own transaction).
+    {
+        let tx = conn.unchecked_transaction()?;
+        right_agent::learning_episodes::mark_episode_failed(&tx, episode_id, reason)
+            .with_context(|| format!("mark learning episode {episode_id} failed"))?;
+        tx.commit()?;
+    }
+    // Second write: drive the circuit-breaker gate (its own transaction).
+    // Atomicity loss between the two writes is acceptable — they touch
+    // independent tables and the circuit self-heals on the next failure.
+    let (count, opened) = record_review_failure(
+        &conn,
         &runtime.agent_name,
-        trigger_kind,
-        ReviewStatus::Failed,
-        false,
+        &now_utc,
+        runtime.learning.circuit_failure_threshold,
+        runtime.learning.circuit_cooldown_minutes,
     )
-    .with_context(|| format!("finish failed learning episode {episode_id} review gate"))?;
-    tx.commit()?;
-    Ok(())
+    .with_context(|| {
+        format!(
+            "record review failure for {} (episode {episode_id} reviewer crash)",
+            runtime.agent_name
+        )
+    })?;
+    Ok(Some((count, opened)))
 }
 
 fn parse_review_refs_json(raw: &str) -> anyhow::Result<Vec<String>> {
@@ -1546,7 +1627,34 @@ async fn run_episode_selector(
         ));
     }
     let stdout = String::from_utf8(output.stdout).context("selector stdout was not UTF-8")?;
-    parse_selector_process_stdout(&stdout).map_err(anyhow::Error::msg)
+    let result = parse_selector_process_stdout(&stdout).map_err(anyhow::Error::msg)?;
+
+    // Record usage — best-effort, never fail the selector over this.
+    if let Some(breakdown) = crate::cc::stream::parse_usage_full(&stdout) {
+        let conn = right_db::open_connection(&runtime.agent_db_dir, false);
+        match conn {
+            Ok(conn) => {
+                if let Err(e) = right_agent::usage::insert::insert_learning_selector(
+                    &conn, &breakdown, episode.id,
+                ) {
+                    tracing::warn!(
+                        agent = %runtime.agent_name,
+                        episode_id = episode.id,
+                        "failed to record selector usage event: {e:#}"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent = %runtime.agent_name,
+                    episode_id = episode.id,
+                    "failed to open db for selector usage event: {e:#}"
+                );
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 fn build_selector_prompt(corpus_json: &str) -> String {
@@ -1586,10 +1694,11 @@ fn requeue_episode(
 
 fn requeue_episode_or_fail(
     conn: &rusqlite::Connection,
-    agent_name: &str,
+    runtime: &LearningEpisodeRuntime,
     episode_id: i64,
     now: chrono::DateTime<chrono::Utc>,
     settle_seconds: u64,
+    now_utc: &str,
 ) -> anyhow::Result<()> {
     match requeue_episode(conn, episode_id, now, settle_seconds) {
         Ok(()) => Ok(()),
@@ -1605,7 +1714,9 @@ fn requeue_episode_or_fail(
         }
         Err(e) => {
             let reason = format!("learning episode requeue failed: {e:#}");
-            mark_claimed_episode_failed(conn, agent_name, episode_id, &reason, false)?;
+            // Requeue failure after a Skip decision — we do not own the gate and
+            // this is not a review-pipeline failure, so do not record a circuit failure.
+            mark_claimed_episode_failed(conn, runtime, episode_id, &reason, now_utc, false)?;
             Err(anyhow!(reason))
         }
     }
