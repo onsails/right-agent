@@ -971,13 +971,39 @@ fn learning_setup(
     let settle_seconds =
         parse_learning_settle_seconds(settle_input.trim(), existing.episode_settle_seconds)?;
 
+    let Some(threshold_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new(
+            "circuit failure threshold (consecutive review failures before learning pauses):",
+        )
+        .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let circuit_failure_threshold = parse_learning_circuit_failure_threshold(
+        threshold_input.trim(),
+        existing.circuit_failure_threshold,
+    )?;
+
+    let Some(cooldown_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("circuit cooldown minutes (minutes to pause after circuit opens):")
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let circuit_cooldown_minutes = parse_learning_circuit_cooldown_minutes(
+        cooldown_input.trim(),
+        existing.circuit_cooldown_minutes,
+    )?;
+
     Ok(Some(right_agent::agent::types::LearningConfig {
         episode_selector_model: model,
         episode_selector_max_budget_usd: existing.episode_selector_max_budget_usd,
         episode_settle_seconds: settle_seconds,
         max_daily_budget_usd,
-        circuit_failure_threshold: existing.circuit_failure_threshold,
-        circuit_cooldown_minutes: existing.circuit_cooldown_minutes,
+        circuit_failure_threshold,
+        circuit_cooldown_minutes,
     }))
 }
 
@@ -1005,6 +1031,36 @@ fn parse_learning_settle_seconds(input: &str, fallback: u64) -> miette::Result<u
         .map_err(|e| miette::miette!("invalid settle seconds \"{input}\": {e}"))?;
     if value == 0 {
         return Err(miette::miette!("settle seconds must be greater than zero"));
+    }
+    Ok(value)
+}
+
+fn parse_learning_circuit_failure_threshold(input: &str, fallback: u32) -> miette::Result<u32> {
+    if input.is_empty() {
+        return Ok(fallback);
+    }
+    let value = input
+        .parse::<u32>()
+        .map_err(|e| miette::miette!("invalid circuit failure threshold \"{input}\": {e}"))?;
+    if value < 1 {
+        return Err(miette::miette!(
+            "circuit failure threshold must be at least 1"
+        ));
+    }
+    Ok(value)
+}
+
+fn parse_learning_circuit_cooldown_minutes(input: &str, fallback: u32) -> miette::Result<u32> {
+    if input.is_empty() {
+        return Ok(fallback);
+    }
+    let value = input
+        .parse::<u32>()
+        .map_err(|e| miette::miette!("invalid circuit cooldown minutes \"{input}\": {e}"))?;
+    if value < 1 {
+        return Err(miette::miette!(
+            "circuit cooldown minutes must be at least 1"
+        ));
     }
     Ok(value)
 }
