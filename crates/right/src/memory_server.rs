@@ -528,8 +528,8 @@ impl rmcp::ServerHandler for MemoryServer {
                  - mcp__right__cron_update: Update an existing cron job spec (partial — only changed fields)\n\
                  - mcp__right__cron_delete: Delete a cron job spec\n\
                  - mcp__right__cron_list: List all current cron job specs\n\
-                 - mcp__right__cron_list_runs: List recent cron job runs with results (summary + notify)\n\
-                 - mcp__right__cron_show_run: Get full details of a specific cron run (summary + notify)\n\
+                 - mcp__right__cron_list_runs: List recent cron job runs with results (run_note + delivery)\n\
+                 - mcp__right__cron_show_run: Get full details of a specific cron run (run_note + delivery)\n\
                  - mcp__right__cron_trigger: Trigger a cron job for immediate execution\n\n\
                  ## MCP Management\n\
                  - mcp__right__mcp_list: List all registered MCP servers (read-only — add/remove/auth via Telegram /mcp)\n\n\

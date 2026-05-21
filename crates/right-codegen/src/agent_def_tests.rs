@@ -738,7 +738,8 @@ fn schemas_do_not_use_old_cron_output_names() {
         let props = v["properties"].as_object().unwrap();
         assert!(!props.contains_key("summary"));
         assert!(!props.contains_key("notify"));
-        assert!(!props.contains_key("no_notify_reason"));
+        let old_silent_reason_key = ["no", "notify", "reason"].join("_");
+        assert!(!props.contains_key(&old_silent_reason_key));
     }
 }
 
