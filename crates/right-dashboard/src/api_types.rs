@@ -174,6 +174,7 @@ pub struct RunDetailResponse {
     pub run_note: Option<String>,
     pub delivery: Option<serde_json::Value>,
     pub delivery_error: Option<String>,
+    pub error_message: Option<String>,
     pub log: LogExcerpt,
 }
 
