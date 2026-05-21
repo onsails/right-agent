@@ -1,3 +1,4 @@
+pub(crate) mod alerts;
 pub mod allowlist_commands;
 pub(crate) mod archive;
 pub mod attachments;
@@ -9,6 +10,7 @@ pub mod dispatch;
 pub mod filter;
 pub mod handler;
 pub(crate) mod idle;
+pub(crate) mod learning_alerts;
 pub mod markdown;
 pub(crate) mod mcp_auth_choice;
 pub mod memory_alerts;

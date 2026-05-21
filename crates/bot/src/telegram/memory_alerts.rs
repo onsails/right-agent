@@ -4,8 +4,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::Utc;
-
 use right_agent::agent::allowlist::AllowlistHandle;
 use right_memory::alert_types::{AUTH_FAILED, CLIENT_FLOOD};
 use right_memory::{MemoryStatus, ResilientHindsight};
@@ -82,7 +80,7 @@ pub fn spawn_watcher(
                 t.tick().await;
                 let drops_1h = wrapper.client_drops_1h().await;
                 if drops_1h > right_memory::resilient::CLIENT_FLOOD_THRESHOLD
-                    && should_fire(&db, CLIENT_FLOOD)
+                    && super::alerts::should_fire(&db, CLIENT_FLOOD)
                 {
                     let msg = format!(
                         "\u{26a0} Memory retains persistently rejected (HTTP 4xx) — \
@@ -93,7 +91,7 @@ pub fn spawn_watcher(
                     // changes after startup are honored.
                     let chats = current_chats(&allowlist);
                     broadcast_to_chats(&bot, &chats, &msg).await;
-                    record_fire(&db, CLIENT_FLOOD);
+                    super::alerts::record_fire(&db, CLIENT_FLOOD);
                 }
             }
         });
@@ -107,7 +105,7 @@ async fn handle_status_change(
     db: &std::path::Path,
 ) {
     if matches!(status, MemoryStatus::AuthFailed { .. }) {
-        if should_fire(db, AUTH_FAILED) {
+        if super::alerts::should_fire(db, AUTH_FAILED) {
             let msg = "\u{26a0} Memory provider authentication failed.\n\
                        Rotate the Hindsight API key — set `memory.api_key` in \
                        agent.yaml or the HINDSIGHT_API_KEY env var — and restart \
@@ -116,7 +114,7 @@ async fn handle_status_change(
             // changes after startup are honored.
             let chats = current_chats(allowlist);
             broadcast_to_chats(bot, &chats, msg).await;
-            record_fire(db, AUTH_FAILED);
+            super::alerts::record_fire(db, AUTH_FAILED);
         }
     } else if matches!(status, MemoryStatus::Healthy) {
         // Clear dedup on recovery.
@@ -131,52 +129,5 @@ async fn handle_status_change(
             }
             Err(e) => tracing::warn!("memory_alerts dedup clear open failed: {e:#}"),
         }
-    }
-}
-
-fn should_fire(db: &std::path::Path, alert_type: &str) -> bool {
-    let conn = match right_db::open_connection(db, false) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("should_fire open failed: {e:#}");
-            return false;
-        }
-    };
-    let existing: Option<String> = match conn.query_row(
-        "SELECT first_sent_at FROM memory_alerts WHERE alert_type = ?1",
-        [alert_type],
-        |r| r.get(0),
-    ) {
-        Ok(v) => Some(v),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(e) => {
-            tracing::warn!("should_fire query failed: {e:#}");
-            return false;
-        }
-    };
-    let Some(sent) = existing else { return true };
-    let parsed = match chrono::DateTime::parse_from_rfc3339(&sent) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("should_fire parse failed: {e:#}");
-            return true;
-        }
-    };
-    Utc::now().signed_duration_since(parsed.with_timezone(&Utc)) > chrono::Duration::hours(24)
-}
-
-fn record_fire(db: &std::path::Path, alert_type: &str) {
-    match right_db::open_connection(db, false) {
-        Ok(conn) => {
-            let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            if let Err(e) = conn.execute(
-                "INSERT INTO memory_alerts(alert_type, first_sent_at) VALUES (?1, ?2) \
-                 ON CONFLICT(alert_type) DO UPDATE SET first_sent_at = excluded.first_sent_at",
-                [alert_type, &now],
-            ) {
-                tracing::warn!("record_fire failed: {e:#}");
-            }
-        }
-        Err(e) => tracing::warn!("record_fire open failed: {e:#}"),
     }
 }
