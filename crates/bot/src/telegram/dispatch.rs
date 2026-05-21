@@ -689,7 +689,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             right_agent::agent::types::LearningConfig::default(),
             None,
-            std::sync::Arc::new(teloxide::Bot::new("smoke")),
+            None,
         );
         let (smoke_drain_scheduler, _smoke_drain_handle) =
             crate::learning_episode::DrainScheduler::spawn(

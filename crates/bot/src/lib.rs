@@ -981,7 +981,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             Arc::clone(&debug_flag),
             config.learning.clone(),
             None,
-            learning_bot,
+            Some(learning_bot),
         );
         crate::learning_episode::DrainScheduler::spawn(
             bootstrap_runtime,

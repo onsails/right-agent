@@ -31,12 +31,17 @@ pub fn spawn_watcher(
     agent_dir: PathBuf,
     allowlist: AllowlistHandle,
 ) {
-    // Startup cleanup: delete alerts older than 1h so crash-loops re-notify.
+    // Startup cleanup: delete memory alerts older than 1h so crash-loops
+    // re-notify. Scoped to memory alert types so longer-dedup alerts on the
+    // shared `memory_alerts` table (e.g. `learning_circuit_open`, 24h) keep
+    // their dedup window across bot restarts.
     match right_db::open_connection(&agent_dir, false) {
         Ok(conn) => {
             if let Err(e) = conn.execute(
-                "DELETE FROM memory_alerts WHERE datetime(first_sent_at) < datetime('now', '-1 hour')",
-                [],
+                "DELETE FROM memory_alerts \
+                 WHERE alert_type IN (?1, ?2) \
+                   AND datetime(first_sent_at) < datetime('now', '-1 hour')",
+                [AUTH_FAILED, CLIENT_FLOOD],
             ) {
                 tracing::warn!("memory_alerts startup cleanup failed: {e:#}");
             }

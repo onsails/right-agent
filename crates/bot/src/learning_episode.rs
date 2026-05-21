@@ -162,9 +162,9 @@ pub(crate) struct LearningEpisodeRuntime {
     /// the scheduler exists. Production capture callsites must always carry
     /// `Some(...)`.
     pub(crate) scheduler: Option<Arc<DrainScheduler>>,
-    /// Bot for sending circuit-open alerts. Seed-only runtimes may carry a
-    /// stub bot that is never called (alerts fire only from the drain task).
-    pub(crate) bot: Arc<teloxide::Bot>,
+    /// Bot for sending circuit-open alerts. `None` for seed-only runtimes;
+    /// the drain task that fires alerts always carries `Some`.
+    pub(crate) bot: Option<Arc<teloxide::Bot>>,
 }
 
 impl std::fmt::Debug for LearningEpisodeRuntime {
@@ -195,7 +195,7 @@ impl LearningEpisodeRuntime {
         debug: Arc<AtomicBool>,
         learning: right_agent::agent::types::LearningConfig,
         scheduler: Option<Arc<DrainScheduler>>,
-        bot: Arc<teloxide::Bot>,
+        bot: Option<Arc<teloxide::Bot>>,
     ) -> Self {
         Self {
             agent_dir,
@@ -748,28 +748,18 @@ fn mark_claimed_episode_failed(
 /// Spawn a fire-and-forget task to send the circuit-open Telegram alert.
 /// Called whenever `record_review_failure` returns `opened_circuit = true`.
 fn spawn_circuit_open_alert(runtime: &LearningEpisodeRuntime, reason: &str) {
-    let bot = Arc::clone(&runtime.bot);
-    let db = runtime.agent_db_dir.clone();
-    let agent_name = runtime.agent_name.clone();
-    let agent_dir = runtime.agent_dir.clone();
-    let reason = reason.to_owned();
-    let failure_threshold = runtime.learning.circuit_failure_threshold;
-    let cooldown = runtime.learning.circuit_cooldown_minutes;
-    tokio::spawn(async move {
-        if let Err(e) = crate::telegram::learning_alerts::maybe_alert_circuit_open(
-            bot,
-            &db,
-            &agent_name,
-            &agent_dir,
-            &reason,
-            cooldown,
-            failure_threshold,
-        )
-        .await
-        {
-            tracing::warn!("maybe_alert_circuit_open failed: {e:#}");
-        }
-    });
+    let Some(bot) = runtime.bot.as_ref().map(Arc::clone) else {
+        return;
+    };
+    crate::telegram::learning_alerts::spawn_circuit_open_alert(
+        bot,
+        runtime.agent_db_dir.clone(),
+        runtime.agent_name.clone(),
+        runtime.agent_dir.clone(),
+        reason.to_owned(),
+        runtime.learning.circuit_failure_threshold,
+        runtime.learning.circuit_cooldown_minutes,
+    );
 }
 
 fn record_selector_output(

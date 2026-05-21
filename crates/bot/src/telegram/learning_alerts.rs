@@ -5,7 +5,7 @@
 //! `opened_circuit = true`. Dedup is 24 hours per agent (alert_type key
 //! `"learning_circuit_open"`) via the shared `alerts` module.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -15,6 +15,35 @@ use teloxide::prelude::*;
 use super::alerts;
 
 const ALERT_TYPE: &str = "learning_circuit_open";
+
+/// Fire-and-forget the circuit-open Telegram alert. Used by every callsite that
+/// receives `opened_circuit = true` from `record_review_failure`. Errors are
+/// logged inside the spawned task; the caller never awaits.
+pub(crate) fn spawn_circuit_open_alert(
+    bot: Arc<Bot>,
+    agent_db_dir: PathBuf,
+    agent_name: String,
+    agent_dir: PathBuf,
+    reason: String,
+    failure_threshold: u32,
+    cooldown_minutes: u32,
+) {
+    tokio::spawn(async move {
+        if let Err(e) = maybe_alert_circuit_open(
+            bot,
+            &agent_db_dir,
+            &agent_name,
+            &agent_dir,
+            &reason,
+            cooldown_minutes,
+            failure_threshold,
+        )
+        .await
+        {
+            tracing::warn!("maybe_alert_circuit_open failed: {e:#}");
+        }
+    });
+}
 
 /// Send a circuit-open alert to the first chat in the agent's allowlist if
 /// the 24-hour dedup window allows. No-op if the dedup window blocks the
