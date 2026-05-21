@@ -1922,6 +1922,46 @@ fn execution_event_ref(id: i64) -> String {
     format!("exec:{id}")
 }
 
+/// Build the deprecation WARN text for an agent whose `learning_episodes`
+/// table has fresh activity but whose `background_review_enabled = false`.
+pub(crate) fn deprecation_warn_message(agent_name: &str) -> String {
+    format!(
+        "agent {agent_name}: background learning is deprecated and disabled by default. \
+         Set `learning.background_review_enabled: true` in agents/{agent_name}/agent.yaml \
+         to restore the prior pipeline; otherwise post-turn fork-probe takes over. \
+         Cleanup spec will drop the background code in a future release."
+    )
+}
+
+/// Detect whether the agent has `learning_episodes` rows newer than 24h.
+pub(crate) fn has_recent_legacy_activity(
+    conn: &rusqlite::Connection,
+) -> Result<bool, rusqlite::Error> {
+    let now = chrono::Utc::now();
+    let cutoff = (now - chrono::Duration::hours(24))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM learning_episodes WHERE created_at >= ?1",
+        [cutoff.as_str()],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+#[cfg(test)]
+mod deprecation_warn_tests {
+    use super::*;
+
+    #[test]
+    fn deprecation_warn_message_mentions_agent_name_and_yaml_key() {
+        let msg = deprecation_warn_message("agent-b");
+        assert!(msg.contains("agent-b"));
+        assert!(msg.contains("background_review_enabled"));
+        assert!(msg.contains("agents/agent-b/agent.yaml"));
+    }
+}
+
 #[cfg(test)]
 #[path = "learning_episode_tests.rs"]
 mod tests;
