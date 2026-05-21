@@ -15,6 +15,7 @@ pub(crate) enum MemoryMode {
 /// `Cron` keeps Operating Instructions and adds the Cron Delivery
 /// Contract; identity files are still emitted. `Normal` is the
 /// everyday worker/delivery/reflection path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptMode {
     Normal,
     Bootstrap,
