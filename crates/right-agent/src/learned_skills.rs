@@ -645,7 +645,9 @@ pub fn mark_review_finished_in_tx(
              turns_since_review = CASE WHEN ?3 THEN 0 ELSE turns_since_review END, \
              skill_issue_hints_since_review = CASE WHEN ?4 THEN 0 ELSE skill_issue_hints_since_review END, \
              last_review_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), \
-             last_review_status = ?2 \
+             last_review_status = ?2, \
+             consecutive_review_failures = 0, \
+             review_circuit_open_until = NULL \
          WHERE agent_name = ?1",
         rusqlite::params![
             agent_name,
@@ -1951,5 +1953,41 @@ mod tests {
             .unwrap();
         assert_eq!(open_until, None);
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn mark_review_finished_resets_circuit_and_failures() {
+        let conn = conn();
+        ensure_agent_nudge_state(&conn, "agent-b");
+        conn.execute(
+            "UPDATE skill_nudge_state SET \
+                review_running = 1, \
+                consecutive_review_failures = 4, \
+                review_circuit_open_until = '2026-05-21T05:00:00Z' \
+             WHERE agent_name = 'agent-b'",
+            [],
+        )
+        .unwrap();
+
+        mark_review_finished(
+            &conn,
+            "agent-b",
+            ReviewTriggerKind::EffortThreshold,
+            ReviewStatus::NothingToLearn,
+            false,
+        )
+        .unwrap();
+
+        let (running, failures, open_until): (i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT review_running, consecutive_review_failures, review_circuit_open_until \
+                 FROM skill_nudge_state WHERE agent_name = 'agent-b'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(running, 0);
+        assert_eq!(failures, 0);
+        assert_eq!(open_until, None);
     }
 }
