@@ -85,6 +85,26 @@ pub fn insert_learning_skill_review(
     )
 }
 
+/// Insert a row for a fork-probe invocation (post-turn classifier).
+///
+/// `chat_id` and `thread_id` carry the originating foreground turn so the
+/// dashboard can group probe spend by chat.
+pub fn insert_learning_fork_probe(
+    conn: &Connection,
+    b: &UsageBreakdown,
+    chat_id: i64,
+    thread_id: i64,
+) -> Result<(), UsageError> {
+    insert_row(
+        conn,
+        b,
+        "learning_fork_probe",
+        Some(chat_id),
+        Some(thread_id),
+        None,
+    )
+}
+
 fn insert_row(
     conn: &Connection,
     b: &UsageBreakdown,
@@ -326,5 +346,22 @@ mod tests {
         assert_eq!(source, "learning_skill_review");
         assert_eq!(chat_id, Some(-1001));
         assert_eq!(thread_id, Some(7));
+    }
+
+    #[test]
+    fn insert_learning_fork_probe_writes_row_with_correct_source() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_learning_fork_probe(&conn, &sample_breakdown(), 1234, 0).unwrap();
+        let (source, chat_id, thread_id): (String, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT source, chat_id, thread_id FROM usage_events LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "learning_fork_probe");
+        assert_eq!(chat_id, Some(1234));
+        assert_eq!(thread_id, Some(0));
     }
 }
