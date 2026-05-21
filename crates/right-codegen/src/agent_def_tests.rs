@@ -1,6 +1,6 @@
 use crate::{
-    BG_CONTINUATION_SCHEMA_JSON, BOOTSTRAP_SCHEMA_JSON, CRON_SCHEMA_JSON, REPLY_SCHEMA_JSON,
-    generate_system_prompt,
+    BG_CONTINUATION_SCHEMA_JSON, BOOTSTRAP_SCHEMA_JSON, CRON_SCHEMA_JSON, FORK_PROBE_PROMPT,
+    FORK_PROBE_SCHEMA_JSON, REPLY_SCHEMA_JSON, generate_system_prompt,
 };
 
 fn enum_values(field: &serde_json::Value) -> Vec<&str> {
@@ -762,4 +762,28 @@ fn operating_instructions_documents_media_groups() {
         ops.contains("2–10") || ops.contains("2-10"),
         "must mention the 2–10 item limit"
     );
+}
+
+#[test]
+fn fork_probe_schema_is_valid_json_with_signal_fields() {
+    let parsed: serde_json::Value = serde_json::from_str(FORK_PROBE_SCHEMA_JSON)
+        .expect("FORK_PROBE_SCHEMA_JSON must be valid JSON");
+    let properties = parsed
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("schema needs properties");
+    assert!(properties.contains_key("workflow_complete"));
+    assert!(properties.contains_key("learning_signal"));
+    assert!(properties.contains_key("skill_issue_signal"));
+    let required = parsed
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .expect("schema needs required");
+    assert!(required.iter().any(|v| v == "workflow_complete"));
+}
+
+#[test]
+fn fork_probe_prompt_contains_signal_field_names() {
+    assert!(FORK_PROBE_PROMPT.contains("learning_signal"));
+    assert!(FORK_PROBE_PROMPT.contains("skill_issue_signal"));
 }
