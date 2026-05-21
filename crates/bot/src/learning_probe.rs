@@ -53,8 +53,8 @@ pub(crate) struct ParsedProbe {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ProbeParseError {
-    #[error("probe stdout is not valid JSON: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error("probe stdout envelope unwrap failed: {0}")]
+    Envelope(String),
     #[error("probe JSON missing required field `workflow_complete`")]
     MissingWorkflowComplete,
     #[error("probe JSON `workflow_complete` must be a boolean")]
@@ -63,14 +63,16 @@ pub(crate) enum ProbeParseError {
 
 /// Parse the JSON document returned by `--output-format json`.
 ///
-/// CC wraps the assistant reply in `{"result": {...}}` for non-stream output;
-/// we tolerate both shapes (unwrapped object or `result`-wrapped).
+/// CC emits the production envelope as either
+/// `{"type":"result","structured_output":{...},...}` (newer) or
+/// `{"type":"result","result":"<JSON-encoded string>",...}` (older). We
+/// delegate envelope unwrapping to `learning_review::unwrap_structured_output_payload`
+/// so the probe and the Stage 2 review path stay in lock-step. The flat
+/// top-level shape (unit-test fixtures) also parses because the helper falls
+/// back to the root document when neither wrapper field is present.
 pub(crate) fn parse_probe_output(stdout: &str) -> Result<ParsedProbe, ProbeParseError> {
-    let value: serde_json::Value = serde_json::from_str(stdout)?;
-    let body = match value.get("result") {
-        Some(serde_json::Value::Object(_)) => &value["result"],
-        _ => &value,
-    };
+    let body = crate::learning_review::unwrap_structured_output_payload(stdout, "probe")
+        .map_err(ProbeParseError::Envelope)?;
     let workflow_complete = body
         .get("workflow_complete")
         .ok_or(ProbeParseError::MissingWorkflowComplete)?
@@ -213,20 +215,9 @@ pub(crate) async fn run_probe(ctx: ProbeContext) {
 }
 
 fn record_probe_result(ctx: &ProbeContext, probe_session_id: &str, stdout: &str) {
-    let parsed = match parse_probe_output(stdout) {
-        Ok(parsed) => parsed,
-        Err(e) => {
-            tracing::warn!(
-                agent = %ctx.agent_name,
-                main_session = %ctx.main_session_id,
-                error = %e,
-                stdout_excerpt = %stdout.chars().take(256).collect::<String>(),
-                "fork-probe stdout parse failed"
-            );
-            return;
-        }
-    };
-
+    // Open the DB and write the usage row BEFORE attempting to parse the schema
+    // payload. Zero-signal probes still cost money and must be visible in
+    // `usage_events`; otherwise parse failures would hide every dollar spent.
     let conn = match right_db::open_connection(&ctx.agent_db_dir, false) {
         Ok(conn) => conn,
         Err(e) => {
@@ -251,6 +242,20 @@ fn record_probe_result(ctx: &ProbeContext, probe_session_id: &str, stdout: &str)
             "fork-probe usage insert failed: {e:#}"
         );
     }
+
+    let parsed = match parse_probe_output(stdout) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                main_session = %ctx.main_session_id,
+                error = %e,
+                stdout_excerpt = %stdout.chars().take(256).collect::<String>(),
+                "fork-probe stdout parse failed"
+            );
+            return;
+        }
+    };
 
     let Some((signal_kind, payload_json)) = select_probe_signal(&parsed) else {
         return;
@@ -372,10 +377,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_probe_output_unwraps_result_envelope() {
-        let stdout = r#"{"result":{"workflow_complete":false,"learning_signal":null,"skill_issue_signal":null}}"#;
+    fn parse_probe_output_unwraps_structured_output_envelope() {
+        let stdout = r#"{"type":"result","structured_output":{"workflow_complete":true,"learning_signal":null,"skill_issue_signal":null}}"#;
         let parsed = parse_probe_output(stdout).unwrap();
-        assert!(!parsed.workflow_complete);
+        assert!(parsed.workflow_complete);
+        assert!(parsed.learning_signal.is_none());
+        assert!(parsed.skill_issue_signal.is_none());
+    }
+
+    #[test]
+    fn parse_probe_output_unwraps_result_string_envelope() {
+        let stdout = r#"{"type":"result","result":"{\"workflow_complete\":true,\"learning_signal\":null,\"skill_issue_signal\":null}"}"#;
+        let parsed = parse_probe_output(stdout).unwrap();
+        assert!(parsed.workflow_complete);
+        assert!(parsed.learning_signal.is_none());
+        assert!(parsed.skill_issue_signal.is_none());
     }
 
     #[test]
@@ -388,7 +404,7 @@ mod tests {
     #[test]
     fn parse_probe_output_rejects_malformed_json() {
         let err = parse_probe_output("not json").unwrap_err();
-        assert!(matches!(err, ProbeParseError::Json(_)));
+        assert!(matches!(err, ProbeParseError::Envelope(_)));
     }
 
     #[test]
