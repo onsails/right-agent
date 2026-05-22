@@ -15,7 +15,7 @@ use right_dashboard::read_model::{
     activity::{ActivityOverviewInput, activity_overview, activity_run_detail},
     dashboard_overview::{DashboardOverviewInput, dashboard_overview},
     learning::{
-        LearningOverviewInput, learning_overview, learning_report_detail, signals_by_source_24h,
+        LearningOverviewInput, learning_overview, learning_report_detail, skill_lifecycle_overview,
     },
     learning_episodes::{LearningEpisodesInput, learning_episode_detail, learning_episodes},
     usage::{UsageOverviewInput, usage_overview},
@@ -118,8 +118,8 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
             get(handle_learning_report_detail),
         )
         .route(
-            "/dashboard/{agent}/api/v1/learning/signals_by_source",
-            get(handle_learning_signals_by_source),
+            "/dashboard/{agent}/api/v1/learning/skill_lifecycle",
+            get(handle_learning_skill_lifecycle),
         )
         .route(
             "/dashboard/{agent}/api/v1/knowledge/skills",
@@ -470,7 +470,7 @@ async fn handle_learning_report_detail(
     }
 }
 
-async fn handle_learning_signals_by_source(
+async fn handle_learning_skill_lifecycle(
     AxumPath(agent): AxumPath<String>,
     State(state): State<DashboardState>,
     headers: HeaderMap,
@@ -479,20 +479,20 @@ async fn handle_learning_signals_by_source(
         return error.into_response();
     }
 
-    let conn = match open_dashboard_read_connection(&state) {
-        Ok(conn) => conn,
-        Err(error) => return error.into_response(),
-    };
-
-    let now_utc = chrono::Utc::now().to_rfc3339();
-    match signals_by_source_24h(&conn, &state.agent_name, &now_utc) {
+    // Lifecycle data is host-side .usage.json; no DB connection needed.
+    let _ = agent;
+    let usage_path = state.agent_dir.join(".claude/skills/.usage.json");
+    match skill_lifecycle_overview(&state.agent_name, &usage_path) {
         Ok(response) => Json(response).into_response(),
         Err(error) => {
-            tracing::error!(agent = %state.agent_name, "dashboard signals_by_source query failed: {error:#}");
+            tracing::error!(
+                agent = %state.agent_name,
+                "dashboard skill_lifecycle read failed: {error:#}",
+            );
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "signals_by_source_failed",
-                Some("failed to read signals_by_source"),
+                "skill_lifecycle_failed",
+                Some("failed to read skill lifecycle"),
             )
         }
     }

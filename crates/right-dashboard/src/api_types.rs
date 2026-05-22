@@ -483,12 +483,22 @@ pub struct SandboxProcess {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct SignalsBySourceResponse {
+pub struct SkillLifecycleOverviewResponse {
     pub agent: String,
-    pub window_label: String,
-    pub reply_field: i64,
-    pub fork_probe: i64,
-    pub background_review: i64,
+    pub total_active: i64,
+    pub total_stale: i64,
+    pub total_archived: i64,
+    pub agent_created_active: i64,
+    pub foreground_active: i64,
+    pub bundled_active: i64,
+    pub recently_used: Vec<RecentSkill>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecentSkill {
+    pub package_name: String,
+    pub use_count: u64,
+    pub last_used_at: Option<String>,
 }
 
 #[cfg(test)]

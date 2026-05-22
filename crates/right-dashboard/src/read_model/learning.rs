@@ -171,40 +171,81 @@ pub fn learning_overview(
     })
 }
 
-pub fn signals_by_source_24h(
-    conn: &Connection,
+/// Compute the skill-lifecycle overview from the host-side `.usage.json` file
+/// produced by the lifecycle subsystem. Returns empty counts when the file is
+/// absent or empty.
+pub fn skill_lifecycle_overview(
     agent: &str,
-    now_utc: &str,
-) -> Result<crate::api_types::SignalsBySourceResponse, ReadModelError> {
-    let now = DateTime::parse_from_rfc3339(now_utc)?.with_timezone(&Utc);
-    let cutoff = (now - Duration::hours(24)).to_rfc3339();
+    usage_path: &std::path::Path,
+) -> Result<crate::api_types::SkillLifecycleOverviewResponse, ReadModelError> {
+    let content = std::fs::read_to_string(usage_path).unwrap_or_default();
+    let parsed: serde_json::Value = if content.trim().is_empty() {
+        serde_json::Value::Object(Default::default())
+    } else {
+        serde_json::from_str(&content)?
+    };
 
-    let reply_field: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM skill_nudge_signals \
-         WHERE agent_name = ?1 AND accepted_at >= ?2 AND source = 'reply_field'",
-        params![agent, cutoff.as_str()],
-        |r| r.get(0),
-    )?;
-    let fork_probe: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM skill_nudge_signals \
-         WHERE agent_name = ?1 AND accepted_at >= ?2 AND source = 'fork_probe'",
-        params![agent, cutoff.as_str()],
-        |r| r.get(0),
-    )?;
-    let background_review: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM skill_review_reports \
-         WHERE agent_name = ?1 AND created_at >= ?2 \
-           AND status IN ('create_candidate','update_candidate')",
-        params![agent, cutoff.as_str()],
-        |r| r.get(0),
-    )?;
+    let mut total_active = 0;
+    let mut total_stale = 0;
+    let mut total_archived = 0;
+    let mut agent_created_active = 0;
+    let mut foreground_active = 0;
+    let mut bundled_active = 0;
+    let mut recently_used: Vec<crate::api_types::RecentSkill> = Vec::new();
 
-    Ok(crate::api_types::SignalsBySourceResponse {
+    if let Some(map) = parsed.as_object() {
+        for (name, record) in map {
+            let state = record
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("active");
+            let created_by = record
+                .get("created_by")
+                .and_then(|v| v.as_str())
+                .unwrap_or("foreground");
+            match state {
+                "active" => total_active += 1,
+                "stale" => total_stale += 1,
+                "archived" => total_archived += 1,
+                _ => {}
+            }
+            if state == "active" {
+                match created_by {
+                    "probe_writer" | "curator" => agent_created_active += 1,
+                    "foreground" => foreground_active += 1,
+                    "bundled" => bundled_active += 1,
+                    _ => {}
+                }
+            }
+            let use_count = record
+                .get("use_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let last_used_at = record
+                .get("last_used_at")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            if use_count > 0 {
+                recently_used.push(crate::api_types::RecentSkill {
+                    package_name: name.clone(),
+                    use_count,
+                    last_used_at,
+                });
+            }
+        }
+    }
+    recently_used.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
+    recently_used.truncate(20);
+
+    Ok(crate::api_types::SkillLifecycleOverviewResponse {
         agent: agent.to_owned(),
-        window_label: "24h".to_owned(),
-        reply_field,
-        fork_probe,
-        background_review,
+        total_active,
+        total_stale,
+        total_archived,
+        agent_created_active,
+        foreground_active,
+        bundled_active,
+        recently_used,
     })
 }
 
@@ -1232,52 +1273,40 @@ mod tests {
     }
 
     #[test]
-    fn signals_by_source_24h_returns_three_buckets_with_correct_counts() {
-        let (_dir, conn) = fixture();
+    fn skill_lifecycle_overview_counts_by_state_and_provenance() {
+        use tempfile::TempDir;
 
-        let now = "2026-05-21T12:00:00Z";
-        // 2 reply_field, 1 fork_probe, all within 24h.
-        for (inv, src) in [
-            ("inv-a", "reply_field"),
-            ("inv-b", "reply_field"),
-            ("inv-c", "fork_probe"),
-        ] {
-            conn.execute(
-                "INSERT INTO skill_nudge_signals \
-                 (invocation_id, agent_name, root_session_id, chat_id, thread_id, signal_kind, payload_json, accepted_at, source) \
-                 VALUES (?1, 'right', 's', 1, 0, 'learning', '{}', ?2, ?3)",
-                rusqlite::params![inv, "2026-05-21T11:00:00Z", src],
-            )
-            .unwrap();
-        }
-        // 1 background-review-equivalent report within 24h.
-        conn.execute(
-            "INSERT INTO skill_review_reports \
-             (agent_name, source_invocation_id, root_session_id, chat_id, thread_id, trigger_kind, status, confidence, candidate_skill_name, candidate_summary, evidence_refs_json, review_output_json, telegram_notified, created_at) \
-             VALUES ('right', 'inv-x', 's', 1, 0, 'learning_signal', 'create_candidate', 'medium', 'rightx-foo', NULL, '[]', '{}', 0, '2026-05-21T10:00:00Z')",
-            [],
-        )
-        .unwrap();
+        let dir = TempDir::new().unwrap();
+        let usage_path = dir.path().join(".usage.json");
+        let json = r#"{
+            "rightx-foo": {"state": "active", "created_by": "probe_writer", "use_count": 5, "last_used_at": "2026-05-22T10:00:00Z"},
+            "rightx-bar": {"state": "stale", "created_by": "probe_writer", "use_count": 0},
+            "rightx-baz": {"state": "archived", "created_by": "probe_writer", "use_count": 1, "last_used_at": "2026-05-15T10:00:00Z"},
+            "rightx-explicit": {"state": "active", "created_by": "foreground"},
+            "rightx-bundled": {"state": "active", "created_by": "bundled"}
+        }"#;
+        std::fs::write(&usage_path, json).unwrap();
 
-        let result = signals_by_source_24h(&conn, "right", now).unwrap();
-        assert_eq!(result.reply_field, 2);
-        assert_eq!(result.fork_probe, 1);
-        assert_eq!(result.background_review, 1);
+        let resp = skill_lifecycle_overview("right", &usage_path).unwrap();
+        assert_eq!(resp.total_active, 3); // foo + explicit + bundled
+        assert_eq!(resp.total_stale, 1);
+        assert_eq!(resp.total_archived, 1);
+        assert_eq!(resp.agent_created_active, 1); // foo only
+        assert_eq!(resp.foreground_active, 1); // explicit
+        assert_eq!(resp.bundled_active, 1);
+        // recently_used includes only entries with use_count > 0; sorted by last_used_at desc.
+        assert_eq!(resp.recently_used.len(), 2);
+        assert_eq!(resp.recently_used[0].package_name, "rightx-foo");
     }
 
     #[test]
-    fn signals_by_source_24h_window_excludes_old_rows() {
-        let (_dir, conn) = fixture();
-
-        conn.execute(
-            "INSERT INTO skill_nudge_signals \
-             (invocation_id, agent_name, root_session_id, chat_id, thread_id, signal_kind, payload_json, accepted_at, source) \
-             VALUES ('old', 'right', 's', 1, 0, 'learning', '{}', '2026-05-19T00:00:00Z', 'fork_probe')",
-            [],
-        )
-        .unwrap();
-
-        let result = signals_by_source_24h(&conn, "right", "2026-05-21T12:00:00Z").unwrap();
-        assert_eq!(result.fork_probe, 0);
+    fn skill_lifecycle_overview_empty_when_file_missing() {
+        let resp =
+            skill_lifecycle_overview("right", std::path::Path::new("/nonexistent/.usage.json"))
+                .unwrap();
+        assert_eq!(resp.total_active, 0);
+        assert_eq!(resp.total_stale, 0);
+        assert_eq!(resp.total_archived, 0);
+        assert!(resp.recently_used.is_empty());
     }
 }
