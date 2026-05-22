@@ -1,5 +1,7 @@
 # Skill Learning: Probe-Writer + Curator (Hermes-aligned)
 
+> **Successor:** `docs/superpowers/specs/2026-05-22-prefilter-classifier-and-curator-state-design.md` refines the prefilter into a 3-mode classifier, migrates curator state to `data.db`, and adds a multi-signal curator trigger.
+
 **Date:** 2026-05-22
 **Status:** Design approved; pending implementation plan
 **Supersedes (partially):** `2026-05-21-learning-fork-probe-design.md` — the report-only fork-probe is replaced by a write-capable probe-writer, and the `skill_nudge_signals` queue is removed.
