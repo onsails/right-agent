@@ -19,17 +19,31 @@ pub(crate) struct CuratorConfig {
     pub paused: bool,
     pub interval_hours: u32,
     pub min_idle_hours: u32,
+    pub min_cooldown_hours: u32,
     pub stale_after_days: u32,
     pub archive_after_days: u32,
+    pub cost_spike_k: f64,
+    pub cost_spike_baseline_days: u32,
+    pub cost_spike_min_floor_usd: f64,
+    pub skill_change_threshold: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CuratorGateDecision {
-    Run,
+    Run { trigger: CuratorTrigger },
     SkipDisabled,
     SkipPaused,
-    SkipIntervalNotElapsed,
+    SkipCircuitOpen,
     SkipChatNotIdle,
+    SkipCooldown,
+    SkipNoTrigger,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CuratorTrigger {
+    CostSpike(right_agent::usage::turn_baseline::CostSpikeEvidence),
+    SkillChangeCount { count: u32, threshold: u32 },
+    TimeFallback { interval_hours: u32 },
 }
 
 /// Pure gate decision. No I/O.
@@ -38,6 +52,8 @@ pub(crate) fn should_run_now(
     state: &CuratorState,
     now: DateTime<Utc>,
     latest_user_activity_at: Option<DateTime<Utc>>,
+    cost_spike_evidence: Option<right_agent::usage::turn_baseline::CostSpikeEvidence>,
+    skill_change_count: u32,
 ) -> CuratorGateDecision {
     if !config.enabled {
         return CuratorGateDecision::SkipDisabled;
@@ -45,26 +61,62 @@ pub(crate) fn should_run_now(
     if config.paused {
         return CuratorGateDecision::SkipPaused;
     }
-    if let Some(last) = state.last_run_at.as_deref() {
-        if let Ok(last_dt) = DateTime::parse_from_rfc3339(last) {
-            let last_dt = last_dt.with_timezone(&Utc);
-            if now - last_dt < Duration::hours(config.interval_hours as i64) {
-                return CuratorGateDecision::SkipIntervalNotElapsed;
-            }
-        }
-    } else {
-        // First-ever run: caller seeds last_run_at and defers one interval.
-        return CuratorGateDecision::SkipIntervalNotElapsed;
+    if let Some(open_until) = state.circuit_open_until.as_deref()
+        && let Ok(dt) = DateTime::parse_from_rfc3339(open_until)
+        && dt.with_timezone(&Utc) > now
+    {
+        return CuratorGateDecision::SkipCircuitOpen;
     }
     if let Some(latest) = latest_user_activity_at
         && now - latest < Duration::hours(config.min_idle_hours as i64)
     {
         return CuratorGateDecision::SkipChatNotIdle;
     }
-    CuratorGateDecision::Run
+
+    let last = state.last_run_at.as_deref().and_then(|s| {
+        DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| d.with_timezone(&Utc))
+    });
+
+    // Cooldown gate — applies to ALL triggers including time fallback.
+    if let Some(last_dt) = last
+        && now - last_dt < Duration::hours(config.min_cooldown_hours as i64)
+    {
+        return CuratorGateDecision::SkipCooldown;
+    }
+
+    // Trigger priority: cost spike > skill change count > time fallback.
+    if let Some(ev) = cost_spike_evidence {
+        return CuratorGateDecision::Run {
+            trigger: CuratorTrigger::CostSpike(ev),
+        };
+    }
+    if skill_change_count >= config.skill_change_threshold {
+        return CuratorGateDecision::Run {
+            trigger: CuratorTrigger::SkillChangeCount {
+                count: skill_change_count,
+                threshold: config.skill_change_threshold,
+            },
+        };
+    }
+    if let Some(last_dt) = last
+        && now - last_dt >= Duration::hours(config.interval_hours as i64)
+    {
+        return CuratorGateDecision::Run {
+            trigger: CuratorTrigger::TimeFallback {
+                interval_hours: config.interval_hours,
+            },
+        };
+    }
+    if last.is_none() {
+        // First-ever run with no triggers — keep Hermes defer pattern.
+        return CuratorGateDecision::SkipNoTrigger;
+    }
+    CuratorGateDecision::SkipNoTrigger
 }
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration as StdDuration;
@@ -73,46 +125,6 @@ use crate::telegram::SessionLocks;
 
 const CURATOR_TIMEOUT: StdDuration = StdDuration::from_secs(900);
 const CURATOR_MAX_TURNS: u32 = 9999;
-
-// File-based state helpers — superseded by load_state_db/save_state_db.
-// Callers in run_if_due are migrated in Task 15; kept here to keep build green.
-#[allow(dead_code)]
-pub(crate) fn state_path(agent_dir: &Path) -> PathBuf {
-    agent_dir.join(".claude/skills/.curator_state.json")
-}
-
-#[allow(dead_code)]
-pub(crate) fn load_state(path: &Path) -> CuratorState {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<LegacyCuratorState>(&s).ok())
-        .map(|l| CuratorState {
-            last_run_at: l.last_run_at,
-            ..Default::default()
-        })
-        .unwrap_or_default()
-}
-
-#[allow(dead_code)]
-pub(crate) fn save_state(path: &Path, state: &CuratorState) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    let legacy = LegacyCuratorState {
-        last_run_at: state.last_run_at.clone(),
-    };
-    let body = serde_json::to_vec_pretty(&legacy)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, path)
-}
-
-/// Minimal on-disk representation used by the legacy file-based helpers.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct LegacyCuratorState {
-    last_run_at: Option<String>,
-}
 
 pub(crate) fn load_state_db(conn: &rusqlite::Connection) -> Result<CuratorState, rusqlite::Error> {
     let row = conn.query_row(
@@ -172,31 +184,84 @@ pub(crate) struct CuratorContext {
 }
 
 /// Gate, snapshot, transitions, and LLM fork. Best-effort: every failure path
-/// logs a warn and continues. Updates `last_run_at` after a Run-gated invocation.
+/// logs a warn and continues. Updates state after a Run-gated invocation.
 pub(crate) async fn run_if_due(
     ctx: CuratorContext,
     latest_user_activity_at: Option<DateTime<Utc>>,
 ) {
-    let state_path = state_path(&ctx.agent_dir);
-    let mut state = load_state(&state_path);
+    let conn = match right_db::open_connection(&ctx.agent_db_dir, false) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator open_connection failed: {e:#}");
+            return;
+        }
+    };
+    let mut state = match load_state_db(&conn) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator load_state_db failed: {e:#}");
+            return;
+        }
+    };
 
-    // Seed first-run timestamp if missing (Hermes pattern: defer one interval on cold start).
+    // Seed first-run timestamp (Hermes defer).
     if state.last_run_at.is_none() {
         state.last_run_at = Some(Utc::now().to_rfc3339());
-        if let Err(e) = save_state(&state_path, &state) {
+        if let Err(e) = save_state_db(&conn, &state) {
             tracing::warn!(agent = %ctx.agent_name, "curator seed state failed: {e:#}");
         }
         return;
     }
 
     let now = Utc::now();
-    let decision = should_run_now(ctx.config, &state, now, latest_user_activity_at);
-    if decision != CuratorGateDecision::Run {
-        tracing::debug!(agent = %ctx.agent_name, "curator gate: {:?}", decision);
-        return;
-    }
+
+    // Compute trigger signals.
+    let cost_spike_evidence = match right_agent::usage::turn_baseline::check_probe_writer_cost_spike(
+        &conn,
+        now,
+        ctx.config.cost_spike_baseline_days,
+        ctx.config.cost_spike_k,
+        ctx.config.cost_spike_min_floor_usd,
+    ) {
+        Ok(ev) => ev,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator cost spike check failed: {e:#}");
+            None
+        }
+    };
 
     let skills_dir = ctx.agent_dir.join(".claude/skills");
+    let usage_path = skills_dir.join(".usage.json");
+    let index = match crate::lifecycle::usage::read_index(&usage_path) {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator usage read failed: {e:#}");
+            return;
+        }
+    };
+    let since = state.last_run_at.as_deref().unwrap_or("");
+    let change_count = crate::lifecycle::usage::count_changes_since(&index, since);
+
+    let decision = should_run_now(
+        ctx.config,
+        &state,
+        now,
+        latest_user_activity_at,
+        cost_spike_evidence,
+        change_count,
+    );
+
+    let trigger = match decision {
+        CuratorGateDecision::Run { trigger } => trigger,
+        other => {
+            tracing::debug!(agent = %ctx.agent_name, "curator gate: {:?}", other);
+            return;
+        }
+    };
+
+    // Capture evidence.
+    state.last_spike_evidence_json = Some(serialize_evidence(&trigger, now));
+
     let backups_dir = ctx.agent_dir.join("curator_backups");
     let now_str = now.format("%Y%m%dT%H%M%SZ").to_string();
     if let Err(e) = crate::lifecycle::snapshot::snapshot_skills(&skills_dir, &backups_dir, &now_str)
@@ -204,33 +269,27 @@ pub(crate) async fn run_if_due(
         tracing::warn!(agent = %ctx.agent_name, "curator snapshot failed: {e:#}");
     }
 
-    let usage_path = skills_dir.join(".usage.json");
-    let mut index = match crate::lifecycle::usage::read_index(&usage_path) {
-        Ok(i) => i,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator usage read failed: {e:#}");
-            return;
-        }
-    };
+    let mut index_mut = index;
     let transition_changes = crate::lifecycle::transitions::apply_automatic_transitions(
-        &mut index,
+        &mut index_mut,
         now,
         crate::lifecycle::transitions::TransitionConfig {
             stale_after_days: ctx.config.stale_after_days as i64,
             archive_after_days: ctx.config.archive_after_days as i64,
         },
     );
-    if let Err(e) = crate::lifecycle::usage::write_index(&usage_path, &index) {
+    if let Err(e) = crate::lifecycle::usage::write_index(&usage_path, &index_mut) {
         tracing::warn!(agent = %ctx.agent_name, "curator usage write failed: {e:#}");
     }
     tracing::info!(
         agent = %ctx.agent_name,
         transitions = transition_changes,
+        trigger = ?trigger,
         "curator auto-transitions applied"
     );
 
     // LLM consolidation fork.
-    let invocation = build_curator_invocation(&ctx, &index);
+    let invocation = build_curator_invocation(&ctx, &index_mut);
     let args = invocation.into_args();
 
     let mut cmd = crate::cc::invocation::build_claude_command(
@@ -243,34 +302,81 @@ pub(crate) async fn run_if_due(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    match tokio::time::timeout(CURATOR_TIMEOUT, cmd.output()).await {
+    let run_status = match tokio::time::timeout(CURATOR_TIMEOUT, cmd.output()).await {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             if let Some(b) = crate::cc::stream::parse_usage_full(&stdout)
-                && let Ok(conn) = right_db::open_connection(&ctx.agent_db_dir, false)
                 && let Err(e) = right_agent::usage::insert::insert_learning_curator(&conn, &b)
             {
                 tracing::warn!(agent = %ctx.agent_name, "curator usage insert failed: {e:#}");
             }
-            if !output.status.success() {
+            if output.status.success() {
+                "success".to_owned()
+            } else {
                 tracing::warn!(
                     agent = %ctx.agent_name,
                     status = ?output.status,
                     "curator exited non-zero"
                 );
+                "failed".to_owned()
             }
         }
-        Ok(Err(e)) => tracing::warn!(agent = %ctx.agent_name, "curator spawn failed: {e:#}"),
-        Err(_) => tracing::warn!(
-            agent = %ctx.agent_name,
-            "curator timed out after {}s",
-            CURATOR_TIMEOUT.as_secs()
-        ),
+        Ok(Err(e)) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator spawn failed: {e:#}");
+            "failed".to_owned()
+        }
+        Err(_) => {
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                "curator timed out after {}s",
+                CURATOR_TIMEOUT.as_secs()
+            );
+            "failed".to_owned()
+        }
     };
 
     state.last_run_at = Some(now.to_rfc3339());
-    if let Err(e) = save_state(&state_path, &state) {
+    state.last_run_status = Some(run_status.clone());
+    if run_status == "success" {
+        state.consecutive_failures = 0;
+        state.circuit_open_until = None;
+    } else {
+        // TODO(Phase-2): set circuit_open_until when consecutive_failures crosses a
+        // threshold. Today the gate checks circuit_open_until but no runtime path
+        // opens the circuit — it's only set by direct DB writes (tests).
+        state.consecutive_failures += 1;
+    }
+    if let Err(e) = save_state_db(&conn, &state) {
         tracing::warn!(agent = %ctx.agent_name, "curator save state failed: {e:#}");
+    }
+}
+
+fn serialize_evidence(trigger: &CuratorTrigger, now: DateTime<Utc>) -> String {
+    let computed_at = now.to_rfc3339();
+    match trigger {
+        CuratorTrigger::CostSpike(ev) => serde_json::json!({
+            "trigger": "cost_spike",
+            "computed_at": computed_at,
+            "details": {
+                "today_cost_usd": ev.today_cost_usd,
+                "baseline_p50_usd": ev.baseline_p50_usd,
+                "k": ev.k,
+                "min_floor_usd": ev.min_floor_usd
+            }
+        })
+        .to_string(),
+        CuratorTrigger::SkillChangeCount { count, threshold } => serde_json::json!({
+            "trigger": "skill_change_count",
+            "computed_at": computed_at,
+            "details": { "count": count, "threshold": threshold }
+        })
+        .to_string(),
+        CuratorTrigger::TimeFallback { interval_hours } => serde_json::json!({
+            "trigger": "time_fallback",
+            "computed_at": computed_at,
+            "details": { "interval_hours": interval_hours }
+        })
+        .to_string(),
     }
 }
 
@@ -406,8 +512,13 @@ mod tests {
             paused: false,
             interval_hours: 168,
             min_idle_hours: 2,
+            min_cooldown_hours: 12,
             stale_after_days: 30,
             archive_after_days: 90,
+            cost_spike_k: 3.0,
+            cost_spike_baseline_days: 14,
+            cost_spike_min_floor_usd: 0.05,
+            skill_change_threshold: 3,
         }
     }
 
@@ -424,7 +535,9 @@ mod tests {
                 c,
                 &CuratorState::default(),
                 dt("2026-05-22T00:00:00Z"),
-                None
+                None,
+                None,
+                0
             ),
             CuratorGateDecision::SkipDisabled
         );
@@ -439,58 +552,139 @@ mod tests {
                 c,
                 &CuratorState::default(),
                 dt("2026-05-22T00:00:00Z"),
-                None
+                None,
+                None,
+                0
             ),
             CuratorGateDecision::SkipPaused
         );
     }
 
     #[test]
-    fn first_run_defers_one_interval() {
-        let state = CuratorState {
+    fn circuit_open_in_future_skips() {
+        let s = CuratorState {
+            circuit_open_until: Some("2027-01-01T00:00:00Z".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            should_run_now(cfg(), &s, dt("2026-05-22T00:00:00Z"), None, None, 0),
+            CuratorGateDecision::SkipCircuitOpen
+        );
+    }
+
+    #[test]
+    fn cooldown_blocks_all_triggers() {
+        let s = CuratorState {
+            last_run_at: Some("2026-05-21T18:00:00Z".into()),
+            ..Default::default()
+        };
+        let ev = right_agent::usage::turn_baseline::CostSpikeEvidence {
+            today_cost_usd: 1.0,
+            baseline_p50_usd: 0.1,
+            k: 3.0,
+            min_floor_usd: 0.05,
+        };
+        assert_eq!(
+            should_run_now(cfg(), &s, dt("2026-05-22T00:00:00Z"), None, Some(ev), 5),
+            CuratorGateDecision::SkipCooldown
+        );
+    }
+
+    #[test]
+    fn cost_spike_fires_after_cooldown() {
+        let s = CuratorState {
+            last_run_at: Some("2026-05-21T00:00:00Z".into()),
+            ..Default::default()
+        };
+        let ev = right_agent::usage::turn_baseline::CostSpikeEvidence {
+            today_cost_usd: 1.0,
+            baseline_p50_usd: 0.1,
+            k: 3.0,
+            min_floor_usd: 0.05,
+        };
+        let d = should_run_now(
+            cfg(),
+            &s,
+            dt("2026-05-22T00:00:00Z"),
+            None,
+            Some(ev.clone()),
+            0,
+        );
+        assert!(matches!(
+            d,
+            CuratorGateDecision::Run {
+                trigger: CuratorTrigger::CostSpike(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn skill_change_count_fires_when_no_cost_spike() {
+        let s = CuratorState {
+            last_run_at: Some("2026-05-21T00:00:00Z".into()),
+            ..Default::default()
+        };
+        let d = should_run_now(cfg(), &s, dt("2026-05-22T00:00:00Z"), None, None, 4);
+        assert_eq!(
+            d,
+            CuratorGateDecision::Run {
+                trigger: CuratorTrigger::SkillChangeCount {
+                    count: 4,
+                    threshold: 3
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn time_fallback_fires_when_no_other_trigger() {
+        let s = CuratorState {
+            last_run_at: Some("2026-05-01T00:00:00Z".into()),
+            ..Default::default()
+        };
+        let d = should_run_now(cfg(), &s, dt("2026-05-22T00:00:00Z"), None, None, 0);
+        assert_eq!(
+            d,
+            CuratorGateDecision::Run {
+                trigger: CuratorTrigger::TimeFallback {
+                    interval_hours: 168
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn no_trigger_no_run() {
+        let s = CuratorState {
+            last_run_at: Some("2026-05-21T00:00:00Z".into()),
+            ..Default::default()
+        };
+        let d = should_run_now(cfg(), &s, dt("2026-05-22T00:00:00Z"), None, None, 0);
+        // last_run_at 24h ago; cooldown 12h passed; no spike; no change-count; not 168h yet
+        assert_eq!(d, CuratorGateDecision::SkipNoTrigger);
+    }
+
+    #[test]
+    fn first_ever_run_defers() {
+        let s = CuratorState {
             last_run_at: None,
             ..Default::default()
         };
-        assert_eq!(
-            should_run_now(cfg(), &state, dt("2026-05-22T00:00:00Z"), None),
-            CuratorGateDecision::SkipIntervalNotElapsed
-        );
-    }
-
-    #[test]
-    fn within_interval_skips() {
-        let state = CuratorState {
-            last_run_at: Some("2026-05-21T00:00:00Z".to_owned()),
-            ..Default::default()
-        };
-        assert_eq!(
-            should_run_now(cfg(), &state, dt("2026-05-22T00:00:00Z"), None),
-            CuratorGateDecision::SkipIntervalNotElapsed
-        );
-    }
-
-    #[test]
-    fn after_interval_runs_when_idle() {
-        let state = CuratorState {
-            last_run_at: Some("2026-05-01T00:00:00Z".to_owned()),
-            ..Default::default()
-        };
-        assert_eq!(
-            should_run_now(cfg(), &state, dt("2026-05-22T00:00:00Z"), None),
-            CuratorGateDecision::Run
-        );
+        let d = should_run_now(cfg(), &s, dt("2026-05-22T00:00:00Z"), None, None, 0);
+        assert_eq!(d, CuratorGateDecision::SkipNoTrigger);
     }
 
     #[test]
     fn chat_active_within_min_idle_skips() {
-        let state = CuratorState {
-            last_run_at: Some("2026-05-01T00:00:00Z".to_owned()),
+        let s = CuratorState {
+            last_run_at: Some("2026-05-01T00:00:00Z".into()),
             ..Default::default()
         };
         let now = dt("2026-05-22T00:00:00Z");
+        // Chat activity 30 minutes before `now`, well within min_idle_hours=2.
         let just_now = now - Duration::minutes(30);
         assert_eq!(
-            should_run_now(cfg(), &state, now, Some(just_now)),
+            should_run_now(cfg(), &s, now, Some(just_now), None, 0),
             CuratorGateDecision::SkipChatNotIdle
         );
     }

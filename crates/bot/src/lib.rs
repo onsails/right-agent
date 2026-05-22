@@ -1194,8 +1194,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         paused: curator_learning.curator_paused,
                         interval_hours: curator_learning.curator_interval_hours,
                         min_idle_hours: curator_learning.curator_min_idle_hours,
+                        min_cooldown_hours: curator_learning.curator_min_cooldown_hours,
                         stale_after_days: curator_learning.curator_stale_after_days,
                         archive_after_days: curator_learning.curator_archive_after_days,
+                        cost_spike_k: curator_learning.curator_cost_spike_k,
+                        cost_spike_baseline_days: curator_learning.curator_cost_spike_baseline_days,
+                        cost_spike_min_floor_usd: curator_learning.curator_cost_spike_min_floor_usd,
+                        skill_change_threshold: curator_learning.curator_skill_change_threshold,
                     },
                 };
                 // latest_user_activity_at hookup deferred — pass None for v1.
