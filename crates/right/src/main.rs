@@ -9,6 +9,7 @@ mod memory_server;
 pub(crate) mod progress;
 mod restore;
 pub(crate) mod right_backend;
+pub(crate) mod skill_lifecycle;
 mod wizard;
 
 /// Source-of-truth list for every interactive prompt label rendered from
