@@ -84,73 +84,94 @@ pub const CRON_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"delivery":
 /// for the foreground answer that was sent to background.
 pub const BG_CONTINUATION_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"delivery":{"type":"object","properties":{"kind":{"const":"notify"},"content":{"type":"string","minLength":1},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["kind","content"]},"run_note":{"type":"string"}},"required":["delivery","run_note"]}"#;
 
-/// JSON schema for the fork-probe classifier output.
-///
-/// Mirrors `learning_signal` and `skill_issue_signal` shapes from
-/// `REPLY_SCHEMA_JSON`. `workflow_complete` is captured for telemetry
-/// but does not gate signal ingestion in v1.
-pub const FORK_PROBE_SCHEMA_JSON: &str = r#"{
-  "type": "object",
-  "properties": {
-    "workflow_complete": { "type": "boolean" },
-    "learning_signal": {
-      "type": ["object", "null"],
-      "properties": {
-        "kind": { "const": "create_candidate" },
-        "package_name_hint": { "type": "string" },
-        "trigger": {
-          "enum": ["explicit_user_request", "multi_step_workflow", "recovered_surprise", "user_correction", "repeated_tool_pattern"]
-        },
-        "reason_not_written": {
-          "enum": ["conversation_still_evolving", "needs_full_context_review", "write_or_publish_failed", "needs_existing_skill_diff"]
-        },
-        "event_refs": {
-          "type": "array",
-          "items": { "type": "string" },
-          "minItems": 1
-        },
-        "summary": { "type": "string" }
-      },
-      "required": ["kind", "package_name_hint", "trigger", "reason_not_written", "event_refs", "summary"]
-    },
-    "skill_issue_signal": {
-      "type": ["object", "null"],
-      "properties": {
-        "kind": { "const": "update_candidate" },
-        "skill_name": { "type": "string" },
-        "issue": {
-          "enum": ["missing_step", "stale_command", "wrong_api_assumption", "overbroad_activation", "broken_script", "unsafe_instruction"]
-        },
-        "reason_not_patched": {
-          "enum": ["conversation_still_evolving", "needs_full_context_review", "write_or_publish_failed", "needs_existing_skill_diff"]
-        },
-        "observed_effect": {
-          "enum": ["retry_after_tool_error", "retry_after_user_correction", "manual_override", "verified_alternative"]
-        },
-        "event_refs": {
-          "type": "array",
-          "items": { "type": "string" },
-          "minItems": 1
-        },
-        "patch_hint": { "type": "string" }
-      },
-      "required": ["kind", "skill_name", "issue", "reason_not_patched", "observed_effect", "event_refs", "patch_hint"]
-    }
-  },
-  "required": ["workflow_complete"]
-}"#;
+/// First user message delivered to a probe-writer fork. Wraps the captured
+/// anchored exchange and instructs the model to ignore any newer activity
+/// that may exist in the inherited transcript.
+pub const PROBE_WRITER_ANCHOR_TEMPLATE: &str = "\
+<probe_writer_anchor>
+USER (target): {user_msg_text}
+ASSISTANT (target): {assistant_reply_text}
+</probe_writer_anchor>
 
-/// Prompt sent to the fork-probe classifier.
-///
-/// The probe inherits the foreground turn's transcript via
-/// `claude -p --resume <main> --fork-session` and emits JSON per
-/// `FORK_PROBE_SCHEMA_JSON`. Set signal fields to null when nothing qualifies.
-pub const FORK_PROBE_PROMPT: &str = "\
-Review the just-finished turn. \
-Decide whether the workflow is complete and whether a reusable learning candidate \
-(`learning_signal`) or a skill-issue worth recording (`skill_issue_signal`) exists. \
-Emit JSON matching the provided schema. Set `learning_signal` and `skill_issue_signal` \
-to null if nothing qualifies. Do not invoke any tool.";
+Your review target is the anchored exchange above. The forked session may \
+contain newer activity — IGNORE it. Focus exclusively on the anchored turn.
+";
+
+/// Class-first guidance + naming + protocol + quality for the probe-writer.
+/// Concatenated after the anchor block in the first user message of the fork.
+pub const PROBE_WRITER_INSTRUCTIONS: &str = "\
+Decide whether the anchored exchange contains a reusable workflow worth \
+capturing as a `rightx-*` skill, or whether an existing `rightx-*` skill needs \
+to be patched. Apply class-first preference:
+
+1. Survey existing `rightx-*` skills (via Read on `.claude/skills/installed.json` \
+   and on individual SKILL.md files in `.claude/skills/rightx-*/`).
+2. If the workflow matches an existing skill that's broken or incomplete: \
+   call `mcp__right__skill_learning_start` with `action=\"update\"` and \
+   `skill_name=\"<existing-rightx-slug>\"`, then patch the skill files via \
+   Edit/Write, then call `mcp__right__skill_learning_finish` with \
+   `status=\"updated\"`.
+3. If the workflow is genuinely novel and reusable: call \
+   `mcp__right__skill_learning_start` with `action=\"create\"` and \
+   `skill_name=\"rightx-<kebab-case-slug>\"`, then Write the new \
+   `.claude/skills/<skill_name>/SKILL.md`, then call \
+   `mcp__right__skill_learning_finish` with `status=\"created\"`.
+4. If uncertain, NOT reusable, or one-off task narrative: exit silently.
+
+`rightx-*` skill quality:
+- `SKILL.md` MUST have YAML frontmatter with `name` (= directory slug) and \
+  `description` (≤1024 chars, concrete activation triggers — \"when to use\").
+- Body: when to use, exact steps that worked, tool/API gotchas, verification, \
+  when not to use.
+- Optional subdirs: `scripts/`, `references/`, `assets/` only when they remove \
+  real future complexity.
+- Never store secrets, transcripts, or session-specific narrative.
+
+Do NOT update bundled, hub-installed, codegen-owned, or pinned skills. You can \
+detect bundled/codegen-owned ones by absence in the agent's `installed.json` or \
+by the `source` field of an existing record.
+";
+
+/// System prompt for the curator's own forked session (NOT inherited from
+/// main agent). Concatenated with the dynamic candidate-list as the first user
+/// message of the curator fork.
+pub const CURATOR_SYSTEM_PROMPT: &str = "\
+You are the Right Agent skill CURATOR. You consolidate, patch, and archive \
+agent-created `rightx-*` skills.
+
+Goal: keep the skill library coherent. Prefer broader umbrella skills over \
+narrow near-duplicates. Promote support material into `references/`, \
+`templates/`, or `scripts/` under an umbrella skill where it removes \
+duplication.
+
+Three consolidation tactics:
+
+1. MERGE INTO EXISTING UMBRELLA — when narrow skills overlap with an existing \
+   umbrella, patch the umbrella and demote the narrow skills' content into the \
+   umbrella's `references/<slug>.md`. Archive the narrow skills with the \
+   `absorbed_into` annotation pointing to the umbrella.
+2. CREATE NEW UMBRELLA WITH DEMOTION — when two or more narrow skills overlap \
+   but no umbrella exists, create `rightx-<umbrella-slug>` and demote the \
+   originals into its `references/`. Archive originals with `absorbed_into`.
+3. DEMOTE TO REFERENCES — when one narrow skill is fully covered by a broader \
+   skill's scope, move its body into the broader skill's `references/<slug>.md` \
+   and archive with `absorbed_into`.
+
+Hard rules:
+- NEVER delete a skill. Archive only (move to `.archive/`).
+- DO NOT touch skills marked `created_by=\"foreground\"`, `\"bundled\"`, or \
+  `pinned=true`.
+- `use_count=0` is NOT sufficient evidence to archive. Use the inventory's \
+  `last_used_at` / `last_patched_at` activity dates. Honor the automatic \
+  state already applied (stale/archived) — your job is structural \
+  consolidation, not lifecycle scheduling.
+- Each consolidation action: call `mcp__right__skill_learning_start` with the \
+  appropriate `action`, perform the writes, call `mcp__right__skill_learning_finish`.
+
+Tools available: Read, Bash (for `mv` into `.archive/`), \
+`mcp__right__skill_learning_start`, `mcp__right__skill_learning_finish`. No \
+other tools.
+";
 
 /// Generate the base system prompt for all agent modes.
 ///
