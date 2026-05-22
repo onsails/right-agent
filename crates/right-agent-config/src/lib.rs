@@ -161,6 +161,18 @@ where
     }
 }
 
+fn deserialize_positive_finite_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if value.is_finite() && value > 0.0 {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom("value must be finite and > 0.0"))
+    }
+}
+
 fn deserialize_positive_u32<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -380,7 +392,10 @@ pub struct LearningConfig {
 
     /// Multiplier on 14-day P50 probe-writer cost; ≥ k * P50 in last 24h
     /// triggers an early curator run.
-    #[serde(default = "default_curator_cost_spike_k")]
+    #[serde(
+        default = "default_curator_cost_spike_k",
+        deserialize_with = "deserialize_positive_finite_f64"
+    )]
     pub curator_cost_spike_k: f64,
     #[serde(
         default = "default_curator_cost_spike_baseline_days",
@@ -389,7 +404,10 @@ pub struct LearningConfig {
     pub curator_cost_spike_baseline_days: u32,
     /// Absolute floor on 24h probe-writer spend below which the cost-spike
     /// trigger never fires — protects low-activity agents.
-    #[serde(default = "default_curator_cost_spike_min_floor_usd")]
+    #[serde(
+        default = "default_curator_cost_spike_min_floor_usd",
+        deserialize_with = "deserialize_positive_finite_f64"
+    )]
     pub curator_cost_spike_min_floor_usd: f64,
     /// Skills created/patched since last curator run; ≥ threshold triggers a
     /// run.

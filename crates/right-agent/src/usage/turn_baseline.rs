@@ -7,6 +7,7 @@ use rusqlite::Connection;
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnBaselines {
     pub sample_size: u32,
+    pub elapsed_sample_size: u32,
     pub window_days: u32,
     pub cost_usd: BaselineMetric<f64>,
     pub num_turns: BaselineMetric<u32>,
@@ -52,6 +53,7 @@ pub fn compute(
     let elapsed_sample_size = elapsed.len() as u32;
     Ok(TurnBaselines {
         sample_size,
+        elapsed_sample_size,
         window_days,
         cost_usd: percentile_metric(&mut costs, sample_size, min_sample),
         num_turns: percentile_metric(&mut turns, sample_size, min_sample),
@@ -156,17 +158,14 @@ pub fn check_probe_writer_cost_spike(
     let rows = stmt.query_map([&window_start, &today_start], |r| r.get::<_, f64>(0))?;
     let mut daily: Vec<f64> = rows.collect::<Result<_, _>>()?;
     if daily.is_empty() {
-        // No probe_writer history — fall back to floor-only check.
-        return Ok(Some(CostSpikeEvidence {
-            today_cost_usd: today_cost,
-            baseline_p50_usd: 0.0,
-            k,
-            min_floor_usd,
-        }));
+        // No probe_writer history in the baseline window — defer to other
+        // triggers (skill-change-count or time-fallback) rather than firing
+        // CostSpike with a fabricated p50=0.
+        return Ok(None);
     }
     daily.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let p50 = daily[daily.len() / 2];
-    if today_cost >= k * p50.max(min_floor_usd) {
+    let p50 = percentile(&daily, 0.50);
+    if today_cost >= k * p50 && today_cost >= min_floor_usd {
         Ok(Some(CostSpikeEvidence {
             today_cost_usd: today_cost,
             baseline_p50_usd: p50,
@@ -357,13 +356,53 @@ mod cost_spike_tests {
     }
 
     #[test]
-    fn fires_when_today_above_floor_and_no_baseline() {
+    fn returns_none_when_no_baseline_history() {
         let dir = tempdir().unwrap();
         let conn = open_connection(dir.path(), true).unwrap();
         insert_learning_probe_writer(&conn, &b(0.20), 1, 0).unwrap();
         let now = Utc::now();
         let r = check_probe_writer_cost_spike(&conn, now, 14, 3.0, 0.05).unwrap();
-        // baseline empty + today > floor → fires
-        assert!(r.is_some());
+        // No prior probe_writer days in the baseline window — must not fire.
+        // Skill-change-count or time-fallback triggers handle the new-agent case.
+        assert!(r.is_none());
+    }
+
+    /// Regression: p50=0.02/day, floor=0.05, k=3.0, today=0.08.
+    /// today >= k*p50 (0.06) AND today >= floor (0.05) → must fire.
+    /// Old code: threshold = k * max(p50, floor) = 3 * 0.05 = 0.15 → 0.08 < 0.15 → None (bug).
+    ///
+    /// The baseline query groups by day and sums; one row per day at 0.02 gives p50=0.02.
+    #[test]
+    fn fires_when_today_exceeds_k_times_p50_and_floor_independently() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        // One row per day for 7 days in the baseline window, each costing 0.02.
+        // p50 of [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02] = 0.02.
+        for day in 1..=7u32 {
+            let ts = (Utc::now() - chrono::Duration::days(day as i64))
+                .format("%Y-%m-%dT12:00:00Z")
+                .to_string();
+            conn.execute(
+                "INSERT INTO usage_events \
+                 (session_uuid, source, ts, total_cost_usd, num_turns, \
+                  input_tokens, output_tokens, cache_creation_tokens, \
+                  cache_read_tokens, web_search_requests, web_fetch_requests, \
+                  model_usage_json, api_key_source) \
+                 VALUES ('s', 'learning_probe_writer', ?1, 0.02, 1, 0, 0, 0, 0, 0, 0, '{}', 'none')",
+                [&ts],
+            )
+            .unwrap();
+        }
+        // Today's spend: 0.08 >= k*p50=0.06 AND 0.08 >= floor=0.05 → must fire.
+        insert_learning_probe_writer(&conn, &b(0.08), 1, 0).unwrap();
+        let now = Utc::now();
+        let r = check_probe_writer_cost_spike(&conn, now, 14, 3.0, 0.05).unwrap();
+        assert!(
+            r.is_some(),
+            "expected Some: today=0.08 >= k*p50=0.06 and >= floor=0.05"
+        );
+        let ev = r.unwrap();
+        assert!((ev.today_cost_usd - 0.08).abs() < 1e-9);
+        assert!((ev.baseline_p50_usd - 0.02).abs() < 1e-9);
     }
 }

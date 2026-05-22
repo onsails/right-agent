@@ -613,18 +613,21 @@ pub(crate) fn bounded_text(value: &str, max_chars: usize, suffix: &str) -> Strin
     out
 }
 
+/// Max chars per description line in the prefilter skill-index summary.
+const SKILL_INDEX_DESC_MAX_CHARS: usize = 120;
+
 /// One-line-per-skill projection of a `LearnedSkillSummary` slice.
 /// Each line is `- <name>: <description>`. The description is extracted from
 /// the SKILL.md frontmatter `description:` field in `excerpt`; if not found,
 /// the first non-empty, non-fence line of `excerpt` is used instead. In both
-/// cases only the first 120 chars of the first line are kept.
+/// cases only `SKILL_INDEX_DESC_MAX_CHARS` chars of the first line are kept.
 pub(crate) fn render_skill_index_summary(skills: &[LearnedSkillSummary]) -> String {
     use std::fmt::Write;
     let mut s = String::new();
     for sk in skills {
         let desc_line = extract_skill_description(&sk.excerpt)
             .chars()
-            .take(120)
+            .take(SKILL_INDEX_DESC_MAX_CHARS)
             .collect::<String>();
         let _ = writeln!(s, "- {name}: {desc_line}", name = sk.name);
     }
