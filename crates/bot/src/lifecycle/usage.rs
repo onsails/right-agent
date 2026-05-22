@@ -176,6 +176,20 @@ pub(crate) fn set_pinned(path: &Path, skill_name: &str, pinned: bool) -> Result<
     })
 }
 
+/// Count skills whose `created_at` OR `last_patched_at` is strictly after
+/// `since`. Used by the curator's skill-change-count trigger.
+pub(crate) fn count_changes_since(index: &Index, since: &str) -> u32 {
+    let mut n = 0u32;
+    for r in index.skills.values() {
+        let created = r.created_at.as_deref().unwrap_or("");
+        let patched = r.last_patched_at.as_deref().unwrap_or("");
+        if created.as_bytes() > since.as_bytes() || patched.as_bytes() > since.as_bytes() {
+            n += 1;
+        }
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +364,32 @@ mod tests {
         assert!(read_index(&path).unwrap().skills["rightx-foo"].pinned);
         set_pinned(&path, "rightx-foo", false).unwrap();
         assert!(!read_index(&path).unwrap().skills["rightx-foo"].pinned);
+    }
+}
+
+#[cfg(test)]
+mod count_tests {
+    use super::*;
+
+    #[test]
+    fn counts_skills_created_after_since() {
+        let mut idx = Index::default();
+        let mut r = UsageRecord::default();
+        r.created_at = Some("2026-05-22T12:00:00Z".into());
+        idx.skills.insert("rightx-new".into(), r);
+        let mut older = UsageRecord::default();
+        older.created_at = Some("2026-05-20T12:00:00Z".into());
+        idx.skills.insert("rightx-old".into(), older);
+        assert_eq!(count_changes_since(&idx, "2026-05-21T00:00:00Z"), 1);
+    }
+
+    #[test]
+    fn counts_skills_patched_after_since() {
+        let mut idx = Index::default();
+        let mut r = UsageRecord::default();
+        r.created_at = Some("2026-04-01T00:00:00Z".into());
+        r.last_patched_at = Some("2026-05-22T12:00:00Z".into());
+        idx.skills.insert("rightx-patched".into(), r);
+        assert_eq!(count_changes_since(&idx, "2026-05-21T00:00:00Z"), 1);
     }
 }
