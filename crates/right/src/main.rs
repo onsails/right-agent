@@ -336,6 +336,40 @@ pub enum AgentCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Operator-only skill lifecycle controls (pin/unpin/list-pins)
+    Skill {
+        #[command(subcommand)]
+        command: AgentSkillCommands,
+    },
+}
+
+/// Operator-only skill lifecycle subcommands.
+#[derive(Subcommand)]
+pub enum AgentSkillCommands {
+    /// Pin a `rightx-*` skill so the curator never archives it
+    Pin {
+        /// Agent name
+        #[arg(long)]
+        agent: String,
+        /// Skill package name (must start with `rightx-`)
+        #[arg(long)]
+        name: String,
+    },
+    /// Unpin a previously-pinned `rightx-*` skill
+    Unpin {
+        /// Agent name
+        #[arg(long)]
+        agent: String,
+        /// Skill package name (must start with `rightx-`)
+        #[arg(long)]
+        name: String,
+    },
+    /// List pinned skills for an agent
+    ListPins {
+        /// Agent name
+        #[arg(long)]
+        agent: String,
+    },
 }
 
 /// Subcommands for `right memory`.
@@ -919,6 +953,7 @@ async fn main() -> miette::Result<()> {
                 }
                 Ok(())
             }
+            AgentCommands::Skill { command } => cmd_agent_skill(&home, command),
         },
         Commands::Memory { command } => match command {
             MemoryCommands::List {
@@ -3909,6 +3944,52 @@ async fn cmd_agent_destroy(
     }
 
     Ok(())
+}
+
+/// Operator-only skill pin/unpin/list-pins helper. Mutates host-side
+/// `.usage.json` directly via [`crate::skill_lifecycle`].
+fn cmd_agent_skill(home: &Path, command: AgentSkillCommands) -> miette::Result<()> {
+    match command {
+        AgentSkillCommands::Pin { agent, name } => {
+            if !name.starts_with("rightx-") {
+                return Err(miette::miette!("skill name must start with `rightx-`"));
+            }
+            let usage_path = right_config::agents_dir(home)
+                .join(&agent)
+                .join(".claude/skills/.usage.json");
+            crate::skill_lifecycle::set_pinned(&usage_path, &name, true)
+                .map_err(|e| miette::miette!("set_pinned: {e:#}"))?;
+            println!("pinned: {name}");
+            Ok(())
+        }
+        AgentSkillCommands::Unpin { agent, name } => {
+            if !name.starts_with("rightx-") {
+                return Err(miette::miette!("skill name must start with `rightx-`"));
+            }
+            let usage_path = right_config::agents_dir(home)
+                .join(&agent)
+                .join(".claude/skills/.usage.json");
+            crate::skill_lifecycle::set_pinned(&usage_path, &name, false)
+                .map_err(|e| miette::miette!("set_pinned: {e:#}"))?;
+            println!("unpinned: {name}");
+            Ok(())
+        }
+        AgentSkillCommands::ListPins { agent } => {
+            let usage_path = right_config::agents_dir(home)
+                .join(&agent)
+                .join(".claude/skills/.usage.json");
+            let pins = crate::skill_lifecycle::list_pinned(&usage_path)
+                .map_err(|e| miette::miette!("list_pinned: {e:#}"))?;
+            if pins.is_empty() {
+                println!("(no pinned skills)");
+            } else {
+                for name in pins {
+                    println!("{name}");
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn cmd_agent_rebootstrap(home: &Path, agent_name: &str, yes: bool) -> miette::Result<()> {
