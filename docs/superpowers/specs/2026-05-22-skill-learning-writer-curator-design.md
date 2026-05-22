@@ -95,11 +95,17 @@ The foreground path keeps `/right-learn-skill` for explicit user intent. When in
 
 ## Components
 
-### 1. ProbeAnchor
+### 1. ProbeAnchor and race-safety
 
 Captured synchronously by `bot::telegram::worker` at the end of each foreground turn, before any async work spawns. Anchor includes verbatim user message text, verbatim assistant reply text, the main session uuid, capture timestamp, chat id, thread id. Passed by value into prefilter and probe-writer paths.
 
-Race-safety: even if the user sends another message while prefilter runs, the anchor is already bound to the original turn. Prefilter sees only the anchored exchange (not full transcript), so newer messages are invisible. Probe-writer fork inherits whatever transcript exists at fork time, but its prompt explicitly anchors to the captured texts and instructs the model to ignore anything that arrived after.
+**Race-safety via existing per-session mutex.** Probe-writer's `claude -p --resume <main> --fork-session` is a `--resume` caller, so it naturally participates in the existing per-session mutex (ARCHITECTURE.md → "Per-session mutex on `--resume`"). Probe-writer acquires the mutex before spawning CC, spawns the fork, **waits for the fork's `system/init` event** (parsed from `stream-json` stdout — the same handshake pattern as background-continuation in `bot::background::request_background_continuation`), then releases the mutex. The fork is now on its own session_id and the main session is free for subsequent user turns.
+
+Hold-window for the mutex: only the fork-init phase (~200-500ms typical), not the full probe-writer lifetime. If a new user message arrives during this window, its worker waits on the same mutex; ordering is FIFO.
+
+**Anchor as belt-and-suspenders.** Between anchor capture and mutex acquisition there is a ~1-2s window (prefilter latency). If a new user message wins the mutex during that window, it completes its turn first and its turn appears in main's JSONL before probe-writer's fork init reads it. Probe-writer's fork would then inherit a transcript containing both turns. The anchor in probe-writer's prompt ("review ONLY the anchored exchange; ignore newer activity") makes the model focus on the right turn. The mutex prevents partial-read races; the anchor handles ordering ambiguity.
+
+Stronger guarantee (hold mutex from anchor capture through fork init, blocking new user messages for ~1.5-2.5s on every learning-eligible turn) is rejected: UX cost (perceived bot lag) outweighs the marginal correctness gain over anchor-based mitigation.
 
 ### 2. Prefilter classifier (Haiku)
 
@@ -119,7 +125,7 @@ Spawned only when prefilter returns `should_probe = true`. Forks main session vi
 
 Tools whitelist: `Write`, `Read`, `Bash`, `mcp__right__skill_learning_start`, `mcp__right__skill_learning_finish`. No other tools, no other MCP servers exposed.
 
-Max turns: 8. Enough for survey → decide → start → write → finish. Hermes uses 16; we start tighter and raise if quality demands.
+Max turns: 16. Aligned with Hermes' production value (`background_review.py:398`). Budget: survey (2-4 reads) + decide + start + write SKILL.md + optional `references/`/`scripts/` files + finish = 5-9 turns typical, 16 leaves comfortable margin without runaway.
 
 Prompt structure delivered as the first user message in the fork (Hermes pattern: prompt-as-user-msg keeps system cached):
 
@@ -162,7 +168,7 @@ When firing:
 
 1. Acquire per-agent skill-write mutex (shared with probe-writer).
 2. `snapshot_skills`: tar-gzip `.claude/skills/` to `agents/<name>/curator_backups/<utc>/skills.tar.gz`. Excludes `.archive/` and `.curator_backups/`. Best-effort: failure logs warn, doesn't block run.
-3. `apply_automatic_transitions`: pure-Rust pass over `.usage.json`. Active → stale after 30 days unused. Stale → active on any new use. Any → archived after 90 days unused. Pinned bypasses all transitions. Archive moves directory to `.claude/skills/.archive/rightx-<slug>-<ts>/`.
+3. `apply_automatic_transitions`: pure-Rust pass over `.usage.json`. Computes `latest_activity_at = max(last_used_at, last_patched_at)` per skill. Active → stale when `now - latest_activity_at > stale_after_days` (default 30). Stale → active on any new use. Any → archived when `now - latest_activity_at > archive_after_days` (default 90). Pinned bypasses all transitions. Archive moves directory to `.claude/skills/.archive/rightx-<slug>-<ts>/`.
 4. Curator fork: `claude -p --session-id <curator-uuid> --no-resume`. Tools whitelist: `Read`, `Bash`, `mcp__right__skill_learning_start`, `mcp__right__skill_learning_finish`. Max turns 9999 (Hermes default; large because iterative tool use over hundreds of skills).
 5. Curator system prompt is its own codegen constant `CURATOR_SYSTEM_PROMPT`, NOT inherited from main agent. Specialized for consolidation/lifecycle decisions.
 6. Curator's initial user message contains the skill inventory (names + descriptions + `.usage.json` stats) plus class-first consolidation rules. Skill bodies are loaded on-demand via `Read` tool calls — the LLM decides which to deep-view.
@@ -174,8 +180,41 @@ Permission rules:
 - Curator can only patch/archive/create skills with `created_by IN ('probe_writer', 'curator')`.
 - `created_by = 'foreground'` (user-explicit-intent) is permanently excluded.
 - Bundled `.claude/skills/*` (those shipped by codegen) excluded. Identified by `created_by = "bundled"` in `.usage.json`, set when codegen installs them on bot startup.
-- Pinned skills (`pinned: true` in `.usage.json`) excluded from archive but patch allowed (Hermes pattern).
+- Pinned skills (`pinned: true` in `.usage.json`) excluded from archive but patch allowed (Hermes pattern). Pinning is an **operator escape hatch** via CLI (`right agent skill pin <name>`), not a user-facing UI feature.
 - Never delete; archive (rename) only.
+
+#### 4.1 Consolidation mechanics
+
+Curator can perform structural consolidation when its LLM pass identifies near-duplicates or overlapping coverage. Three tactics (Hermes-aligned per `agent/curator.py:330-447`):
+
+**Tactic 1: Merge into existing umbrella.**
+Two narrow skills `rightx-foo-a` and `rightx-foo-b` cover the same topic, and an umbrella `rightx-foo` already exists. Curator:
+- Patches `rightx-foo`'s SKILL.md to incorporate techniques/gotchas from `rightx-foo-a` and `rightx-foo-b`.
+- Moves the full content of the narrow skills into `rightx-foo/references/foo-a.md` and `references/foo-b.md` for retrieval.
+- Archives `rightx-foo-a` and `rightx-foo-b` directories with annotation `absorbed_into = "rightx-foo"` written to their final `.usage.json` records.
+
+**Tactic 2: Create new umbrella with demotion.**
+Two narrow skills overlap but no umbrella exists. Curator creates `rightx-<umbrella-slug>`, writes a class-level SKILL.md, demotes both originals into the new umbrella's `references/` subdir, archives originals with `absorbed_into` annotation.
+
+**Tactic 3: Demote single skill to references.**
+One narrow skill is fully covered by an existing broader skill's scope. Curator moves the narrow skill's SKILL.md into the broader skill's `references/<slug>.md`. Archives original with `absorbed_into` annotation.
+
+**`absorbed_into` annotation**: written to the archived skill's final `.usage.json` record. Format:
+```json
+{
+  "rightx-foo-a": {
+    "state": "archived",
+    "archived_at": "2026-05-29T14:00:00Z",
+    "absorbed_into": "rightx-foo",
+    "created_by": "probe_writer",
+    ...
+  }
+}
+```
+
+**Cron skill-ref migration**: agent's `cron_specs` may reference skill names. Bot startup scans active `cron_specs` for skill references; for each absorbed skill (presence in `.usage.json` with `absorbed_into != null`), rewrites the cron spec to point at the umbrella. One-time migration per absorption event, logged.
+
+Never delete. Always archive. `absorbed_into` records the lineage for future reference and rollback (operator can restore from `.curator_backups/<ts>/skills.tar.gz`).
 
 ### 5. Foreground `/right-learn-skill` skill (preserved, simplified)
 
@@ -187,6 +226,48 @@ Permission rules:
 - Provenance: caller is foreground → `is_background_review() == false` → `created_by = "foreground"`.
 
 Operating-instructions update: the existing line "When you discover a reusable procedure..., use the `/right-learn-skill` skill. It decides whether to create or update a `rightx-*` learned skill, or leave a nudge signal" is rewritten to "When the **user** explicitly asks you to save / remember / fix a `rightx-*` skill, use the `/right-learn-skill` skill. The platform handles routine learning automatically."
+
+### 5a. `used_skill_receipts` (vocal-to-user signal + bump_use source)
+
+Reply-schema field becomes **required** (was optional + nullable). Empty array allowed; null / absence forbidden.
+
+`REPLY_SCHEMA_JSON` change:
+
+```json
+"used_skill_receipts": {
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "package_name": { "type": "string", "pattern": "^rightx-" },
+      "message": { "type": "string", "minLength": 1 }
+    },
+    "required": ["package_name", "message"]
+  }
+}
+```
+
+Plus addition to top-level `"required": ["content", "used_skill_receipts"]`.
+
+CC's structured-output validator rejects replies missing the field — the agent cannot accidentally omit it. Empty array is the no-skill-used case.
+
+`OPERATING_INSTRUCTIONS.md` line rewrite (currently line 44-46):
+
+> "Always include `used_skill_receipts` in your reply. Empty array `[]` if no `rightx-*` skill applied. Non-empty array (one entry per skill) when one or more skills materially guided your answer. The `message` field describes the workflow you applied — e.g. \"Built and verified npm package\" — and is shown to the user. Avoid generic messages like \"Done\"."
+
+**Worker rendering** (`crates/bot/src/cc/worker_reply.rs::append_used_skill_receipts`): rewrite from current `\n\n<message>` to:
+
+```
+<reply content>
+
+💡 <message> (<code>rightx-foo</code>)
+```
+
+(One line per receipt; `package_name` in Telegram HTML `<code>` tag so it renders monospace and is visually distinct from the agent's prose.)
+
+**`bump_use` hook**: worker, at receipt-parsing site, for each receipt whose `package_name` matches `^rightx-`, calls `lifecycle::usage::bump_use(agent_dir, package_name)` which updates `.usage.json::<name>::{use_count++, last_used_at=now}`. Non-`rightx-` receipts are dropped silently (schema pattern should catch them upstream; defense-in-depth).
+
+Backward-compatibility window: agents on pre-spec codegen may transiently emit `null` or omit the field. Bot worker tolerates absence/null as empty during the transition (no schema-validation re-prompt loop). After codegen propagates and CC re-loads schemas, the strict path takes over.
 
 ### 6. Per-agent skill-write mutex
 
@@ -201,35 +282,47 @@ No per-skill granularity. Cheap; sufficient.
 
 ### 7. Usage tracking (`.usage.json`)
 
-New file `agents/<name>/.claude/skills/.usage.json`. Format (Hermes-compatible):
+New file `agents/<name>/.claude/skills/.usage.json`. Format:
 
 ```json
 {
   "rightx-foo": {
     "use_count": 12,
-    "view_count": 3,
     "patch_count": 1,
     "last_used_at": "2026-05-21T14:23:00Z",
-    "last_viewed_at": "2026-05-22T08:00:00Z",
     "last_patched_at": "2026-05-20T11:15:00Z",
     "state": "active",
     "pinned": false,
     "created_by": "probe_writer",
     "created_at": "2026-05-15T10:00:00Z",
-    "archived_at": null
+    "archived_at": null,
+    "absorbed_into": null
   }
 }
 ```
 
+`view_count` / `last_viewed_at` from Hermes are intentionally omitted: their `bump_view` hook fires on an explicit `skill_view` tool call (agent-driven open). In our system CC auto-loads skills based on description matching, with no observable per-skill activation signal. Tracking views without that signal would be either overcount (all loaded skills bumped) or zero — neither useful. Staleness relies on `last_used_at` (from receipt parsing) and `last_patched_at` (from curator/probe-writer mutations) only.
+
 Atomic write via tempfile + rename. flock on Linux/macOS for concurrent updaters. Updates triggered by:
 
-- `bump_view` — when CC loads a skill into the agent's prompt at session start. Hook point: `bot::cc::prompt` skill index assembly.
-- `bump_use` — when assistant reply includes a `used_skill_receipts` entry mentioning the skill (existing reply schema field).
-- `bump_patch` — on `skill_learning_finish` with `status = "updated"`.
+- `bump_use` — worker on receipt parsing in `crates/bot/src/cc/worker_reply.rs` (see §5a). Increments `use_count`, sets `last_used_at = now`.
+- `bump_patch` — on `skill_learning_finish` with `status = "updated"`. Increments `patch_count`, sets `last_patched_at = now`.
 - `mark_created` — on `skill_learning_finish` with `status = "created"`. Records `created_by` from the active provenance source.
-- `mark_archived` — on curator archive action.
+- `mark_archived` — on curator archive action. Sets `state = "archived"`, `archived_at = now`, optionally `absorbed_into = "<umbrella>"`.
+
+Staleness criterion (used by curator's `apply_automatic_transitions`):
+
+```
+latest_activity_at = max(last_used_at, last_patched_at)
+stale     = (now - latest_activity_at) > stale_after_days   (default 30)
+archived  = (now - latest_activity_at) > archive_after_days (default 90)
+```
+
+`absorbed_into = null` for normal skills; set to the absorbing umbrella's name on archive-via-consolidation (see §4.1).
 
 Records for newly discovered skills (not yet in `.usage.json`) are created lazily on first read. Default `created_by = "foreground"` (conservative — keeps existing pre-migration skills curator-immune).
+
+`pinned` is set via operator CLI (`right agent skill pin <name>`), not user-facing. Bypasses archive transition; patch still allowed.
 
 ## Data model changes
 
@@ -337,11 +430,11 @@ Final: `cargo test --workspace` before merge.
 
 ## Open questions (deferred to plan)
 
-1. **`bump_view` hook point.** When does CC "load" a skill description into context? Best guess: at session start when CC scans `.claude/skills/`. Plumbing: hook into `bot::cc::prompt` system-prompt assembly to enumerate skills present in the assembled context, bump-view each. Verify via CC source.
-2. **Half-written skill recovery.** A probe-writer killed between `skill_learning_start` and writing SKILL.md leaves a dir without SKILL.md. `skill_learning_finish` validation catches and rejects. Curator's first pass identifies and archives such orphans. Implementation detail in plan.
-3. **Curator dry-run mode.** `learning.curator_dry_run: bool` flag (default false). When true, curator runs the LLM pass but blocks all `skill_manage` write actions, only logs decisions. Useful for operator validation. Decide if v1 ships with this or defers.
-4. **`.usage.json` for bundled skills.** Bundled (codegen-installed) skills get records too, but with `created_by = "bundled"`. Curator excludes. Decide whether to omit them from `.usage.json` entirely or include for `bump_use` stats.
-5. **Anchor escape vs main session bloat.** If a chat fires many learnable turns rapidly, probe-writers queue under the mutex. Each fork inherits a growing main session transcript. Cache hit rates degrade as the main session JSONL grows. Likely acceptable for v1; revisit if observed in production.
+1. **Half-written skill recovery.** A probe-writer killed between `skill_learning_start` and writing SKILL.md leaves a dir without SKILL.md. `skill_learning_finish` validation catches and rejects. Curator's first pass identifies and archives such orphans. Implementation detail in plan.
+2. **Curator dry-run mode.** `learning.curator_dry_run: bool` flag (default false). When true, curator runs the LLM pass but blocks all `skill_manage` write actions, only logs decisions. Useful for operator validation. Decide if v1 ships with this or defers.
+3. **`.usage.json` for bundled skills.** Bundled (codegen-installed) skills get records too with `created_by = "bundled"` so `bump_use` stats are visible in the dashboard. Curator's permission rule excludes `created_by = "bundled"` from any write action. Plan needs to wire this on bundle install/upgrade.
+4. **Main session bloat.** If a chat fires many learnable turns rapidly, probe-writers queue under the mutex. Each fork inherits a growing main session transcript. Cache hit rates degrade as the main session JSONL grows. Likely acceptable for v1; revisit if observed in production.
+5. **Schema migration window for `used_skill_receipts` required.** When agents restart on the new codegen, they immediately get the strict schema. Replies emitted during the restart-and-roll-out interval may fail validation. Worker tolerates absence/null transitively (degrades to empty array). Question: how long do we keep that tolerance? Suggest one release cycle, then remove.
 
 ## Implementation handoff
 
@@ -351,9 +444,12 @@ The plan must:
 - New codegen constants: `PROBE_WRITER_INSTRUCTIONS`, `CURATOR_SYSTEM_PROMPT`, `PROBE_WRITER_ANCHOR_TEMPLATE`.
 - `LearningConfig` field additions + deprecation warnings on removed fields.
 - Wizard prompts updates.
-- `/right-learn-skill` SKILL.md rewrite.
-- Operating instructions rewrite.
-- Reply schema cleanup (remove signal fields).
-- Per-agent mutex in worker context.
-- Dashboard updates: drop `signals_by_source_24h`, add `skill_lifecycle_overview` reading `.usage.json`.
+- `/right-learn-skill` SKILL.md rewrite (explicit-intent only, no deferred-signal section).
+- Operating instructions rewrite (auto-learning by platform; explicit `/right-learn-skill` only on user ask; **MUST** emit `used_skill_receipts`).
+- `REPLY_SCHEMA_JSON` cleanup: remove `learning_signal`/`skill_issue_signal`, make `used_skill_receipts` required-not-nullable with `^rightx-` pattern on `package_name`.
+- `append_used_skill_receipts` rewrite: render `💡 <message> (<code>rightx-foo</code>)` per receipt.
+- `bump_use` hook in `worker_reply` receipt-parsing path.
+- Probe-writer + curator integrate with existing per-session mutex and existing `system/init` handshake from `bot::background`. No new mutex primitive; reuse.
+- Operator CLI: `right agent skill pin <name>` / `unpin` / `list-pins` subcommand wiring into `.usage.json::pinned`.
+- Dashboard updates: drop `signals_by_source_24h`, add `skill_lifecycle_overview` reading `.usage.json` (active/stale/archived counts, recently-used top-N).
 - TDD per `AGENTS.rust.md` cadence; final `cargo test --workspace`.
