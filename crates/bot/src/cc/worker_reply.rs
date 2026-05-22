@@ -99,6 +99,16 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
     Ok((output, session_id))
 }
 
+/// Returns `true` when `name` is a `rightx-` skill package name (prefix "rightx-").
+///
+/// Used to filter skill receipts for probe-anchor collection and lifecycle
+/// bump-use; the "rightx-" prefix is the convention for user-local skills
+/// created or patched by the skill-learning pipeline.
+pub(crate) const fn is_rightx_skill(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    matches!(bytes, [b'r', b'i', b'g', b'h', b't', b'x', b'-', ..])
+}
+
 pub(crate) fn append_used_skill_receipts(
     content: Option<String>,
     receipts: Option<&[UsedSkillReceipt]>,
@@ -112,7 +122,7 @@ pub(crate) fn append_used_skill_receipts(
 
     let lines: Vec<String> = receipts
         .iter()
-        .filter(|r| r.package_name.starts_with("rightx-"))
+        .filter(|r| is_rightx_skill(&r.package_name))
         .filter(|r| !r.message.trim().is_empty())
         .map(|r| {
             format!(
@@ -425,5 +435,16 @@ mod tests {
         // Only IDENTITY.md exists
         std::fs::write(dir.path().join("IDENTITY.md"), "# test").unwrap();
         assert!(!should_accept_bootstrap(dir.path()));
+    }
+
+    #[test]
+    fn used_skill_receipts_filter_only_rightx_names() {
+        assert!(is_rightx_skill("rightx-foo"));
+        assert!(is_rightx_skill("rightx-x"));
+        assert!(is_rightx_skill("rightx-some-skill-name"));
+        assert!(!is_rightx_skill("foo"));
+        assert!(!is_rightx_skill("rightx")); // no dash → not a rightx skill
+        assert!(!is_rightx_skill(""));
+        assert!(!is_rightx_skill("mcp__right__use_skill"));
     }
 }
