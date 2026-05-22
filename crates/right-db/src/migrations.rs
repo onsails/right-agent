@@ -32,8 +32,10 @@ const V25_SCHEMA: &str = include_str!("sql/v25_async_runs_delivery_decision.sql"
 const V26_SCHEMA: &str = include_str!("sql/v26_skill_nudge_circuit_breaker.sql");
 #[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
 const V27_SCHEMA: &str = include_str!("sql/v27_skill_nudge_signals_source.sql");
+#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
+const V28_SCHEMA: &str = include_str!("sql/v28_usage_wall_elapsed.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 27;
+pub const LATEST_SCHEMA_VERSION: u32 = 28;
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -441,6 +443,22 @@ fn v27_skill_nudge_signals_source(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
+/// v28: Add nullable `wall_elapsed_ms` column to `usage_events`.
+///
+/// Idempotent — checks pragma_table_info before ALTER. Foreground worker
+/// turns populate this; non-foreground sources leave NULL.
+fn v28_usage_wall_elapsed_ms(tx: &Transaction) -> Result<(), HookError> {
+    let count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('usage_events') WHERE name = ?1",
+        ["wall_elapsed_ms"],
+        |r| r.get(0),
+    )?;
+    if count == 0 {
+        tx.execute_batch("ALTER TABLE usage_events ADD COLUMN wall_elapsed_ms INTEGER")?;
+    }
+    Ok(())
+}
+
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::LazyLock::new(|| {
     Migrations::new(vec![
         M::up(V1_SCHEMA),
@@ -470,6 +488,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up(V25_SCHEMA),
         M::up_with_hook("", v26_skill_nudge_circuit_breaker),
         M::up_with_hook("", v27_skill_nudge_signals_source),
+        M::up_with_hook("", v28_usage_wall_elapsed_ms),
     ])
 });
 
@@ -2136,5 +2155,41 @@ continue background work',
             )
             .unwrap();
         assert_eq!(exists, 1, "idx_skill_nudge_signals_source must exist");
+    }
+
+    #[test]
+    fn v28_adds_wall_elapsed_ms_column_idempotently() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 27).unwrap();
+        let pre: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('usage_events') WHERE name = ?1",
+                ["wall_elapsed_ms"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pre, 0, "wall_elapsed_ms must not exist at v27");
+
+        MIGRATIONS.to_version(&mut conn, 28).unwrap();
+        let post: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('usage_events') WHERE name = ?1",
+                ["wall_elapsed_ms"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(post, 1, "wall_elapsed_ms must exist at v28");
+
+        let notnull: i64 = conn
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('usage_events') WHERE name = ?1",
+                ["wall_elapsed_ms"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(notnull, 0, "wall_elapsed_ms must be nullable");
+
+        // Re-run is no-op.
+        MIGRATIONS.to_version(&mut conn, 28).unwrap();
     }
 }
