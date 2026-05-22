@@ -146,6 +146,7 @@ mod tests {
                 r#"{{"{model}":{{"costUSD":{cost},"inputTokens":10,"outputTokens":20,"cacheCreationInputTokens":30,"cacheReadInputTokens":40}}}}"#
             ),
             api_key_source: "none".into(),
+            wall_elapsed_ms: None,
         }
     }
 

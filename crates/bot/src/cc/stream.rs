@@ -295,6 +295,7 @@ pub(crate) fn parse_usage_full(result_json: &str) -> Option<UsageBreakdown> {
         web_fetch_requests: get_u64("/usage/server_tool_use/web_fetch_requests"),
         model_usage_json,
         api_key_source: "none".into(),
+        wall_elapsed_ms: None,
     })
 }
 

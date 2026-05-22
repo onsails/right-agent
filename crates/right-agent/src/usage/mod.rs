@@ -47,6 +47,10 @@ pub struct UsageBreakdown {
     /// `apiKeySource` captured from the CC `system/init` event.
     /// 'none' = OAuth/setup-token (subscription). Other values = API key mode.
     pub api_key_source: String,
+    /// Wall-clock latency from CC spawn to result event. Populated only for
+    /// foreground worker turns; other sources leave it `None` and the column
+    /// remains NULL.
+    pub wall_elapsed_ms: Option<u64>,
 }
 
 /// Per-model totals, aggregated across rows in a window.
@@ -110,6 +114,7 @@ mod tests {
             web_fetch_requests: 0,
             model_usage_json: "{}".into(),
             api_key_source: "none".into(),
+            wall_elapsed_ms: None,
         };
         assert_eq!(b.api_key_source, "none");
     }
