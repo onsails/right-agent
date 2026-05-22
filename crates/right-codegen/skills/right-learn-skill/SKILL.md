@@ -1,26 +1,26 @@
 ---
 name: right-learn-skill
 description: >-
-  Use when real work reveals a reusable workflow, recovered tool/API surprise,
-  durable user correction, or problem with a rightx-* learned skill that should
-  be captured for future sessions.
-version: 0.1.0
+  Use ONLY when the user explicitly asks you to save / remember / fix a
+  reusable workflow. Routine learning is handled automatically by the
+  platform's probe-writer; do not invoke this skill based on your own
+  judgment that a workflow might be reusable.
+version: 0.2.0
 compatibility: Uses standard Claude Code Agent Skills in .claude/skills.
 ---
 
-# /right-learn-skill -- Learn Or Update Skills
+# /right-learn-skill — Explicit User-Intent Skill Writes
 
-Use this skill only when the lesson is reusable across future sessions.
+Use this skill ONLY when the user explicitly says something like "save this as
+a skill", "remember how to do X", "this skill is broken, fix it", or otherwise
+directs you to create or modify a `rightx-*` skill. Routine learning happens
+automatically — you do NOT need this skill for every reusable workflow you
+encounter.
 
 ## Create A New Skill
 
-Create a new skill when at least one trigger is true:
-
-- The user explicitly asked you to learn, save, or remember the workflow.
-- The task required several non-obvious repeated steps.
-- A command, tool, API, or MCP call failed or returned an unexpected shape, and you found a verified reusable path.
-- The user corrected your approach and the correction is a durable gotcha.
-- You discovered a repeated tool/API usage pattern likely to recur.
+Create a new skill when the user explicitly asked you to learn, save, or
+remember the workflow.
 
 New skills created by Right learning must use a `rightx-` package name:
 
@@ -111,11 +111,3 @@ In `SKILL.md`, include:
 
 Do not store secrets. Do not copy large transcripts. Keep references focused.
 
-## Deferred Signal
-
-If the conversation is still evolving or a full-context review is safer, do not write a half-baked skill. Instead, leave at most one hidden structured output signal:
-
-- `learning_signal` for a new `rightx-*` skill candidate
-- `skill_issue_signal` for an existing `rightx-*` learned skill problem
-
-Emit no signal after a successful `mcp__right__skill_learning_finish`. Emit at most one signal, never both. Use 1 non-empty event ref for an explicit user request and 2+ non-empty event refs for every other trigger. Do not emit a signal for weak hunches, one-off facts, or unverified failures.
