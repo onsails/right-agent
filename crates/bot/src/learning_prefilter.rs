@@ -2,6 +2,7 @@
 //!
 //! Spec: docs/superpowers/specs/2026-05-22-skill-learning-writer-curator-design.md
 
+use crate::cc::worker_reply::is_rightx_skill;
 use crate::telegram::worker::ProbeAnchor;
 
 /// Decision returned by the prefilter.
@@ -200,7 +201,7 @@ pub(crate) fn parse_output(stdout: &str) -> PrefilterDecision {
                 .get("target_skill")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            if target.is_empty() || !target.starts_with("rightx-") {
+            if !is_rightx_skill(target) {
                 tracing::warn!(
                     target = %target,
                     "prefilter patch_existing missing/invalid target_skill"
@@ -404,6 +405,7 @@ mod tests {
         use right_agent::usage::turn_baseline::{BaselineMetric, TurnBaselines};
         TurnBaselines {
             sample_size: n,
+            elapsed_sample_size: n,
             window_days: 14,
             cost_usd: BaselineMetric::Insufficient { sample_size: n },
             num_turns: BaselineMetric::Insufficient { sample_size: n },
@@ -415,6 +417,7 @@ mod tests {
         use right_agent::usage::turn_baseline::{BaselineMetric, TurnBaselines};
         TurnBaselines {
             sample_size: 50,
+            elapsed_sample_size: 50,
             window_days: 14,
             cost_usd: BaselineMetric::Available {
                 p50: 0.03,

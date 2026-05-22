@@ -1848,10 +1848,22 @@ pub fn spawn_worker(
 
                 tokio::spawn(async move {
                     let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-                    let today_spend = right_db::open_connection(&agent_db_dir, false)
-                        .ok()
-                        .and_then(|c| crate::learning_prefilter::today_spend_usd(&c, &now_utc).ok())
-                        .unwrap_or(0.0);
+                    let conn = match right_db::open_connection(&agent_db_dir, false) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!(agent = %agent_name, "prefilter budget gate: open_connection failed: {e:#}");
+                            return;
+                        }
+                    };
+                    let today_spend = match crate::learning_prefilter::today_spend_usd(
+                        &conn, &now_utc,
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(agent = %agent_name, "prefilter budget gate: today_spend query failed: {e:#}");
+                            return;
+                        }
+                    };
                     if today_spend >= daily_budget {
                         tracing::debug!(
                             agent = %agent_name,

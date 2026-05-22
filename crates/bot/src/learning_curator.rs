@@ -46,6 +46,44 @@ pub(crate) enum CuratorTrigger {
     TimeFallback { interval_hours: u32 },
 }
 
+/// Trigger-independent skip conditions: enabled, paused, circuit open, chat
+/// idle, cooldown. Returns `Some(skip)` if one fires, `None` if all pass.
+/// Extracted so `run_if_due` can short-circuit BEFORE computing expensive
+/// trigger signals (cost-spike SQL, skills index file read).
+fn cheap_skip(
+    config: CuratorConfig,
+    state: &CuratorState,
+    now: DateTime<Utc>,
+    latest_user_activity_at: Option<DateTime<Utc>>,
+) -> Option<CuratorGateDecision> {
+    if !config.enabled {
+        return Some(CuratorGateDecision::SkipDisabled);
+    }
+    if config.paused {
+        return Some(CuratorGateDecision::SkipPaused);
+    }
+    if let Some(open_until) = state.circuit_open_until.as_deref()
+        && let Ok(dt) = DateTime::parse_from_rfc3339(open_until)
+        && dt.with_timezone(&Utc) > now
+    {
+        return Some(CuratorGateDecision::SkipCircuitOpen);
+    }
+    if let Some(latest) = latest_user_activity_at
+        && now - latest < Duration::hours(config.min_idle_hours as i64)
+    {
+        return Some(CuratorGateDecision::SkipChatNotIdle);
+    }
+    if let Some(last_dt) = state.last_run_at.as_deref().and_then(|s| {
+        DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| d.with_timezone(&Utc))
+    }) && now - last_dt < Duration::hours(config.min_cooldown_hours as i64)
+    {
+        return Some(CuratorGateDecision::SkipCooldown);
+    }
+    None
+}
+
 /// Pure gate decision. No I/O.
 pub(crate) fn should_run_now(
     config: CuratorConfig,
@@ -55,35 +93,8 @@ pub(crate) fn should_run_now(
     cost_spike_evidence: Option<right_agent::usage::turn_baseline::CostSpikeEvidence>,
     skill_change_count: u32,
 ) -> CuratorGateDecision {
-    if !config.enabled {
-        return CuratorGateDecision::SkipDisabled;
-    }
-    if config.paused {
-        return CuratorGateDecision::SkipPaused;
-    }
-    if let Some(open_until) = state.circuit_open_until.as_deref()
-        && let Ok(dt) = DateTime::parse_from_rfc3339(open_until)
-        && dt.with_timezone(&Utc) > now
-    {
-        return CuratorGateDecision::SkipCircuitOpen;
-    }
-    if let Some(latest) = latest_user_activity_at
-        && now - latest < Duration::hours(config.min_idle_hours as i64)
-    {
-        return CuratorGateDecision::SkipChatNotIdle;
-    }
-
-    let last = state.last_run_at.as_deref().and_then(|s| {
-        DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|d| d.with_timezone(&Utc))
-    });
-
-    // Cooldown gate — applies to ALL triggers including time fallback.
-    if let Some(last_dt) = last
-        && now - last_dt < Duration::hours(config.min_cooldown_hours as i64)
-    {
-        return CuratorGateDecision::SkipCooldown;
+    if let Some(skip) = cheap_skip(config, state, now, latest_user_activity_at) {
+        return skip;
     }
 
     // Trigger priority: cost spike > skill change count > time fallback.
@@ -100,6 +111,11 @@ pub(crate) fn should_run_now(
             },
         };
     }
+    let last = state.last_run_at.as_deref().and_then(|s| {
+        DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| d.with_timezone(&Utc))
+    });
     if let Some(last_dt) = last
         && now - last_dt >= Duration::hours(config.interval_hours as i64)
     {
@@ -109,10 +125,8 @@ pub(crate) fn should_run_now(
             },
         };
     }
-    if last.is_none() {
-        // First-ever run with no triggers — keep Hermes defer pattern.
-        return CuratorGateDecision::SkipNoTrigger;
-    }
+    // No trigger fired — covers both the first-ever-run case (Hermes defer)
+    // and the post-cooldown idle case.
     CuratorGateDecision::SkipNoTrigger
 }
 
@@ -204,16 +218,24 @@ pub(crate) async fn run_if_due(
         }
     };
 
+    let now = Utc::now();
+
     // Seed first-run timestamp (Hermes defer).
     if state.last_run_at.is_none() {
-        state.last_run_at = Some(Utc::now().to_rfc3339());
+        state.last_run_at = Some(now.to_rfc3339());
         if let Err(e) = save_state_db(&conn, &state) {
             tracing::warn!(agent = %ctx.agent_name, "curator seed state failed: {e:#}");
         }
         return;
     }
 
-    let now = Utc::now();
+    // Cheap pre-gate: short-circuit before computing cost-spike SQL or
+    // reading the usage index file. On a busy ticker (60s per agent), these
+    // are wasted I/O when the chat is active or we're inside cooldown.
+    if let Some(skip) = cheap_skip(ctx.config, &state, now, latest_user_activity_at) {
+        tracing::debug!(agent = %ctx.agent_name, "curator gate: {:?}", skip);
+        return;
+    }
 
     // Compute trigger signals.
     let cost_spike_evidence = match right_agent::usage::turn_baseline::check_probe_writer_cost_spike(

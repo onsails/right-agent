@@ -178,12 +178,60 @@ pub(crate) fn set_pinned(path: &Path, skill_name: &str, pinned: bool) -> Result<
 
 /// Count skills whose `created_at` OR `last_patched_at` is strictly after
 /// `since`. Used by the curator's skill-change-count trigger.
+///
+/// Both `since` and the index timestamps may use different RFC 3339 formats
+/// (e.g. `"2026-05-22T13:45:30.123456789+00:00"` vs `"2026-05-22T13:45:30Z"`).
+/// We parse every timestamp as `DateTime<Utc>` to avoid lexicographic
+/// mis-ordering at the fractional-seconds / `Z` boundary.
+///
+/// `since` empty or unparseable → treated as the Unix epoch (every row counts).
+/// An index timestamp that fails to parse → treated as "before since" (not counted).
 pub(crate) fn count_changes_since(index: &Index, since: &str) -> u32 {
+    use chrono::{DateTime, Utc};
+
+    let since_dt: DateTime<Utc> = if since.is_empty() {
+        DateTime::UNIX_EPOCH
+    } else {
+        match DateTime::parse_from_rfc3339(since) {
+            Ok(dt) => dt.to_utc(),
+            Err(e) => {
+                tracing::warn!(
+                    "count_changes_since: unparseable `since` {:?}: {e:#}",
+                    since
+                );
+                DateTime::UNIX_EPOCH
+            }
+        }
+    };
+
+    let parse_ts = |s: &str| -> Option<DateTime<Utc>> {
+        match DateTime::parse_from_rfc3339(s) {
+            Ok(dt) => Some(dt.to_utc()),
+            Err(e) => {
+                tracing::warn!(
+                    "count_changes_since: unparseable index timestamp {:?}: {e:#}",
+                    s
+                );
+                None
+            }
+        }
+    };
+
     let mut n = 0u32;
     for r in index.skills.values() {
-        let created = r.created_at.as_deref().unwrap_or("");
-        let patched = r.last_patched_at.as_deref().unwrap_or("");
-        if created.as_bytes() > since.as_bytes() || patched.as_bytes() > since.as_bytes() {
+        let created_after = r
+            .created_at
+            .as_deref()
+            .and_then(parse_ts)
+            .map(|dt| dt > since_dt)
+            .unwrap_or(false);
+        let patched_after = r
+            .last_patched_at
+            .as_deref()
+            .and_then(parse_ts)
+            .map(|dt| dt > since_dt)
+            .unwrap_or(false);
+        if created_after || patched_after {
             n += 1;
         }
     }
@@ -391,5 +439,41 @@ mod count_tests {
         r.last_patched_at = Some("2026-05-22T12:00:00Z".into());
         idx.skills.insert("rightx-patched".into(), r);
         assert_eq!(count_changes_since(&idx, "2026-05-21T00:00:00Z"), 1);
+    }
+
+    /// Regression: `since` is in RFC 3339 format with a fractional-seconds
+    /// `+00:00` suffix (as written by `Utc::now().to_rfc3339()`), while index
+    /// timestamps use the `"%Y-%m-%dT%H:%M:%SZ"` format.  At byte position 19
+    /// `Z` (0x5A) sorts higher than `.` (0x2E) and `+` (0x2B), so a naïve
+    /// lexicographic comparison incorrectly treats a skill timestamped BEFORE
+    /// `since` as coming after it.
+    #[test]
+    fn count_changes_since_mixed_rfc3339_formats_no_false_positive() {
+        // `since` uses the rfc3339() format with nanoseconds + offset.
+        let since = "2026-05-22T13:45:30.123456789+00:00";
+
+        let mut idx = Index::default();
+
+        // Skill created 1 second BEFORE `since` — must NOT be counted.
+        let mut before = UsageRecord::default();
+        before.created_at = Some("2026-05-22T13:45:29Z".into()); // Z format, 1s earlier
+        idx.skills.insert("rightx-before".into(), before);
+
+        assert_eq!(
+            count_changes_since(&idx, since),
+            0,
+            "skill created before `since` must not be counted (was producing 1 with byte-cmp)"
+        );
+
+        // Skill created 1 second AFTER `since` — must be counted.
+        let mut after = UsageRecord::default();
+        after.created_at = Some("2026-05-22T13:45:31Z".into()); // Z format, 1s later
+        idx.skills.insert("rightx-after".into(), after);
+
+        assert_eq!(
+            count_changes_since(&idx, since),
+            1,
+            "only the skill created after `since` should be counted"
+        );
     }
 }
