@@ -85,7 +85,14 @@ does not expose a reusable procedure), exit silently.",
     };
 
     format!(
-        "{hint_block}\n\nEXISTING SKILLS:\n{index}\n\nTURN:\nUSER: {user}\nASSISTANT: {assistant}\n"
+        "{hint_block}\n\n\
+When you call mcp__right__skill_learning_finish, ALWAYS include the field\n\
+\"hint_outcome\" with one of:\n\
+  - \"applied_as_hinted\" — you patched/created exactly as the hint suggested.\n\
+  - \"applied_differently\" — you took action but not as hinted (e.g. patched a\n\
+    different skill, created instead of patched).\n\
+  - \"refused\" — you exited without writing because the hint was unjustified.\n\n\
+EXISTING SKILLS:\n{index}\n\nTURN:\nUSER: {user}\nASSISTANT: {assistant}\n"
     )
 }
 
@@ -274,6 +281,7 @@ mod tests {
         assert!(p.contains("hi"));
         assert!(p.contains("bye"));
         assert!(p.contains("rightx-foo: bar"));
+        assert!(p.contains("hint_outcome"));
     }
 
     #[test]
@@ -300,6 +308,7 @@ mod tests {
         assert!(p.contains("PREFILTER HINT: patch_existing"));
         assert!(p.contains("TARGET SKILL: rightx-foo"));
         assert!(p.contains("missed step"));
+        assert!(p.contains("hint_outcome"));
     }
 
     #[test]
@@ -315,5 +324,6 @@ mod tests {
         assert!(p.contains("PREFILTER HINT: create_new"));
         assert!(p.contains("TOPIC HINT: git rebase recovery"));
         assert!(p.contains("new procedure"));
+        assert!(p.contains("hint_outcome"));
     }
 }
