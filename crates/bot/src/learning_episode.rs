@@ -248,7 +248,8 @@ impl LearningEpisodeRuntime {
             seed_ref,
             target_chat_id,
             target_thread_id,
-            settle_seconds: self.learning.episode_settle_seconds,
+            // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+            settle_seconds: self.learning.episode_settle_seconds.unwrap_or(90),
             now: &now,
         };
         let episode_id = capture_episode_seed(conn, input)?;
@@ -646,12 +647,13 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
             | ReviewSkipReason::DailyBudget
             | ReviewSkipReason::CircuitOpen,
         ) => {
+            // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
             requeue_episode_or_fail(
                 &conn,
                 &runtime,
                 episode.id,
                 now,
-                runtime.learning.episode_settle_seconds,
+                runtime.learning.episode_settle_seconds.unwrap_or(90),
                 &now_str,
             )?;
             runtime.schedule_drain();
@@ -750,12 +752,13 @@ fn mark_claimed_episode_failed(
         return Ok(None);
     }
     // Second write: drive the circuit-breaker gate (its own transaction).
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     let (count, opened) = record_review_failure(
         conn,
         &runtime.agent_name,
         now_utc,
-        runtime.learning.circuit_failure_threshold,
-        runtime.learning.circuit_cooldown_minutes,
+        runtime.learning.circuit_failure_threshold.unwrap_or(5),
+        runtime.learning.circuit_cooldown_minutes.unwrap_or(60),
     )
     .with_context(|| format!("record review failure for {}", runtime.agent_name))?;
     Ok(Some((count, opened)))
@@ -767,14 +770,15 @@ fn spawn_circuit_open_alert(runtime: &LearningEpisodeRuntime, reason: &str) {
     let Some(bot) = runtime.bot.as_ref().map(Arc::clone) else {
         return;
     };
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     crate::telegram::learning_alerts::spawn_circuit_open_alert(
         bot,
         runtime.agent_db_dir.clone(),
         runtime.agent_name.clone(),
         runtime.agent_dir.clone(),
         reason.to_owned(),
-        runtime.learning.circuit_failure_threshold,
-        runtime.learning.circuit_cooldown_minutes,
+        runtime.learning.circuit_failure_threshold.unwrap_or(5),
+        runtime.learning.circuit_cooldown_minutes.unwrap_or(60),
     );
 }
 
@@ -1025,12 +1029,13 @@ async fn run_episode_reviewer_inner(
             tx.commit()?;
         }
         let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
         let (_, opened) = record_review_failure(
             &conn,
             &episode.agent_name,
             &now_utc,
-            runtime.learning.circuit_failure_threshold,
-            runtime.learning.circuit_cooldown_minutes,
+            runtime.learning.circuit_failure_threshold.unwrap_or(5),
+            runtime.learning.circuit_cooldown_minutes.unwrap_or(60),
         )
         .with_context(|| {
             format!(
@@ -1466,12 +1471,13 @@ fn mark_episode_review_failed_and_finish(
     // Second write: drive the circuit-breaker gate (its own transaction).
     // Atomicity loss between the two writes is acceptable — they touch
     // independent tables and the circuit self-heals on the next failure.
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     let (count, opened) = record_review_failure(
         &conn,
         &runtime.agent_name,
         &now_utc,
-        runtime.learning.circuit_failure_threshold,
-        runtime.learning.circuit_cooldown_minutes,
+        runtime.learning.circuit_failure_threshold.unwrap_or(5),
+        runtime.learning.circuit_cooldown_minutes.unwrap_or(60),
     )
     .with_context(|| {
         format!(

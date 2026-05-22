@@ -933,9 +933,11 @@ fn format_learning_display(learning: &right_agent::agent::types::LearningConfig)
         .episode_selector_model
         .as_deref()
         .unwrap_or("agent model");
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     format!(
         "{model}, daily ${}, {}s",
-        learning.max_daily_budget_usd, learning.episode_settle_seconds
+        learning.max_daily_budget_usd,
+        learning.episode_settle_seconds.unwrap_or(90)
     )
 }
 
@@ -968,8 +970,11 @@ fn learning_setup(
     else {
         return Ok(None);
     };
-    let settle_seconds =
-        parse_learning_settle_seconds(settle_input.trim(), existing.episode_settle_seconds)?;
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+    let settle_seconds = parse_learning_settle_seconds(
+        settle_input.trim(),
+        existing.episode_settle_seconds.unwrap_or(90),
+    )?;
 
     let Some(threshold_input) = right_agent::init::inquire_back(|| {
         inquire::Text::new(
@@ -980,9 +985,10 @@ fn learning_setup(
     else {
         return Ok(None);
     };
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     let circuit_failure_threshold = parse_learning_circuit_failure_threshold(
         threshold_input.trim(),
-        existing.circuit_failure_threshold,
+        existing.circuit_failure_threshold.unwrap_or(5),
     )?;
 
     let Some(cooldown_input) = right_agent::init::inquire_back(|| {
@@ -992,9 +998,10 @@ fn learning_setup(
     else {
         return Ok(None);
     };
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     let circuit_cooldown_minutes = parse_learning_circuit_cooldown_minutes(
         cooldown_input.trim(),
-        existing.circuit_cooldown_minutes,
+        existing.circuit_cooldown_minutes.unwrap_or(60),
     )?;
 
     let Some(probe_model_input) = right_agent::init::inquire_back(|| {
@@ -1005,7 +1012,8 @@ fn learning_setup(
     };
     let probe_model = parse_probe_model(&probe_model_input).map_err(|e| miette::miette!(e))?;
 
-    let fork_probe_default = if existing.fork_probe_enabled {
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+    let fork_probe_default = if existing.fork_probe_enabled.unwrap_or(true) {
         "yes"
     } else {
         "no"
@@ -1021,7 +1029,8 @@ fn learning_setup(
     let fork_probe_enabled =
         parse_fork_probe_enabled(&fork_probe_input).map_err(|e| miette::miette!(e))?;
 
-    let background_review_default = if existing.background_review_enabled {
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+    let background_review_default = if existing.background_review_enabled.unwrap_or(false) {
         "yes"
     } else {
         "no"
@@ -1037,16 +1046,18 @@ fn learning_setup(
     let background_review_enabled = parse_background_review_enabled(&background_review_input)
         .map_err(|e| miette::miette!(e))?;
 
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     Ok(Some(right_agent::agent::types::LearningConfig {
         episode_selector_model: model,
         episode_selector_max_budget_usd: existing.episode_selector_max_budget_usd,
-        episode_settle_seconds: settle_seconds,
+        episode_settle_seconds: Some(settle_seconds),
         max_daily_budget_usd,
-        circuit_failure_threshold,
-        circuit_cooldown_minutes,
-        probe_model,
-        fork_probe_enabled,
-        background_review_enabled,
+        circuit_failure_threshold: Some(circuit_failure_threshold),
+        circuit_cooldown_minutes: Some(circuit_cooldown_minutes),
+        legacy_probe_model: probe_model,
+        fork_probe_enabled: Some(fork_probe_enabled),
+        background_review_enabled: Some(background_review_enabled),
+        ..right_agent::agent::types::LearningConfig::default()
     }))
 }
 
@@ -1730,17 +1741,18 @@ fn update_agent_yaml_learning(
         "  max_daily_budget_usd: {}",
         learning.max_daily_budget_usd
     ));
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     lines.push(format!(
         "  episode_settle_seconds: {}",
-        learning.episode_settle_seconds
+        learning.episode_settle_seconds.unwrap_or(90)
     ));
     lines.push(format!(
         "  circuit_failure_threshold: {}",
-        learning.circuit_failure_threshold
+        learning.circuit_failure_threshold.unwrap_or(5)
     ));
     lines.push(format!(
         "  circuit_cooldown_minutes: {}",
-        learning.circuit_cooldown_minutes
+        learning.circuit_cooldown_minutes.unwrap_or(60)
     ));
 
     let mut output = lines.join("\n");

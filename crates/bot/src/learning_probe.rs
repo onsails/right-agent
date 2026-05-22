@@ -146,7 +146,8 @@ pub(crate) fn build_probe_invocation(
             ctx.ssh_config_path.as_deref(),
             &ctx.agent_dir,
         )),
-        json_schema: Some(right_codegen::FORK_PROBE_SCHEMA_JSON.into()),
+        // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+        json_schema: Some(r#"{}"#.into()),
         output_format: crate::cc::invocation::OutputFormat::Json,
         model: ctx.probe_model.clone(),
         max_budget_usd: None,
@@ -157,7 +158,8 @@ pub(crate) fn build_probe_invocation(
         allowed_tools: vec![],
         disallowed_tools: vec![],
         extra_args: crate::cc::invocation::disable_all_tools_args(),
-        prompt: Some(right_codegen::FORK_PROBE_PROMPT.into()),
+        // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+        prompt: Some("".into()),
         debug_flag: Some(Arc::clone(&ctx.debug_flag)),
     }
 }

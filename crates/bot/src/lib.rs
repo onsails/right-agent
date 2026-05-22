@@ -271,7 +271,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     config.learning.warn_on_deprecated(&args.agent);
 
-    if !config.learning.background_review_enabled {
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+    if !config.learning.background_review_enabled.unwrap_or(false) {
         match right_db::open_connection(&agent_dir, false) {
             Ok(conn) => match crate::learning_episode::has_recent_legacy_activity(&conn) {
                 Ok(true) => {
@@ -1000,7 +1001,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // this scheduler via `schedule_drain`; the noop variant swallows the
     // notifications cheaply.
     let (learning_drain_scheduler, learning_drain_handle) =
-        if config.learning.background_review_enabled {
+        // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+        if config.learning.background_review_enabled.unwrap_or(false) {
             let learning_bot = Arc::new(telegram::bot::build_bot(token.clone()));
             let bootstrap_runtime = crate::learning_episode::LearningEpisodeRuntime::new(
                 agent_dir.clone(),
@@ -1016,7 +1018,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             );
             let (scheduler, handle) = crate::learning_episode::DrainScheduler::spawn(
                 bootstrap_runtime,
-                std::time::Duration::from_secs(config.learning.episode_settle_seconds),
+                // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+                std::time::Duration::from_secs(config.learning.episode_settle_seconds.unwrap_or(90)),
                 shutdown.clone(),
             );
             (scheduler, Some(handle))
