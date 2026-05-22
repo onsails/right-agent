@@ -1872,7 +1872,10 @@ pub fn spawn_worker(
                     };
                     let decision =
                         crate::learning_prefilter::run(prefilter_ctx, anchor.clone()).await;
-                    if decision != crate::learning_prefilter::PrefilterDecision::Probe {
+                    if matches!(
+                        decision,
+                        crate::learning_prefilter::PrefilterDecision::Skip { .. }
+                    ) {
                         return;
                     }
                     if !probe_writer_enabled {
