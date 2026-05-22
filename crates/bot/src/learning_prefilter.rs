@@ -7,17 +7,40 @@ use crate::telegram::worker::ProbeAnchor;
 /// Decision returned by the prefilter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PrefilterDecision {
-    Probe,
-    Skip,
+    Skip {
+        reason: String,
+    },
+    PatchExisting {
+        target_skill: String,
+        reason: String,
+    },
+    CreateNew {
+        topic_hint: String,
+        reason: String,
+    },
 }
 
 pub(crate) const PREFILTER_SCHEMA_JSON: &str = r#"{
   "type": "object",
   "properties": {
-    "should_probe": { "type": "boolean" },
-    "reason": { "type": "string" }
+    "decision": {
+      "type": "string",
+      "enum": ["skip", "patch_existing", "create_new"]
+    },
+    "target_skill": {
+      "type": "string",
+      "pattern": "^rightx-[a-z0-9-]+$"
+    },
+    "topic_hint": {
+      "type": "string",
+      "maxLength": 120
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 400
+    }
   },
-  "required": ["should_probe", "reason"]
+  "required": ["decision", "reason"]
 }"#;
 
 /// Sum today's spend across learning sources from `usage_events`. Used by the
@@ -69,19 +92,64 @@ pub(crate) fn parse_output(stdout: &str) -> PrefilterDecision {
     let inner = match crate::learning_review::unwrap_structured_output_payload(stdout, "prefilter")
     {
         Ok(v) => v,
-        Err(_) => return PrefilterDecision::Skip,
+        Err(_) => {
+            return PrefilterDecision::Skip {
+                reason: "envelope parse failed".into(),
+            };
+        }
     };
-    inner
-        .get("should_probe")
-        .and_then(|v| v.as_bool())
-        .map(|b| {
-            if b {
-                PrefilterDecision::Probe
-            } else {
-                PrefilterDecision::Skip
+
+    let decision = inner.get("decision").and_then(|v| v.as_str());
+    let reason = inner
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+
+    match decision {
+        Some("skip") => PrefilterDecision::Skip { reason },
+        Some("patch_existing") => {
+            let target = inner
+                .get("target_skill")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if target.is_empty() || !target.starts_with("rightx-") {
+                tracing::warn!(
+                    target = %target,
+                    "prefilter patch_existing missing/invalid target_skill"
+                );
+                return PrefilterDecision::Skip {
+                    reason: "patch_existing without valid target_skill".into(),
+                };
             }
-        })
-        .unwrap_or(PrefilterDecision::Skip)
+            PrefilterDecision::PatchExisting {
+                target_skill: target.into(),
+                reason,
+            }
+        }
+        Some("create_new") => {
+            let hint = inner
+                .get("topic_hint")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if hint.is_empty() {
+                tracing::warn!("prefilter create_new missing topic_hint");
+                return PrefilterDecision::Skip {
+                    reason: "create_new without topic_hint".into(),
+                };
+            }
+            PrefilterDecision::CreateNew {
+                topic_hint: hint.into(),
+                reason,
+            }
+        }
+        other => {
+            tracing::warn!(decision = ?other, "prefilter unknown decision");
+            PrefilterDecision::Skip {
+                reason: "unknown decision".into(),
+            }
+        }
+    }
 }
 
 use std::path::PathBuf;
@@ -141,7 +209,9 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
                 agent = %ctx.agent_name,
                 "prefilter spawn failed: {e:#}"
             );
-            return PrefilterDecision::Skip;
+            return PrefilterDecision::Skip {
+                reason: "spawn failed".into(),
+            };
         }
         Err(_) => {
             tracing::warn!(
@@ -149,7 +219,9 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
                 "prefilter timed out after {}s",
                 PREFILTER_TIMEOUT.as_secs()
             );
-            return PrefilterDecision::Skip;
+            return PrefilterDecision::Skip {
+                reason: "timed out".into(),
+            };
         }
     };
 
@@ -160,7 +232,9 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
             stderr = %String::from_utf8_lossy(&output.stderr),
             "prefilter non-zero exit"
         );
-        return PrefilterDecision::Skip;
+        return PrefilterDecision::Skip {
+            reason: "non-zero exit".into(),
+        };
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -205,32 +279,86 @@ mod tests {
         let p = build_prompt(&anchor("hello world", "hi back"));
         assert!(p.contains("hello world"));
         assert!(p.contains("hi back"));
-        assert!(p.contains("should_probe"));
     }
 
     #[test]
-    fn parse_output_should_probe_true_returns_probe() {
-        let stdout =
-            r#"{"type":"result","structured_output":{"should_probe":true,"reason":"multi-step"}}"#;
-        assert_eq!(parse_output(stdout), PrefilterDecision::Probe);
+    fn parses_skip_decision() {
+        let stdout = wrap_cc_envelope(r#"{"decision":"skip","reason":"trivial echo"}"#);
+        let d = parse_output(&stdout);
+        assert!(matches!(d, PrefilterDecision::Skip { reason } if reason == "trivial echo"));
     }
 
     #[test]
-    fn parse_output_should_probe_false_returns_skip() {
-        let stdout =
-            r#"{"type":"result","structured_output":{"should_probe":false,"reason":"chat"}}"#;
-        assert_eq!(parse_output(stdout), PrefilterDecision::Skip);
+    fn parses_patch_existing_decision_with_target() {
+        let stdout = wrap_cc_envelope(
+            r#"{"decision":"patch_existing","target_skill":"rightx-foo","reason":"missed step"}"#,
+        );
+        let d = parse_output(&stdout);
+        match d {
+            PrefilterDecision::PatchExisting {
+                target_skill,
+                reason,
+            } => {
+                assert_eq!(target_skill, "rightx-foo");
+                assert_eq!(reason, "missed step");
+            }
+            _ => panic!("expected PatchExisting"),
+        }
     }
 
     #[test]
-    fn parse_output_invalid_json_returns_skip() {
-        assert_eq!(parse_output("not json"), PrefilterDecision::Skip);
+    fn parses_create_new_decision_with_topic_hint() {
+        let stdout = wrap_cc_envelope(
+            r#"{"decision":"create_new","topic_hint":"git rebase recovery","reason":"new procedure"}"#,
+        );
+        let d = parse_output(&stdout);
+        match d {
+            PrefilterDecision::CreateNew { topic_hint, reason } => {
+                assert_eq!(topic_hint, "git rebase recovery");
+                assert_eq!(reason, "new procedure");
+            }
+            _ => panic!("expected CreateNew"),
+        }
     }
 
     #[test]
-    fn parse_output_missing_field_returns_skip() {
-        let stdout = r#"{"type":"result","structured_output":{}}"#;
-        assert_eq!(parse_output(stdout), PrefilterDecision::Skip);
+    fn patch_without_target_returns_skip() {
+        let stdout = wrap_cc_envelope(r#"{"decision":"patch_existing","reason":"vague"}"#);
+        let d = parse_output(&stdout);
+        assert!(matches!(d, PrefilterDecision::Skip { .. }));
+    }
+
+    #[test]
+    fn create_without_topic_hint_returns_skip() {
+        let stdout = wrap_cc_envelope(r#"{"decision":"create_new","reason":"vague"}"#);
+        let d = parse_output(&stdout);
+        assert!(matches!(d, PrefilterDecision::Skip { .. }));
+    }
+
+    #[test]
+    fn target_skill_not_rightx_returns_skip() {
+        let stdout = wrap_cc_envelope(
+            r#"{"decision":"patch_existing","target_skill":"foo-bar","reason":"x"}"#,
+        );
+        let d = parse_output(&stdout);
+        assert!(matches!(d, PrefilterDecision::Skip { .. }));
+    }
+
+    #[test]
+    fn malformed_json_returns_skip() {
+        let d = parse_output("not json");
+        assert!(matches!(d, PrefilterDecision::Skip { .. }));
+    }
+
+    /// Wrap raw JSON in the CC `--output-format json` envelope the parser
+    /// expects (`result` field). Implementation borrows from
+    /// `learning_review::unwrap_structured_output_payload`.
+    fn wrap_cc_envelope(inner_json: &str) -> String {
+        serde_json::json!({
+            "type": "result",
+            "result": inner_json,
+        })
+        .to_string()
     }
 
     #[test]
