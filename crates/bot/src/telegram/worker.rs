@@ -1465,7 +1465,8 @@ pub fn spawn_worker(
                     // Fire-and-forget post-turn fork-probe. Must run after
                     // Telegram send so it never blocks user-visible latency.
                     // All failure paths log a warning and skip — best-effort.
-                    if ctx.learning.fork_probe_enabled
+                    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+                    if ctx.learning.fork_probe_enabled.unwrap_or(true)
                         && matches!(cc_prompt_mode, Some(crate::cc::prompt::PromptMode::Normal))
                         && !reply_has_accepted_signal
                     {
@@ -1491,7 +1492,8 @@ pub fn spawn_worker(
                         };
                         let decision = crate::learning_probe::should_run_probe(
                             crate::learning_probe::ProbeGateInput {
-                                fork_probe_enabled: ctx.learning.fork_probe_enabled,
+                                // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+                                fork_probe_enabled: ctx.learning.fork_probe_enabled.unwrap_or(true),
                                 is_foreground: true,
                                 reply_has_signal: reply_has_accepted_signal,
                                 today_spend_usd: today_spend,
@@ -1506,9 +1508,10 @@ pub fn spawn_worker(
                                 main_session_id: session_uuid.clone(),
                                 chat_id,
                                 thread_id: eff_thread_id,
+                                // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
                                 probe_model: ctx
                                     .learning
-                                    .probe_model
+                                    .legacy_probe_model
                                     .clone()
                                     .or_else(|| ctx.model.load().as_ref().clone()),
                                 ssh_config_path: ctx.ssh_config_path.clone(),
@@ -2501,8 +2504,9 @@ fn maybe_spawn_learned_skill_review(
     let source_invocation_id = source_invocation_id.to_owned();
     let root_session_id = root_session_id.to_owned();
     let tg_chat_id = teloxide::types::ChatId(chat_id);
-    let failure_threshold = ctx.learning.circuit_failure_threshold;
-    let cooldown_minutes = ctx.learning.circuit_cooldown_minutes;
+    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+    let failure_threshold = ctx.learning.circuit_failure_threshold.unwrap_or(5);
+    let cooldown_minutes = ctx.learning.circuit_cooldown_minutes.unwrap_or(60);
 
     std::mem::drop(tokio::spawn(async move {
         let review_future = run_background_learned_skill_review(
