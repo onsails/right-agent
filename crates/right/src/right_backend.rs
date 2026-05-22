@@ -736,6 +736,36 @@ impl RightBackend {
             return Ok(result);
         }
 
+        // Update host-side .usage.json for the skill lifecycle subsystem.
+        // Foreground writes via this tool (skill_learning_finish) are tagged
+        // `created_by="foreground"`. Probe-writer/curator writes go through
+        // the same tool but the invocation context is not yet wired to
+        // differentiate; v1 falls back to "foreground" for all skill_learning_*
+        // invocations (probe-writer/curator are background callers that will
+        // be distinguished in a follow-up via a new invocation-kind hint).
+        if params.status.is_success() {
+            let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            let usage_path = agent_dir.join(".claude/skills/.usage.json");
+            let outcome = match params.status.as_str() {
+                "created" => crate::skill_lifecycle::mark_created_foreground(
+                    &usage_path,
+                    &params.skill_name,
+                    &now_utc,
+                ),
+                "updated" => {
+                    crate::skill_lifecycle::bump_patch(&usage_path, &params.skill_name, &now_utc)
+                }
+                _ => Ok(()),
+            };
+            if let Err(e) = outcome {
+                tracing::warn!(
+                    agent = %agent_name,
+                    skill = %params.skill_name,
+                    "skill lifecycle usage write failed: {e:#}"
+                );
+            }
+        }
+
         Ok(CallToolResult::success(vec![Content::text(
             crate::learning::success_json(params.status.as_str(), &params.skill_name),
         )]))
