@@ -1488,67 +1488,8 @@ pub fn spawn_worker(
                         }
                     }
 
-                    // Fire-and-forget post-turn fork-probe. Must run after
-                    // Telegram send so it never blocks user-visible latency.
-                    // All failure paths log a warning and skip — best-effort.
-                    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
-                    if ctx.learning.fork_probe_enabled.unwrap_or(true)
-                        && matches!(cc_prompt_mode, Some(crate::cc::prompt::PromptMode::Normal))
-                        && !reply_has_accepted_signal
-                    {
-                        let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-                        let today_spend = match right_db::open_connection(&ctx.agent_db_dir, false)
-                        {
-                            Ok(conn) => {
-                                match crate::learning_probe::today_spend_usd(&conn, &now_utc) {
-                                    Ok(spend) => spend,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            ?key,
-                                            "fork-probe today_spend_usd failed: {e:#}"
-                                        );
-                                        0.0
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(?key, "fork-probe db open failed: {e:#}");
-                                0.0
-                            }
-                        };
-                        let decision = crate::learning_probe::should_run_probe(
-                            crate::learning_probe::ProbeGateInput {
-                                // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
-                                fork_probe_enabled: ctx.learning.fork_probe_enabled.unwrap_or(true),
-                                is_foreground: true,
-                                reply_has_signal: reply_has_accepted_signal,
-                                today_spend_usd: today_spend,
-                                daily_budget_usd: ctx.learning.max_daily_budget_usd,
-                            },
-                        );
-                        if matches!(decision, crate::learning_probe::ProbeDecision::Run) {
-                            let probe_ctx = crate::learning_probe::ProbeContext {
-                                agent_dir: ctx.agent_dir.clone(),
-                                agent_db_dir: ctx.agent_db_dir.clone(),
-                                agent_name: ctx.agent_name.clone(),
-                                main_session_id: session_uuid.clone(),
-                                chat_id,
-                                thread_id: eff_thread_id,
-                                // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
-                                probe_model: ctx
-                                    .learning
-                                    .legacy_probe_model
-                                    .clone()
-                                    .or_else(|| ctx.model.load().as_ref().clone()),
-                                ssh_config_path: ctx.ssh_config_path.clone(),
-                                resolved_sandbox: ctx.resolved_sandbox.clone(),
-                                debug_flag: Arc::clone(&ctx.debug),
-                            };
-                            tokio::spawn(async move {
-                                crate::learning_probe::run_probe(probe_ctx).await;
-                            });
-                        }
-                    }
+                    // Post-turn learning pipeline (prefilter → probe-writer) wired in Task 18.
+                    // Anchor captured above (see `_probe_anchor`); consumed by Task 18.
                 }
                 Ok(None) => {
                     tracing::warn!(?key, "unexpected Ok(None) from invoke_cc — no reply sent");
