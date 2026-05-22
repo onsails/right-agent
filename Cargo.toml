@@ -58,6 +58,8 @@ teloxide = { version = "0.17", default-features = false, features = ["macros", "
 uuid = { version = "1", features = ["v4"] }
 dashmap = "6.2"
 tokio-util = { version = "0.7", features = ["rt"] }
+tar = "0.4"
+flate2 = "1"
 tempfile = "3.27"
 chrono = { version = "0.4", features = ["serde"] }
 cron = "0.16"
