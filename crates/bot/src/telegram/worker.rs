@@ -1876,12 +1876,26 @@ pub fn spawn_worker(
                     };
                     let decision =
                         crate::learning_prefilter::run(prefilter_ctx, anchor.clone()).await;
-                    if matches!(
-                        decision,
-                        crate::learning_prefilter::PrefilterDecision::Skip { .. }
-                    ) {
-                        return;
-                    }
+                    let hint = match decision {
+                        crate::learning_prefilter::PrefilterDecision::Skip { reason } => {
+                            tracing::debug!(reason = %reason, "prefilter skipped");
+                            return;
+                        }
+                        crate::learning_prefilter::PrefilterDecision::PatchExisting {
+                            target_skill,
+                            reason,
+                        } => crate::learning_probe_writer::ProbeWriterHint::PatchExisting {
+                            target_skill,
+                            reason,
+                        },
+                        crate::learning_prefilter::PrefilterDecision::CreateNew {
+                            topic_hint,
+                            reason,
+                        } => crate::learning_probe_writer::ProbeWriterHint::CreateNew {
+                            topic_hint,
+                            reason,
+                        },
+                    };
                     if !probe_writer_enabled {
                         return;
                     }
@@ -1927,6 +1941,7 @@ pub fn spawn_worker(
                         session_locks,
                         chat_id: anchor.chat_id,
                         thread_id: anchor.thread_id,
+                        incoming_hint: hint,
                     };
                     crate::learning_probe_writer::run(writer_ctx, anchor, skill_index).await;
                 });

@@ -17,6 +17,19 @@ use crate::telegram::worker::ProbeAnchor;
 const PROBE_WRITER_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) const PROBE_WRITER_MAX_TURNS: u32 = 16;
 
+/// Hint from the prefilter directing the probe-writer's framing.
+#[derive(Debug, Clone)]
+pub(crate) enum ProbeWriterHint {
+    PatchExisting {
+        target_skill: String,
+        reason: String,
+    },
+    CreateNew {
+        topic_hint: String,
+        reason: String,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ProbeWriterContext {
     pub agent_dir: PathBuf,
@@ -29,13 +42,41 @@ pub(crate) struct ProbeWriterContext {
     pub session_locks: SessionLocks,
     pub chat_id: i64,
     pub thread_id: i64,
+    pub incoming_hint: ProbeWriterHint,
 }
 
 /// Compose the first user-message body delivered to the fork.
-pub(crate) fn build_user_prompt(anchor: &ProbeAnchor, skill_index: &str) -> String {
-    let anchor_block = right_codegen::PROBE_WRITER_ANCHOR_TEMPLATE
-        .replace("{user_msg_text}", &anchor.user_msg_text)
-        .replace("{assistant_reply_text}", &anchor.assistant_reply_text);
+pub(crate) fn build_user_prompt(
+    anchor: &ProbeAnchor,
+    skill_index: &str,
+    hint: &ProbeWriterHint,
+) -> String {
+    let user: String = anchor.user_msg_text.chars().take(8000).collect();
+    let assistant: String = anchor.assistant_reply_text.chars().take(12000).collect();
+    let hint_block = match hint {
+        ProbeWriterHint::PatchExisting {
+            target_skill,
+            reason,
+        } => format!(
+            "PREFILTER HINT: patch_existing\n\
+TARGET SKILL: {target_skill}\n\
+REASON: {reason}\n\n\
+Verify the gap described in REASON by reading {target_skill}/SKILL.md \
+and the turn transcript below. If you confirm the gap, patch the skill. \
+If the hint is mistaken (skill is already correct, or the gap is \
+elsewhere), exit silently or create a new skill if a different procedure \
+is exposed.",
+        ),
+        ProbeWriterHint::CreateNew { topic_hint, reason } => format!(
+            "PREFILTER HINT: create_new\n\
+TOPIC HINT: {topic_hint}\n\
+REASON: {reason}\n\n\
+Verify that no existing skill covers TOPIC HINT by scanning the index \
+below. If a close-enough skill exists, patch it instead. If nothing \
+matches, create a new rightx-* skill. If the hint is wrong (the turn \
+does not expose a reusable procedure), exit silently.",
+        ),
+    };
 
     let index = if skill_index.is_empty() {
         "(no existing rightx-* skills)"
@@ -44,8 +85,7 @@ pub(crate) fn build_user_prompt(anchor: &ProbeAnchor, skill_index: &str) -> Stri
     };
 
     format!(
-        "{anchor_block}\n\n{instructions}\n\n<skill_index>\n{index}\n</skill_index>",
-        instructions = right_codegen::PROBE_WRITER_INSTRUCTIONS,
+        "{hint_block}\n\nEXISTING SKILLS:\n{index}\n\nTURN:\nUSER: {user}\nASSISTANT: {assistant}\n"
     )
 }
 
@@ -89,7 +129,7 @@ pub(crate) fn build_invocation(
 /// the remainder.
 pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_index: String) {
     let probe_session_id = uuid::Uuid::new_v4().to_string();
-    let user_prompt = build_user_prompt(&anchor, &skill_index);
+    let user_prompt = build_user_prompt(&anchor, &skill_index, &ctx.incoming_hint);
     let invocation = build_invocation(
         &ctx,
         &anchor.main_session_uuid,
@@ -221,23 +261,59 @@ mod tests {
         }
     }
 
+    fn default_hint() -> ProbeWriterHint {
+        ProbeWriterHint::CreateNew {
+            topic_hint: "topic".into(),
+            reason: "reason".into(),
+        }
+    }
+
     #[test]
     fn build_user_prompt_includes_anchor_instructions_and_index() {
-        let p = build_user_prompt(&anchor("hi", "bye"), "- rightx-foo: bar");
+        let p = build_user_prompt(&anchor("hi", "bye"), "- rightx-foo: bar", &default_hint());
         assert!(p.contains("hi"));
         assert!(p.contains("bye"));
-        assert!(p.contains("Survey") || p.contains("survey"));
         assert!(p.contains("rightx-foo: bar"));
     }
 
     #[test]
     fn build_user_prompt_empty_index_uses_placeholder() {
-        let p = build_user_prompt(&anchor("a", "b"), "");
+        let p = build_user_prompt(&anchor("a", "b"), "", &default_hint());
         assert!(p.contains("no existing rightx-* skills"));
     }
 
     #[test]
     fn probe_writer_max_turns_is_16() {
         assert_eq!(PROBE_WRITER_MAX_TURNS, 16);
+    }
+
+    #[test]
+    fn build_user_prompt_includes_patch_block_for_patch_hint() {
+        let p = build_user_prompt(
+            &anchor("u", "a"),
+            "- rightx-foo: ...",
+            &ProbeWriterHint::PatchExisting {
+                target_skill: "rightx-foo".into(),
+                reason: "missed step".into(),
+            },
+        );
+        assert!(p.contains("PREFILTER HINT: patch_existing"));
+        assert!(p.contains("TARGET SKILL: rightx-foo"));
+        assert!(p.contains("missed step"));
+    }
+
+    #[test]
+    fn build_user_prompt_includes_create_block_for_create_hint() {
+        let p = build_user_prompt(
+            &anchor("u", "a"),
+            "- rightx-foo: ...",
+            &ProbeWriterHint::CreateNew {
+                topic_hint: "git rebase recovery".into(),
+                reason: "new procedure".into(),
+            },
+        );
+        assert!(p.contains("PREFILTER HINT: create_new"));
+        assert!(p.contains("TOPIC HINT: git rebase recovery"));
+        assert!(p.contains("new procedure"));
     }
 }
