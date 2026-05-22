@@ -1843,6 +1843,8 @@ pub fn spawn_worker(
                 let session_locks = ctx.session_locks.clone();
                 let debug_flag = Arc::clone(&ctx.debug);
                 let daily_budget = ctx.learning.max_daily_budget_usd;
+                let baseline_window_days = ctx.learning.baseline_window_days;
+                let baseline_min_sample = ctx.learning.baseline_min_sample;
 
                 tokio::spawn(async move {
                     let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -1869,6 +1871,8 @@ pub fn spawn_worker(
                         model: prefilter_model,
                         chat_id: anchor.chat_id,
                         thread_id: anchor.thread_id,
+                        baseline_window_days,
+                        baseline_min_sample,
                     };
                     let decision =
                         crate::learning_prefilter::run(prefilter_ctx, anchor.clone()).await;
