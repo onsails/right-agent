@@ -1,6 +1,7 @@
 use crate::{
-    BG_CONTINUATION_SCHEMA_JSON, BOOTSTRAP_SCHEMA_JSON, CRON_SCHEMA_JSON, FORK_PROBE_PROMPT,
-    FORK_PROBE_SCHEMA_JSON, REPLY_SCHEMA_JSON, generate_system_prompt,
+    BG_CONTINUATION_SCHEMA_JSON, BOOTSTRAP_SCHEMA_JSON, CRON_SCHEMA_JSON, CURATOR_SYSTEM_PROMPT,
+    PROBE_WRITER_ANCHOR_TEMPLATE, PROBE_WRITER_INSTRUCTIONS, REPLY_SCHEMA_JSON,
+    generate_system_prompt,
 };
 
 #[test]
@@ -716,25 +717,28 @@ fn operating_instructions_documents_media_groups() {
 }
 
 #[test]
-fn fork_probe_schema_is_valid_json_with_signal_fields() {
-    let parsed: serde_json::Value = serde_json::from_str(FORK_PROBE_SCHEMA_JSON)
-        .expect("FORK_PROBE_SCHEMA_JSON must be valid JSON");
-    let properties = parsed
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-        .expect("schema needs properties");
-    assert!(properties.contains_key("workflow_complete"));
-    assert!(properties.contains_key("learning_signal"));
-    assert!(properties.contains_key("skill_issue_signal"));
-    let required = parsed
-        .get("required")
-        .and_then(serde_json::Value::as_array)
-        .expect("schema needs required");
-    assert!(required.iter().any(|v| v == "workflow_complete"));
+fn probe_writer_anchor_template_contains_placeholders() {
+    assert!(PROBE_WRITER_ANCHOR_TEMPLATE.contains("{user_msg_text}"));
+    assert!(PROBE_WRITER_ANCHOR_TEMPLATE.contains("{assistant_reply_text}"));
 }
 
 #[test]
-fn fork_probe_prompt_contains_signal_field_names() {
-    assert!(FORK_PROBE_PROMPT.contains("learning_signal"));
-    assert!(FORK_PROBE_PROMPT.contains("skill_issue_signal"));
+fn probe_writer_instructions_contain_class_first_guidance() {
+    assert!(PROBE_WRITER_INSTRUCTIONS.contains("Survey"));
+    assert!(PROBE_WRITER_INSTRUCTIONS.to_lowercase().contains("update"));
+    assert!(PROBE_WRITER_INSTRUCTIONS.contains("rightx-"));
+    assert!(PROBE_WRITER_INSTRUCTIONS.contains("skill_learning_start"));
+    assert!(PROBE_WRITER_INSTRUCTIONS.contains("skill_learning_finish"));
+}
+
+#[test]
+fn curator_system_prompt_mentions_consolidation_and_archive_only() {
+    assert!(CURATOR_SYSTEM_PROMPT.to_lowercase().contains("consolidat"));
+    assert!(CURATOR_SYSTEM_PROMPT.to_lowercase().contains("archive"));
+    assert!(
+        CURATOR_SYSTEM_PROMPT
+            .to_lowercase()
+            .contains("never delete")
+    );
+    assert!(CURATOR_SYSTEM_PROMPT.contains("rightx-"));
 }
