@@ -110,19 +110,25 @@ pub(crate) fn append_used_skill_receipts(
         return content;
     }
 
-    let messages = receipts
+    let lines: Vec<String> = receipts
         .iter()
-        .map(|receipt| receipt.message.trim())
-        .filter(|message| !message.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if messages.is_empty() {
-        return content.filter(|content| !content.is_empty());
+        .filter(|r| r.package_name.starts_with("rightx-"))
+        .filter(|r| !r.message.trim().is_empty())
+        .map(|r| {
+            format!(
+                "💡 {} (<code>{}</code>)",
+                r.message.trim(),
+                r.package_name.trim()
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        return content.filter(|c| !c.is_empty());
     }
-
+    let joined = lines.join("\n");
     match content {
-        Some(content) if !content.is_empty() => Some(format!("{content}\n\n{messages}")),
-        _ => Some(messages),
+        Some(c) if !c.is_empty() => Some(format!("{c}\n\n{joined}")),
+        _ => Some(joined),
     }
 }
 
@@ -247,12 +253,12 @@ mod tests {
 
     #[test]
     fn parse_reply_output_accepts_used_skill_receipts() {
-        let json = r#"{"result":{"content":"done","used_skill_receipts":[{"package_name":"right-mcp","message":"Used skill: right-mcp"}]}}"#;
+        let json = r#"{"result":{"content":"done","used_skill_receipts":[{"package_name":"rightx-foo","message":"Used my workflow"}]}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
         let receipts = output.used_skill_receipts.unwrap();
         assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].package_name, "right-mcp");
-        assert_eq!(receipts[0].message, "Used skill: right-mcp");
+        assert_eq!(receipts[0].package_name, "rightx-foo");
+        assert_eq!(receipts[0].message, "Used my workflow");
     }
 
     #[test]
@@ -278,69 +284,93 @@ mod tests {
     }
 
     #[test]
-    fn append_used_skill_receipts_adds_messages_after_content() {
+    fn append_used_skill_receipts_renders_visual_marker_with_package_name() {
+        let receipts = vec![UsedSkillReceipt {
+            package_name: "rightx-foo".into(),
+            message: "Used my workflow".into(),
+        }];
+        let content =
+            append_used_skill_receipts(Some("Done".to_owned()), Some(receipts.as_slice())).unwrap();
+        assert!(content.contains("💡"));
+        assert!(content.contains("Used my workflow"));
+        assert!(content.contains("<code>rightx-foo</code>"));
+        assert!(content.starts_with("Done"));
+    }
+
+    #[test]
+    fn append_used_skill_receipts_filters_non_rightx_packages() {
         let receipts = vec![
             UsedSkillReceipt {
-                package_name: "right-mcp".to_owned(),
-                message: "Used skill: right-mcp".to_owned(),
+                package_name: "rightx-good".into(),
+                message: "ok".into(),
             },
             UsedSkillReceipt {
-                package_name: "right-memory".to_owned(),
-                message: "Used skill: right-memory".to_owned(),
+                package_name: "built-in".into(),
+                message: "leaked".into(),
             },
         ];
-
         let content =
-            append_used_skill_receipts(Some("Done".to_owned()), Some(receipts.as_slice()));
+            append_used_skill_receipts(Some("Done".to_owned()), Some(receipts.as_slice())).unwrap();
+        assert!(content.contains("rightx-good"));
+        assert!(!content.contains("leaked"));
+        assert!(!content.contains("built-in"));
+    }
 
-        assert_eq!(
-            content.as_deref(),
-            Some("Done\n\nUsed skill: right-mcp\nUsed skill: right-memory")
+    #[test]
+    fn append_used_skill_receipts_handles_multiple_receipts() {
+        let receipts = vec![
+            UsedSkillReceipt {
+                package_name: "rightx-a".into(),
+                message: "did a".into(),
+            },
+            UsedSkillReceipt {
+                package_name: "rightx-b".into(),
+                message: "did b".into(),
+            },
+        ];
+        let content =
+            append_used_skill_receipts(Some("Reply".to_owned()), Some(receipts.as_slice()))
+                .unwrap();
+        let lines: Vec<&str> = content.split('\n').collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("rightx-a") && l.contains("did a"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("rightx-b") && l.contains("did b"))
         );
     }
 
     #[test]
-    fn append_used_skill_receipts_none_content_blank_receipts_returns_none() {
+    fn append_used_skill_receipts_filters_blank_messages() {
         let receipts = vec![
             UsedSkillReceipt {
-                package_name: "right-mcp".to_owned(),
-                message: "   ".to_owned(),
+                package_name: "rightx-a".into(),
+                message: "   ".into(),
             },
             UsedSkillReceipt {
-                package_name: "right-memory".to_owned(),
-                message: "\n\t".to_owned(),
+                package_name: "rightx-b".into(),
+                message: "Real msg".into(),
             },
         ];
-
-        let content = append_used_skill_receipts(None, Some(receipts.as_slice()));
-
-        assert_eq!(content, None);
+        let content =
+            append_used_skill_receipts(Some("Done".to_owned()), Some(receipts.as_slice())).unwrap();
+        assert!(content.contains("Real msg"));
+        // Blank-only receipt should be filtered out, no trailing line for it
     }
 
     #[test]
-    fn append_used_skill_receipts_appends_only_nonblank_trimmed_messages() {
-        let receipts = vec![
-            UsedSkillReceipt {
-                package_name: "right-mcp".to_owned(),
-                message: "  Used skill: right-mcp  ".to_owned(),
-            },
-            UsedSkillReceipt {
-                package_name: "right-memory".to_owned(),
-                message: "\n".to_owned(),
-            },
-            UsedSkillReceipt {
-                package_name: "right-codegen".to_owned(),
-                message: "\tUsed skill: right-codegen\n".to_owned(),
-            },
-        ];
-
+    fn append_used_skill_receipts_all_blank_returns_content_unchanged() {
+        let receipts = vec![UsedSkillReceipt {
+            package_name: "rightx-blank".into(),
+            message: "  \n  ".into(),
+        }];
         let content =
             append_used_skill_receipts(Some("Done".to_owned()), Some(receipts.as_slice()));
-
-        assert_eq!(
-            content.as_deref(),
-            Some("Done\n\nUsed skill: right-mcp\nUsed skill: right-codegen")
-        );
+        assert_eq!(content.as_deref(), Some("Done"));
     }
 
     #[test]

@@ -1303,6 +1303,26 @@ pub fn spawn_worker(
                         output.content,
                         output.used_skill_receipts.as_deref(),
                     );
+                    if let Some(receipts) = output.used_skill_receipts.as_deref() {
+                        let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                        let usage_path = ctx.agent_dir.join(".claude/skills/.usage.json");
+                        for receipt in receipts {
+                            if !receipt.package_name.starts_with("rightx-") {
+                                continue;
+                            }
+                            if let Err(e) = crate::lifecycle::usage::bump_use(
+                                &usage_path,
+                                &receipt.package_name,
+                                &now_utc,
+                            ) {
+                                tracing::warn!(
+                                    agent = %ctx.agent_name,
+                                    package = %receipt.package_name,
+                                    "bump_use failed: {e:#}"
+                                );
+                            }
+                        }
+                    }
                     let reply_to = if is_group {
                         // Always reply-to the triggering message in groups,
                         // regardless of batch size.
