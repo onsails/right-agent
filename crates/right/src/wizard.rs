@@ -40,9 +40,18 @@ pub(crate) const PROMPT_LABELS: &[&str] = &[
     // agent_setting_menu sub-prompts
     "model (e.g. sonnet, opus, haiku — empty to clear):",
     "allowed chat ids (comma-separated, empty to clear):",
-    "episode selector model (empty to inherit agent model):",
-    "episode selector max budget usd:",
-    "episode settle seconds:",
+    // learning_setup prompts
+    "max daily budget usd:",
+    "enable prefilter?",
+    "prefilter model (empty for default haiku):",
+    "enable probe-writer?",
+    "probe-writer model (empty to inherit agent model):",
+    "enable curator?",
+    "curator model (empty to inherit agent model):",
+    "curator interval hours:",
+    "curator min idle hours:",
+    "curator stale after days:",
+    "curator archive after days:",
     // sandbox mode — label + options (shared with init.rs)
     "sandbox mode:",
     "openshell — isolated container (recommended)",
@@ -929,34 +938,33 @@ fn format_memory_display(
 
 /// Compact one-line summary of learning config for the settings menu.
 fn format_learning_display(learning: &right_agent::agent::types::LearningConfig) -> String {
-    let model = learning
-        .episode_selector_model
-        .as_deref()
-        .unwrap_or("agent model");
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+    let prefilter = if learning.prefilter_enabled {
+        "on"
+    } else {
+        "off"
+    };
+    let probe = if learning.probe_writer_enabled {
+        "on"
+    } else {
+        "off"
+    };
+    let curator = if learning.curator_enabled {
+        "on"
+    } else {
+        "off"
+    };
     format!(
-        "{model}, daily ${}, {}s",
-        learning.max_daily_budget_usd,
-        learning.episode_settle_seconds.unwrap_or(90)
+        "prefilter:{prefilter} probe:{probe} curator:{curator} daily:${}",
+        learning.max_daily_budget_usd
     )
 }
 
-/// Interactive learning config submenu. Empty selector model inherits the
-/// agent model; empty numeric fields keep their current values.
+/// Interactive learning config submenu. Empty model fields inherit the agent
+/// model; empty numeric fields keep their current values.
 fn learning_setup(
     existing: &right_agent::agent::types::LearningConfig,
 ) -> miette::Result<Option<right_agent::agent::types::LearningConfig>> {
-    let Some(model_input) = right_agent::init::inquire_back(|| {
-        inquire::Text::new("episode selector model (empty to inherit agent model):").prompt()
-    })?
-    else {
-        return Ok(None);
-    };
-    let model = match model_input.trim() {
-        "" => None,
-        value => Some(value.to_owned()),
-    };
-
+    // max_daily_budget_usd
     let Some(budget_input) =
         right_agent::init::inquire_back(|| inquire::Text::new("max daily budget usd:").prompt())?
     else {
@@ -965,99 +973,176 @@ fn learning_setup(
     let max_daily_budget_usd =
         parse_learning_budget_usd(budget_input.trim(), existing.max_daily_budget_usd)?;
 
-    let Some(settle_input) =
-        right_agent::init::inquire_back(|| inquire::Text::new("episode settle seconds:").prompt())?
-    else {
-        return Ok(None);
-    };
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
-    let settle_seconds = parse_learning_settle_seconds(
-        settle_input.trim(),
-        existing.episode_settle_seconds.unwrap_or(90),
-    )?;
-
-    let Some(threshold_input) = right_agent::init::inquire_back(|| {
-        inquire::Text::new(
-            "circuit failure threshold (consecutive review failures before learning pauses):",
-        )
-        .prompt()
-    })?
-    else {
-        return Ok(None);
-    };
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
-    let circuit_failure_threshold = parse_learning_circuit_failure_threshold(
-        threshold_input.trim(),
-        existing.circuit_failure_threshold.unwrap_or(5),
-    )?;
-
-    let Some(cooldown_input) = right_agent::init::inquire_back(|| {
-        inquire::Text::new("circuit cooldown minutes (minutes to pause after circuit opens):")
-            .prompt()
-    })?
-    else {
-        return Ok(None);
-    };
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
-    let circuit_cooldown_minutes = parse_learning_circuit_cooldown_minutes(
-        cooldown_input.trim(),
-        existing.circuit_cooldown_minutes.unwrap_or(60),
-    )?;
-
-    let Some(probe_model_input) = right_agent::init::inquire_back(|| {
-        inquire::Text::new("fork-probe model (empty to inherit agent model):").prompt()
-    })?
-    else {
-        return Ok(None);
-    };
-    let probe_model = parse_probe_model(&probe_model_input).map_err(|e| miette::miette!(e))?;
-
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
-    let fork_probe_default = if existing.fork_probe_enabled.unwrap_or(true) {
+    // prefilter_enabled
+    let prefilter_default = if existing.prefilter_enabled {
         "yes"
     } else {
         "no"
     };
-    let Some(fork_probe_input) = right_agent::init::inquire_back(|| {
-        inquire::Text::new("enable fork-probe (post-turn signal classifier)?")
-            .with_default(fork_probe_default)
+    let Some(prefilter_enabled_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("enable prefilter?")
+            .with_default(prefilter_default)
             .prompt()
     })?
     else {
         return Ok(None);
     };
-    let fork_probe_enabled =
-        parse_fork_probe_enabled(&fork_probe_input).map_err(|e| miette::miette!(e))?;
+    let prefilter_enabled =
+        parse_bool_yes_no(&prefilter_enabled_input).map_err(|e| miette::miette!(e))?;
 
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
-    let background_review_default = if existing.background_review_enabled.unwrap_or(false) {
+    // prefilter_model
+    let prefilter_model_default = existing
+        .prefilter_model
+        .as_deref()
+        .unwrap_or("claude-haiku-4-5-20251001");
+    let Some(prefilter_model_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("prefilter model (empty for default haiku):")
+            .with_default(prefilter_model_default)
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let prefilter_model =
+        parse_optional_model_override(&prefilter_model_input).map_err(|e| miette::miette!(e))?;
+
+    // probe_writer_enabled
+    let probe_writer_default = if existing.probe_writer_enabled {
         "yes"
     } else {
         "no"
     };
-    let Some(background_review_input) = right_agent::init::inquire_back(|| {
-        inquire::Text::new("enable deprecated background learning (advanced; off by default)?")
-            .with_default(background_review_default)
+    let Some(probe_writer_enabled_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("enable probe-writer?")
+            .with_default(probe_writer_default)
             .prompt()
     })?
     else {
         return Ok(None);
     };
-    let background_review_enabled = parse_background_review_enabled(&background_review_input)
-        .map_err(|e| miette::miette!(e))?;
+    let probe_writer_enabled =
+        parse_bool_yes_no(&probe_writer_enabled_input).map_err(|e| miette::miette!(e))?;
 
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
+    // probe_writer_model
+    let Some(probe_writer_model_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("probe-writer model (empty to inherit agent model):").prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let probe_writer_model =
+        parse_optional_model_override(&probe_writer_model_input).map_err(|e| miette::miette!(e))?;
+
+    // curator_enabled
+    let curator_default = if existing.curator_enabled {
+        "yes"
+    } else {
+        "no"
+    };
+    let Some(curator_enabled_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("enable curator?")
+            .with_default(curator_default)
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_enabled =
+        parse_bool_yes_no(&curator_enabled_input).map_err(|e| miette::miette!(e))?;
+
+    // curator_model
+    let Some(curator_model_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("curator model (empty to inherit agent model):").prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_model =
+        parse_optional_model_override(&curator_model_input).map_err(|e| miette::miette!(e))?;
+
+    // curator_interval_hours
+    let Some(curator_interval_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("curator interval hours:")
+            .with_default(&existing.curator_interval_hours.to_string())
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_interval_hours = parse_u32_positive(
+        curator_interval_input.trim(),
+        existing.curator_interval_hours,
+        "curator interval hours",
+    )?;
+
+    // curator_min_idle_hours
+    let Some(curator_min_idle_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("curator min idle hours:")
+            .with_default(&existing.curator_min_idle_hours.to_string())
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_min_idle_hours = parse_u32_positive(
+        curator_min_idle_input.trim(),
+        existing.curator_min_idle_hours,
+        "curator min idle hours",
+    )?;
+
+    // curator_stale_after_days
+    let Some(curator_stale_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("curator stale after days:")
+            .with_default(&existing.curator_stale_after_days.to_string())
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_stale_after_days = parse_u32_positive(
+        curator_stale_input.trim(),
+        existing.curator_stale_after_days,
+        "curator stale after days",
+    )?;
+
+    // curator_archive_after_days
+    let Some(curator_archive_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("curator archive after days:")
+            .with_default(&existing.curator_archive_after_days.to_string())
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_archive_after_days = parse_u32_positive(
+        curator_archive_input.trim(),
+        existing.curator_archive_after_days,
+        "curator archive after days",
+    )?;
+
     Ok(Some(right_agent::agent::types::LearningConfig {
-        episode_selector_model: model,
-        episode_selector_max_budget_usd: existing.episode_selector_max_budget_usd,
-        episode_settle_seconds: Some(settle_seconds),
+        prefilter_enabled,
+        prefilter_model,
+        probe_writer_enabled,
+        probe_writer_model,
+        curator_enabled,
+        curator_model,
+        curator_interval_hours,
+        curator_min_idle_hours,
+        curator_stale_after_days,
+        curator_archive_after_days,
+        curator_paused: existing.curator_paused,
         max_daily_budget_usd,
-        circuit_failure_threshold: Some(circuit_failure_threshold),
-        circuit_cooldown_minutes: Some(circuit_cooldown_minutes),
-        legacy_probe_model: probe_model,
-        fork_probe_enabled: Some(fork_probe_enabled),
-        background_review_enabled: Some(background_review_enabled),
-        ..right_agent::agent::types::LearningConfig::default()
+        // Deprecated fields — leave at None.
+        fork_probe_enabled: None,
+        fork_probe_model: None,
+        legacy_probe_model: None,
+        background_review_enabled: None,
+        episode_selector_model: None,
+        episode_selector_max_budget_usd: None,
+        episode_settle_seconds: None,
+        circuit_failure_threshold: None,
+        circuit_cooldown_minutes: None,
     }))
 }
 
@@ -1076,50 +1161,7 @@ fn parse_learning_budget_usd(input: &str, fallback: f64) -> miette::Result<f64> 
     Ok(value)
 }
 
-fn parse_learning_settle_seconds(input: &str, fallback: u64) -> miette::Result<u64> {
-    if input.is_empty() {
-        return Ok(fallback);
-    }
-    let value = input
-        .parse::<u64>()
-        .map_err(|e| miette::miette!("invalid settle seconds \"{input}\": {e}"))?;
-    if value == 0 {
-        return Err(miette::miette!("settle seconds must be greater than zero"));
-    }
-    Ok(value)
-}
-
-fn parse_learning_circuit_failure_threshold(input: &str, fallback: u32) -> miette::Result<u32> {
-    if input.is_empty() {
-        return Ok(fallback);
-    }
-    let value = input
-        .parse::<u32>()
-        .map_err(|e| miette::miette!("invalid circuit failure threshold \"{input}\": {e}"))?;
-    if value < 1 {
-        return Err(miette::miette!(
-            "circuit failure threshold must be at least 1"
-        ));
-    }
-    Ok(value)
-}
-
-fn parse_learning_circuit_cooldown_minutes(input: &str, fallback: u32) -> miette::Result<u32> {
-    if input.is_empty() {
-        return Ok(fallback);
-    }
-    let value = input
-        .parse::<u32>()
-        .map_err(|e| miette::miette!("invalid circuit cooldown minutes \"{input}\": {e}"))?;
-    if value < 1 {
-        return Err(miette::miette!(
-            "circuit cooldown minutes must be at least 1"
-        ));
-    }
-    Ok(value)
-}
-
-pub(crate) fn parse_probe_model(input: &str) -> Result<Option<String>, String> {
+pub(crate) fn parse_optional_model_override(input: &str) -> Result<Option<String>, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         Ok(None)
@@ -1128,7 +1170,7 @@ pub(crate) fn parse_probe_model(input: &str) -> Result<Option<String>, String> {
     }
 }
 
-pub(crate) fn parse_fork_probe_enabled(input: &str) -> Result<bool, String> {
+pub(crate) fn parse_bool_yes_no(input: &str) -> Result<bool, String> {
     match input.trim().to_ascii_lowercase().as_str() {
         "yes" | "y" | "true" | "on" => Ok(true),
         "no" | "n" | "false" | "off" => Ok(false),
@@ -1136,11 +1178,17 @@ pub(crate) fn parse_fork_probe_enabled(input: &str) -> Result<bool, String> {
     }
 }
 
-pub(crate) fn parse_background_review_enabled(input: &str) -> Result<bool, String> {
-    if input.trim().is_empty() {
-        return Ok(false);
+fn parse_u32_positive(input: &str, fallback: u32, label: &str) -> miette::Result<u32> {
+    if input.is_empty() {
+        return Ok(fallback);
     }
-    parse_fork_probe_enabled(input)
+    let v: u32 = input
+        .parse()
+        .map_err(|e| miette::miette!("invalid {label}: {e}"))?;
+    if v == 0 {
+        return Err(miette::miette!("{label} must be > 0"));
+    }
+    Ok(v)
 }
 
 /// Interactive memory config submenu. Returns `Ok(None)` when the user
@@ -1708,8 +1756,8 @@ pub(crate) fn update_agent_yaml_memory(
 /// Replace the `learning:` block in an agent.yaml file.
 ///
 /// Removes any existing `learning:` block (header + indented body), then
-/// appends the new block. `episode_selector_model` is omitted when absent so
-/// runtime selection inherits the agent model.
+/// appends the new block. Optional model fields are omitted when `None` so the
+/// runtime inherits the agent model.
 fn update_agent_yaml_learning(
     path: &Path,
     learning: &right_agent::agent::types::LearningConfig,
@@ -1734,25 +1782,43 @@ fn update_agent_yaml_learning(
     }
 
     lines.push("learning:".to_string());
-    if let Some(model) = learning.episode_selector_model.as_deref() {
-        lines.push(format!("  episode_selector_model: \"{model}\""));
-    }
     lines.push(format!(
         "  max_daily_budget_usd: {}",
         learning.max_daily_budget_usd
     ));
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     lines.push(format!(
-        "  episode_settle_seconds: {}",
-        learning.episode_settle_seconds.unwrap_or(90)
+        "  prefilter_enabled: {}",
+        learning.prefilter_enabled
+    ));
+    if let Some(model) = learning.prefilter_model.as_deref() {
+        lines.push(format!("  prefilter_model: \"{model}\""));
+    }
+    lines.push(format!(
+        "  probe_writer_enabled: {}",
+        learning.probe_writer_enabled
+    ));
+    if let Some(model) = learning.probe_writer_model.as_deref() {
+        lines.push(format!("  probe_writer_model: \"{model}\""));
+    }
+    lines.push(format!("  curator_enabled: {}", learning.curator_enabled));
+    if let Some(model) = learning.curator_model.as_deref() {
+        lines.push(format!("  curator_model: \"{model}\""));
+    }
+    lines.push(format!(
+        "  curator_interval_hours: {}",
+        learning.curator_interval_hours
     ));
     lines.push(format!(
-        "  circuit_failure_threshold: {}",
-        learning.circuit_failure_threshold.unwrap_or(5)
+        "  curator_min_idle_hours: {}",
+        learning.curator_min_idle_hours
     ));
     lines.push(format!(
-        "  circuit_cooldown_minutes: {}",
-        learning.circuit_cooldown_minutes.unwrap_or(60)
+        "  curator_stale_after_days: {}",
+        learning.curator_stale_after_days
+    ));
+    lines.push(format!(
+        "  curator_archive_after_days: {}",
+        learning.curator_archive_after_days
     ));
 
     let mut output = lines.join("\n");
@@ -1783,15 +1849,18 @@ mod learning_yaml_tests {
         let dir = tempdir().unwrap();
         let path = write_yaml(dir.path(), "model: \"sonnet\"\n");
         let learning = LearningConfig {
-            episode_selector_model: Some("claude-sonnet-4-6".to_owned()),
-            episode_selector_max_budget_usd: None,
-            episode_settle_seconds: 180,
             max_daily_budget_usd: 12.5,
-            circuit_failure_threshold: 8,
-            circuit_cooldown_minutes: 30,
-            probe_model: None,
-            fork_probe_enabled: true,
-            background_review_enabled: false,
+            prefilter_enabled: false,
+            prefilter_model: Some("claude-haiku-4-5-20251001".to_owned()),
+            probe_writer_enabled: true,
+            probe_writer_model: Some("claude-sonnet-4-6".to_owned()),
+            curator_enabled: true,
+            curator_model: None,
+            curator_interval_hours: 48,
+            curator_min_idle_hours: 4,
+            curator_stale_after_days: 14,
+            curator_archive_after_days: 60,
+            ..LearningConfig::default()
         };
         update_agent_yaml_learning(&path, &learning).unwrap();
 
@@ -1800,89 +1869,87 @@ mod learning_yaml_tests {
             content.contains("model: \"sonnet\""),
             "pre-existing field survives"
         );
+        assert!(content.contains("prefilter_model: \"claude-haiku-4-5-20251001\""));
+        assert!(content.contains("probe_writer_model: \"claude-sonnet-4-6\""));
+        assert!(!content.contains("curator_model:"), "absent model omitted");
         let parsed: right_agent::agent::AgentConfig = serde_saphyr::from_str(&content).unwrap();
-        assert_eq!(
-            parsed.learning.episode_selector_model,
-            learning.episode_selector_model
-        );
         assert!(
             (parsed.learning.max_daily_budget_usd - learning.max_daily_budget_usd).abs()
                 < f64::EPSILON
         );
-        assert_eq!(
-            parsed.learning.episode_settle_seconds,
-            learning.episode_settle_seconds
-        );
-        assert_eq!(
-            parsed.learning.circuit_failure_threshold,
-            learning.circuit_failure_threshold
-        );
-        assert_eq!(
-            parsed.learning.circuit_cooldown_minutes,
-            learning.circuit_cooldown_minutes
-        );
+        assert_eq!(parsed.learning.prefilter_enabled, false);
+        assert_eq!(parsed.learning.probe_writer_enabled, true);
+        assert_eq!(parsed.learning.curator_interval_hours, 48);
+        assert_eq!(parsed.learning.curator_stale_after_days, 14);
+        assert_eq!(parsed.learning.curator_archive_after_days, 60);
     }
 
     #[test]
-    fn update_agent_yaml_learning_replaces_existing_and_omits_absent_model() {
+    fn update_agent_yaml_learning_replaces_existing_and_omits_absent_models() {
         let dir = tempdir().unwrap();
-        let initial = "model: \"sonnet\"\n\nlearning:\n  episode_selector_model: \"old\"\n  max_daily_budget_usd: 7.5\n  episode_settle_seconds: 180\n\nnetwork_policy: permissive\n";
+        let initial = "model: \"sonnet\"\n\nlearning:\n  max_daily_budget_usd: 7.5\n  curator_interval_hours: 999\n\nnetwork_policy: permissive\n";
         let path = write_yaml(dir.path(), initial);
         let learning = LearningConfig {
-            episode_selector_model: None,
-            episode_selector_max_budget_usd: None,
-            episode_settle_seconds: 90,
-            max_daily_budget_usd: 5.0,
-            circuit_failure_threshold: 5,
-            circuit_cooldown_minutes: 60,
-            probe_model: None,
-            fork_probe_enabled: true,
-            background_review_enabled: false,
+            max_daily_budget_usd: 2.0,
+            ..LearningConfig::default()
         };
         update_agent_yaml_learning(&path, &learning).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(!content.contains("episode_selector_model"));
-        assert!(content.contains("max_daily_budget_usd: 5"));
-        assert!(content.contains("network_policy: permissive"));
-        let parsed: right_agent::agent::AgentConfig = serde_saphyr::from_str(&content).unwrap();
+        assert!(content.contains("max_daily_budget_usd: 2"));
         assert!(
-            (parsed.learning.max_daily_budget_usd - learning.max_daily_budget_usd).abs()
-                < f64::EPSILON
+            !content.contains("999"),
+            "old curator_interval_hours replaced"
         );
+        assert!(content.contains("network_policy: permissive"));
+        assert!(
+            !content.contains("prefilter_model:") || content.contains("prefilter_model: \"claude"),
+            "prefilter model written correctly"
+        );
+        let parsed: right_agent::agent::AgentConfig = serde_saphyr::from_str(&content).unwrap();
+        assert!((parsed.learning.max_daily_budget_usd - 2.0).abs() < f64::EPSILON);
         assert_eq!(
-            parsed.learning.episode_settle_seconds,
-            learning.episode_settle_seconds
+            parsed.learning.curator_interval_hours,
+            LearningConfig::default().curator_interval_hours
         );
     }
 
     #[test]
-    fn parse_probe_model_blank_returns_none() {
-        assert_eq!(parse_probe_model(""), Ok(None));
+    fn parse_optional_model_override_blank_returns_none() {
+        assert_eq!(parse_optional_model_override(""), Ok(None));
+        assert_eq!(parse_optional_model_override("   "), Ok(None));
     }
 
     #[test]
-    fn parse_probe_model_string_returns_some() {
+    fn parse_optional_model_override_string_returns_some() {
         assert_eq!(
-            parse_probe_model("claude-haiku-4-5-20251001"),
+            parse_optional_model_override("claude-haiku-4-5-20251001"),
             Ok(Some("claude-haiku-4-5-20251001".to_owned()))
         );
     }
 
     #[test]
-    fn parse_fork_probe_enabled_accepts_yes_no_true_false() {
-        assert_eq!(parse_fork_probe_enabled("yes"), Ok(true));
-        assert_eq!(parse_fork_probe_enabled("no"), Ok(false));
-        assert_eq!(parse_fork_probe_enabled("true"), Ok(true));
-        assert_eq!(parse_fork_probe_enabled("false"), Ok(false));
-        assert!(parse_fork_probe_enabled("maybe").is_err());
+    fn parse_bool_yes_no_accepts_yes_no_true_false() {
+        assert_eq!(parse_bool_yes_no("yes"), Ok(true));
+        assert_eq!(parse_bool_yes_no("no"), Ok(false));
+        assert_eq!(parse_bool_yes_no("true"), Ok(true));
+        assert_eq!(parse_bool_yes_no("false"), Ok(false));
+        assert!(parse_bool_yes_no("maybe").is_err());
     }
 
     #[test]
-    fn parse_background_review_enabled_defaults_off() {
-        assert_eq!(parse_background_review_enabled("no"), Ok(false));
-        assert_eq!(parse_background_review_enabled(""), Ok(false));
-        assert_eq!(parse_background_review_enabled("yes"), Ok(true));
+    fn parse_u32_positive_rejects_zero() {
+        assert!(parse_u32_positive("0", 1, "test").is_err());
+    }
+
+    #[test]
+    fn parse_u32_positive_empty_returns_fallback() {
+        assert_eq!(parse_u32_positive("", 42, "test").unwrap(), 42);
+    }
+
+    #[test]
+    fn parse_u32_positive_parses_value() {
+        assert_eq!(parse_u32_positive("168", 1, "test").unwrap(), 168);
     }
 }
 
