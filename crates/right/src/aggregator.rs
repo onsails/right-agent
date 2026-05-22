@@ -598,7 +598,7 @@ impl rmcp::ServerHandler for Aggregator {
                  delivery, reflection, and background-continuation turns must not use it.\n\n\
                  ## Learning\n\
                  - mcp__right__skill_learning_start: Stage 1 foreground metadata/progress for learned skill create/update. Call before writing or patching skill package files. action=create and action=update both require rightx-* skill names. Accepts skill names only, never paths.\n\
-                 - mcp__right__skill_learning_finish: Stage 1 foreground metadata/receipt for skill create/update completion. Successful statuses require a non-empty LLM-authored message argument, verify the skill package exists at .claude/skills/<skill_name>/SKILL.md, and send learned/updated receipts. Does not move files.\n\n\
+                 - mcp__right__skill_learning_finish: Stage 1 foreground metadata/receipt for skill create/update completion. Successful statuses require a non-empty LLM-authored message argument, verify the skill package exists at .claude/skills/<skill_name>/SKILL.md, and send learned/updated receipts. Does not move files. Optional field hint_outcome: \"applied_as_hinted\" | \"applied_differently\" | \"refused\" — probe-writer must include this when a prefilter hint was provided.\n\n\
                  Error convention (operation errors):\n\
                  On operation failure, tools return is_error: true with content\n  \
                  { \"error\": { \"code\": \"<code>\", \"message\": \"<human readable>\", \"details\"?: {...} } }\n\

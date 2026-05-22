@@ -105,6 +105,11 @@ pub(crate) struct SkillLearningFinishParams {
         description = "Evidence references from the current turn. Use one non-empty ref for explicit user requests, otherwise two or more."
     )]
     pub(crate) event_refs: Option<Vec<String>>,
+    #[schemars(
+        description = "Optional. Probe-writer reports back whether the prefilter hint matched. One of: applied_as_hinted, applied_differently, refused."
+    )]
+    #[serde(default)]
+    pub(crate) hint_outcome: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -445,4 +450,23 @@ pub(crate) fn success_json(status: &str, skill_name: &str) -> String {
         "skill_name": skill_name,
     })
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_learning_finish_accepts_hint_outcome_field() {
+        let json = r#"{"action":"create","status":"created","skill_name":"rightx-foo","hint_outcome":"applied_as_hinted"}"#;
+        let params: SkillLearningFinishParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.hint_outcome.as_deref(), Some("applied_as_hinted"));
+    }
+
+    #[test]
+    fn skill_learning_finish_accepts_missing_hint_outcome() {
+        let json = r#"{"action":"create","status":"created","skill_name":"rightx-foo"}"#;
+        let params: SkillLearningFinishParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.hint_outcome, None);
+    }
 }

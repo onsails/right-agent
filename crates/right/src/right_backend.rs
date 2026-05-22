@@ -672,6 +672,14 @@ impl RightBackend {
                 ));
             }
         };
+        if let Some(ho) = params.hint_outcome.as_deref() {
+            tracing::info!(
+                agent = %agent_name,
+                skill = %params.skill_name,
+                hint_outcome = %ho,
+                "probe-writer hint outcome"
+            );
+        }
         if let Err(result) =
             crate::learning::validate_learning_target(agent_dir, params.action, &params.skill_name)
         {
