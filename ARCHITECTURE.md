@@ -176,29 +176,32 @@ identity files.
 Per-turn skill-learning pipeline (replaces the prior fork-probe classifier):
 
 1. **Anchor capture** (`bot::telegram::worker`): after the foreground assistant
-   reply is sent, the worker captures a `ProbeAnchor`
-   (user_msg_text, assistant_reply_text, main_session_uuid, captured_at,
-   chat_id, thread_id) for downstream consumption.
-2. **Prefilter** (`bot::learning_prefilter`): a Haiku classifier (default
-   `claude-haiku-4-5-20251001`) decides `should_probe` from the anchor text only,
-   with `--tools ""` and `--output-format json`. Cheap and bounded; logs/usage
-   tracked as source `learning_prefilter`.
-3. **Probe-writer** (`bot::learning_probe_writer`): when the prefilter votes
-   `Probe`, the worker forks the main CC session with `--fork-session --resume
-   <main> --session-id <new>` and a tool-whitelisted invocation
-   (Write/Read/Bash + `mcp__right__skill_learning_{start,finish}`) at
-   `--max-turns 16`. The probe-writer surveys existing `rightx-*` skills and
-   either creates a new one, patches an existing one, or exits silently. Session
-   mutex on the main session UUID is held only until the `system/init`
-   handshake; then the writer detaches. Usage tracked as `learning_probe_writer`.
-4. **Curator** (`bot::learning_curator`): a periodic per-agent ticker
-   (60s tick, gated by `curator_interval_hours` / `curator_min_idle_hours`)
-   takes a `.claude/skills/` tar.gz snapshot, applies pure-Rust lifecycle
-   transitions (`active`/`stale`/`archived` based on `last_used_at` /
-   `last_patched_at`), and forks a CC session with `CURATOR_SYSTEM_PROMPT` to
-   consolidate near-duplicates (merge into umbrella, demote into `references/`,
-   archive originals with `absorbed_into`). The curator never deletes — only
-   archives. Usage tracked as `learning_curator`.
+   reply is sent, the worker captures a `ProbeAnchor` (user text, assistant
+   text, main session UUID, captured_at, chat/thread, **num_turns,
+   total_cost_usd, wall_elapsed_ms, used_skill_receipts**) for downstream
+   consumption.
+
+2. **Prefilter** (`bot::learning_prefilter`): a Haiku classifier returns a
+   structured three-way decision —
+   `Skip{reason}` / `PatchExisting{target_skill, reason}` /
+   `CreateNew{topic_hint, reason}`. The prompt embeds per-agent baselines
+   (P50/P90/P99 over 14d foreground turns) for `num_turns`, `total_cost_usd`,
+   and `wall_elapsed_ms`, plus a one-line-per-skill index summary. Baselines
+   are computed on demand by `right_agent::usage::turn_baseline::compute`.
+
+3. **Probe-writer** (`bot::learning_probe_writer`): when the prefilter
+   returns non-Skip, the worker forks the main CC session with the decision
+   as a directed hint. The writer verifies and may patch, create, or refuse.
+   It reports `hint_outcome` (`applied_as_hinted` / `applied_differently` /
+   `refused`) back via `mcp__right__skill_learning_finish`.
+
+4. **Curator** (`bot::learning_curator`): per-agent 60s ticker reads state
+   from the `curator_state` singleton row in `data.db`. The gate is
+   multi-signal: cost spike (today's `learning_probe_writer` cost vs
+   `k * 14d P50` with a floor), skill-change count (≥ N skills
+   created/patched since last run), or the 168h time fallback. A
+   `min_cooldown_hours` floor blocks all triggers including the time
+   fallback. Trigger evidence is captured in `last_spike_evidence_json`.
 
 Lifecycle state lives in host-side `<agent>/.claude/skills/.usage.json` and is
 written atomically (tempfile + rename + `fs4` advisory lock). The schema is
@@ -354,16 +357,20 @@ per-turn writer + periodic curator. Two independent gates run today:
    today's spend across `right_agent::usage::LEARNING_SOURCES`
    (`learning_selector`, `learning_reviewer`, `learning_skill_review`,
    `learning_prefilter`, `learning_probe_writer`, `learning_curator`) is below
-   `LearningConfig.max_daily_budget_usd` (default $1.00). The prefilter's
-   `should_probe` decision gates the probe-writer fork. The session mutex on
+   `LearningConfig.max_daily_budget_usd` (default $1.00). A non-`skip`
+   prefilter decision gates and directs the probe-writer fork. The session mutex on
    the main session UUID prevents concurrent `--resume` against the same
    transcript; the writer holds it only until its `system/init` handshake.
 
 2. **Curator gate** (periodic, agent ticker, pure logic in
-   `bot::learning_curator::should_run_now`):
-   `enabled` + `!paused` + `last_run_at + interval_hours <= now` +
-   (no chat activity within `min_idle_hours`). First-ever runs seed
-   `last_run_at` and defer one interval (Hermes pattern).
+   `bot::learning_curator::should_run_now`): order is `enabled` → `!paused` →
+   `circuit_open_until` (skip if in future) → `min_idle_hours` (skip if any
+   chat activity within window) → `min_cooldown_hours` (blocks ALL triggers
+   below) → trigger priority **CostSpike > SkillChangeCount > TimeFallback**.
+   First-ever runs seed `last_run_at` in `curator_state` and defer (Hermes
+   pattern). State (`last_run_at`, `last_run_status`, `consecutive_failures`,
+   `circuit_open_until`, `last_spike_evidence_json`) lives in the per-agent
+   `curator_state` singleton row.
 
 `try_mark_review_started` and the legacy Stage 2 selector/reviewer have been
 removed from the runtime path; their gate fields (`circuit_failure_threshold`,
@@ -405,7 +412,8 @@ See: `docs/architecture/memory.md` (Memory Resilience Layer).
 Tables in per-agent `data.db`: `memories` / `memory_events` / `memories_fts`
 (legacy, unused but retained for migration compat), `telegram_sessions`,
 `cron_specs`, `async_runs`, `mcp_servers`, `auth_tokens`, `pending_retains`,
-`memory_alerts`. Run `sqlite3 data.db .schema` for column-level definitions.
+`memory_alerts`, `curator_state` (singleton; `agent_singleton_id` PRIMARY KEY
+CHECK = 1). Run `sqlite3 data.db .schema` for column-level definitions.
 
 ## External Integrations
 

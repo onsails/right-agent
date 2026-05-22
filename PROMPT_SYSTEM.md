@@ -366,13 +366,66 @@ Required: `delivery` and `run_note`. `delivery.kind` is always `"notify"` and `d
 
 ### PREFILTER_SCHEMA_JSON (per-turn Haiku classifier)
 
-Required: `should_probe` (boolean) and `reason` (string). Defined in
-`bot::learning_prefilter::PREFILTER_SCHEMA_JSON`.
+Three-way decision schema. Defined in `bot::learning_prefilter::PREFILTER_SCHEMA_JSON`.
+
+Required fields:
+
+- `decision` — enum `["skip", "patch_existing", "create_new"]`
+- `reason` — string, `maxLength: 400` (always required)
+- `target_skill` — string, pattern `^rightx-[a-z0-9-]+$` (required when
+  `decision == "patch_existing"`)
+- `topic_hint` — string, `maxLength: 120` (required when
+  `decision == "create_new"`)
 
 The prefilter is a `claude -p --tools "" --max-turns 1 --output-format json
 --json-schema PREFILTER_SCHEMA_JSON` invocation fired async after each
-foreground reply (default model `claude-haiku-4-5-20251001`). Its
-`should_probe` decision gates the downstream probe-writer fork.
+foreground reply (default model `claude-haiku-4-5-20251001`). A non-`skip`
+decision gates and directs the downstream probe-writer fork.
+
+### TURN STATS in prefilter prompt
+
+The prefilter prompt embeds per-agent turn baselines computed by
+`right_agent::usage::turn_baseline::compute` over the last 14 days of
+foreground turns. Two cases:
+
+**Available (n ≥ 20):**
+```
+TURN STATS (P50/P90/P99 over last 14d foreground turns, n=<n>)
+  turns:        <p50> / <p90> / <p99>
+  cost_usd:     <p50> / <p90> / <p99>
+  elapsed_ms:   <p50> / <p90> / <p99>
+```
+
+**Insufficient (n < 20):**
+```
+TURN STATS: insufficient history (n=<n>, need 20). Treat this turn as
+average complexity.
+```
+
+The prompt also embeds a one-line-per-skill index summary of existing
+`rightx-*` skills so the classifier can recommend `patch_existing` with a
+specific `target_skill`.
+
+### Probe-writer hint propagation
+
+`ProbeWriterContext` carries `incoming_hint: ProbeWriterHint` with two
+variants:
+
+- `PatchExisting { target_skill: String, reason: String }` — the prefilter
+  identified a specific existing skill to patch.
+- `CreateNew { topic_hint: String, reason: String }` — the prefilter
+  recommends creating a new skill around the given topic.
+
+The probe-writer's first user message branches on the hint variant, embedding
+the directed guidance alongside the `<probe_writer_anchor>` and the current
+`rightx-*` skill index. The writer may comply with the hint, deviate (e.g.
+choose a different existing skill), or refuse entirely. It reports the outcome
+via the `hint_outcome` field on `mcp__right__skill_learning_finish`:
+
+- `applied_as_hinted` — writer followed the hint as given.
+- `applied_differently` — writer acted but diverged from the hint (e.g.
+  patched a different skill, or created instead of patching).
+- `refused` — writer determined no action was warranted.
 
 ### PROBE_WRITER_ANCHOR_TEMPLATE + PROBE_WRITER_INSTRUCTIONS (post-turn probe-writer)
 
@@ -477,13 +530,15 @@ files under `.claude/skills/<skill_name>/`. Create and update both require
 
 Per-turn skill-learning pipeline (the prior fork-probe is removed): after
 every successful foreground reply, the worker runs a Haiku prefilter against
-the captured anchor. On `should_probe == true` the worker forks the main
-session as a tool-whitelisted probe-writer (max_turns 16) that either
-writes a new `rightx-*` SKILL.md or patches an existing one. A periodic
-per-agent curator ticker independently applies lifecycle transitions to
-`<agent>/.claude/skills/.usage.json` and forks a fresh CC session with
-`CURATOR_SYSTEM_PROMPT` for consolidation work. See `ARCHITECTURE.md` for
-the full per-turn + curator pipeline diagram.
+the captured anchor (with per-agent baselines and skill index). On a non-`skip`
+decision the worker forks the main session as a tool-whitelisted probe-writer
+(max_turns 16), passing the `PatchExisting` or `CreateNew` hint. The writer
+either patches or creates a `rightx-*` SKILL.md and reports `hint_outcome` via
+`mcp__right__skill_learning_finish`. A periodic per-agent curator ticker reads
+state from the `curator_state` singleton in `data.db`, checks a multi-signal
+gate (cost spike, skill-change count, or time fallback), and forks a fresh CC
+session with `CURATOR_SYSTEM_PROMPT` for consolidation work. See
+`ARCHITECTURE.md` for the full per-turn + curator pipeline.
 
 Deprecated Stage 2 background learned-skill review (selector/reviewer with
 `background_review_enabled`) is no longer wired into the runtime. The
