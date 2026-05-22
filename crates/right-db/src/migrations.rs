@@ -34,8 +34,9 @@ const V26_SCHEMA: &str = include_str!("sql/v26_skill_nudge_circuit_breaker.sql")
 const V27_SCHEMA: &str = include_str!("sql/v27_skill_nudge_signals_source.sql");
 #[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
 const V28_SCHEMA: &str = include_str!("sql/v28_usage_wall_elapsed.sql");
+const V29_SCHEMA: &str = include_str!("sql/v29_curator_state.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 28;
+pub const LATEST_SCHEMA_VERSION: u32 = 29;
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -489,6 +490,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up_with_hook("", v26_skill_nudge_circuit_breaker),
         M::up_with_hook("", v27_skill_nudge_signals_source),
         M::up_with_hook("", v28_usage_wall_elapsed_ms),
+        M::up(V29_SCHEMA),
     ])
 });
 
@@ -2191,5 +2193,46 @@ continue background work',
 
         // Re-run is no-op.
         MIGRATIONS.to_version(&mut conn, 28).unwrap();
+    }
+
+    #[test]
+    fn v29_creates_curator_state_singleton_table_idempotently() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 28).unwrap();
+        let pre: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='curator_state'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pre, 0);
+
+        MIGRATIONS.to_version(&mut conn, 29).unwrap();
+        let post: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='curator_state'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(post, 1);
+
+        // Singleton CHECK constraint: id=2 must fail.
+        let err = conn.execute(
+            "INSERT INTO curator_state (agent_singleton_id, last_run_at) VALUES (2, NULL)",
+            [],
+        );
+        assert!(err.is_err(), "CHECK constraint must reject id != 1");
+
+        // id=1 must succeed.
+        conn.execute(
+            "INSERT INTO curator_state (agent_singleton_id, last_run_at) VALUES (1, '2026-05-22T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Re-run is no-op.
+        MIGRATIONS.to_version(&mut conn, 29).unwrap();
     }
 }
