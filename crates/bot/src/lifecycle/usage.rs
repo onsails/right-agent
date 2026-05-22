@@ -113,6 +113,69 @@ pub(crate) fn write_index(path: &Path, index: &Index) -> Result<(), UsageError> 
     Ok(())
 }
 
+fn mutate<F>(path: &Path, mutate_fn: F) -> Result<(), UsageError>
+where
+    F: FnOnce(&mut Index),
+{
+    let mut index = read_index(path)?;
+    mutate_fn(&mut index);
+    write_index(path, &index)
+}
+
+pub(crate) fn bump_use(path: &Path, skill_name: &str, now_utc: &str) -> Result<(), UsageError> {
+    mutate(path, |idx| {
+        let r = idx.skills.entry(skill_name.to_owned()).or_default();
+        r.use_count += 1;
+        r.last_used_at = Some(now_utc.to_owned());
+        if r.state == LifecycleState::Stale {
+            r.state = LifecycleState::Active;
+        }
+    })
+}
+
+pub(crate) fn bump_patch(path: &Path, skill_name: &str, now_utc: &str) -> Result<(), UsageError> {
+    mutate(path, |idx| {
+        let r = idx.skills.entry(skill_name.to_owned()).or_default();
+        r.patch_count += 1;
+        r.last_patched_at = Some(now_utc.to_owned());
+    })
+}
+
+pub(crate) fn mark_created(
+    path: &Path,
+    skill_name: &str,
+    created_by: CreatedBy,
+    now_utc: &str,
+) -> Result<(), UsageError> {
+    mutate(path, |idx| {
+        let r = idx.skills.entry(skill_name.to_owned()).or_default();
+        r.created_by = created_by;
+        r.created_at = Some(now_utc.to_owned());
+        r.state = LifecycleState::Active;
+    })
+}
+
+pub(crate) fn mark_archived(
+    path: &Path,
+    skill_name: &str,
+    absorbed_into: Option<&str>,
+    now_utc: &str,
+) -> Result<(), UsageError> {
+    mutate(path, |idx| {
+        let r = idx.skills.entry(skill_name.to_owned()).or_default();
+        r.state = LifecycleState::Archived;
+        r.archived_at = Some(now_utc.to_owned());
+        r.absorbed_into = absorbed_into.map(str::to_owned);
+    })
+}
+
+pub(crate) fn set_pinned(path: &Path, skill_name: &str, pinned: bool) -> Result<(), UsageError> {
+    mutate(path, |idx| {
+        let r = idx.skills.entry(skill_name.to_owned()).or_default();
+        r.pinned = pinned;
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +258,97 @@ mod tests {
             content.contains("\"use_count\": 1"),
             "new content must be present"
         );
+    }
+
+    fn now_utc() -> String {
+        "2026-05-22T12:00:00Z".to_owned()
+    }
+
+    #[test]
+    fn bump_use_increments_count_and_sets_timestamp() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(".usage.json");
+        bump_use(&path, "rightx-foo", &now_utc()).unwrap();
+        let idx = read_index(&path).unwrap();
+        let r = idx.skills.get("rightx-foo").unwrap();
+        assert_eq!(r.use_count, 1);
+        assert_eq!(r.last_used_at.as_deref(), Some(now_utc().as_str()));
+        bump_use(&path, "rightx-foo", &now_utc()).unwrap();
+        let r2 = read_index(&path)
+            .unwrap()
+            .skills
+            .remove("rightx-foo")
+            .unwrap();
+        assert_eq!(r2.use_count, 2);
+    }
+
+    #[test]
+    fn bump_use_creates_record_if_absent_with_foreground_default() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(".usage.json");
+        bump_use(&path, "rightx-new", &now_utc()).unwrap();
+        let r = read_index(&path)
+            .unwrap()
+            .skills
+            .remove("rightx-new")
+            .unwrap();
+        assert_eq!(r.created_by, CreatedBy::Foreground);
+        assert_eq!(r.state, LifecycleState::Active);
+    }
+
+    #[test]
+    fn bump_patch_increments_patch_count_and_timestamp() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(".usage.json");
+        bump_patch(&path, "rightx-foo", &now_utc()).unwrap();
+        let r = read_index(&path)
+            .unwrap()
+            .skills
+            .remove("rightx-foo")
+            .unwrap();
+        assert_eq!(r.patch_count, 1);
+        assert_eq!(r.last_patched_at.as_deref(), Some(now_utc().as_str()));
+    }
+
+    #[test]
+    fn mark_created_sets_created_by_and_created_at() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(".usage.json");
+        mark_created(&path, "rightx-foo", CreatedBy::ProbeWriter, &now_utc()).unwrap();
+        let r = read_index(&path)
+            .unwrap()
+            .skills
+            .remove("rightx-foo")
+            .unwrap();
+        assert_eq!(r.created_by, CreatedBy::ProbeWriter);
+        assert_eq!(r.created_at.as_deref(), Some(now_utc().as_str()));
+        assert_eq!(r.state, LifecycleState::Active);
+    }
+
+    #[test]
+    fn mark_archived_sets_state_and_optional_absorbed_into() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(".usage.json");
+        mark_created(&path, "rightx-old", CreatedBy::ProbeWriter, &now_utc()).unwrap();
+        mark_archived(&path, "rightx-old", Some("rightx-umbrella"), &now_utc()).unwrap();
+        let r = read_index(&path)
+            .unwrap()
+            .skills
+            .remove("rightx-old")
+            .unwrap();
+        assert_eq!(r.state, LifecycleState::Archived);
+        assert_eq!(r.archived_at.as_deref(), Some(now_utc().as_str()));
+        assert_eq!(r.absorbed_into.as_deref(), Some("rightx-umbrella"));
+    }
+
+    #[test]
+    fn set_pinned_toggles_pinned_flag() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(".usage.json");
+        mark_created(&path, "rightx-foo", CreatedBy::ProbeWriter, &now_utc()).unwrap();
+        set_pinned(&path, "rightx-foo", true).unwrap();
+        assert!(read_index(&path).unwrap().skills["rightx-foo"].pinned);
+        set_pinned(&path, "rightx-foo", false).unwrap();
+        assert!(!read_index(&path).unwrap().skills["rightx-foo"].pinned);
     }
 }
