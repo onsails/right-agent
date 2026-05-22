@@ -10,6 +10,7 @@ mod keepalive;
 pub(crate) mod learning_episode;
 pub(crate) mod learning_probe;
 pub(crate) mod learning_review;
+pub(crate) mod lifecycle;
 pub(crate) mod login;
 pub(crate) mod reflection;
 mod stt;
