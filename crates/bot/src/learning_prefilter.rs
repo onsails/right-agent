@@ -255,23 +255,52 @@ pub(crate) struct PrefilterContext {
     pub model: String,
     pub chat_id: i64,
     pub thread_id: i64,
+    /// Window for baseline percentiles (passes through to `turn_baseline::compute`).
+    pub baseline_window_days: u32,
+    /// Minimum sample size for the baseline to be `Available`.
+    pub baseline_min_sample: u32,
 }
 
 /// Run the Haiku prefilter on an anchor. Logs warns on any failure, returns Skip.
 pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> PrefilterDecision {
     use crate::cc::invocation::{ClaudeInvocation, OutputFormat, build_claude_command};
 
-    // Task 10 will replace these with real baseline.compute() and rendered summary.
-    use right_agent::usage::turn_baseline::{BaselineMetric, TurnBaselines};
-    let placeholder_baselines = TurnBaselines {
-        sample_size: 0,
-        window_days: 14,
-        cost_usd: BaselineMetric::Insufficient { sample_size: 0 },
-        num_turns: BaselineMetric::Insufficient { sample_size: 0 },
-        wall_elapsed_ms: BaselineMetric::Insufficient { sample_size: 0 },
+    let conn = match right_db::open_connection(&ctx.agent_db_dir, false) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "prefilter open_connection failed: {e:#}");
+            return PrefilterDecision::Skip {
+                reason: "db open failed".into(),
+            };
+        }
     };
-    let placeholder_summary = String::new();
-    let prompt = build_prompt(&anchor, &placeholder_baselines, &placeholder_summary);
+    let baselines = match right_agent::usage::turn_baseline::compute(
+        &conn,
+        ctx.baseline_window_days,
+        ctx.baseline_min_sample,
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "prefilter baseline compute failed: {e:#}");
+            return PrefilterDecision::Skip {
+                reason: "baseline compute failed".into(),
+            };
+        }
+    };
+    drop(conn);
+
+    let skills = match crate::learning_review::collect_host_rightx_skill_index(&ctx.agent_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "prefilter skill index failed: {e:#}");
+            return PrefilterDecision::Skip {
+                reason: "skill index failed".into(),
+            };
+        }
+    };
+    let summary = crate::learning_review::render_skill_index_summary(&skills);
+
+    let prompt = build_prompt(&anchor, &baselines, &summary);
     let invocation = ClaudeInvocation {
         mcp_config_path: None,
         json_schema: Some(PREFILTER_SCHEMA_JSON.into()),
