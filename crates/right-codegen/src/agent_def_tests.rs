@@ -3,15 +3,6 @@ use crate::{
     FORK_PROBE_SCHEMA_JSON, REPLY_SCHEMA_JSON, generate_system_prompt,
 };
 
-fn enum_values(field: &serde_json::Value) -> Vec<&str> {
-    field["enum"]
-        .as_array()
-        .expect("field enum must be an array")
-        .iter()
-        .map(|value| value.as_str().expect("enum value must be a string"))
-        .collect()
-}
-
 #[test]
 fn reply_schema_json_is_valid() {
     let parsed: serde_json::Value =
@@ -20,75 +11,35 @@ fn reply_schema_json_is_valid() {
 }
 
 #[test]
-fn reply_schema_contains_learned_skill_fields() {
-    let parsed: serde_json::Value =
-        serde_json::from_str(REPLY_SCHEMA_JSON).expect("REPLY_SCHEMA_JSON must be valid JSON");
-    let properties = parsed["properties"]
-        .as_object()
-        .expect("schema properties must be an object");
-    assert!(
-        properties.contains_key("used_skill_receipts"),
-        "schema must include used_skill_receipts"
-    );
-    assert!(
-        properties.contains_key("learning_signal"),
-        "schema must include learning_signal"
-    );
-    assert!(
-        properties.contains_key("skill_issue_signal"),
-        "schema must include skill_issue_signal"
-    );
+fn reply_schema_requires_used_skill_receipts() {
+    let v: serde_json::Value = serde_json::from_str(REPLY_SCHEMA_JSON).unwrap();
+    let required = v["required"].as_array().unwrap();
+    assert!(required.iter().any(|x| x == "used_skill_receipts"));
+    assert!(required.iter().any(|x| x == "content"));
+}
 
-    let required = parsed["required"]
-        .as_array()
-        .expect("schema required must be an array");
-    let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
-    assert!(required_strs.contains(&"content"), "must require content");
-    assert!(
-        !required_strs.contains(&"used_skill_receipts"),
-        "used_skill_receipts must be optional"
-    );
+#[test]
+fn reply_schema_used_skill_receipts_is_non_nullable_array() {
+    let v: serde_json::Value = serde_json::from_str(REPLY_SCHEMA_JSON).unwrap();
+    let receipts = &v["properties"]["used_skill_receipts"];
+    assert_eq!(receipts["type"].as_str(), Some("array"));
+}
 
-    for path in [
-        &["learning_signal", "trigger"][..],
-        &["learning_signal", "reason_not_written"][..],
-        &["skill_issue_signal", "issue"][..],
-        &["skill_issue_signal", "reason_not_patched"][..],
-        &["skill_issue_signal", "observed_effect"][..],
-    ] {
-        let field = &properties[path[0]]["properties"][path[1]];
-        assert!(
-            field.get("enum").and_then(|v| v.as_array()).is_some(),
-            "{}.{} must use a JSON Schema enum",
-            path[0],
-            path[1]
-        );
-    }
+#[test]
+fn reply_schema_used_skill_receipt_item_constrains_package_name_to_rightx() {
+    let v: serde_json::Value = serde_json::from_str(REPLY_SCHEMA_JSON).unwrap();
+    let pattern =
+        v["properties"]["used_skill_receipts"]["items"]["properties"]["package_name"]["pattern"]
+            .as_str()
+            .expect("pattern field expected");
+    assert_eq!(pattern, "^rightx-");
+}
 
-    let trigger_enum = enum_values(&properties["learning_signal"]["properties"]["trigger"]);
-    assert_eq!(
-        trigger_enum,
-        vec![
-            "explicit_user_request",
-            "multi_step_workflow",
-            "recovered_surprise",
-            "user_correction",
-            "repeated_tool_pattern",
-        ]
-    );
-
-    let issue_enum = enum_values(&properties["skill_issue_signal"]["properties"]["issue"]);
-    assert_eq!(
-        issue_enum,
-        vec![
-            "missing_step",
-            "stale_command",
-            "wrong_api_assumption",
-            "overbroad_activation",
-            "broken_script",
-            "unsafe_instruction",
-        ]
-    );
+#[test]
+fn reply_schema_omits_learning_signal_field() {
+    let v: serde_json::Value = serde_json::from_str(REPLY_SCHEMA_JSON).unwrap();
+    assert!(v["properties"].get("learning_signal").is_none());
+    assert!(v["properties"].get("skill_issue_signal").is_none());
 }
 
 #[test]
