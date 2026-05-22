@@ -189,10 +189,14 @@ mod tests {
         ProbeAnchor {
             user_msg_text: user.to_owned(),
             assistant_reply_text: assistant.to_owned(),
-            main_session_uuid: "main".to_owned(),
+            main_session_uuid: "uuid-main".to_owned(),
             captured_at: chrono::Utc::now(),
             chat_id: 1,
             thread_id: 0,
+            num_turns: 1,
+            total_cost_usd: 0.0,
+            wall_elapsed_ms: 0,
+            used_skill_receipts: Vec::new(),
         }
     }
 
