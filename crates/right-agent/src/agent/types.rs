@@ -177,24 +177,13 @@ backoff_seconds: 30
     #[test]
     fn learning_config_defaults_when_missing() {
         let cfg: AgentConfig = serde_saphyr::from_str("restart: never\n").unwrap();
+        assert!(cfg.learning.prefilter_enabled);
+        assert!(cfg.learning.probe_writer_enabled);
+        assert!(cfg.learning.curator_enabled);
+        assert!((cfg.learning.max_daily_budget_usd - 1.00).abs() < f64::EPSILON);
+        // Deprecated fields (Option-typed) default to None.
         assert_eq!(cfg.learning.episode_selector_model, None);
         assert_eq!(cfg.learning.episode_selector_max_budget_usd, None);
-        assert_eq!(cfg.learning.episode_settle_seconds, 90);
-        assert!((cfg.learning.max_daily_budget_usd - 5.00).abs() < f64::EPSILON);
-        assert_eq!(cfg.learning.circuit_failure_threshold, 5);
-        assert_eq!(cfg.learning.circuit_cooldown_minutes, 60);
-    }
-
-    #[test]
-    fn learning_config_explicit_yaml_roundtrip() {
-        let yaml = "learning:\n  episode_selector_model: \"claude-sonnet-4-6\"\n  episode_selector_max_budget_usd: 0.25\n  episode_settle_seconds: 180\n";
-        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
-        assert_eq!(
-            cfg.learning.episode_selector_model.as_deref(),
-            Some("claude-sonnet-4-6")
-        );
-        assert_eq!(cfg.learning.episode_selector_max_budget_usd, Some(0.25));
-        assert_eq!(cfg.learning.episode_settle_seconds, 180);
     }
 
     #[test]
@@ -212,41 +201,25 @@ backoff_seconds: 30
     }
 
     #[test]
-    fn learning_config_rejects_zero_failure_threshold() {
-        let yaml = "learning:\n  circuit_failure_threshold: 0\n";
-        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn learning_config_rejects_zero_circuit_cooldown_minutes() {
-        let yaml = "learning:\n  circuit_cooldown_minutes: 0\n";
-        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn learning_config_accepts_yaml_with_overrides() {
-        let yaml = "learning:\n  max_daily_budget_usd: 12.5\n  circuit_failure_threshold: 8\n  circuit_cooldown_minutes: 30\n";
+        let yaml = "learning:\n  max_daily_budget_usd: 12.5\n  curator_interval_hours: 24\n";
         let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert!((cfg.learning.max_daily_budget_usd - 12.5).abs() < f64::EPSILON);
-        assert_eq!(cfg.learning.circuit_failure_threshold, 8);
-        assert_eq!(cfg.learning.circuit_cooldown_minutes, 30);
+        assert_eq!(cfg.learning.curator_interval_hours, 24);
     }
 
     #[test]
-    fn learning_config_accepts_legacy_episode_selector_max_budget_usd() {
-        let yaml = "learning:\n  episode_selector_max_budget_usd: 0.10\n";
+    fn learning_config_accepts_legacy_deprecated_fields_silently() {
+        let yaml = "learning:\n  episode_selector_max_budget_usd: 0.10\n  fork_probe_enabled: true\n  background_review_enabled: false\n  episode_settle_seconds: 60\n  circuit_failure_threshold: 3\n  circuit_cooldown_minutes: 15\n";
         let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(cfg.learning.episode_selector_max_budget_usd, Some(0.10));
-        assert!((cfg.learning.max_daily_budget_usd - 5.00).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn learning_config_rejects_zero_settle_seconds() {
-        let yaml = "learning:\n  episode_settle_seconds: 0\n";
-        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
-        assert!(result.is_err());
+        assert_eq!(cfg.learning.fork_probe_enabled, Some(true));
+        assert_eq!(cfg.learning.background_review_enabled, Some(false));
+        assert_eq!(cfg.learning.episode_settle_seconds, Some(60));
+        assert_eq!(cfg.learning.circuit_failure_threshold, Some(3));
+        assert_eq!(cfg.learning.circuit_cooldown_minutes, Some(15));
+        // New fields keep defaults.
+        assert!((cfg.learning.max_daily_budget_usd - 1.00).abs() < f64::EPSILON);
     }
 
     #[test]

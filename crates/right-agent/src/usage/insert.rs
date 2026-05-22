@@ -85,11 +85,11 @@ pub fn insert_learning_skill_review(
     )
 }
 
-/// Insert a row for a fork-probe invocation (post-turn classifier).
+/// Insert a row for a per-turn prefilter invocation (Haiku classifier).
 ///
 /// `chat_id` and `thread_id` carry the originating foreground turn so the
-/// dashboard can group probe spend by chat.
-pub fn insert_learning_fork_probe(
+/// dashboard can group prefilter spend by chat.
+pub fn insert_learning_prefilter(
     conn: &Connection,
     b: &UsageBreakdown,
     chat_id: i64,
@@ -98,11 +98,36 @@ pub fn insert_learning_fork_probe(
     insert_row(
         conn,
         b,
-        "learning_fork_probe",
+        "learning_prefilter",
         Some(chat_id),
         Some(thread_id),
         None,
     )
+}
+
+/// Insert a row for a post-turn probe-writer fork (writes skill files).
+///
+/// `chat_id` and `thread_id` carry the originating foreground turn so the
+/// dashboard can group probe-writer spend by chat.
+pub fn insert_learning_probe_writer(
+    conn: &Connection,
+    b: &UsageBreakdown,
+    chat_id: i64,
+    thread_id: i64,
+) -> Result<(), UsageError> {
+    insert_row(
+        conn,
+        b,
+        "learning_probe_writer",
+        Some(chat_id),
+        Some(thread_id),
+        None,
+    )
+}
+
+/// Insert a row for a periodic curator pass (no chat context).
+pub fn insert_learning_curator(conn: &Connection, b: &UsageBreakdown) -> Result<(), UsageError> {
+    insert_row(conn, b, "learning_curator", None, None, None)
 }
 
 fn insert_row(
@@ -349,10 +374,10 @@ mod tests {
     }
 
     #[test]
-    fn insert_learning_fork_probe_writes_row_with_correct_source() {
+    fn insert_learning_prefilter_writes_row_with_correct_source() {
         let dir = tempdir().unwrap();
         let conn = open_connection(dir.path(), true).unwrap();
-        insert_learning_fork_probe(&conn, &sample_breakdown(), 1234, 0).unwrap();
+        insert_learning_prefilter(&conn, &sample_breakdown(), 1234, 0).unwrap();
         let (source, chat_id, thread_id): (String, Option<i64>, Option<i64>) = conn
             .query_row(
                 "SELECT source, chat_id, thread_id FROM usage_events LIMIT 1",
@@ -360,8 +385,42 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(source, "learning_fork_probe");
+        assert_eq!(source, "learning_prefilter");
         assert_eq!(chat_id, Some(1234));
         assert_eq!(thread_id, Some(0));
+    }
+
+    #[test]
+    fn insert_learning_probe_writer_writes_row_with_correct_source() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_learning_probe_writer(&conn, &sample_breakdown(), 1234, 0).unwrap();
+        let (source, chat_id, thread_id): (String, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT source, chat_id, thread_id FROM usage_events LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "learning_probe_writer");
+        assert_eq!(chat_id, Some(1234));
+        assert_eq!(thread_id, Some(0));
+    }
+
+    #[test]
+    fn insert_learning_curator_writes_row_with_null_chat() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_learning_curator(&conn, &sample_breakdown()).unwrap();
+        let (source, chat_id, thread_id): (String, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT source, chat_id, thread_id FROM usage_events LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "learning_curator");
+        assert_eq!(chat_id, None);
+        assert_eq!(thread_id, None);
     }
 }
