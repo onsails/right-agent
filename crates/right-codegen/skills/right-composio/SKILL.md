@@ -1,14 +1,22 @@
 ---
 name: right-composio
 description: >-
-  Use when the user's request maps to a Composio-fronted service
-  (Notion, Gmail, Calendar, Slack, GitHub, etc.) and you're about to
-  call mcp__right__composio__*. Covers workbench-vs-context discipline,
-  MULTI_EXECUTE batching, and search_tools discovery. Activate ONLY
-  when composio is in your MCP list.
+  Use BEFORE calling any mcp__right__composio__* tool — especially
+  COMPOSIO_SEARCH_TOOLS, COMPOSIO_MULTI_EXECUTE_TOOL, or
+  COMPOSIO_REMOTE_WORKBENCH — and whenever a request involves Notion,
+  Gmail, Google Calendar, Google Drive, Slack, GitHub, Linear, or any
+  other service routed through Composio. Sessions that skip this
+  skill burn 300-500K context tokens on repeated tool searches and
+  inline payloads ($200+ per session observed in cache-write cost).
+  Read once per session, on resume, and any turn that mentions a
+  Composio-fronted service.
 ---
 
 # /right-composio — Composio MCP playbook
+
+**Read this BEFORE your first `mcp__right__composio__*` call this
+session, and again on resume.** The defaults (no workbench, fresh
+search every turn, one tool per call) will bury you in context tokens.
 
 Composio is a gateway: one MCP server fronts 250+ external services
 (Notion, Gmail, Calendar, Slack, GitHub, ...). Tool surface is narrow
@@ -54,9 +62,14 @@ When in doubt: workbench on. Pull with
 
 ## Tool-selection patterns
 
-- **Unknown toolkit slug?** Always
-  `mcp__right__composio__COMPOSIO_SEARCH_TOOLS` first. Don't guess —
-  slugs change.
+- **Unknown toolkit slug?** Call
+  `mcp__right__composio__COMPOSIO_SEARCH_TOOLS` ONCE per slug per
+  session. Each search drops 20-50KB of schemas into your context —
+  30 redundant searches = 580KB of bloat. After you learn a slug
+  (e.g. `NOTION_UPDATE_PAGE`, `GMAIL_SEND_EMAIL`), reuse it from your
+  turn-by-turn context; do NOT re-search "to be sure". Slugs are
+  stable within a session. If you genuinely forgot one, ask the user
+  rather than re-searching the same toolkit.
 - **Multiple ops on same toolkit?** One MULTI_EXECUTE with a `tools`
   array beats N separate calls.
 - **Non-trivial query/transform on a result?**
