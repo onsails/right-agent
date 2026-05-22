@@ -122,6 +122,27 @@ fn default_curator_archive_after_days() -> u32 {
 fn default_curator_paused() -> bool {
     false
 }
+fn default_curator_cost_spike_k() -> f64 {
+    3.0
+}
+fn default_curator_cost_spike_baseline_days() -> u32 {
+    14
+}
+fn default_curator_cost_spike_min_floor_usd() -> f64 {
+    0.05
+}
+fn default_curator_skill_change_threshold() -> u32 {
+    3
+}
+fn default_curator_min_cooldown_hours() -> u32 {
+    12
+}
+fn default_baseline_window_days() -> u32 {
+    14
+}
+fn default_baseline_min_sample() -> u32 {
+    20
+}
 fn default_max_daily_budget_usd_v2() -> f64 {
     1.00
 }
@@ -357,6 +378,48 @@ pub struct LearningConfig {
     #[serde(default = "default_curator_paused")]
     pub curator_paused: bool,
 
+    /// Multiplier on 14-day P50 probe-writer cost; ≥ k * P50 in last 24h
+    /// triggers an early curator run.
+    #[serde(default = "default_curator_cost_spike_k")]
+    pub curator_cost_spike_k: f64,
+    #[serde(
+        default = "default_curator_cost_spike_baseline_days",
+        deserialize_with = "deserialize_positive_u32"
+    )]
+    pub curator_cost_spike_baseline_days: u32,
+    /// Absolute floor on 24h probe-writer spend below which the cost-spike
+    /// trigger never fires — protects low-activity agents.
+    #[serde(default = "default_curator_cost_spike_min_floor_usd")]
+    pub curator_cost_spike_min_floor_usd: f64,
+    /// Skills created/patched since last curator run; ≥ threshold triggers a
+    /// run.
+    #[serde(
+        default = "default_curator_skill_change_threshold",
+        deserialize_with = "deserialize_positive_u32"
+    )]
+    pub curator_skill_change_threshold: u32,
+    /// Hard cooldown between curator runs — gates every trigger including the
+    /// 168h fallback.
+    #[serde(
+        default = "default_curator_min_cooldown_hours",
+        deserialize_with = "deserialize_positive_u32"
+    )]
+    pub curator_min_cooldown_hours: u32,
+
+    /// Window for prefilter per-agent turn baselines.
+    #[serde(
+        default = "default_baseline_window_days",
+        deserialize_with = "deserialize_positive_u32"
+    )]
+    pub baseline_window_days: u32,
+    /// Minimum sample size in window for prefilter baselines to be considered
+    /// sufficient. Below this, the prompt notes "baseline insufficient."
+    #[serde(
+        default = "default_baseline_min_sample",
+        deserialize_with = "deserialize_positive_u32"
+    )]
+    pub baseline_min_sample: u32,
+
     /// Daily $ budget shared by probe-writer and curator.
     #[serde(
         default = "default_max_daily_budget_usd_v2",
@@ -400,6 +463,13 @@ impl Default for LearningConfig {
             curator_stale_after_days: default_curator_stale_after_days(),
             curator_archive_after_days: default_curator_archive_after_days(),
             curator_paused: default_curator_paused(),
+            curator_cost_spike_k: default_curator_cost_spike_k(),
+            curator_cost_spike_baseline_days: default_curator_cost_spike_baseline_days(),
+            curator_cost_spike_min_floor_usd: default_curator_cost_spike_min_floor_usd(),
+            curator_skill_change_threshold: default_curator_skill_change_threshold(),
+            curator_min_cooldown_hours: default_curator_min_cooldown_hours(),
+            baseline_window_days: default_baseline_window_days(),
+            baseline_min_sample: default_baseline_min_sample(),
             max_daily_budget_usd: default_max_daily_budget_usd_v2(),
             fork_probe_enabled: None,
             fork_probe_model: None,
@@ -708,6 +778,26 @@ mod tests {
         assert_eq!(cfg.curator_archive_after_days, 90);
         assert!(!cfg.curator_paused);
         assert_eq!(cfg.max_daily_budget_usd, 1.00);
+    }
+
+    #[test]
+    fn default_learning_has_new_curator_trigger_fields() {
+        let cfg = LearningConfig::default();
+        assert!((cfg.curator_cost_spike_k - 3.0).abs() < 1e-9);
+        assert_eq!(cfg.curator_cost_spike_baseline_days, 14);
+        assert!((cfg.curator_cost_spike_min_floor_usd - 0.05).abs() < 1e-9);
+        assert_eq!(cfg.curator_skill_change_threshold, 3);
+        assert_eq!(cfg.curator_min_cooldown_hours, 12);
+        assert_eq!(cfg.baseline_window_days, 14);
+        assert_eq!(cfg.baseline_min_sample, 20);
+    }
+
+    #[test]
+    fn learning_yaml_accepts_missing_new_fields_via_defaults() {
+        let yaml = "prefilter_enabled: true";
+        let cfg: LearningConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(cfg.curator_skill_change_threshold, 3);
+        assert!((cfg.curator_cost_spike_k - 3.0).abs() < 1e-9);
     }
 
     #[test]
