@@ -62,6 +62,103 @@ pub(crate) fn parse_output(stdout: &str) -> PrefilterDecision {
         .unwrap_or(PrefilterDecision::Skip)
 }
 
+use std::path::PathBuf;
+use std::time::Duration;
+
+const PREFILTER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bundle of inputs needed to run one prefilter invocation.
+#[derive(Debug, Clone)]
+pub(crate) struct PrefilterContext {
+    pub agent_dir: PathBuf,
+    pub agent_db_dir: PathBuf,
+    pub agent_name: String,
+    pub ssh_config_path: Option<PathBuf>,
+    pub resolved_sandbox: Option<String>,
+    pub model: String,
+    pub chat_id: i64,
+    pub thread_id: i64,
+}
+
+/// Run the Haiku prefilter on an anchor. Logs warns on any failure, returns Skip.
+pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> PrefilterDecision {
+    use crate::cc::invocation::{ClaudeInvocation, OutputFormat, build_claude_command};
+
+    let prompt = build_prompt(&anchor);
+    let invocation = ClaudeInvocation {
+        mcp_config_path: None,
+        json_schema: Some(PREFILTER_SCHEMA_JSON.into()),
+        output_format: OutputFormat::Json,
+        model: Some(ctx.model.clone()),
+        max_budget_usd: None,
+        max_turns: Some(1),
+        resume_session_id: None,
+        new_session_id: None,
+        fork_session: false,
+        allowed_tools: vec![],
+        disallowed_tools: vec![],
+        extra_args: crate::cc::invocation::disable_all_tools_args(),
+        prompt: Some(prompt),
+        debug_flag: None,
+    };
+    let args = invocation.into_args();
+    let mut cmd = build_claude_command(
+        &args,
+        &ctx.agent_dir,
+        ctx.ssh_config_path.as_deref(),
+        ctx.resolved_sandbox.as_deref(),
+    );
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let output = match tokio::time::timeout(PREFILTER_TIMEOUT, cmd.output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                "prefilter spawn failed: {e:#}"
+            );
+            return PrefilterDecision::Skip;
+        }
+        Err(_) => {
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                "prefilter timed out after {}s",
+                PREFILTER_TIMEOUT.as_secs()
+            );
+            return PrefilterDecision::Skip;
+        }
+    };
+
+    if !output.status.success() {
+        tracing::warn!(
+            agent = %ctx.agent_name,
+            status = ?output.status,
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "prefilter non-zero exit"
+        );
+        return PrefilterDecision::Skip;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    // Record usage event. Zero-signal results still cost money and must be visible.
+    if let Some(b) = crate::cc::stream::parse_usage_full(&stdout)
+        && let Ok(conn) = right_db::open_connection(&ctx.agent_db_dir, false)
+        && let Err(e) = right_agent::usage::insert::insert_learning_prefilter(
+            &conn,
+            &b,
+            ctx.chat_id,
+            ctx.thread_id,
+        )
+    {
+        tracing::warn!(agent = %ctx.agent_name, "prefilter usage insert failed: {e:#}");
+    }
+
+    parse_output(&stdout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
