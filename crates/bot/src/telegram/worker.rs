@@ -20,7 +20,9 @@ use uuid::Uuid;
 
 use crate::cc::markdown_utils::{html_escape, strip_html_tags};
 pub use crate::cc::worker_reply::{ReplyOutput, parse_reply_output};
-use crate::cc::worker_reply::{append_used_skill_receipts, should_accept_bootstrap};
+use crate::cc::worker_reply::{
+    append_used_skill_receipts, is_rightx_skill, should_accept_bootstrap,
+};
 use crate::reflection::FailureKind;
 use right_agent::learned_skills::{
     NudgeSignalKind, NudgeSignalRecord, ReviewGateDecision, ReviewGateInput, ReviewStatus,
@@ -1222,6 +1224,8 @@ pub fn spawn_worker(
                 is_first_call,
                 reply_has_accepted_signal,
                 cc_prompt_mode,
+                cc_usage,
+                cc_wall_elapsed_ms,
             ) = match invoke_cc(
                 &input,
                 first_text,
@@ -1240,6 +1244,8 @@ pub fn spawn_worker(
                     is_first_call,
                     reply_has_accepted_signal,
                     prompt_mode,
+                    usage,
+                    wall_elapsed_ms,
                 }) => (
                     Ok(output),
                     session_uuid,
@@ -1247,6 +1253,8 @@ pub fn spawn_worker(
                     is_first_call,
                     reply_has_accepted_signal,
                     Some(prompt_mode),
+                    usage,
+                    wall_elapsed_ms,
                 ),
                 Err(failure) => {
                     let uuid = match &failure {
@@ -1260,7 +1268,16 @@ pub fn spawn_worker(
                     // reply, so the bootstrap welcome photo should not fire.
                     // Auth-error recovery deactivates the session, so a
                     // subsequent retry sees is_first_call=true again.
-                    (Err(failure), uuid, None, false, false, None)
+                    (
+                        Err(failure),
+                        uuid,
+                        None,
+                        false,
+                        false,
+                        None,
+                        crate::cc::stream::StreamUsage::default(),
+                        0u64,
+                    )
                 }
             };
 
@@ -1339,13 +1356,17 @@ pub fn spawn_worker(
                         output.content,
                         output.used_skill_receipts.as_deref(),
                     );
+                    // Collect rightx skill names used this turn (deduplicated).
+                    let mut used_skill_names: std::collections::BTreeSet<String> =
+                        Default::default();
                     if let Some(receipts) = output.used_skill_receipts.as_deref() {
                         let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
                         let usage_path = ctx.agent_dir.join(".claude/skills/.usage.json");
                         for receipt in receipts {
-                            if !receipt.package_name.starts_with("rightx-") {
+                            if !is_rightx_skill(&receipt.package_name) {
                                 continue;
                             }
+                            used_skill_names.insert(receipt.package_name.clone());
                             if let Err(e) = crate::lifecycle::usage::bump_use(
                                 &usage_path,
                                 &receipt.package_name,
@@ -1477,10 +1498,10 @@ pub fn spawn_worker(
                             captured_at: chrono::Utc::now(),
                             chat_id,
                             thread_id: eff_thread_id,
-                            num_turns: 0,        // Task 7 will wire from StreamUsage
-                            total_cost_usd: 0.0, // Task 7 will wire from StreamUsage
-                            wall_elapsed_ms: 0,  // Task 7 will wire actual measurement
-                            used_skill_receipts: Vec::new(), // Task 7 will wire actual receipts
+                            num_turns: cc_usage.num_turns,
+                            total_cost_usd: cc_usage.cost_usd,
+                            wall_elapsed_ms: cc_wall_elapsed_ms,
+                            used_skill_receipts: used_skill_names.into_iter().collect::<Vec<_>>(),
                         });
                     } else {
                         tracing::warn!(?key, "CC returned content: null -- no text reply sent");
@@ -2173,6 +2194,10 @@ pub(crate) struct CcReply {
     pub(crate) reply_has_accepted_signal: bool,
     /// Prompt mode used for this invocation. Fork-probe runs only for `Normal`.
     pub(crate) prompt_mode: crate::cc::prompt::PromptMode,
+    /// Usage stats extracted from the CC `result` event.
+    pub(crate) usage: crate::cc::stream::StreamUsage,
+    /// Wall-clock elapsed ms from CC spawn to result event (or process exit).
+    pub(crate) wall_elapsed_ms: u64,
 }
 
 #[derive(Debug)]
@@ -3672,6 +3697,7 @@ async fn invoke_cc(
         }
     }
 
+    let turn_started_at = std::time::Instant::now();
     let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Ok(child) => child,
         Err(e) => {
@@ -3887,6 +3913,8 @@ async fn invoke_cc(
                                         breakdown.api_key_source = api_key_source
                                             .clone()
                                             .unwrap_or_else(|| "none".into());
+                                        breakdown.wall_elapsed_ms =
+                                            Some(turn_started_at.elapsed().as_millis() as u64);
                                         if let Err(e) =
                                             right_agent::usage::insert::insert_interactive(
                                                 &conn,
@@ -4280,6 +4308,8 @@ async fn invoke_cc(
             is_first_call,
             reply_has_accepted_signal: false,
             prompt_mode,
+            usage: usage.clone(),
+            wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
         });
     }
 
@@ -4364,6 +4394,8 @@ async fn invoke_cc(
                         is_first_call,
                         reply_has_accepted_signal: false,
                         prompt_mode,
+                        usage: usage.clone(),
+                        wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                     });
                 } else {
                     // Token request already running — silent, don't spam.
@@ -4374,6 +4406,8 @@ async fn invoke_cc(
                         is_first_call,
                         reply_has_accepted_signal: false,
                         prompt_mode,
+                        usage: usage.clone(),
+                        wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                     });
                 }
             } else {
@@ -4405,6 +4439,8 @@ async fn invoke_cc(
                         is_first_call,
                         reply_has_accepted_signal: false,
                         prompt_mode,
+                        usage: usage.clone(),
+                        wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                     });
                 } else {
                     return Ok(CcReply {
@@ -4414,6 +4450,8 @@ async fn invoke_cc(
                         is_first_call,
                         reply_has_accepted_signal: false,
                         prompt_mode,
+                        usage: usage.clone(),
+                        wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                     });
                 }
             }
@@ -4577,6 +4615,8 @@ async fn invoke_cc(
                 is_first_call,
                 reply_has_accepted_signal,
                 prompt_mode,
+                usage,
+                wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
             })
         }
         Err(reason) => {

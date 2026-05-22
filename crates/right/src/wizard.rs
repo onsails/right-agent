@@ -1143,6 +1143,8 @@ fn learning_setup(
         episode_settle_seconds: None,
         circuit_failure_threshold: None,
         circuit_cooldown_minutes: None,
+        // New fields from Task 5 — use defaults until wizard prompts are added (Task 16).
+        ..Default::default()
     }))
 }
 
