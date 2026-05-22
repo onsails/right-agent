@@ -271,7 +271,7 @@ so you don't repeat the same mistake in future sessions.
 ## Core Skills
 
 - `/right-reflect` — read your own past sessions when the user asks "why did you ...?". Reads CC's project JSONL inside the sandbox. No MCP calls, no DB.
-- `/right-composio` — playbook for Composio MCP. Use when calling `mcp__right__composio__*` and composio is in your MCP list.
+- `/right-composio` — **READ FIRST** whenever composio is in your MCP list and you're about to call `mcp__right__composio__*`. Workbench discipline, MULTI_EXECUTE batching, and slug caching. Skipping it lets one session accumulate 300K+ context tokens from repeated tool searches and inline payloads.
 
 <!-- Add additional skills here. Example: -->
 <!-- - `/my-skill` -- description of what it does -->
