@@ -146,14 +146,16 @@ fn insert_row(
             input_tokens, output_tokens,
             cache_creation_tokens, cache_read_tokens,
             web_search_requests, web_fetch_requests,
-            model_usage_json, api_key_source
+            model_usage_json, api_key_source,
+            wall_elapsed_ms
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5,
             ?6, ?7, ?8,
             ?9, ?10,
             ?11, ?12,
             ?13, ?14,
-            ?15, ?16
+            ?15, ?16,
+            ?17
          )",
         params![
             ts,
@@ -172,6 +174,7 @@ fn insert_row(
             b.web_fetch_requests as i64,
             b.model_usage_json,
             b.api_key_source,
+            b.wall_elapsed_ms.map(|v| v as i64),
         ],
     )?;
     Ok(())
@@ -196,6 +199,7 @@ mod tests {
             web_fetch_requests: 2,
             model_usage_json: r#"{"claude-sonnet-4-6":{"costUSD":0.05}}"#.into(),
             api_key_source: "none".into(),
+            wall_elapsed_ms: None,
         }
     }
 
@@ -422,5 +426,38 @@ mod tests {
         assert_eq!(source, "learning_curator");
         assert_eq!(chat_id, None);
         assert_eq!(thread_id, None);
+    }
+
+    #[test]
+    fn insert_threads_wall_elapsed_ms_when_set() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        let mut b = sample_breakdown();
+        b.wall_elapsed_ms = Some(12345);
+        insert_interactive(&conn, &b, 1, 0).unwrap();
+
+        let elapsed: Option<i64> = conn
+            .query_row(
+                "SELECT wall_elapsed_ms FROM usage_events LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(elapsed, Some(12345));
+    }
+
+    #[test]
+    fn insert_keeps_wall_elapsed_ms_null_when_none() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_learning_curator(&conn, &sample_breakdown()).unwrap();
+        let elapsed: Option<i64> = conn
+            .query_row(
+                "SELECT wall_elapsed_ms FROM usage_events LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(elapsed, None);
     }
 }
