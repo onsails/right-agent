@@ -364,20 +364,53 @@ the final structured output is delivered.
 
 Required: `delivery` and `run_note`. `delivery.kind` is always `"notify"` and `delivery.content` has `minLength: 1`; silent output is forbidden.
 
-### FORK_PROBE_SCHEMA_JSON (post-turn fork-probe)
+### PREFILTER_SCHEMA_JSON (per-turn Haiku classifier)
 
-Required: `workflow_complete` (boolean). Optional nullable `learning_signal`
-and `skill_issue_signal` mirror the `reply-schema.json` shapes verbatim
-(same enum values, same required nested fields, `event_refs.minItems: 1`).
+Required: `should_probe` (boolean) and `reason` (string). Defined in
+`bot::learning_prefilter::PREFILTER_SCHEMA_JSON`.
 
-The fork-probe is a `claude -p --resume <main> --fork-session --tools ""
---max-turns 1 --output-format json` invocation fired async after each
-foreground reply when the agent did not self-emit a signal in its
-structured reply. Non-null signals are persisted to `skill_nudge_signals`
-with `source = 'fork_probe'`. The probe inherits the main session
-transcript via fork (cache-read pricing) and never invokes a tool.
-Constants are `right_codegen::FORK_PROBE_SCHEMA_JSON` and
-`right_codegen::FORK_PROBE_PROMPT`.
+The prefilter is a `claude -p --tools "" --max-turns 1 --output-format json
+--json-schema PREFILTER_SCHEMA_JSON` invocation fired async after each
+foreground reply (default model `claude-haiku-4-5-20251001`). Its
+`should_probe` decision gates the downstream probe-writer fork.
+
+### PROBE_WRITER_ANCHOR_TEMPLATE + PROBE_WRITER_INSTRUCTIONS (post-turn probe-writer)
+
+The probe-writer is a session-bearing `claude -p --resume <main>
+--fork-session --session-id <new> --allowedTools Write,Read,Bash,
+mcp__right__skill_learning_start,mcp__right__skill_learning_finish
+--max-turns 16 --output-format stream-json` invocation fired when the
+prefilter votes `Probe`. The first user message wraps the captured
+`<probe_writer_anchor>` (verbatim user_msg_text + assistant_reply_text)
+plus the class-first guidance in `PROBE_WRITER_INSTRUCTIONS` plus the
+agent's current `rightx-*` skill index. The writer either calls
+`mcp__right__skill_learning_start` + writes a SKILL.md +
+`mcp__right__skill_learning_finish`, or exits silently. Constants are
+`right_codegen::PROBE_WRITER_ANCHOR_TEMPLATE` and
+`right_codegen::PROBE_WRITER_INSTRUCTIONS`.
+
+### CURATOR_SYSTEM_PROMPT (periodic skill curator)
+
+The curator is a fresh-session (no `--resume`) `claude -p --session-id <new>
+--allowedTools Read,Bash,mcp__right__skill_learning_start,
+mcp__right__skill_learning_finish --max-turns 9999 --output-format
+stream-json` invocation fired by the per-agent ticker when the gate fires
+(see `bot::learning_curator::should_run_now`). The first user message is
+`CURATOR_SYSTEM_PROMPT` followed by an `<inventory>` block listing
+agent-created (`probe_writer` / `curator`) `rightx-*` skills with their
+state, use_count, patch_count, and pinned flag. The curator consolidates
+duplicates by merging into an umbrella, creating a new umbrella, or
+demoting to references — and archives originals with `absorbed_into`.
+It NEVER deletes a skill. Constant is `right_codegen::CURATOR_SYSTEM_PROMPT`.
+
+### `used_skill_receipts` (required in REPLY_SCHEMA_JSON)
+
+Every reply MUST include `used_skill_receipts` (array, possibly empty).
+Each entry has `package_name` (pattern `^rightx-`) and `message`
+(minLength 1). The worker filters non-rightx package_names and renders
+each entry as `\n\n💡 <message> (<code><package_name></code>)` after the
+assistant's content, and bumps `use_count` + `last_used_at` for the named
+skill in `<agent>/.claude/skills/.usage.json`.
 
 ## MCP Server Instructions
 
@@ -442,21 +475,20 @@ move skill files from sandbox to host. The active agent writes skill package
 files under `.claude/skills/<skill_name>/`. Create and update both require
 `rightx-*` skill package names.
 
-Post-turn fork-probe is the primary learning-signal detector. After every
-successful foreground reply, the worker spawns a fork of the main session that
-classifies the just-finished turn against `FORK_PROBE_SCHEMA_JSON` and persists
-any non-null `learning_signal` / `skill_issue_signal` to `skill_nudge_signals`
-with `source = 'fork_probe'`. The probe runs only when the agent did NOT
-self-emit a signal in its structured reply (`source = 'reply_field'` covers
-the self-emit case). Probe uses the agent's main model by default
-(`learning.probe_model: ~`) to keep prompt cache warm; override is available
-per agent.
+Per-turn skill-learning pipeline (the prior fork-probe is removed): after
+every successful foreground reply, the worker runs a Haiku prefilter against
+the captured anchor. On `should_probe == true` the worker forks the main
+session as a tool-whitelisted probe-writer (max_turns 16) that either
+writes a new `rightx-*` SKILL.md or patches an existing one. A periodic
+per-agent curator ticker independently applies lifecycle transitions to
+`<agent>/.claude/skills/.usage.json` and forks a fresh CC session with
+`CURATOR_SYSTEM_PROMPT` for consolidation work. See `ARCHITECTURE.md` for
+the full per-turn + curator pipeline diagram.
 
-Deprecated Stage 2 background learned-skill review is report-only and OFF by
-default (`learning.background_review_enabled: false`). When enabled, the
-selector and reviewer invocations pass `--tools ""`, omit MCP config, and
-receive only prompt-supplied selected context plus the prebuilt `rightx-*`
-skill index. The reviewer may record high-confidence create/update candidates
+Deprecated Stage 2 background learned-skill review (selector/reviewer with
+`background_review_enabled`) is no longer wired into the runtime. The
+field is accepted as `Option<bool>` for backward-compatibility but
+silently ignored. The reviewer may record high-confidence create/update candidates
 from a selected learning episode, but it must not create, patch, archive, or
 delete skill package files. It does not expose or call
 `mcp__right__skill_learning_start` or

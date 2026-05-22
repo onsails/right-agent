@@ -173,22 +173,44 @@ Session-bearing `claude -p` invocations get a composite system prompt via
 Prompt caching is critical — avoid per-message tool calls to read
 identity files.
 
-Post-turn fork-probe (`crates/bot/src/learning_probe.rs`) is the primary
-mechanism for learning-signal detection. After each foreground reply, the
-worker spawns a fire-and-forget `claude -p --resume <main> --fork-session
---tools "" --max-turns 1 --output-format json --json-schema FORK_PROBE_SCHEMA_JSON`
-invocation that classifies whether the just-finished turn contains a
-learnable signal the agent failed to self-emit. Non-null outputs are persisted
-to `skill_nudge_signals` with `source = 'fork_probe'`.
+Per-turn skill-learning pipeline (replaces the prior fork-probe classifier):
+
+1. **Anchor capture** (`bot::telegram::worker`): after the foreground assistant
+   reply is sent, the worker captures a `ProbeAnchor`
+   (user_msg_text, assistant_reply_text, main_session_uuid, captured_at,
+   chat_id, thread_id) for downstream consumption.
+2. **Prefilter** (`bot::learning_prefilter`): a Haiku classifier (default
+   `claude-haiku-4-5-20251001`) decides `should_probe` from the anchor text only,
+   with `--tools ""` and `--output-format json`. Cheap and bounded; logs/usage
+   tracked as source `learning_prefilter`.
+3. **Probe-writer** (`bot::learning_probe_writer`): when the prefilter votes
+   `Probe`, the worker forks the main CC session with `--fork-session --resume
+   <main> --session-id <new>` and a tool-whitelisted invocation
+   (Write/Read/Bash + `mcp__right__skill_learning_{start,finish}`) at
+   `--max-turns 16`. The probe-writer surveys existing `rightx-*` skills and
+   either creates a new one, patches an existing one, or exits silently. Session
+   mutex on the main session UUID is held only until the `system/init`
+   handshake; then the writer detaches. Usage tracked as `learning_probe_writer`.
+4. **Curator** (`bot::learning_curator`): a periodic per-agent ticker
+   (60s tick, gated by `curator_interval_hours` / `curator_min_idle_hours`)
+   takes a `.claude/skills/` tar.gz snapshot, applies pure-Rust lifecycle
+   transitions (`active`/`stale`/`archived` based on `last_used_at` /
+   `last_patched_at`), and forks a CC session with `CURATOR_SYSTEM_PROMPT` to
+   consolidate near-duplicates (merge into umbrella, demote into `references/`,
+   archive originals with `absorbed_into`). The curator never deletes — only
+   archives. Usage tracked as `learning_curator`.
+
+Lifecycle state lives in host-side `<agent>/.claude/skills/.usage.json` and is
+written atomically (tempfile + rename + `fs4` advisory lock). The schema is
+authored by `bot::lifecycle::usage` and mirrored read-only by
+`right::skill_lifecycle` for the MCP backend's `skill_learning_finish` hook.
 
 Stage 2 background selector/reviewer (`crates/bot/src/learning_episode.rs`,
-`crates/bot/src/learning_review.rs`) is deprecated behind
-`learning.background_review_enabled` (default `false`). When enabled, those
-invocations remain explicit exceptions: report-only JSON with no session
-resume/fork, no MCP config, no composite system prompt, and `--tools ""`. They
-receive only prompt-supplied selected context and the prebuilt `rightx-*` skill
-index. Candidate evidence must cite at least one selected primary `msg:*` or
-non-thinking `exec:*` ref; thinking-only and low-trust-only evidence is rejected.
+`crates/bot/src/learning_review.rs`) is deprecated; legacy fields
+(`fork_probe_enabled`, `background_review_enabled`, `episode_settle_seconds`,
+`circuit_*`, `probe_model`) in `agent.yaml` are accepted and silently warned
+about by `LearningConfig::warn_on_deprecated`. New deployments configure
+`prefilter_*` / `probe_writer_*` / `curator_*` via the `right config` wizard.
 
 See `PROMPT_SYSTEM.md` for full documentation.
 
@@ -205,16 +227,21 @@ omitted):
 - `--output-format <stream-json|json>` (`--verbose` auto-added for `stream-json` only)
 - `--json-schema <schema>` — structured output
 
-The post-turn fork-probe IS session-bearing — it forks the main session
+The post-turn probe-writer fork IS session-bearing — it forks the main session
 (`--fork-session --resume <main>`) so it can preserve `--mcp-config` +
 `--strict-mcp-config` and inherit the transcript via prompt cache. Tools are
-neutralised at runtime via `--tools ""`.
+narrowed at runtime via `--allowedTools Write,Read,Bash,
+mcp__right__skill_learning_start,mcp__right__skill_learning_finish`.
 
-Deprecated Stage 2 selector/reviewer calls are not session-bearing and
-intentionally omit `--mcp-config` / `--strict-mcp-config`; they pass
-`--tools ""` to disable every Claude Code tool and depend only on
-prompt-supplied context. They run only when
-`learning.background_review_enabled = true`.
+The Haiku prefilter and the periodic curator are independent CC invocations.
+The prefilter is non-session-bearing (`--tools ""`, JSON schema). The curator
+forks a fresh session (no `--resume`) with the curator system prompt and a
+narrow tool whitelist.
+
+Deprecated Stage 2 selector/reviewer calls (when `background_review_enabled`
+was set) were not session-bearing and intentionally omitted `--mcp-config` /
+`--strict-mcp-config`. That path no longer ships; the field is silently
+ignored.
 
 **Optional per-callsite:**
 - `--model` — override default model
@@ -317,47 +344,43 @@ path — in-flight CC subprocesses keep their old flags; the next invocation
 in any chat picks up the new value. Adding more hot-reloadable fields
 requires extending the diff in `crates/bot/src/config_watcher.rs::diff_classify`.
 
-### Learning review gate
+### Skill learning loop
 
-`try_mark_review_started` (`crates/right-agent/src/learned_skills.rs`) is the
-shared gate for the deprecated Stage 2 selector/reviewer
-(`crates/bot/src/learning_episode.rs`) and worker-side skill review
-(`crates/bot/src/telegram/worker.rs`). Only active when
-`learning.background_review_enabled = true`. The gate enforces, in order:
+The skill-learning pipeline replaces the deprecated Stage 2 reviewer with a
+per-turn writer + periodic curator. Two independent gates run today:
 
-- `Skip(AlreadyRunning)` — `skill_nudge_state.review_running = 1`.
-- `Skip(CircuitOpen)` — `consecutive_review_failures >= circuit_failure_threshold`
-  opened `review_circuit_open_until` in the future. Window auto-clears
-  (`consecutive_review_failures = 0`, `review_circuit_open_until = NULL`)
-  before the budget check when the open-until time is now in the past.
-- `Skip(DailyBudget)` — `SUM(usage_events.total_cost_usd)` for today UTC
-  across `right_agent::usage::LEARNING_SOURCES`
-  (`learning_selector`, `learning_reviewer`, `learning_skill_review`,
-  `learning_fork_probe`) is at or above `LearningConfig.max_daily_budget_usd`
-  (default $5).
+1. **Prefilter + probe-writer gate** (per turn, in worker): runs only when the
+   prefilter is enabled, the foreground turn was a Normal prompt mode, and
+   today's spend across `right_agent::usage::LEARNING_SOURCES`
+   (`learning_selector`, `learning_reviewer`, `learning_skill_review`,
+   `learning_prefilter`, `learning_probe_writer`, `learning_curator`) is below
+   `LearningConfig.max_daily_budget_usd` (default $1.00). The prefilter's
+   `should_probe` decision gates the probe-writer fork. The session mutex on
+   the main session UUID prevents concurrent `--resume` against the same
+   transcript; the writer holds it only until its `system/init` handshake.
 
-The fork-probe path uses its own gate (`learning_probe::should_run_probe`,
-pure logic): `fork_probe_enabled` + foreground-only + `reply_has_signal == false`
-+ today's spend across `LEARNING_SOURCES` below budget. The two gates share the
-same daily-budget pool but are otherwise independent.
+2. **Curator gate** (periodic, agent ticker, pure logic in
+   `bot::learning_curator::should_run_now`):
+   `enabled` + `!paused` + `last_run_at + interval_hours <= now` +
+   (no chat activity within `min_idle_hours`). First-ever runs seed
+   `last_run_at` and defer one interval (Hermes pattern).
 
-Failure paths call `record_review_failure` which increments the counter and
-opens the circuit on the threshold-crossing call. The bot fires a one-shot
-`learning_circuit_open` Telegram alert (24h dedup via the shared
-`memory_alerts` table) only on the closed→open transition. Success path
-(`mark_review_finished`) resets both columns. Adding a new learning-adjacent
-invocation requires extending `LEARNING_SOURCES` so both the gate query and
-the dashboard `SOURCES` array pick it up; the dashboard test
+`try_mark_review_started` and the legacy Stage 2 selector/reviewer have been
+removed from the runtime path; their gate fields (`circuit_failure_threshold`,
+`circuit_cooldown_minutes`) are kept as Option<u32> in the config for
+backward-compatibility and silently ignored.
+
+Adding a new learning-adjacent invocation requires extending
+`right_agent::usage::LEARNING_SOURCES` so both the budget gate and the
+dashboard `SOURCES` array pick it up; the dashboard test
 (`usage_overview_sources_match_learning_sources_constant`) enforces sync via
 a dev-dep cross-crate assertion.
 
-`skill_nudge_signals.source` records where each accepted learning signal
-originated: `reply_field` (agent emitted in structured reply) or `fork_probe`
-(post-turn classifier emitted). The dashboard widget
-`signals_by_source_24h` reads both and additionally counts
-`skill_review_reports` rows with `status IN ('create_candidate',
-'update_candidate')` as `background_review` so legacy-path counts remain
-visible while the Stage 2 deprecation lands.
+Skill lifecycle state (`<agent>/.claude/skills/.usage.json`) is the host-side
+source of truth for active/stale/archived status, `created_by` provenance
+(foreground / probe_writer / curator / bundled), and the operator pin flag.
+The dashboard `skill_lifecycle_overview` route reads from this file directly
+— no SQL involved.
 
 ### Memory
 
