@@ -225,6 +225,21 @@ fn schedule_user_turn_mcp_repair(
     });
 }
 
+/// Captured user-message + assistant-reply pair at the end of a foreground
+/// turn. Consumed by the per-turn learning pipeline (prefilter → probe-writer).
+///
+/// Spec: docs/superpowers/specs/2026-05-22-skill-learning-writer-curator-design.md
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct ProbeAnchor {
+    pub user_msg_text: String,
+    pub assistant_reply_text: String,
+    pub main_session_uuid: String,
+    pub captured_at: DateTime<Utc>,
+    pub chat_id: i64,
+    pub thread_id: i64,
+}
+
 /// A single Telegram message queued into the debounce channel.
 #[derive(Clone)]
 pub struct DebounceMsg {
@@ -1431,6 +1446,17 @@ pub fn spawn_worker(
                                 content.clone(),
                             );
                         }
+
+                        // Capture probe anchor for the post-turn learning pipeline
+                        // (consumed by Task 18 worker integration).
+                        let _probe_anchor = ProbeAnchor {
+                            user_msg_text: input.clone(),
+                            assistant_reply_text: content.clone(),
+                            main_session_uuid: session_uuid.clone(),
+                            captured_at: chrono::Utc::now(),
+                            chat_id,
+                            thread_id: eff_thread_id,
+                        };
                     } else {
                         tracing::warn!(?key, "CC returned content: null -- no text reply sent");
                     }
