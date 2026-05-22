@@ -225,8 +225,9 @@ fn schedule_user_turn_mcp_repair(
     });
 }
 
-/// Captured user-message + assistant-reply pair at the end of a foreground
-/// turn. Consumed by the per-turn learning pipeline (prefilter → probe-writer).
+/// Snapshot of one foreground turn, captured after the assistant reply was
+/// sent. Consumed by the prefilter and (if it returns non-Skip) the
+/// probe-writer.
 ///
 /// Spec: docs/superpowers/specs/2026-05-22-skill-learning-writer-curator-design.md
 #[derive(Debug, Clone)]
@@ -238,6 +239,15 @@ pub(crate) struct ProbeAnchor {
     pub captured_at: DateTime<Utc>,
     pub chat_id: i64,
     pub thread_id: i64,
+    /// num_turns from the foreground CC `result` event.
+    pub num_turns: u32,
+    /// total_cost_usd from the foreground CC `result` event.
+    pub total_cost_usd: f64,
+    /// Wall-clock from CC spawn to result event in milliseconds.
+    pub wall_elapsed_ms: u64,
+    /// `rightx-<slug>` skill names the foreground turn used (extracted from
+    /// `mcp__right__use_skill` tool calls in the stream).
+    pub used_skill_receipts: Vec<String>,
 }
 
 /// A single Telegram message queued into the debounce channel.
@@ -1467,6 +1477,10 @@ pub fn spawn_worker(
                             captured_at: chrono::Utc::now(),
                             chat_id,
                             thread_id: eff_thread_id,
+                            num_turns: 0,        // Task 7 will wire from StreamUsage
+                            total_cost_usd: 0.0, // Task 7 will wire from StreamUsage
+                            wall_elapsed_ms: 0,  // Task 7 will wire actual measurement
+                            used_skill_receipts: Vec::new(), // Task 7 will wire actual receipts
                         });
                     } else {
                         tracing::warn!(?key, "CC returned content: null -- no text reply sent");
