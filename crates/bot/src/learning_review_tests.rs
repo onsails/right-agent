@@ -847,3 +847,78 @@ fn stream_event_timeline_keeps_recent_events_from_append_only_log() {
 fn bounded_text_strips_nul_bytes() {
     assert_eq!(bounded_text("ab\0cd", 100, "..."), "abcd");
 }
+
+#[test]
+fn render_skill_index_summary_outputs_one_line_per_skill() {
+    let skills = vec![
+        LearnedSkillSummary {
+            name: "rightx-a".into(),
+            excerpt: "---\nname: rightx-a\ndescription: Does the A thing\n---\nbody".into(),
+        },
+        LearnedSkillSummary {
+            name: "rightx-b".into(),
+            excerpt:
+                "---\nname: rightx-b\ndescription: Multi-line desc first\nmore desc here\n---\nbody"
+                    .into(),
+        },
+    ];
+    let s = render_skill_index_summary(&skills);
+    assert!(s.contains("rightx-a: Does the A thing"), "got: {s}");
+    assert!(s.contains("rightx-b: Multi-line desc first"), "got: {s}");
+    // Must not bleed second description line into output
+    assert!(!s.contains("more desc here"), "got: {s}");
+    // Two lines, one per skill
+    assert_eq!(s.trim_end_matches('\n').lines().count(), 2);
+}
+
+#[test]
+fn render_skill_index_summary_truncates_long_description() {
+    let long_desc = "x".repeat(200);
+    let skills = vec![LearnedSkillSummary {
+        name: "rightx-long".into(),
+        excerpt: format!("description: {long_desc}"),
+    }];
+    let s = render_skill_index_summary(&skills);
+    let line = s.trim();
+    // "- rightx-long: " is 17 chars; description truncated to 120 chars
+    let desc_part = line.strip_prefix("- rightx-long: ").unwrap();
+    assert_eq!(desc_part.chars().count(), 120, "got: {s}");
+}
+
+#[test]
+fn render_skill_index_summary_falls_back_to_first_line_when_no_description_field() {
+    let skills = vec![LearnedSkillSummary {
+        name: "rightx-nodesc".into(),
+        excerpt: "# Some Header\nSome body text".into(),
+    }];
+    let s = render_skill_index_summary(&skills);
+    assert!(s.contains("rightx-nodesc: # Some Header"), "got: {s}");
+}
+
+#[test]
+fn render_skill_index_summary_empty_slice_returns_empty_string() {
+    let s = render_skill_index_summary(&[]);
+    assert!(s.is_empty());
+}
+
+#[test]
+fn extract_skill_description_ignores_description_outside_frontmatter() {
+    // The YAML frontmatter has no `description:` field; the body prose does.
+    // The function must NOT pick up the body `description:`.
+    let excerpt =
+        "---\nname: rightx-foo\n---\n\nSome body text\ndescription: this is not the description\n";
+    let skills = vec![LearnedSkillSummary {
+        name: "rightx-foo".into(),
+        excerpt: excerpt.into(),
+    }];
+    let s = render_skill_index_summary(&skills);
+    assert!(
+        !s.contains("this is not the description"),
+        "body description leaked into summary: {s}"
+    );
+    // Fallback must have used the first non-empty body line instead.
+    assert!(
+        s.contains("rightx-foo"),
+        "skill name missing from summary: {s}"
+    );
+}

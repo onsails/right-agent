@@ -613,6 +613,50 @@ pub(crate) fn bounded_text(value: &str, max_chars: usize, suffix: &str) -> Strin
     out
 }
 
+/// One-line-per-skill projection of a `LearnedSkillSummary` slice.
+/// Each line is `- <name>: <description>`. The description is extracted from
+/// the SKILL.md frontmatter `description:` field in `excerpt`; if not found,
+/// the first non-empty, non-fence line of `excerpt` is used instead. In both
+/// cases only the first 120 chars of the first line are kept.
+pub(crate) fn render_skill_index_summary(skills: &[LearnedSkillSummary]) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    for sk in skills {
+        let desc_line = extract_skill_description(&sk.excerpt)
+            .chars()
+            .take(120)
+            .collect::<String>();
+        let _ = writeln!(s, "- {name}: {desc_line}", name = sk.name);
+    }
+    s
+}
+
+/// Extract the `description:` value from SKILL.md frontmatter text, or fall
+/// back to the first non-empty, non-fence line.
+fn extract_skill_description(excerpt: &str) -> &str {
+    const DESCRIPTION_PREFIX: &str = "description:";
+    // Only search for `description:` inside the YAML frontmatter block.
+    let mut lines = excerpt.lines();
+    if lines.next().is_some_and(|l| l.trim() == "---") {
+        for line in lines.by_ref() {
+            if line.trim() == "---" {
+                break;
+            }
+            if let Some(rest) = line.strip_prefix(DESCRIPTION_PREFIX) {
+                return rest.trim();
+            }
+        }
+    }
+    // Fallback: first non-empty, non-fence, non-code-fence line in the body.
+    for line in excerpt.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && trimmed != "---" && !trimmed.starts_with("```") {
+            return trimmed;
+        }
+    }
+    ""
+}
+
 pub(crate) fn collect_host_rightx_skill_index(
     agent_dir: &Path,
 ) -> std::io::Result<Vec<LearnedSkillSummary>> {
