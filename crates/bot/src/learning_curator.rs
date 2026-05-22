@@ -4,9 +4,13 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CuratorState {
     pub last_run_at: Option<String>,
+    pub last_run_status: Option<String>,
+    pub consecutive_failures: u32,
+    pub circuit_open_until: Option<String>,
+    pub last_spike_evidence_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,26 +74,87 @@ use crate::telegram::SessionLocks;
 const CURATOR_TIMEOUT: StdDuration = StdDuration::from_secs(900);
 const CURATOR_MAX_TURNS: u32 = 9999;
 
+// File-based state helpers — superseded by load_state_db/save_state_db.
+// Callers in run_if_due are migrated in Task 15; kept here to keep build green.
+#[allow(dead_code)]
 pub(crate) fn state_path(agent_dir: &Path) -> PathBuf {
     agent_dir.join(".claude/skills/.curator_state.json")
 }
 
+#[allow(dead_code)]
 pub(crate) fn load_state(path: &Path) -> CuratorState {
     std::fs::read_to_string(path)
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .and_then(|s| serde_json::from_str::<LegacyCuratorState>(&s).ok())
+        .map(|l| CuratorState {
+            last_run_at: l.last_run_at,
+            ..Default::default()
+        })
         .unwrap_or_default()
 }
 
+#[allow(dead_code)]
 pub(crate) fn save_state(path: &Path, state: &CuratorState) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("tmp");
-    let body = serde_json::to_vec_pretty(state)
+    let legacy = LegacyCuratorState {
+        last_run_at: state.last_run_at.clone(),
+    };
+    let body = serde_json::to_vec_pretty(&legacy)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, path)
+}
+
+/// Minimal on-disk representation used by the legacy file-based helpers.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LegacyCuratorState {
+    last_run_at: Option<String>,
+}
+
+pub(crate) fn load_state_db(conn: &rusqlite::Connection) -> Result<CuratorState, rusqlite::Error> {
+    let row = conn.query_row(
+        "SELECT last_run_at, last_run_status, consecutive_failures, \
+                circuit_open_until, last_spike_evidence_json \
+         FROM curator_state WHERE agent_singleton_id = 1",
+        [],
+        |r| {
+            Ok(CuratorState {
+                last_run_at: r.get(0)?,
+                last_run_status: r.get(1)?,
+                consecutive_failures: r.get::<_, i64>(2)? as u32,
+                circuit_open_until: r.get(3)?,
+                last_spike_evidence_json: r.get(4)?,
+            })
+        },
+    );
+    match row {
+        Ok(s) => Ok(s),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(CuratorState::default()),
+        Err(e) => Err(e),
+    }
+}
+
+pub(crate) fn save_state_db(
+    conn: &rusqlite::Connection,
+    state: &CuratorState,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT OR REPLACE INTO curator_state \
+            (agent_singleton_id, last_run_at, last_run_status, \
+             consecutive_failures, circuit_open_until, last_spike_evidence_json) \
+         VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            state.last_run_at,
+            state.last_run_status,
+            state.consecutive_failures as i64,
+            state.circuit_open_until,
+            state.last_spike_evidence_json,
+        ],
+    )?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +343,62 @@ fn render_candidate_list(index: &crate::lifecycle::usage::Index) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    fn open_test_conn() -> rusqlite::Connection {
+        let dir = tempdir().unwrap();
+        right_db::open_connection(dir.path(), true).unwrap()
+    }
+
+    #[test]
+    fn db_load_state_returns_default_when_empty() {
+        let conn = open_test_conn();
+        let s = load_state_db(&conn).unwrap();
+        assert!(s.last_run_at.is_none());
+        assert_eq!(s.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn db_save_then_load_round_trip() {
+        let conn = open_test_conn();
+        let s = CuratorState {
+            last_run_at: Some("2026-05-22T00:00:00Z".to_owned()),
+            last_run_status: Some("success".to_owned()),
+            consecutive_failures: 2,
+            circuit_open_until: None,
+            last_spike_evidence_json: Some(r#"{"trigger":"cost_spike"}"#.to_owned()),
+        };
+        save_state_db(&conn, &s).unwrap();
+        let loaded = load_state_db(&conn).unwrap();
+        assert_eq!(loaded, s);
+    }
+
+    #[test]
+    fn db_save_replaces_existing_row() {
+        let conn = open_test_conn();
+        save_state_db(
+            &conn,
+            &CuratorState {
+                last_run_at: Some("a".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        save_state_db(
+            &conn,
+            &CuratorState {
+                last_run_at: Some("b".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM curator_state", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let loaded = load_state_db(&conn).unwrap();
+        assert_eq!(loaded.last_run_at.as_deref(), Some("b"));
+    }
 
     fn cfg() -> CuratorConfig {
         CuratorConfig {
@@ -326,7 +447,10 @@ mod tests {
 
     #[test]
     fn first_run_defers_one_interval() {
-        let state = CuratorState { last_run_at: None };
+        let state = CuratorState {
+            last_run_at: None,
+            ..Default::default()
+        };
         assert_eq!(
             should_run_now(cfg(), &state, dt("2026-05-22T00:00:00Z"), None),
             CuratorGateDecision::SkipIntervalNotElapsed
@@ -337,6 +461,7 @@ mod tests {
     fn within_interval_skips() {
         let state = CuratorState {
             last_run_at: Some("2026-05-21T00:00:00Z".to_owned()),
+            ..Default::default()
         };
         assert_eq!(
             should_run_now(cfg(), &state, dt("2026-05-22T00:00:00Z"), None),
@@ -348,6 +473,7 @@ mod tests {
     fn after_interval_runs_when_idle() {
         let state = CuratorState {
             last_run_at: Some("2026-05-01T00:00:00Z".to_owned()),
+            ..Default::default()
         };
         assert_eq!(
             should_run_now(cfg(), &state, dt("2026-05-22T00:00:00Z"), None),
@@ -359,6 +485,7 @@ mod tests {
     fn chat_active_within_min_idle_skips() {
         let state = CuratorState {
             last_run_at: Some("2026-05-01T00:00:00Z".to_owned()),
+            ..Default::default()
         };
         let now = dt("2026-05-22T00:00:00Z");
         let just_now = now - Duration::minutes(30);
