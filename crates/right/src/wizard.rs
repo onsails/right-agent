@@ -1120,6 +1120,117 @@ fn learning_setup(
         "curator archive after days",
     )?;
 
+    // curator_cost_spike_k
+    let Some(curator_cost_spike_k_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new(
+            "curator cost-spike multiplier k (today's probe-writer cost >= k * baseline P50 → trigger):",
+        )
+        .with_default(&format!("{:.3}", existing.curator_cost_spike_k))
+        .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_cost_spike_k = parse_positive_finite_f64(
+        curator_cost_spike_k_input.trim(),
+        existing.curator_cost_spike_k,
+        "curator cost-spike multiplier k",
+    )?;
+
+    // curator_cost_spike_baseline_days
+    let Some(curator_cost_spike_baseline_days_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("curator cost-spike baseline window (days):")
+            .with_default(&existing.curator_cost_spike_baseline_days.to_string())
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_cost_spike_baseline_days = parse_u32_positive(
+        curator_cost_spike_baseline_days_input.trim(),
+        existing.curator_cost_spike_baseline_days,
+        "curator cost-spike baseline window days",
+    )?;
+
+    // curator_cost_spike_min_floor_usd
+    let Some(curator_cost_spike_min_floor_usd_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new(
+            "curator cost-spike absolute floor (USD; below this, spike never fires):",
+        )
+        .with_default(&format!("{:.3}", existing.curator_cost_spike_min_floor_usd))
+        .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_cost_spike_min_floor_usd = parse_positive_finite_f64(
+        curator_cost_spike_min_floor_usd_input.trim(),
+        existing.curator_cost_spike_min_floor_usd,
+        "curator cost-spike floor USD",
+    )?;
+
+    // curator_skill_change_threshold
+    let Some(curator_skill_change_threshold_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new(
+            "curator skill-change count threshold (new/patched skills since last run → trigger):",
+        )
+        .with_default(&existing.curator_skill_change_threshold.to_string())
+        .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_skill_change_threshold = parse_u32_positive(
+        curator_skill_change_threshold_input.trim(),
+        existing.curator_skill_change_threshold,
+        "curator skill-change count threshold",
+    )?;
+
+    // curator_min_cooldown_hours
+    let Some(curator_min_cooldown_hours_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("curator minimum cooldown (hours; blocks ALL triggers):")
+            .with_default(&existing.curator_min_cooldown_hours.to_string())
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_min_cooldown_hours = parse_u32_positive(
+        curator_min_cooldown_hours_input.trim(),
+        existing.curator_min_cooldown_hours,
+        "curator minimum cooldown hours",
+    )?;
+
+    // baseline_window_days
+    let Some(baseline_window_days_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("prefilter baseline window (days):")
+            .with_default(&existing.baseline_window_days.to_string())
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let baseline_window_days = parse_u32_positive(
+        baseline_window_days_input.trim(),
+        existing.baseline_window_days,
+        "prefilter baseline window days",
+    )?;
+
+    // baseline_min_sample
+    let Some(baseline_min_sample_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("prefilter baseline minimum sample size:")
+            .with_default(&existing.baseline_min_sample.to_string())
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let baseline_min_sample = parse_u32_positive(
+        baseline_min_sample_input.trim(),
+        existing.baseline_min_sample,
+        "prefilter baseline minimum sample size",
+    )?;
+
     Ok(Some(right_agent::agent::types::LearningConfig {
         prefilter_enabled,
         prefilter_model,
@@ -1133,6 +1244,13 @@ fn learning_setup(
         curator_archive_after_days,
         curator_paused: existing.curator_paused,
         max_daily_budget_usd,
+        curator_cost_spike_k,
+        curator_cost_spike_baseline_days,
+        curator_cost_spike_min_floor_usd,
+        curator_skill_change_threshold,
+        curator_min_cooldown_hours,
+        baseline_window_days,
+        baseline_min_sample,
         // Deprecated fields — leave at None.
         fork_probe_enabled: None,
         fork_probe_model: None,
@@ -1143,8 +1261,6 @@ fn learning_setup(
         episode_settle_seconds: None,
         circuit_failure_threshold: None,
         circuit_cooldown_minutes: None,
-        // New fields from Task 5 — use defaults until wizard prompts are added (Task 16).
-        ..Default::default()
     }))
 }
 
@@ -1189,6 +1305,19 @@ fn parse_u32_positive(input: &str, fallback: u32, label: &str) -> miette::Result
         .map_err(|e| miette::miette!("invalid {label}: {e}"))?;
     if v == 0 {
         return Err(miette::miette!("{label} must be > 0"));
+    }
+    Ok(v)
+}
+
+fn parse_positive_finite_f64(input: &str, fallback: f64, label: &str) -> miette::Result<f64> {
+    if input.is_empty() {
+        return Ok(fallback);
+    }
+    let v: f64 = input
+        .parse()
+        .map_err(|e| miette::miette!("invalid {label}: {e}"))?;
+    if !v.is_finite() || v <= 0.0 {
+        return Err(miette::miette!("{label} must be a positive finite number"));
     }
     Ok(v)
 }
@@ -1822,6 +1951,34 @@ fn update_agent_yaml_learning(
         "  curator_archive_after_days: {}",
         learning.curator_archive_after_days
     ));
+    lines.push(format!(
+        "  curator_cost_spike_k: {:.3}",
+        learning.curator_cost_spike_k
+    ));
+    lines.push(format!(
+        "  curator_cost_spike_baseline_days: {}",
+        learning.curator_cost_spike_baseline_days
+    ));
+    lines.push(format!(
+        "  curator_cost_spike_min_floor_usd: {:.3}",
+        learning.curator_cost_spike_min_floor_usd
+    ));
+    lines.push(format!(
+        "  curator_skill_change_threshold: {}",
+        learning.curator_skill_change_threshold
+    ));
+    lines.push(format!(
+        "  curator_min_cooldown_hours: {}",
+        learning.curator_min_cooldown_hours
+    ));
+    lines.push(format!(
+        "  baseline_window_days: {}",
+        learning.baseline_window_days
+    ));
+    lines.push(format!(
+        "  baseline_min_sample: {}",
+        learning.baseline_min_sample
+    ));
 
     let mut output = lines.join("\n");
     if !output.ends_with('\n') {
@@ -1952,6 +2109,60 @@ mod learning_yaml_tests {
     #[test]
     fn parse_u32_positive_parses_value() {
         assert_eq!(parse_u32_positive("168", 1, "test").unwrap(), 168);
+    }
+
+    #[test]
+    fn parse_positive_finite_f64_rejects_zero() {
+        assert!(parse_positive_finite_f64("0", 1.0, "test").is_err());
+    }
+
+    #[test]
+    fn parse_positive_finite_f64_rejects_negative() {
+        assert!(parse_positive_finite_f64("-1.5", 1.0, "test").is_err());
+    }
+
+    #[test]
+    fn parse_positive_finite_f64_rejects_inf() {
+        assert!(parse_positive_finite_f64("inf", 1.0, "test").is_err());
+    }
+
+    #[test]
+    fn parse_positive_finite_f64_empty_returns_fallback() {
+        let v = parse_positive_finite_f64("", 3.0, "test").unwrap();
+        assert!((v - 3.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_positive_finite_f64_parses_value() {
+        let v = parse_positive_finite_f64("2.5", 1.0, "test").unwrap();
+        assert!((v - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn update_agent_yaml_learning_emits_new_knob_fields() {
+        let dir = tempdir().unwrap();
+        let path = write_yaml(dir.path(), "model: \"sonnet\"\n");
+        let learning = LearningConfig {
+            curator_cost_spike_k: 5.0,
+            curator_cost_spike_baseline_days: 7,
+            curator_cost_spike_min_floor_usd: 0.10,
+            curator_skill_change_threshold: 5,
+            curator_min_cooldown_hours: 24,
+            baseline_window_days: 21,
+            baseline_min_sample: 30,
+            ..LearningConfig::default()
+        };
+        update_agent_yaml_learning(&path, &learning).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: right_agent::agent::AgentConfig = serde_saphyr::from_str(&content).unwrap();
+        assert!((parsed.learning.curator_cost_spike_k - 5.0).abs() < 1e-9);
+        assert_eq!(parsed.learning.curator_cost_spike_baseline_days, 7);
+        assert!((parsed.learning.curator_cost_spike_min_floor_usd - 0.10).abs() < 1e-9);
+        assert_eq!(parsed.learning.curator_skill_change_threshold, 5);
+        assert_eq!(parsed.learning.curator_min_cooldown_hours, 24);
+        assert_eq!(parsed.learning.baseline_window_days, 21);
+        assert_eq!(parsed.learning.baseline_min_sample, 30);
     }
 }
 
