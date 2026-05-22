@@ -231,8 +231,9 @@ fn record_probe_result(ctx: &ProbeContext, probe_session_id: &str, stdout: &str)
         }
     };
 
+    // STUB: legacy fork-probe path emits as learning_probe_writer until Task 16 lands.
     if let Some(breakdown) = crate::cc::stream::parse_usage_full(stdout)
-        && let Err(e) = right_agent::usage::insert::insert_learning_fork_probe(
+        && let Err(e) = right_agent::usage::insert::insert_learning_probe_writer(
             &conn,
             &breakdown,
             ctx.chat_id,

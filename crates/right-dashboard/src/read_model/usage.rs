@@ -6,14 +6,16 @@ use rusqlite::{Connection, params};
 
 use super::ReadModelError;
 
-const SOURCES: [&str; 7] = [
+const SOURCES: [&str; 9] = [
     "interactive",
     "cron",
     "reflection",
     "learning_selector",
     "learning_reviewer",
     "learning_skill_review",
-    "learning_fork_probe",
+    "learning_prefilter",
+    "learning_probe_writer",
+    "learning_curator",
 ];
 
 pub struct UsageOverviewInput {
