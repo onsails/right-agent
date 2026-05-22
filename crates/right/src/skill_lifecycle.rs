@@ -148,3 +148,22 @@ pub fn bump_patch(path: &Path, skill_name: &str, now_utc: &str) -> Result<(), Us
         r.last_patched_at = Some(now_utc.to_owned());
     })
 }
+
+/// Set or clear the curator-pin guard for a skill.
+pub fn set_pinned(path: &Path, skill_name: &str, pinned: bool) -> Result<(), UsageError> {
+    mutate(path, |idx| {
+        let r = idx.skills.entry(skill_name.to_owned()).or_default();
+        r.pinned = pinned;
+    })
+}
+
+/// List skill names with `pinned = true`.
+pub fn list_pinned(path: &Path) -> Result<Vec<String>, UsageError> {
+    let index = read_index(path)?;
+    Ok(index
+        .skills
+        .into_iter()
+        .filter(|(_, r)| r.pinned)
+        .map(|(name, _)| name)
+        .collect())
+}
