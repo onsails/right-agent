@@ -66,23 +66,110 @@ pub(crate) fn today_spend_usd(
 }
 
 /// Compose the prompt that goes to Haiku.
-pub(crate) fn build_prompt(anchor: &ProbeAnchor) -> String {
+pub(crate) fn build_prompt(
+    anchor: &ProbeAnchor,
+    baselines: &right_agent::usage::turn_baseline::TurnBaselines,
+    skill_index_summary: &str,
+) -> String {
     let user: String = anchor.user_msg_text.chars().take(2000).collect();
     let assistant: String = anchor.assistant_reply_text.chars().take(4000).collect();
+    let stats = render_turn_stats(anchor, baselines);
+    let receipts_section = if anchor.used_skill_receipts.is_empty() {
+        "USED SKILLS: none".to_owned()
+    } else {
+        format!(
+            "USED SKILLS:\n{}",
+            anchor
+                .used_skill_receipts
+                .iter()
+                .map(|s| format!("- {s}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    let framing = if anchor.used_skill_receipts.is_empty() {
+        "No existing skill was used in this turn. Decide whether the turn \
+exposed a reusable procedure that warrants a *new* skill, or whether it \
+was trivial (Skip)."
+    } else {
+        "One or more existing skills were used. Decide whether any of them \
+needs a *patch* (because the turn exposed a gap or correction), whether a \
+*new* skill should be created for a procedure beyond the cited skills' \
+scope, or whether the turn was a clean application of existing skills \
+(Skip)."
+    };
+    let skill_index_summary = skill_index_summary.trim_end();
     format!(
-        "Decide whether the just-finished turn produced a reusable workflow \
-worth examining for skill creation/update. Reply JSON per schema.
+        "Decide whether the just-finished turn produced material worth \
+spawning the probe-writer (Sonnet) over. Reply JSON per schema.
+
+{stats}
+
+{receipts_section}
+
+EXISTING SKILLS (abbreviated):
+{skill_index_summary}
 
 USER: {user}
 ASSISTANT: {assistant}
 
-Set should_probe=true if any of:
-- workflow involved multi-step coordination across tools/files;
-- user explicitly asked to remember/save/fix;
-- user corrected a previous approach;
-- a non-obvious gotcha was discovered.
+{framing}
 
-Otherwise should_probe=false (chat, trivial command, conversational reply)."
+Set:
+- decision=\"skip\" if the turn was trivial chat/echo or already \
+well-covered by existing skills.
+- decision=\"patch_existing\" with target_skill=\"rightx-<name>\" if a \
+used skill needs a focused update (gap, correction, missing edge case).
+- decision=\"create_new\" with topic_hint=\"<short topic>\" if the turn \
+exposes a reusable procedure not covered by any existing skill.
+
+reason is a short justification (max 400 chars)."
+    )
+}
+
+fn render_turn_stats(
+    anchor: &ProbeAnchor,
+    b: &right_agent::usage::turn_baseline::TurnBaselines,
+) -> String {
+    use right_agent::usage::turn_baseline::BaselineMetric;
+    let n = b.sample_size;
+    let window = b.window_days;
+    if matches!(b.cost_usd, BaselineMetric::Insufficient { .. }) {
+        return format!(
+            "TURN STATS (baseline insufficient, only n={n} prior turns):\n  \
+num_turns: {turns}, cost: ${cost:.3}, elapsed: {elapsed_s}s",
+            turns = anchor.num_turns,
+            cost = anchor.total_cost_usd,
+            elapsed_s = anchor.wall_elapsed_ms / 1000,
+        );
+    }
+    let cost_line = match b.cost_usd {
+        BaselineMetric::Available { p50, p90, p99 } => format!(
+            "  cost:       ${cur:.3}   (P50=${p50:.3}, P90=${p90:.3}, P99=${p99:.3})",
+            cur = anchor.total_cost_usd
+        ),
+        _ => format!("  cost:       ${:.3}", anchor.total_cost_usd),
+    };
+    let turns_line = match b.num_turns {
+        BaselineMetric::Available { p50, p90, p99 } => format!(
+            "  num_turns:  {cur}      (P50={p50}, P90={p90}, P99={p99})",
+            cur = anchor.num_turns
+        ),
+        _ => format!("  num_turns:  {}", anchor.num_turns),
+    };
+    let elapsed_line = match b.wall_elapsed_ms {
+        BaselineMetric::Available { p50, p90, p99 } => format!(
+            "  elapsed:    {cur}s     (P50={p50}s, P90={p90}s, P99={p99}s)",
+            cur = anchor.wall_elapsed_ms / 1000,
+            p50 = p50 / 1000,
+            p90 = p90 / 1000,
+            p99 = p99 / 1000
+        ),
+        _ => format!("  elapsed:    {}s", anchor.wall_elapsed_ms / 1000),
+    };
+    format!(
+        "TURN STATS (this turn vs agent's {window}d foreground baseline, n={n}):\n\
+{turns_line}\n{cost_line}\n{elapsed_line}"
     )
 }
 
@@ -174,7 +261,17 @@ pub(crate) struct PrefilterContext {
 pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> PrefilterDecision {
     use crate::cc::invocation::{ClaudeInvocation, OutputFormat, build_claude_command};
 
-    let prompt = build_prompt(&anchor);
+    // Task 10 will replace these with real baseline.compute() and rendered summary.
+    use right_agent::usage::turn_baseline::{BaselineMetric, TurnBaselines};
+    let placeholder_baselines = TurnBaselines {
+        sample_size: 0,
+        window_days: 14,
+        cost_usd: BaselineMetric::Insufficient { sample_size: 0 },
+        num_turns: BaselineMetric::Insufficient { sample_size: 0 },
+        wall_elapsed_ms: BaselineMetric::Insufficient { sample_size: 0 },
+    };
+    let placeholder_summary = String::new();
+    let prompt = build_prompt(&anchor, &placeholder_baselines, &placeholder_summary);
     let invocation = ClaudeInvocation {
         mcp_config_path: None,
         json_schema: Some(PREFILTER_SCHEMA_JSON.into()),
@@ -274,9 +371,44 @@ mod tests {
         }
     }
 
+    fn baselines_insufficient(n: u32) -> right_agent::usage::turn_baseline::TurnBaselines {
+        use right_agent::usage::turn_baseline::{BaselineMetric, TurnBaselines};
+        TurnBaselines {
+            sample_size: n,
+            window_days: 14,
+            cost_usd: BaselineMetric::Insufficient { sample_size: n },
+            num_turns: BaselineMetric::Insufficient { sample_size: n },
+            wall_elapsed_ms: BaselineMetric::Insufficient { sample_size: n },
+        }
+    }
+
+    fn baselines_available() -> right_agent::usage::turn_baseline::TurnBaselines {
+        use right_agent::usage::turn_baseline::{BaselineMetric, TurnBaselines};
+        TurnBaselines {
+            sample_size: 50,
+            window_days: 14,
+            cost_usd: BaselineMetric::Available {
+                p50: 0.03,
+                p90: 0.18,
+                p99: 0.95,
+            },
+            num_turns: BaselineMetric::Available {
+                p50: 4,
+                p90: 12,
+                p99: 24,
+            },
+            wall_elapsed_ms: BaselineMetric::Available {
+                p50: 6_000,
+                p90: 22_000,
+                p99: 58_000,
+            },
+        }
+    }
+
     #[test]
     fn build_prompt_embeds_anchor_texts() {
-        let p = build_prompt(&anchor("hello world", "hi back"));
+        let bs = baselines_insufficient(0);
+        let p = build_prompt(&anchor("hello world", "hi back"), &bs, "");
         assert!(p.contains("hello world"));
         assert!(p.contains("hi back"));
     }
@@ -366,9 +498,53 @@ mod tests {
         // Use non-ASCII markers absent from the template prose.
         let long_user = "ы".repeat(10_000);
         let long_asst = "ё".repeat(10_000);
-        let p = build_prompt(&anchor(&long_user, &long_asst));
+        let bs = baselines_insufficient(0);
+        let p = build_prompt(&anchor(&long_user, &long_asst), &bs, "");
         // User truncated to 2000 chars, assistant to 4000 chars.
         assert_eq!(p.matches('ы').count(), 2000);
         assert_eq!(p.matches('ё').count(), 4000);
+    }
+
+    #[test]
+    fn build_prompt_includes_create_new_framing_when_receipts_empty() {
+        let mut a = anchor("hello", "hi");
+        a.used_skill_receipts.clear();
+        let bs = baselines_insufficient(8);
+        let p = build_prompt(&a, &bs, "- rightx-foo: foo desc");
+        assert!(p.contains("No existing skill was used"), "got: {p}");
+        assert!(p.contains("USED SKILLS: none"), "got: {p}");
+    }
+
+    #[test]
+    fn build_prompt_includes_patch_framing_when_receipts_present() {
+        let mut a = anchor("hello", "hi");
+        a.used_skill_receipts = vec!["rightx-foo".into()];
+        let bs = baselines_insufficient(8);
+        let p = build_prompt(&a, &bs, "- rightx-foo: foo desc");
+        assert!(
+            p.contains("One or more existing skills were used"),
+            "got: {p}"
+        );
+        assert!(p.contains("- rightx-foo"), "got: {p}");
+    }
+
+    #[test]
+    fn build_prompt_renders_percentiles_when_baseline_available() {
+        let a = anchor("hello", "hi");
+        let bs = baselines_available();
+        let p = build_prompt(&a, &bs, "");
+        assert!(p.contains("vs agent's"), "got: {p}");
+        assert!(p.contains("P50="), "got: {p}");
+        assert!(p.contains("P90="), "got: {p}");
+        assert!(p.contains("P99="), "got: {p}");
+    }
+
+    #[test]
+    fn build_prompt_renders_insufficient_baseline_message() {
+        let a = anchor("hello", "hi");
+        let bs = baselines_insufficient(8);
+        let p = build_prompt(&a, &bs, "");
+        assert!(p.contains("baseline insufficient"), "got: {p}");
+        assert!(p.contains("n=8"), "got: {p}");
     }
 }
