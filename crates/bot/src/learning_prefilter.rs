@@ -20,6 +20,28 @@ pub(crate) const PREFILTER_SCHEMA_JSON: &str = r#"{
   "required": ["should_probe", "reason"]
 }"#;
 
+/// Sum today's spend across learning sources from `usage_events`. Used by the
+/// worker to gate the prefilter+probe-writer pipeline against the daily budget.
+pub(crate) fn today_spend_usd(
+    conn: &rusqlite::Connection,
+    now_utc: &str,
+) -> Result<f64, rusqlite::Error> {
+    let date_part = now_utc.split_once('T').map(|(d, _)| d).unwrap_or(now_utc);
+    let today_start = format!("{date_part}T00:00:00Z");
+    let placeholders = std::iter::repeat_n("?", right_agent::usage::LEARNING_SOURCES.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT COALESCE(SUM(total_cost_usd), 0.0) FROM usage_events \
+         WHERE ts >= ?1 AND source IN ({placeholders})"
+    );
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&today_start];
+    for s in right_agent::usage::LEARNING_SOURCES {
+        params.push(s);
+    }
+    conn.query_row(&sql, params.as_slice(), |r| r.get::<_, f64>(0))
+}
+
 /// Compose the prompt that goes to Haiku.
 pub(crate) fn build_prompt(anchor: &ProbeAnchor) -> String {
     let user: String = anchor.user_msg_text.chars().take(2000).collect();
