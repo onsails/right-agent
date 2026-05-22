@@ -91,28 +91,39 @@ fn default_show_thinking() -> bool {
     true
 }
 
-fn default_episode_settle_seconds() -> u64 {
-    90
-}
-
 fn default_max_daily_budget_usd() -> f64 {
     5.00
 }
 
-fn default_circuit_failure_threshold() -> u32 {
-    5
-}
-
-fn default_circuit_cooldown_minutes() -> u32 {
-    60
-}
-
-fn default_fork_probe_enabled() -> bool {
+fn default_prefilter_enabled() -> bool {
     true
 }
-
-fn default_background_review_enabled() -> bool {
+fn default_prefilter_model() -> Option<String> {
+    Some("claude-haiku-4-5-20251001".to_owned())
+}
+fn default_probe_writer_enabled() -> bool {
+    true
+}
+fn default_curator_enabled() -> bool {
+    true
+}
+fn default_curator_interval_hours() -> u32 {
+    168
+}
+fn default_curator_min_idle_hours() -> u32 {
+    2
+}
+fn default_curator_stale_after_days() -> u32 {
+    30
+}
+fn default_curator_archive_after_days() -> u32 {
+    90
+}
+fn default_curator_paused() -> bool {
     false
+}
+fn default_max_daily_budget_usd_v2() -> f64 {
+    1.00
 }
 
 fn deserialize_positive_finite_f64_max_daily<'de, D>(deserializer: D) -> Result<f64, D::Error>
@@ -125,20 +136,6 @@ where
     } else {
         Err(serde::de::Error::custom(
             "max_daily_budget_usd must be finite and > 0.0",
-        ))
-    }
-}
-
-fn deserialize_positive_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = u64::deserialize(deserializer)?;
-    if value > 0 {
-        Ok(value)
-    } else {
-        Err(serde::de::Error::custom(
-            "episode_settle_seconds must be greater than 0",
         ))
     }
 }
@@ -317,90 +314,147 @@ impl Default for MemoryConfig {
     }
 }
 
-/// Learning-review configuration for an agent.
+/// Learning-loop configuration (probe-writer + curator pipeline).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct LearningConfig {
-    /// Optional selector model. None means inherit the agent model.
-    pub episode_selector_model: Option<String>,
+    /// Haiku classifier before probe-writer spawn.
+    #[serde(default = "default_prefilter_enabled")]
+    pub prefilter_enabled: bool,
+    #[serde(default = "default_prefilter_model")]
+    pub prefilter_model: Option<String>,
 
-    /// Soft-deprecated. Kept for backward-compatibility with existing
-    /// agent.yaml files. Not read by any code. A warn-log is emitted at
-    /// agent load time when present (see `warn_on_deprecated`). Slated for
-    /// removal in a future release.
-    pub episode_selector_max_budget_usd: Option<f64>,
+    /// Probe-writer fork after each foreground turn.
+    #[serde(default = "default_probe_writer_enabled")]
+    pub probe_writer_enabled: bool,
+    /// Inherit AgentConfig.model when None.
+    pub probe_writer_model: Option<String>,
 
-    /// Delay after seed evidence before selecting the episode boundary.
+    /// Periodic skill curator.
+    #[serde(default = "default_curator_enabled")]
+    pub curator_enabled: bool,
+    pub curator_model: Option<String>,
     #[serde(
-        default = "default_episode_settle_seconds",
-        deserialize_with = "deserialize_positive_u64"
+        default = "default_curator_interval_hours",
+        deserialize_with = "deserialize_positive_u32"
     )]
-    pub episode_settle_seconds: u64,
-
-    /// Daily $ budget across all learning invocations.
+    pub curator_interval_hours: u32,
     #[serde(
-        default = "default_max_daily_budget_usd",
+        default = "default_curator_min_idle_hours",
+        deserialize_with = "deserialize_positive_u32"
+    )]
+    pub curator_min_idle_hours: u32,
+    #[serde(
+        default = "default_curator_stale_after_days",
+        deserialize_with = "deserialize_positive_u32"
+    )]
+    pub curator_stale_after_days: u32,
+    #[serde(
+        default = "default_curator_archive_after_days",
+        deserialize_with = "deserialize_positive_u32"
+    )]
+    pub curator_archive_after_days: u32,
+    #[serde(default = "default_curator_paused")]
+    pub curator_paused: bool,
+
+    /// Daily $ budget shared by probe-writer and curator.
+    #[serde(
+        default = "default_max_daily_budget_usd_v2",
         deserialize_with = "deserialize_positive_finite_f64_max_daily"
     )]
     pub max_daily_budget_usd: f64,
 
-    /// Consecutive failures that trip the circuit breaker.
-    #[serde(
-        default = "default_circuit_failure_threshold",
-        deserialize_with = "deserialize_positive_u32"
-    )]
-    pub circuit_failure_threshold: u32,
-
-    /// How long the circuit stays open after tripping (minutes).
-    #[serde(
-        default = "default_circuit_cooldown_minutes",
-        deserialize_with = "deserialize_positive_u32"
-    )]
-    pub circuit_cooldown_minutes: u32,
-
-    /// Model used by the fork-probe. `None` = inherit `AgentConfig.model`.
-    pub probe_model: Option<String>,
-
-    /// Master switch for the fork-probe. Defaults `true`; set `false` to
-    /// disable post-turn signal-classification probes for an agent.
-    #[serde(default = "default_fork_probe_enabled")]
-    pub fork_probe_enabled: bool,
-
-    /// Deprecated Stage 2 background pipeline opt-in. Defaults `false`.
-    /// When `true`, the legacy `DrainScheduler` + selector + reviewer
-    /// run alongside fork-probe; daily budget covers both.
-    #[serde(default = "default_background_review_enabled")]
-    pub background_review_enabled: bool,
+    /// Deprecated fields kept for forward compat (silently ignored).
+    /// `serde(default)` on the struct accepts their presence without error.
+    #[serde(default)]
+    pub fork_probe_enabled: Option<bool>,
+    #[serde(default)]
+    pub fork_probe_model: Option<String>,
+    #[serde(default, rename = "probe_model")]
+    pub legacy_probe_model: Option<String>,
+    #[serde(default)]
+    pub background_review_enabled: Option<bool>,
+    #[serde(default)]
+    pub episode_selector_model: Option<String>,
+    #[serde(default)]
+    pub episode_selector_max_budget_usd: Option<f64>,
+    #[serde(default)]
+    pub episode_settle_seconds: Option<u64>,
+    #[serde(default)]
+    pub circuit_failure_threshold: Option<u32>,
+    #[serde(default)]
+    pub circuit_cooldown_minutes: Option<u32>,
 }
 
 impl Default for LearningConfig {
     fn default() -> Self {
         Self {
+            prefilter_enabled: default_prefilter_enabled(),
+            prefilter_model: default_prefilter_model(),
+            probe_writer_enabled: default_probe_writer_enabled(),
+            probe_writer_model: None,
+            curator_enabled: default_curator_enabled(),
+            curator_model: None,
+            curator_interval_hours: default_curator_interval_hours(),
+            curator_min_idle_hours: default_curator_min_idle_hours(),
+            curator_stale_after_days: default_curator_stale_after_days(),
+            curator_archive_after_days: default_curator_archive_after_days(),
+            curator_paused: default_curator_paused(),
+            max_daily_budget_usd: default_max_daily_budget_usd_v2(),
+            fork_probe_enabled: None,
+            fork_probe_model: None,
+            legacy_probe_model: None,
+            background_review_enabled: None,
             episode_selector_model: None,
             episode_selector_max_budget_usd: None,
-            episode_settle_seconds: default_episode_settle_seconds(),
-            max_daily_budget_usd: default_max_daily_budget_usd(),
-            circuit_failure_threshold: default_circuit_failure_threshold(),
-            circuit_cooldown_minutes: default_circuit_cooldown_minutes(),
-            probe_model: None,
-            fork_probe_enabled: default_fork_probe_enabled(),
-            background_review_enabled: default_background_review_enabled(),
+            episode_settle_seconds: None,
+            circuit_failure_threshold: None,
+            circuit_cooldown_minutes: None,
         }
     }
 }
 
 impl LearningConfig {
-    /// Emit a deprecation warning if the obsolete `episode_selector_max_budget_usd`
-    /// field is set in agent.yaml. Call once at agent load time.
+    /// Emit one warn at load-time if a deprecated field is set in agent.yaml.
     pub fn warn_on_deprecated(&self, agent_name: &str) {
-        if let Some(value) = self.episode_selector_max_budget_usd {
-            tracing::warn!(
-                agent = %agent_name,
-                value,
-                "agent.yaml: `episode_selector_max_budget_usd` is deprecated and ignored; \
-                 use `max_daily_budget_usd` instead. The deprecated field will be removed \
-                 in a future release."
-            );
+        let pairs: [(&str, bool); 9] = [
+            ("fork_probe_enabled", self.fork_probe_enabled.is_some()),
+            ("fork_probe_model", self.fork_probe_model.is_some()),
+            ("probe_model", self.legacy_probe_model.is_some()),
+            (
+                "background_review_enabled",
+                self.background_review_enabled.is_some(),
+            ),
+            (
+                "episode_selector_model",
+                self.episode_selector_model.is_some(),
+            ),
+            (
+                "episode_selector_max_budget_usd",
+                self.episode_selector_max_budget_usd.is_some(),
+            ),
+            (
+                "episode_settle_seconds",
+                self.episode_settle_seconds.is_some(),
+            ),
+            (
+                "circuit_failure_threshold",
+                self.circuit_failure_threshold.is_some(),
+            ),
+            (
+                "circuit_cooldown_minutes",
+                self.circuit_cooldown_minutes.is_some(),
+            ),
+        ];
+        for (field, present) in pairs {
+            if present {
+                tracing::warn!(
+                    agent = %agent_name,
+                    field,
+                    "agent.yaml: `{field}` is deprecated and ignored. See \
+                     docs/superpowers/specs/2026-05-22-skill-learning-writer-curator-design.md."
+                );
+            }
         }
     }
 }
@@ -637,61 +691,45 @@ mod tests {
     }
 
     #[test]
-    fn learning_config_defaults_set_fork_probe_on_and_background_off() {
+    fn learning_config_defaults_use_new_fields() {
         let cfg = LearningConfig::default();
-        assert!(cfg.fork_probe_enabled, "fork_probe must default ON");
-        assert!(
-            !cfg.background_review_enabled,
-            "background_review must default OFF"
-        );
-        assert!(
-            cfg.probe_model.is_none(),
-            "probe_model must default to None (inherit agent.model)"
-        );
-    }
-
-    #[test]
-    fn learning_config_deserialises_minimal_yaml_with_new_defaults() {
-        let yaml = "{}";
-        let cfg: LearningConfig = serde_saphyr::from_str(yaml).unwrap();
-        assert!(cfg.fork_probe_enabled);
-        assert!(!cfg.background_review_enabled);
-        assert!(cfg.probe_model.is_none());
-    }
-
-    #[test]
-    fn learning_config_deserialises_pre_v27_yaml_without_new_fields() {
-        let yaml = "
-episode_selector_model: claude-sonnet-4-6
-episode_settle_seconds: 60
-max_daily_budget_usd: 2.50
-circuit_failure_threshold: 3
-circuit_cooldown_minutes: 30
-";
-        let cfg: LearningConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(cfg.prefilter_enabled);
         assert_eq!(
-            cfg.episode_selector_model.as_deref(),
-            Some("claude-sonnet-4-6")
-        );
-        assert!(cfg.fork_probe_enabled);
-        assert!(!cfg.background_review_enabled);
-        assert_eq!(cfg.max_daily_budget_usd, 2.50);
-    }
-
-    #[test]
-    fn learning_config_accepts_probe_model_override() {
-        let yaml = "probe_model: claude-haiku-4-5-20251001\n";
-        let cfg: LearningConfig = serde_saphyr::from_str(yaml).unwrap();
-        assert_eq!(
-            cfg.probe_model.as_deref(),
+            cfg.prefilter_model.as_deref(),
             Some("claude-haiku-4-5-20251001")
         );
+        assert!(cfg.probe_writer_enabled);
+        assert!(cfg.probe_writer_model.is_none());
+        assert!(cfg.curator_enabled);
+        assert!(cfg.curator_model.is_none());
+        assert_eq!(cfg.curator_interval_hours, 168);
+        assert_eq!(cfg.curator_min_idle_hours, 2);
+        assert_eq!(cfg.curator_stale_after_days, 30);
+        assert_eq!(cfg.curator_archive_after_days, 90);
+        assert!(!cfg.curator_paused);
+        assert_eq!(cfg.max_daily_budget_usd, 1.00);
     }
 
     #[test]
-    fn learning_config_accepts_background_review_opt_in() {
-        let yaml = "background_review_enabled: true\n";
+    fn learning_config_deprecated_fields_are_ignored() {
+        let yaml = r#"
+fork_probe_enabled: true
+fork_probe_model: claude-opus-4-7
+background_review_enabled: true
+episode_settle_seconds: 60
+circuit_failure_threshold: 5
+circuit_cooldown_minutes: 60
+episode_selector_max_budget_usd: 0.10
+episode_selector_model: claude-haiku-4-5
+max_daily_budget_usd: 2.50
+prefilter_enabled: false
+"#;
         let cfg: LearningConfig = serde_saphyr::from_str(yaml).unwrap();
-        assert!(cfg.background_review_enabled);
+        assert_eq!(cfg.max_daily_budget_usd, 2.50);
+        assert!(!cfg.prefilter_enabled);
+        assert!(
+            cfg.probe_writer_enabled,
+            "probe_writer_enabled defaults to true"
+        );
     }
 }
