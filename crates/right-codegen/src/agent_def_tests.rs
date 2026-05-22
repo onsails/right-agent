@@ -334,29 +334,29 @@ fn operating_instructions_teach_used_learned_skill_receipts() {
 }
 
 #[test]
-fn right_learn_skill_prompt_uses_current_prefix_and_exact_signal_rules() {
+fn right_learn_skill_prompt_uses_explicit_intent_framing() {
     let skill = include_str!("../skills/right-learn-skill/SKILL.md");
     assert!(
-        skill.contains("description: >-\n  Use when"),
-        "right-learn-skill description should start with Use when"
+        skill.contains("description: >-\n  Use ONLY when the user explicitly asks"),
+        "right-learn-skill description should narrow to explicit-user-intent only"
     );
     assert!(
         skill.contains(right_mcp::LEARNED_SKILL_PREFIX),
         "right-learn-skill must mention learned-skill prefix {:?}",
         right_mcp::LEARNED_SKILL_PREFIX
     );
-    for needle in [
-        "used_skill_receipts",
-        "at most one",
-        "successful `mcp__right__skill_learning_finish`",
-        "1 non-empty event ref",
-        "2+ non-empty event refs",
-    ] {
-        assert!(
-            skill.contains(needle),
-            "right-learn-skill must mention {needle:?}"
-        );
-    }
+    assert!(
+        !skill.contains("learning_signal") && !skill.contains("skill_issue_signal"),
+        "right-learn-skill must NOT reference deferred-signal emission"
+    );
+    assert!(
+        skill.contains("mcp__right__skill_learning_start"),
+        "right-learn-skill must keep the start/finish protocol"
+    );
+    assert!(
+        skill.contains("mcp__right__skill_learning_finish"),
+        "right-learn-skill must keep the start/finish protocol"
+    );
 }
 
 #[test]
