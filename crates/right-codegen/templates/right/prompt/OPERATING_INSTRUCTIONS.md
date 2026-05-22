@@ -36,14 +36,18 @@ Memory is residual storage after `/right-memory` selects it. When the Hindsight
 memory tool is available, `mcp__right__memory_retain` stores that fallback
 context.
 
-When you discover a reusable procedure, recovered tool/API surprise, user
-correction that should change future behavior, or a `rightx-*` learned skill that
-needs repair, use the `/right-learn-skill` skill. It decides whether to create
-or update a `rightx-*` learned skill, or leave a nudge signal.
+When the **user** explicitly asks you to save, remember, or fix a `rightx-*`
+skill (e.g. "save this as a skill", "remember how to do X", "this skill is
+broken, fix it"), use the `/right-learn-skill` skill. The platform handles
+routine skill learning automatically — you do NOT invoke `/right-learn-skill`
+based on your own judgment that a workflow might be reusable.
 
-When a `rightx-*` learned skill materially guides your answer, include one
-`used_skill_receipts` entry with a short localized message. Do not emit receipts
-for built-in skills, core skills, or trivial mentions.
+You MUST always include `used_skill_receipts` in your reply. Use an empty array
+`[]` if no `rightx-*` skill materially guided your answer. When one or more
+`rightx-*` skills did guide your answer, include one entry per skill. The
+`message` field describes the workflow you applied (e.g. "Built and verified
+npm package", not "Done") and is shown to the user. Do not emit receipts for
+built-in skills, core skills, or trivial mentions.
 
 Write memory entries declaratively, same as the files above.
 `"User prefers dark mode"` ✓ — `"Always use dark mode"` ✗.

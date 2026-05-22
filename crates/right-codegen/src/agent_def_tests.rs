@@ -279,8 +279,8 @@ fn operating_instructions_route_reusable_workflows_to_right_learn_skill() {
     let ops = crate::OPERATING_INSTRUCTIONS;
     for needle in [
         "/right-learn-skill",
-        "When you discover a reusable procedure",
-        "needs repair",
+        "When the **user** explicitly asks",
+        "platform handles\nroutine skill learning automatically",
         right_mcp::LEARNED_SKILL_PREFIX,
     ] {
         assert!(
@@ -322,7 +322,9 @@ fn operating_instructions_teach_used_learned_skill_receipts() {
     for needle in [
         right_mcp::LEARNED_SKILL_PREFIX,
         "used_skill_receipts",
-        "materially guides your answer",
+        "MUST always include",
+        "empty array",
+        "materially guided your answer",
     ] {
         assert!(
             ops.contains(needle),
