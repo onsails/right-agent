@@ -1,7 +1,7 @@
 //! Per-agent statistical baselines for foreground turn metrics.
 
 use crate::usage::error::UsageError;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +113,69 @@ fn percentile<T: Lerp>(sorted: &[T], q: f64) -> T {
     let hi = (lo + 1).min(n - 1);
     let frac = pos - pos.floor();
     T::lerp(sorted[lo], sorted[hi], frac)
+}
+
+/// Trigger evidence for `cost_spike` — populated when the gate fires due to
+/// today's probe-writer cost exceeding the 14d P50 multiplier.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CostSpikeEvidence {
+    pub today_cost_usd: f64,
+    pub baseline_p50_usd: f64,
+    pub k: f64,
+    pub min_floor_usd: f64,
+}
+
+/// Return `Some(evidence)` iff today's probe-writer spend exceeds both `k *
+/// baseline_p50` and `min_floor_usd`. Both conditions must hold.
+pub fn check_probe_writer_cost_spike(
+    conn: &Connection,
+    now: DateTime<Utc>,
+    baseline_days: u32,
+    k: f64,
+    min_floor_usd: f64,
+) -> Result<Option<CostSpikeEvidence>, UsageError> {
+    let today_start = now.format("%Y-%m-%dT00:00:00Z").to_string();
+    let today_cost: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(total_cost_usd), 0.0) FROM usage_events \
+         WHERE source = 'learning_probe_writer' AND ts >= ?1",
+        [&today_start],
+        |r| r.get(0),
+    )?;
+    if today_cost < min_floor_usd {
+        return Ok(None);
+    }
+    // Daily sums over the baseline window — group by date.
+    let window_start = (now - chrono::Duration::days(baseline_days as i64))
+        .format("%Y-%m-%dT00:00:00Z")
+        .to_string();
+    let mut stmt = conn.prepare(
+        "SELECT SUM(total_cost_usd) FROM usage_events \
+         WHERE source = 'learning_probe_writer' AND ts >= ?1 AND ts < ?2 \
+         GROUP BY substr(ts, 1, 10)",
+    )?;
+    let rows = stmt.query_map([&window_start, &today_start], |r| r.get::<_, f64>(0))?;
+    let mut daily: Vec<f64> = rows.collect::<Result<_, _>>()?;
+    if daily.is_empty() {
+        // No probe_writer history — fall back to floor-only check.
+        return Ok(Some(CostSpikeEvidence {
+            today_cost_usd: today_cost,
+            baseline_p50_usd: 0.0,
+            k,
+            min_floor_usd,
+        }));
+    }
+    daily.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p50 = daily[daily.len() / 2];
+    if today_cost >= k * p50.max(min_floor_usd) {
+        Ok(Some(CostSpikeEvidence {
+            today_cost_usd: today_cost,
+            baseline_p50_usd: p50,
+            k,
+            min_floor_usd,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -255,5 +318,52 @@ mod tests {
             b.wall_elapsed_ms,
             BaselineMetric::Available { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod cost_spike_tests {
+    use super::*;
+    use crate::usage::UsageBreakdown;
+    use crate::usage::insert::insert_learning_probe_writer;
+    use right_db::open_connection;
+    use tempfile::tempdir;
+
+    fn b(cost: f64) -> UsageBreakdown {
+        UsageBreakdown {
+            session_uuid: "s".into(),
+            total_cost_usd: cost,
+            num_turns: 1,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            web_search_requests: 0,
+            web_fetch_requests: 0,
+            model_usage_json: "{}".into(),
+            api_key_source: "none".into(),
+            wall_elapsed_ms: None,
+        }
+    }
+
+    #[test]
+    fn returns_none_when_today_below_floor() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_learning_probe_writer(&conn, &b(0.01), 1, 0).unwrap();
+        let now = Utc::now();
+        let r = check_probe_writer_cost_spike(&conn, now, 14, 3.0, 0.05).unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn fires_when_today_above_floor_and_no_baseline() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_learning_probe_writer(&conn, &b(0.20), 1, 0).unwrap();
+        let now = Utc::now();
+        let r = check_probe_writer_cost_spike(&conn, now, 14, 3.0, 0.05).unwrap();
+        // baseline empty + today > floor → fires
+        assert!(r.is_some());
     }
 }
