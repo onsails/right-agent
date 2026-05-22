@@ -1151,6 +1151,59 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .await;
     });
 
+    // Curator ticker: periodically apply skill lifecycle transitions and run
+    // the LLM consolidation pass (per-agent).
+    {
+        let curator_agent_dir = agent_dir.clone();
+        let curator_agent_db_dir = agent_dir.clone();
+        let curator_agent_name = args.agent.clone();
+        let curator_ssh_config = ssh_config_path.clone();
+        let curator_resolved = resolved_sandbox.clone();
+        let curator_learning = config.learning.clone();
+        let curator_debug = Arc::clone(&debug_flag);
+        let curator_session_locks = Arc::clone(&session_locks);
+        let curator_model = Arc::clone(&model_arc);
+        let curator_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = curator_shutdown.cancelled() => return,
+                }
+                let curator_model_str = curator_learning
+                    .curator_model
+                    .clone()
+                    .or_else(|| (**curator_model.load()).clone())
+                    .unwrap_or_default();
+                if curator_model_str.is_empty() {
+                    continue;
+                }
+                let ctx = crate::learning_curator::CuratorContext {
+                    agent_dir: curator_agent_dir.clone(),
+                    agent_db_dir: curator_agent_db_dir.clone(),
+                    agent_name: curator_agent_name.clone(),
+                    ssh_config_path: curator_ssh_config.clone(),
+                    resolved_sandbox: curator_resolved.clone(),
+                    model: curator_model_str,
+                    debug_flag: Arc::clone(&curator_debug),
+                    session_locks: Arc::clone(&curator_session_locks),
+                    config: crate::learning_curator::CuratorConfig {
+                        enabled: curator_learning.curator_enabled,
+                        paused: curator_learning.curator_paused,
+                        interval_hours: curator_learning.curator_interval_hours,
+                        min_idle_hours: curator_learning.curator_min_idle_hours,
+                        stale_after_days: curator_learning.curator_stale_after_days,
+                        archive_after_days: curator_learning.curator_archive_after_days,
+                    },
+                };
+                // latest_user_activity_at hookup deferred — pass None for v1.
+                crate::learning_curator::run_if_due(ctx, None).await;
+            }
+        });
+    }
+
     // Spawn periodic claude upgrade task (sandbox-only).
     let upgrade_handle = ssh_config_path.as_ref().map(|cfg_path| {
         // SAFETY: ssh_config_path is Some only when is_sandboxed is true, and
