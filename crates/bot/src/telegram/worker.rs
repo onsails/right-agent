@@ -909,6 +909,16 @@ fn assistant_text_was_delivered(caption_consumed: bool, sent_any_text_message: b
     caption_consumed || sent_any_text_message
 }
 
+/// First non-empty line of a `rightx-*` SKILL.md excerpt, capped at 200 chars.
+fn summary_first_line(excerpt: &str) -> String {
+    excerpt
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.chars().take(200).collect())
+        .unwrap_or_default()
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InvocationLogContext {
@@ -1312,6 +1322,7 @@ pub fn spawn_worker(
             } else {
                 batch.first().map(|m| m.message_id)
             };
+            let mut post_turn_probe_anchor: Option<ProbeAnchor> = None;
             match reply_result {
                 Ok(Some(mut output)) => {
                     output.content = append_used_skill_receipts(
@@ -1447,16 +1458,16 @@ pub fn spawn_worker(
                             );
                         }
 
-                        // Capture probe anchor for the post-turn learning pipeline
-                        // (consumed by Task 18 worker integration).
-                        let _probe_anchor = ProbeAnchor {
+                        // Capture probe anchor; consumed by the post-turn learning
+                        // pipeline (prefilter → probe-writer) below.
+                        post_turn_probe_anchor = Some(ProbeAnchor {
                             user_msg_text: input.clone(),
                             assistant_reply_text: content.clone(),
                             main_session_uuid: session_uuid.clone(),
                             captured_at: chrono::Utc::now(),
                             chat_id,
                             thread_id: eff_thread_id,
-                        };
+                        });
                     } else {
                         tracing::warn!(?key, "CC returned content: null -- no text reply sent");
                     }
@@ -1487,9 +1498,6 @@ pub fn spawn_worker(
                             .await;
                         }
                     }
-
-                    // Post-turn learning pipeline (prefilter → probe-writer) wired in Task 18.
-                    // Anchor captured above (see `_probe_anchor`); consumed by Task 18.
                 }
                 Ok(None) => {
                     tracing::warn!(?key, "unexpected Ok(None) from invoke_cc — no reply sent");
@@ -1776,6 +1784,110 @@ pub fn spawn_worker(
                         }
                     }
                 }
+            }
+
+            // Post-turn learning pipeline (prefilter → probe-writer). Fire-and-forget;
+            // never blocks user-visible latency. All failure paths log and skip.
+            if let Some(anchor) = post_turn_probe_anchor.take()
+                && ctx.learning.prefilter_enabled
+                && matches!(cc_prompt_mode, Some(crate::cc::prompt::PromptMode::Normal))
+            {
+                let agent_dir = ctx.agent_dir.clone();
+                let agent_db_dir = ctx.agent_db_dir.clone();
+                let agent_name = ctx.agent_name.clone();
+                let ssh_config = ctx.ssh_config_path.clone();
+                let resolved = ctx.resolved_sandbox.clone();
+                let prefilter_model = ctx
+                    .learning
+                    .prefilter_model
+                    .clone()
+                    .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_owned());
+                let probe_writer_enabled = ctx.learning.probe_writer_enabled;
+                let probe_writer_model_override = ctx.learning.probe_writer_model.clone();
+                let model_arc = Arc::clone(&ctx.model);
+                let session_locks = ctx.session_locks.clone();
+                let debug_flag = Arc::clone(&ctx.debug);
+                let daily_budget = ctx.learning.max_daily_budget_usd;
+
+                tokio::spawn(async move {
+                    let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                    let today_spend = right_db::open_connection(&agent_db_dir, false)
+                        .ok()
+                        .and_then(|c| crate::learning_prefilter::today_spend_usd(&c, &now_utc).ok())
+                        .unwrap_or(0.0);
+                    if today_spend >= daily_budget {
+                        tracing::debug!(
+                            agent = %agent_name,
+                            spend = today_spend,
+                            budget = daily_budget,
+                            "learning pipeline skipped: daily budget exhausted"
+                        );
+                        return;
+                    }
+
+                    let prefilter_ctx = crate::learning_prefilter::PrefilterContext {
+                        agent_dir: agent_dir.clone(),
+                        agent_db_dir: agent_db_dir.clone(),
+                        agent_name: agent_name.clone(),
+                        ssh_config_path: ssh_config.clone(),
+                        resolved_sandbox: resolved.clone(),
+                        model: prefilter_model,
+                        chat_id: anchor.chat_id,
+                        thread_id: anchor.thread_id,
+                    };
+                    let decision =
+                        crate::learning_prefilter::run(prefilter_ctx, anchor.clone()).await;
+                    if decision != crate::learning_prefilter::PrefilterDecision::Probe {
+                        return;
+                    }
+                    if !probe_writer_enabled {
+                        return;
+                    }
+                    let probe_writer_model = match probe_writer_model_override
+                        .or_else(|| (**model_arc.load()).clone())
+                    {
+                        Some(m) if !m.is_empty() => m,
+                        _ => {
+                            tracing::warn!(
+                                agent = %agent_name,
+                                "probe-writer model unresolved, skipping"
+                            );
+                            return;
+                        }
+                    };
+
+                    let skill_index =
+                        match crate::learning_review::collect_host_rightx_skill_index(&agent_dir) {
+                            Ok(entries) => entries
+                                .into_iter()
+                                .map(|s| {
+                                    format!("- {}: {}", s.name, summary_first_line(&s.excerpt))
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            Err(e) => {
+                                tracing::warn!(
+                                    agent = %agent_name,
+                                    "collect_host_rightx_skill_index failed: {e:#}"
+                                );
+                                String::new()
+                            }
+                        };
+
+                    let writer_ctx = crate::learning_probe_writer::ProbeWriterContext {
+                        agent_dir,
+                        agent_db_dir,
+                        agent_name,
+                        ssh_config_path: ssh_config,
+                        resolved_sandbox: resolved,
+                        model: probe_writer_model,
+                        debug_flag,
+                        session_locks,
+                        chat_id: anchor.chat_id,
+                        thread_id: anchor.thread_id,
+                    };
+                    crate::learning_probe_writer::run(writer_ctx, anchor, skill_index).await;
+                });
             }
 
             // Auto-retain and prefetch (fire-and-forget).
