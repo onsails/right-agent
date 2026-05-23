@@ -8,10 +8,11 @@
   },
   "dependencies": {
     "@vitejs/plugin-vue": "latest",
+    "echarts": "^6.1.0",
     "typescript": "latest",
     "vite": "latest",
     "vue": "latest",
+    "vue-echarts": "^8.0.1",
     "vue-tsc": "latest"
-  },
-  "devDependencies": {}
+  }
 }

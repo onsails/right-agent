@@ -44,6 +44,9 @@ export interface DashboardOverviewResponse {
   learning_candidates_24h: number
   doctor: OverviewDoctorStatus
   sandbox: OverviewSandboxStatus
+  signals: DashboardSignal[]
+  cost_learning_river: CostLearningRiver
+  warnings: DashboardDataWarning[]
 }
 
 export interface OverviewDoctorStatus {
@@ -63,6 +66,10 @@ export interface UsageOverviewResponse {
   agent: string
   generated_at: string
   windows: UsageWindow[]
+  selected_window: string
+  daily_series: UsageDailyPoint[]
+  source_series: UsageSourceSeries[]
+  warnings: DashboardDataWarning[]
 }
 
 export interface UsageWindow {
@@ -106,6 +113,91 @@ export interface UsageModelSummary {
   output_tokens: number
   cache_creation_tokens: number
   cache_read_tokens: number
+}
+
+export interface DashboardDataWarning {
+  source: string
+  kind: string
+  message: string
+}
+
+export interface DashboardSignal {
+  id: string
+  kind: string
+  severity: string
+  occurred_at: string
+  title: string
+  detail: string | null
+  source: string | null
+  cost_usd: number | null
+  related_run_id: string | null
+  related_skill_name: string | null
+  related_report_id: number | null
+}
+
+export interface CostLearningRiver {
+  window: string
+  points: CostLearningPoint[]
+  series: CostLearningSeries[]
+  markers: LearningMarker[]
+}
+
+export interface CostLearningPoint {
+  bucket: string
+  total_cost_usd: number
+  sources: UsageSourcePoint[]
+}
+
+export interface CostLearningSeries {
+  source: string
+  points: CostSeriesPoint[]
+}
+
+export interface CostSeriesPoint {
+  bucket: string
+  cost_usd: number
+}
+
+export interface LearningMarker {
+  id: string
+  occurred_at: string
+  kind: string
+  label: string
+  severity: string
+  skill_name: string | null
+  source: string | null
+  cost_usd: number | null
+}
+
+export interface UsageDailyPoint {
+  date: string
+  total_cost_usd: number
+  subscription_cost_usd: number
+  api_cost_usd: number
+  turns: number
+  invocations: number
+  input_tokens: number
+  output_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
+  web_search_requests: number
+  web_fetch_requests: number
+  sources: UsageSourcePoint[]
+  models: UsageModelSummary[]
+}
+
+export interface UsageSourcePoint {
+  source: string
+  cost_usd: number
+  subscription_cost_usd: number
+  api_cost_usd: number
+  turns: number
+  invocations: number
+}
+
+export interface UsageSourceSeries {
+  source: string
+  points: CostSeriesPoint[]
 }
 
 export interface OverviewSummary {
@@ -180,6 +272,34 @@ export interface LearningOverviewResponse {
   health: LearningHealth
   lifecycle: LearningLifecycle
   recent_reports: LearningReportSummary[]
+  flow_nodes: LearningFlowNode[]
+  flow_edges: LearningFlowEdge[]
+  recent_learning_signals: LearningSignalPoint[]
+  warnings: DashboardDataWarning[]
+}
+
+export interface LearningFlowNode {
+  id: string
+  label: string
+  kind: string
+  count: number
+  severity: string
+}
+
+export interface LearningFlowEdge {
+  source: string
+  target: string
+  count: number
+}
+
+export interface LearningSignalPoint {
+  id: string
+  occurred_at: string
+  kind: string
+  label: string
+  severity: string
+  skill_name: string | null
+  count: number
 }
 
 export interface LearningFunnel {
