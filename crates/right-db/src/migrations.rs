@@ -38,8 +38,9 @@ const V29_SCHEMA: &str = include_str!("sql/v29_curator_state.sql");
 #[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
 const V30_SCHEMA: &str = include_str!("sql/v30_skill_learning_hint_outcome.sql");
 const V31_SCHEMA: &str = include_str!("sql/v31_skill_learning_events_dashboard_index.sql");
+const V32_SCHEMA: &str = include_str!("sql/v32_skill_lifecycle.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 31;
+pub const LATEST_SCHEMA_VERSION: u32 = 32;
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -512,6 +513,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up(V29_SCHEMA),
         M::up_with_hook("", v30_skill_learning_hint_outcome),
         M::up(V31_SCHEMA),
+        M::up(V32_SCHEMA),
     ])
 });
 
@@ -2306,5 +2308,72 @@ continue background work',
 
         // Re-run is no-op.
         MIGRATIONS.to_version(&mut conn, 30).unwrap();
+    }
+
+    #[test]
+    fn skill_lifecycle_schema_constraints_and_defaults() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='skill_lifecycle'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1, "skill_lifecycle table must exist");
+
+        let skill_name_pk: i64 = conn
+            .query_row(
+                "SELECT pk FROM pragma_table_info('skill_lifecycle') WHERE name = 'skill_name'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(skill_name_pk, 1, "skill_name must be the primary key");
+
+        conn.execute(
+            "INSERT INTO skill_lifecycle (skill_name) VALUES ('default-row')",
+            [],
+        )
+        .unwrap();
+        let defaults: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT pinned, use_count, patch_count FROM skill_lifecycle WHERE skill_name = 'default-row'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(defaults, (0, 0, 0));
+
+        for state in ["active", "stale", "archived"] {
+            conn.execute(
+                "INSERT INTO skill_lifecycle (skill_name, state) VALUES (?1, ?2)",
+                [format!("state-{state}"), state.to_string()],
+            )
+            .unwrap();
+        }
+        let invalid_state = conn.execute(
+            "INSERT INTO skill_lifecycle (skill_name, state) VALUES ('state-invalid', 'retired')",
+            [],
+        );
+        assert!(invalid_state.is_err(), "invalid state must be rejected");
+
+        for created_by in ["foreground", "probe_writer", "curator", "bundled"] {
+            conn.execute(
+                "INSERT INTO skill_lifecycle (skill_name, created_by) VALUES (?1, ?2)",
+                [format!("created-by-{created_by}"), created_by.to_string()],
+            )
+            .unwrap();
+        }
+        let invalid_created_by = conn.execute(
+            "INSERT INTO skill_lifecycle (skill_name, created_by) VALUES ('created-by-invalid', 'unknown')",
+            [],
+        );
+        assert!(
+            invalid_created_by.is_err(),
+            "invalid created_by must be rejected"
+        );
     }
 }
