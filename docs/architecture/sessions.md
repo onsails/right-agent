@@ -224,14 +224,21 @@ foreground Telegram turns instead of dropping them. The worker uses the same
 `async_runs kind='background'` continuation path as the Background button, but
 with shutdown-specific logs and banner text. If handoff cannot be confirmed by
 the continuation's `system/init`, the background row is marked failed with
-pending delivery.
+pending delivery. Workers that have received Telegram messages but have not
+started a foreground Claude invocation exit during shutdown instead of starting
+new foreground work.
 
 During shutdown, cron schedulers stop creating new runs. Running cron jobs get
 the bounded `SHUTDOWN_JOB_TIMEOUT` drain. Jobs still running after that timeout
 are aborted by the owning bot process and marked failed with a
 `cron_shutdown_interrupted` error payload; targeted runs remain pending for
-delivery. The shutdown delivery flush sends already-terminal pending async
-results without waiting for chat-idle politeness, then exits.
+delivery. After the normal async delivery loop exits within its shutdown
+deadline, the shutdown delivery flush sends already-terminal pending async
+results without waiting for chat-idle politeness, then exits. The shutdown
+deadline is applied before Telegram send side effects as a safe interruption.
+Once a Telegram delivery request is in flight, a shutdown timeout is treated as
+an unknown send outcome and marked terminal failed instead of retried, avoiding
+duplicate partial delivery on restart.
 
 ## Self-introspection
 
