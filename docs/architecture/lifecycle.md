@@ -74,11 +74,16 @@ right bot --agent <name>  (spawned by process-compose)
   ├─ Start teloxide long-polling dispatcher
   └─ On SIGINT/SIGTERM:
       ├─ Stop accepting Telegram updates
+      ├─ Cancel workers that have not started foreground Claude work
       ├─ Request shutdown background handoff for active foreground turns
       ├─ Wait briefly for foreground handoff gates to drain
       ├─ Stop cron schedulers and bounded-drain running cron jobs
       ├─ Mark owned timed-out cron runs as shutdown-interrupted failures
+      ├─ Wait up to the async-delivery shutdown deadline for the normal
+      │   delivery loop to exit; abort and skip explicit flush if it cannot
+      │   finish
       ├─ Flush already-ready async deliveries without idle-delay politeness
+      │   when the normal loop exits cleanly
       └─ Tear down SSH control master and exit
 
 Per message:

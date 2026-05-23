@@ -1321,7 +1321,18 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             }
         }
     }
-    tracing::info!("flushing ready async deliveries for shutdown");
+    tracing::info!("waiting for async delivery to finish");
+    let mut delivery_handle = delivery_handle;
+    let delivery_loop_finished = wait_for_delivery_loop_shutdown(
+        &mut delivery_handle,
+        async_delivery::ASYNC_DELIVERY_SHUTDOWN_TIMEOUT,
+    )
+    .await;
+    if delivery_loop_finished {
+        tracing::info!("flushing ready async deliveries for shutdown");
+    } else {
+        tracing::warn!("skipping shutdown async delivery flush because normal loop did not finish");
+    }
     let (
         flush_agent_dir,
         flush_agent_name,
@@ -1338,25 +1349,25 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         flush_learning,
         flush_learning_drain_scheduler,
     ) = delivery_flush_args;
-    async_delivery::flush_ready_deliveries_for_shutdown(
-        flush_agent_dir,
-        flush_agent_name,
-        flush_model,
-        flush_bot,
-        flush_allowlist,
-        flush_idle_ts,
-        flush_ssh_config,
-        flush_internal_client,
-        flush_resolved_sandbox,
-        flush_upgrade_lock,
-        flush_session_locks,
-        flush_debug,
-        flush_learning,
-        flush_learning_drain_scheduler,
-    )
-    .await;
-    tracing::info!("waiting for async delivery to finish");
-    let _ = delivery_handle.await;
+    if delivery_loop_finished {
+        async_delivery::flush_ready_deliveries_for_shutdown(
+            flush_agent_dir,
+            flush_agent_name,
+            flush_model,
+            flush_bot,
+            flush_allowlist,
+            flush_idle_ts,
+            flush_ssh_config,
+            flush_internal_client,
+            flush_resolved_sandbox,
+            flush_upgrade_lock,
+            flush_session_locks,
+            flush_debug,
+            flush_learning,
+            flush_learning_drain_scheduler,
+        )
+        .await;
+    }
     if let Some(handle) = sync_handle {
         tracing::info!("waiting for sync to finish");
         let _ = handle.await;
@@ -1390,6 +1401,43 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     }
 
     Ok(false)
+}
+
+async fn wait_for_delivery_loop_shutdown(
+    delivery_handle: &mut tokio::task::JoinHandle<()>,
+    timeout: std::time::Duration,
+) -> bool {
+    match tokio::time::timeout(timeout, &mut *delivery_handle).await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            tracing::warn!("async delivery task panicked: {e}");
+            false
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = timeout.as_secs(),
+                "async delivery task did not finish within shutdown deadline; aborting delivery loop"
+            );
+            delivery_handle.abort();
+            let abort_wait = timeout.min(std::time::Duration::from_secs(1));
+            match tokio::time::timeout(abort_wait, &mut *delivery_handle).await {
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_secs = abort_wait.as_secs(),
+                        "async delivery task did not observe abort within shutdown deadline"
+                    );
+                    false
+                }
+                Ok(Ok(())) => false,
+                Ok(Err(e)) => {
+                    if !e.is_cancelled() {
+                        tracing::warn!("async delivery task panicked after abort: {e}");
+                    }
+                    false
+                }
+            }
+        }
+    }
 }
 
 /// Memory drain loop. Periodically flushes `pending_retains` to Hindsight,
@@ -1614,5 +1662,31 @@ mod tests {
             .await
             .expect("drain loop must exit when shutdown is cancelled")
             .expect("blocking thread must not panic on shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delivery_loop_shutdown_wait_returns_after_timeout() {
+        let mut handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        let finished =
+            super::wait_for_delivery_loop_shutdown(&mut handle, Duration::from_millis(10)).await;
+
+        assert!(!finished);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delivery_loop_shutdown_wait_does_not_await_unresponsive_abort() {
+        let mut handle = tokio::spawn(async {
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        let started = std::time::Instant::now();
+
+        let finished =
+            super::wait_for_delivery_loop_shutdown(&mut handle, Duration::from_millis(10)).await;
+
+        assert!(!finished);
+        assert!(started.elapsed() < Duration::from_millis(150));
     }
 }

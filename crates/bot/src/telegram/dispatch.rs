@@ -87,6 +87,10 @@ fn visible_bot_commands() -> Vec<TelegramBotCommand> {
         .collect()
 }
 
+fn cancel_preinvoke_workers_for_shutdown(worker_shutdown: &CancellationToken) {
+    worker_shutdown.cancel();
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PreFilterLogMeta {
     chat_id: i64,
@@ -323,6 +327,7 @@ where
     let stop_tokens_for_shutdown = Arc::clone(&stop_tokens);
     let bg_requests_for_shutdown = Arc::clone(&bg_requests);
     let bg_handoff_gates_for_shutdown = Arc::clone(&bg_handoff_gates);
+    let worker_shutdown_for_signal = worker_shutdown.clone();
     tokio::spawn(async move {
         tokio::select! {
             _ = signal_cancel_task.cancelled() => {
@@ -334,6 +339,7 @@ where
             }
         }
 
+        cancel_preinvoke_workers_for_shutdown(&worker_shutdown_for_signal);
         let requested = super::request_shutdown_backgrounding(
             &stop_tokens_for_shutdown,
             &bg_requests_for_shutdown,
@@ -807,6 +813,15 @@ mod tests {
             BotCommand::parse("/usage detail", "right_bot").unwrap(),
             BotCommand::Usage(arg) if arg == "detail"
         ));
+    }
+
+    #[test]
+    fn shutdown_start_cancels_worker_shutdown_token() {
+        let worker_shutdown = CancellationToken::new();
+
+        cancel_preinvoke_workers_for_shutdown(&worker_shutdown);
+
+        assert!(worker_shutdown.is_cancelled());
     }
 
     #[test]

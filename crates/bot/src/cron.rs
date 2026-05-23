@@ -1224,6 +1224,21 @@ impl PendingExecuteHandle {
 
 type ExecuteHandles = Arc<std::sync::Mutex<Vec<PendingExecuteHandle>>>;
 
+fn register_execute_handle(
+    execute_handles: &ExecuteHandles,
+    job_name: String,
+    handle: JoinHandle<()>,
+) -> Result<(), JoinHandle<()>> {
+    match execute_handles.lock() {
+        Ok(mut guard) => {
+            guard.retain(|h| !h.handle.is_finished());
+            guard.push(PendingExecuteHandle { job_name, handle });
+            Ok(())
+        }
+        Err(_) => Err(handle),
+    }
+}
+
 /// Main reconciler loop. Polls `crons/*.yaml` every 60s, spawning per-job loops.
 ///
 /// Cron results are persisted to DB. A separate delivery loop reads pending rows
@@ -1448,12 +1463,7 @@ fn fire_one_shot_specs(
             .await;
             delete_one_shot_spec(&ad, &jn);
         });
-        if let Ok(mut guard) = execute_handles.lock() {
-            guard.push(PendingExecuteHandle {
-                job_name: name,
-                handle,
-            });
-        } else {
+        if let Err(handle) = register_execute_handle(execute_handles, name, handle) {
             triggered_handles.push(handle);
         }
     }
@@ -1643,12 +1653,7 @@ fn reconcile_jobs(
                 .await;
             });
             // Register for shutdown tracking
-            if let Ok(mut guard) = execute_handles.lock() {
-                guard.push(PendingExecuteHandle {
-                    job_name: trigger_name,
-                    handle,
-                });
-            } else {
+            if let Err(handle) = register_execute_handle(execute_handles, trigger_name, handle) {
                 triggered_handles.push(handle);
             }
         }
@@ -1725,6 +1730,9 @@ async fn run_job_loop(
         let dbg = debug.clone();
         let lrn = learning.clone();
         let lrn_scheduler = Arc::clone(&learning_drain_scheduler);
+        let delete_after_run = spec.schedule_kind.is_one_shot();
+        let delete_agent_dir = ad.clone();
+        let delete_job_name = jn.clone();
         let handle = tokio::spawn(async move {
             execute_job(
                 &jn,
@@ -1741,23 +1749,27 @@ async fn run_job_loop(
                 lrn_scheduler,
             )
             .await;
+            if delete_after_run {
+                delete_one_shot_spec(&delete_agent_dir, &delete_job_name);
+            }
         });
         if spec.schedule_kind.is_one_shot() {
-            // Wait for execution, then delete and exit loop
-            if let Err(e) = handle.await {
-                tracing::error!(job = %job_name, "one-shot job panicked: {e}");
+            if let Err(handle) = register_execute_handle(&execute_handles, job_name.clone(), handle)
+            {
+                tracing::warn!(
+                    job = %job_name,
+                    "failed to track one-shot cron execution for shutdown"
+                );
+                if let Err(e) = handle.await {
+                    tracing::error!(job = %job_name, "one-shot job panicked: {e}");
+                }
             }
-            delete_one_shot_spec(&agent_dir, &job_name);
             break;
         }
         // Register for shutdown tracking (only for recurring jobs that continue the loop)
-        if let Ok(mut guard) = execute_handles.lock() {
-            // Clean up finished handles to prevent unbounded growth
-            guard.retain(|h| !h.handle.is_finished());
-            guard.push(PendingExecuteHandle {
-                job_name: job_name.clone(),
-                handle,
-            });
+        if let Err(handle) = register_execute_handle(&execute_handles, job_name.clone(), handle) {
+            tracing::warn!(job = %job_name, "failed to track cron execution for shutdown");
+            drop(handle);
         }
     }
 }
@@ -1771,6 +1783,19 @@ mod classify_tests {
     async fn pending_execute_handle_retains_job_name_for_shutdown_marking() {
         let handle = PendingExecuteHandle::new_for_test("job-a");
         assert_eq!(handle.job_name(), "job-a");
+    }
+
+    #[tokio::test]
+    async fn register_execute_handle_tracks_job_name_for_shutdown_marking() {
+        let execute_handles: ExecuteHandles = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handle = tokio::spawn(async {});
+
+        register_execute_handle(&execute_handles, "job-a".to_owned(), handle)
+            .expect("execute handle should register");
+
+        let guard = execute_handles.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0].job_name(), "job-a");
     }
 
     #[test]

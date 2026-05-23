@@ -301,6 +301,18 @@ use right_platform_knobs::IDLE_THRESHOLD_SECS;
 const POLL_INTERVAL_SECS: u64 = 30; // Check every 30s
 const PENDING_FETCH_BATCH_SIZE: usize = 25;
 const MAX_DELIVERY_ATTEMPTS: u32 = 3;
+pub(crate) const ASYNC_DELIVERY_SHUTDOWN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(20);
+const TELEGRAM_SEND_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+const DELIVERY_INTERRUPTED_BY_SHUTDOWN: &str = "delivery interrupted by shutdown";
+const DELIVERY_SEND_OUTCOME_UNKNOWN_AFTER_SHUTDOWN: &str =
+    "delivery send outcome unknown after shutdown";
+
+#[derive(Debug, Clone, Copy)]
+struct DeliveryShutdownControl<'a> {
+    token: Option<&'a tokio_util::sync::CancellationToken>,
+    deadline: Option<tokio::time::Instant>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryMode {
@@ -378,6 +390,7 @@ async fn run_delivery_once(
     debug: &Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent::agent::types::LearningConfig,
     learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
+    shutdown: DeliveryShutdownControl<'_>,
 ) -> bool {
     let pending = match fetch_next_pending(conn, &state.delivered_in_memory) {
         Ok(Some(p)) => p,
@@ -511,6 +524,7 @@ async fn run_delivery_once(
         upgrade_lock,
         session_locks.clone(),
         Arc::clone(debug),
+        shutdown,
     )
     .await
     {
@@ -559,6 +573,29 @@ async fn run_delivery_once(
             );
         }
         Err(e) => {
+            if is_delivery_shutdown_interruption(&e) {
+                tracing::info!(
+                    kind = %to_deliver.kind,
+                    label = %pending_label(&to_deliver),
+                    run_id = %to_deliver.id,
+                    "async delivery interrupted by shutdown; leaving row pending"
+                );
+                return false;
+            }
+            if is_delivery_terminal_shutdown_send_error(&e) {
+                tracing::warn!(
+                    kind = %to_deliver.kind,
+                    label = %pending_label(&to_deliver),
+                    run_id = %to_deliver.id,
+                    "async delivery send outcome is unknown after shutdown deadline; marking terminal failed to avoid duplicate delivery"
+                );
+                if let Err(mark_err) = mark_delivery_outcome(conn, &to_deliver.id, "failed") {
+                    tracing::error!(run_id = %to_deliver.id, "terminal delivery-failure DB update failed: {mark_err:#}");
+                    state.delivered_in_memory.insert(to_deliver.id.clone());
+                }
+                state.attempt_counts.remove(&to_deliver.id);
+                return true;
+            }
             let attempts = state
                 .attempt_counts
                 .entry(to_deliver.id.clone())
@@ -649,9 +686,112 @@ pub(crate) async fn run_delivery_loop(
             &debug,
             &learning,
             &learning_drain_scheduler,
+            DeliveryShutdownControl {
+                token: Some(&shutdown),
+                deadline: None,
+            },
         )
         .await;
     }
+}
+
+async fn run_or_delivery_shutdown<T>(
+    control: DeliveryShutdownControl<'_>,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    tokio::select! {
+        biased;
+        _ = async {
+            if let Some(token) = control.token {
+                token.cancelled().await;
+            }
+        }, if control.token.is_some() => Err(DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()),
+        _ = async {
+            if let Some(deadline) = control.deadline {
+                tokio::time::sleep_until(deadline).await;
+            }
+        }, if control.deadline.is_some() => Err(DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()),
+        result = future => Ok(result),
+    }
+}
+
+fn is_delivery_shutdown_interruption(error: &str) -> bool {
+    error == DELIVERY_INTERRUPTED_BY_SHUTDOWN
+}
+
+async fn run_telegram_request_with_shutdown<F, T, E>(
+    control: DeliveryShutdownControl<'_>,
+    previous_telegram_side_effect: bool,
+    request: F,
+) -> Result<Result<T, E>, String>
+where
+    F: std::future::IntoFuture<Output = Result<T, E>>,
+{
+    let pre_poll_shutdown_error = if previous_telegram_side_effect {
+        DELIVERY_SEND_OUTCOME_UNKNOWN_AFTER_SHUTDOWN
+    } else {
+        DELIVERY_INTERRUPTED_BY_SHUTDOWN
+    };
+    if control
+        .deadline
+        .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+    {
+        return Err(pre_poll_shutdown_error.to_owned());
+    }
+    if control.token.is_some_and(|token| token.is_cancelled()) {
+        return Err(pre_poll_shutdown_error.to_owned());
+    }
+
+    let request_was_polled = std::sync::atomic::AtomicBool::new(false);
+    let mut inner = Box::pin(request.into_future());
+    let future = std::future::poll_fn(|cx| {
+        request_was_polled.store(true, std::sync::atomic::Ordering::Relaxed);
+        inner.as_mut().poll(cx)
+    });
+    tokio::pin!(future);
+    let mut deadline = control.deadline;
+
+    loop {
+        if let Some(until) = deadline {
+            if until <= tokio::time::Instant::now() {
+                return Err(DELIVERY_SEND_OUTCOME_UNKNOWN_AFTER_SHUTDOWN.to_owned());
+            }
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(until) => {
+                    return Err(DELIVERY_SEND_OUTCOME_UNKNOWN_AFTER_SHUTDOWN.to_owned());
+                }
+                result = &mut future => return Ok(result),
+            }
+        }
+
+        if let Some(token) = control.token {
+            if token.is_cancelled() {
+                if request_was_polled.load(std::sync::atomic::Ordering::Relaxed) {
+                    deadline = Some(tokio::time::Instant::now() + TELEGRAM_SEND_SHUTDOWN_GRACE);
+                    continue;
+                }
+                return Err(pre_poll_shutdown_error.to_owned());
+            }
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => {
+                    if request_was_polled.load(std::sync::atomic::Ordering::Relaxed) {
+                        deadline = Some(tokio::time::Instant::now() + TELEGRAM_SEND_SHUTDOWN_GRACE);
+                    } else {
+                        return Err(pre_poll_shutdown_error.to_owned());
+                    }
+                }
+                result = &mut future => return Ok(result),
+            }
+        } else {
+            return Ok(future.await);
+        }
+    }
+}
+
+fn is_delivery_terminal_shutdown_send_error(error: &str) -> bool {
+    error == DELIVERY_SEND_OUTCOME_UNKNOWN_AFTER_SHUTDOWN
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -679,7 +819,7 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
         }
     };
     let mut state = DeliveryLoopState::new();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = tokio::time::Instant::now() + ASYNC_DELIVERY_SHUTDOWN_TIMEOUT;
     loop {
         if tokio::time::Instant::now() >= deadline {
             tracing::warn!("async delivery shutdown flush timed out");
@@ -703,6 +843,10 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
             &debug,
             &learning,
             &learning_drain_scheduler,
+            DeliveryShutdownControl {
+                token: None,
+                deadline: Some(deadline),
+            },
         )
         .await;
         if !delivered {
@@ -825,11 +969,12 @@ async fn deliver_through_session(
     upgrade_lock: &tokio::sync::RwLock<()>,
     session_locks: crate::telegram::SessionLocks,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    shutdown: DeliveryShutdownControl<'_>,
 ) -> Result<DeliverySendReport, String> {
     use std::process::Stdio;
 
     // Block while upgrade is running.
-    let _upgrade_guard = upgrade_lock.read().await;
+    let _upgrade_guard = run_or_delivery_shutdown(shutdown, upgrade_lock.read()).await?;
 
     // Acquire the per-session mutex so delivery doesn't race with an active worker
     // turn on the same CC session (same --resume chain). None when there is no
@@ -840,7 +985,7 @@ async fn deliver_through_session(
                 .entry(id)
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone();
-            Some(entry.lock_owned().await)
+            Some(run_or_delivery_shutdown(shutdown, entry.lock_owned()).await?)
         }
         None => None,
     };
@@ -873,24 +1018,26 @@ async fn deliver_through_session(
     let base_prompt = right_codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
 
     // Fetch MCP instructions from aggregator (non-fatal).
-    let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await
-    {
-        Ok(resp) => {
-            if resp.instructions.trim().len()
-                > right_codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
-                    .trim()
-                    .len()
-            {
-                Some(resp.instructions)
-            } else {
+    let mcp_instructions: Option<String> =
+        match run_or_delivery_shutdown(shutdown, internal_client.mcp_instructions(agent_name))
+            .await?
+        {
+            Ok(resp) => {
+                if resp.instructions.trim().len()
+                    > right_codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
+                        .trim()
+                        .len()
+                {
+                    Some(resp.instructions)
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::warn!("delivery: failed to fetch MCP instructions: {e:#}");
                 None
             }
-        }
-        Err(e) => {
-            tracing::warn!("delivery: failed to fetch MCP instructions: {e:#}");
-            None
-        }
-    };
+        };
 
     // Delivery sessions skip memory injection — same rationale as cron jobs.
     let memory_mode: Option<crate::cc::prompt::MemoryMode> = None;
@@ -956,17 +1103,19 @@ async fn deliver_through_session(
 
     if let Some(mut stdin) = child.stdin() {
         use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(yaml_input.as_bytes())
-            .await
+        run_or_delivery_shutdown(shutdown, stdin.write_all(yaml_input.as_bytes()))
+            .await?
             .map_err(|e| format!("stdin write: {e:#}"))?;
     }
 
     const DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-    let output = tokio::time::timeout(DELIVERY_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| "delivery CC subprocess timed out after 120s".to_string())?
-        .map_err(|e| format!("wait_with_output: {e:#}"))?;
+    let output = run_or_delivery_shutdown(
+        shutdown,
+        tokio::time::timeout(DELIVERY_TIMEOUT, child.wait_with_output()),
+    )
+    .await?
+    .map_err(|_| "delivery CC subprocess timed out after 120s".to_string())?
+    .map_err(|e| format!("wait_with_output: {e:#}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1020,7 +1169,9 @@ async fn deliver_through_session(
             if let Some(t) = target_thread_id {
                 send = send.message_thread_id(ThreadId(MessageId(t as i32)));
             }
-            if let Err(e) = send.await {
+            if let Err(e) =
+                run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, send).await?
+            {
                 tracing::warn!(
                     chat_id = target_chat_id,
                     "async delivery: HTML send failed, retrying plain: {e:#}"
@@ -1030,7 +1181,10 @@ async fn deliver_through_session(
                 if let Some(t) = target_thread_id {
                     fallback = fallback.message_thread_id(ThreadId(MessageId(t as i32)));
                 }
-                if let Err(e2) = fallback.await {
+                if let Err(e2) =
+                    run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, fallback)
+                        .await?
+                {
                     tracing::error!(
                         chat_id = target_chat_id,
                         "async delivery: plain text fallback also failed: {e2:#}"
@@ -1048,16 +1202,20 @@ async fn deliver_through_session(
 
     if let Some(ref atts) = reply.attachments
         && !atts.is_empty()
-        && let Err(e) = crate::telegram::attachments::send_attachments(
-            atts,
-            bot,
-            teloxide::types::ChatId(target_chat_id),
-            target_thread_id.unwrap_or(0),
-            agent_dir,
-            ssh_config_path,
-            resolved_sandbox,
+        && let Err(e) = run_telegram_request_with_shutdown(
+            shutdown,
+            report.total_sent() > 0,
+            crate::telegram::attachments::send_attachments(
+                atts,
+                bot,
+                teloxide::types::ChatId(target_chat_id),
+                target_thread_id.unwrap_or(0),
+                agent_dir,
+                ssh_config_path,
+                resolved_sandbox,
+            ),
         )
-        .await
+        .await?
     {
         tracing::error!(
             chat_id = target_chat_id,
@@ -1082,6 +1240,144 @@ mod tests {
     fn delivery_mode_shutdown_flush_skips_idle_gate() {
         assert!(should_wait_for_idle(DeliveryMode::Normal, 10));
         assert!(!should_wait_for_idle(DeliveryMode::ShutdownFlush, 10));
+    }
+
+    #[tokio::test]
+    async fn shutdown_deadline_bounds_single_delivery_attempt() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(10);
+        let result = run_or_delivery_shutdown(
+            DeliveryShutdownControl {
+                token: None,
+                deadline: Some(deadline),
+            },
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                true
+            },
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_shutdown_cancels_pending_future() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        shutdown.cancel();
+
+        let result = run_or_delivery_shutdown(
+            DeliveryShutdownControl {
+                token: Some(&shutdown),
+                deadline: None,
+            },
+            async { true },
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_without_shutdown_waits_for_future() {
+        let result = run_or_delivery_shutdown(
+            DeliveryShutdownControl {
+                token: None,
+                deadline: None,
+            },
+            async { true },
+        )
+        .await;
+
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn delivery_shutdown_interruption_is_not_retry_failure() {
+        assert!(is_delivery_shutdown_interruption(
+            DELIVERY_INTERRUPTED_BY_SHUTDOWN
+        ));
+        assert!(!is_delivery_shutdown_interruption(
+            "stdin write: broken pipe"
+        ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_bounded_telegram_send_timeout_is_terminal_not_retryable() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(10);
+        let result = run_telegram_request_with_shutdown(
+            DeliveryShutdownControl {
+                token: None,
+                deadline: Some(deadline),
+            },
+            false,
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Ok::<_, String>(())
+            },
+        )
+        .await;
+
+        let error = result.unwrap_err();
+        assert!(is_delivery_terminal_shutdown_send_error(&error));
+        assert!(!is_delivery_shutdown_interruption(&error));
+    }
+
+    #[tokio::test]
+    async fn expired_shutdown_deadline_does_not_start_fresh_telegram_send() {
+        let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let was_polled = Arc::clone(&polled);
+        let deadline = tokio::time::Instant::now() - std::time::Duration::from_millis(1);
+
+        let result = run_telegram_request_with_shutdown(
+            DeliveryShutdownControl {
+                token: None,
+                deadline: Some(deadline),
+            },
+            false,
+            async move {
+                was_polled.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::future::pending::<Result<(), String>>().await
+            },
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            DELIVERY_INTERRUPTED_BY_SHUTDOWN.to_owned()
+        );
+        assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelled_shutdown_after_prior_send_is_terminal_without_new_send_poll() {
+        let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let was_polled = Arc::clone(&polled);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        shutdown.cancel();
+
+        let result = run_telegram_request_with_shutdown(
+            DeliveryShutdownControl {
+                token: Some(&shutdown),
+                deadline: None,
+            },
+            true,
+            async move {
+                was_polled.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::future::pending::<Result<(), String>>().await
+            },
+        )
+        .await;
+
+        assert!(is_delivery_terminal_shutdown_send_error(
+            &result.unwrap_err()
+        ));
+        assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     fn setup_db() -> (tempfile::TempDir, rusqlite::Connection) {
