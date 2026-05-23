@@ -370,7 +370,7 @@ fn latest_activity_at(row: &SkillLifecycleRow) -> Option<DateTime<Utc>> {
         (Some(used), Some(patched)) => Some(used.max(patched)),
         (Some(used), None) => Some(used),
         (None, Some(patched)) => Some(patched),
-        (None, None) => row.created_at,
+        (None, None) => None,
     }
 }
 
@@ -608,5 +608,34 @@ mod tests {
                 "{skill_name} must not transition"
             );
         }
+    }
+
+    #[test]
+    fn automatic_transitions_leave_rows_without_activity_unchanged() {
+        let conn = migrated_conn();
+        let now = utc("2026-05-23T12:00:00Z");
+        let config = TransitionConfig {
+            stale_after: TimeDelta::days(7),
+            archive_after: TimeDelta::days(30),
+        };
+        insert_lifecycle_row(
+            &conn,
+            "created-only-probe",
+            LifecycleState::Active,
+            false,
+            CreatedBy::ProbeWriter,
+            0,
+            0,
+            None,
+            None,
+        );
+
+        let updated = apply_automatic_transitions(&conn, now, config).unwrap();
+
+        assert_eq!(updated, 0);
+        assert_eq!(
+            get(&conn, "created-only-probe").unwrap().unwrap().state,
+            LifecycleState::Active
+        );
     }
 }
