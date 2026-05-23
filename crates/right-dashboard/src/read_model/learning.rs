@@ -1,19 +1,23 @@
 use crate::api_types::{
-    LearningCapabilities, LearningEpisodeDetail, LearningEventSummary, LearningEvidenceSnippet,
-    LearningFunnel, LearningHealth, LearningLifecycle, LearningOverviewResponse, LearningQuality,
-    LearningReportDetailResponse, LearningReportSummary, LearningReviewerDetail,
-    LearningSelectorDetail,
+    DashboardDataWarning, LearningCapabilities, LearningEpisodeDetail, LearningEventSummary,
+    LearningEvidenceSnippet, LearningFlowEdge, LearningFlowNode, LearningFunnel, LearningHealth,
+    LearningLifecycle, LearningOverviewResponse, LearningQuality, LearningReportDetailResponse,
+    LearningReportSummary, LearningReviewerDetail, LearningSelectorDetail, LearningSignalPoint,
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension as _, params};
 
-use super::ReadModelError;
+use super::{
+    ReadModelError,
+    learning_outcomes::{learning_outcome_kind, learning_outcome_severity},
+};
 
 pub const LEARNING_REVIEW_DAILY_LIMIT: i64 = 12;
 const RECENT_REPORT_LIMIT: i64 = 20;
 const RECENT_EVENT_LIMIT: i64 = 10;
+const RECENT_LEARNING_SIGNAL_LIMIT: usize = 30;
 const CANDIDATE_NAME_LIMIT: i64 = 20;
 const EVIDENCE_SNIPPET_TEXT_MAX_CHARS: usize = 320;
 const EVIDENCE_SNIPPET_LIMIT: usize = 24;
@@ -26,22 +30,6 @@ pub struct LearningOverviewInput {
 
 pub(super) fn parse_generated_at(value: &str) -> Result<DateTime<Utc>, ReadModelError> {
     Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
-}
-
-pub(super) fn window_start(
-    generated_at: &str,
-    duration: Duration,
-) -> Result<String, ReadModelError> {
-    Ok((parse_generated_at(generated_at)? - duration).to_rfc3339())
-}
-
-fn count_since(
-    conn: &Connection,
-    sql: &str,
-    agent: &str,
-    since: &str,
-) -> Result<i64, ReadModelError> {
-    Ok(conn.query_row(sql, params![agent, since], |row| row.get(0))?)
 }
 
 fn rate(numerator: i64, denominator: i64) -> Option<f64> {
@@ -64,57 +52,33 @@ pub fn learning_overview(
     conn: &Connection,
     input: LearningOverviewInput,
 ) -> Result<LearningOverviewResponse, ReadModelError> {
-    let since_24h = window_start(&input.generated_at, Duration::hours(24))?;
-    let since_7d = window_start(&input.generated_at, Duration::days(7))?;
+    let generated_at_utc = parse_generated_at(&input.generated_at)?;
+    let since_24h_utc = generated_at_utc - Duration::hours(24);
+    let since_7d_utc = generated_at_utc - Duration::days(7);
     let agent_name = input.agent;
     let generated_at = input.generated_at;
     let agent = agent_name.as_str();
 
-    let signals_accepted_24h = count_since(
-        conn,
-        "SELECT COUNT(*) FROM skill_nudge_signals WHERE agent_name=?1 AND accepted_at >= ?2",
-        agent,
-        &since_24h,
-    )?;
+    let signals_accepted_24h =
+        signal_count_in_window(conn, agent, &since_24h_utc, &generated_at_utc)?;
 
     let episode_count = |status: &str| -> Result<i64, ReadModelError> {
-        Ok(conn.query_row(
-            "SELECT COUNT(*) FROM learning_episodes
-             WHERE agent_name=?1 AND status=?2 AND created_at >= ?3",
-            params![agent, status, since_24h],
-            |row| row.get(0),
-        )?)
+        episode_count_in_window(conn, agent, status, &since_24h_utc, &generated_at_utc)
     };
 
     let report_count = |status: &str| -> Result<i64, ReadModelError> {
-        Ok(conn.query_row(
-            "SELECT COUNT(*) FROM skill_review_reports
-             WHERE agent_name=?1 AND status=?2 AND created_at >= ?3",
-            params![agent, status, since_24h],
-            |row| row.get(0),
-        )?)
+        report_count_in_window(conn, agent, status, &since_24h_utc, &generated_at_utc)
     };
 
-    let reports_total_24h = count_since(
-        conn,
-        "SELECT COUNT(*) FROM skill_review_reports WHERE agent_name=?1 AND created_at >= ?2",
-        agent,
-        &since_24h,
-    )?;
+    let reports_total_24h =
+        report_total_count_in_window(conn, agent, &since_24h_utc, &generated_at_utc)?;
     let create_candidates_24h = report_count("create_candidate")?;
     let update_candidates_24h = report_count("update_candidate")?;
     let nothing_to_learn_24h = report_count("nothing_to_learn")?;
     let failed_reviews_24h = report_count("failed")?;
     let non_failed_reports = create_candidates_24h + update_candidates_24h + nothing_to_learn_24h;
-    let foreground_created_or_updated_7d = conn.query_row(
-        "SELECT COUNT(*) FROM skill_learning_events
-         WHERE agent_name=?1
-           AND phase='finish'
-           AND status IN ('created','updated')
-           AND created_at >= ?2",
-        params![agent, since_7d],
-        |row| row.get(0),
-    )?;
+    let foreground_created_or_updated_7d =
+        successful_writer_count_in_window(conn, agent, &since_7d_utc, &generated_at_utc)?;
 
     let quality = LearningQuality {
         candidate_rate: rate(
@@ -124,15 +88,46 @@ pub fn learning_overview(
         nothing_to_learn_rate: rate(nothing_to_learn_24h, non_failed_reports),
         create_count_24h: create_candidates_24h,
         update_count_24h: update_candidates_24h,
-        high_confidence_count_24h: confidence_count(conn, agent, &since_24h, "high")?,
-        medium_confidence_count_24h: confidence_count(conn, agent, &since_24h, "medium")?,
-        low_confidence_count_24h: confidence_count(conn, agent, &since_24h, "low")?,
+        high_confidence_count_24h: confidence_count(
+            conn,
+            agent,
+            &since_24h_utc,
+            &generated_at_utc,
+            "high",
+        )?,
+        medium_confidence_count_24h: confidence_count(
+            conn,
+            agent,
+            &since_24h_utc,
+            &generated_at_utc,
+            "medium",
+        )?,
+        low_confidence_count_24h: confidence_count(
+            conn,
+            agent,
+            &since_24h_utc,
+            &generated_at_utc,
+            "low",
+        )?,
         failed_count_24h: failed_reviews_24h,
     };
 
     let health = learning_health(conn, agent, &generated_at)?;
-    let lifecycle = learning_lifecycle(conn, agent, &since_7d)?;
+    let lifecycle = learning_lifecycle(conn, agent, &since_7d_utc, &generated_at_utc)?;
     let recent_reports = recent_reports(conn, agent)?;
+    let flow_counts = learning_flow_counts(conn, agent, &since_7d_utc, &generated_at_utc)?;
+    let flow_nodes = learning_flow_nodes(&flow_counts);
+    let (flow_edges, partial_flow) = learning_flow_edges(&flow_nodes);
+    let recent_learning_signals =
+        recent_learning_signals(conn, agent, &since_7d_utc, &generated_at_utc)?;
+    let mut warnings = Vec::<DashboardDataWarning>::new();
+    if partial_flow {
+        warnings.push(DashboardDataWarning {
+            source: "learning_flow".to_owned(),
+            kind: "partial_data".to_owned(),
+            message: "writer transitions are aggregate-only and partially inferred".to_owned(),
+        });
+    }
     let episodes_pending_24h = episode_count("pending")?;
     let episodes_selecting_24h = episode_count("selecting")?;
     let episodes_selected_24h = episode_count("selected")?;
@@ -168,11 +163,427 @@ pub fn learning_overview(
         health,
         lifecycle,
         recent_reports,
-        flow_nodes: Vec::new(),
-        flow_edges: Vec::new(),
-        recent_learning_signals: Vec::new(),
-        warnings: Vec::new(),
+        flow_nodes,
+        flow_edges,
+        recent_learning_signals,
+        warnings,
     })
+}
+
+struct LearningFlowCounts {
+    signals: i64,
+    create_candidates: i64,
+    update_candidates: i64,
+    nothing_to_learn: i64,
+    failed_reviews: i64,
+    writer_created: i64,
+    writer_updated: i64,
+    writer_failed: i64,
+}
+
+fn learning_flow_counts(
+    conn: &Connection,
+    agent: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<LearningFlowCounts, ReadModelError> {
+    Ok(LearningFlowCounts {
+        signals: signal_count_in_window(conn, agent, since, now)?,
+        create_candidates: report_count_in_window(conn, agent, "create_candidate", since, now)?,
+        update_candidates: report_count_in_window(conn, agent, "update_candidate", since, now)?,
+        nothing_to_learn: report_count_in_window(conn, agent, "nothing_to_learn", since, now)?,
+        failed_reviews: report_count_in_window(conn, agent, "failed", since, now)?,
+        writer_created: writer_status_count_in_window(conn, agent, "created", since, now)?,
+        writer_updated: writer_status_count_in_window(conn, agent, "updated", since, now)?,
+        writer_failed: failed_writer_count_in_window(conn, agent, since, now)?,
+    })
+}
+
+fn learning_flow_nodes(counts: &LearningFlowCounts) -> Vec<LearningFlowNode> {
+    vec![
+        LearningFlowNode {
+            id: "signals".to_owned(),
+            label: "Signals".to_owned(),
+            kind: "signal".to_owned(),
+            count: counts.signals,
+            severity: "info".to_owned(),
+        },
+        LearningFlowNode {
+            id: "prefilter_create".to_owned(),
+            label: "Create candidates".to_owned(),
+            kind: "prefilter".to_owned(),
+            count: counts.create_candidates,
+            severity: "info".to_owned(),
+        },
+        LearningFlowNode {
+            id: "prefilter_patch".to_owned(),
+            label: "Patch candidates".to_owned(),
+            kind: "prefilter".to_owned(),
+            count: counts.update_candidates,
+            severity: "info".to_owned(),
+        },
+        LearningFlowNode {
+            id: "prefilter_skip".to_owned(),
+            label: "Nothing to learn".to_owned(),
+            kind: "prefilter".to_owned(),
+            count: counts.nothing_to_learn,
+            severity: "info".to_owned(),
+        },
+        LearningFlowNode {
+            id: "prefilter_failed".to_owned(),
+            label: "Failed reviews".to_owned(),
+            kind: "prefilter".to_owned(),
+            count: counts.failed_reviews,
+            severity: "bad".to_owned(),
+        },
+        LearningFlowNode {
+            id: "writer_created".to_owned(),
+            label: "Created".to_owned(),
+            kind: "writer".to_owned(),
+            count: counts.writer_created,
+            severity: "info".to_owned(),
+        },
+        LearningFlowNode {
+            id: "writer_updated".to_owned(),
+            label: "Updated".to_owned(),
+            kind: "writer".to_owned(),
+            count: counts.writer_updated,
+            severity: "info".to_owned(),
+        },
+        LearningFlowNode {
+            id: "writer_failed".to_owned(),
+            label: "Failed or aborted".to_owned(),
+            kind: "writer".to_owned(),
+            count: counts.writer_failed,
+            severity: "bad".to_owned(),
+        },
+    ]
+}
+
+fn learning_flow_edges(nodes: &[LearningFlowNode]) -> (Vec<LearningFlowEdge>, bool) {
+    let count = |id: &str| -> i64 {
+        nodes
+            .iter()
+            .find(|node| node.id == id)
+            .map(|node| node.count)
+            .unwrap_or(0)
+    };
+    let mut edges = Vec::new();
+    let mut signal_budget = count("signals");
+    for target in [
+        "prefilter_create",
+        "prefilter_patch",
+        "prefilter_skip",
+        "prefilter_failed",
+    ] {
+        let value = count(target).min(signal_budget);
+        if value > 0 {
+            edges.push(LearningFlowEdge {
+                source: "signals".to_owned(),
+                target: target.to_owned(),
+                count: value,
+            });
+            signal_budget -= value;
+        }
+    }
+
+    let created_attached = count("prefilter_create").min(count("writer_created"));
+    if created_attached > 0 {
+        edges.push(LearningFlowEdge {
+            source: "prefilter_create".to_owned(),
+            target: "writer_created".to_owned(),
+            count: created_attached,
+        });
+    }
+
+    let updated_attached = count("prefilter_patch").min(count("writer_updated"));
+    if updated_attached > 0 {
+        edges.push(LearningFlowEdge {
+            source: "prefilter_patch".to_owned(),
+            target: "writer_updated".to_owned(),
+            count: updated_attached,
+        });
+    }
+
+    let failed_attached = count("prefilter_failed").min(count("writer_failed"));
+    if failed_attached > 0 {
+        edges.push(LearningFlowEdge {
+            source: "prefilter_failed".to_owned(),
+            target: "writer_failed".to_owned(),
+            count: failed_attached,
+        });
+    }
+
+    let mut represented_writers = created_attached + updated_attached + failed_attached;
+    for (target, remaining) in [
+        ("writer_created", count("writer_created") - created_attached),
+        ("writer_updated", count("writer_updated") - updated_attached),
+        ("writer_failed", count("writer_failed") - failed_attached),
+    ] {
+        let value = remaining.min(signal_budget);
+        if value > 0 {
+            edges.push(LearningFlowEdge {
+                source: "signals".to_owned(),
+                target: target.to_owned(),
+                count: value,
+            });
+            signal_budget -= value;
+            represented_writers += value;
+        }
+    }
+
+    let writer_total = count("writer_created") + count("writer_updated") + count("writer_failed");
+    (edges, writer_total > represented_writers)
+}
+
+fn coarse_timestamp_bounds(since: &DateTime<Utc>, now: &DateTime<Utc>) -> (String, String) {
+    (
+        (*since - Duration::days(1)).to_rfc3339(),
+        (*now + Duration::days(1)).to_rfc3339(),
+    )
+}
+
+fn signal_count_in_window(
+    conn: &Connection,
+    agent: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
+    let mut stmt = conn.prepare(
+        "SELECT accepted_at
+         FROM skill_nudge_signals
+         WHERE agent_name=?1
+           AND accepted_at >= ?2
+           AND accepted_at <= ?3",
+    )?;
+    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
+        row.get::<_, String>(0)
+    })?;
+    count_parsed_window_rows(rows, since, now)
+}
+
+fn episode_count_in_window(
+    conn: &Connection,
+    agent: &str,
+    status: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
+    let mut stmt = conn.prepare(
+        "SELECT created_at
+         FROM learning_episodes
+         WHERE agent_name=?1
+           AND status=?2
+           AND created_at >= ?3
+           AND created_at <= ?4",
+    )?;
+    let rows = stmt.query_map(params![agent, status, coarse_since, coarse_until], |row| {
+        row.get::<_, String>(0)
+    })?;
+    count_parsed_window_rows(rows, since, now)
+}
+
+fn report_total_count_in_window(
+    conn: &Connection,
+    agent: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
+    let mut stmt = conn.prepare(
+        "SELECT created_at
+         FROM skill_review_reports
+         WHERE agent_name=?1
+           AND created_at >= ?2
+           AND created_at <= ?3",
+    )?;
+    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
+        row.get::<_, String>(0)
+    })?;
+    count_parsed_window_rows(rows, since, now)
+}
+
+fn report_count_in_window(
+    conn: &Connection,
+    agent: &str,
+    status: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
+    let mut stmt = conn.prepare(
+        "SELECT created_at
+         FROM skill_review_reports
+         WHERE agent_name=?1
+           AND status=?2
+           AND created_at >= ?3
+           AND created_at <= ?4",
+    )?;
+    let rows = stmt.query_map(params![agent, status, coarse_since, coarse_until], |row| {
+        row.get::<_, String>(0)
+    })?;
+    count_parsed_window_rows(rows, since, now)
+}
+
+fn confidence_count(
+    conn: &Connection,
+    agent: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+    confidence: &str,
+) -> Result<i64, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
+    let mut stmt = conn.prepare(
+        "SELECT created_at
+         FROM skill_review_reports
+         WHERE agent_name=?1
+           AND confidence=?2
+           AND created_at >= ?3
+           AND created_at <= ?4",
+    )?;
+    let rows = stmt.query_map(
+        params![agent, confidence, coarse_since, coarse_until],
+        |row| row.get::<_, String>(0),
+    )?;
+    count_parsed_window_rows(rows, since, now)
+}
+
+fn writer_status_count_in_window(
+    conn: &Connection,
+    agent: &str,
+    status: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
+    let mut stmt = conn.prepare(
+        "SELECT created_at
+         FROM skill_learning_events
+         WHERE agent_name=?1
+           AND phase='finish'
+           AND status=?2
+           AND created_at >= ?3
+           AND created_at <= ?4",
+    )?;
+    let rows = stmt.query_map(params![agent, status, coarse_since, coarse_until], |row| {
+        row.get::<_, String>(0)
+    })?;
+    count_parsed_window_rows(rows, since, now)
+}
+
+fn successful_writer_count_in_window(
+    conn: &Connection,
+    agent: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
+    let mut stmt = conn.prepare(
+        "SELECT created_at
+         FROM skill_learning_events
+         WHERE agent_name=?1
+           AND phase='finish'
+           AND status IN ('created','updated')
+           AND created_at >= ?2
+           AND created_at <= ?3",
+    )?;
+    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
+        row.get::<_, String>(0)
+    })?;
+    count_parsed_window_rows(rows, since, now)
+}
+
+fn failed_writer_count_in_window(
+    conn: &Connection,
+    agent: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
+    let mut stmt = conn.prepare(
+        "SELECT created_at
+         FROM skill_learning_events
+         WHERE agent_name=?1
+           AND phase='finish'
+           AND status IN ('failed','aborted')
+           AND created_at >= ?2
+           AND created_at <= ?3",
+    )?;
+    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
+        row.get::<_, String>(0)
+    })?;
+    count_parsed_window_rows(rows, since, now)
+}
+
+fn count_parsed_window_rows(
+    rows: impl Iterator<Item = rusqlite::Result<String>>,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let mut count = 0;
+    for row in rows {
+        let timestamp = parse_generated_at(&row?)?;
+        if timestamp >= *since && timestamp <= *now {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn recent_learning_signals(
+    conn: &Connection,
+    agent: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<Vec<LearningSignalPoint>, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
+    let mut stmt = conn.prepare(
+        "SELECT id, action, skill_name, status, hint_outcome, created_at
+         FROM skill_learning_events
+         WHERE agent_name=?1
+           AND phase='finish'
+           AND created_at >= ?2
+           AND created_at <= ?3
+         ORDER BY created_at DESC, id DESC",
+    )?;
+    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    let mut signals = Vec::<(DateTime<Utc>, i64, LearningSignalPoint)>::new();
+    for row in rows {
+        let (id, action, skill_name, status, hint_outcome, occurred_at) = row?;
+        let occurred_at_utc = parse_generated_at(&occurred_at)?;
+        if occurred_at_utc < *since || occurred_at_utc > *now {
+            continue;
+        }
+        signals.push((
+            occurred_at_utc,
+            id,
+            LearningSignalPoint {
+                id: format!("learning:{id}"),
+                occurred_at: occurred_at_utc.to_rfc3339(),
+                kind: learning_outcome_kind(&action, status.as_deref(), hint_outcome.as_deref())
+                    .to_owned(),
+                label: skill_name.clone(),
+                severity: learning_outcome_severity(status.as_deref(), hint_outcome.as_deref())
+                    .to_owned(),
+                skill_name: Some(skill_name),
+                count: 1,
+            },
+        ));
+    }
+    signals.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    signals.truncate(RECENT_LEARNING_SIGNAL_LIMIT);
+    Ok(signals.into_iter().map(|(_, _, signal)| signal).collect())
 }
 
 /// Compute the skill-lifecycle overview from the host-side `.usage.json` file
@@ -253,20 +664,6 @@ pub fn skill_lifecycle_overview(
     })
 }
 
-fn confidence_count(
-    conn: &Connection,
-    agent: &str,
-    since: &str,
-    confidence: &str,
-) -> Result<i64, ReadModelError> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*) FROM skill_review_reports
-         WHERE agent_name=?1 AND confidence=?2 AND created_at >= ?3",
-        params![agent, confidence, since],
-        |row| row.get(0),
-    )?)
-}
-
 fn learning_health(
     conn: &Connection,
     agent: &str,
@@ -340,87 +737,110 @@ fn possibly_stuck(
 fn learning_lifecycle(
     conn: &Connection,
     agent: &str,
-    since_7d: &str,
+    since_7d: &DateTime<Utc>,
+    now: &DateTime<Utc>,
 ) -> Result<LearningLifecycle, ReadModelError> {
-    let status_count = |status: &str| -> Result<i64, ReadModelError> {
-        Ok(conn.query_row(
-            "SELECT COUNT(*) FROM skill_learning_events
-             WHERE agent_name=?1 AND phase='finish' AND status=?2 AND created_at >= ?3",
-            params![agent, status, since_7d],
-            |row| row.get(0),
-        )?)
-    };
-    let failed_or_aborted_7d = conn.query_row(
-        "SELECT COUNT(*) FROM skill_learning_events
-         WHERE agent_name=?1
-           AND phase='finish'
-           AND status IN ('failed','aborted')
-           AND created_at >= ?2",
-        params![agent, since_7d],
-        |row| row.get(0),
-    )?;
-
     Ok(LearningLifecycle {
-        created_7d: status_count("created")?,
-        updated_7d: status_count("updated")?,
-        failed_or_aborted_7d,
-        recent_successful_events: recent_successful_events(conn, agent, since_7d)?,
-        candidate_skill_names_7d: candidate_skill_names(conn, agent, since_7d)?,
+        created_7d: writer_status_count_in_window(conn, agent, "created", since_7d, now)?,
+        updated_7d: writer_status_count_in_window(conn, agent, "updated", since_7d, now)?,
+        failed_or_aborted_7d: failed_writer_count_in_window(conn, agent, since_7d, now)?,
+        recent_successful_events: recent_successful_events(conn, agent, since_7d, now)?,
+        candidate_skill_names_7d: candidate_skill_names(conn, agent, since_7d, now)?,
     })
 }
 
 fn recent_successful_events(
     conn: &Connection,
     agent: &str,
-    since_7d: &str,
+    since_7d: &DateTime<Utc>,
+    now: &DateTime<Utc>,
 ) -> Result<Vec<LearningEventSummary>, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since_7d, now);
     let mut stmt = conn.prepare(
-        "SELECT skill_name, action, status, message, summary, created_at
+        "SELECT id, skill_name, action, status, message, summary, created_at
          FROM skill_learning_events
          WHERE agent_name=?1
            AND phase='finish'
            AND status IN ('created','updated')
            AND created_at >= ?2
-         ORDER BY created_at DESC, id DESC
-         LIMIT ?3",
+           AND created_at <= ?3
+         ORDER BY created_at DESC, id DESC",
     )?;
-    let rows = stmt
-        .query_map(params![agent, since_7d, RECENT_EVENT_LIMIT], |row| {
-            Ok(LearningEventSummary {
-                skill_name: row.get(0)?,
-                action: row.get(1)?,
-                status: row.get(2)?,
-                message: row.get(3)?,
-                summary: row.get(4)?,
-                created_at: row.get(5)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+    let mut events = Vec::<(DateTime<Utc>, i64, LearningEventSummary)>::new();
+    for row in rows {
+        let (id, skill_name, action, status, message, summary, created_at) = row?;
+        let created_at_utc = parse_generated_at(&created_at)?;
+        if created_at_utc < *since_7d || created_at_utc > *now {
+            continue;
+        }
+        events.push((
+            created_at_utc,
+            id,
+            LearningEventSummary {
+                skill_name,
+                action,
+                status,
+                message,
+                summary,
+                created_at: created_at_utc.to_rfc3339(),
+            },
+        ));
+    }
+    events.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    events.truncate(RECENT_EVENT_LIMIT as usize);
+    Ok(events.into_iter().map(|(_, _, event)| event).collect())
 }
 
 fn candidate_skill_names(
     conn: &Connection,
     agent: &str,
-    since_7d: &str,
+    since_7d: &DateTime<Utc>,
+    now: &DateTime<Utc>,
 ) -> Result<Vec<String>, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since_7d, now);
     let mut stmt = conn.prepare(
-        "SELECT candidate_skill_name
+        "SELECT candidate_skill_name, created_at
          FROM skill_review_reports
          WHERE agent_name=?1
            AND candidate_skill_name IS NOT NULL
            AND status IN ('create_candidate','update_candidate')
            AND created_at >= ?2
-         GROUP BY candidate_skill_name
-         ORDER BY MAX(created_at) DESC
-         LIMIT ?3",
+           AND created_at <= ?3",
     )?;
-    let rows = stmt
-        .query_map(params![agent, since_7d, CANDIDATE_NAME_LIMIT], |row| {
-            row.get(0)
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut newest_by_name = BTreeMap::<String, DateTime<Utc>>::new();
+    for row in rows {
+        let (name, created_at) = row?;
+        let created_at_utc = parse_generated_at(&created_at)?;
+        if created_at_utc < *since_7d || created_at_utc > *now {
+            continue;
+        }
+        newest_by_name
+            .entry(name)
+            .and_modify(|current| {
+                if created_at_utc > *current {
+                    *current = created_at_utc;
+                }
+            })
+            .or_insert(created_at_utc);
+    }
+    let mut rows = newest_by_name.into_iter().collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    rows.truncate(CANDIDATE_NAME_LIMIT as usize);
+    Ok(rows.into_iter().map(|(name, _)| name).collect())
 }
 
 fn recent_reports(
@@ -828,6 +1248,24 @@ mod tests {
         }
     }
 
+    fn flow_node_count(response: &LearningOverviewResponse, id: &str) -> i64 {
+        response
+            .flow_nodes
+            .iter()
+            .find(|node| node.id == id)
+            .map(|node| node.count)
+            .unwrap_or(0)
+    }
+
+    fn flow_edge_count(response: &LearningOverviewResponse, source: &str, target: &str) -> i64 {
+        response
+            .flow_edges
+            .iter()
+            .find(|edge| edge.source == source && edge.target == target)
+            .map(|edge| edge.count)
+            .unwrap_or(0)
+    }
+
     #[test]
     fn learning_overview_builds_funnel_quality_health_and_lifecycle() {
         let (_dir, conn) = fixture();
@@ -918,6 +1356,352 @@ mod tests {
             vec!["rightx-oauth-debugging"]
         );
         assert_eq!(response.recent_reports[0].id, 7);
+    }
+
+    #[test]
+    fn learning_overview_builds_flow_nodes_edges_and_recent_signals() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO skill_nudge_signals (
+                invocation_id, agent_name, root_session_id, chat_id, thread_id,
+                signal_kind, payload_json, accepted_at
+             ) VALUES (
+                'inv-1', 'right', 'session-1', 10, 20,
+                'learning', '{}', '2026-05-20T10:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                message, summary, event_refs_json, hint_outcome, created_at
+             ) VALUES (
+                'inv-2', 'right', 'create', 'rightx-oauth-debugging', 'finish',
+                'created', 'Learned OAuth callback verification.',
+                'Reusable OAuth setup workflow.', '[]', 'applied_as_hinted',
+                '2026-05-20T11:10:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let response = learning_overview(&conn, input()).unwrap();
+
+        assert!(
+            response
+                .flow_nodes
+                .iter()
+                .any(|node| node.id == "signals" && node.count == 1)
+        );
+        assert!(
+            response
+                .flow_nodes
+                .iter()
+                .any(|node| node.id == "writer_created" && node.count == 1)
+        );
+        assert!(
+            response
+                .flow_edges
+                .iter()
+                .any(|edge| edge.source == "signals" && edge.target == "writer_created")
+        );
+        assert_eq!(response.recent_learning_signals[0].kind, "skill_created");
+    }
+
+    #[test]
+    fn learning_overview_flow_prefers_prefilter_pipeline_when_reports_exist() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO skill_nudge_signals (
+                invocation_id, agent_name, root_session_id, chat_id, thread_id,
+                signal_kind, payload_json, accepted_at
+             ) VALUES (
+                'inv-1', 'right', 'session-1', 10, 20,
+                'learning', '{}', '2026-05-20T10:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                agent_name, source_invocation_id, trigger_kind, status,
+                confidence, evidence_refs_json, review_output_json, created_at
+             ) VALUES (
+                'right', 'inv-1', 'learning_signal', 'create_candidate',
+                'high', '[]', '{}', '2026-05-20T10:30:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                message, summary, event_refs_json, hint_outcome, created_at
+             ) VALUES (
+                'inv-2', 'right', 'create', 'rightx-oauth-debugging', 'finish',
+                'created', 'Learned OAuth callback verification.',
+                'Reusable OAuth setup workflow.', '[]', 'applied_as_hinted',
+                '2026-05-20T11:10:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let response = learning_overview(&conn, input()).unwrap();
+
+        assert_eq!(flow_edge_count(&response, "signals", "prefilter_create"), 1);
+        assert_eq!(
+            flow_edge_count(&response, "prefilter_create", "writer_created"),
+            1
+        );
+        assert_eq!(flow_edge_count(&response, "signals", "writer_created"), 0);
+        assert!(response.warnings.is_empty());
+    }
+
+    #[test]
+    fn learning_overview_warns_when_writer_flow_is_partially_inferred() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO skill_nudge_signals (
+                invocation_id, agent_name, root_session_id, chat_id, thread_id,
+                signal_kind, payload_json, accepted_at
+             ) VALUES (
+                'inv-1', 'right', 'session-1', 10, 20,
+                'learning', '{}', '2026-05-20T10:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                agent_name, source_invocation_id, trigger_kind, status,
+                confidence, evidence_refs_json, review_output_json, created_at
+             ) VALUES (
+                'right', 'inv-1', 'learning_signal', 'create_candidate',
+                'high', '[]', '{}', '2026-05-20T10:30:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                message, summary, event_refs_json, hint_outcome, created_at
+             ) VALUES
+                ('inv-2', 'right', 'create', 'rightx-oauth-debugging', 'finish',
+                 'created', 'Learned OAuth callback verification.',
+                 'Reusable OAuth setup workflow.', '[]', 'applied_as_hinted',
+                 '2026-05-20T11:10:00Z'),
+                ('inv-3', 'right', 'create', 'rightx-extra', 'finish',
+                 'created', 'Learned another workflow.',
+                 'Another workflow.', '[]', 'applied_as_hinted',
+                 '2026-05-20T11:20:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let response = learning_overview(&conn, input()).unwrap();
+
+        assert_eq!(
+            flow_edge_count(&response, "prefilter_create", "writer_created"),
+            1
+        );
+        assert!(response.warnings.iter().any(|warning| {
+            warning.source == "learning_flow" && warning.kind == "partial_data"
+        }));
+    }
+
+    #[test]
+    fn learning_overview_flow_uses_bounded_7d_window() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO skill_nudge_signals (
+                invocation_id, agent_name, root_session_id, chat_id, thread_id,
+                signal_kind, payload_json, accepted_at
+             ) VALUES
+                ('old-signal-1', 'right', 'session-1', 10, 20, 'learning', '{}', '2026-05-16T10:00:00Z'),
+                ('old-signal-2', 'right', 'session-1', 10, 20, 'learning', '{}', '2026-05-17T10:00:00Z'),
+                ('future-signal', 'right', 'session-1', 10, 20, 'learning', '{}', '2026-05-21T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                agent_name, source_invocation_id, trigger_kind, status,
+                confidence, evidence_refs_json, review_output_json, created_at
+             ) VALUES
+                ('right', 'old-create', 'learning_signal', 'create_candidate', 'high', '[]', '{}', '2026-05-16T10:10:00Z'),
+                ('right', 'old-update', 'learning_signal', 'update_candidate', 'medium', '[]', '{}', '2026-05-16T10:20:00Z'),
+                ('right', 'old-skip', 'learning_signal', 'nothing_to_learn', 'low', '[]', '{}', '2026-05-16T10:30:00Z'),
+                ('right', 'future-create', 'learning_signal', 'create_candidate', 'high', '[]', '{}', '2026-05-21T10:10:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                message, summary, event_refs_json, hint_outcome, created_at
+             ) VALUES
+                ('old-created', 'right', 'create', 'rightx-created', 'finish', 'created', 'created', 'created', '[]', NULL, '2026-05-16T11:00:00Z'),
+                ('future-created', 'right', 'create', 'rightx-future', 'finish', 'created', 'future', 'future', '[]', NULL, '2026-05-21T11:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let response = learning_overview(&conn, input()).unwrap();
+
+        assert_eq!(flow_node_count(&response, "signals"), 2);
+        assert_eq!(flow_node_count(&response, "prefilter_create"), 1);
+        assert_eq!(flow_node_count(&response, "prefilter_patch"), 1);
+        assert_eq!(flow_node_count(&response, "prefilter_skip"), 1);
+        assert_eq!(flow_node_count(&response, "writer_created"), 1);
+        assert_eq!(flow_edge_count(&response, "signals", "prefilter_create"), 1);
+        assert_eq!(
+            flow_edge_count(&response, "prefilter_create", "writer_created"),
+            1
+        );
+        assert_eq!(flow_edge_count(&response, "signals", "writer_created"), 0);
+    }
+
+    #[test]
+    fn learning_overview_flow_keeps_failed_reviews_out_of_writer_failed() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO skill_nudge_signals (
+                invocation_id, agent_name, root_session_id, chat_id, thread_id,
+                signal_kind, payload_json, accepted_at
+             ) VALUES (
+                'inv-1', 'right', 'session-1', 10, 20,
+                'learning', '{}', '2026-05-20T10:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                agent_name, source_invocation_id, trigger_kind, status,
+                confidence, evidence_refs_json, review_output_json, created_at
+             ) VALUES (
+                'right', 'failed-review', 'learning_signal', 'failed',
+                'low', '[]', '{}', '2026-05-20T11:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let response = learning_overview(&conn, input()).unwrap();
+
+        assert_eq!(flow_node_count(&response, "prefilter_failed"), 1);
+        assert_eq!(flow_node_count(&response, "writer_failed"), 0);
+    }
+
+    #[test]
+    fn learning_overview_recent_signals_parse_utc_bounds_and_sort() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                message, summary, event_refs_json, hint_outcome, created_at
+             ) VALUES
+                ('normal-created', 'right', 'create', 'rightx-normal', 'finish', 'created', 'created', 'created', '[]', NULL, '2026-05-20T10:00:00Z'),
+                ('offset-updated', 'right', 'update', 'rightx-offset', 'finish', 'updated', 'updated', 'updated', '[]', NULL, '2026-05-20T15:30:00.500+04:00'),
+                ('future-failed', 'right', 'update', 'rightx-future', 'finish', 'failed', 'future', 'future', '[]', NULL, '2026-05-20T11:30:00.000-02:00'),
+                ('old-created', 'right', 'create', 'rightx-old', 'finish', 'created', 'old', 'old', '[]', NULL, '2026-05-13T11:59:59Z')",
+            [],
+        )
+        .unwrap();
+
+        let response = learning_overview(&conn, input()).unwrap();
+        let labels = response
+            .recent_learning_signals
+            .iter()
+            .map(|signal| signal.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels, vec!["rightx-offset", "rightx-normal"]);
+        assert_eq!(response.recent_learning_signals[0].kind, "skill_updated");
+        assert_eq!(response.recent_learning_signals[0].severity, "info");
+    }
+
+    #[test]
+    fn learning_overview_counts_parse_utc_bounds() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT INTO skill_nudge_signals (
+                invocation_id, agent_name, root_session_id, chat_id, thread_id,
+                signal_kind, payload_json, accepted_at
+             ) VALUES
+                ('valid-signal', 'right', 'session-1', 10, 20, 'learning', '{}', '2026-05-20T15:30:00.500+04:00'),
+                ('future-signal', 'right', 'session-1', 10, 20, 'learning', '{}', '2026-05-20T11:30:00.000-02:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO learning_episodes (
+                agent_name, kind, seed_trigger_kind, seed_ref, status,
+                message_refs_json, execution_event_refs_json, ready_after,
+                created_at, updated_at
+             ) VALUES
+                ('right', 'foreground_thread', 'learning_signal', 'inv:valid', 'selected',
+                 '[]', '[]', '2026-05-20T15:30:00.500+04:00',
+                 '2026-05-20T15:30:00.500+04:00', '2026-05-20T15:31:00.500+04:00'),
+                ('right', 'foreground_thread', 'learning_signal', 'inv:future', 'selected',
+                 '[]', '[]', '2026-05-20T11:30:00.000-02:00',
+                 '2026-05-20T11:30:00.000-02:00', '2026-05-20T11:31:00.000-02:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                agent_name, source_invocation_id, trigger_kind, status,
+                confidence, candidate_skill_name, evidence_refs_json,
+                review_output_json, created_at
+             ) VALUES
+                ('right', 'valid-report', 'learning_signal', 'create_candidate',
+                 'high', 'rightx-valid-candidate', '[]', '{}',
+                 '2026-05-20T15:30:00.500+04:00'),
+                ('right', 'future-report', 'learning_signal', 'update_candidate',
+                 'high', 'rightx-future-candidate', '[]', '{}',
+                 '2026-05-20T11:30:00.000-02:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                message, summary, event_refs_json, hint_outcome, created_at
+             ) VALUES
+                ('valid-created', 'right', 'create', 'rightx-valid', 'finish',
+                 'created', 'created', 'created', '[]', NULL,
+                 '2026-05-20T15:30:00.500+04:00'),
+                ('future-updated', 'right', 'update', 'rightx-future', 'finish',
+                 'updated', 'future', 'future', '[]', NULL,
+                 '2026-05-20T11:30:00.000-02:00')",
+            [],
+        )
+        .unwrap();
+
+        let response = learning_overview(&conn, input()).unwrap();
+
+        assert_eq!(response.funnel.signals_accepted_24h, 1);
+        assert_eq!(response.funnel.episodes_selected_24h, 1);
+        assert_eq!(response.funnel.reports_total_24h, 1);
+        assert_eq!(response.funnel.create_candidates_24h, 1);
+        assert_eq!(response.funnel.update_candidates_24h, 0);
+        assert_eq!(response.quality.high_confidence_count_24h, 1);
+        assert_eq!(response.funnel.foreground_created_or_updated_7d, 1);
+        assert_eq!(response.lifecycle.created_7d, 1);
+        assert_eq!(response.lifecycle.updated_7d, 0);
+        assert_eq!(
+            response.lifecycle.candidate_skill_names_7d,
+            vec!["rightx-valid-candidate"]
+        );
+        assert_eq!(response.lifecycle.recent_successful_events.len(), 1);
+        assert_eq!(
+            response.lifecycle.recent_successful_events[0].skill_name,
+            "rightx-valid"
+        );
     }
 
     #[test]
