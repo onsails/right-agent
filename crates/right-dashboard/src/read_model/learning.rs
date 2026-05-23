@@ -168,6 +168,10 @@ pub fn learning_overview(
         health,
         lifecycle,
         recent_reports,
+        flow_nodes: Vec::new(),
+        flow_edges: Vec::new(),
+        recent_learning_signals: Vec::new(),
+        warnings: Vec::new(),
     })
 }
 

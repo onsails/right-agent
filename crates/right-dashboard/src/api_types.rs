@@ -51,6 +51,9 @@ pub struct DashboardOverviewResponse {
     pub learning_candidates_24h: i64,
     pub doctor: OverviewDoctorStatus,
     pub sandbox: OverviewSandboxStatus,
+    pub signals: Vec<DashboardSignal>,
+    pub cost_learning_river: CostLearningRiver,
+    pub warnings: Vec<DashboardDataWarning>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -73,6 +76,10 @@ pub struct UsageOverviewResponse {
     pub agent: String,
     pub generated_at: String,
     pub windows: Vec<UsageWindow>,
+    pub selected_window: String,
+    pub daily_series: Vec<UsageDailyPoint>,
+    pub source_series: Vec<UsageSourceSeries>,
+    pub warnings: Vec<DashboardDataWarning>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -119,6 +126,101 @@ pub struct UsageModelSummary {
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DashboardDataWarning {
+    pub source: String,
+    pub kind: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct DashboardSignal {
+    pub id: String,
+    pub kind: String,
+    pub severity: String,
+    pub occurred_at: String,
+    pub title: String,
+    pub detail: Option<String>,
+    pub source: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub related_run_id: Option<String>,
+    pub related_skill_name: Option<String>,
+    pub related_report_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CostLearningRiver {
+    pub window: String,
+    pub points: Vec<CostLearningPoint>,
+    pub series: Vec<CostLearningSeries>,
+    pub markers: Vec<LearningMarker>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CostLearningPoint {
+    pub bucket: String,
+    pub total_cost_usd: f64,
+    pub sources: Vec<UsageSourcePoint>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CostLearningSeries {
+    pub source: String,
+    pub points: Vec<CostSeriesPoint>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CostSeriesPoint {
+    pub bucket: String,
+    pub cost_usd: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LearningMarker {
+    pub id: String,
+    pub occurred_at: String,
+    pub kind: String,
+    pub label: String,
+    pub severity: String,
+    pub skill_name: Option<String>,
+    pub source: Option<String>,
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct UsageDailyPoint {
+    pub date: String,
+    pub total_cost_usd: f64,
+    pub subscription_cost_usd: f64,
+    pub api_cost_usd: f64,
+    pub turns: u64,
+    pub invocations: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub web_search_requests: u64,
+    pub web_fetch_requests: u64,
+    pub sources: Vec<UsageSourcePoint>,
+    pub models: Vec<UsageModelSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct UsageSourcePoint {
+    pub source: String,
+    pub cost_usd: f64,
+    pub subscription_cost_usd: f64,
+    pub api_cost_usd: f64,
+    pub turns: u64,
+    pub invocations: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct UsageSourceSeries {
+    pub source: String,
+    pub points: Vec<CostSeriesPoint>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -204,6 +306,37 @@ pub struct LearningOverviewResponse {
     pub health: LearningHealth,
     pub lifecycle: LearningLifecycle,
     pub recent_reports: Vec<LearningReportSummary>,
+    pub flow_nodes: Vec<LearningFlowNode>,
+    pub flow_edges: Vec<LearningFlowEdge>,
+    pub recent_learning_signals: Vec<LearningSignalPoint>,
+    pub warnings: Vec<DashboardDataWarning>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LearningFlowNode {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    pub count: i64,
+    pub severity: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LearningFlowEdge {
+    pub source: String,
+    pub target: String,
+    pub count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LearningSignalPoint {
+    pub id: String,
+    pub occurred_at: String,
+    pub kind: String,
+    pub label: String,
+    pub severity: String,
+    pub skill_name: Option<String>,
+    pub count: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -563,6 +696,14 @@ mod dashboard_v2_tests {
                 state: "unknown".to_owned(),
                 detail: None,
             },
+            signals: vec![],
+            cost_learning_river: CostLearningRiver {
+                window: "last_30_days".to_owned(),
+                points: vec![],
+                series: vec![],
+                markers: vec![],
+            },
+            warnings: vec![],
         };
 
         let value = serde_json::to_value(&response).unwrap();
@@ -586,7 +727,151 @@ mod dashboard_v2_tests {
                     "state": "unknown",
                     "detail": null,
                 },
+                "signals": [],
+                "cost_learning_river": {
+                    "window": "last_30_days",
+                    "points": [],
+                    "series": [],
+                    "markers": [],
+                },
+                "warnings": [],
             })
+        );
+    }
+
+    #[test]
+    fn dashboard_visual_overview_serializes_expected_shape() {
+        let response = DashboardOverviewResponse {
+            agent: "alpha".to_owned(),
+            generated_at: "2026-05-23T10:00:00Z".to_owned(),
+            active_runs: 1,
+            recent_failures: 1,
+            today_cost_usd: 1.25,
+            learning_candidates_24h: 2,
+            doctor: OverviewDoctorStatus {
+                state: "not_loaded".to_owned(),
+                pass_count: 0,
+                warn_count: 0,
+                fail_count: 0,
+                generated_at: None,
+            },
+            sandbox: OverviewSandboxStatus {
+                state: "configured".to_owned(),
+                detail: Some("sandbox alpha".to_owned()),
+            },
+            signals: vec![DashboardSignal {
+                id: "learning:rightx-debug:2026-05-23T09:00:00Z".to_owned(),
+                kind: "learning_outcome".to_owned(),
+                severity: "info".to_owned(),
+                occurred_at: "2026-05-23T09:00:00Z".to_owned(),
+                title: "Skill created".to_owned(),
+                detail: Some("rightx-debug".to_owned()),
+                source: Some("learning_probe_writer".to_owned()),
+                cost_usd: None,
+                related_run_id: None,
+                related_skill_name: Some("rightx-debug".to_owned()),
+                related_report_id: None,
+            }],
+            cost_learning_river: CostLearningRiver {
+                window: "last_30_days".to_owned(),
+                points: vec![CostLearningPoint {
+                    bucket: "2026-05-23".to_owned(),
+                    total_cost_usd: 1.25,
+                    sources: vec![UsageSourcePoint {
+                        source: "interactive".to_owned(),
+                        cost_usd: 1.25,
+                        subscription_cost_usd: 1.25,
+                        api_cost_usd: 0.0,
+                        turns: 1,
+                        invocations: 1,
+                    }],
+                }],
+                series: vec![CostLearningSeries {
+                    source: "interactive".to_owned(),
+                    points: vec![CostSeriesPoint {
+                        bucket: "2026-05-23".to_owned(),
+                        cost_usd: 1.25,
+                    }],
+                }],
+                markers: vec![LearningMarker {
+                    id: "marker:rightx-debug".to_owned(),
+                    occurred_at: "2026-05-23T09:00:00Z".to_owned(),
+                    kind: "skill_created".to_owned(),
+                    label: "rightx-debug".to_owned(),
+                    severity: "info".to_owned(),
+                    skill_name: Some("rightx-debug".to_owned()),
+                    source: Some("learning_probe_writer".to_owned()),
+                    cost_usd: None,
+                }],
+            },
+            warnings: vec![DashboardDataWarning {
+                source: "curator_state".to_owned(),
+                kind: "unavailable".to_owned(),
+                message: "curator state row is absent".to_owned(),
+            }],
+        };
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["signals"][0]["kind"], "learning_outcome");
+        assert_eq!(
+            value["cost_learning_river"]["points"][0]["bucket"],
+            "2026-05-23"
+        );
+        assert_eq!(value["warnings"][0]["kind"], "unavailable");
+    }
+
+    #[test]
+    fn usage_visual_series_serializes_expected_shape() {
+        let response = UsageOverviewResponse {
+            agent: "alpha".to_owned(),
+            generated_at: "2026-05-23T10:00:00Z".to_owned(),
+            windows: vec![],
+            selected_window: "last_30_days".to_owned(),
+            daily_series: vec![UsageDailyPoint {
+                date: "2026-05-23".to_owned(),
+                total_cost_usd: 1.25,
+                subscription_cost_usd: 1.00,
+                api_cost_usd: 0.25,
+                turns: 2,
+                invocations: 2,
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_creation_tokens: 5,
+                cache_read_tokens: 40,
+                web_search_requests: 1,
+                web_fetch_requests: 2,
+                sources: vec![UsageSourcePoint {
+                    source: "interactive".to_owned(),
+                    cost_usd: 1.25,
+                    subscription_cost_usd: 1.00,
+                    api_cost_usd: 0.25,
+                    turns: 2,
+                    invocations: 2,
+                }],
+                models: vec![UsageModelSummary {
+                    model: "sonnet".to_owned(),
+                    cost_usd: 1.25,
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    cache_creation_tokens: 5,
+                    cache_read_tokens: 40,
+                }],
+            }],
+            source_series: vec![UsageSourceSeries {
+                source: "interactive".to_owned(),
+                points: vec![CostSeriesPoint {
+                    bucket: "2026-05-23".to_owned(),
+                    cost_usd: 1.25,
+                }],
+            }],
+            warnings: vec![],
+        };
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["selected_window"], "last_30_days");
+        assert_eq!(
+            value["daily_series"][0]["sources"][0]["source"],
+            "interactive"
         );
     }
 }
@@ -669,6 +954,10 @@ mod learning_tests {
                 telegram_notified: true,
                 created_at: "2026-05-20T11:00:00Z".to_owned(),
             }],
+            flow_nodes: vec![],
+            flow_edges: vec![],
+            recent_learning_signals: vec![],
+            warnings: vec![],
         };
 
         let value = serde_json::to_value(&response).unwrap();
@@ -738,5 +1027,93 @@ mod learning_tests {
         assert_eq!(value["evidence"][0]["available"], false);
         assert!(value["evidence"][0]["text"].is_null());
         assert_eq!(value["reviewer"]["user_notice_present"], false);
+    }
+
+    #[test]
+    fn learning_flow_serializes_expected_shape() {
+        let response = LearningOverviewResponse {
+            agent: "right".to_owned(),
+            generated_at: "2026-05-23T10:00:00Z".to_owned(),
+            refresh_interval_secs: 5,
+            capabilities: LearningCapabilities {
+                learning_metrics: true,
+                learning_evidence_snippets: true,
+                learning_commands: false,
+            },
+            funnel: LearningFunnel {
+                signals_accepted_24h: 1,
+                episodes_pending_24h: 0,
+                episodes_selecting_24h: 0,
+                episodes_selected_24h: 0,
+                episodes_reviewing_24h: 0,
+                episodes_reviewed_24h: 0,
+                episodes_no_episode_24h: 0,
+                episodes_insufficient_context_24h: 0,
+                episodes_failed_24h: 0,
+                reports_total_24h: 0,
+                create_candidates_24h: 0,
+                update_candidates_24h: 0,
+                nothing_to_learn_24h: 0,
+                failed_reviews_24h: 0,
+                foreground_created_or_updated_7d: 1,
+            },
+            quality: LearningQuality {
+                candidate_rate: None,
+                nothing_to_learn_rate: None,
+                create_count_24h: 0,
+                update_count_24h: 0,
+                high_confidence_count_24h: 0,
+                medium_confidence_count_24h: 0,
+                low_confidence_count_24h: 0,
+                failed_count_24h: 0,
+            },
+            health: LearningHealth {
+                review_running: false,
+                daily_review_count: 0,
+                daily_limit: 12,
+                creation_review_interval: 15,
+                tool_iters_since_review: 0,
+                turns_since_review: 0,
+                skill_issue_hints_since_review: 0,
+                last_review_status: None,
+                last_review_at: None,
+                possibly_stuck: false,
+            },
+            lifecycle: LearningLifecycle {
+                created_7d: 1,
+                updated_7d: 0,
+                failed_or_aborted_7d: 0,
+                recent_successful_events: vec![],
+                candidate_skill_names_7d: vec![],
+            },
+            recent_reports: vec![],
+            flow_nodes: vec![LearningFlowNode {
+                id: "writer_created".to_owned(),
+                label: "Created".to_owned(),
+                kind: "writer".to_owned(),
+                count: 1,
+                severity: "info".to_owned(),
+            }],
+            flow_edges: vec![LearningFlowEdge {
+                source: "prefilter_create".to_owned(),
+                target: "writer_created".to_owned(),
+                count: 1,
+            }],
+            recent_learning_signals: vec![LearningSignalPoint {
+                id: "learn:rightx-debug".to_owned(),
+                occurred_at: "2026-05-23T09:00:00Z".to_owned(),
+                kind: "skill_created".to_owned(),
+                label: "rightx-debug".to_owned(),
+                severity: "info".to_owned(),
+                skill_name: Some("rightx-debug".to_owned()),
+                count: 1,
+            }],
+            warnings: vec![],
+        };
+
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["flow_nodes"][0]["id"], "writer_created");
+        assert_eq!(value["flow_edges"][0]["count"], 1);
+        assert_eq!(value["recent_learning_signals"][0]["kind"], "skill_created");
     }
 }
