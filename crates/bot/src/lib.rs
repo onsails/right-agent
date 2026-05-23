@@ -1130,6 +1130,22 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_learning = config.learning.clone();
     let delivery_model = Arc::clone(&model_arc);
     let delivery_learning_drain_scheduler = Arc::clone(&learning_drain_scheduler);
+    let delivery_flush_args = (
+        delivery_agent_dir.clone(),
+        delivery_agent_name.clone(),
+        Arc::clone(&delivery_model),
+        delivery_bot.clone(),
+        delivery_allowlist.clone(),
+        Arc::clone(&delivery_idle_ts),
+        delivery_ssh_config.clone(),
+        Arc::clone(&delivery_internal_client),
+        delivery_sandbox.clone(),
+        Arc::clone(&delivery_upgrade_lock),
+        Arc::clone(&delivery_session_locks),
+        Arc::clone(&delivery_debug),
+        delivery_learning.clone(),
+        Arc::clone(&delivery_learning_drain_scheduler),
+    );
     let delivery_handle = tokio::spawn(async move {
         async_delivery::run_delivery_loop(
             delivery_agent_dir,
@@ -1305,6 +1321,40 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             }
         }
     }
+    tracing::info!("flushing ready async deliveries for shutdown");
+    let (
+        flush_agent_dir,
+        flush_agent_name,
+        flush_model,
+        flush_bot,
+        flush_allowlist,
+        flush_idle_ts,
+        flush_ssh_config,
+        flush_internal_client,
+        flush_resolved_sandbox,
+        flush_upgrade_lock,
+        flush_session_locks,
+        flush_debug,
+        flush_learning,
+        flush_learning_drain_scheduler,
+    ) = delivery_flush_args;
+    async_delivery::flush_ready_deliveries_for_shutdown(
+        flush_agent_dir,
+        flush_agent_name,
+        flush_model,
+        flush_bot,
+        flush_allowlist,
+        flush_idle_ts,
+        flush_ssh_config,
+        flush_internal_client,
+        flush_resolved_sandbox,
+        flush_upgrade_lock,
+        flush_session_locks,
+        flush_debug,
+        flush_learning,
+        flush_learning_drain_scheduler,
+    )
+    .await;
     tracing::info!("waiting for async delivery to finish");
     let _ = delivery_handle.await;
     if let Some(handle) = sync_handle {
