@@ -91,6 +91,8 @@ pub enum ReconnectError {
 ///
 /// Cancellable refresh:
 /// - Accepts a [`CancellationToken`] and checks it before each attempt.
+/// - Races each in-flight token request against `cancel.cancelled()` so
+///   server removal does not wait for a slow token endpoint or request timeout.
 /// - During backoff sleeps, races the sleep against `cancel.cancelled()` so
 ///   cancellation wakes up immediately rather than waiting the full delay.
 /// - Returns typed [`ReconnectError`] instead of `miette::Result`.
@@ -122,7 +124,13 @@ pub async fn do_refresh_cancellable(
             form.push(("client_secret", secret.as_str()));
         }
 
-        let resp = client.post(&entry.token_endpoint).form(&form).send().await;
+        let request = client.post(&entry.token_endpoint).form(&form).send();
+        let resp = tokio::select! {
+            resp = request => resp,
+            _ = cancel.cancelled() => {
+                return Err(ReconnectError::Cancelled);
+            }
+        };
 
         match resp {
             Ok(r) if r.status().is_success() => {
@@ -389,6 +397,20 @@ mod tests {
         }
     }
 
+    async fn wait_for_received_requests(server: &MockServer, expected: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let received = server.received_requests().await.unwrap().len();
+            if received >= expected {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("mock server received {received} requests, expected at least {expected}");
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
     /// Verify that cancellation during a backoff sleep returns `Err(Cancelled)`
     /// without waiting the full backoff duration.
     #[tokio::test]
@@ -418,10 +440,9 @@ mod tests {
                 async move { do_refresh_cancellable(&client, &entry, &cancel_clone).await },
             );
 
-        // Let the first attempt complete (it hits the MockServer and gets 503).
-        // Then advance time slightly — not enough to expire the 30s backoff,
-        // just enough to confirm we are inside the backoff sleep.
-        tokio::time::advance(Duration::from_secs(1)).await;
+        // Let the first attempt complete (it hits the MockServer and gets 503),
+        // then yield so the spawned task can reach the backoff select.
+        wait_for_received_requests(&server, 1).await;
         // Yield so the spawned task can reach the tokio::select! inside backoff.
         tokio::task::yield_now().await;
 
@@ -438,6 +459,50 @@ mod tests {
         );
 
         // wiremock verifies exactly 1 POST was received (from the expect(1) above).
+    }
+
+    /// Verify that cancellation also interrupts an in-flight HTTP refresh
+    /// request, not only the retry backoff between requests.
+    #[tokio::test]
+    async fn cancellation_aborts_refresh_during_in_flight_request() {
+        setup_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_delay(Duration::from_secs(5))
+                    .set_body_string("slow upstream"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let entry = make_entry(format!("{}/token", server.uri()));
+        let client = reqwest::Client::new();
+        let cancel = CancellationToken::new();
+
+        let cancel_clone = cancel.clone();
+        let mut handle =
+            tokio::spawn(
+                async move { do_refresh_cancellable(&client, &entry, &cancel_clone).await },
+            );
+
+        wait_for_received_requests(&server, 1).await;
+
+        cancel.cancel();
+
+        let joined = match tokio::time::timeout(Duration::from_secs(1), &mut handle).await {
+            Ok(joined) => joined.expect("task panicked"),
+            Err(_) => {
+                handle.abort();
+                panic!("refresh did not return promptly after cancellation");
+            }
+        };
+        assert!(
+            matches!(joined, Err(ReconnectError::Cancelled)),
+            "expected Cancelled, got {joined:?}",
+        );
     }
 
     /// When all refresh retries are exhausted, the backend status must NOT be set to

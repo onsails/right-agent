@@ -54,6 +54,10 @@ short-lived tokens (TTL under ~2h) from busy-looping the scheduler.
 `reconnect.rs::do_refresh_cancellable` classifies every token-endpoint
 failure into one of two variants of `RefreshFailure`:
 
+Refresh requests are cancellation-aware while the HTTP request is in flight
+and while sleeping between transient retries. Removing a server or replacing
+its OAuth entry does not wait for a slow token endpoint or client timeout.
+
 | Class | Triggered by | Scheduler response |
 |-------|--------------|--------------------|
 | `Transient` | Network error, 5xx, 408, 429 | Reschedule with exponential backoff, retry indefinitely. Backend status unchanged (stays `Connected` from the user's perspective). |
@@ -101,8 +105,8 @@ Two correctness handles keep stale results from polluting state:
 
 1. **Per-server `CancellationToken`s** (`cancel_tokens`): both
    `RemoveServer` and a superseding `NewEntry` cancel the in-flight
-   refresh, so `do_refresh_cancellable` aborts at its next pre-attempt
-   check or interrupts a backoff sleep.
+   refresh, so `do_refresh_cancellable` aborts an in-flight token request,
+   the next pre-attempt check, or a backoff sleep.
 2. **Per-server generation counters** (`generations`): `NewEntry` bumps
    the counter; each spawned task is tagged with the generation it saw
    at spawn time. The join_next handler discards results whose tag
