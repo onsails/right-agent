@@ -739,6 +739,12 @@ dd {
   align-items: center;
 }
 
+.row-main > strong,
+.row-main > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .row-main {
   flex-wrap: wrap;
 }
@@ -776,6 +782,49 @@ dd {
   top: 10px;
   display: grid;
   gap: 10px;
+}
+
+.chart-panel {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  min-height: 220px;
+}
+
+.two-column + .chart-panel {
+  margin-top: 10px;
+}
+
+.dashboard-chart {
+  width: 100%;
+  height: 240px;
+}
+
+.chart-empty {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  color: var(--tg-theme-hint-color, #6b7b88);
+  font-size: 0.84rem;
+}
+
+.marker-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.marker-chip {
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.18));
+  border-radius: 7px;
+  background: var(--tg-theme-bg-color, #f4f6f8);
+  color: var(--tg-theme-text-color, #17212b);
+  cursor: pointer;
+  overflow-wrap: anywhere;
 }
 
 .text-block {
