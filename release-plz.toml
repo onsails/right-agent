@@ -34,15 +34,23 @@ git_tag_name = "v{{ version }}"
 [[package]]
 name = "right-db"
 version_group = "workspace"
+git_tag_enable = true
+git_tag_name = "right-db-v{{ version }}"
 
 [[package]]
 name = "right-mcp"
 version_group = "workspace"
+git_tag_enable = true
+git_tag_name = "right-mcp-v{{ version }}"
 
 [[package]]
 name = "right-codegen"
 version_group = "workspace"
+git_tag_enable = true
+git_tag_name = "right-codegen-v{{ version }}"
 
 [[package]]
 name = "right-memory"
 version_group = "workspace"
+git_tag_enable = true
+git_tag_name = "right-memory-v{{ version }}"
