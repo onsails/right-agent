@@ -50,21 +50,21 @@ function count(value: number): string {
       <section class="text-block">
         <h3>Sources</h3>
         <div class="row-list">
-          <div v-for="source in point.sources" :key="source.source" class="model-row">
+          <div v-for="source in (point.sources ?? [])" :key="source.source" class="model-row">
             <span>{{ source.source }}</span>
             <strong>{{ money(source.cost_usd) }}</strong>
           </div>
-          <p v-if="point.sources.length === 0" class="muted-line">No source spend</p>
+          <p v-if="(point.sources ?? []).length === 0" class="muted-line">No source spend</p>
         </div>
       </section>
       <section class="text-block">
         <h3>Models</h3>
         <div class="row-list">
-          <div v-for="model in point.models" :key="model.model" class="model-row">
+          <div v-for="model in (point.models ?? [])" :key="model.model" class="model-row">
             <span>{{ model.model }}</span>
             <strong>{{ money(model.cost_usd) }}</strong>
           </div>
-          <p v-if="point.models.length === 0" class="muted-line">No model spend</p>
+          <p v-if="(point.models ?? []).length === 0" class="muted-line">No model spend</p>
         </div>
       </section>
     </template>

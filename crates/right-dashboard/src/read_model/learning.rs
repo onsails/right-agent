@@ -10,8 +10,9 @@ use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension as _, params};
 
 use super::{
-    ReadModelError,
+    ReadModelError, coarse_timestamp_bounds, count_parsed_window_rows,
     learning_outcomes::{learning_outcome_kind, learning_outcome_severity},
+    parse_utc,
 };
 
 pub const LEARNING_REVIEW_DAILY_LIMIT: i64 = 12;
@@ -26,10 +27,6 @@ pub struct LearningOverviewInput {
     pub agent: String,
     pub generated_at: String,
     pub refresh_interval_secs: u64,
-}
-
-pub(super) fn parse_generated_at(value: &str) -> Result<DateTime<Utc>, ReadModelError> {
-    Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
 }
 
 fn rate(numerator: i64, denominator: i64) -> Option<f64> {
@@ -52,7 +49,7 @@ pub fn learning_overview(
     conn: &Connection,
     input: LearningOverviewInput,
 ) -> Result<LearningOverviewResponse, ReadModelError> {
-    let generated_at_utc = parse_generated_at(&input.generated_at)?;
+    let generated_at_utc = parse_utc(&input.generated_at)?;
     let since_24h_utc = generated_at_utc - Duration::hours(24);
     let since_7d_utc = generated_at_utc - Duration::days(7);
     let agent_name = input.agent;
@@ -618,13 +615,6 @@ fn attach_flow_edge_with_cap(
     *represented += value;
 }
 
-fn coarse_timestamp_bounds(since: &DateTime<Utc>, now: &DateTime<Utc>) -> (String, String) {
-    (
-        (*since - Duration::days(1)).to_rfc3339(),
-        (*now + Duration::days(1)).to_rfc3339(),
-    )
-}
-
 fn signal_count_in_window(
     conn: &Connection,
     agent: &str,
@@ -928,21 +918,6 @@ fn curator_trigger_evidence_timestamp(raw: &str) -> Result<Option<DateTime<Utc>>
         .map_err(|_| ())
 }
 
-fn count_parsed_window_rows(
-    rows: impl Iterator<Item = rusqlite::Result<String>>,
-    since: &DateTime<Utc>,
-    now: &DateTime<Utc>,
-) -> Result<i64, ReadModelError> {
-    let mut count = 0;
-    for row in rows {
-        let timestamp = parse_generated_at(&row?)?;
-        if timestamp >= *since && timestamp <= *now {
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
 fn recent_learning_signals(
     conn: &Connection,
     agent: &str,
@@ -972,7 +947,7 @@ fn recent_learning_signals(
     let mut signals = Vec::<(DateTime<Utc>, i64, LearningSignalPoint)>::new();
     for row in rows {
         let (id, action, skill_name, status, hint_outcome, occurred_at) = row?;
-        let occurred_at_utc = parse_generated_at(&occurred_at)?;
+        let occurred_at_utc = parse_utc(&occurred_at)?;
         if occurred_at_utc < *since || occurred_at_utc > *now {
             continue;
         }
@@ -999,12 +974,17 @@ fn recent_learning_signals(
 
 /// Compute the skill-lifecycle overview from the host-side `.usage.json` file
 /// produced by the lifecycle subsystem. Returns empty counts when the file is
-/// absent or empty.
+/// absent or empty. Other I/O errors (permission denied, etc.) propagate per
+/// FAIL FAST.
 pub fn skill_lifecycle_overview(
     agent: &str,
     usage_path: &std::path::Path,
 ) -> Result<crate::api_types::SkillLifecycleOverviewResponse, ReadModelError> {
-    let content = std::fs::read_to_string(usage_path).unwrap_or_default();
+    let content = match std::fs::read_to_string(usage_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
     let parsed: serde_json::Value = if content.trim().is_empty() {
         serde_json::Value::Object(Default::default())
     } else {
@@ -1131,7 +1111,7 @@ fn possibly_stuck(
     agent: &str,
     generated_at: &str,
 ) -> Result<bool, ReadModelError> {
-    let cutoff = (parse_generated_at(generated_at)? - Duration::minutes(10)).to_rfc3339();
+    let cutoff = (parse_utc(generated_at)? - Duration::minutes(10)).to_rfc3339();
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM learning_episodes
          WHERE agent_name=?1 AND status='reviewing' AND updated_at < ?2
@@ -1191,7 +1171,7 @@ fn recent_successful_events(
     let mut events = Vec::<(DateTime<Utc>, i64, LearningEventSummary)>::new();
     for row in rows {
         let (id, skill_name, action, status, message, summary, created_at) = row?;
-        let created_at_utc = parse_generated_at(&created_at)?;
+        let created_at_utc = parse_utc(&created_at)?;
         if created_at_utc < *since_7d || created_at_utc > *now {
             continue;
         }
@@ -1235,7 +1215,7 @@ fn candidate_skill_names(
     let mut newest_by_name = BTreeMap::<String, DateTime<Utc>>::new();
     for row in rows {
         let (name, created_at) = row?;
-        let created_at_utc = parse_generated_at(&created_at)?;
+        let created_at_utc = parse_utc(&created_at)?;
         if created_at_utc < *since_7d || created_at_utc > *now {
             continue;
         }

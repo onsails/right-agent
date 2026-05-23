@@ -1323,7 +1323,7 @@ pub fn spawn_worker(
                 session_uuid,
                 turn_id,
                 is_first_call,
-                reply_has_accepted_signal,
+                _reply_has_accepted_signal,
                 cc_prompt_mode,
                 cc_usage,
                 cc_wall_elapsed_ms,

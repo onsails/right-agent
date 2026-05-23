@@ -8,8 +8,9 @@ use rusqlite::{Connection, params};
 use std::collections::BTreeMap;
 
 use super::{
-    ReadModelError,
+    ReadModelError, coarse_timestamp_bounds, count_parsed_window_rows,
     learning_outcomes::{learning_outcome_kind, learning_outcome_severity, learning_outcome_title},
+    parse_utc,
 };
 
 const SIGNAL_LIMIT: usize = 30;
@@ -99,8 +100,7 @@ fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f64, ReadMode
         .and_hms_opt(0, 0, 0)
         .ok_or_else(|| ReadModelError::InvalidStartOfDay(generated_at.to_owned()))?;
     let start = Utc.from_utc_datetime(&start_naive);
-    let coarse_since = (start - Duration::days(1)).to_rfc3339();
-    let coarse_until = (now + Duration::days(1)).to_rfc3339();
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(&start, &now);
 
     let mut stmt = conn.prepare(
         "SELECT ts, total_cost_usd
@@ -195,8 +195,7 @@ fn run_failure_signals(
     since: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<Vec<DashboardSignal>, ReadModelError> {
-    let coarse_since = (*since - Duration::days(1)).to_rfc3339();
-    let coarse_until = (*now + Duration::days(1)).to_rfc3339();
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
     let mut stmt = conn.prepare(
         "SELECT id, kind, producer_ref, COALESCE(finished_at, updated_at, created_at)
          FROM async_runs
@@ -247,8 +246,7 @@ fn learning_outcome_signals(
     since: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<Vec<DashboardSignal>, ReadModelError> {
-    let coarse_since = (*since - Duration::days(1)).to_rfc3339();
-    let coarse_until = (*now + Duration::days(1)).to_rfc3339();
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
     let mut stmt = conn.prepare(
         "SELECT id, action, skill_name, status, hint_outcome, COALESCE(summary, message), created_at
          FROM skill_learning_events
@@ -306,8 +304,7 @@ fn cost_learning_river(
         .and_hms_opt(0, 0, 0)
         .ok_or_else(|| ReadModelError::InvalidStartOfDay(generated_at.to_owned()))?;
     let start_utc = Utc.from_utc_datetime(&start_naive);
-    let coarse_since = (start_utc - Duration::days(1)).to_rfc3339();
-    let coarse_until = (now + Duration::days(1)).to_rfc3339();
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(&start_utc, &now);
 
     let mut points = (0..RIVER_DAYS)
         .map(|offset| CostLearningPoint {
@@ -431,8 +428,7 @@ fn learning_markers(
     since: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<Vec<LearningMarker>, ReadModelError> {
-    let coarse_since = (*since - Duration::days(1)).to_rfc3339();
-    let coarse_until = (*now + Duration::days(1)).to_rfc3339();
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
     let mut stmt = conn.prepare(
         "SELECT id, action, skill_name, status, hint_outcome, created_at
          FROM skill_learning_events
@@ -824,15 +820,10 @@ fn curator_status_title(status: &str) -> &'static str {
     }
 }
 
-fn parse_utc(value: &str) -> Result<DateTime<Utc>, ReadModelError> {
-    Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
-}
-
 fn recent_failure_count(conn: &Connection, generated_at: &str) -> Result<i64, ReadModelError> {
     let now = parse_utc(generated_at)?;
     let since = now - Duration::hours(24);
-    let coarse_since = (since - Duration::days(1)).to_rfc3339();
-    let coarse_until = (now + Duration::days(1)).to_rfc3339();
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(&since, &now);
     let mut stmt = conn.prepare(
         "SELECT COALESCE(finished_at, updated_at, created_at)
          FROM async_runs
@@ -843,14 +834,7 @@ fn recent_failure_count(conn: &Connection, generated_at: &str) -> Result<i64, Re
     let rows = stmt.query_map(params![coarse_since, coarse_until], |row| {
         row.get::<_, String>(0)
     })?;
-    let mut count = 0;
-    for row in rows {
-        let occurred_at = parse_utc(&row?)?;
-        if occurred_at >= since && occurred_at <= now {
-            count += 1;
-        }
-    }
-    Ok(count)
+    count_parsed_window_rows(rows, &since, &now)
 }
 
 fn learning_candidate_count(
@@ -860,8 +844,7 @@ fn learning_candidate_count(
 ) -> Result<i64, ReadModelError> {
     let now = parse_utc(generated_at)?;
     let since = now - Duration::hours(24);
-    let coarse_since = (since - Duration::days(1)).to_rfc3339();
-    let coarse_until = (now + Duration::days(1)).to_rfc3339();
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(&since, &now);
     let mut stmt = conn.prepare(
         "SELECT created_at
          FROM skill_review_reports
@@ -873,14 +856,7 @@ fn learning_candidate_count(
     let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
         row.get::<_, String>(0)
     })?;
-    let mut count = 0;
-    for row in rows {
-        let created_at = parse_utc(&row?)?;
-        if created_at >= since && created_at <= now {
-            count += 1;
-        }
-    }
-    Ok(count)
+    count_parsed_window_rows(rows, &since, &now)
 }
 
 #[cfg(test)]

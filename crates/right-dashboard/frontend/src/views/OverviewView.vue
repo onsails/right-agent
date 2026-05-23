@@ -21,14 +21,14 @@ const selectedSignal = computed(() => {
   if (selectedKind.value !== 'signal' || selectedId.value === null) {
     return null
   }
-  return props.overview?.signals.find((signal) => signal.id === selectedId.value) ?? null
+  return (props.overview?.signals ?? []).find((signal) => signal.id === selectedId.value) ?? null
 })
 
 const selectedMarker = computed(() => {
   if (selectedKind.value !== 'marker' || selectedId.value === null) {
     return null
   }
-  return props.overview?.cost_learning_river.markers.find((marker) => marker.id === selectedId.value) ?? null
+  return (props.overview?.cost_learning_river?.markers ?? []).find((marker) => marker.id === selectedId.value) ?? null
 })
 
 const selectedEyebrow = computed(() => {

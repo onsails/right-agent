@@ -1,11 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { ComposeOption, SankeySeriesOption, TooltipComponentOption } from 'echarts'
-import VChart from 'vue-echarts'
-import { registerDashboardCharts } from '../../charts'
+import AsyncVChart from './AsyncVChart.vue'
 import type { LearningFlowEdge, LearningFlowNode } from '../../types'
-
-registerDashboardCharts()
 
 type LearningFlowChartOption = ComposeOption<SankeySeriesOption | TooltipComponentOption>
 
@@ -63,7 +60,7 @@ const option = computed<LearningFlowChartOption>(() => ({
       </div>
     </header>
     <div v-if="!hasFlowData" class="chart-empty">No learning flow data</div>
-    <VChart
+    <AsyncVChart
       v-else
       class="dashboard-chart"
       :option="option"

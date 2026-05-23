@@ -1,11 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import VChart from 'vue-echarts'
-import { registerDashboardCharts } from '../../charts'
+import AsyncVChart from './AsyncVChart.vue'
 import { money } from '../../format'
 import type { CostLearningRiver, LearningMarker } from '../../types'
-
-registerDashboardCharts()
 
 type ThemeRiverDatum = [bucket: string, costUsd: number, source: string]
 
@@ -93,14 +90,14 @@ const option = computed(() => {
   }
 
   const data: ThemeRiverDatum[] = river.points.flatMap((point) =>
-    point.sources.map((source): ThemeRiverDatum => [point.bucket, source.cost_usd, source.source]),
+    (point.sources ?? []).map((source): ThemeRiverDatum => [point.bucket, source.cost_usd, source.source]),
   )
 
   if (data.length === 0) {
     return null
   }
 
-  const markers: MarkerDatum[] = river.markers.map((marker, index) => ({
+  const markers: MarkerDatum[] = (river.markers ?? []).map((marker, index) => ({
     name: marker.label,
     value: [marker.occurred_at, index % 2],
     markerId: marker.id,
@@ -170,7 +167,7 @@ const option = computed(() => {
     </header>
 
     <div v-if="!option" class="chart-empty">No cost data</div>
-    <VChart
+    <AsyncVChart
       v-else
       class="dashboard-chart"
       :option="option"
@@ -178,9 +175,9 @@ const option = computed(() => {
       @click="selectMarkerFromChart"
     />
 
-    <div v-if="river?.markers.length" class="marker-list">
+    <div v-if="(river?.markers ?? []).length" class="marker-list">
       <button
-        v-for="marker in river.markers"
+        v-for="marker in (river?.markers ?? [])"
         :key="marker.id"
         type="button"
         class="marker-chip"

@@ -37,8 +37,9 @@ const V28_SCHEMA: &str = include_str!("sql/v28_usage_wall_elapsed.sql");
 const V29_SCHEMA: &str = include_str!("sql/v29_curator_state.sql");
 #[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
 const V30_SCHEMA: &str = include_str!("sql/v30_skill_learning_hint_outcome.sql");
+const V31_SCHEMA: &str = include_str!("sql/v31_skill_learning_events_dashboard_index.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 30;
+pub const LATEST_SCHEMA_VERSION: u32 = 31;
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -510,6 +511,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up_with_hook("", v28_usage_wall_elapsed_ms),
         M::up(V29_SCHEMA),
         M::up_with_hook("", v30_skill_learning_hint_outcome),
+        M::up(V31_SCHEMA),
     ])
 });
 

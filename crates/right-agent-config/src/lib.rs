@@ -91,10 +91,6 @@ fn default_show_thinking() -> bool {
     true
 }
 
-fn default_max_daily_budget_usd() -> f64 {
-    5.00
-}
-
 fn default_prefilter_enabled() -> bool {
     true
 }
