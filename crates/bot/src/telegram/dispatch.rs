@@ -313,15 +313,17 @@ where
         .expect("failed to spawn signal listener thread");
 
     // Shutdown driver task: converts any shutdown trigger (SIGTERM/SIGINT or
-    // config change) into a single cancellation on `signal_cancel`, then
-    // drives dispatcher shutdown. The wrapped listener observes the same
-    // token (see `ShutdownAware` below) and ends its update stream so
-    // `dispatch_with_listener` returns even when no inbound webhook arrives
-    // to close the underlying mpsc channel. Worker tasks drain their mpsc
-    // channels and exit; in-flight CC subprocesses are killed by
-    // kill_on_drop(true) when workers are dropped.
+    // config change) into a single cancellation on `signal_cancel`, asks active
+    // foreground turns to hand off to background, then drives dispatcher
+    // shutdown. The wrapped listener observes the same token (see
+    // `ShutdownAware` below) and ends its update stream so
+    // `dispatch_with_listener` returns even when no inbound webhook arrives to
+    // close the underlying mpsc channel.
     let signal_cancel_task = signal_cancel.clone();
     let worker_shutdown_task = worker_shutdown.clone();
+    let stop_tokens_for_shutdown = Arc::clone(&stop_tokens);
+    let bg_requests_for_shutdown = Arc::clone(&bg_requests);
+    let bg_handoff_gates_for_shutdown = Arc::clone(&bg_handoff_gates);
     tokio::spawn(async move {
         tokio::select! {
             _ = signal_cancel_task.cancelled() => {
@@ -333,6 +335,15 @@ where
             }
         }
 
+        let requested = super::request_shutdown_backgrounding(
+            &stop_tokens_for_shutdown,
+            &bg_requests_for_shutdown,
+            &bg_handoff_gates_for_shutdown,
+        );
+        tracing::info!(
+            active_foreground = requested,
+            "shutdown: requested foreground background handoff"
+        );
         worker_shutdown_task.cancel();
 
         match shutdown_token.shutdown() {
@@ -409,6 +420,14 @@ where
         )
         .await;
     tracing::info!("dispatcher exited cleanly");
+    let handoffs_done =
+        super::wait_for_handoff_gates_empty(&bg_handoff_gates, std::time::Duration::from_secs(30))
+            .await;
+    if handoffs_done {
+        tracing::info!("shutdown: foreground handoff gates drained");
+    } else {
+        tracing::warn!("shutdown: timed out waiting for foreground handoff gates");
+    }
     worker_shutdown.cancel();
     Ok(())
 }

@@ -123,6 +123,45 @@ pub(crate) async fn wait_for_bg_handoff_gate(gates: &BgHandoffGates, key: (i64, 
     }
 }
 
+pub(crate) fn request_shutdown_backgrounding(
+    stop_tokens: &StopTokens,
+    bg_requests: &BgRequests,
+    gates: &BgHandoffGates,
+) -> usize {
+    let mut requested = 0usize;
+    for entry in stop_tokens.iter() {
+        let key = *entry.key();
+        let (turn_id, token) = entry.value();
+        set_bg_handoff_gate(gates, key);
+        bg_requests.insert(
+            key,
+            BgRequest {
+                turn_id: *turn_id,
+                reason: worker::BgReason::Shutdown,
+            },
+        );
+        token.cancel();
+        requested += 1;
+    }
+    requested
+}
+
+pub(crate) async fn wait_for_handoff_gates_empty(
+    gates: &BgHandoffGates,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if gates.is_empty() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// User-requested thinking visibility action from an inline callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThinkingToggleAction {
@@ -356,5 +395,43 @@ mod tests {
         assert!(!*map.get(&key).unwrap().value());
 
         assert!(!set_thinking_visibility(&map, (999, 0), true));
+    }
+}
+
+#[cfg(test)]
+mod shutdown_request_tests {
+    use super::*;
+
+    #[test]
+    fn request_shutdown_backgrounding_sets_gate_and_cancels_tokens() {
+        let stop_tokens: StopTokens = Arc::new(DashMap::new());
+        let bg_requests: BgRequests = Arc::new(DashMap::new());
+        let gates: BgHandoffGates = Arc::new(DashMap::new());
+        let token = CancellationToken::new();
+
+        stop_tokens.insert((10, 0), (7, token.clone()));
+
+        let requested = request_shutdown_backgrounding(&stop_tokens, &bg_requests, &gates);
+
+        assert_eq!(requested, 1);
+        assert!(token.is_cancelled());
+        assert!(gates.get(&(10, 0)).is_some());
+        let request = bg_requests.get(&(10, 0)).unwrap();
+        assert_eq!(request.turn_id, 7);
+        assert_eq!(request.reason, worker::BgReason::Shutdown);
+    }
+
+    #[tokio::test]
+    async fn wait_for_handoff_gates_empty_returns_after_release() {
+        let gates: BgHandoffGates = Arc::new(DashMap::new());
+        set_bg_handoff_gate(&gates, (10, 0));
+        let release = Arc::clone(&gates);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            release_bg_handoff_gate(&release, (10, 0));
+        });
+
+        let done = wait_for_handoff_gates_empty(&gates, std::time::Duration::from_secs(1)).await;
+        assert!(done);
     }
 }
