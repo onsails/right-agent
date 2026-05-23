@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import LearningFlowChart from '../../components/charts/LearningFlowChart.vue'
+import LearningSignalPanel from '../../components/charts/LearningSignalPanel.vue'
 import MetricCard from '../../components/MetricCard.vue'
 import StatusPill from '../../components/StatusPill.vue'
 import { percent, shortDate } from '../../format'
@@ -18,6 +20,21 @@ const emit = defineEmits<{
 </script>
 
 <template>
+  <section v-if="learning?.warnings.length" class="notice">
+    <strong>Partial data</strong>
+    <span v-for="warning in learning.warnings" :key="`${warning.source}:${warning.kind}:${warning.message}`">
+      {{ warning.message }}
+    </span>
+  </section>
+
+  <section class="two-column wide-main">
+    <LearningFlowChart
+      :nodes="learning?.flow_nodes ?? []"
+      :edges="learning?.flow_edges ?? []"
+    />
+    <LearningSignalPanel :signals="learning?.recent_learning_signals ?? []" />
+  </section>
+
   <section class="metric-grid">
     <MetricCard label="Signals" :value="learning?.funnel.signals_accepted_24h ?? 0" />
     <MetricCard label="Reports" :value="learning?.funnel.reports_total_24h ?? 0" tone="active" />
