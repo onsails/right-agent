@@ -1,10 +1,31 @@
 <script setup lang="ts">
+import { computed, ref, watchEffect } from 'vue'
+import UsageBreakdown from '../components/charts/UsageBreakdown.vue'
+import UsageSpendChart from '../components/charts/UsageSpendChart.vue'
 import { money } from '../format'
 import type { UsageOverviewResponse, UsageWindow } from '../types'
 
-defineProps<{
+const props = defineProps<{
   usage: UsageOverviewResponse | null
 }>()
+
+const selectedDate = ref<string | null>(null)
+
+watchEffect(() => {
+  const points = props.usage?.daily_series ?? []
+  if (points.length === 0) {
+    selectedDate.value = null
+    return
+  }
+
+  if (selectedDate.value === null || !points.some((point) => point.date === selectedDate.value)) {
+    selectedDate.value = points[points.length - 1].date
+  }
+})
+
+const selectedPoint = computed(() =>
+  props.usage?.daily_series.find((point) => point.date === selectedDate.value) ?? null,
+)
 
 function windowRows(window: UsageWindow | null | undefined) {
   return window?.sources ?? []
@@ -12,6 +33,22 @@ function windowRows(window: UsageWindow | null | undefined) {
 </script>
 
 <template>
+  <section v-if="usage?.warnings.length" class="notice">
+    <strong>Partial data</strong>
+    <span v-for="warning in usage.warnings" :key="`${warning.source}:${warning.kind}:${warning.message}`">
+      {{ warning.message }}
+    </span>
+  </section>
+
+  <section class="two-column wide-main">
+    <UsageSpendChart
+      :points="usage?.daily_series ?? []"
+      :selected-date="selectedDate"
+      @select-date="selectedDate = $event"
+    />
+    <UsageBreakdown :point="selectedPoint" />
+  </section>
+
   <section class="list-stack">
     <article v-for="window in usage?.windows ?? []" :key="window.key" class="panel">
       <header class="panel-head">
@@ -22,35 +59,10 @@ function windowRows(window: UsageWindow | null | undefined) {
         <strong>{{ money(window.total_cost_usd) }}</strong>
       </header>
 
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Source</th>
-              <th>Cost</th>
-              <th>Turns</th>
-              <th>Calls</th>
-              <th>Input</th>
-              <th>Output</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="source in windowRows(window)" :key="source.source">
-              <td>{{ source.source }}</td>
-              <td>{{ money(source.cost_usd) }}</td>
-              <td>{{ source.turns }}</td>
-              <td>{{ source.invocations }}</td>
-              <td>{{ source.input_tokens }}</td>
-              <td>{{ source.output_tokens }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
       <div class="model-grid">
-        <div v-for="model in window.per_model" :key="model.model" class="model-row">
-          <span>{{ model.model }}</span>
-          <strong>{{ money(model.cost_usd) }}</strong>
+        <div v-for="source in windowRows(window)" :key="source.source" class="model-row">
+          <span>{{ source.source }}</span>
+          <strong>{{ money(source.cost_usd) }}</strong>
         </div>
       </div>
     </article>
