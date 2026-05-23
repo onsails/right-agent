@@ -1115,6 +1115,18 @@ mod tests {
         assert_eq!(body["today_cost_usd"], 0.0);
         assert_eq!(body["doctor"]["state"], "not_loaded");
         assert_eq!(body["sandbox"]["state"], "unavailable");
+        assert!(
+            body.get("signals").is_some(),
+            "overview must expose visual signals"
+        );
+        assert!(
+            body.get("cost_learning_river").is_some(),
+            "overview must expose cost_learning_river"
+        );
+        assert!(
+            body.get("warnings").is_some(),
+            "overview must expose warnings"
+        );
     }
 
     #[tokio::test]
@@ -1181,6 +1193,15 @@ mod tests {
         assert_eq!(body["agent"], "alpha");
         assert!(body["windows"].is_array());
         assert_eq!(body["windows"][0]["key"], "today");
+        assert_eq!(body["selected_window"], "last_30_days");
+        assert!(
+            body.get("daily_series").is_some(),
+            "usage must expose daily_series"
+        );
+        assert!(
+            body.get("source_series").is_some(),
+            "usage must expose source_series"
+        );
     }
 
     #[tokio::test]
@@ -1197,6 +1218,18 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["capabilities"]["learning_metrics"], true);
+        assert!(
+            body.get("flow_nodes").is_some(),
+            "learning overview must expose flow_nodes"
+        );
+        assert!(
+            body.get("flow_edges").is_some(),
+            "learning overview must expose flow_edges"
+        );
+        assert!(
+            body.get("recent_learning_signals").is_some(),
+            "learning overview must expose recent_learning_signals"
+        );
     }
 
     #[tokio::test]
