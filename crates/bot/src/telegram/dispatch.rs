@@ -87,10 +87,6 @@ fn visible_bot_commands() -> Vec<TelegramBotCommand> {
         .collect()
 }
 
-fn cancel_preinvoke_workers_for_shutdown(worker_shutdown: &CancellationToken) {
-    worker_shutdown.cancel();
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PreFilterLogMeta {
     chat_id: i64,
@@ -316,13 +312,6 @@ where
         })
         .expect("failed to spawn signal listener thread");
 
-    // Shutdown driver task: converts any shutdown trigger (SIGTERM/SIGINT or
-    // config change) into a single cancellation on `signal_cancel`, asks active
-    // foreground turns to hand off to background, then drives dispatcher
-    // shutdown. The wrapped listener observes the same token (see
-    // `ShutdownAware` below) and ends its update stream so
-    // `dispatch_with_listener` returns even when no inbound webhook arrives to
-    // close the underlying mpsc channel.
     let signal_cancel_task = signal_cancel.clone();
     let stop_tokens_for_shutdown = Arc::clone(&stop_tokens);
     let bg_requests_for_shutdown = Arc::clone(&bg_requests);
@@ -339,7 +328,7 @@ where
             }
         }
 
-        cancel_preinvoke_workers_for_shutdown(&worker_shutdown_for_signal);
+        worker_shutdown_for_signal.cancel();
         let requested = super::request_shutdown_backgrounding(
             &stop_tokens_for_shutdown,
             &bg_requests_for_shutdown,
@@ -813,15 +802,6 @@ mod tests {
             BotCommand::parse("/usage detail", "right_bot").unwrap(),
             BotCommand::Usage(arg) if arg == "detail"
         ));
-    }
-
-    #[test]
-    fn shutdown_start_cancels_worker_shutdown_token() {
-        let worker_shutdown = CancellationToken::new();
-
-        cancel_preinvoke_workers_for_shutdown(&worker_shutdown);
-
-        assert!(worker_shutdown.is_cancelled());
     }
 
     #[test]

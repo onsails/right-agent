@@ -362,6 +362,11 @@ fn mark_cron_interrupted_by_shutdown(
         let delivery_required = target_chat_id != 0;
         let (run_note, delivery_json, error_json) =
             cron_shutdown_failure_payload(&run_id, job_name, reason)?;
+        // Inline UPDATE keeps the `status = 'running'` guard so a natural
+        // finish racing with the shutdown sweep does not get clobbered.
+        // `exit_code` is intentionally not in the SET list: a row at
+        // `status='running'` has no exit code yet, and skipping the column
+        // means a future race that wrote one would not be silently erased.
         let changed = tx.execute(
             "UPDATE async_runs
              SET run_note = ?2,
@@ -370,7 +375,6 @@ fn mark_cron_interrupted_by_shutdown(
                  delivery_required = ?5,
                  delivery_status = ?6,
                  finished_at = ?7,
-                 exit_code = NULL,
                  status = 'failed',
                  updated_at = ?7
              WHERE id = ?1
@@ -379,11 +383,7 @@ fn mark_cron_interrupted_by_shutdown(
             rusqlite::params![
                 run_id,
                 run_note,
-                if delivery_required {
-                    Some(delivery_json)
-                } else {
-                    None
-                },
+                delivery_required.then_some(delivery_json),
                 error_json,
                 delivery_required,
                 if delivery_required { "pending" } else { "none" },
@@ -1199,24 +1199,12 @@ const POST_BREAK_WAIT_TIMEOUT_SECS: u64 = 5;
 /// `telegram::worker`.
 const POST_BREAK_STDERR_TIMEOUT_SECS: u64 = 2;
 
-/// Shared storage for in-flight execute_job handles.
-///
-/// `run_job_loop` and triggered job spawns push handles here.
-/// Shutdown collects and awaits them with a timeout.
 struct PendingExecuteHandle {
     job_name: String,
     handle: JoinHandle<()>,
 }
 
 impl PendingExecuteHandle {
-    #[cfg(test)]
-    fn new_for_test(job_name: &str) -> Self {
-        Self {
-            job_name: job_name.to_owned(),
-            handle: tokio::spawn(async {}),
-        }
-    }
-
     fn job_name(&self) -> &str {
         &self.job_name
     }
@@ -1386,6 +1374,20 @@ pub(crate) async fn run_cron_task(
     tracing::info!(agent = %agent_name, "cron shutdown complete");
 }
 
+/// Drop guard that deletes the one-shot spec when the spawned execute task
+/// exits — including via cancellation (`JoinHandle::abort` on shutdown). A
+/// plain post-await call would be skipped if the future is dropped mid-await.
+struct OneShotSpecDeleter {
+    agent_dir: std::path::PathBuf,
+    job_name: String,
+}
+
+impl Drop for OneShotSpecDeleter {
+    fn drop(&mut self) {
+        delete_one_shot_spec(&self.agent_dir, &self.job_name);
+    }
+}
+
 /// Delete a one-shot spec after it has fired. Opens a fresh DB connection
 /// (callers are inside `tokio::spawn` and cannot share the reconciler's connection).
 fn delete_one_shot_spec(agent_dir: &std::path::Path, job_name: &str) {
@@ -1445,7 +1447,12 @@ fn fire_one_shot_specs(
         let dbg = debug.clone();
         let lrn = learning.clone();
         let lrn_scheduler = Arc::clone(learning_drain_scheduler);
+        let one_shot_deleter = OneShotSpecDeleter {
+            agent_dir: ad.clone(),
+            job_name: jn.clone(),
+        };
         let handle = tokio::spawn(async move {
+            let _one_shot_deleter = one_shot_deleter;
             execute_job(
                 &jn,
                 &sp,
@@ -1461,7 +1468,6 @@ fn fire_one_shot_specs(
                 lrn_scheduler,
             )
             .await;
-            delete_one_shot_spec(&ad, &jn);
         });
         if let Err(handle) = register_execute_handle(execute_handles, name, handle) {
             triggered_handles.push(handle);
@@ -1730,10 +1736,15 @@ async fn run_job_loop(
         let dbg = debug.clone();
         let lrn = learning.clone();
         let lrn_scheduler = Arc::clone(&learning_drain_scheduler);
-        let delete_after_run = spec.schedule_kind.is_one_shot();
-        let delete_agent_dir = ad.clone();
-        let delete_job_name = jn.clone();
+        let one_shot_deleter = spec
+            .schedule_kind
+            .is_one_shot()
+            .then(|| OneShotSpecDeleter {
+                agent_dir: ad.clone(),
+                job_name: jn.clone(),
+            });
         let handle = tokio::spawn(async move {
+            let _one_shot_deleter = one_shot_deleter;
             execute_job(
                 &jn,
                 &sp,
@@ -1749,9 +1760,6 @@ async fn run_job_loop(
                 lrn_scheduler,
             )
             .await;
-            if delete_after_run {
-                delete_one_shot_spec(&delete_agent_dir, &delete_job_name);
-            }
         });
         if spec.schedule_kind.is_one_shot() {
             if let Err(handle) = register_execute_handle(&execute_handles, job_name.clone(), handle)
@@ -1778,12 +1786,6 @@ async fn run_job_loop(
 mod classify_tests {
     use super::*;
     use crate::reflection::FailureKind;
-
-    #[tokio::test]
-    async fn pending_execute_handle_retains_job_name_for_shutdown_marking() {
-        let handle = PendingExecuteHandle::new_for_test("job-a");
-        assert_eq!(handle.job_name(), "job-a");
-    }
 
     #[tokio::test]
     async fn register_execute_handle_tracks_job_name_for_shutdown_marking() {
