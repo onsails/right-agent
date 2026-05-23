@@ -219,6 +219,20 @@ read only `async_runs.kind = 'background'` rows for the chat, including running
 rows and finished `success`/`failed` rows with `delivery_status IN
 ('pending', 'retryable')`.
 
+Process shutdown (`SIGINT`/`SIGTERM`) requests background handoff for active
+foreground Telegram turns instead of dropping them. The worker uses the same
+`async_runs kind='background'` continuation path as the Background button, but
+with shutdown-specific logs and banner text. If handoff cannot be confirmed by
+the continuation's `system/init`, the background row is marked failed with
+pending delivery.
+
+During shutdown, cron schedulers stop creating new runs. Running cron jobs get
+the bounded `SHUTDOWN_JOB_TIMEOUT` drain. Jobs still running after that timeout
+are aborted by the owning bot process and marked failed with a
+`cron_shutdown_interrupted` error payload; targeted runs remain pending for
+delivery. The shutdown delivery flush sends already-terminal pending async
+results without waiting for chat-idle politeness, then exits.
+
 ## Self-introspection
 
 Session-bearing CC invocations write their full conversation graph to
