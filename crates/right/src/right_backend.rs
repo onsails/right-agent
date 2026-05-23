@@ -631,6 +631,7 @@ impl RightBackend {
                     skill_name: params.skill_name.clone(),
                     phase: right_agent::learned_skills::LearningPhase::Start,
                     status: None,
+                    hint_outcome: None,
                     reason: params.reason.clone(),
                     message: params.message.clone(),
                     summary: None,
@@ -672,11 +673,11 @@ impl RightBackend {
                 ));
             }
         };
-        if let Some(ho) = params.hint_outcome.as_deref() {
+        if let Some(ho) = params.hint_outcome {
             tracing::info!(
                 agent = %agent_name,
                 skill = %params.skill_name,
-                hint_outcome = %ho,
+                hint_outcome = %ho.as_str(),
                 "probe-writer hint outcome"
             );
         }
@@ -724,6 +725,9 @@ impl RightBackend {
                     skill_name: params.skill_name.clone(),
                     phase: right_agent::learned_skills::LearningPhase::Finish,
                     status: Some(params.status.as_domain()),
+                    hint_outcome: params
+                        .hint_outcome
+                        .map(|hint_outcome| hint_outcome.as_str().to_owned()),
                     reason: None,
                     message: params.message.clone(),
                     summary: params.summary.clone(),

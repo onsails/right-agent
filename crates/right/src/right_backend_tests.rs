@@ -741,6 +741,81 @@ async fn skill_learning_finish_rejects_success_when_package_missing() {
 }
 
 #[tokio::test]
+async fn skill_learning_finish_persists_hint_outcome_for_aborted_finish() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_finish",
+            json!({
+                "action": "create",
+                "skill_name": "rightx-user-workflow",
+                "status": "aborted",
+                "hint_outcome": "refused",
+                "message": "Refused because there was not enough evidence.",
+            }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-hint-outcome".to_owned()),
+            },
+        )
+        .await
+        .expect("tool call should complete");
+
+    assert_eq!(result.is_error, Some(false));
+    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let hint_outcome: Option<String> = conn
+        .query_row(
+            "SELECT hint_outcome FROM skill_learning_events WHERE invocation_id = 'inv-hint-outcome'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("hint outcome row");
+    assert_eq!(hint_outcome.as_deref(), Some("refused"));
+}
+
+#[tokio::test]
+async fn skill_learning_finish_rejects_invalid_hint_outcome_before_insert() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_finish",
+            json!({
+                "action": "create",
+                "skill_name": "rightx-user-workflow",
+                "status": "aborted",
+                "hint_outcome": "bogus",
+                "message": "Invalid hint outcome should be rejected.",
+            }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-invalid-hint".to_owned()),
+            },
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+
+    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM skill_learning_events WHERE invocation_id = 'inv-invalid-hint'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count learning events");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
 async fn skill_learning_finish_rejects_sandboxed_host_fallback_without_mtls() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");

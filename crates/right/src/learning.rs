@@ -81,6 +81,24 @@ impl LearningFinishStatusParam {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LearningHintOutcomeParam {
+    AppliedAsHinted,
+    AppliedDifferently,
+    Refused,
+}
+
+impl LearningHintOutcomeParam {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::AppliedAsHinted => "applied_as_hinted",
+            Self::AppliedDifferently => "applied_differently",
+            Self::Refused => "refused",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct SkillLearningFinishParams {
     #[schemars(
@@ -109,7 +127,7 @@ pub(crate) struct SkillLearningFinishParams {
         description = "Optional. Probe-writer reports back whether the prefilter hint matched. One of: applied_as_hinted, applied_differently, refused."
     )]
     #[serde(default)]
-    pub(crate) hint_outcome: Option<String>,
+    pub(crate) hint_outcome: Option<LearningHintOutcomeParam>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,7 +478,10 @@ mod tests {
     fn skill_learning_finish_accepts_hint_outcome_field() {
         let json = r#"{"action":"create","status":"created","skill_name":"rightx-foo","hint_outcome":"applied_as_hinted"}"#;
         let params: SkillLearningFinishParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.hint_outcome.as_deref(), Some("applied_as_hinted"));
+        assert_eq!(
+            params.hint_outcome.map(LearningHintOutcomeParam::as_str),
+            Some("applied_as_hinted")
+        );
     }
 
     #[test]
@@ -468,5 +489,15 @@ mod tests {
         let json = r#"{"action":"create","status":"created","skill_name":"rightx-foo"}"#;
         let params: SkillLearningFinishParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.hint_outcome, None);
+    }
+
+    #[test]
+    fn skill_learning_finish_rejects_invalid_hint_outcome_field() {
+        let json = r#"{"action":"create","status":"aborted","skill_name":"rightx-foo","hint_outcome":"bogus"}"#;
+        let err = serde_json::from_str::<SkillLearningFinishParams>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unexpected error: {err}"
+        );
     }
 }
