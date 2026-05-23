@@ -320,7 +320,6 @@ where
     // `dispatch_with_listener` returns even when no inbound webhook arrives to
     // close the underlying mpsc channel.
     let signal_cancel_task = signal_cancel.clone();
-    let worker_shutdown_task = worker_shutdown.clone();
     let stop_tokens_for_shutdown = Arc::clone(&stop_tokens);
     let bg_requests_for_shutdown = Arc::clone(&bg_requests);
     let bg_handoff_gates_for_shutdown = Arc::clone(&bg_handoff_gates);
@@ -344,7 +343,6 @@ where
             active_foreground = requested,
             "shutdown: requested foreground background handoff"
         );
-        worker_shutdown_task.cancel();
 
         match shutdown_token.shutdown() {
             Ok(fut) => {
