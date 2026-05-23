@@ -673,10 +673,10 @@ for this turn — the user is waiting for an answer.\n\
 fn background_banner(reason: BgReason) -> &'static str {
     match reason {
         BgReason::AutoTimeout => {
-            "Foreground hit 10-min limit - continuing in background. Will reply when ready"
+            "Foreground hit 10-min limit — continuing in background. Will reply when ready"
         }
         BgReason::UserRequested => "Working in background. Will reply when ready",
-        BgReason::Shutdown => "Shutting down - continuing in background. Will reply when ready",
+        BgReason::Shutdown => "Shutting down — continuing in background. Will reply when ready",
     }
 }
 
@@ -1054,14 +1054,6 @@ fn log_result_timing(ctx: &InvocationLogContext, timing: &crate::cc::stream::Res
     );
 }
 
-fn should_exit_before_foreground_work(shutdown: &CancellationToken) -> bool {
-    shutdown.is_cancelled()
-}
-
-fn should_skip_process_spawn_for_shutdown(shutdown: &CancellationToken) -> bool {
-    shutdown.is_cancelled()
-}
-
 fn cleanup_unspawned_first_call_session(
     conn: &rusqlite::Connection,
     chat_id: i64,
@@ -1144,10 +1136,13 @@ pub fn spawn_worker(
             );
             let batch = collect_batch(first, &mut rx).await;
             super::wait_for_bg_handoff_gate(&ctx.bg_handoff_gates, key).await;
-            if should_exit_before_foreground_work(&ctx.shutdown) {
-                tracing::info!(
+            if ctx.shutdown.is_cancelled() {
+                tracing::warn!(
                     ?key,
-                    "worker shutdown requested before foreground invocation — exiting"
+                    chat_id = tg_chat_id.0,
+                    eff_thread_id,
+                    dropped_message_ids = ?batch.iter().map(|m| m.message_id).collect::<Vec<_>>(),
+                    "worker shutdown -- abandoning unprocessed batch (foreground turn not yet registered)"
                 );
                 break;
             }
@@ -1268,10 +1263,13 @@ pub fn spawn_worker(
                 );
                 continue;
             };
-            if should_exit_before_foreground_work(&ctx.shutdown) {
-                tracing::info!(
+            if ctx.shutdown.is_cancelled() {
+                tracing::warn!(
                     ?key,
-                    "worker shutdown requested after input preparation — exiting"
+                    chat_id = tg_chat_id.0,
+                    eff_thread_id,
+                    dropped_message_ids = ?batch.iter().map(|m| m.message_id).collect::<Vec<_>>(),
+                    "worker shutdown -- abandoning unprocessed batch (foreground turn not yet registered)"
                 );
                 break;
             }
@@ -1303,10 +1301,13 @@ pub fn spawn_worker(
 
             // Block while upgrade is running (upgrade holds write lock).
             let _upgrade_guard = ctx.upgrade_lock.read().await;
-            if should_exit_before_foreground_work(&ctx.shutdown) {
-                tracing::info!(
+            if ctx.shutdown.is_cancelled() {
+                tracing::warn!(
                     ?key,
-                    "worker shutdown requested before claude invoke — exiting"
+                    chat_id = tg_chat_id.0,
+                    eff_thread_id,
+                    dropped_message_ids = ?batch.iter().map(|m| m.message_id).collect::<Vec<_>>(),
+                    "worker shutdown -- abandoning unprocessed batch (foreground turn not yet registered)"
                 );
                 cancel_token.cancel();
                 typing_task.await.ok();
@@ -3780,11 +3781,9 @@ async fn invoke_cc(
     let sandboxed = ctx.ssh_config_path.is_some();
     let turn_id = super::next_turn_id();
     let log_ctx = InvocationLogContext::new(chat_id, eff_thread_id, session_uuid.clone(), turn_id);
-    // Register before process spawn so shutdown can either request a handoff for
-    // this turn or the post-registration gate below can skip it without spawning.
     let stop_token =
         register_stop_token_for_foreground(&ctx.stop_tokens, (chat_id, eff_thread_id), turn_id);
-    if should_skip_process_spawn_for_shutdown(&ctx.shutdown) || stop_token.is_cancelled() {
+    if ctx.shutdown.is_cancelled() || stop_token.is_cancelled() {
         tracing::info!(
             chat_id = log_ctx.chat_id,
             eff_thread_id = log_ctx.eff_thread_id,
@@ -3793,17 +3792,45 @@ async fn invoke_cc(
             turn_id = log_ctx.turn_id,
             "shutdown requested before claude spawn -- skipping foreground invocation"
         );
-        clear_foreground_handoff_controls(
-            &ctx.stop_tokens,
-            &ctx.bg_requests,
-            &ctx.bg_handoff_gates,
-            (chat_id, eff_thread_id),
-            turn_id,
-        );
+        // Capture any pending bg_request before we tear down. If the shutdown
+        // driver inserted a BgReason::Shutdown handoff for this turn between
+        // `register_stop_token_for_foreground` and now, we MUST surface it as
+        // a Backgrounded failure so spawn_worker forks the user's turn into
+        // background. Discarding it (the pre-fix behaviour) silently broke
+        // the hybrid-shutdown invariant that interrupted turns continue.
+        let pending_bg = consume_bg_request(&ctx.bg_requests, (chat_id, eff_thread_id), turn_id);
+        // Remove the stop_token regardless of which path we take below — stale
+        // entries would confuse subsequent batches.
+        ctx.stop_tokens.remove(&(chat_id, eff_thread_id));
         cleanup_unspawned_first_call_session(&conn, chat_id, eff_thread_id, is_first_call);
         if let Some(active) = active_progress.take() {
             finish_progress_invocation(ctx, active).await;
         }
+        // Self-elect to Backgrounded::Shutdown when shutdown is observed and we
+        // have a valid resumable session (non-first-call). The shutdown driver
+        // sets `ctx.shutdown` and `request_shutdown_backgrounding` sequentially
+        // with no .await between them, so a worker thread can observe the
+        // cancellation before the driver inserts the bg_request. Relying solely
+        // on `pending_bg` would silently drop the turn in that race window.
+        // For first-call turns we cannot fork — the session UUID was just
+        // minted, no .jsonl exists on disk — so fall through to Ok(None) +
+        // cleanup_unspawned_first_call_session below.
+        let should_background = !is_first_call
+            && (ctx.shutdown.is_cancelled() || matches!(pending_bg, Some(BgReason::Shutdown)));
+        if should_background {
+            // Do NOT release the bg_handoff_gate here — spawn_worker's
+            // Backgrounded handler holds it via `BgHandoffGateRelease` until
+            // the background fork's `system/init` confirms takeover.
+            return Err(InvokeCcFailure::Backgrounded {
+                reason: BgReason::Shutdown,
+                main_session_id: session_uuid.clone(),
+                thinking_msg_id: None,
+                session_guard,
+            });
+        }
+        // No shutdown handoff for this turn — release the handoff gate (if
+        // any) and exit cleanly.
+        super::release_bg_handoff_gate(&ctx.bg_handoff_gates, (chat_id, eff_thread_id));
         return Ok(CcReply {
             output: None,
             session_uuid,
@@ -3933,9 +3960,6 @@ async fn invoke_cc(
         }
     }
 
-    // The stop token was inserted before process spawn so shutdown can see the
-    // turn before any awaited child I/O. `turn_id` stamps this invocation so
-    // concurrent bg/stop callbacks can be tied to the current turn.
     let visibility_key = (chat_id, eff_thread_id);
     let fallback_expanded = super::initial_thinking_visibility(ctx.show_thinking, is_group);
     ctx.thinking_visibility
@@ -4914,24 +4938,6 @@ mod tests {
 
         let bytes = buffer.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
-    }
-
-    #[test]
-    fn shutdown_guard_blocks_preinvoke_foreground_work() {
-        let shutdown = CancellationToken::new();
-        assert!(!should_exit_before_foreground_work(&shutdown));
-
-        shutdown.cancel();
-        assert!(should_exit_before_foreground_work(&shutdown));
-    }
-
-    #[test]
-    fn shutdown_guard_blocks_process_spawn_inside_invoke() {
-        let shutdown = CancellationToken::new();
-        assert!(!should_skip_process_spawn_for_shutdown(&shutdown));
-
-        shutdown.cancel();
-        assert!(should_skip_process_spawn_for_shutdown(&shutdown));
     }
 
     #[test]
@@ -6307,7 +6313,7 @@ mod background_continuation_tests {
     fn background_banner_distinguishes_shutdown() {
         assert_eq!(
             background_banner(BgReason::Shutdown),
-            "Shutting down - continuing in background. Will reply when ready"
+            "Shutting down — continuing in background. Will reply when ready"
         );
     }
 
