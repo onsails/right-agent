@@ -71,7 +71,15 @@ right bot --agent <name>  (spawned by process-compose)
   ├─ Clear stale Telegram per-chat command scopes for current allowlist ids
   │   and legacy `allowed_chat_ids`, then register current command autocomplete
   │   in Default, AllPrivateChats, and AllGroupChats scopes
-  └─ Start teloxide long-polling dispatcher
+  ├─ Start teloxide long-polling dispatcher
+  └─ On SIGINT/SIGTERM:
+      ├─ Stop accepting Telegram updates
+      ├─ Request shutdown background handoff for active foreground turns
+      ├─ Wait briefly for foreground handoff gates to drain
+      ├─ Stop cron schedulers and bounded-drain running cron jobs
+      ├─ Mark owned timed-out cron runs as shutdown-interrupted failures
+      ├─ Flush already-ready async deliveries without idle-delay politeness
+      └─ Tear down SSH control master and exit
 
 Per message:
   ├─ Extract text + attachments from Telegram message
