@@ -1,11 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import VChart from 'vue-echarts'
-import { registerDashboardCharts } from '../../charts'
+import AsyncVChart from './AsyncVChart.vue'
 import { money } from '../../format'
 import type { UsageDailyPoint } from '../../types'
-
-registerDashboardCharts()
 
 interface TooltipRow {
   seriesName?: string
@@ -34,11 +31,11 @@ const emit = defineEmits<{
 }>()
 
 const sources = computed(() =>
-  Array.from(new Set(props.points.flatMap((point) => point.sources.map((source) => source.source)))),
+  Array.from(new Set(props.points.flatMap((point) => (point.sources ?? []).map((source) => source.source)))),
 )
 
 const hasSpendData = computed(() =>
-  props.points.some((point) => point.sources.some((source) => source.cost_usd > 0)),
+  props.points.some((point) => (point.sources ?? []).some((source) => source.cost_usd > 0)),
 )
 
 function isTooltipRow(value: unknown): value is TooltipRow {
@@ -66,7 +63,7 @@ function selectDate(event: ChartClickEvent): void {
 }
 
 function barDatum(point: UsageDailyPoint, source: string): BarDatum {
-  const value = point.sources.find((row) => row.source === source)?.cost_usd ?? 0
+  const value = (point.sources ?? []).find((row) => row.source === source)?.cost_usd ?? 0
   if (point.date !== props.selectedDate) {
     return value
   }
@@ -108,7 +105,7 @@ const option = computed(() => ({
       </div>
     </header>
     <div v-if="!hasSpendData" class="chart-empty">No usage data</div>
-    <VChart
+    <AsyncVChart
       v-else
       class="dashboard-chart"
       :option="option"

@@ -12,6 +12,7 @@ use right_dashboard::auth::{
     AuthError, DashboardUser, InitDataValidation, authorize_user, validate_init_data,
 };
 use right_dashboard::read_model::{
+    ReadModelError,
     activity::{ActivityOverviewInput, activity_overview, activity_run_detail},
     dashboard_overview::{DashboardOverviewInput, dashboard_overview},
     learning::{
@@ -20,6 +21,7 @@ use right_dashboard::read_model::{
     learning_episodes::{LearningEpisodesInput, learning_episode_detail, learning_episodes},
     usage::{UsageOverviewInput, usage_overview},
 };
+use rusqlite::Connection;
 
 mod health;
 mod identity;
@@ -205,10 +207,6 @@ async fn handle_activity_overview(
         return error.into_response();
     }
 
-    let conn = match open_dashboard_read_connection(&state) {
-        Ok(conn) => conn,
-        Err(error) => return error.into_response(),
-    };
     let input = ActivityOverviewInput {
         agent: state.agent_name.clone(),
         generated_at: chrono::Utc::now().to_rfc3339(),
@@ -216,10 +214,13 @@ async fn handle_activity_overview(
         foreground: foreground_activity(&state),
     };
 
-    match activity_overview(&conn, input) {
+    let agent_name = state.agent_name.clone();
+    match with_dashboard_conn(&state, move |conn| activity_overview(conn, input)).await {
         Ok(response) => Json(response).into_response(),
-        Err(error) => {
-            tracing::error!(agent = %state.agent_name, "dashboard activity overview query failed: {error:#}");
+        Err(DashboardConnError::Open(error)) => error.into_response(),
+        Err(DashboardConnError::Join(error)) => error.into_response(),
+        Err(DashboardConnError::Work(error)) => {
+            tracing::error!(agent = %agent_name, "dashboard activity overview query failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "overview_failed",
@@ -238,10 +239,6 @@ async fn handle_overview(
         return error.into_response();
     }
 
-    let conn = match open_dashboard_read_connection(&state) {
-        Ok(conn) => conn,
-        Err(error) => return error.into_response(),
-    };
     let input = DashboardOverviewInput {
         agent: state.agent_name.clone(),
         generated_at: chrono::Utc::now().to_rfc3339(),
@@ -249,10 +246,13 @@ async fn handle_overview(
         sandbox: overview_sandbox_status(&state),
     };
 
-    match dashboard_overview(&conn, input) {
+    let agent_name = state.agent_name.clone();
+    match with_dashboard_conn(&state, move |conn| dashboard_overview(conn, input)).await {
         Ok(response) => Json(response).into_response(),
-        Err(error) => {
-            tracing::error!(agent = %state.agent_name, "dashboard overview query failed: {error:#}");
+        Err(DashboardConnError::Open(error)) => error.into_response(),
+        Err(DashboardConnError::Join(error)) => error.into_response(),
+        Err(DashboardConnError::Work(error)) => {
+            tracing::error!(agent = %agent_name, "dashboard overview query failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "overview_failed",
@@ -271,16 +271,19 @@ async fn handle_activity_run_detail(
         return error.into_response();
     }
 
-    let conn = match open_dashboard_read_connection(&state) {
-        Ok(conn) => conn,
-        Err(error) => return error.into_response(),
-    };
-
-    match activity_run_detail(&conn, &run_id, MAX_LOG_LINES) {
+    let agent_name = state.agent_name.clone();
+    let run_id_for_query = run_id.clone();
+    match with_dashboard_conn(&state, move |conn| {
+        activity_run_detail(conn, &run_id_for_query, MAX_LOG_LINES)
+    })
+    .await
+    {
         Ok(Some(response)) => Json(response).into_response(),
         Ok(None) => json_error(StatusCode::NOT_FOUND, "not_found", Some("run not found")),
-        Err(error) => {
-            tracing::error!(agent = %state.agent_name, run_id = %run_id, "dashboard run detail query failed: {error:#}");
+        Err(DashboardConnError::Open(error)) => error.into_response(),
+        Err(DashboardConnError::Join(error)) => error.into_response(),
+        Err(DashboardConnError::Work(error)) => {
+            tracing::error!(agent = %agent_name, run_id = %run_id, "dashboard run detail query failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "run_detail_failed",
@@ -299,19 +302,18 @@ async fn handle_usage_overview(
         return error.into_response();
     }
 
-    let conn = match open_dashboard_read_connection(&state) {
-        Ok(conn) => conn,
-        Err(error) => return error.into_response(),
-    };
     let input = UsageOverviewInput {
         agent: state.agent_name.clone(),
         generated_at: chrono::Utc::now().to_rfc3339(),
     };
 
-    match usage_overview(&conn, input) {
+    let agent_name = state.agent_name.clone();
+    match with_dashboard_conn(&state, move |conn| usage_overview(conn, input)).await {
         Ok(response) => Json(response).into_response(),
-        Err(error) => {
-            tracing::error!(agent = %state.agent_name, "dashboard usage query failed: {error:#}");
+        Err(DashboardConnError::Open(error)) => error.into_response(),
+        Err(DashboardConnError::Join(error)) => error.into_response(),
+        Err(DashboardConnError::Work(error)) => {
+            tracing::error!(agent = %agent_name, "dashboard usage query failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "usage_failed",
@@ -330,20 +332,19 @@ async fn handle_learning_overview(
         return error.into_response();
     }
 
-    let conn = match open_dashboard_read_connection(&state) {
-        Ok(conn) => conn,
-        Err(error) => return error.into_response(),
-    };
     let input = LearningOverviewInput {
         agent: state.agent_name.clone(),
         generated_at: chrono::Utc::now().to_rfc3339(),
         refresh_interval_secs: REFRESH_INTERVAL_SECS,
     };
 
-    match learning_overview(&conn, input) {
+    let agent_name = state.agent_name.clone();
+    match with_dashboard_conn(&state, move |conn| learning_overview(conn, input)).await {
         Ok(response) => Json(response).into_response(),
-        Err(error) => {
-            tracing::error!(agent = %state.agent_name, "dashboard learning overview query failed: {error:#}");
+        Err(DashboardConnError::Open(error)) => error.into_response(),
+        Err(DashboardConnError::Join(error)) => error.into_response(),
+        Err(DashboardConnError::Work(error)) => {
+            tracing::error!(agent = %agent_name, "dashboard learning overview query failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "learning_overview_failed",
@@ -362,19 +363,18 @@ async fn handle_learning_episodes(
         return error.into_response();
     }
 
-    let conn = match open_dashboard_read_connection(&state) {
-        Ok(conn) => conn,
-        Err(error) => return error.into_response(),
-    };
     let input = LearningEpisodesInput {
         agent: state.agent_name.clone(),
         generated_at: chrono::Utc::now().to_rfc3339(),
     };
 
-    match learning_episodes(&conn, input) {
+    let agent_name = state.agent_name.clone();
+    match with_dashboard_conn(&state, move |conn| learning_episodes(conn, input)).await {
         Ok(response) => Json(response).into_response(),
-        Err(error) => {
-            tracing::error!(agent = %state.agent_name, "dashboard learning episodes query failed: {error:#}");
+        Err(DashboardConnError::Open(error)) => error.into_response(),
+        Err(DashboardConnError::Join(error)) => error.into_response(),
+        Err(DashboardConnError::Work(error)) => {
+            tracing::error!(agent = %agent_name, "dashboard learning episodes query failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "learning_episodes_failed",
@@ -404,20 +404,23 @@ async fn handle_learning_episode_detail(
         }
     };
 
-    let conn = match open_dashboard_read_connection(&state) {
-        Ok(conn) => conn,
-        Err(error) => return error.into_response(),
-    };
-
-    match learning_episode_detail(&conn, &state.agent_name, episode_id) {
+    let agent_name = state.agent_name.clone();
+    let agent_name_for_query = state.agent_name.clone();
+    match with_dashboard_conn(&state, move |conn| {
+        learning_episode_detail(conn, &agent_name_for_query, episode_id)
+    })
+    .await
+    {
         Ok(Some(response)) => Json(response).into_response(),
         Ok(None) => json_error(
             StatusCode::NOT_FOUND,
             "not_found",
             Some("learning episode not found"),
         ),
-        Err(error) => {
-            tracing::error!(agent = %state.agent_name, episode_id, "dashboard learning episode query failed: {error:#}");
+        Err(DashboardConnError::Open(error)) => error.into_response(),
+        Err(DashboardConnError::Join(error)) => error.into_response(),
+        Err(DashboardConnError::Work(error)) => {
+            tracing::error!(agent = %agent_name, episode_id, "dashboard learning episode query failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "learning_episode_failed",
@@ -447,20 +450,23 @@ async fn handle_learning_report_detail(
         }
     };
 
-    let conn = match open_dashboard_read_connection(&state) {
-        Ok(conn) => conn,
-        Err(error) => return error.into_response(),
-    };
-
-    match learning_report_detail(&conn, &state.agent_name, report_id) {
+    let agent_name = state.agent_name.clone();
+    let agent_name_for_query = state.agent_name.clone();
+    match with_dashboard_conn(&state, move |conn| {
+        learning_report_detail(conn, &agent_name_for_query, report_id)
+    })
+    .await
+    {
         Ok(Some(response)) => Json(response).into_response(),
         Ok(None) => json_error(
             StatusCode::NOT_FOUND,
             "not_found",
             Some("learning report not found"),
         ),
-        Err(error) => {
-            tracing::error!(agent = %state.agent_name, report_id, "dashboard learning report query failed: {error:#}");
+        Err(DashboardConnError::Open(error)) => error.into_response(),
+        Err(DashboardConnError::Join(error)) => error.into_response(),
+        Err(DashboardConnError::Work(error)) => {
+            tracing::error!(agent = %agent_name, report_id, "dashboard learning report query failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "learning_report_failed",
@@ -479,12 +485,17 @@ async fn handle_learning_skill_lifecycle(
         return error.into_response();
     }
 
-    // Lifecycle data is host-side .usage.json; no DB connection needed.
+    // Lifecycle data is host-side .usage.json; no DB connection needed but the
+    // read is synchronous and must run off the tokio reactor.
     let _ = agent;
+    let agent_name = state.agent_name.clone();
     let usage_path = state.agent_dir.join(".claude/skills/.usage.json");
-    match skill_lifecycle_overview(&state.agent_name, &usage_path) {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => {
+    let join_result =
+        tokio::task::spawn_blocking(move || skill_lifecycle_overview(&agent_name, &usage_path))
+            .await;
+    match join_result {
+        Ok(Ok(response)) => Json(response).into_response(),
+        Ok(Err(error)) => {
             tracing::error!(
                 agent = %state.agent_name,
                 "dashboard skill_lifecycle read failed: {error:#}",
@@ -493,6 +504,17 @@ async fn handle_learning_skill_lifecycle(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "skill_lifecycle_failed",
                 Some("failed to read skill lifecycle"),
+            )
+        }
+        Err(join_error) => {
+            tracing::error!(
+                agent = %state.agent_name,
+                "dashboard skill_lifecycle task panicked: {join_error}",
+            );
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "skill_lifecycle_panic",
+                Some("skill lifecycle task panicked"),
             )
         }
     }
@@ -706,17 +728,59 @@ fn authenticate_api(
     Ok(user)
 }
 
-fn open_dashboard_read_connection(
-    state: &DashboardState,
-) -> Result<rusqlite::Connection, DashboardRouteError> {
-    right_db::open_connection_readonly(&state.agent_dir).map_err(|error| {
-        tracing::error!(agent = %state.agent_name, "dashboard db open failed: {error:#}");
-        DashboardRouteError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_open_failed",
-            Some("failed to open dashboard database"),
-        )
+/// Failure mode from `with_dashboard_conn`. Connection-open and JoinError
+/// failures already have HTTP responses associated with them; the `Work`
+/// variant carries the read-model error so each route can produce its own
+/// status code, error code, and log message.
+enum DashboardConnError {
+    Open(DashboardRouteError),
+    Join(DashboardRouteError),
+    Work(ReadModelError),
+}
+
+/// Run a synchronous read-model query against the per-agent SQLite database on
+/// the tokio blocking pool. Both the connection open and the closure execution
+/// happen inside `spawn_blocking` so the async reactor is never stalled by
+/// SQLite I/O.
+///
+/// The closure receives a borrowed `Connection` (not consumed) and returns a
+/// `ReadModelError` on query failure. JoinError (panic in blocking task)
+/// returns a 500 with `db_panic` error code.
+async fn with_dashboard_conn<F, T>(state: &DashboardState, work: F) -> Result<T, DashboardConnError>
+where
+    F: FnOnce(&Connection) -> Result<T, ReadModelError> + Send + 'static,
+    T: Send + 'static,
+{
+    let agent_dir = state.agent_dir.clone();
+    let agent_name = state.agent_name.clone();
+    let agent_name_for_join = state.agent_name.clone();
+    let join_result = tokio::task::spawn_blocking(move || {
+        let conn = right_db::open_connection_readonly(&agent_dir).map_err(|error| {
+            tracing::error!(agent = %agent_name, "dashboard db open failed: {error:#}");
+            DashboardConnError::Open(DashboardRouteError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_open_failed",
+                Some("failed to open dashboard database"),
+            ))
+        })?;
+        work(&conn).map_err(DashboardConnError::Work)
     })
+    .await;
+
+    match join_result {
+        Ok(result) => result,
+        Err(join_error) => {
+            tracing::error!(
+                agent = %agent_name_for_join,
+                "dashboard db blocking task panicked: {join_error}",
+            );
+            Err(DashboardConnError::Join(DashboardRouteError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_panic",
+                Some("dashboard database task panicked"),
+            )))
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1617,5 +1681,48 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["report"]["id"], 1);
         assert_eq!(body["report"]["status"], "nothing_to_learn");
+    }
+
+    #[tokio::test]
+    async fn with_dashboard_conn_returns_db_panic_on_closure_panic() {
+        // Initialise a real per-agent SQLite so `open_connection_readonly`
+        // inside `with_dashboard_conn` succeeds. We want to exercise the
+        // panic-recovery path after the connection is opened, not the
+        // `Open` error path.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+
+        let state = test_state(temp.path().to_path_buf());
+
+        // Suppress the default panic hook for the duration of the
+        // intentional panic so test output stays clean. `take_hook` /
+        // `set_hook` are global; restore on the way out.
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result =
+            super::with_dashboard_conn(&state, |_conn| -> Result<(), _> { panic!("boom") }).await;
+        std::panic::set_hook(previous_hook);
+
+        let join_error = match result {
+            Err(super::DashboardConnError::Join(error)) => error,
+            Err(super::DashboardConnError::Open(_)) => {
+                panic!("expected Join variant, got Open: connection should have opened first")
+            }
+            Err(super::DashboardConnError::Work(_)) => {
+                panic!(
+                    "expected Join variant, got Work: closure should have panicked, not returned an error"
+                )
+            }
+            Ok(()) => panic!("expected Join variant, got Ok: closure was supposed to panic"),
+        };
+
+        let response = join_error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .expect("body bytes");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json response");
+        assert_eq!(body["error"], "db_panic");
+        assert_eq!(body["detail"], "dashboard database task panicked");
     }
 }
