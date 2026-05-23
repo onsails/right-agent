@@ -1,6 +1,6 @@
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
-import { BarChart, LineChart, SankeyChart, ThemeRiverChart } from 'echarts/charts'
+import { BarChart, LineChart, SankeyChart, ScatterChart, ThemeRiverChart } from 'echarts/charts'
 import {
   DatasetComponent,
   DataZoomComponent,
@@ -23,6 +23,7 @@ export function registerDashboardCharts(): void {
     BarChart,
     LineChart,
     SankeyChart,
+    ScatterChart,
     ThemeRiverChart,
     DatasetComponent,
     DataZoomComponent,
