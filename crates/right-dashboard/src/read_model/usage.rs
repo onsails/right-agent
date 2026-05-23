@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::api_types::{
     CostSeriesPoint, DashboardDataWarning, UsageDailyPoint, UsageModelSummary,
@@ -40,7 +40,7 @@ pub fn usage_overview(
     );
     let week_start = now - Duration::days(7);
     let month_start = now - Duration::days(30);
-    let unknown_sources = unknown_usage_sources(conn)?;
+    let unknown_sources = unknown_usage_sources(conn, &now)?;
 
     let windows = vec![
         build_window(
@@ -435,17 +435,31 @@ fn source_rank(source: &str) -> Option<usize> {
         .position(|known_source| *known_source == source)
 }
 
-fn unknown_usage_sources(conn: &Connection) -> Result<Vec<String>, ReadModelError> {
-    let mut stmt = conn.prepare("SELECT DISTINCT source FROM usage_events ORDER BY source ASC")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    let mut sources = Vec::new();
-    for source in rows {
-        let source = source?;
+fn unknown_usage_sources(
+    conn: &Connection,
+    generated_at: &DateTime<Utc>,
+) -> Result<Vec<String>, ReadModelError> {
+    let coarse_until = (*generated_at + Duration::days(1)).to_rfc3339();
+    let mut stmt = conn.prepare(
+        "SELECT source, ts
+         FROM usage_events
+         WHERE ts <= ?1
+         ORDER BY source ASC, ts ASC",
+    )?;
+    let rows = stmt.query_map(params![coarse_until], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut sources = BTreeSet::new();
+    for row in rows {
+        let (source, ts) = row?;
         if source_rank(&source).is_none() {
-            sources.push(source);
+            let event_at = DateTime::parse_from_rfc3339(&ts)?.with_timezone(&Utc);
+            if event_at <= *generated_at {
+                sources.insert(source);
+            }
         }
     }
-    Ok(sources)
+    Ok(sources.into_iter().collect())
 }
 
 fn unknown_source_warnings(unknown_sources: &[String]) -> Vec<DashboardDataWarning> {
@@ -805,6 +819,13 @@ mod tests {
         insert_usage(&conn, "2026-04-01T08:00:00Z", "interactive", 9.99, "old");
         insert_usage(&conn, "2026-05-01T10:00:00Z", "new_source", 4.44, "unknown");
         insert_usage(&conn, "2026-05-23T23:00:00Z", "interactive", 7.77, "future");
+        insert_usage(
+            &conn,
+            "2026-05-23T23:00:00Z",
+            "future_source",
+            8.88,
+            "future_unknown",
+        );
 
         let response = usage_overview(
             &conn,
@@ -894,6 +915,12 @@ mod tests {
             .iter()
             .find(|series| series.source == "new_source")
             .unwrap();
+        assert!(
+            response
+                .source_series
+                .iter()
+                .all(|series| series.source != "future_source")
+        );
         assert_eq!(interactive.points.len(), 30);
         assert_eq!(cron.points.len(), 30);
         assert_eq!(new_source_series.points.len(), 30);
