@@ -2248,7 +2248,13 @@ pub async fn handle_bg_callback(
             // worker to misclassify a normal-finished turn as Backgrounded.
             let (turn_id, token) = entry.value();
             super::set_bg_handoff_gate(&worker_ctl.bg_handoff_gates, key);
-            worker_ctl.bg_requests.insert(key, *turn_id);
+            worker_ctl.bg_requests.insert(
+                key,
+                super::BgRequest {
+                    turn_id: *turn_id,
+                    reason: super::worker::BgReason::UserRequested,
+                },
+            );
             token.cancel();
             drop(entry);
             Some("Sending to background...")

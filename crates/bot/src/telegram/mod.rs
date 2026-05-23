@@ -77,12 +77,19 @@ pub(crate) type StopTokens = Arc<DashMap<(i64, i64), (u64, CancellationToken)>>;
 /// Key: root_session_id UUID string. Value: shared mutex.
 pub(crate) type SessionLocks = Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
-/// Per-(chat, thread) flag set by the Background button callback.
-/// Presence in the map means the user requested backgrounding (not a Stop).
-/// Value: turn_id of the turn the bg request was issued against. Worker
-/// only honors entries whose stored turn_id matches its own current turn —
-/// stale entries from a previous turn are dropped on exit.
-pub(crate) type BgRequests = Arc<DashMap<(i64, i64), u64>>;
+/// A foreground turn request to convert the active Claude invocation into a
+/// background continuation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BgRequest {
+    pub(crate) turn_id: u64,
+    pub(crate) reason: worker::BgReason,
+}
+
+/// Per-(chat, thread) flag set by the Background button callback or shutdown.
+/// Presence in the map means the foreground turn should be backgrounded (not a Stop).
+/// Worker only honors entries whose stored turn_id matches its own current
+/// turn — stale entries from a previous turn are dropped on exit.
+pub(crate) type BgRequests = Arc<DashMap<(i64, i64), BgRequest>>;
 
 /// Per-(chat, thread) handoff gate set before a foreground turn is moved to
 /// background. Workers wait while a gate is present so the next foreground turn

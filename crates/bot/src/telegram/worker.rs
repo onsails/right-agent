@@ -311,7 +311,7 @@ pub struct WorkerContext {
     pub session_locks: super::SessionLocks,
     /// Per-(chat, thread) flag set by the bg callback. Worker checks after kill+wait
     /// to distinguish UserRequested backgrounding from auto-timeout.
-    pub bg_requests: super::BgRequests,
+    pub(crate) bg_requests: super::BgRequests,
     /// Per-(chat, thread) gate held while a foreground turn is handed to background.
     pub bg_handoff_gates: super::BgHandoffGates,
     /// Per-run thinking-preview visibility, mutated by Show/Hide thinking callbacks.
@@ -422,12 +422,13 @@ pub(crate) fn should_honor_bg_request(
 
 /// Atomically remove and classify the bg_requests entry for `key`.
 ///
-/// Returns `true` only when an entry exists AND its stored turn_id matches the
-/// caller's `current_turn_id` — i.e. the bg click was issued *for this very
-/// turn*. Stale entries (from a previous turn that exited without cleanup, or
-/// a bg click that races a normal stream-end completion of this turn) are
-/// dropped and treated as not-bg, so a normal-completion turn can never be
-/// silently reclassified as Backgrounded (which would drop the real reply).
+/// Returns the backgrounding reason only when an entry exists AND its stored
+/// turn_id matches the caller's `current_turn_id` — i.e. the bg request was
+/// issued *for this very turn*. Stale entries (from a previous turn that exited
+/// without cleanup, or a bg click that races a normal stream-end completion of
+/// this turn) are dropped and treated as not-bg, so a normal-completion turn can
+/// never be silently reclassified as Backgrounded (which would drop the real
+/// reply).
 ///
 /// The entry is always removed regardless of match result, so leaked entries
 /// from other turn ids cannot accumulate at the same (chat, thread) key.
@@ -435,20 +436,20 @@ pub(crate) fn consume_bg_request(
     bg_requests: &super::BgRequests,
     key: (i64, i64),
     current_turn_id: u64,
-) -> bool {
+) -> Option<BgReason> {
     match bg_requests.remove(&key) {
-        Some((_, stamped_id)) if stamped_id == current_turn_id => true,
-        Some((_, stamped_id)) => {
+        Some((_, request)) if request.turn_id == current_turn_id => Some(request.reason),
+        Some((_, request)) => {
             tracing::warn!(
                 chat_id = key.0,
                 eff_thread_id = key.1,
                 current_turn_id,
-                stamped_id,
+                stamped_id = request.turn_id,
                 "ignoring stale bg_requests entry from another turn"
             );
-            false
+            None
         }
-        None => false,
+        None => None,
     }
 }
 
@@ -623,6 +624,9 @@ fn continuation_reason_text(reason: BgReason) -> &'static str {
             "the foreground turn hit the 10-minute safety limit and was terminated"
         }
         BgReason::UserRequested => "the user moved this work to background execution",
+        BgReason::Shutdown => {
+            "the bot process is shutting down and moved this foreground turn to background execution"
+        }
     }
 }
 
@@ -1787,6 +1791,9 @@ pub fn spawn_worker(
                                     BgReason::UserRequested => {
                                         "\u{1f319} Working in background. Will reply when ready"
                                     }
+                                    BgReason::Shutdown => {
+                                        "\u{1f319} Bot is shutting down. Continuing in background; will reply when ready"
+                                    }
                                 };
                                 let _ = ctx
                                     .bot
@@ -2162,12 +2169,14 @@ fn spawn_token_request(
 }
 
 /// Why a foreground CC turn was moved to background execution.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BgReason {
     /// The CC subprocess was killed because it exceeded the 10-minute safety limit.
     AutoTimeout,
     /// The user pressed the "Background" inline button during the thinking phase.
     UserRequested,
+    /// The bot process is shutting down and moved the turn out of foreground.
+    Shutdown,
 }
 
 /// Classification of why `invoke_cc` failed, used by `spawn_worker` to decide
@@ -4160,7 +4169,8 @@ async fn invoke_cc(
     // User clicked Background — check before treating cancellation as a normal stop.
     // The bg callback inserts a (key -> turn_id) entry and cancels the stop token,
     // so `stopped` is true here as well; bg semantics override.
-    let was_bg_request = consume_bg_request(&ctx.bg_requests, (chat_id, eff_thread_id), turn_id);
+    let bg_reason = consume_bg_request(&ctx.bg_requests, (chat_id, eff_thread_id), turn_id);
+    let was_bg_request = bg_reason.is_some();
 
     // Read any remaining stderr. Bounded to keep a wedged pipe from blocking
     // the worker — see the post-break cleanup comment above.
@@ -4253,7 +4263,12 @@ async fn invoke_cc(
     // `consume_bg_request`, so dropping the flag here cannot leak.
     let bg_click_after_success =
         was_bg_request && !timed_out && exit_code == 0 && !stdout_str.is_empty();
-    let was_bg_request = should_honor_bg_request(was_bg_request, timed_out, exit_code, &stdout_str);
+    let bg_reason = if should_honor_bg_request(was_bg_request, timed_out, exit_code, &stdout_str) {
+        bg_reason
+    } else {
+        None
+    };
+    let was_bg_request = bg_reason.is_some();
     if bg_click_after_success {
         // bg click landed on a normally-finished turn — drop the flag so the
         // real reply still gets delivered.
@@ -4315,9 +4330,9 @@ async fn invoke_cc(
     // Handle user-requested backgrounding — must come BEFORE the `stopped`
     // check, since the bg button cancels the same stop_token (so `stopped` is
     // also true).
-    if was_bg_request {
+    if let Some(reason) = bg_reason {
         return Err(InvokeCcFailure::Backgrounded {
-            reason: BgReason::UserRequested,
+            reason,
             main_session_id: session_uuid.clone(),
             thinking_msg_id,
             session_guard,
@@ -6052,6 +6067,13 @@ mod background_continuation_tests {
     }
 
     #[test]
+    fn continuation_prompt_mentions_shutdown_reason() {
+        let p = build_continuation_prompt(BgReason::Shutdown);
+        assert!(p.contains("the bot process is shutting down"));
+        assert!(p.contains("MOST RECENT MESSAGE"));
+    }
+
+    #[test]
     fn build_continuation_prompt_forbids_silence() {
         let p = build_continuation_prompt(BgReason::AutoTimeout);
         assert!(
@@ -6257,18 +6279,43 @@ mod bg_request_race_tests {
     #[test]
     fn empty_map_returns_false() {
         let bg = empty_bg_map();
-        assert!(!consume_bg_request(&bg, (1, 0), 42));
+        assert_eq!(consume_bg_request(&bg, (1, 0), 42), None);
     }
 
     #[test]
     fn matching_turn_id_returns_true_and_removes_entry() {
         let bg = empty_bg_map();
-        bg.insert((1, 0), 42);
-        assert!(consume_bg_request(&bg, (1, 0), 42));
+        bg.insert(
+            (1, 0),
+            super::super::BgRequest {
+                turn_id: 42,
+                reason: BgReason::UserRequested,
+            },
+        );
+        assert_eq!(
+            consume_bg_request(&bg, (1, 0), 42),
+            Some(BgReason::UserRequested)
+        );
         assert!(
             bg.get(&(1, 0)).is_none(),
             "matched entry must be removed on consume"
         );
+    }
+
+    #[test]
+    fn shutdown_bg_request_consumes_matching_turn_id() {
+        let bg: super::super::BgRequests = Arc::new(DashMap::new());
+        bg.insert(
+            (1, 0),
+            super::super::BgRequest {
+                turn_id: 42,
+                reason: BgReason::Shutdown,
+            },
+        );
+
+        let consumed = consume_bg_request(&bg, (1, 0), 42);
+        assert_eq!(consumed, Some(BgReason::Shutdown));
+        assert!(bg.get(&(1, 0)).is_none());
     }
 
     #[test]
@@ -6279,16 +6326,38 @@ mod bg_request_race_tests {
         // NOT see this as a bg request — otherwise its real reply gets
         // silently dropped and the user sees only the bg banner.
         let bg = empty_bg_map();
-        bg.insert((1, 0), 999);
+        bg.insert(
+            (1, 0),
+            super::super::BgRequest {
+                turn_id: 999,
+                reason: BgReason::UserRequested,
+            },
+        );
         let was_bg = consume_bg_request(&bg, (1, 0), 1);
-        assert!(
-            !was_bg,
+        assert_eq!(
+            was_bg, None,
             "stale entry from another turn must not classify as bg"
         );
         assert!(
             bg.get(&(1, 0)).is_none(),
             "stale entry must be removed so it can't leak into the next turn"
         );
+    }
+
+    #[test]
+    fn stale_shutdown_bg_request_is_removed_and_ignored() {
+        let bg: super::super::BgRequests = Arc::new(DashMap::new());
+        bg.insert(
+            (1, 0),
+            super::super::BgRequest {
+                turn_id: 999,
+                reason: BgReason::Shutdown,
+            },
+        );
+
+        let consumed = consume_bg_request(&bg, (1, 0), 1);
+        assert_eq!(consumed, None);
+        assert!(bg.get(&(1, 0)).is_none());
     }
 
     #[test]
