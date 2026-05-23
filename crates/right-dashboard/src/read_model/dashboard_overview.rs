@@ -1,4 +1,6 @@
-use crate::api_types::{DashboardOverviewResponse, OverviewDoctorStatus, OverviewSandboxStatus};
+use crate::api_types::{
+    CostLearningRiver, DashboardOverviewResponse, OverviewDoctorStatus, OverviewSandboxStatus,
+};
 use chrono::Duration;
 use rusqlite::{Connection, params};
 
@@ -37,6 +39,14 @@ pub fn dashboard_overview(
             generated_at: None,
         },
         sandbox: input.sandbox,
+        signals: Vec::new(),
+        cost_learning_river: CostLearningRiver {
+            window: "last_30_days".to_owned(),
+            points: Vec::new(),
+            series: Vec::new(),
+            markers: Vec::new(),
+        },
+        warnings: Vec::new(),
     })
 }
 

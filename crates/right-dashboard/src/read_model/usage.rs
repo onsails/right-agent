@@ -59,6 +59,10 @@ pub fn usage_overview(
         agent: input.agent,
         generated_at: input.generated_at,
         windows,
+        selected_window: "last_30_days".to_owned(),
+        daily_series: Vec::new(),
+        source_series: Vec::new(),
+        warnings: Vec::new(),
     })
 }
 
