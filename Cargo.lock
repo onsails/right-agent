@@ -3065,6 +3065,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "right-lifecycle"
+version = "0.2.15"
+dependencies = [
+ "chrono",
+ "right-db",
+ "rusqlite",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "right-mcp"
 version = "0.2.15"
 dependencies = [

@@ -3,6 +3,7 @@ members = [
     "crates/right-agent",
     "crates/right-config",
     "crates/right-db",
+    "crates/right-lifecycle",
     "crates/right-memory",
     "crates/right-mcp",
     "crates/right-codegen",
