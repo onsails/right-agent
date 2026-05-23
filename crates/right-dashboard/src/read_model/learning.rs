@@ -115,12 +115,12 @@ pub fn learning_overview(
     let health = learning_health(conn, agent, &generated_at)?;
     let lifecycle = learning_lifecycle(conn, agent, &since_7d_utc, &generated_at_utc)?;
     let recent_reports = recent_reports(conn, agent)?;
-    let flow_counts = learning_flow_counts(conn, agent, &since_7d_utc, &generated_at_utc)?;
+    let (flow_counts, mut warnings) =
+        learning_flow_counts(conn, agent, &since_7d_utc, &generated_at_utc)?;
     let flow_nodes = learning_flow_nodes(&flow_counts);
     let (flow_edges, partial_flow) = learning_flow_edges(&flow_nodes, &flow_counts);
     let recent_learning_signals =
         recent_learning_signals(conn, agent, &since_7d_utc, &generated_at_utc)?;
-    let mut warnings = Vec::<DashboardDataWarning>::new();
     if partial_flow {
         warnings.push(DashboardDataWarning {
             source: "learning_flow".to_owned(),
@@ -194,65 +194,76 @@ fn learning_flow_counts(
     agent: &str,
     since: &DateTime<Utc>,
     now: &DateTime<Utc>,
-) -> Result<LearningFlowCounts, ReadModelError> {
-    Ok(LearningFlowCounts {
-        signals: signal_count_in_window(conn, agent, since, now)?,
-        create_candidates: report_count_in_window(conn, agent, "create_candidate", since, now)?,
-        update_candidates: report_count_in_window(conn, agent, "update_candidate", since, now)?,
-        nothing_to_learn: report_count_in_window(conn, agent, "nothing_to_learn", since, now)?,
-        failed_reviews: report_count_in_window(conn, agent, "failed", since, now)?,
-        curator_triggered: curator_trigger_count_in_window(conn, since, now)?,
-        writer_applied_as_hinted: writer_hint_outcome_count_in_window(
-            conn,
-            agent,
-            "applied_as_hinted",
-            since,
-            now,
-        )?,
-        writer_applied_differently: writer_hint_outcome_count_in_window(
-            conn,
-            agent,
-            "applied_differently",
-            since,
-            now,
-        )?,
-        writer_refused: writer_hint_outcome_count_in_window(conn, agent, "refused", since, now)?,
-        writer_failed: failed_writer_flow_count_in_window(conn, agent, since, now)?,
-        skill_created: writer_status_count_in_window(conn, agent, "created", since, now)?,
-        skill_updated: writer_status_count_in_window(conn, agent, "updated", since, now)?,
-        applied_as_hinted_created: writer_hint_status_count_in_window(
-            conn,
-            agent,
-            "applied_as_hinted",
-            "created",
-            since,
-            now,
-        )?,
-        applied_as_hinted_updated: writer_hint_status_count_in_window(
-            conn,
-            agent,
-            "applied_as_hinted",
-            "updated",
-            since,
-            now,
-        )?,
-        applied_differently_created: writer_hint_status_count_in_window(
-            conn,
-            agent,
-            "applied_differently",
-            "created",
-            since,
-            now,
-        )?,
-        applied_differently_updated: writer_hint_status_count_in_window(
-            conn,
-            agent,
-            "applied_differently",
-            "updated",
-            since,
-            now,
-        )?,
-    })
+) -> Result<(LearningFlowCounts, Vec<DashboardDataWarning>), ReadModelError> {
+    let (curator_triggered, curator_warning) = curator_trigger_count_in_window(conn, since, now)?;
+    let mut warnings = Vec::new();
+    if let Some(warning) = curator_warning {
+        warnings.push(warning);
+    }
+
+    Ok((
+        LearningFlowCounts {
+            signals: signal_count_in_window(conn, agent, since, now)?,
+            create_candidates: report_count_in_window(conn, agent, "create_candidate", since, now)?,
+            update_candidates: report_count_in_window(conn, agent, "update_candidate", since, now)?,
+            nothing_to_learn: report_count_in_window(conn, agent, "nothing_to_learn", since, now)?,
+            failed_reviews: report_count_in_window(conn, agent, "failed", since, now)?,
+            curator_triggered,
+            writer_applied_as_hinted: writer_hint_outcome_count_in_window(
+                conn,
+                agent,
+                "applied_as_hinted",
+                since,
+                now,
+            )?,
+            writer_applied_differently: writer_hint_outcome_count_in_window(
+                conn,
+                agent,
+                "applied_differently",
+                since,
+                now,
+            )?,
+            writer_refused: writer_hint_outcome_count_in_window(
+                conn, agent, "refused", since, now,
+            )?,
+            writer_failed: failed_writer_flow_count_in_window(conn, agent, since, now)?,
+            skill_created: writer_status_count_in_window(conn, agent, "created", since, now)?,
+            skill_updated: writer_status_count_in_window(conn, agent, "updated", since, now)?,
+            applied_as_hinted_created: writer_hint_status_count_in_window(
+                conn,
+                agent,
+                "applied_as_hinted",
+                "created",
+                since,
+                now,
+            )?,
+            applied_as_hinted_updated: writer_hint_status_count_in_window(
+                conn,
+                agent,
+                "applied_as_hinted",
+                "updated",
+                since,
+                now,
+            )?,
+            applied_differently_created: writer_hint_status_count_in_window(
+                conn,
+                agent,
+                "applied_differently",
+                "created",
+                since,
+                now,
+            )?,
+            applied_differently_updated: writer_hint_status_count_in_window(
+                conn,
+                agent,
+                "applied_differently",
+                "updated",
+                since,
+                now,
+            )?,
+        },
+        warnings,
+    ))
 }
 
 fn learning_flow_nodes(counts: &LearningFlowCounts) -> Vec<LearningFlowNode> {
@@ -865,7 +876,7 @@ fn curator_trigger_count_in_window(
     conn: &Connection,
     since: &DateTime<Utc>,
     now: &DateTime<Utc>,
-) -> Result<i64, ReadModelError> {
+) -> Result<(i64, Option<DashboardDataWarning>), ReadModelError> {
     let raw = conn
         .query_row(
             "SELECT last_spike_evidence_json
@@ -878,17 +889,24 @@ fn curator_trigger_count_in_window(
         .flatten();
 
     let Some(raw) = raw else {
-        return Ok(0);
+        return Ok((0, None));
     };
     match curator_trigger_evidence_timestamp(&raw) {
-        Ok(Some(occurred_at)) if occurred_at >= *since && occurred_at <= *now => Ok(1),
-        Ok(_) => Ok(0),
+        Ok(Some(occurred_at)) if occurred_at >= *since && occurred_at <= *now => Ok((1, None)),
+        Ok(_) => Ok((0, None)),
         Err(()) => {
             tracing::warn!(
                 source = "curator_state.last_spike_evidence_json",
                 "dashboard: skipped malformed curator trigger evidence JSON"
             );
-            Ok(0)
+            Ok((
+                0,
+                Some(DashboardDataWarning {
+                    source: "curator_state.last_spike_evidence_json".to_owned(),
+                    kind: "malformed_json".to_owned(),
+                    message: "skipped malformed curator spike evidence JSON".to_owned(),
+                }),
+            ))
         }
     }
 }
@@ -1900,6 +1918,10 @@ mod tests {
         .unwrap();
         let response = learning_overview(&conn, input()).unwrap();
         assert_eq!(flow_node_count(&response, "curator_triggered"), 0);
+        assert!(response.warnings.iter().any(|warning| {
+            warning.source == "curator_state.last_spike_evidence_json"
+                && warning.kind == "malformed_json"
+        }));
     }
 
     #[test]
