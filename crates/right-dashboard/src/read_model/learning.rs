@@ -117,7 +117,7 @@ pub fn learning_overview(
     let recent_reports = recent_reports(conn, agent)?;
     let flow_counts = learning_flow_counts(conn, agent, &since_7d_utc, &generated_at_utc)?;
     let flow_nodes = learning_flow_nodes(&flow_counts);
-    let (flow_edges, partial_flow) = learning_flow_edges(&flow_nodes);
+    let (flow_edges, partial_flow) = learning_flow_edges(&flow_nodes, &flow_counts);
     let recent_learning_signals =
         recent_learning_signals(conn, agent, &since_7d_utc, &generated_at_utc)?;
     let mut warnings = Vec::<DashboardDataWarning>::new();
@@ -176,9 +176,17 @@ struct LearningFlowCounts {
     update_candidates: i64,
     nothing_to_learn: i64,
     failed_reviews: i64,
-    writer_created: i64,
-    writer_updated: i64,
+    curator_triggered: i64,
+    writer_applied_as_hinted: i64,
+    writer_applied_differently: i64,
+    writer_refused: i64,
     writer_failed: i64,
+    skill_created: i64,
+    skill_updated: i64,
+    applied_as_hinted_created: i64,
+    applied_as_hinted_updated: i64,
+    applied_differently_created: i64,
+    applied_differently_updated: i64,
 }
 
 fn learning_flow_counts(
@@ -193,9 +201,57 @@ fn learning_flow_counts(
         update_candidates: report_count_in_window(conn, agent, "update_candidate", since, now)?,
         nothing_to_learn: report_count_in_window(conn, agent, "nothing_to_learn", since, now)?,
         failed_reviews: report_count_in_window(conn, agent, "failed", since, now)?,
-        writer_created: writer_status_count_in_window(conn, agent, "created", since, now)?,
-        writer_updated: writer_status_count_in_window(conn, agent, "updated", since, now)?,
-        writer_failed: failed_writer_count_in_window(conn, agent, since, now)?,
+        curator_triggered: curator_trigger_count_in_window(conn, since, now)?,
+        writer_applied_as_hinted: writer_hint_outcome_count_in_window(
+            conn,
+            agent,
+            "applied_as_hinted",
+            since,
+            now,
+        )?,
+        writer_applied_differently: writer_hint_outcome_count_in_window(
+            conn,
+            agent,
+            "applied_differently",
+            since,
+            now,
+        )?,
+        writer_refused: writer_hint_outcome_count_in_window(conn, agent, "refused", since, now)?,
+        writer_failed: failed_writer_flow_count_in_window(conn, agent, since, now)?,
+        skill_created: writer_status_count_in_window(conn, agent, "created", since, now)?,
+        skill_updated: writer_status_count_in_window(conn, agent, "updated", since, now)?,
+        applied_as_hinted_created: writer_hint_status_count_in_window(
+            conn,
+            agent,
+            "applied_as_hinted",
+            "created",
+            since,
+            now,
+        )?,
+        applied_as_hinted_updated: writer_hint_status_count_in_window(
+            conn,
+            agent,
+            "applied_as_hinted",
+            "updated",
+            since,
+            now,
+        )?,
+        applied_differently_created: writer_hint_status_count_in_window(
+            conn,
+            agent,
+            "applied_differently",
+            "created",
+            since,
+            now,
+        )?,
+        applied_differently_updated: writer_hint_status_count_in_window(
+            conn,
+            agent,
+            "applied_differently",
+            "updated",
+            since,
+            now,
+        )?,
     })
 }
 
@@ -237,18 +293,32 @@ fn learning_flow_nodes(counts: &LearningFlowCounts) -> Vec<LearningFlowNode> {
             severity: "bad".to_owned(),
         },
         LearningFlowNode {
-            id: "writer_created".to_owned(),
-            label: "Created".to_owned(),
-            kind: "writer".to_owned(),
-            count: counts.writer_created,
+            id: "curator_triggered".to_owned(),
+            label: "Curator triggered".to_owned(),
+            kind: "curator".to_owned(),
+            count: counts.curator_triggered,
             severity: "info".to_owned(),
         },
         LearningFlowNode {
-            id: "writer_updated".to_owned(),
-            label: "Updated".to_owned(),
+            id: "writer_applied_as_hinted".to_owned(),
+            label: "Applied as hinted".to_owned(),
             kind: "writer".to_owned(),
-            count: counts.writer_updated,
+            count: counts.writer_applied_as_hinted,
             severity: "info".to_owned(),
+        },
+        LearningFlowNode {
+            id: "writer_applied_differently".to_owned(),
+            label: "Applied differently".to_owned(),
+            kind: "writer".to_owned(),
+            count: counts.writer_applied_differently,
+            severity: "info".to_owned(),
+        },
+        LearningFlowNode {
+            id: "writer_refused".to_owned(),
+            label: "Refused".to_owned(),
+            kind: "writer".to_owned(),
+            count: counts.writer_refused,
+            severity: "warn".to_owned(),
         },
         LearningFlowNode {
             id: "writer_failed".to_owned(),
@@ -257,10 +327,27 @@ fn learning_flow_nodes(counts: &LearningFlowCounts) -> Vec<LearningFlowNode> {
             count: counts.writer_failed,
             severity: "bad".to_owned(),
         },
+        LearningFlowNode {
+            id: "skill_created".to_owned(),
+            label: "Skills created".to_owned(),
+            kind: "skill".to_owned(),
+            count: counts.skill_created,
+            severity: "info".to_owned(),
+        },
+        LearningFlowNode {
+            id: "skill_updated".to_owned(),
+            label: "Skills patched".to_owned(),
+            kind: "skill".to_owned(),
+            count: counts.skill_updated,
+            severity: "info".to_owned(),
+        },
     ]
 }
 
-fn learning_flow_edges(nodes: &[LearningFlowNode]) -> (Vec<LearningFlowEdge>, bool) {
+fn learning_flow_edges(
+    nodes: &[LearningFlowNode],
+    counts: &LearningFlowCounts,
+) -> (Vec<LearningFlowEdge>, bool) {
     let count = |id: &str| -> i64 {
         nodes
             .iter()
@@ -269,6 +356,7 @@ fn learning_flow_edges(nodes: &[LearningFlowNode]) -> (Vec<LearningFlowEdge>, bo
             .unwrap_or(0)
     };
     let mut edges = Vec::new();
+    let mut prefilter_incoming = BTreeMap::<&str, i64>::new();
     let mut signal_budget = count("signals");
     for target in [
         "prefilter_create",
@@ -283,57 +371,240 @@ fn learning_flow_edges(nodes: &[LearningFlowNode]) -> (Vec<LearningFlowEdge>, bo
                 target: target.to_owned(),
                 count: value,
             });
+            *prefilter_incoming.entry(target).or_default() += value;
             signal_budget -= value;
         }
     }
 
-    let created_attached = count("prefilter_create").min(count("writer_created"));
-    if created_attached > 0 {
-        edges.push(LearningFlowEdge {
-            source: "prefilter_create".to_owned(),
-            target: "writer_created".to_owned(),
-            count: created_attached,
-        });
-    }
-
-    let updated_attached = count("prefilter_patch").min(count("writer_updated"));
-    if updated_attached > 0 {
-        edges.push(LearningFlowEdge {
-            source: "prefilter_patch".to_owned(),
-            target: "writer_updated".to_owned(),
-            count: updated_attached,
-        });
-    }
-
-    let failed_attached = count("prefilter_failed").min(count("writer_failed"));
-    if failed_attached > 0 {
-        edges.push(LearningFlowEdge {
-            source: "prefilter_failed".to_owned(),
-            target: "writer_failed".to_owned(),
-            count: failed_attached,
-        });
-    }
-
-    let mut represented_writers = created_attached + updated_attached + failed_attached;
-    for (target, remaining) in [
-        ("writer_created", count("writer_created") - created_attached),
-        ("writer_updated", count("writer_updated") - updated_attached),
-        ("writer_failed", count("writer_failed") - failed_attached),
-    ] {
-        let value = remaining.min(signal_budget);
+    let mut curator_budget = count("curator_triggered");
+    for target in ["prefilter_create", "prefilter_patch"] {
+        let already_attached = prefilter_incoming.get(target).copied().unwrap_or(0);
+        let value = (count(target) - already_attached).min(curator_budget);
         if value > 0 {
             edges.push(LearningFlowEdge {
-                source: "signals".to_owned(),
+                source: "curator_triggered".to_owned(),
                 target: target.to_owned(),
                 count: value,
             });
-            signal_budget -= value;
-            represented_writers += value;
+            *prefilter_incoming.entry(target).or_default() += value;
+            curator_budget -= value;
         }
     }
 
-    let writer_total = count("writer_created") + count("writer_updated") + count("writer_failed");
-    (edges, writer_total > represented_writers)
+    let mut writer_remaining = BTreeMap::<&str, i64>::from([
+        (
+            "writer_applied_as_hinted",
+            count("writer_applied_as_hinted"),
+        ),
+        (
+            "writer_applied_differently",
+            count("writer_applied_differently"),
+        ),
+        ("writer_refused", count("writer_refused")),
+        ("writer_failed", count("writer_failed")),
+    ]);
+    let mut represented_writers = 0;
+
+    let mut create_budget = count("prefilter_create");
+    attach_flow_edge_with_cap(
+        &mut edges,
+        "prefilter_create",
+        "writer_applied_as_hinted",
+        &mut create_budget,
+        &mut writer_remaining,
+        counts.applied_as_hinted_created,
+        &mut represented_writers,
+    );
+    attach_flow_edge_with_cap(
+        &mut edges,
+        "prefilter_create",
+        "writer_applied_differently",
+        &mut create_budget,
+        &mut writer_remaining,
+        counts.applied_differently_created,
+        &mut represented_writers,
+    );
+    attach_flow_edge(
+        &mut edges,
+        "prefilter_create",
+        "writer_refused",
+        &mut create_budget,
+        &mut writer_remaining,
+        &mut represented_writers,
+    );
+    attach_flow_edge(
+        &mut edges,
+        "prefilter_create",
+        "writer_failed",
+        &mut create_budget,
+        &mut writer_remaining,
+        &mut represented_writers,
+    );
+
+    let mut patch_budget = count("prefilter_patch");
+    attach_flow_edge_with_cap(
+        &mut edges,
+        "prefilter_patch",
+        "writer_applied_as_hinted",
+        &mut patch_budget,
+        &mut writer_remaining,
+        counts.applied_as_hinted_updated,
+        &mut represented_writers,
+    );
+    attach_flow_edge_with_cap(
+        &mut edges,
+        "prefilter_patch",
+        "writer_applied_differently",
+        &mut patch_budget,
+        &mut writer_remaining,
+        counts.applied_differently_updated,
+        &mut represented_writers,
+    );
+    attach_flow_edge(
+        &mut edges,
+        "prefilter_patch",
+        "writer_refused",
+        &mut patch_budget,
+        &mut writer_remaining,
+        &mut represented_writers,
+    );
+    attach_flow_edge(
+        &mut edges,
+        "prefilter_patch",
+        "writer_failed",
+        &mut patch_budget,
+        &mut writer_remaining,
+        &mut represented_writers,
+    );
+
+    for target in [
+        "writer_applied_as_hinted",
+        "writer_applied_differently",
+        "writer_refused",
+        "writer_failed",
+    ] {
+        attach_flow_edge(
+            &mut edges,
+            "curator_triggered",
+            target,
+            &mut curator_budget,
+            &mut writer_remaining,
+            &mut represented_writers,
+        );
+    }
+
+    for target in [
+        "writer_applied_as_hinted",
+        "writer_applied_differently",
+        "writer_refused",
+        "writer_failed",
+    ] {
+        attach_flow_edge(
+            &mut edges,
+            "signals",
+            target,
+            &mut signal_budget,
+            &mut writer_remaining,
+            &mut represented_writers,
+        );
+    }
+
+    let mut skill_remaining = BTreeMap::<&str, i64>::from([
+        ("skill_created", count("skill_created")),
+        ("skill_updated", count("skill_updated")),
+    ]);
+    let mut represented_skills = 0;
+    let mut hinted_budget = count("writer_applied_as_hinted");
+    attach_flow_edge_with_cap(
+        &mut edges,
+        "writer_applied_as_hinted",
+        "skill_created",
+        &mut hinted_budget,
+        &mut skill_remaining,
+        counts.applied_as_hinted_created,
+        &mut represented_skills,
+    );
+    attach_flow_edge_with_cap(
+        &mut edges,
+        "writer_applied_as_hinted",
+        "skill_updated",
+        &mut hinted_budget,
+        &mut skill_remaining,
+        counts.applied_as_hinted_updated,
+        &mut represented_skills,
+    );
+    let mut different_budget = count("writer_applied_differently");
+    attach_flow_edge_with_cap(
+        &mut edges,
+        "writer_applied_differently",
+        "skill_created",
+        &mut different_budget,
+        &mut skill_remaining,
+        counts.applied_differently_created,
+        &mut represented_skills,
+    );
+    attach_flow_edge_with_cap(
+        &mut edges,
+        "writer_applied_differently",
+        "skill_updated",
+        &mut different_budget,
+        &mut skill_remaining,
+        counts.applied_differently_updated,
+        &mut represented_skills,
+    );
+
+    let writer_total = count("writer_applied_as_hinted")
+        + count("writer_applied_differently")
+        + count("writer_refused")
+        + count("writer_failed");
+    let skill_total = count("skill_created") + count("skill_updated");
+    (
+        edges,
+        writer_total > represented_writers || skill_total > represented_skills,
+    )
+}
+
+fn attach_flow_edge(
+    edges: &mut Vec<LearningFlowEdge>,
+    source: &str,
+    target: &'static str,
+    source_budget: &mut i64,
+    target_remaining: &mut BTreeMap<&'static str, i64>,
+    represented: &mut i64,
+) {
+    attach_flow_edge_with_cap(
+        edges,
+        source,
+        target,
+        source_budget,
+        target_remaining,
+        i64::MAX,
+        represented,
+    );
+}
+
+fn attach_flow_edge_with_cap(
+    edges: &mut Vec<LearningFlowEdge>,
+    source: &str,
+    target: &'static str,
+    source_budget: &mut i64,
+    target_remaining: &mut BTreeMap<&'static str, i64>,
+    cap: i64,
+    represented: &mut i64,
+) {
+    let remaining = target_remaining.get(target).copied().unwrap_or(0);
+    let value = (*source_budget).min(remaining).min(cap);
+    if value <= 0 {
+        return;
+    }
+    edges.push(LearningFlowEdge {
+        source: source.to_owned(),
+        target: target.to_owned(),
+        count: value,
+    });
+    *source_budget -= value;
+    target_remaining.insert(target, remaining - value);
+    *represented += value;
 }
 
 fn coarse_timestamp_bounds(since: &DateTime<Utc>, now: &DateTime<Utc>) -> (String, String) {
@@ -473,6 +744,56 @@ fn writer_status_count_in_window(
     count_parsed_window_rows(rows, since, now)
 }
 
+fn writer_hint_outcome_count_in_window(
+    conn: &Connection,
+    agent: &str,
+    hint_outcome: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
+    let mut stmt = conn.prepare(
+        "SELECT created_at
+         FROM skill_learning_events
+         WHERE agent_name=?1
+           AND phase='finish'
+           AND hint_outcome=?2
+           AND created_at >= ?3
+           AND created_at <= ?4",
+    )?;
+    let rows = stmt.query_map(
+        params![agent, hint_outcome, coarse_since, coarse_until],
+        |row| row.get::<_, String>(0),
+    )?;
+    count_parsed_window_rows(rows, since, now)
+}
+
+fn writer_hint_status_count_in_window(
+    conn: &Connection,
+    agent: &str,
+    hint_outcome: &str,
+    status: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
+    let mut stmt = conn.prepare(
+        "SELECT created_at
+         FROM skill_learning_events
+         WHERE agent_name=?1
+           AND phase='finish'
+           AND hint_outcome=?2
+           AND status=?3
+           AND created_at >= ?4
+           AND created_at <= ?5",
+    )?;
+    let rows = stmt.query_map(
+        params![agent, hint_outcome, status, coarse_since, coarse_until],
+        |row| row.get::<_, String>(0),
+    )?;
+    count_parsed_window_rows(rows, since, now)
+}
+
 fn successful_writer_count_in_window(
     conn: &Connection,
     agent: &str,
@@ -486,6 +807,29 @@ fn successful_writer_count_in_window(
          WHERE agent_name=?1
            AND phase='finish'
            AND status IN ('created','updated')
+           AND created_at >= ?2
+           AND created_at <= ?3",
+    )?;
+    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
+        row.get::<_, String>(0)
+    })?;
+    count_parsed_window_rows(rows, since, now)
+}
+
+fn failed_writer_flow_count_in_window(
+    conn: &Connection,
+    agent: &str,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
+    let mut stmt = conn.prepare(
+        "SELECT created_at
+         FROM skill_learning_events
+         WHERE agent_name=?1
+           AND phase='finish'
+           AND status IN ('failed','aborted')
+           AND COALESCE(hint_outcome, '') <> 'refused'
            AND created_at >= ?2
            AND created_at <= ?3",
     )?;
@@ -515,6 +859,55 @@ fn failed_writer_count_in_window(
         row.get::<_, String>(0)
     })?;
     count_parsed_window_rows(rows, since, now)
+}
+
+fn curator_trigger_count_in_window(
+    conn: &Connection,
+    since: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let raw = conn
+        .query_row(
+            "SELECT last_spike_evidence_json
+             FROM curator_state
+             WHERE agent_singleton_id = 1",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+
+    let Some(raw) = raw else {
+        return Ok(0);
+    };
+    match curator_trigger_evidence_timestamp(&raw) {
+        Ok(Some(occurred_at)) if occurred_at >= *since && occurred_at <= *now => Ok(1),
+        Ok(_) => Ok(0),
+        Err(()) => {
+            tracing::warn!(
+                source = "curator_state.last_spike_evidence_json",
+                "dashboard: skipped malformed curator trigger evidence JSON"
+            );
+            Ok(0)
+        }
+    }
+}
+
+fn curator_trigger_evidence_timestamp(raw: &str) -> Result<Option<DateTime<Utc>>, ()> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).map_err(|_| ())?;
+    if value
+        .get("trigger")
+        .and_then(|field| field.as_str())
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let Some(computed_at) = value.get("computed_at").and_then(|field| field.as_str()) else {
+        return Ok(None);
+    };
+    DateTime::parse_from_rfc3339(computed_at)
+        .map(|timestamp| Some(timestamp.with_timezone(&Utc)))
+        .map_err(|_| ())
 }
 
 fn count_parsed_window_rows(
@@ -1398,15 +1791,115 @@ mod tests {
             response
                 .flow_nodes
                 .iter()
-                .any(|node| node.id == "writer_created" && node.count == 1)
+                .any(|node| node.id == "writer_applied_as_hinted" && node.count == 1)
+        );
+        assert!(
+            response
+                .flow_nodes
+                .iter()
+                .any(|node| node.id == "skill_created" && node.count == 1)
         );
         assert!(
             response
                 .flow_edges
                 .iter()
-                .any(|edge| edge.source == "signals" && edge.target == "writer_created")
+                .any(|edge| edge.source == "signals" && edge.target == "writer_applied_as_hinted")
         );
+        assert!(response.flow_edges.iter().any(
+            |edge| edge.source == "writer_applied_as_hinted" && edge.target == "skill_created"
+        ));
         assert_eq!(response.recent_learning_signals[0].kind, "skill_created");
+    }
+
+    #[test]
+    fn learning_overview_flow_projects_hint_outcomes_skills_and_curator_trigger() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "INSERT OR REPLACE INTO curator_state (
+                agent_singleton_id, last_run_at, last_run_status,
+                consecutive_failures, circuit_open_until, last_spike_evidence_json
+             ) VALUES (
+                1, NULL, NULL, 0, NULL,
+                '{\"trigger\":\"skill_change_count\",\"computed_at\":\"2026-05-20T09:30:00Z\",\"details\":{\"count\":3,\"threshold\":2}}'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_review_reports (
+                agent_name, source_invocation_id, trigger_kind, status,
+                confidence, evidence_refs_json, review_output_json, created_at
+             ) VALUES
+                ('right', 'inv-create-1', 'learning_signal', 'create_candidate',
+                 'high', '[]', '{}', '2026-05-20T10:00:00Z'),
+                ('right', 'inv-patch-1', 'learning_signal', 'update_candidate',
+                 'high', '[]', '{}', '2026-05-20T10:01:00Z'),
+                ('right', 'inv-create-2', 'learning_signal', 'create_candidate',
+                 'medium', '[]', '{}', '2026-05-20T10:02:00Z'),
+                ('right', 'inv-patch-2', 'learning_signal', 'update_candidate',
+                 'medium', '[]', '{}', '2026-05-20T10:03:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                message, summary, event_refs_json, hint_outcome, created_at
+             ) VALUES
+                ('inv-created', 'right', 'create', 'rightx-created', 'finish',
+                 'created', 'created', 'created', '[]', 'applied_as_hinted',
+                 '2026-05-20T10:10:00Z'),
+                ('inv-updated', 'right', 'update', 'rightx-updated', 'finish',
+                 'updated', 'updated', 'updated', '[]', 'applied_differently',
+                 '2026-05-20T10:11:00Z'),
+                ('inv-refused', 'right', 'create', 'rightx-refused', 'finish',
+                 'aborted', 'refused', 'refused', '[]', 'refused',
+                 '2026-05-20T10:12:00Z'),
+                ('inv-failed', 'right', 'update', 'rightx-failed', 'finish',
+                 'failed', 'failed', 'failed', '[]', NULL,
+                 '2026-05-20T10:13:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let response = learning_overview(&conn, input()).unwrap();
+
+        assert_eq!(flow_node_count(&response, "curator_triggered"), 1);
+        assert_eq!(flow_node_count(&response, "writer_applied_as_hinted"), 1);
+        assert_eq!(flow_node_count(&response, "writer_applied_differently"), 1);
+        assert_eq!(flow_node_count(&response, "writer_refused"), 1);
+        assert_eq!(flow_node_count(&response, "writer_failed"), 1);
+        assert_eq!(flow_node_count(&response, "skill_created"), 1);
+        assert_eq!(flow_node_count(&response, "skill_updated"), 1);
+        assert_eq!(
+            flow_edge_count(&response, "curator_triggered", "prefilter_create"),
+            1
+        );
+        assert_eq!(
+            flow_edge_count(&response, "prefilter_create", "writer_applied_as_hinted"),
+            1
+        );
+        assert_eq!(
+            flow_edge_count(&response, "prefilter_patch", "writer_applied_differently"),
+            1
+        );
+        assert_eq!(
+            flow_edge_count(&response, "writer_applied_as_hinted", "skill_created"),
+            1
+        );
+        assert_eq!(
+            flow_edge_count(&response, "writer_applied_differently", "skill_updated"),
+            1
+        );
+
+        conn.execute(
+            "UPDATE curator_state
+             SET last_spike_evidence_json = '{not json'",
+            [],
+        )
+        .unwrap();
+        let response = learning_overview(&conn, input()).unwrap();
+        assert_eq!(flow_node_count(&response, "curator_triggered"), 0);
     }
 
     #[test]
@@ -1452,10 +1945,17 @@ mod tests {
 
         assert_eq!(flow_edge_count(&response, "signals", "prefilter_create"), 1);
         assert_eq!(
-            flow_edge_count(&response, "prefilter_create", "writer_created"),
+            flow_edge_count(&response, "prefilter_create", "writer_applied_as_hinted"),
             1
         );
-        assert_eq!(flow_edge_count(&response, "signals", "writer_created"), 0);
+        assert_eq!(
+            flow_edge_count(&response, "signals", "writer_applied_as_hinted"),
+            0
+        );
+        assert_eq!(
+            flow_edge_count(&response, "writer_applied_as_hinted", "skill_created"),
+            1
+        );
         assert!(response.warnings.is_empty());
     }
 
@@ -1504,7 +2004,7 @@ mod tests {
         let response = learning_overview(&conn, input()).unwrap();
 
         assert_eq!(
-            flow_edge_count(&response, "prefilter_create", "writer_created"),
+            flow_edge_count(&response, "prefilter_create", "writer_applied_as_hinted"),
             1
         );
         assert!(response.warnings.iter().any(|warning| {
@@ -1555,13 +2055,16 @@ mod tests {
         assert_eq!(flow_node_count(&response, "prefilter_create"), 1);
         assert_eq!(flow_node_count(&response, "prefilter_patch"), 1);
         assert_eq!(flow_node_count(&response, "prefilter_skip"), 1);
-        assert_eq!(flow_node_count(&response, "writer_created"), 1);
+        assert_eq!(flow_node_count(&response, "skill_created"), 1);
         assert_eq!(flow_edge_count(&response, "signals", "prefilter_create"), 1);
         assert_eq!(
-            flow_edge_count(&response, "prefilter_create", "writer_created"),
-            1
+            flow_edge_count(&response, "prefilter_create", "writer_applied_as_hinted"),
+            0
         );
-        assert_eq!(flow_edge_count(&response, "signals", "writer_created"), 0);
+        assert_eq!(
+            flow_edge_count(&response, "signals", "writer_applied_as_hinted"),
+            0
+        );
     }
 
     #[test]

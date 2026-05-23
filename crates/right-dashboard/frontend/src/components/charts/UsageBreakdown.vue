@@ -5,6 +5,12 @@ import type { UsageDailyPoint } from '../../types'
 defineProps<{
   point: UsageDailyPoint | null
 }>()
+
+const integer = new Intl.NumberFormat()
+
+function count(value: number): string {
+  return integer.format(value)
+}
 </script>
 
 <template>
@@ -24,6 +30,23 @@ defineProps<{
         <div><dt>Turns</dt><dd>{{ point.turns }}</dd></div>
         <div><dt>Calls</dt><dd>{{ point.invocations }}</dd></div>
       </dl>
+      <section class="text-block">
+        <h3>Counters</h3>
+        <div class="row-list">
+          <div class="model-row">
+            <span>Tokens</span>
+            <strong>{{ count(point.input_tokens) }} in / {{ count(point.output_tokens) }} out</strong>
+          </div>
+          <div class="model-row">
+            <span>Cache</span>
+            <strong>{{ count(point.cache_creation_tokens) }} create / {{ count(point.cache_read_tokens) }} read</strong>
+          </div>
+          <div class="model-row">
+            <span>Web</span>
+            <strong>{{ count(point.web_search_requests) }} search / {{ count(point.web_fetch_requests) }} fetch</strong>
+          </div>
+        </div>
+      </section>
       <section class="text-block">
         <h3>Sources</h3>
         <div class="row-list">

@@ -40,22 +40,39 @@ pub fn usage_overview(
     );
     let week_start = now - Duration::days(7);
     let month_start = now - Duration::days(30);
+    let unknown_sources = unknown_usage_sources(conn)?;
 
     let windows = vec![
-        build_window(conn, "today", "Today", Some(&today_start), &now)?,
-        build_window(conn, "last_7_days", "Last 7 days", Some(&week_start), &now)?,
+        build_window(
+            conn,
+            "today",
+            "Today",
+            Some(&today_start),
+            &now,
+            &unknown_sources,
+        )?,
+        build_window(
+            conn,
+            "last_7_days",
+            "Last 7 days",
+            Some(&week_start),
+            &now,
+            &unknown_sources,
+        )?,
         build_window(
             conn,
             "last_30_days",
             "Last 30 days",
             Some(&month_start),
             &now,
+            &unknown_sources,
         )?,
-        build_window(conn, "all_time", "All time", None, &now)?,
+        build_window(conn, "all_time", "All time", None, &now, &unknown_sources)?,
     ];
 
-    let (daily_series, warnings) = build_daily_series(conn, &now)?;
-    let source_series = build_source_series(&daily_series);
+    let (daily_series, mut warnings) = build_daily_series(conn, &now)?;
+    warnings.extend(unknown_source_warnings(&unknown_sources));
+    let source_series = build_source_series(&daily_series, &unknown_sources);
 
     Ok(UsageOverviewResponse {
         agent: input.agent,
@@ -74,10 +91,17 @@ fn build_window(
     label: &str,
     since: Option<&DateTime<Utc>>,
     until: &DateTime<Utc>,
+    unknown_sources: &[String],
 ) -> Result<UsageWindow, ReadModelError> {
-    let mut sources = Vec::with_capacity(SOURCES.len());
+    let mut sources = Vec::with_capacity(SOURCES.len() + unknown_sources.len());
     for source in SOURCES {
         sources.push(aggregate_source(conn, source, since, until)?);
+    }
+    for source in unknown_sources {
+        let summary = aggregate_source(conn, source, since, until)?;
+        if summary.invocations > 0 {
+            sources.push(summary);
+        }
     }
     let per_model = aggregate_window_models(&sources);
 
@@ -197,9 +221,6 @@ fn build_daily_series(
         if event_at < chart_start_utc || event_at > *now {
             continue;
         }
-        if source_rank(&source).is_none() {
-            continue;
-        }
 
         let date = event_at.date_naive().format("%Y-%m-%d").to_string();
         let Some(idx) = by_date.get(&date).copied() else {
@@ -289,7 +310,10 @@ fn build_daily_series(
     Ok((points, warnings))
 }
 
-fn build_source_series(points: &[UsageDailyPoint]) -> Vec<UsageSourceSeries> {
+fn build_source_series(
+    points: &[UsageDailyPoint],
+    unknown_sources: &[String],
+) -> Vec<UsageSourceSeries> {
     let mut totals = BTreeMap::<(&str, &str), f64>::new();
     for point in points {
         for source in &point.sources {
@@ -300,16 +324,37 @@ fn build_source_series(points: &[UsageDailyPoint]) -> Vec<UsageSourceSeries> {
         }
     }
 
-    SOURCES
+    let mut source_names = SOURCES
+        .iter()
+        .map(|source| (*source).to_owned())
+        .collect::<Vec<_>>();
+    for source in unknown_sources {
+        if !source_names.iter().any(|existing| existing == source) {
+            source_names.push(source.clone());
+        }
+    }
+    for point in points {
+        for source in &point.sources {
+            if !source_names
+                .iter()
+                .any(|existing| existing == &source.source)
+            {
+                source_names.push(source.source.clone());
+            }
+        }
+    }
+    sort_source_names(&mut source_names);
+
+    source_names
         .iter()
         .map(|source| UsageSourceSeries {
-            source: (*source).to_owned(),
+            source: source.clone(),
             points: points
                 .iter()
                 .map(|point| CostSeriesPoint {
                     bucket: point.date.clone(),
                     cost_usd: totals
-                        .get(&(*source, point.date.as_str()))
+                        .get(&(source.as_str(), point.date.as_str()))
                         .copied()
                         .unwrap_or(0.0),
                 })
@@ -373,10 +418,45 @@ fn sort_source_points(rows: &mut [UsageSourcePoint]) {
     );
 }
 
+fn sort_source_names(rows: &mut [String]) {
+    rows.sort_by(
+        |left, right| match (source_rank(left), source_rank(right)) {
+            (Some(left_rank), Some(right_rank)) => left_rank.cmp(&right_rank),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.cmp(right),
+        },
+    );
+}
+
 fn source_rank(source: &str) -> Option<usize> {
     SOURCES
         .iter()
         .position(|known_source| *known_source == source)
+}
+
+fn unknown_usage_sources(conn: &Connection) -> Result<Vec<String>, ReadModelError> {
+    let mut stmt = conn.prepare("SELECT DISTINCT source FROM usage_events ORDER BY source ASC")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut sources = Vec::new();
+    for source in rows {
+        let source = source?;
+        if source_rank(&source).is_none() {
+            sources.push(source);
+        }
+    }
+    Ok(sources)
+}
+
+fn unknown_source_warnings(unknown_sources: &[String]) -> Vec<DashboardDataWarning> {
+    unknown_sources
+        .iter()
+        .map(|source| DashboardDataWarning {
+            source: "usage_events.source".to_owned(),
+            kind: "unknown_source".to_owned(),
+            message: format!("included unknown usage source `{source}` in usage totals"),
+        })
+        .collect()
 }
 
 fn aggregate_source(
@@ -744,17 +824,19 @@ mod tests {
             .iter()
             .find(|point| point.date == "2026-05-01")
             .unwrap();
-        assert!((may_1.total_cost_usd - 0.30).abs() < 1e-9);
-        assert_eq!(may_1.invocations, 2);
-        assert_eq!(may_1.sources.len(), 2);
-        assert!(
-            may_1
-                .sources
-                .iter()
-                .all(|source| source.source != "new_source")
-        );
-        assert_eq!(may_1.models[0].model, "opus");
-        assert_eq!(may_1.models[1].model, "sonnet");
+        assert!((may_1.total_cost_usd - 4.74).abs() < 1e-9);
+        assert_eq!(may_1.invocations, 3);
+        assert_eq!(may_1.sources.len(), 3);
+        let new_source = may_1
+            .sources
+            .iter()
+            .find(|source| source.source == "new_source")
+            .unwrap();
+        assert!((new_source.cost_usd - 4.44).abs() < 1e-9);
+        assert_eq!(new_source.invocations, 1);
+        assert_eq!(may_1.models[0].model, "unknown");
+        assert_eq!(may_1.models[1].model, "opus");
+        assert_eq!(may_1.models[2].model, "sonnet");
         assert!(
             response
                 .daily_series
@@ -779,21 +861,23 @@ mod tests {
             .iter()
             .find(|window| window.key == "last_30_days")
             .unwrap();
-        assert!((last_30_days.total_cost_usd - 0.30).abs() < 1e-9);
-        assert!(
-            response
-                .source_series
-                .iter()
-                .all(|series| series.source != "new_source")
-        );
+        assert!((last_30_days.total_cost_usd - 4.74).abs() < 1e-9);
+        let last_30_days_new_source = last_30_days
+            .sources
+            .iter()
+            .find(|source| source.source == "new_source")
+            .unwrap();
+        assert!((last_30_days_new_source.cost_usd - 4.44).abs() < 1e-9);
 
+        let mut expected_sources = SOURCES.to_vec();
+        expected_sources.push("new_source");
         assert_eq!(
             response
                 .source_series
                 .iter()
                 .map(|series| series.source.as_str())
                 .collect::<Vec<_>>(),
-            SOURCES
+            expected_sources
         );
         let interactive = response
             .source_series
@@ -805,8 +889,14 @@ mod tests {
             .iter()
             .find(|series| series.source == "cron")
             .unwrap();
+        let new_source_series = response
+            .source_series
+            .iter()
+            .find(|series| series.source == "new_source")
+            .unwrap();
         assert_eq!(interactive.points.len(), 30);
         assert_eq!(cron.points.len(), 30);
+        assert_eq!(new_source_series.points.len(), 30);
         let interactive_may_1 = interactive
             .points
             .iter()
@@ -819,6 +909,22 @@ mod tests {
             .find(|point| point.bucket == "2026-04-24")
             .unwrap();
         assert!((interactive_apr_24.cost_usd - 0.0).abs() < 1e-9);
+        let new_source_may_1 = new_source_series
+            .points
+            .iter()
+            .find(|point| point.bucket == "2026-05-01")
+            .unwrap();
+        assert!((new_source_may_1.cost_usd - 4.44).abs() < 1e-9);
+        let new_source_apr_24 = new_source_series
+            .points
+            .iter()
+            .find(|point| point.bucket == "2026-04-24")
+            .unwrap();
+        assert!((new_source_apr_24.cost_usd - 0.0).abs() < 1e-9);
+        assert_eq!(response.warnings.len(), 1);
+        assert_eq!(response.warnings[0].source, "usage_events.source");
+        assert_eq!(response.warnings[0].kind, "unknown_source");
+        assert!(response.warnings[0].message.contains("new_source"));
     }
 
     #[test]
