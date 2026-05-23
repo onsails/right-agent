@@ -316,6 +316,86 @@ fn insert_running_run(
     )
 }
 
+fn cron_shutdown_failure_payload(
+    run_id: &str,
+    job_name: &str,
+    reason: &str,
+) -> Result<(String, String, String), rusqlite::Error> {
+    let content = format!(
+        "Cron job `{job_name}` was interrupted because the bot is shutting down. Run `{run_id}` did not finish."
+    );
+    let delivery_json = notify_delivery_json(&content, None)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let run_note = format!("Cron job `{job_name}` interrupted by shutdown");
+    let error_json = serde_json::json!({
+        "kind": "cron_shutdown_interrupted",
+        "run_id": run_id,
+        "job_name": job_name,
+        "reason": reason,
+    })
+    .to_string();
+    Ok((run_note, delivery_json, error_json))
+}
+
+fn mark_cron_interrupted_by_shutdown(
+    conn: &rusqlite::Connection,
+    job_name: &str,
+    reason: &str,
+) -> Result<usize, rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    let rows = {
+        let mut stmt = tx.prepare(
+            "SELECT id, target_chat_id
+             FROM async_runs
+             WHERE kind = 'cron'
+               AND producer_ref = ?1
+               AND status = 'running'",
+        )?;
+        stmt.query_map([job_name], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut updated = 0usize;
+    let now = chrono::Utc::now().to_rfc3339();
+    for (run_id, target_chat_id) in rows {
+        let delivery_required = target_chat_id != 0;
+        let (run_note, delivery_json, error_json) =
+            cron_shutdown_failure_payload(&run_id, job_name, reason)?;
+        let changed = tx.execute(
+            "UPDATE async_runs
+             SET run_note = ?2,
+                 delivery_json = ?3,
+                 error_json = ?4,
+                 delivery_required = ?5,
+                 delivery_status = ?6,
+                 finished_at = ?7,
+                 exit_code = NULL,
+                 status = 'failed',
+                 updated_at = ?7
+             WHERE id = ?1
+               AND kind = 'cron'
+               AND status = 'running'",
+            rusqlite::params![
+                run_id,
+                run_note,
+                if delivery_required {
+                    Some(delivery_json)
+                } else {
+                    None
+                },
+                error_json,
+                delivery_required,
+                if delivery_required { "pending" } else { "none" },
+                now,
+            ],
+        )?;
+        updated += changed;
+    }
+    tx.commit()?;
+    Ok(updated)
+}
+
 fn update_failed_run_record(conn: &rusqlite::Connection, run_id: &str, exit_code: Option<i32>) {
     update_run_record(conn, run_id, exit_code, "failed");
 }
@@ -2222,5 +2302,81 @@ mod target_snapshot_tests {
             )
             .unwrap();
         assert_eq!(target_chat_id, 0);
+    }
+
+    #[test]
+    fn mark_cron_interrupted_by_shutdown_sets_failed_pending_delivery_for_target() {
+        let (_dir, conn) = migrated_conn();
+        let spec = right_agent::cron_spec::CronSpec {
+            schedule_kind: right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".into()),
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: Some(-777),
+            target_thread_id: Some(13),
+        };
+        insert_running_run(
+            &conn,
+            "run-1",
+            "job-x",
+            "2026-05-05T12:00:00Z",
+            "/sandbox/crons/logs/job-x-run-1.ndjson",
+            &spec,
+        )
+        .unwrap();
+
+        let updated =
+            mark_cron_interrupted_by_shutdown(&conn, "job-x", "shutdown timeout").unwrap();
+
+        assert_eq!(updated, 1);
+        let row: (String, String, String, String) = conn
+            .query_row(
+                "SELECT status, delivery_status, COALESCE(run_note, ''), COALESCE(error_json, '') \
+                 FROM async_runs WHERE id = 'run-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1, "pending");
+        assert!(row.2.contains("job-x"));
+        assert!(row.3.contains("shutdown timeout"));
+    }
+
+    #[test]
+    fn mark_cron_interrupted_by_shutdown_uses_none_delivery_for_targetless() {
+        let (_dir, conn) = migrated_conn();
+        let spec = right_agent::cron_spec::CronSpec {
+            schedule_kind: right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".into()),
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: None,
+            target_thread_id: None,
+        };
+        insert_running_run(
+            &conn,
+            "run-2",
+            "job-y",
+            "2026-05-05T12:00:00Z",
+            "/log/path",
+            &spec,
+        )
+        .unwrap();
+
+        let updated =
+            mark_cron_interrupted_by_shutdown(&conn, "job-y", "shutdown timeout").unwrap();
+
+        assert_eq!(updated, 1);
+        let row: (String, i64, String) = conn
+            .query_row(
+                "SELECT status, delivery_required, delivery_status FROM async_runs WHERE id = 'run-2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("failed".to_string(), 0, "none".to_string()));
     }
 }
