@@ -1203,7 +1203,26 @@ const POST_BREAK_STDERR_TIMEOUT_SECS: u64 = 2;
 ///
 /// `run_job_loop` and triggered job spawns push handles here.
 /// Shutdown collects and awaits them with a timeout.
-type ExecuteHandles = Arc<std::sync::Mutex<Vec<(String, JoinHandle<()>)>>>;
+struct PendingExecuteHandle {
+    job_name: String,
+    handle: JoinHandle<()>,
+}
+
+impl PendingExecuteHandle {
+    #[cfg(test)]
+    fn new_for_test(job_name: &str) -> Self {
+        Self {
+            job_name: job_name.to_owned(),
+            handle: tokio::spawn(async {}),
+        }
+    }
+
+    fn job_name(&self) -> &str {
+        &self.job_name
+    }
+}
+
+type ExecuteHandles = Arc<std::sync::Mutex<Vec<PendingExecuteHandle>>>;
 
 /// Main reconciler loop. Polls `crons/*.yaml` every 60s, spawning per-job loops.
 ///
@@ -1288,17 +1307,20 @@ pub(crate) async fn run_cron_task(
 
     // Phase 2: Wait for in-flight execute_job tasks with timeout.
     // Clean up finished handles first.
-    let pending: Vec<(String, JoinHandle<()>)> = {
+    let pending: Vec<PendingExecuteHandle> = {
         let mut guard = execute_handles
             .lock()
             .expect("execute_handles mutex poisoned");
-        guard.drain(..).filter(|(_, h)| !h.is_finished()).collect()
+        guard
+            .drain(..)
+            .filter(|h| !h.handle.is_finished())
+            .collect()
     };
 
     if pending.is_empty() {
         tracing::info!(agent = %agent_name, "cron shutdown: no running jobs");
     } else {
-        let names: Vec<&str> = pending.iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<&str> = pending.iter().map(PendingExecuteHandle::job_name).collect();
         tracing::info!(
             agent = %agent_name,
             count = pending.len(),
@@ -1307,8 +1329,9 @@ pub(crate) async fn run_cron_task(
             SHUTDOWN_JOB_TIMEOUT.as_secs()
         );
 
-        for (name, handle) in pending {
-            match tokio::time::timeout(SHUTDOWN_JOB_TIMEOUT, handle).await {
+        for mut pending_handle in pending {
+            let name = pending_handle.job_name().to_owned();
+            match tokio::time::timeout(SHUTDOWN_JOB_TIMEOUT, &mut pending_handle.handle).await {
                 Ok(Ok(())) => {
                     tracing::info!(job = %name, "cron shutdown: job finished cleanly");
                 }
@@ -1319,10 +1342,27 @@ pub(crate) async fn run_cron_task(
                     tracing::warn!(
                         job = %name,
                         timeout_secs = SHUTDOWN_JOB_TIMEOUT.as_secs(),
-                        "cron shutdown: job timed out, aborting"
+                        "cron shutdown: job timed out, aborting and marking interrupted"
                     );
-                    // handle is dropped here → task continues as orphan
-                    // (abort requires owning the handle, which timeout consumed)
+                    pending_handle.handle.abort();
+                    match right_db::open_connection(&agent_dir, false) {
+                        Ok(conn) => {
+                            if let Err(e) =
+                                mark_cron_interrupted_by_shutdown(&conn, &name, "shutdown timeout")
+                            {
+                                tracing::error!(
+                                    job = %name,
+                                    "cron shutdown: mark interrupted failed: {e:#}"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                job = %name,
+                                "cron shutdown: DB open to mark interrupted failed: {e:#}"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1409,7 +1449,10 @@ fn fire_one_shot_specs(
             delete_one_shot_spec(&ad, &jn);
         });
         if let Ok(mut guard) = execute_handles.lock() {
-            guard.push((name, handle));
+            guard.push(PendingExecuteHandle {
+                job_name: name,
+                handle,
+            });
         } else {
             triggered_handles.push(handle);
         }
@@ -1601,7 +1644,10 @@ fn reconcile_jobs(
             });
             // Register for shutdown tracking
             if let Ok(mut guard) = execute_handles.lock() {
-                guard.push((trigger_name, handle));
+                guard.push(PendingExecuteHandle {
+                    job_name: trigger_name,
+                    handle,
+                });
             } else {
                 triggered_handles.push(handle);
             }
@@ -1707,8 +1753,11 @@ async fn run_job_loop(
         // Register for shutdown tracking (only for recurring jobs that continue the loop)
         if let Ok(mut guard) = execute_handles.lock() {
             // Clean up finished handles to prevent unbounded growth
-            guard.retain(|(_, h)| !h.is_finished());
-            guard.push((job_name.clone(), handle));
+            guard.retain(|h| !h.handle.is_finished());
+            guard.push(PendingExecuteHandle {
+                job_name: job_name.clone(),
+                handle,
+            });
         }
     }
 }
@@ -1717,6 +1766,12 @@ async fn run_job_loop(
 mod classify_tests {
     use super::*;
     use crate::reflection::FailureKind;
+
+    #[tokio::test]
+    async fn pending_execute_handle_retains_job_name_for_shutdown_marking() {
+        let handle = PendingExecuteHandle::new_for_test("job-a");
+        assert_eq!(handle.job_name(), "job-a");
+    }
 
     #[test]
     fn classify_budget_exceeded_from_text() {
