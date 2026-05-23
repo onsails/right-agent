@@ -300,6 +300,31 @@ use right_platform_knobs::IDLE_THRESHOLD_SECS;
 
 const POLL_INTERVAL_SECS: u64 = 30; // Check every 30s
 const PENDING_FETCH_BATCH_SIZE: usize = 25;
+const MAX_DELIVERY_ATTEMPTS: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryMode {
+    Normal,
+    ShutdownFlush,
+}
+
+fn should_wait_for_idle(mode: DeliveryMode, idle_for: i64) -> bool {
+    mode == DeliveryMode::Normal && idle_for < IDLE_THRESHOLD_SECS
+}
+
+struct DeliveryLoopState {
+    delivered_in_memory: HashSet<String>,
+    attempt_counts: std::collections::HashMap<String, u32>,
+}
+
+impl DeliveryLoopState {
+    fn new() -> Self {
+        Self {
+            delivered_in_memory: HashSet::new(),
+            attempt_counts: std::collections::HashMap::new(),
+        }
+    }
+}
 
 /// Outcome of resolving a pending async run's delivery target against the live allowlist.
 #[derive(Debug)]
@@ -334,6 +359,238 @@ fn pending_label(pending: &PendingAsyncResult) -> &str {
         .unwrap_or(pending.kind.as_str())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn run_delivery_once(
+    conn: &mut rusqlite::Connection,
+    state: &mut DeliveryLoopState,
+    mode: DeliveryMode,
+    agent_dir: &Path,
+    agent_name: &str,
+    model: &Arc<arc_swap::ArcSwap<Option<String>>>,
+    bot: &crate::telegram::BotType,
+    allowlist: &right_agent::agent::allowlist::AllowlistHandle,
+    idle_ts: &Arc<IdleTimestamp>,
+    ssh_config_path: Option<&Path>,
+    internal_client: &Arc<right_mcp::internal_client::InternalClient>,
+    resolved_sandbox: Option<&str>,
+    upgrade_lock: &Arc<tokio::sync::RwLock<()>>,
+    session_locks: &crate::telegram::SessionLocks,
+    debug: &Arc<std::sync::atomic::AtomicBool>,
+    learning: &right_agent::agent::types::LearningConfig,
+    learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
+) -> bool {
+    let pending = match fetch_next_pending(conn, &state.delivered_in_memory) {
+        Ok(Some(p)) => p,
+        Ok(None) => return false,
+        Err(e) => {
+            tracing::error!("async delivery: fetch_next_pending failed: {e:#}");
+            return false;
+        }
+    };
+
+    let last = idle_ts.0.load(std::sync::atomic::Ordering::Relaxed);
+    let now = chrono::Utc::now().timestamp();
+    let idle_for = now - last;
+    if should_wait_for_idle(mode, idle_for) {
+        let wait = IDLE_THRESHOLD_SECS - idle_for;
+        tracing::info!(
+            kind = %pending.kind,
+            producer_ref = ?pending.producer_ref,
+            run_id = %pending.id,
+            idle_secs = idle_for,
+            wait_secs = wait,
+            "async delivery: result pending, waiting for chat idle ({IDLE_THRESHOLD_SECS}s)"
+        );
+        return false;
+    }
+
+    let (to_deliver, skipped) = match select_delivery_candidate(conn, pending) {
+        Ok(Some((result, s))) => (result, s),
+        Ok(None) => return false,
+        Err(e) => {
+            tracing::error!("async delivery: candidate selection failed: {e:#}");
+            return false;
+        }
+    };
+
+    if state.delivered_in_memory.contains(&to_deliver.id) {
+        if mark_delivery_outcome(conn, &to_deliver.id, "delivered").is_ok() {
+            state.delivered_in_memory.remove(&to_deliver.id);
+        }
+        tracing::debug!(run_id = %to_deliver.id, "skipping already-delivered run (in-memory dedup)");
+        return true;
+    }
+
+    let allowlist_snapshot = {
+        let guard = allowlist.0.read().expect("allowlist lock poisoned");
+        guard.clone()
+    };
+
+    let (target_chat_id, target_thread_id) =
+        match classify_pending_target(&to_deliver, &allowlist_snapshot) {
+            TargetClassification::NoTarget => {
+                tracing::warn!(
+                    kind = %to_deliver.kind,
+                    producer_ref = ?to_deliver.producer_ref,
+                    run_id = %to_deliver.id,
+                    "async run has no target_chat_id; marking delivery no_target"
+                );
+                if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "no_target") {
+                    tracing::error!(run_id = %to_deliver.id, "mark no_target failed: {e:#}");
+                    state.delivered_in_memory.insert(to_deliver.id.clone());
+                }
+                return true;
+            }
+            TargetClassification::Denied => {
+                tracing::warn!(
+                    kind = %to_deliver.kind,
+                    producer_ref = ?to_deliver.producer_ref,
+                    run_id = %to_deliver.id,
+                    target_chat_id = ?to_deliver.target_chat_id,
+                    "async delivery target chat is not in allowlist; skipping delivery"
+                );
+                if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "denied") {
+                    tracing::error!(run_id = %to_deliver.id, "mark denied failed: {e:#}");
+                    state.delivered_in_memory.insert(to_deliver.id.clone());
+                }
+                return true;
+            }
+            TargetClassification::Ready { chat_id, thread_id } => (chat_id, thread_id),
+        };
+
+    let session_id = match crate::telegram::session::get_active_session(
+        conn,
+        target_chat_id,
+        target_thread_id.unwrap_or(0),
+    ) {
+        Ok(s) => s.map(|s| s.root_session_id),
+        Err(e) => {
+            tracing::error!("async delivery: session lookup failed: {e:#}");
+            None
+        }
+    };
+
+    let yaml = match format_async_yaml(&to_deliver, skipped) {
+        Ok(y) => y,
+        Err(e) => {
+            tracing::error!(
+                kind = %to_deliver.kind,
+                label = %pending_label(&to_deliver),
+                run_id = %to_deliver.id,
+                "async delivery: delivery_json deserialization failed, marking delivery failed: {e:#}"
+            );
+            if let Err(db_err) = mark_delivery_outcome(conn, &to_deliver.id, "failed") {
+                tracing::error!(run_id = %to_deliver.id, "mark failed for malformed delivery_json failed: {db_err:#}");
+                state.delivered_in_memory.insert(to_deliver.id.clone());
+            }
+            return true;
+        }
+    };
+    tracing::info!(
+        kind = %to_deliver.kind,
+        label = %pending_label(&to_deliver),
+        run_id = %to_deliver.id,
+        skipped,
+        target_chat_id,
+        ?target_thread_id,
+        "delivering async result through main session"
+    );
+
+    match deliver_through_session(
+        &yaml,
+        agent_dir,
+        agent_name,
+        bot,
+        target_chat_id,
+        target_thread_id,
+        ssh_config_path,
+        crate::snapshot_model(model),
+        session_id,
+        internal_client,
+        resolved_sandbox,
+        upgrade_lock,
+        session_locks.clone(),
+        Arc::clone(debug),
+    )
+    .await
+    {
+        Ok(report) => {
+            if let Err(e) = ensure_delivery_send_report_non_empty(report) {
+                tracing::error!(run_id = %to_deliver.id, "async delivery returned empty send report: {e}");
+                return true;
+            }
+            // TODO(usage): delivery stream capture lives elsewhere — follow up.
+            // deliver_through_session uses OutputFormat::Json (single JSON blob, not stream-json
+            // NDJSON), so there is no "result" event line to feed parse_usage_full. Usage
+            // tracking for delivery sessions requires either switching to stream-json output
+            // or extracting cost from the non-streaming JSON response format.
+            if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "delivered") {
+                tracing::error!(run_id = %to_deliver.id, "delivery DB update failed: {e:#}");
+                state.delivered_in_memory.insert(to_deliver.id.clone());
+            }
+            capture_async_delivery_seed(
+                conn,
+                agent_dir,
+                agent_name,
+                &to_deliver,
+                ssh_config_path,
+                resolved_sandbox,
+                debug,
+                learning,
+                crate::snapshot_model(model),
+                learning_drain_scheduler,
+            );
+            let outbox_subdir = match to_deliver.kind.as_str() {
+                "background" => "background",
+                _ => "cron",
+            };
+            let outbox_dir = agent_dir
+                .join("outbox")
+                .join(outbox_subdir)
+                .join(&to_deliver.id);
+            if let Err(e) = std::fs::remove_dir_all(&outbox_dir)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(run_id = %to_deliver.id, "outbox cleanup failed: {e:#}");
+            }
+            idle_ts.0.store(
+                chrono::Utc::now().timestamp(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        Err(e) => {
+            let attempts = state
+                .attempt_counts
+                .entry(to_deliver.id.clone())
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
+            tracing::error!(
+                kind = %to_deliver.kind,
+                label = %pending_label(&to_deliver),
+                run_id = %to_deliver.id,
+                attempt = *attempts,
+                max = MAX_DELIVERY_ATTEMPTS,
+                "async delivery failed: {e:#}"
+            );
+            if *attempts >= MAX_DELIVERY_ATTEMPTS {
+                tracing::warn!(
+                    kind = %to_deliver.kind,
+                    label = %pending_label(&to_deliver),
+                    run_id = %to_deliver.id,
+                    "giving up after {MAX_DELIVERY_ATTEMPTS} attempts, marking as delivered"
+                );
+                if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "failed") {
+                    tracing::error!(run_id = %to_deliver.id, "delivery-failure DB update failed: {e:#}");
+                    state.delivered_in_memory.insert(to_deliver.id.clone());
+                }
+                state.attempt_counts.remove(&to_deliver.id);
+            }
+        }
+    }
+
+    true
+}
+
 /// Main delivery loop. Runs as a tokio task.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_delivery_loop(
@@ -355,7 +612,7 @@ pub(crate) async fn run_delivery_loop(
 ) {
     tracing::info!(agent = %agent_name, "async delivery loop started");
 
-    let conn = match right_db::open_connection(&agent_dir, false) {
+    let mut conn = match right_db::open_connection(&agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("async delivery: DB open failed: {e:#}");
@@ -363,15 +620,7 @@ pub(crate) async fn run_delivery_loop(
         }
     };
 
-    // Track run IDs that were successfully sent to Telegram but failed to be marked
-    // as delivered in the DB. Prevents duplicate sends on subsequent delivery ticks.
-    let mut delivered_in_memory: HashSet<String> = HashSet::new();
-
-    // Track delivery attempt counts per run_id. After MAX_DELIVERY_ATTEMPTS failures,
-    // mark as delivered to avoid infinite retry loops.
-    const MAX_DELIVERY_ATTEMPTS: u32 = 3;
-    let mut attempt_counts: std::collections::HashMap<String, u32> =
-        std::collections::HashMap::new();
+    let mut state = DeliveryLoopState::new();
 
     loop {
         tokio::select! {
@@ -382,212 +631,82 @@ pub(crate) async fn run_delivery_loop(
             }
         }
 
-        let pending = match fetch_next_pending(&conn, &delivered_in_memory) {
-            Ok(Some(p)) => p,
-            Ok(None) => continue,
-            Err(e) => {
-                tracing::error!("async delivery: fetch_next_pending failed: {e:#}");
-                continue;
-            }
-        };
-
-        let last = idle_ts.0.load(std::sync::atomic::Ordering::Relaxed);
-        let now = chrono::Utc::now().timestamp();
-        let idle_for = now - last;
-        if idle_for < IDLE_THRESHOLD_SECS {
-            let wait = IDLE_THRESHOLD_SECS - idle_for;
-            tracing::info!(
-                kind = %pending.kind,
-                producer_ref = ?pending.producer_ref,
-                run_id = %pending.id,
-                idle_secs = idle_for,
-                wait_secs = wait,
-                "async delivery: result pending, waiting for chat idle ({IDLE_THRESHOLD_SECS}s)"
-            );
-            continue;
-        }
-
-        let (to_deliver, skipped) = match select_delivery_candidate(&conn, pending) {
-            Ok(Some((result, s))) => (result, s),
-            Ok(None) => continue,
-            Err(e) => {
-                tracing::error!("async delivery: candidate selection failed: {e:#}");
-                continue;
-            }
-        };
-
-        if delivered_in_memory.contains(&to_deliver.id) {
-            if mark_delivery_outcome(&conn, &to_deliver.id, "delivered").is_ok() {
-                delivered_in_memory.remove(&to_deliver.id);
-            }
-            tracing::debug!(run_id = %to_deliver.id, "skipping already-delivered run (in-memory dedup)");
-            continue;
-        }
-
-        let allowlist_snapshot = {
-            let guard = allowlist.0.read().expect("allowlist lock poisoned");
-            guard.clone()
-        };
-
-        let (target_chat_id, target_thread_id) =
-            match classify_pending_target(&to_deliver, &allowlist_snapshot) {
-                TargetClassification::NoTarget => {
-                    tracing::warn!(
-                        kind = %to_deliver.kind,
-                        producer_ref = ?to_deliver.producer_ref,
-                        run_id = %to_deliver.id,
-                        "async run has no target_chat_id; marking delivery no_target"
-                    );
-                    if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "no_target") {
-                        tracing::error!(run_id = %to_deliver.id, "mark no_target failed: {e:#}");
-                        delivered_in_memory.insert(to_deliver.id.clone());
-                    }
-                    continue;
-                }
-                TargetClassification::Denied => {
-                    tracing::warn!(
-                        kind = %to_deliver.kind,
-                        producer_ref = ?to_deliver.producer_ref,
-                        run_id = %to_deliver.id,
-                        target_chat_id = ?to_deliver.target_chat_id,
-                        "async delivery target chat is not in allowlist; skipping delivery"
-                    );
-                    if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "denied") {
-                        tracing::error!(run_id = %to_deliver.id, "mark denied failed: {e:#}");
-                        delivered_in_memory.insert(to_deliver.id.clone());
-                    }
-                    continue;
-                }
-                TargetClassification::Ready { chat_id, thread_id } => (chat_id, thread_id),
-            };
-
-        let session_id = match crate::telegram::session::get_active_session(
-            &conn,
-            target_chat_id,
-            target_thread_id.unwrap_or(0),
-        ) {
-            Ok(s) => s.map(|s| s.root_session_id),
-            Err(e) => {
-                tracing::error!("async delivery: session lookup failed: {e:#}");
-                None
-            }
-        };
-
-        let yaml = match format_async_yaml(&to_deliver, skipped) {
-            Ok(y) => y,
-            Err(e) => {
-                tracing::error!(
-                    kind = %to_deliver.kind,
-                    label = %pending_label(&to_deliver),
-                    run_id = %to_deliver.id,
-                    "async delivery: delivery_json deserialization failed, marking delivery failed: {e:#}"
-                );
-                if let Err(db_err) = mark_delivery_outcome(&conn, &to_deliver.id, "failed") {
-                    tracing::error!(run_id = %to_deliver.id, "mark failed for malformed delivery_json failed: {db_err:#}");
-                    delivered_in_memory.insert(to_deliver.id.clone());
-                }
-                continue;
-            }
-        };
-        tracing::info!(
-            kind = %to_deliver.kind,
-            label = %pending_label(&to_deliver),
-            run_id = %to_deliver.id,
-            skipped,
-            target_chat_id,
-            ?target_thread_id,
-            "delivering async result through main session"
-        );
-
-        match deliver_through_session(
-            &yaml,
+        run_delivery_once(
+            &mut conn,
+            &mut state,
+            DeliveryMode::Normal,
             &agent_dir,
             &agent_name,
+            &model,
             &bot,
-            target_chat_id,
-            target_thread_id,
+            &allowlist,
+            &idle_ts,
             ssh_config_path.as_deref(),
-            crate::snapshot_model(&model),
-            session_id,
             &internal_client,
             resolved_sandbox.as_deref(),
             &upgrade_lock,
-            session_locks.clone(),
-            debug.clone(),
+            &session_locks,
+            &debug,
+            &learning,
+            &learning_drain_scheduler,
         )
-        .await
-        {
-            Ok(report) => {
-                if let Err(e) = ensure_delivery_send_report_non_empty(report) {
-                    tracing::error!(run_id = %to_deliver.id, "async delivery returned empty send report: {e}");
-                    continue;
-                }
-                // TODO(usage): delivery stream capture lives elsewhere — follow up.
-                // deliver_through_session uses OutputFormat::Json (single JSON blob, not stream-json
-                // NDJSON), so there is no "result" event line to feed parse_usage_full. Usage
-                // tracking for delivery sessions requires either switching to stream-json output
-                // or extracting cost from the non-streaming JSON response format.
-                if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "delivered") {
-                    tracing::error!(run_id = %to_deliver.id, "delivery DB update failed: {e:#}");
-                    delivered_in_memory.insert(to_deliver.id.clone());
-                }
-                capture_async_delivery_seed(
-                    &conn,
-                    &agent_dir,
-                    &agent_name,
-                    &to_deliver,
-                    ssh_config_path.as_deref(),
-                    resolved_sandbox.as_deref(),
-                    &debug,
-                    &learning,
-                    crate::snapshot_model(&model),
-                    &learning_drain_scheduler,
-                );
-                let outbox_subdir = match to_deliver.kind.as_str() {
-                    "background" => "background",
-                    _ => "cron",
-                };
-                let outbox_dir = agent_dir
-                    .join("outbox")
-                    .join(outbox_subdir)
-                    .join(&to_deliver.id);
-                if let Err(e) = std::fs::remove_dir_all(&outbox_dir)
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    tracing::warn!(run_id = %to_deliver.id, "outbox cleanup failed: {e:#}");
-                }
-                idle_ts.0.store(
-                    chrono::Utc::now().timestamp(),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-            }
-            Err(e) => {
-                let attempts = attempt_counts
-                    .entry(to_deliver.id.clone())
-                    .and_modify(|c| *c += 1)
-                    .or_insert(1);
-                tracing::error!(
-                    kind = %to_deliver.kind,
-                    label = %pending_label(&to_deliver),
-                    run_id = %to_deliver.id,
-                    attempt = *attempts,
-                    max = MAX_DELIVERY_ATTEMPTS,
-                    "async delivery failed: {e:#}"
-                );
-                if *attempts >= MAX_DELIVERY_ATTEMPTS {
-                    tracing::warn!(
-                        kind = %to_deliver.kind,
-                        label = %pending_label(&to_deliver),
-                        run_id = %to_deliver.id,
-                        "giving up after {MAX_DELIVERY_ATTEMPTS} attempts, marking as delivered"
-                    );
-                    if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "failed") {
-                        tracing::error!(run_id = %to_deliver.id, "delivery-failure DB update failed: {e:#}");
-                        delivered_in_memory.insert(to_deliver.id.clone());
-                    }
-                    attempt_counts.remove(&to_deliver.id);
-                }
-            }
+        .await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn flush_ready_deliveries_for_shutdown(
+    agent_dir: PathBuf,
+    agent_name: String,
+    model: Arc<arc_swap::ArcSwap<Option<String>>>,
+    bot: crate::telegram::BotType,
+    allowlist: right_agent::agent::allowlist::AllowlistHandle,
+    idle_ts: Arc<IdleTimestamp>,
+    ssh_config_path: Option<PathBuf>,
+    internal_client: Arc<right_mcp::internal_client::InternalClient>,
+    resolved_sandbox: Option<String>,
+    upgrade_lock: Arc<tokio::sync::RwLock<()>>,
+    session_locks: crate::telegram::SessionLocks,
+    debug: Arc<std::sync::atomic::AtomicBool>,
+    learning: right_agent::agent::types::LearningConfig,
+    learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
+) {
+    let mut conn = match right_db::open_connection(&agent_dir, false) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("async delivery shutdown flush: DB open failed: {e:#}");
+            return;
+        }
+    };
+    let mut state = DeliveryLoopState::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!("async delivery shutdown flush timed out");
+            return;
+        }
+        let delivered = run_delivery_once(
+            &mut conn,
+            &mut state,
+            DeliveryMode::ShutdownFlush,
+            &agent_dir,
+            &agent_name,
+            &model,
+            &bot,
+            &allowlist,
+            &idle_ts,
+            ssh_config_path.as_deref(),
+            &internal_client,
+            resolved_sandbox.as_deref(),
+            &upgrade_lock,
+            &session_locks,
+            &debug,
+            &learning,
+            &learning_drain_scheduler,
+        )
+        .await;
+        if !delivered {
+            return;
         }
     }
 }
@@ -958,6 +1077,12 @@ async fn deliver_through_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delivery_mode_shutdown_flush_skips_idle_gate() {
+        assert!(should_wait_for_idle(DeliveryMode::Normal, 10));
+        assert!(!should_wait_for_idle(DeliveryMode::ShutdownFlush, 10));
+    }
 
     fn setup_db() -> (tempfile::TempDir, rusqlite::Connection) {
         let dir = tempfile::tempdir().unwrap();
