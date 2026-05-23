@@ -82,6 +82,7 @@
 - `identity_files.rs` — bounded host-side identity-file summary/detail helpers for `IDENTITY.md`, `SOUL.md`, and `USER.md`.
 - `assets.rs` — embedded static dashboard asset lookup and content types.
 - `frontend/` — Vue/Vite source for the Mini App dashboard.
+- `frontend/src/components/charts/` — Vue/ECharts components for overview signal timeline, cost/learning river, usage spend chart, and learning flow.
 - `static/dashboard/` — checked-in built dashboard assets served by the bot.
 
 ### right-memory
