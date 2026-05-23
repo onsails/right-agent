@@ -655,6 +655,16 @@ for this turn — the user is waiting for an answer.\n\
     )
 }
 
+fn background_banner(reason: BgReason) -> &'static str {
+    match reason {
+        BgReason::AutoTimeout => {
+            "Foreground hit 10-min limit - continuing in background. Will reply when ready"
+        }
+        BgReason::UserRequested => "Working in background. Will reply when ready",
+        BgReason::Shutdown => "Shutting down - continuing in background. Will reply when ready",
+    }
+}
+
 fn create_background_run(
     conn: &rusqlite::Connection,
     chat_id: i64,
@@ -1783,18 +1793,7 @@ pub fn spawn_worker(
                         crate::background::HandoffStatus::Spawned => {
                             tracing::info!(?key, %run_id, "background run spawned");
                             if let Some(msg_id) = thinking_msg_id {
-                                let banner = match reason {
-                                    BgReason::AutoTimeout => {
-                                        "\u{23f1} Foreground hit 10-min limit — continuing in background. \
-                                         Will reply when ready \u{1f319}"
-                                    }
-                                    BgReason::UserRequested => {
-                                        "\u{1f319} Working in background. Will reply when ready"
-                                    }
-                                    BgReason::Shutdown => {
-                                        "\u{1f319} Bot is shutting down. Continuing in background; will reply when ready"
-                                    }
-                                };
+                                let banner = background_banner(reason);
                                 let _ = ctx
                                     .bot
                                     .edit_message_text(tg_chat_id, msg_id, banner)
@@ -6071,6 +6070,14 @@ mod background_continuation_tests {
         let p = build_continuation_prompt(BgReason::Shutdown);
         assert!(p.contains("the bot process is shutting down"));
         assert!(p.contains("MOST RECENT MESSAGE"));
+    }
+
+    #[test]
+    fn background_banner_distinguishes_shutdown() {
+        assert_eq!(
+            background_banner(BgReason::Shutdown),
+            "Shutting down - continuing in background. Will reply when ready"
+        );
     }
 
     #[test]
