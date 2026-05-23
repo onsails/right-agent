@@ -35,8 +35,10 @@ const V27_SCHEMA: &str = include_str!("sql/v27_skill_nudge_signals_source.sql");
 #[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
 const V28_SCHEMA: &str = include_str!("sql/v28_usage_wall_elapsed.sql");
 const V29_SCHEMA: &str = include_str!("sql/v29_curator_state.sql");
+#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
+const V30_SCHEMA: &str = include_str!("sql/v30_skill_learning_hint_outcome.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 29;
+pub const LATEST_SCHEMA_VERSION: u32 = 30;
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -460,6 +462,22 @@ fn v28_usage_wall_elapsed_ms(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
+/// v30: Add nullable hint_outcome to skill_learning_events.
+///
+/// Idempotent — checks pragma_table_info before ALTER. The column carries a
+/// CHECK constraint for new writes, but remains nullable for historical rows.
+fn v30_skill_learning_hint_outcome(tx: &Transaction) -> Result<(), HookError> {
+    let count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('skill_learning_events') WHERE name = ?1",
+        ["hint_outcome"],
+        |r| r.get(0),
+    )?;
+    if count == 0 {
+        tx.execute_batch(V30_SCHEMA)?;
+    }
+    Ok(())
+}
+
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::LazyLock::new(|| {
     Migrations::new(vec![
         M::up(V1_SCHEMA),
@@ -491,6 +509,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up_with_hook("", v27_skill_nudge_signals_source),
         M::up_with_hook("", v28_usage_wall_elapsed_ms),
         M::up(V29_SCHEMA),
+        M::up_with_hook("", v30_skill_learning_hint_outcome),
     ])
 });
 
@@ -2234,5 +2253,56 @@ continue background work',
 
         // Re-run is no-op.
         MIGRATIONS.to_version(&mut conn, 29).unwrap();
+    }
+
+    #[test]
+    fn v30_adds_skill_learning_event_hint_outcome_idempotently() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 29).unwrap();
+        let pre: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('skill_learning_events') WHERE name = ?1",
+                ["hint_outcome"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pre, 0);
+
+        MIGRATIONS.to_version(&mut conn, 30).unwrap();
+        let post: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('skill_learning_events') WHERE name = ?1",
+                ["hint_outcome"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(post, 1);
+
+        conn.execute(
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                event_refs_json, hint_outcome
+             ) VALUES (
+                'inv-1', 'alpha', 'create', 'rightx-demo', 'finish', 'aborted',
+                '[]', 'refused'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let invalid = conn.execute(
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                event_refs_json, hint_outcome
+             ) VALUES (
+                'inv-2', 'alpha', 'create', 'rightx-demo', 'finish', 'aborted',
+                '[]', 'bogus'
+             )",
+            [],
+        );
+        assert!(invalid.is_err(), "invalid hint_outcome must be rejected");
+
+        // Re-run is no-op.
+        MIGRATIONS.to_version(&mut conn, 30).unwrap();
     }
 }

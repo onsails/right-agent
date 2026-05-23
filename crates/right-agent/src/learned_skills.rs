@@ -64,6 +64,7 @@ pub struct LearningEvent {
     pub skill_name: String,
     pub phase: LearningPhase,
     pub status: Option<LearningStatus>,
+    pub hint_outcome: Option<String>,
     pub reason: Option<String>,
     pub message: Option<String>,
     pub summary: Option<String>,
@@ -199,8 +200,8 @@ pub fn insert_learning_event(
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "INSERT INTO skill_learning_events \
-         (invocation_id, agent_name, action, skill_name, phase, status, reason, message, summary, event_refs_json) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         (invocation_id, agent_name, action, skill_name, phase, status, hint_outcome, reason, message, summary, event_refs_json) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             event.invocation_id,
             event.agent_name,
@@ -208,6 +209,7 @@ pub fn insert_learning_event(
             event.skill_name,
             event.phase.as_str(),
             event.status.map(LearningStatus::as_str),
+            event.hint_outcome,
             event.reason,
             event.message,
             event.summary,
@@ -1559,6 +1561,7 @@ mod tests {
                 skill_name: "rightx-demo".to_owned(),
                 phase: LearningPhase::Finish,
                 status: Some(LearningStatus::Failed),
+                hint_outcome: None,
                 reason: None,
                 message: None,
                 summary: Some("write failed".to_owned()),
@@ -1577,6 +1580,7 @@ mod tests {
                 skill_name: "rightx-demo".to_owned(),
                 phase: LearningPhase::Finish,
                 status: Some(LearningStatus::Created),
+                hint_outcome: None,
                 reason: None,
                 message: Some("Learned skill: rightx-demo".to_owned()),
                 summary: Some("captured workflow".to_owned()),
@@ -1585,6 +1589,37 @@ mod tests {
         )
         .unwrap();
         assert!(successful_finish_exists(&conn, "inv-1").unwrap());
+    }
+
+    #[test]
+    fn insert_learning_event_persists_hint_outcome() {
+        let conn = conn();
+        insert_learning_event(
+            &conn,
+            &LearningEvent {
+                invocation_id: "inv-hint".to_owned(),
+                agent_name: "right".to_owned(),
+                action: LearningAction::Create,
+                skill_name: "rightx-demo".to_owned(),
+                phase: LearningPhase::Finish,
+                status: Some(LearningStatus::Aborted),
+                hint_outcome: Some("refused".to_owned()),
+                reason: None,
+                message: Some("Refused to create skill.".to_owned()),
+                summary: Some("insufficient evidence".to_owned()),
+                event_refs: vec![],
+            },
+        )
+        .unwrap();
+
+        let hint_outcome: Option<String> = conn
+            .query_row(
+                "SELECT hint_outcome FROM skill_learning_events WHERE invocation_id = 'inv-hint'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hint_outcome.as_deref(), Some("refused"));
     }
 
     #[test]
@@ -1666,6 +1701,7 @@ mod tests {
                 skill_name: "rightx-demo".to_owned(),
                 phase: LearningPhase::Finish,
                 status: Some(LearningStatus::Created),
+                hint_outcome: None,
                 reason: None,
                 message: Some("Learned skill: rightx-demo".to_owned()),
                 summary: Some("captured workflow".to_owned()),
