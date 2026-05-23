@@ -12,6 +12,8 @@ pub mod dashboard_overview;
 pub mod learning;
 #[path = "read_model/learning_episodes.rs"]
 pub mod learning_episodes;
+#[path = "read_model/learning_outcomes.rs"]
+mod learning_outcomes;
 #[path = "read_model/usage.rs"]
 pub mod usage;
 

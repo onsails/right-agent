@@ -7,7 +7,10 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use rusqlite::{Connection, params};
 use std::collections::BTreeMap;
 
-use super::ReadModelError;
+use super::{
+    ReadModelError,
+    learning_outcomes::{learning_outcome_kind, learning_outcome_severity, learning_outcome_title},
+};
 
 const SIGNAL_LIMIT: usize = 30;
 const RIVER_DAYS: i64 = 30;
@@ -274,21 +277,14 @@ fn learning_outcome_signals(
         if occurred_at_utc < *since || occurred_at_utc > *now {
             continue;
         }
-        let title = match (action.as_str(), status.as_deref(), hint_outcome.as_deref()) {
-            (_, _, Some("refused")) => "Learning refused",
-            ("create", Some("created"), _) => "Skill created",
-            ("update", Some("updated"), _) => "Skill updated",
-            (_, Some("failed"), _) => "Learning failed",
-            (_, Some("aborted"), _) => "Learning aborted",
-            _ => "Learning finished",
-        };
         signals.push(DashboardSignal {
             id: format!("learning:{id}:{skill_name}"),
             kind: "learning_outcome".to_owned(),
-            severity: learning_status_severity(status.as_deref(), hint_outcome.as_deref())
+            severity: learning_outcome_severity(status.as_deref(), hint_outcome.as_deref())
                 .to_owned(),
             occurred_at: occurred_at_utc.to_rfc3339(),
-            title: title.to_owned(),
+            title: learning_outcome_title(&action, status.as_deref(), hint_outcome.as_deref())
+                .to_owned(),
             detail,
             source: Some("learning_probe_writer".to_owned()),
             cost_usd: None,
@@ -467,10 +463,10 @@ fn learning_markers(
         markers.push(LearningMarker {
             id: format!("marker:{id}:{skill_name}"),
             occurred_at: occurred_at_utc.to_rfc3339(),
-            kind: learning_marker_kind(&action, status.as_deref(), hint_outcome.as_deref())
+            kind: learning_outcome_kind(&action, status.as_deref(), hint_outcome.as_deref())
                 .to_owned(),
             label: skill_name.clone(),
-            severity: learning_status_severity(status.as_deref(), hint_outcome.as_deref())
+            severity: learning_outcome_severity(status.as_deref(), hint_outcome.as_deref())
                 .to_owned(),
             skill_name: Some(skill_name),
             source: Some("learning_probe_writer".to_owned()),
@@ -521,31 +517,6 @@ fn median(sorted: &[f64]) -> f64 {
         (sorted[mid - 1] + sorted[mid]) / 2.0
     } else {
         sorted[mid]
-    }
-}
-
-fn learning_marker_kind(
-    action: &str,
-    status: Option<&str>,
-    hint_outcome: Option<&str>,
-) -> &'static str {
-    match (action, status, hint_outcome) {
-        (_, _, Some("refused")) => "skill_refused",
-        (_, Some("failed"), _) => "skill_failed",
-        (_, Some("aborted"), _) => "skill_aborted",
-        ("create", Some("created"), _) => "skill_created",
-        ("update", Some("updated"), _) => "skill_updated",
-        ("create", _, _) => "skill_created",
-        ("update", _, _) => "skill_updated",
-        _ => "skill_learned",
-    }
-}
-
-fn learning_status_severity(status: Option<&str>, hint_outcome: Option<&str>) -> &'static str {
-    match (status, hint_outcome) {
-        (_, Some("refused")) => "warn",
-        (Some("failed" | "aborted"), _) => "bad",
-        _ => "info",
     }
 }
 
