@@ -19,18 +19,6 @@ import type {
   UsageOverviewResponse,
 } from './types'
 
-declare global {
-  interface Window {
-    Telegram?: {
-      WebApp?: {
-        initData?: string
-        ready?: () => void
-        expand?: () => void
-      }
-    }
-  }
-}
-
 export class DashboardApiError extends Error {
   readonly status: number
   readonly code?: string

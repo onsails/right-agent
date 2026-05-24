@@ -18,6 +18,7 @@ import {
   skillsOverview,
   usageOverview,
 } from './api'
+import { initializeTelegramWebApp } from './telegram'
 import AppShell from './components/AppShell.vue'
 import ActivityView from './views/ActivityView.vue'
 import HealthView from './views/HealthView.vue'
@@ -96,8 +97,7 @@ const tabs = computed(() => {
 })
 
 onMounted(() => {
-  window.Telegram?.WebApp?.ready?.()
-  window.Telegram?.WebApp?.expand?.()
+  initializeTelegramWebApp()
   void loadInitial()
 })
 
