@@ -79,6 +79,49 @@ export function statusTone(status: string | null | undefined): string {
   return 'muted'
 }
 
+interface DeliveryDisplay {
+  delivery_required: boolean
+  delivery_status: string
+  delivery_kind: string | null
+}
+
+export function deliveryText(run: DeliveryDisplay): string {
+  const kind = run.delivery_kind?.trim().toLowerCase()
+  if (kind === 'notify') {
+    return 'Notify'
+  }
+  if (kind === 'silent') {
+    return 'Silent'
+  }
+  if (kind) {
+    return kind
+  }
+  return run.delivery_required ? 'Notify' : 'Silent'
+}
+
+export function deliveryLabel(run: DeliveryDisplay): string {
+  const text = deliveryText(run)
+  const status = run.delivery_status.trim().toLowerCase()
+  if (!status || status === 'none') {
+    return text
+  }
+  return `${text} ${status}`
+}
+
+export function deliveryTone(run: DeliveryDisplay): string {
+  const status = run.delivery_status.trim().toLowerCase()
+  if (status === 'delivered') {
+    return 'ok'
+  }
+  if (status === 'failed') {
+    return 'bad'
+  }
+  if (run.delivery_required || status === 'pending' || status === 'retryable') {
+    return 'active'
+  }
+  return 'muted'
+}
+
 export function notifyText(value: unknown): string | null {
   if (value === null || value === undefined) {
     return null

@@ -238,8 +238,8 @@ export interface RunSummary {
   started_at: string | null
   finished_at: string | null
   exit_code: number | null
-  delivery_status: string
   delivery_required: boolean
+  delivery_status: string
   delivery_kind: string | null
   run_note: string | null
   cost_usd: number | null
