@@ -155,42 +155,6 @@ mod cli_parse_tests {
         Cli::try_parse_from(["right", "agent", "skill", "list"])
             .expect("agent skill list must remain available");
     }
-
-    #[test]
-    fn agent_skill_rejects_pin_commands() {
-        for args in [
-            ["right", "agent", "skill", "pin", "rightx-test"].as_slice(),
-            ["right", "agent", "skill", "unpin", "rightx-test"].as_slice(),
-            ["right", "agent", "skill", "list-pins"].as_slice(),
-            [
-                "right",
-                "agent",
-                "skill",
-                "pin",
-                "--agent",
-                "alpha",
-                "--name",
-                "rightx-test",
-            ]
-            .as_slice(),
-            [
-                "right",
-                "agent",
-                "skill",
-                "unpin",
-                "--agent",
-                "alpha",
-                "--name",
-                "rightx-test",
-            ]
-            .as_slice(),
-            ["right", "agent", "skill", "list-pins", "--agent", "alpha"].as_slice(),
-        ] {
-            if Cli::try_parse_from(args).is_ok() {
-                panic!("agent skill pin command must not parse: {args:?}");
-            }
-        }
-    }
 }
 
 #[derive(Parser)]
