@@ -299,6 +299,8 @@ pub struct ReloadResponse {
 pub enum ProgressInvocationKindDto {
     Foreground,
     BackgroundReview,
+    ProbeWriter,
+    Curator,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

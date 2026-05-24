@@ -32,8 +32,20 @@ pub(crate) struct ToolCallContext {
 pub(crate) enum ProgressInvocationKind {
     Foreground,
     BackgroundReview,
+    ProbeWriter,
+    Curator,
     #[cfg(test)]
     NonForeground,
+}
+
+impl ProgressInvocationKind {
+    pub(crate) fn is_learning_capable(self) -> bool {
+        matches!(self, Self::Foreground | Self::ProbeWriter | Self::Curator)
+    }
+
+    pub(crate) fn sends_learning_messages(self) -> bool {
+        matches!(self, Self::Foreground)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,10 +190,7 @@ impl ProgressRegistry {
     ) -> Result<(ProgressInvocationKind, ProgressSendTarget), ProgressError> {
         let inner = self.inner.lock().await;
         let invocation = inner.get(invocation_id).ok_or(ProgressError::Unavailable)?;
-        if !matches!(
-            invocation.kind,
-            ProgressInvocationKind::Foreground | ProgressInvocationKind::BackgroundReview
-        ) {
+        if !invocation.kind.sends_learning_messages() {
             return Err(ProgressError::Forbidden);
         }
         Ok((
@@ -191,6 +200,18 @@ impl ProgressRegistry {
                 bot_send_token: invocation.bot_send_token.clone(),
             },
         ))
+    }
+
+    pub(crate) async fn learning_invocation_kind(
+        &self,
+        invocation_id: &str,
+    ) -> Result<ProgressInvocationKind, ProgressError> {
+        let inner = self.inner.lock().await;
+        let invocation = inner.get(invocation_id).ok_or(ProgressError::Unavailable)?;
+        if !invocation.kind.is_learning_capable() {
+            return Err(ProgressError::Forbidden);
+        }
+        Ok(invocation.kind)
     }
 
     #[allow(dead_code)]
@@ -426,5 +447,111 @@ mod tests {
 
         let err = registry.begin_send("inv-1").await.unwrap_err();
         assert_eq!(err, ProgressError::Forbidden);
+    }
+
+    mod progress_invocation_kind {
+        use super::*;
+
+        fn registration(
+            invocation_id: &str,
+            kind: ProgressInvocationKind,
+            conversation_scope: Option<ConversationScope>,
+        ) -> ProgressRegistration {
+            ProgressRegistration {
+                invocation_id: invocation_id.to_owned(),
+                kind,
+                bot_socket_path: PathBuf::from("/tmp/bot.sock"),
+                bot_send_token: "send-token".to_owned(),
+                conversation_scope,
+            }
+        }
+
+        #[tokio::test]
+        async fn probe_writer_and_curator_are_learning_capable() {
+            let registry = ProgressRegistry::default();
+            let kinds = [
+                ("probe-writer-inv", ProgressInvocationKind::ProbeWriter),
+                ("curator-inv", ProgressInvocationKind::Curator),
+            ];
+
+            for (invocation_id, kind) in kinds {
+                registry
+                    .register(registration(invocation_id, kind, None))
+                    .await;
+
+                let actual = registry
+                    .learning_invocation_kind(invocation_id)
+                    .await
+                    .unwrap();
+                assert_eq!(actual, kind);
+            }
+        }
+
+        #[tokio::test]
+        async fn probe_writer_and_curator_do_not_have_conversation_scope() {
+            let registry = ProgressRegistry::default();
+            let scope = ConversationScope {
+                chat_id: 100,
+                thread_id: 7,
+            };
+            let kinds = [
+                ("probe-writer-inv", ProgressInvocationKind::ProbeWriter),
+                ("curator-inv", ProgressInvocationKind::Curator),
+            ];
+
+            for (invocation_id, kind) in kinds {
+                registry
+                    .register(registration(invocation_id, kind, Some(scope)))
+                    .await;
+
+                let err = registry
+                    .conversation_scope(invocation_id)
+                    .await
+                    .unwrap_err();
+                assert_eq!(err, ProgressError::Forbidden);
+            }
+        }
+
+        #[tokio::test]
+        async fn probe_writer_and_curator_do_not_send_telegram_learning_messages() {
+            let registry = ProgressRegistry::default();
+            let kinds = [
+                ("probe-writer-inv", ProgressInvocationKind::ProbeWriter),
+                ("curator-inv", ProgressInvocationKind::Curator),
+            ];
+
+            for (invocation_id, kind) in kinds {
+                registry
+                    .register(registration(invocation_id, kind, None))
+                    .await;
+
+                let err = registry
+                    .learning_send_target(invocation_id)
+                    .await
+                    .unwrap_err();
+                assert_eq!(err, ProgressError::Forbidden);
+            }
+        }
+
+        #[tokio::test]
+        async fn foreground_keeps_existing_learning_message_delivery() {
+            let registry = ProgressRegistry::default();
+            registry
+                .register(registration(
+                    "foreground-inv",
+                    ProgressInvocationKind::Foreground,
+                    None,
+                ))
+                .await;
+
+            let (kind, target) = registry
+                .learning_send_target("foreground-inv")
+                .await
+                .unwrap();
+
+            assert_eq!(kind, ProgressInvocationKind::Foreground);
+            assert_eq!(target.bot_socket_path, PathBuf::from("/tmp/bot.sock"));
+            assert_eq!(target.bot_send_token, "send-token");
+        }
     }
 }

@@ -232,12 +232,18 @@ impl RightBackend {
             .map_err(|e| anyhow::anyhow!("mutex poisoned: {e}"))
     }
 
-    async fn lifecycle_created_by(
+    async fn lifecycle_kind_and_created_by(
         &self,
         invocation_id: &str,
-    ) -> Result<right_lifecycle::CreatedBy, CallToolResult> {
-        let (kind, _) = match self.progress.learning_send_target(invocation_id).await {
-            Ok(target) => target,
+    ) -> Result<
+        (
+            crate::progress::ProgressInvocationKind,
+            right_lifecycle::CreatedBy,
+        ),
+        CallToolResult,
+    > {
+        let kind = match self.progress.learning_invocation_kind(invocation_id).await {
+            Ok(kind) => kind,
             Err(crate::progress::ProgressError::Unavailable) => {
                 return Err(tool_error(
                     "learning_unavailable",
@@ -261,18 +267,32 @@ impl RightBackend {
             }
         };
 
-        Ok(match kind {
+        let created_by = match kind {
             crate::progress::ProgressInvocationKind::Foreground => {
                 right_lifecycle::CreatedBy::Foreground
             }
+            crate::progress::ProgressInvocationKind::ProbeWriter => {
+                right_lifecycle::CreatedBy::ProbeWriter
+            }
+            crate::progress::ProgressInvocationKind::Curator => right_lifecycle::CreatedBy::Curator,
             crate::progress::ProgressInvocationKind::BackgroundReview => {
-                right_lifecycle::CreatedBy::Curator
+                return Err(tool_error(
+                    "learning_unavailable",
+                    "learning messages are unavailable for this invocation kind",
+                    None,
+                ));
             }
             #[cfg(test)]
             crate::progress::ProgressInvocationKind::NonForeground => {
-                right_lifecycle::CreatedBy::Foreground
+                return Err(tool_error(
+                    "learning_unavailable",
+                    "learning messages are unavailable for this invocation kind",
+                    None,
+                ));
             }
-        })
+        };
+
+        Ok((kind, created_by))
     }
 
     // ------------------------------------------------------------------
@@ -632,8 +652,8 @@ impl RightBackend {
                 None,
             ));
         };
-        let (kind, _) = match self.progress.learning_send_target(&invocation_id).await {
-            Ok(target) => target,
+        let kind = match self.progress.learning_invocation_kind(&invocation_id).await {
+            Ok(kind) => kind,
             Err(crate::progress::ProgressError::Unavailable) => {
                 return Ok(tool_error(
                     "learning_unavailable",
@@ -779,9 +799,9 @@ impl RightBackend {
             )?;
         }
 
-        let lifecycle_created_by = if params.status.is_success() {
-            match self.lifecycle_created_by(&invocation_id).await {
-                Ok(created_by) => Some(created_by),
+        let lifecycle = if params.status.is_success() {
+            match self.lifecycle_kind_and_created_by(&invocation_id).await {
+                Ok(lifecycle) => Some(lifecycle),
                 Err(result) => return Ok(result),
             }
         } else {
@@ -789,6 +809,14 @@ impl RightBackend {
         };
 
         if params.status.is_success()
+            && lifecycle
+                .map(|(kind, _)| {
+                    crate::learning::should_send_learning_message(
+                        kind,
+                        LearningMessagePhase::FinishSuccess,
+                    )
+                })
+                .unwrap_or(false)
             && let Err(result) = crate::learning::send_learning_message(
                 &self.progress,
                 &invocation_id,
@@ -800,7 +828,7 @@ impl RightBackend {
             return Ok(result);
         }
 
-        if let Some(created_by) = lifecycle_created_by {
+        if let Some((_, created_by)) = lifecycle {
             let now_utc = chrono::Utc::now();
             let conn_arc = self.get_conn(agent_name)?;
             let conn = Self::lock_conn(&conn_arc)?;
