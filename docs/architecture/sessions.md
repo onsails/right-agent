@@ -109,27 +109,29 @@ Per-callsite `--disallowedTools`:
   `mcp__right__skill_learning_start`, and
   `mcp__right__skill_learning_finish` only. It uses a fresh session and
   registers as `Curator` before using the per-invocation MCP config.
-- **Cron** (`bot::cron`): baseline + foreground-only tools
+- **Cron** (`bot::cron`): baseline + invocation-scoped tools
   (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
   `mcp__right__skill_learning_finish`). `Agent`
   intentionally remains allowed; cron jobs may legitimately fan out to
-  subagents. Progress/learning foreground-only tools are denied because cron
-  turns have no live foreground invocation registered; conversation search is
-  also foreground-scoped and returns `conversation_scope_unavailable` outside a
-  registered foreground invocation.
-- **Reflection** (`bot::reflection`): baseline + `Agent` + foreground-only
+  subagents. `send_progress` is foreground-only; learning tools require a
+  registered `Foreground`, `ProbeWriter`, or `Curator` invocation, which cron
+  does not have. Conversation search is also foreground-scoped and returns
+  `conversation_scope_unavailable` outside a registered foreground invocation.
+- **Reflection** (`bot::reflection`): baseline + `Agent` + invocation-scoped
   tools (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
   `mcp__right__skill_learning_finish`).
   Reflection is a single follow-up turn — subagents would waste budget — and
-  it is not a foreground turn, so foreground-only progress/learning tools are
-  unavailable. Conversation search likewise has no foreground scope there.
-- **Delivery** / **background continuation**: baseline + foreground-only tools
+  it is not a registered progress or learning invocation. Conversation search
+  likewise has no foreground scope there.
+- **Delivery** / **background continuation**: baseline + invocation-scoped tools
   (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
   `mcp__right__skill_learning_finish`),
   same rationale as cron. Conversation search likewise has no foreground scope
   there.
 - **Learning prefilter** (`bot::learning_prefilter`): no MCP config and
-  `--tools ""`; it is a classifier and never writes skill files.
+  `--tools ""`; it is a classifier and never writes skill files. Selector,
+  reviewer, and report-only `BackgroundReview` paths are likewise not learning
+  invocations and cannot call learning tools.
 
 The baseline lives in `crates/bot/src/cc/invocation.rs::BASELINE_DISALLOWED_TOOLS`
 and explicitly excludes `Agent`.
