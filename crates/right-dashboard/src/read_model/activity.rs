@@ -403,6 +403,59 @@ mod tests {
     }
 
     #[test]
+    fn activity_overview_includes_cron_run_summary_delivery_and_note_fields() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "UPDATE async_runs
+             SET delivery_json = ?1, run_note = ?2
+             WHERE id = 'run-1'",
+            (r#"{"kind":"notify","content":"done"}"#, "Checked 5 pairs"),
+        )
+        .unwrap();
+
+        let response = activity_overview(
+            &conn,
+            ActivityOverviewInput {
+                agent: "agent-a".to_owned(),
+                generated_at: "2026-05-20T10:00:00Z".to_owned(),
+                refresh_interval_secs: 30,
+                foreground: vec![],
+            },
+        )
+        .unwrap();
+
+        let run = response.crons[0].last_run.as_ref().unwrap();
+        assert!(run.delivery_required);
+        assert_eq!(run.delivery_kind.as_deref(), Some("notify"));
+        assert_eq!(run.run_note.as_deref(), Some("Checked 5 pairs"));
+    }
+
+    #[test]
+    fn activity_overview_ignores_malformed_cron_run_delivery_json_kind() {
+        let (_dir, conn) = fixture();
+        conn.execute(
+            "UPDATE async_runs SET delivery_json = ?1 WHERE id = 'run-1'",
+            [r#"{malformed"#],
+        )
+        .unwrap();
+
+        let response = activity_overview(
+            &conn,
+            ActivityOverviewInput {
+                agent: "agent-a".to_owned(),
+                generated_at: "2026-05-20T10:00:00Z".to_owned(),
+                refresh_interval_secs: 30,
+                foreground: vec![],
+            },
+        )
+        .unwrap();
+
+        let run = response.crons[0].last_run.as_ref().unwrap();
+        assert!(run.delivery_required);
+        assert!(run.delivery_kind.is_none());
+    }
+
+    #[test]
     fn activity_today_cost_includes_events_at_midnight_in_writer_format() {
         // Regression: the writer emits `chrono::Utc::now().to_rfc3339()`
         // (e.g. `2026-05-20T00:00:00.123456789+00:00`). A naive
