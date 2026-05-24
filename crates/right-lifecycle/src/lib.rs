@@ -273,7 +273,7 @@ pub fn apply_automatic_transitions(
         };
 
         match row.state {
-            LifecycleState::Active if activity_at <= archive_cutoff => {
+            LifecycleState::Active if activity_at < archive_cutoff => {
                 changed += transition_candidate_to_archived_if_eligible(
                     &tx,
                     &row.skill_name,
@@ -282,14 +282,14 @@ pub fn apply_automatic_transitions(
                     now_utc,
                 )?;
             }
-            LifecycleState::Active if activity_at <= stale_cutoff => {
+            LifecycleState::Active if activity_at < stale_cutoff => {
                 changed += transition_active_candidate_to_stale_if_eligible(
                     &tx,
                     &row.skill_name,
                     stale_cutoff,
                 )?;
             }
-            LifecycleState::Stale if activity_at <= archive_cutoff => {
+            LifecycleState::Stale if activity_at < archive_cutoff => {
                 changed += transition_candidate_to_archived_if_eligible(
                     &tx,
                     &row.skill_name,
@@ -327,17 +327,17 @@ fn transition_active_candidate_to_stale_if_eligible(
                  WHEN julianday(last_used_at) >= julianday(last_patched_at)
                  THEN julianday(last_used_at)
                  ELSE julianday(last_patched_at)
-               END <= julianday(:cutoff)
+               END < julianday(:cutoff)
              )
              OR (
                last_used_at IS NOT NULL
                AND last_patched_at IS NULL
-               AND julianday(last_used_at) <= julianday(:cutoff)
+               AND julianday(last_used_at) < julianday(:cutoff)
              )
              OR (
                last_used_at IS NULL
                AND last_patched_at IS NOT NULL
-               AND julianday(last_patched_at) <= julianday(:cutoff)
+               AND julianday(last_patched_at) < julianday(:cutoff)
              )
            )",
         rusqlite::named_params! {
@@ -376,17 +376,17 @@ fn transition_candidate_to_archived_if_eligible(
                  WHEN julianday(last_used_at) >= julianday(last_patched_at)
                  THEN julianday(last_used_at)
                  ELSE julianday(last_patched_at)
-               END <= julianday(:cutoff)
+               END < julianday(:cutoff)
              )
              OR (
                last_used_at IS NOT NULL
                AND last_patched_at IS NULL
-               AND julianday(last_used_at) <= julianday(:cutoff)
+               AND julianday(last_used_at) < julianday(:cutoff)
              )
              OR (
                last_used_at IS NULL
                AND last_patched_at IS NOT NULL
-               AND julianday(last_patched_at) <= julianday(:cutoff)
+               AND julianday(last_patched_at) < julianday(:cutoff)
              )
            )",
         rusqlite::named_params! {
@@ -758,6 +758,54 @@ mod tests {
     }
 
     #[test]
+    fn automatic_transitions_do_not_fire_at_exact_thresholds() {
+        let conn = migrated_conn();
+        let now = utc("2026-05-23T12:00:00Z");
+        let config = TransitionConfig {
+            stale_after: TimeDelta::days(7),
+            archive_after: TimeDelta::days(30),
+        };
+        LifecycleRowFixture::new("active-at-stale-boundary")
+            .created_by(CreatedBy::Curator)
+            .last_used_at(now - config.stale_after)
+            .insert(&conn);
+        LifecycleRowFixture::new("active-at-archive-boundary")
+            .created_by(CreatedBy::Curator)
+            .last_used_at(now - config.archive_after)
+            .insert(&conn);
+        LifecycleRowFixture::new("stale-at-archive-boundary")
+            .state(LifecycleState::Stale)
+            .created_by(CreatedBy::ProbeWriter)
+            .last_used_at(now - config.archive_after)
+            .insert(&conn);
+
+        let updated = apply_automatic_transitions(&conn, now, config).unwrap();
+
+        assert_eq!(updated, 1);
+        assert_eq!(
+            get(&conn, "active-at-stale-boundary")
+                .unwrap()
+                .unwrap()
+                .state,
+            LifecycleState::Active
+        );
+        assert_eq!(
+            get(&conn, "active-at-archive-boundary")
+                .unwrap()
+                .unwrap()
+                .state,
+            LifecycleState::Stale
+        );
+        assert_eq!(
+            get(&conn, "stale-at-archive-boundary")
+                .unwrap()
+                .unwrap()
+                .state,
+            LifecycleState::Stale
+        );
+    }
+
+    #[test]
     fn stale_transition_update_rechecks_current_pinned_and_activity() {
         let conn = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
@@ -815,7 +863,7 @@ mod tests {
                 skill_name, state, pinned, created_by, created_at, last_used_at
              ) VALUES (
                 'offset-equivalent', 'active', 0, 'curator',
-                '2026-04-01T00:00:00Z', '2026-05-23T13:00:00+01:00'
+                '2026-04-01T00:00:00Z', '2026-05-23T12:59:59+01:00'
              )",
             [],
         )
