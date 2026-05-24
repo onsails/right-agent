@@ -398,8 +398,14 @@ pub(crate) async fn send_learning_message(
     phase: LearningMessagePhase,
     message: Option<&str>,
 ) -> Result<(), CallToolResult> {
-    let kind = match progress.learning_invocation_kind(invocation_id).await {
-        Ok(kind) => kind,
+    // Single mutex acquisition: looking up kind and target separately would let
+    // an unregister between the two `.await`s flip the result from "send" to a
+    // confusing `Unavailable` error after the phase gate already approved.
+    let (kind, target) = match progress
+        .learning_invocation_kind_and_target(invocation_id)
+        .await
+    {
+        Ok(pair) => pair,
         Err(crate::progress::ProgressError::Unavailable) => {
             return Err(tool_error(
                 "learning_unavailable",
@@ -444,31 +450,6 @@ pub(crate) async fn send_learning_message(
             None,
         ));
     }
-
-    let (_, target) = match progress.learning_send_target(invocation_id).await {
-        Ok(target) => target,
-        Err(crate::progress::ProgressError::Unavailable) => {
-            return Err(tool_error(
-                "learning_unavailable",
-                "learning messages are available only for a registered invocation",
-                None,
-            ));
-        }
-        Err(crate::progress::ProgressError::Forbidden) => {
-            return Err(tool_error(
-                "learning_unavailable",
-                "learning messages are unavailable for this invocation kind",
-                None,
-            ));
-        }
-        Err(crate::progress::ProgressError::RateLimited { .. }) => {
-            return Err(tool_error(
-                "learning_send_failed",
-                "internal error: learning target was rate limited",
-                None,
-            ));
-        }
-    };
 
     let client = InternalClient::new(target.bot_socket_path);
     let request = ProgressSendRequest {

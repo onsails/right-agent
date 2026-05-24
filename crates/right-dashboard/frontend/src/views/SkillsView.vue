@@ -18,6 +18,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   selectSkill: [skill: SkillSummary]
+  skillPinned: [payload: { skillName: string, pinned: boolean }]
 }>()
 
 const pinningSkillName = ref<string | null>(null)
@@ -66,7 +67,7 @@ async function togglePinned(): Promise<void> {
   pinError.value = null
   try {
     const response = await setSkillPinned(skill.name, targetPinned)
-    applyPinnedState(response.skill_name, response.pinned)
+    emit('skillPinned', { skillName: response.skill_name, pinned: response.pinned })
   } catch (error) {
     pinError.value = {
       skillName: skill.name,
@@ -75,23 +76,6 @@ async function togglePinned(): Promise<void> {
   } finally {
     if (pinningSkillName.value === skill.name) {
       pinningSkillName.value = null
-    }
-  }
-}
-
-function applyPinnedState(skillName: string, pinned: boolean): void {
-  if (props.selectedSkill?.skill.name === skillName) {
-    props.selectedSkill.skill.pinned = pinned
-  }
-
-  if (props.skills === null) {
-    return
-  }
-
-  for (const group of skillGroups) {
-    const skill = props.skills.groups[group].find((candidate) => candidate.name === skillName)
-    if (skill) {
-      skill.pinned = pinned
     }
   }
 }

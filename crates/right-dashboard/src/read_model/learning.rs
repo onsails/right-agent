@@ -972,11 +972,12 @@ fn recent_learning_signals(
     Ok(signals.into_iter().map(|(_, _, signal)| signal).collect())
 }
 
-/// Compute the skill-lifecycle overview from the per-agent lifecycle table.
 pub fn skill_lifecycle_overview(
     conn: &Connection,
     agent: &str,
 ) -> Result<crate::api_types::SkillLifecycleOverviewResponse, ReadModelError> {
+    use right_lifecycle::{CreatedBy, LifecycleState};
+
     let mut total_active = 0;
     let mut total_stale = 0;
     let mut total_archived = 0;
@@ -994,28 +995,37 @@ pub fn skill_lifecycle_overview(
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let skill_name: String = row.get(0)?;
-        let state: String = row.get(1)?;
+        let state_raw: String = row.get(1)?;
         let pinned: i64 = row.get(2)?;
-        let created_by: String = row.get(3)?;
+        let created_by_raw: String = row.get(3)?;
         let use_count: i64 = row.get(4)?;
         let last_used_at: Option<String> = row.get(5)?;
 
-        match state.as_str() {
-            "active" => total_active += 1,
-            "stale" => total_stale += 1,
-            "archived" => total_archived += 1,
-            _ => {}
+        let state = LifecycleState::from_db_str(&state_raw).map_err(|_| {
+            ReadModelError::InvalidLifecycle(format!(
+                "skill {skill_name}: invalid state {state_raw:?}"
+            ))
+        })?;
+        let created_by = CreatedBy::from_db_str(&created_by_raw).map_err(|_| {
+            ReadModelError::InvalidLifecycle(format!(
+                "skill {skill_name}: invalid created_by {created_by_raw:?}"
+            ))
+        })?;
+
+        match state {
+            LifecycleState::Active => total_active += 1,
+            LifecycleState::Stale => total_stale += 1,
+            LifecycleState::Archived => total_archived += 1,
         }
         if pinned != 0 {
             pinned_count += 1;
         }
-        if state == "active" {
-            match created_by.as_str() {
-                "probe_writer" => probe_writer_active += 1,
-                "curator" => curator_active += 1,
-                "foreground" => foreground_active += 1,
-                "bundled" => bundled_active += 1,
-                _ => {}
+        if state == LifecycleState::Active {
+            match created_by {
+                CreatedBy::ProbeWriter => probe_writer_active += 1,
+                CreatedBy::Curator => curator_active += 1,
+                CreatedBy::Foreground => foreground_active += 1,
+                CreatedBy::Bundled => bundled_active += 1,
             }
         }
         if use_count > 0 {

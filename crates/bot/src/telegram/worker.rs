@@ -393,10 +393,8 @@ fn record_used_skill_receipts(
     }
 
     let conn = right_db::open_connection(agent_db_dir, false).context("open lifecycle database")?;
-    for skill_name in &used_skill_names {
-        right_lifecycle::bump_use(&conn, skill_name, now_utc)
-            .with_context(|| format!("bump lifecycle usage for {skill_name}"))?;
-    }
+    right_lifecycle::bump_use_many(&conn, &used_skill_names, now_utc)
+        .context("bump lifecycle usage")?;
 
     Ok(used_skill_names)
 }
@@ -1486,20 +1484,24 @@ pub fn spawn_worker(
                         output.content,
                         output.used_skill_receipts.as_deref(),
                     );
-                    // Collect rightx skill names used this turn (deduplicated).
-                    let mut used_skill_names: std::collections::BTreeSet<String> =
-                        Default::default();
-                    if let Some(receipts) = output.used_skill_receipts.as_deref() {
-                        used_skill_names = used_skill_names_from_receipts(receipts);
-                        if let Err(e) =
-                            record_used_skill_receipts(&ctx.agent_dir, receipts, chrono::Utc::now())
-                        {
-                            tracing::warn!(
-                                agent = %ctx.agent_name,
-                                "skill receipt lifecycle update failed: {e:#}"
-                            );
-                        }
-                    }
+                    let used_skill_names: std::collections::BTreeSet<String> =
+                        match output.used_skill_receipts.as_deref() {
+                            Some(receipts) => match record_used_skill_receipts(
+                                &ctx.agent_dir,
+                                receipts,
+                                chrono::Utc::now(),
+                            ) {
+                                Ok(names) => names,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        agent = %ctx.agent_name,
+                                        "skill receipt lifecycle update failed: {e:#}"
+                                    );
+                                    used_skill_names_from_receipts(receipts)
+                                }
+                            },
+                            None => Default::default(),
+                        };
                     let reply_to = if is_group {
                         // Always reply-to the triggering message in groups,
                         // regardless of batch size.

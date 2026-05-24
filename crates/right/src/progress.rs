@@ -184,13 +184,24 @@ impl ProgressRegistry {
         })
     }
 
-    pub(crate) async fn learning_send_target(
+    /// Atomic lookup returning both the invocation kind and its send target
+    /// under a single mutex acquisition.
+    ///
+    /// `send_learning_message` calls this once instead of separately fetching
+    /// kind and target — otherwise an unregister between the two `.await`
+    /// points could flip the result from "send" to a confusing
+    /// `Unavailable` error after the phase gate already approved the send.
+    ///
+    /// Gating on `is_learning_capable` (broader than `sends_learning_messages`)
+    /// matches `learning_invocation_kind`'s semantics: the caller decides via
+    /// `should_send_learning_message` whether the target is actually used.
+    pub(crate) async fn learning_invocation_kind_and_target(
         &self,
         invocation_id: &str,
     ) -> Result<(ProgressInvocationKind, ProgressSendTarget), ProgressError> {
         let inner = self.inner.lock().await;
         let invocation = inner.get(invocation_id).ok_or(ProgressError::Unavailable)?;
-        if !invocation.kind.sends_learning_messages() {
+        if !invocation.kind.is_learning_capable() {
             return Err(ProgressError::Forbidden);
         }
         Ok((
@@ -298,11 +309,14 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn learning_send_target_does_not_consume_progress_rate_limit() {
+    async fn learning_invocation_kind_and_target_does_not_consume_progress_rate_limit() {
         let registry = ProgressRegistry::default();
         registry.register(foreground_registration()).await;
 
-        let (kind, target) = registry.learning_send_target("inv-1").await.unwrap();
+        let (kind, target) = registry
+            .learning_invocation_kind_and_target("inv-1")
+            .await
+            .unwrap();
         assert_eq!(kind, ProgressInvocationKind::Foreground);
         assert_eq!(target.bot_socket_path, PathBuf::from("/tmp/bot.sock"));
         assert_eq!(target.bot_send_token, "send-token");
@@ -514,22 +528,15 @@ mod tests {
 
         #[tokio::test]
         async fn probe_writer_and_curator_do_not_send_telegram_learning_messages() {
-            let registry = ProgressRegistry::default();
             let kinds = [
-                ("probe-writer-inv", ProgressInvocationKind::ProbeWriter),
-                ("curator-inv", ProgressInvocationKind::Curator),
+                ProgressInvocationKind::ProbeWriter,
+                ProgressInvocationKind::Curator,
             ];
-
-            for (invocation_id, kind) in kinds {
-                registry
-                    .register(registration(invocation_id, kind, None))
-                    .await;
-
-                let err = registry
-                    .learning_send_target(invocation_id)
-                    .await
-                    .unwrap_err();
-                assert_eq!(err, ProgressError::Forbidden);
+            for kind in kinds {
+                assert!(
+                    !kind.sends_learning_messages(),
+                    "{kind:?} must not send learning telegram messages"
+                );
             }
         }
 
@@ -545,11 +552,12 @@ mod tests {
                 .await;
 
             let (kind, target) = registry
-                .learning_send_target("foreground-inv")
+                .learning_invocation_kind_and_target("foreground-inv")
                 .await
                 .unwrap();
 
             assert_eq!(kind, ProgressInvocationKind::Foreground);
+            assert!(kind.sends_learning_messages());
             assert_eq!(target.bot_socket_path, PathBuf::from("/tmp/bot.sock"));
             assert_eq!(target.bot_send_token, "send-token");
         }

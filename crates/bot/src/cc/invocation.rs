@@ -160,14 +160,17 @@ impl RegisteredNonForegroundInvocation {
     }
 
     pub(crate) async fn cleanup(mut self) {
-        self.cleanup_inner().await;
-    }
-
-    async fn cleanup_inner(&mut self) {
         if self.cleaned {
             return;
         }
         unregister_invocation(&self.internal_client, &self.agent_name, &self.invocation_id).await;
+        self.cleanup_local_and_sandbox();
+    }
+
+    /// Drop the local MCP config file and schedule sandbox-side cleanup.
+    /// Sync — safe for `Drop`. Does NOT unregister the invocation (only the
+    /// async `cleanup()` path does that).
+    fn cleanup_local_and_sandbox(&mut self) {
         remove_invocation_mcp_config_file(&self.local_mcp_config_path);
         if let Some(sandbox_path) = self.sandbox_mcp_config_path.take() {
             spawn_sandbox_invocation_mcp_cleanup(
@@ -185,14 +188,7 @@ impl Drop for RegisteredNonForegroundInvocation {
         if self.cleaned {
             return;
         }
-        remove_invocation_mcp_config_file(&self.local_mcp_config_path);
-        if let Some(sandbox_path) = self.sandbox_mcp_config_path.take() {
-            spawn_sandbox_invocation_mcp_cleanup(
-                self.invocation_id.clone(),
-                self.resolved_sandbox.clone(),
-                sandbox_path,
-            );
-        }
+        self.cleanup_local_and_sandbox();
     }
 }
 
