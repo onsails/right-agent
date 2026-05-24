@@ -10,6 +10,7 @@ right-agent-config = { path = "../right-agent-config", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }
 right-config = { path = "../right-config", version = "*" }
 right-dashboard = { path = "../right-dashboard", version = "*" }
+right-lifecycle = { path = "../right-lifecycle", version = "*" }
 right-openshell = { path = "../right-openshell", version = "*" }
 right-process = { path = "../right-process", version = "*" }
 right-db = { path = "../right-db", version = "*" }

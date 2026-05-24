@@ -230,8 +230,8 @@ pub(crate) async fn run_if_due(
     }
 
     // Cheap pre-gate: short-circuit before computing cost-spike SQL or
-    // reading the usage index file. On a busy ticker (60s per agent), these
-    // are wasted I/O when the chat is active or we're inside cooldown.
+    // reading lifecycle rows. On a busy ticker (60s per agent), these are
+    // wasted I/O when the chat is active or we're inside cooldown.
     if let Some(skip) = cheap_skip(ctx.config, &state, now, latest_user_activity_at) {
         tracing::debug!(agent = %ctx.agent_name, "curator gate: {:?}", skip);
         return;
@@ -252,17 +252,15 @@ pub(crate) async fn run_if_due(
         }
     };
 
-    let skills_dir = ctx.agent_dir.join(".claude/skills");
-    let usage_path = skills_dir.join(".usage.json");
-    let index = match crate::lifecycle::usage::read_index(&usage_path) {
-        Ok(i) => i,
+    let lifecycle_rows = match crate::lifecycle::usage::list(&conn) {
+        Ok(rows) => rows,
         Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator usage read failed: {e:#}");
+            tracing::warn!(agent = %ctx.agent_name, "curator lifecycle read failed: {e:#}");
             return;
         }
     };
     let since = state.last_run_at.as_deref().unwrap_or("");
-    let change_count = crate::lifecycle::usage::count_changes_since(&index, since);
+    let change_count = crate::lifecycle::usage::count_changes_since(&lifecycle_rows, since);
 
     let decision = should_run_now(
         ctx.config,
@@ -284,6 +282,7 @@ pub(crate) async fn run_if_due(
     // Capture evidence.
     state.last_spike_evidence_json = Some(serialize_evidence(&trigger, now));
 
+    let skills_dir = ctx.agent_dir.join(".claude/skills");
     let backups_dir = ctx.agent_dir.join("curator_backups");
     let now_str = now.format("%Y%m%dT%H%M%SZ").to_string();
     if let Err(e) = crate::lifecycle::snapshot::snapshot_skills(&skills_dir, &backups_dir, &now_str)
@@ -291,18 +290,27 @@ pub(crate) async fn run_if_due(
         tracing::warn!(agent = %ctx.agent_name, "curator snapshot failed: {e:#}");
     }
 
-    let mut index_mut = index;
-    let transition_changes = crate::lifecycle::transitions::apply_automatic_transitions(
-        &mut index_mut,
+    let transition_changes = match crate::lifecycle::transitions::apply_automatic_transitions(
+        &conn,
         now,
         crate::lifecycle::transitions::TransitionConfig {
-            stale_after_days: ctx.config.stale_after_days as i64,
-            archive_after_days: ctx.config.archive_after_days as i64,
+            stale_after: Duration::days(ctx.config.stale_after_days as i64),
+            archive_after: Duration::days(ctx.config.archive_after_days as i64),
         },
-    );
-    if let Err(e) = crate::lifecycle::usage::write_index(&usage_path, &index_mut) {
-        tracing::warn!(agent = %ctx.agent_name, "curator usage write failed: {e:#}");
-    }
+    ) {
+        Ok(changes) => changes,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator auto-transition failed: {e:#}");
+            return;
+        }
+    };
+    let lifecycle_rows = match crate::lifecycle::usage::list(&conn) {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator lifecycle refresh failed: {e:#}");
+            return;
+        }
+    };
     tracing::info!(
         agent = %ctx.agent_name,
         transitions = transition_changes,
@@ -311,7 +319,7 @@ pub(crate) async fn run_if_due(
     );
 
     // LLM consolidation fork.
-    let invocation = build_curator_invocation(&ctx, &index_mut);
+    let invocation = build_curator_invocation(&ctx, &lifecycle_rows);
     let args = invocation.into_args();
 
     let mut cmd = crate::cc::invocation::build_claude_command(
@@ -404,11 +412,11 @@ fn serialize_evidence(trigger: &CuratorTrigger, now: DateTime<Utc>) -> String {
 
 fn build_curator_invocation(
     ctx: &CuratorContext,
-    index: &crate::lifecycle::usage::Index,
+    lifecycle_rows: &[right_lifecycle::SkillLifecycleRow],
 ) -> crate::cc::invocation::ClaudeInvocation {
     use crate::cc::invocation::{ClaudeInvocation, OutputFormat};
     let curator_session_id = uuid::Uuid::new_v4().to_string();
-    let candidate_list = render_candidate_list(index);
+    let candidate_list = render_candidate_list(lifecycle_rows);
     let user_prompt = format!(
         "{system}\n\n{candidates}",
         system = right_codegen::CURATOR_SYSTEM_PROMPT,
@@ -440,14 +448,13 @@ fn build_curator_invocation(
     }
 }
 
-fn render_candidate_list(index: &crate::lifecycle::usage::Index) -> String {
+fn render_candidate_list(lifecycle_rows: &[right_lifecycle::SkillLifecycleRow]) -> String {
     use std::fmt::Write;
     let mut s = String::from("<inventory>\n");
-    for (name, r) in &index.skills {
+    for r in lifecycle_rows {
         if matches!(
             r.created_by,
-            crate::lifecycle::usage::CreatedBy::Foreground
-                | crate::lifecycle::usage::CreatedBy::Bundled
+            right_lifecycle::CreatedBy::Foreground | right_lifecycle::CreatedBy::Bundled
         ) {
             continue;
         }
@@ -457,6 +464,7 @@ fn render_candidate_list(index: &crate::lifecycle::usage::Index) -> String {
         let _ = writeln!(
             s,
             "- {name}: state={state:?} use={used} patch={patched} created_by={by:?} pinned={pinned}",
+            name = r.skill_name,
             state = r.state,
             used = r.use_count,
             patched = r.patch_count,

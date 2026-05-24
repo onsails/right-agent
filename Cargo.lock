@@ -2960,6 +2960,7 @@ dependencies = [
  "right-config",
  "right-dashboard",
  "right-db",
+ "right-lifecycle",
  "right-mcp",
  "right-memory",
  "right-openshell",
