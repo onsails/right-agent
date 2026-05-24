@@ -9,6 +9,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use teloxide::prelude::*;
@@ -21,7 +22,7 @@ use uuid::Uuid;
 use crate::cc::markdown_utils::{html_escape, strip_html_tags};
 pub use crate::cc::worker_reply::{ReplyOutput, parse_reply_output};
 use crate::cc::worker_reply::{
-    append_used_skill_receipts, is_rightx_skill, should_accept_bootstrap,
+    UsedSkillReceipt, append_used_skill_receipts, is_rightx_skill, should_accept_bootstrap,
 };
 use crate::reflection::FailureKind;
 use right_agent::learned_skills::{
@@ -247,8 +248,7 @@ pub(crate) struct ProbeAnchor {
     pub total_cost_usd: f64,
     /// Wall-clock from CC spawn to result event in milliseconds.
     pub wall_elapsed_ms: u64,
-    /// `rightx-<slug>` skill names the foreground turn used (extracted from
-    /// `mcp__right__use_skill` tool calls in the stream).
+    /// `rightx-<slug>` skill names the foreground turn reported in the reply schema.
     pub used_skill_receipts: Vec<String>,
 }
 
@@ -380,6 +380,35 @@ async fn should_accept_bootstrap_for_paths(
         }
         _ => should_accept_bootstrap(agent_dir),
     }
+}
+
+fn record_used_skill_receipts(
+    agent_db_dir: &Path,
+    receipts: &[UsedSkillReceipt],
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<std::collections::BTreeSet<String>> {
+    let used_skill_names = used_skill_names_from_receipts(receipts);
+    if used_skill_names.is_empty() {
+        return Ok(used_skill_names);
+    }
+
+    let conn = right_db::open_connection(agent_db_dir, false).context("open lifecycle database")?;
+    for skill_name in &used_skill_names {
+        right_lifecycle::bump_use(&conn, skill_name, now_utc)
+            .with_context(|| format!("bump lifecycle usage for {skill_name}"))?;
+    }
+
+    Ok(used_skill_names)
+}
+
+fn used_skill_names_from_receipts(
+    receipts: &[UsedSkillReceipt],
+) -> std::collections::BTreeSet<String> {
+    receipts
+        .iter()
+        .filter(|receipt| is_rightx_skill(&receipt.package_name))
+        .map(|receipt| receipt.package_name.clone())
+        .collect()
 }
 
 /// Format a CC subprocess error as a Telegram message (D-16).
@@ -1461,24 +1490,14 @@ pub fn spawn_worker(
                     let mut used_skill_names: std::collections::BTreeSet<String> =
                         Default::default();
                     if let Some(receipts) = output.used_skill_receipts.as_deref() {
-                        let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-                        let usage_path = ctx.agent_dir.join(".claude/skills/.usage.json");
-                        for receipt in receipts {
-                            if !is_rightx_skill(&receipt.package_name) {
-                                continue;
-                            }
-                            used_skill_names.insert(receipt.package_name.clone());
-                            if let Err(e) = crate::lifecycle::usage::bump_use(
-                                &usage_path,
-                                &receipt.package_name,
-                                &now_utc,
-                            ) {
-                                tracing::warn!(
-                                    agent = %ctx.agent_name,
-                                    package = %receipt.package_name,
-                                    "bump_use failed: {e:#}"
-                                );
-                            }
+                        used_skill_names = used_skill_names_from_receipts(receipts);
+                        if let Err(e) =
+                            record_used_skill_receipts(&ctx.agent_dir, receipts, chrono::Utc::now())
+                        {
+                            tracing::warn!(
+                                agent = %ctx.agent_name,
+                                "skill receipt lifecycle update failed: {e:#}"
+                            );
                         }
                     }
                     let reply_to = if is_group {
@@ -4938,6 +4957,67 @@ mod tests {
 
         let bytes = buffer.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
+    }
+
+    fn used_skill_receipt(package_name: &str) -> UsedSkillReceipt {
+        UsedSkillReceipt {
+            package_name: package_name.to_owned(),
+            message: format!("Used {package_name}"),
+        }
+    }
+
+    fn used_skill_receipts_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-05-24T10:15:30Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn used_skill_receipts_record_rightx_usage_once_per_turn_in_db() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(temp.path(), true).unwrap();
+        drop(conn);
+        let receipts = vec![
+            used_skill_receipt("rightx-demo"),
+            used_skill_receipt("rightx-demo"),
+            used_skill_receipt("not-rightx"),
+        ];
+
+        let used_names =
+            record_used_skill_receipts(temp.path(), &receipts, used_skill_receipts_now()).unwrap();
+
+        assert_eq!(
+            used_names.into_iter().collect::<Vec<_>>(),
+            vec!["rightx-demo".to_owned()]
+        );
+        let conn = right_db::open_connection(temp.path(), false).unwrap();
+        let row = right_lifecycle::get(&conn, "rightx-demo")
+            .unwrap()
+            .expect("rightx receipt should create lifecycle row");
+        assert_eq!(row.use_count, 1);
+        assert_eq!(row.created_by, right_lifecycle::CreatedBy::Foreground);
+        assert_eq!(row.last_used_at, Some(used_skill_receipts_now()));
+        assert!(right_lifecycle::get(&conn, "not-rightx").unwrap().is_none());
+
+        record_used_skill_receipts(temp.path(), &receipts, used_skill_receipts_now()).unwrap();
+        let row = right_lifecycle::get(&conn, "rightx-demo").unwrap().unwrap();
+        assert_eq!(row.use_count, 2);
+    }
+
+    #[test]
+    fn used_skill_receipts_return_error_when_lifecycle_db_cannot_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_agent_dir = temp.path().join("missing-agent");
+        let receipts = vec![used_skill_receipt("rightx-demo")];
+
+        let err =
+            record_used_skill_receipts(&missing_agent_dir, &receipts, used_skill_receipts_now())
+                .expect_err("missing DB directory should return an error");
+
+        assert!(
+            format!("{err:#}").contains("database"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
