@@ -149,6 +149,48 @@ mod cli_parse_tests {
 
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
+
+    #[test]
+    fn agent_skill_list_still_parses() {
+        Cli::try_parse_from(["right", "agent", "skill", "list"])
+            .expect("agent skill list must remain available");
+    }
+
+    #[test]
+    fn agent_skill_rejects_pin_commands() {
+        for args in [
+            ["right", "agent", "skill", "pin", "rightx-test"].as_slice(),
+            ["right", "agent", "skill", "unpin", "rightx-test"].as_slice(),
+            ["right", "agent", "skill", "list-pins"].as_slice(),
+            [
+                "right",
+                "agent",
+                "skill",
+                "pin",
+                "--agent",
+                "alpha",
+                "--name",
+                "rightx-test",
+            ]
+            .as_slice(),
+            [
+                "right",
+                "agent",
+                "skill",
+                "unpin",
+                "--agent",
+                "alpha",
+                "--name",
+                "rightx-test",
+            ]
+            .as_slice(),
+            ["right", "agent", "skill", "list-pins", "--agent", "alpha"].as_slice(),
+        ] {
+            if Cli::try_parse_from(args).is_ok() {
+                panic!("agent skill pin command must not parse: {args:?}");
+            }
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -335,40 +377,18 @@ pub enum AgentCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Operator-only skill lifecycle controls (pin/unpin/list-pins)
+    /// Read learned skill lifecycle state
     Skill {
         #[command(subcommand)]
         command: AgentSkillCommands,
     },
 }
 
-/// Operator-only skill lifecycle subcommands.
+/// Skill lifecycle subcommands.
 #[derive(Subcommand)]
 pub enum AgentSkillCommands {
-    /// Pin a `rightx-*` skill so the curator never archives it
-    Pin {
-        /// Agent name
-        #[arg(long)]
-        agent: String,
-        /// Skill package name (must start with `rightx-`)
-        #[arg(long)]
-        name: String,
-    },
-    /// Unpin a previously-pinned `rightx-*` skill
-    Unpin {
-        /// Agent name
-        #[arg(long)]
-        agent: String,
-        /// Skill package name (must start with `rightx-`)
-        #[arg(long)]
-        name: String,
-    },
-    /// List pinned skills for an agent
-    ListPins {
-        /// Agent name
-        #[arg(long)]
-        agent: String,
-    },
+    /// List learned skill lifecycle rows across agents
+    List,
 }
 
 /// Subcommands for `right memory`.
@@ -3945,78 +3965,65 @@ async fn cmd_agent_destroy(
     Ok(())
 }
 
-/// Operator-only skill pin/unpin/list-pins helper.
+/// Read-only skill lifecycle helper.
 fn cmd_agent_skill(home: &Path, command: AgentSkillCommands) -> miette::Result<()> {
     match command {
-        AgentSkillCommands::Pin { agent, name } => {
-            if !name.starts_with("rightx-") {
-                return Err(miette::miette!("skill name must start with `rightx-`"));
-            }
-            let agent_dir = right_config::agents_dir(home).join(&agent);
-            let conn = right_db::open_connection(&agent_dir, false)
-                .map_err(|e| miette::miette!("open lifecycle db: {e:#}"))?;
-            if right_lifecycle::get(&conn, &name)
-                .map_err(|e| miette::miette!("get lifecycle row: {e:#}"))?
-                .is_none()
-            {
-                right_lifecycle::mark_created(
-                    &conn,
-                    &name,
-                    right_lifecycle::CreatedBy::Foreground,
-                    chrono::Utc::now(),
-                )
-                .map_err(|e| miette::miette!("mark_created: {e:#}"))?;
-            }
-            right_lifecycle::set_pinned(&conn, &name, true)
-                .map_err(|e| miette::miette!("set_pinned: {e:#}"))?;
-            println!("pinned: {name}");
-            Ok(())
-        }
-        AgentSkillCommands::Unpin { agent, name } => {
-            if !name.starts_with("rightx-") {
-                return Err(miette::miette!("skill name must start with `rightx-`"));
-            }
-            let agent_dir = right_config::agents_dir(home).join(&agent);
-            let conn = right_db::open_connection(&agent_dir, false)
-                .map_err(|e| miette::miette!("open lifecycle db: {e:#}"))?;
-            if right_lifecycle::get(&conn, &name)
-                .map_err(|e| miette::miette!("get lifecycle row: {e:#}"))?
-                .is_none()
-            {
-                right_lifecycle::mark_created(
-                    &conn,
-                    &name,
-                    right_lifecycle::CreatedBy::Foreground,
-                    chrono::Utc::now(),
-                )
-                .map_err(|e| miette::miette!("mark_created: {e:#}"))?;
-            }
-            right_lifecycle::set_pinned(&conn, &name, false)
-                .map_err(|e| miette::miette!("set_pinned: {e:#}"))?;
-            println!("unpinned: {name}");
-            Ok(())
-        }
-        AgentSkillCommands::ListPins { agent } => {
-            let agent_dir = right_config::agents_dir(home).join(&agent);
-            let conn = right_db::open_connection(&agent_dir, false)
-                .map_err(|e| miette::miette!("open lifecycle db: {e:#}"))?;
-            let pins =
-                right_lifecycle::list(&conn).map_err(|e| miette::miette!("list_pinned: {e:#}"))?;
-            let pins: Vec<_> = pins
-                .into_iter()
-                .filter(|row| row.pinned)
-                .map(|row| row.skill_name)
-                .collect();
-            if pins.is_empty() {
-                println!("(no pinned skills)");
-            } else {
-                for name in pins {
-                    println!("{name}");
-                }
-            }
-            Ok(())
+        AgentSkillCommands::List => cmd_agent_skill_list(home),
+    }
+}
+
+fn cmd_agent_skill_list(home: &Path) -> miette::Result<()> {
+    let agents_dir = right_config::agents_dir(home);
+    if !agents_dir.is_dir() {
+        println!("No learned skills.");
+        return Ok(());
+    }
+
+    let mut agent_dirs = Vec::new();
+    for entry in std::fs::read_dir(&agents_dir)
+        .map_err(|e| miette::miette!("cannot read agents dir: {e:#}"))?
+    {
+        let path = entry
+            .map_err(|e| miette::miette!("cannot read agents dir entry: {e:#}"))?
+            .path();
+        if path.is_dir() {
+            agent_dirs.push(path);
         }
     }
+    agent_dirs.sort();
+
+    let mut any = false;
+    for agent_dir in agent_dirs {
+        let db_path = agent_dir.join("data.db");
+        if !db_path.is_file() {
+            continue;
+        }
+        let agent_name = agent_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| miette::miette!("invalid agent dir name: {}", agent_dir.display()))?;
+        let conn = right_db::open_connection_readonly(&agent_dir)
+            .map_err(|e| miette::miette!("open lifecycle db for {agent_name}: {e:#}"))?;
+        let rows = right_lifecycle::list(&conn)
+            .map_err(|e| miette::miette!("list lifecycle rows for {agent_name}: {e:#}"))?;
+        for row in rows {
+            println!(
+                "{agent_name}\t{}\tstate={}\tpinned={}\tcreated_by={}\tuses={}\tpatches={}",
+                row.skill_name,
+                row.state.as_db_str(),
+                row.pinned,
+                row.created_by.as_db_str(),
+                row.use_count,
+                row.patch_count
+            );
+            any = true;
+        }
+    }
+
+    if !any {
+        println!("No learned skills.");
+    }
+    Ok(())
 }
 
 async fn cmd_agent_rebootstrap(home: &Path, agent_name: &str, yes: bool) -> miette::Result<()> {
