@@ -48,7 +48,8 @@ fn refresh_retry_delay(attempt: u32) -> Duration {
 /// Classification of a token endpoint refresh failure.
 #[derive(Debug, thiserror::Error)]
 pub enum RefreshFailure {
-    /// Transient — network error, 5xx, 408, or 429. Retry later.
+    /// Transient — network error, 5xx, 408, 429, or a Cloudflare challenge.
+    /// Retry later.
     #[error("transient refresh failure: {0}")]
     Transient(String),
 
@@ -62,6 +63,22 @@ pub enum RefreshFailure {
 impl RefreshFailure {
     pub(crate) fn is_permanent(&self) -> bool {
         matches!(self, Self::Permanent(_))
+    }
+}
+
+fn is_cloudflare_challenge_response(status: http::StatusCode, body: &str) -> bool {
+    status == http::StatusCode::FORBIDDEN
+        && (body.contains("__cf_chl_")
+            || body.contains("/cdn-cgi/challenge-platform/")
+            || body.contains("cf_chl_opt")
+            || body.contains("Just a moment"))
+}
+
+fn refresh_http_error_detail(status: http::StatusCode, body: &str) -> String {
+    if is_cloudflare_challenge_response(status, body) {
+        format!("HTTP {status}: Cloudflare challenge")
+    } else {
+        format!("HTTP {status}: {body}")
     }
 }
 
@@ -173,16 +190,16 @@ pub async fn do_refresh_cancellable(
                 let body = r.text().await.unwrap_or_default();
                 let is_transient_http = status == http::StatusCode::REQUEST_TIMEOUT
                     || status == http::StatusCode::TOO_MANY_REQUESTS
-                    || status.is_server_error();
+                    || status.is_server_error()
+                    || is_cloudflare_challenge_response(status, &body);
+                let detail = refresh_http_error_detail(status, &body);
                 if is_transient_http {
-                    tracing::warn!(attempt, %status, %body, "cancellable refresh attempt failed (transient http)");
-                    last_error = Some(format!("HTTP {status}: {body}"));
+                    tracing::warn!(attempt, %status, detail = %detail, "cancellable refresh attempt failed (transient http)");
+                    last_error = Some(detail);
                     // fall through to backoff
                 } else {
-                    tracing::warn!(attempt, %status, %body, "cancellable refresh attempt failed (permanent http)");
-                    return Err(ReconnectError::Refresh(RefreshFailure::Permanent(format!(
-                        "HTTP {status}: {body}"
-                    ))));
+                    tracing::warn!(attempt, %status, detail = %detail, "cancellable refresh attempt failed (permanent http)");
+                    return Err(ReconnectError::Refresh(RefreshFailure::Permanent(detail)));
                 }
             }
             Err(e) => {
@@ -768,6 +785,41 @@ mod tests {
                 Err(ReconnectError::Refresh(RefreshFailure::Permanent(_)))
             ),
             "expected Permanent for 400 invalid_grant, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_classifies_cloudflare_403_challenge_as_transient() {
+        setup_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(403).set_body_string(
+                r#"<!DOCTYPE html><html><head><title>Just a moment...</title></head>
+                <body><script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script>
+                <form action="/api/v3/auth/dash/oauth2/token?__cf_chl_rt_tk=abc"></form></body></html>"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let entry = make_entry(format!("{}/token", server.uri()));
+        let client = reqwest::Client::new();
+        let cancel = CancellationToken::new();
+
+        tokio::time::pause();
+        let handle =
+            tokio::spawn(async move { do_refresh_cancellable(&client, &entry, &cancel).await });
+        for _ in 0..MAX_RETRIES {
+            tokio::time::advance(Duration::from_secs(200)).await;
+            tokio::task::yield_now().await;
+        }
+        let result = handle.await.expect("task panicked");
+        assert!(
+            matches!(
+                result,
+                Err(ReconnectError::Refresh(RefreshFailure::Transient(_)))
+            ),
+            "expected Transient for Cloudflare 403 challenge, got {result:?}"
         );
     }
 

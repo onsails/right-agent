@@ -67,7 +67,7 @@ pub enum ProxyError {
 /// includes `"Auth required"` (from `StreamableHttpError::AuthRequired`).
 /// We match on the substring rather than downcasting through `Box<dyn Error>`
 /// generic transports.
-pub(crate) fn is_upstream_auth_error(msg: &str) -> bool {
+pub fn is_upstream_auth_error(msg: &str) -> bool {
     msg.contains("Auth required")
 }
 

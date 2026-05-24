@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
 use right_mcp::credentials::{self, CredentialError};
-use right_mcp::proxy::{AuthMethod, ProxyBackend};
+use right_mcp::proxy::{AuthMethod, BackendStatus, ProxyBackend};
 use serde::{Deserialize, Serialize};
 
 use crate::aggregator::{
@@ -194,6 +194,74 @@ fn plain_http_warning(url: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+const OAUTH_RECONNECT_MAX_ATTEMPTS: usize = 3;
+
+fn oauth_reconnect_retry_delay(attempt: usize) -> std::time::Duration {
+    #[cfg(test)]
+    {
+        let _ = attempt;
+        std::time::Duration::from_millis(10)
+    }
+
+    #[cfg(not(test))]
+    {
+        std::time::Duration::from_secs(match attempt {
+            1 => 1,
+            2 => 2,
+            _ => 4,
+        })
+    }
+}
+
+fn oauth_reconnect_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+async fn reconnect_after_oauth_update(
+    server_name: &str,
+    handle: Arc<ProxyBackend>,
+) -> Result<(), right_mcp::proxy::ProxyError> {
+    let mut last_error = None;
+
+    for attempt in 1..=OAUTH_RECONNECT_MAX_ATTEMPTS {
+        let client = oauth_reconnect_http_client();
+        match handle.connect(client).await {
+            Ok(_) => {
+                tracing::info!(
+                    server = %server_name,
+                    attempt,
+                    "reconnected after OAuth token update",
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                let detail = format!("{e:#}");
+                tracing::warn!(
+                    server = %server_name,
+                    attempt,
+                    max_attempts = OAUTH_RECONNECT_MAX_ATTEMPTS,
+                    err = %detail,
+                    "reconnect after OAuth failed",
+                );
+                if right_mcp::proxy::is_upstream_auth_error(&detail) {
+                    return Err(e);
+                }
+                last_error = Some(e);
+            }
+        }
+
+        if attempt < OAUTH_RECONNECT_MAX_ATTEMPTS {
+            tokio::time::sleep(oauth_reconnect_retry_delay(attempt)).await;
+        }
+    }
+
+    Err(last_error.expect("at least one OAuth reconnect attempt should run"))
 }
 
 // ---------------------------------------------------------------------------
@@ -536,24 +604,9 @@ async fn handle_set_token(
         mgr.lock().await.cancel(&req.server);
     }
 
-    // Reconnect in background with the new token.
-    let server_name = req.server.clone();
-    let handle_clone = Arc::clone(&handle);
-    tokio::spawn(async move {
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        match handle_clone.connect(client).await {
-            Ok(_) => tracing::info!(server = %server_name, "reconnected after OAuth token update"),
-            Err(e) => {
-                tracing::warn!(server = %server_name, err = %format!("{e:#}"), "reconnect after OAuth failed")
-            }
-        }
-    });
-
-    // Notify refresh scheduler so it schedules future token refreshes
+    // Notify refresh scheduler before readiness probing so a token that was
+    // accepted by the OAuth provider can still be refreshed after transient
+    // upstream MCP failures.
     if let Some(tx) = state.refresh_senders.get(&req.agent) {
         let entry = OAuthServerState {
             refresh_token: Some(req.refresh_token.clone()),
@@ -578,6 +631,28 @@ async fn handle_set_token(
                 "failed to notify refresh scheduler: {e:#}"
             );
         }
+    }
+
+    if let Err(e) = reconnect_after_oauth_update(&req.server, Arc::clone(&handle)).await {
+        let detail = format!("{e:#}");
+        let is_auth_error = right_mcp::proxy::is_upstream_auth_error(&detail);
+        if is_auth_error {
+            handle.set_status(BackendStatus::NeedsAuth).await;
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "mcp_reconnect_needs_auth",
+                Some(detail),
+            )
+            .into_response();
+        }
+
+        handle.set_status(BackendStatus::Unreachable).await;
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "mcp_reconnect_failed",
+            Some(detail),
+        )
+        .into_response();
     }
 
     (
@@ -791,7 +866,12 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use http::Request;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
+
+    fn setup_crypto() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
 
     fn make_test_dispatcher(tmp: &std::path::Path) -> Arc<ToolDispatcher> {
         use crate::aggregator::BackendRegistry;
@@ -876,6 +956,25 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         (status, json)
+    }
+
+    async fn start_failing_mcp_server(counter: Arc<AtomicUsize>) -> String {
+        let app = Router::new().route(
+            "/mcp",
+            axum::routing::any(move || {
+                let counter = Arc::clone(&counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/mcp")
     }
 
     #[tokio::test]
@@ -1259,6 +1358,86 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn set_token_retries_500_and_reports_failure_without_success() {
+        setup_crypto();
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mcp_url = start_failing_mcp_server(Arc::clone(&attempts)).await;
+
+        let (agent_dir, proxies, conn_arc) = {
+            let registry = dispatcher
+                .agents
+                .get("test-agent")
+                .expect("test-agent registered");
+            (
+                registry.agent_dir.clone(),
+                Arc::clone(&registry.proxies),
+                registry
+                    .right
+                    .get_conn("test-agent")
+                    .expect("test db connection"),
+            )
+        };
+        {
+            let conn = conn_arc.lock().unwrap();
+            conn.execute(
+                "INSERT INTO mcp_servers (name, url, auth_type) VALUES ('composio', ?1, 'oauth')",
+                [&mcp_url],
+            )
+            .unwrap();
+        }
+
+        let token = Arc::new(tokio::sync::RwLock::new(Some("old-token".to_string())));
+        let backend = Arc::new(ProxyBackend::new(
+            "composio".into(),
+            agent_dir,
+            mcp_url,
+            Arc::clone(&token),
+            AuthMethod::Bearer,
+        ));
+        backend
+            .set_status(right_mcp::proxy::BackendStatus::NeedsAuth)
+            .await;
+        proxies
+            .write()
+            .await
+            .insert("composio".into(), Arc::clone(&backend));
+
+        let (status, body) = send_json(
+            app,
+            "/set-token",
+            serde_json::json!({
+                "agent": "test-agent",
+                "server": "composio",
+                "access_token": "fresh-token",
+                "refresh_token": "fresh-refresh",
+                "expires_in": 3600,
+                "token_endpoint": "https://auth.example.com/token",
+                "client_id": "my-client"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "body={body}");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "500 initialize responses should be retried a bounded number of times",
+        );
+        assert_eq!(
+            backend.status().await,
+            right_mcp::proxy::BackendStatus::Unreachable,
+            "non-auth reconnect failures must not leave stale needs_auth status",
+        );
+        assert_eq!(
+            *token.read().await,
+            Some("fresh-token".to_string()),
+            "fresh token should still be stored for the refresh scheduler after readiness failure",
+        );
     }
 
     #[tokio::test]

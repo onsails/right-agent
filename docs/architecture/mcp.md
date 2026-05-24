@@ -33,12 +33,28 @@ OAuth callback (bot) → POST /set-token to Aggregator (Unix socket)
   → Aggregator updates DynamicAuthClient.token in-memory
   → Aggregator saves token fields to mcp_servers SQLite table
   → Aggregator schedules refresh timer (see "Refresh margin" below)
+  → Aggregator retries MCP reconnect readiness with the fresh token
+    and returns success only if that reconnect succeeds
   → on timer: POST refresh_token to token_endpoint
   → classify outcome (success / Transient / Permanent)
   → on success: update DynamicAuthClient.token in-memory, persist to SQLite
     (db_update_oauth_token), reset retry counter, reschedule next refresh
   → no .mcp.json writes, no sandbox uploads
 ```
+
+### OAuth callback readiness
+
+The bot callback handler only acknowledges that the provider redirected with an
+authorization code. It does not tell the user that the MCP server is ready until
+the background token exchange and Aggregator `/set-token` call finish.
+
+`/set-token` persists the fresh OAuth state and schedules refresh before probing
+upstream readiness. It then runs a bounded `ProxyBackend::connect()` retry loop
+with the new token. A 5xx initialize failure is retried; if all attempts fail,
+the backend is marked `Unreachable` and `/set-token` returns `502` so Telegram
+reports a failure instead of "Authenticated". If the reconnect failure is an
+upstream auth error (`"Auth required"`), the backend remains `NeedsAuth` and
+`/set-token` returns `401`.
 
 ### Refresh margin
 
@@ -60,7 +76,7 @@ its OAuth entry does not wait for a slow token endpoint or client timeout.
 
 | Class | Triggered by | Scheduler response |
 |-------|--------------|--------------------|
-| `Transient` | Network error, 5xx, 408, 429 | Reschedule with exponential backoff, retry indefinitely. Backend status unchanged (stays `Connected` from the user's perspective). |
+| `Transient` | Network error, 5xx, 408, 429, Cloudflare 403 challenge page | Reschedule with exponential backoff, retry indefinitely. Backend status unchanged (stays `Connected` from the user's perspective). |
 | `Permanent` | Non-recoverable 4xx (typically `invalid_grant` / `invalid_client`) | Flip backend to `NeedsAuth`, drop the timer, clear retry counter. User must re-OAuth via `/mcp auth <server>`. |
 
 Transient backoff schedule (`refresh.rs::transient_backoff_secs`,
@@ -125,6 +141,8 @@ tool-call-driven transitions:
 |---------|------|----|
 | Transient refresh failure | `Connected` | `Connected` (unchanged; retry pending) |
 | Permanent refresh failure | any | `NeedsAuth` |
+| `/set-token` reconnect 5xx exhausted | any | `Unreachable` |
+| `/set-token` reconnect auth failure | any | `NeedsAuth` |
 | Tool-call upstream 401 (`Auth required`) | `Connected` | `NeedsAuth` |
 | Successful refresh | `NeedsAuth` | `NeedsAuth` → background `connect()` → `Connected` |
 | Successful refresh | `Connected` | `Connected` (no reconnect needed) |
