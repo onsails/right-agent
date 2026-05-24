@@ -183,13 +183,14 @@ pub(crate) fn save_state_db(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct CuratorContext {
     pub agent_dir: PathBuf,
     pub agent_db_dir: PathBuf,
     pub agent_name: String,
     pub ssh_config_path: Option<PathBuf>,
     pub resolved_sandbox: Option<String>,
+    pub internal_client: Arc<right_mcp::internal_client::InternalClient>,
     pub model: String,
     pub debug_flag: Arc<AtomicBool>,
     #[allow(dead_code)]
@@ -319,7 +320,38 @@ pub(crate) async fn run_if_due(
     );
 
     // LLM consolidation fork.
-    let invocation = build_curator_invocation(&ctx, &lifecycle_rows);
+    let active_invocation = match crate::cc::invocation::register_non_foreground_invocation(
+        crate::cc::invocation::NonForegroundInvocationRegistration {
+            agent_name: ctx.agent_name.clone(),
+            agent_dir: ctx.agent_dir.clone(),
+            ssh_config_path: ctx.ssh_config_path.clone(),
+            resolved_sandbox: ctx.resolved_sandbox.clone(),
+            internal_client: Arc::clone(&ctx.internal_client),
+            kind: right_mcp::internal_client::ProgressInvocationKindDto::Curator,
+            chat_id: None,
+            thread_id: None,
+        },
+    )
+    .await
+    {
+        Ok(active) => active,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator invocation registration failed: {e:#}");
+            let run_status = "failed".to_owned();
+            state.last_run_at = Some(now.to_rfc3339());
+            state.last_run_status = Some(run_status);
+            state.consecutive_failures += 1;
+            if let Err(e) = save_state_db(&conn, &state) {
+                tracing::warn!(agent = %ctx.agent_name, "curator save state failed: {e:#}");
+            }
+            return;
+        }
+    };
+    let invocation = build_curator_invocation(
+        &ctx,
+        &lifecycle_rows,
+        active_invocation.mcp_config_path().to_owned(),
+    );
     let args = invocation.into_args();
 
     let mut cmd = crate::cc::invocation::build_claude_command(
@@ -364,6 +396,7 @@ pub(crate) async fn run_if_due(
             "failed".to_owned()
         }
     };
+    active_invocation.cleanup().await;
 
     state.last_run_at = Some(now.to_rfc3339());
     state.last_run_status = Some(run_status.clone());
@@ -413,6 +446,7 @@ fn serialize_evidence(trigger: &CuratorTrigger, now: DateTime<Utc>) -> String {
 fn build_curator_invocation(
     ctx: &CuratorContext,
     lifecycle_rows: &[right_lifecycle::SkillLifecycleRow],
+    mcp_config_path: String,
 ) -> crate::cc::invocation::ClaudeInvocation {
     use crate::cc::invocation::{ClaudeInvocation, OutputFormat};
     let curator_session_id = uuid::Uuid::new_v4().to_string();
@@ -423,10 +457,7 @@ fn build_curator_invocation(
         candidates = candidate_list,
     );
     ClaudeInvocation {
-        mcp_config_path: Some(crate::cc::invocation::mcp_config_path(
-            ctx.ssh_config_path.as_deref(),
-            &ctx.agent_dir,
-        )),
+        mcp_config_path: Some(mcp_config_path),
         json_schema: None,
         output_format: OutputFormat::StreamJson,
         model: Some(ctx.model.clone()),
@@ -552,8 +583,51 @@ mod tests {
         }
     }
 
+    fn context(agent_dir: PathBuf) -> CuratorContext {
+        CuratorContext {
+            agent_dir,
+            agent_db_dir: PathBuf::from("/tmp/db"),
+            agent_name: "agent-1".into(),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+            internal_client: Arc::new(right_mcp::internal_client::InternalClient::new(
+                "/tmp/fake.sock",
+            )),
+            model: "claude-sonnet-4-5".into(),
+            debug_flag: Arc::new(AtomicBool::new(false)),
+            session_locks: SessionLocks::default(),
+            config: cfg(),
+        }
+    }
+
     fn dt(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn background_invocation_curator_uses_invocation_scoped_mcp_config() {
+        let dir = tempdir().unwrap();
+        let ctx = context(dir.path().to_path_buf());
+        let mcp_path = dir
+            .path()
+            .join(".claude")
+            .join("mcp-inv-1.json")
+            .to_string_lossy()
+            .into_owned();
+
+        let invocation = build_curator_invocation(&ctx, &[], mcp_path);
+
+        let path = invocation
+            .mcp_config_path
+            .expect("curator should pass an MCP config path");
+        assert!(
+            path.contains("/.claude/mcp-"),
+            "curator path should include a generated invocation id: {path}"
+        );
+        assert!(
+            !path.ends_with("/mcp.json"),
+            "curator must not use the static agent mcp.json: {path}"
+        );
     }
 
     #[test]

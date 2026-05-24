@@ -1957,6 +1957,7 @@ pub fn spawn_worker(
                 let daily_budget = ctx.learning.max_daily_budget_usd;
                 let baseline_window_days = ctx.learning.baseline_window_days;
                 let baseline_min_sample = ctx.learning.baseline_min_sample;
+                let internal_client = Arc::clone(&ctx.internal_client);
 
                 tokio::spawn(async move {
                     let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -2060,6 +2061,7 @@ pub fn spawn_worker(
                         agent_name,
                         ssh_config_path: ssh_config,
                         resolved_sandbox: resolved,
+                        internal_client,
                         model: probe_writer_model,
                         debug_flag,
                         session_locks,

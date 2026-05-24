@@ -1,4 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::Context as _;
 
 /// Built-in CC harness tools blocked for every agent-driven `claude -p` call.
 ///
@@ -118,6 +121,282 @@ pub(crate) fn write_invocation_mcp_config(
     let output_path = claude_dir.join(format!("mcp-{invocation_id}.json"));
     std::fs::write(&output_path, serde_json::to_string(&config)?)?;
     Ok(output_path)
+}
+
+#[derive(Clone)]
+pub(crate) struct NonForegroundInvocationRegistration {
+    pub(crate) agent_name: String,
+    pub(crate) agent_dir: PathBuf,
+    pub(crate) ssh_config_path: Option<PathBuf>,
+    pub(crate) resolved_sandbox: Option<String>,
+    pub(crate) internal_client: Arc<right_mcp::internal_client::InternalClient>,
+    pub(crate) kind: right_mcp::internal_client::ProgressInvocationKindDto,
+    pub(crate) chat_id: Option<i64>,
+    pub(crate) thread_id: Option<i64>,
+}
+
+pub(crate) struct RegisteredNonForegroundInvocation {
+    invocation_id: String,
+    agent_name: String,
+    internal_client: Arc<right_mcp::internal_client::InternalClient>,
+    local_mcp_config_path: PathBuf,
+    claude_mcp_config_path: String,
+    resolved_sandbox: Option<String>,
+    sandbox_mcp_config_path: Option<String>,
+    cleaned: bool,
+}
+
+impl RegisteredNonForegroundInvocation {
+    #[cfg(test)]
+    pub(crate) fn invocation_id(&self) -> &str {
+        &self.invocation_id
+    }
+
+    pub(crate) fn mcp_config_path(&self) -> &str {
+        &self.claude_mcp_config_path
+    }
+
+    pub(crate) async fn cleanup(mut self) {
+        self.cleanup_inner().await;
+    }
+
+    async fn cleanup_inner(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        unregister_invocation(&self.internal_client, &self.agent_name, &self.invocation_id).await;
+        remove_invocation_mcp_config_file(&self.local_mcp_config_path);
+        if let Some(sandbox_path) = self.sandbox_mcp_config_path.take() {
+            spawn_sandbox_invocation_mcp_cleanup(
+                self.invocation_id.clone(),
+                self.resolved_sandbox.clone(),
+                sandbox_path,
+            );
+        }
+        self.cleaned = true;
+    }
+}
+
+impl Drop for RegisteredNonForegroundInvocation {
+    fn drop(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        remove_invocation_mcp_config_file(&self.local_mcp_config_path);
+        if let Some(sandbox_path) = self.sandbox_mcp_config_path.take() {
+            spawn_sandbox_invocation_mcp_cleanup(
+                self.invocation_id.clone(),
+                self.resolved_sandbox.clone(),
+                sandbox_path,
+            );
+        }
+    }
+}
+
+pub(crate) async fn register_non_foreground_invocation(
+    registration: NonForegroundInvocationRegistration,
+) -> anyhow::Result<RegisteredNonForegroundInvocation> {
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let bot_send_token = right_runtime_state::generate_pc_api_token();
+    let register_req = right_mcp::internal_client::ProgressRegisterRequest {
+        agent: registration.agent_name.clone(),
+        invocation_id: invocation_id.clone(),
+        kind: registration.kind,
+        bot_send_token,
+        chat_id: registration.chat_id,
+        thread_id: registration.thread_id,
+    };
+
+    registration
+        .internal_client
+        .progress_register(&register_req)
+        .await
+        .with_context(|| format!("register invocation {invocation_id}"))?;
+
+    let local_mcp_config_path =
+        match write_invocation_mcp_config(&registration.agent_dir, &invocation_id) {
+            Ok(path) => path,
+            Err(e) => {
+                unregister_invocation(
+                    &registration.internal_client,
+                    &registration.agent_name,
+                    &invocation_id,
+                )
+                .await;
+                return Err(e).context("write invocation MCP config");
+            }
+        };
+
+    let (claude_mcp_config_path, sandbox_mcp_config_path) =
+        if registration.ssh_config_path.is_some() {
+            let Some(sandbox_name) = registration.resolved_sandbox.as_deref() else {
+                unregister_invocation(
+                    &registration.internal_client,
+                    &registration.agent_name,
+                    &invocation_id,
+                )
+                .await;
+                remove_invocation_mcp_config_file(&local_mcp_config_path);
+                anyhow::bail!("sandbox name is unresolved for invocation {invocation_id}");
+            };
+            if let Err(e) = right_openshell::openshell::upload_file(
+                sandbox_name,
+                &local_mcp_config_path,
+                "/sandbox/.claude/",
+            )
+            .await
+            {
+                unregister_invocation(
+                    &registration.internal_client,
+                    &registration.agent_name,
+                    &invocation_id,
+                )
+                .await;
+                remove_invocation_mcp_config_file(&local_mcp_config_path);
+                anyhow::bail!("upload invocation MCP config: {e:#}");
+            }
+            let sandbox_path = invocation_sandbox_mcp_path(&invocation_id);
+            (sandbox_path.clone(), Some(sandbox_path))
+        } else {
+            (local_mcp_config_path.to_string_lossy().into_owned(), None)
+        };
+
+    Ok(RegisteredNonForegroundInvocation {
+        invocation_id,
+        agent_name: registration.agent_name,
+        internal_client: registration.internal_client,
+        local_mcp_config_path,
+        claude_mcp_config_path,
+        resolved_sandbox: registration.resolved_sandbox,
+        sandbox_mcp_config_path,
+        cleaned: false,
+    })
+}
+
+fn invocation_sandbox_mcp_path(invocation_id: &str) -> String {
+    format!("/sandbox/.claude/mcp-{invocation_id}.json")
+}
+
+async fn unregister_invocation(
+    internal_client: &right_mcp::internal_client::InternalClient,
+    agent_name: &str,
+    invocation_id: &str,
+) {
+    let unregister_req = right_mcp::internal_client::ProgressUnregisterRequest {
+        agent: agent_name.to_owned(),
+        invocation_id: invocation_id.to_owned(),
+    };
+    if let Err(e) = internal_client.progress_unregister(&unregister_req).await {
+        tracing::warn!(invocation_id, "invocation unregister failed: {e:#}");
+    }
+}
+
+fn remove_invocation_mcp_config_file(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                "invocation MCP config cleanup failed: {e:#}"
+            );
+        }
+    }
+}
+
+fn spawn_sandbox_invocation_mcp_cleanup(
+    invocation_id: String,
+    sandbox_name: Option<String>,
+    sandbox_path: String,
+) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!(
+            invocation_id,
+            sandbox_path,
+            "sandbox invocation MCP config cleanup skipped: no Tokio runtime"
+        );
+        return;
+    };
+    std::mem::drop(handle.spawn(async move {
+        remove_sandbox_invocation_mcp_config_file(invocation_id, sandbox_name, sandbox_path).await;
+    }));
+}
+
+async fn remove_sandbox_invocation_mcp_config_file(
+    invocation_id: String,
+    sandbox_name: Option<String>,
+    sandbox_path: String,
+) {
+    let Some(sandbox_name) = sandbox_name else {
+        tracing::warn!(
+            invocation_id,
+            sandbox_path,
+            "sandbox invocation MCP config cleanup skipped: sandbox name unresolved"
+        );
+        return;
+    };
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+        status => {
+            tracing::warn!(
+                invocation_id,
+                sandbox_path,
+                ?status,
+                "sandbox invocation MCP config cleanup skipped: OpenShell preflight not Ready"
+            );
+            return;
+        }
+    };
+    let mut client = match right_openshell::openshell::connect_grpc(&mtls_dir).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                invocation_id,
+                sandbox_path,
+                "sandbox invocation MCP config cleanup gRPC connect failed: {e:#}"
+            );
+            return;
+        }
+    };
+    let sandbox_id =
+        match right_openshell::openshell::resolve_sandbox_id(&mut client, &sandbox_name).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(
+                    invocation_id,
+                    sandbox_path,
+                    sandbox_name,
+                    "sandbox invocation MCP config cleanup sandbox-id resolve failed: {e:#}"
+                );
+                return;
+            }
+        };
+    match right_openshell::openshell::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["rm", "-f", &sandbox_path],
+        right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+    )
+    .await
+    {
+        Ok((_, 0)) => {}
+        Ok((stdout, exit_code)) => {
+            tracing::warn!(
+                invocation_id,
+                sandbox_path,
+                exit_code,
+                stdout = %stdout,
+                "sandbox invocation MCP config cleanup exited non-zero"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                invocation_id,
+                sandbox_path,
+                "sandbox invocation MCP config cleanup exec failed: {e:#}"
+            );
+        }
+    }
 }
 
 /// CC output format flag.
@@ -328,6 +607,7 @@ pub(crate) fn build_claude_command(
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     fn minimal() -> ClaudeInvocation {
         ClaudeInvocation {
@@ -346,6 +626,94 @@ mod tests {
             prompt: Some("hello".into()),
             debug_flag: None,
         }
+    }
+
+    struct CapturedProgressRequest {
+        path: String,
+        body: serde_json::Value,
+    }
+
+    fn write_base_mcp_config(agent_dir: &Path) {
+        std::fs::write(
+            agent_dir.join("mcp.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "right": {
+                        "headers": {
+                            "Authorization": "Bearer existing-token"
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    fn spawn_progress_api(
+        socket_path: PathBuf,
+        request_count: usize,
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<CapturedProgressRequest>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::UnixListener::bind(socket_path).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let captured = read_progress_request(&mut stream).await;
+                tx.send(captured).unwrap();
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n{\"ok\":true}",
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        (rx, handle)
+    }
+
+    async fn read_progress_request(stream: &mut tokio::net::UnixStream) -> CapturedProgressRequest {
+        let mut buf = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 1024];
+            let n = stream.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "client closed before HTTP request completed");
+            buf.extend_from_slice(&chunk[..n]);
+
+            let Some(header_end) = header_end(&buf) else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&buf[..header_end]);
+            let content_length = content_length(&headers);
+            let body_start = header_end + 4;
+            if buf.len() >= body_start + content_length {
+                let request_line = headers.lines().next().unwrap();
+                let path = request_line.split_whitespace().nth(1).unwrap().to_owned();
+                let body =
+                    serde_json::from_slice(&buf[body_start..body_start + content_length]).unwrap();
+                return CapturedProgressRequest { path, body };
+            }
+        }
+    }
+
+    fn header_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn content_length(headers: &str) -> usize {
+        headers
+            .lines()
+            .find_map(|line| {
+                let mut parts = line.splitn(2, ':');
+                let name = parts.next()?.trim();
+                let value = parts.next()?.trim();
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.parse::<usize>().unwrap())
+            })
+            .unwrap()
     }
 
     #[test]
@@ -620,6 +988,117 @@ mod tests {
             written["mcpServers"]["right"]["headers"]["X-Right-Invocation"],
             "inv-1"
         );
+    }
+
+    #[tokio::test]
+    async fn background_invocation_probe_writer_registers_kind_and_cleans_up_after_spawn_failure() {
+        let agent_dir = tempfile::tempdir().unwrap();
+        write_base_mcp_config(agent_dir.path());
+        let socket_dir = tempfile::tempdir().unwrap();
+        let socket_path = socket_dir.path().join("internal.sock");
+        let (mut requests, server) = spawn_progress_api(socket_path.clone(), 2);
+
+        let active = register_non_foreground_invocation(NonForegroundInvocationRegistration {
+            agent_name: "agent-1".to_owned(),
+            agent_dir: agent_dir.path().to_path_buf(),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+            internal_client: Arc::new(right_mcp::internal_client::InternalClient::new(
+                &socket_path,
+            )),
+            kind: right_mcp::internal_client::ProgressInvocationKindDto::ProbeWriter,
+            chat_id: Some(42),
+            thread_id: Some(7),
+        })
+        .await
+        .unwrap();
+
+        let register = requests.recv().await.unwrap();
+        assert_eq!(register.path, "/progress/register");
+        assert_eq!(register.body["kind"], "probe_writer");
+        assert_ne!(register.body["kind"], "background_review");
+        assert_eq!(register.body["chat_id"], 42);
+        assert_eq!(register.body["thread_id"], 7);
+        assert_eq!(register.body["invocation_id"], active.invocation_id());
+
+        let mcp_path = active.mcp_config_path().to_owned();
+        assert!(
+            mcp_path.contains(&format!("/.claude/mcp-{}.json", active.invocation_id())),
+            "MCP config path should include generated invocation id: {mcp_path}"
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
+        assert_eq!(
+            written["mcpServers"]["right"]["headers"]["X-Right-Invocation"],
+            active.invocation_id()
+        );
+
+        active.cleanup().await;
+
+        let unregister = requests.recv().await.unwrap();
+        assert_eq!(unregister.path, "/progress/unregister");
+        assert_eq!(
+            unregister.body["invocation_id"],
+            register.body["invocation_id"]
+        );
+        assert!(
+            !Path::new(&mcp_path).exists(),
+            "cleanup should remove per-invocation MCP config"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_invocation_curator_registers_kind_and_cleans_up_after_success() {
+        let agent_dir = tempfile::tempdir().unwrap();
+        write_base_mcp_config(agent_dir.path());
+        let socket_dir = tempfile::tempdir().unwrap();
+        let socket_path = socket_dir.path().join("internal.sock");
+        let (mut requests, server) = spawn_progress_api(socket_path.clone(), 2);
+
+        let active = register_non_foreground_invocation(NonForegroundInvocationRegistration {
+            agent_name: "agent-1".to_owned(),
+            agent_dir: agent_dir.path().to_path_buf(),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+            internal_client: Arc::new(right_mcp::internal_client::InternalClient::new(
+                &socket_path,
+            )),
+            kind: right_mcp::internal_client::ProgressInvocationKindDto::Curator,
+            chat_id: None,
+            thread_id: None,
+        })
+        .await
+        .unwrap();
+
+        let register = requests.recv().await.unwrap();
+        assert_eq!(register.path, "/progress/register");
+        assert_eq!(register.body["kind"], "curator");
+        assert_ne!(register.body["kind"], "background_review");
+        assert!(register.body.get("chat_id").is_none());
+        assert!(register.body.get("thread_id").is_none());
+        assert_eq!(register.body["invocation_id"], active.invocation_id());
+
+        let mcp_path = active.mcp_config_path().to_owned();
+        assert!(
+            mcp_path.contains(&format!("/.claude/mcp-{}.json", active.invocation_id())),
+            "MCP config path should include generated invocation id: {mcp_path}"
+        );
+        assert!(Path::new(&mcp_path).exists());
+
+        active.cleanup().await;
+
+        let unregister = requests.recv().await.unwrap();
+        assert_eq!(unregister.path, "/progress/unregister");
+        assert_eq!(
+            unregister.body["invocation_id"],
+            register.body["invocation_id"]
+        );
+        assert!(
+            !Path::new(&mcp_path).exists(),
+            "cleanup should remove per-invocation MCP config"
+        );
+        server.await.unwrap();
     }
 
     #[test]
