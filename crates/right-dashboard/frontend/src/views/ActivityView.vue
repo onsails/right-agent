@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import MetricCard from '../components/MetricCard.vue'
 import StatusPill from '../components/StatusPill.vue'
-import { money, notifyText, shortDate, shortId, statusTone } from '../format'
+import { deliveryLabel, deliveryTone, money, notifyText, shortDate, shortId, statusTone } from '../format'
 import type { CronCard, OverviewResponse, RunDetailResponse, RunSummary } from '../types'
 
 defineProps<{
@@ -64,24 +64,85 @@ function cronStatus(cron: CronCard): string {
         </dl>
 
         <div class="row-list">
-          <button
-            v-for="run in cron.recent_runs"
-            :key="run.id"
-            class="data-row"
-            :class="{ selected: selectedRunId === run.id }"
-            type="button"
-            @click="emit('selectRun', run)"
-          >
-            <span class="row-main">
-              <span class="status-dot" :class="statusTone(run.status)"></span>
-              <strong>{{ run.status }}</strong>
-              <small>{{ shortId(run.id) }}</small>
-            </span>
-            <span class="row-side">
-              <strong>{{ money(run.cost_usd) }}</strong>
-              <small>{{ shortDate(run.started_at) }}</small>
-            </span>
-          </button>
+          <template v-for="run in cron.recent_runs" :key="run.id">
+            <button
+              class="data-row"
+              :class="{ selected: selectedRunId === run.id }"
+              type="button"
+              @click="emit('selectRun', run)"
+            >
+              <span class="row-main">
+                <span class="status-dot" :class="statusTone(run.status)"></span>
+                <strong>{{ run.status }}</strong>
+                <small>{{ shortId(run.id) }}</small>
+                <span class="run-delivery-badge" :class="deliveryTone(run)">{{ deliveryLabel(run) }}</span>
+                <small v-if="run.run_note" class="run-note-preview">{{ run.run_note }}</small>
+              </span>
+              <span class="row-side">
+                <strong>{{ money(run.cost_usd) }}</strong>
+                <small>{{ shortDate(run.started_at) }}</small>
+              </span>
+            </button>
+
+            <section v-if="selectedRunId === run.id" class="run-inline-detail">
+              <p v-if="loadingDetail" class="muted-line">Loading</p>
+              <p v-else-if="detailError" class="notice inline">{{ detailError }}</p>
+              <p v-else-if="!selectedRun || selectedRun.run.id !== run.id" class="muted-line">No run detail</p>
+
+              <template v-else>
+                <dl class="meta-grid compact">
+                  <div>
+                    <dt>Kind</dt>
+                    <dd>{{ selectedRun.run.kind }}</dd>
+                  </div>
+                  <div>
+                    <dt>Delivery</dt>
+                    <dd>{{ deliveryLabel(selectedRun.run) }}</dd>
+                  </div>
+                  <div>
+                    <dt>Exit</dt>
+                    <dd>{{ selectedRun.run.exit_code ?? 'none' }}</dd>
+                  </div>
+                  <div>
+                    <dt>Cost</dt>
+                    <dd>{{ money(selectedRun.run.cost_usd) }}</dd>
+                  </div>
+                  <div>
+                    <dt>Started</dt>
+                    <dd>{{ shortDate(selectedRun.run.started_at) }}</dd>
+                  </div>
+                  <div>
+                    <dt>Finished</dt>
+                    <dd>{{ shortDate(selectedRun.run.finished_at) }}</dd>
+                  </div>
+                </dl>
+
+                <section class="text-block">
+                  <h3>Run note</h3>
+                  <p>{{ selectedRun.run_note || 'No run note' }}</p>
+                </section>
+                <section v-if="notifyText(selectedRun.delivery)" class="text-block">
+                  <h3>Delivery</h3>
+                  <pre>{{ notifyText(selectedRun.delivery) }}</pre>
+                </section>
+                <section v-if="selectedRun.delivery_error" class="text-block">
+                  <h3>Delivery error</h3>
+                  <p>{{ selectedRun.delivery_error }}</p>
+                </section>
+                <section v-if="selectedRun.error_message" class="text-block">
+                  <h3>Error</h3>
+                  <p>{{ selectedRun.error_message }}</p>
+                </section>
+                <section class="text-block">
+                  <h3>Log</h3>
+                  <p v-if="!selectedRun.log.available" class="muted-line">Log unavailable</p>
+                  <pre v-else>{{ selectedRun.log.lines.join('\n') }}<template v-if="selectedRun.log.truncated">
+... truncated
+</template></pre>
+                </section>
+              </template>
+            </section>
+          </template>
           <p v-if="cron.recent_runs.length === 0" class="muted-line">No recent runs</p>
         </div>
       </article>
