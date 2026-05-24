@@ -1,7 +1,9 @@
 # Skill Learning Probe-Writer + Curator Implementation Plan
 
-> Superseded note: all `.usage.json` lifecycle references below are historical
-> plan text. Current lifecycle behavior is DB-backed and documented by
+> Superseded note: all `.usage.json` lifecycle references and CLI
+> `right agent skill pin` / `unpin` / `list-pins` portions below are historical
+> plan text. Current lifecycle behavior is DB-backed, and dashboard pinning is
+> the operator pin/unpin surface, as documented by
 > `docs/superpowers/plans/2026-05-24-skill-lifecycle-db-dashboard-pinning.md`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
