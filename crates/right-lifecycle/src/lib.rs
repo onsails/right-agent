@@ -6,6 +6,7 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, LifecycleError>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LifecycleState {
     Active,
     Stale,
@@ -32,6 +33,7 @@ impl LifecycleState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CreatedBy {
     Foreground,
     ProbeWriter,
@@ -258,10 +260,10 @@ pub fn apply_automatic_transitions(
 ) -> Result<usize> {
     let stale_cutoff = now_utc - config.stale_after;
     let archive_cutoff = now_utc - config.archive_after;
-    let archived_at = now_utc.to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
     let mut changed = 0;
 
-    for row in list(conn)? {
+    for row in list(&tx)? {
         if should_skip_automatic_transition(&row) {
             continue;
         }
@@ -272,34 +274,118 @@ pub fn apply_automatic_transitions(
 
         match row.state {
             LifecycleState::Active if activity_at <= stale_cutoff => {
-                changed += conn.execute(
-                    "UPDATE skill_lifecycle
-                     SET state = ?2
-                     WHERE skill_name = ?1 AND state = ?3",
-                    params![
-                        row.skill_name,
-                        LifecycleState::Stale.as_db_str(),
-                        LifecycleState::Active.as_db_str()
-                    ],
+                changed += transition_active_candidate_to_stale_if_eligible(
+                    &tx,
+                    &row.skill_name,
+                    stale_cutoff,
                 )?;
             }
             LifecycleState::Stale if activity_at <= archive_cutoff => {
-                changed += conn.execute(
-                    "UPDATE skill_lifecycle
-                     SET state = ?2, archived_at = ?3
-                     WHERE skill_name = ?1 AND state = ?4",
-                    params![
-                        row.skill_name,
-                        LifecycleState::Archived.as_db_str(),
-                        archived_at,
-                        LifecycleState::Stale.as_db_str()
-                    ],
+                changed += transition_stale_candidate_to_archived_if_eligible(
+                    &tx,
+                    &row.skill_name,
+                    archive_cutoff,
+                    now_utc,
                 )?;
             }
             _ => {}
         }
     }
 
+    tx.commit()?;
+    Ok(changed)
+}
+
+fn transition_active_candidate_to_stale_if_eligible(
+    conn: &Connection,
+    skill_name: &str,
+    stale_cutoff: DateTime<Utc>,
+) -> Result<usize> {
+    let cutoff = stale_cutoff.to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE skill_lifecycle
+         SET state = :to_state
+         WHERE skill_name = :skill_name
+           AND state = :from_state
+           AND pinned = 0
+           AND created_by IN (:probe_writer, :curator)
+           AND (
+             (
+               last_used_at IS NOT NULL
+               AND last_patched_at IS NOT NULL
+               AND CASE
+                 WHEN last_used_at >= last_patched_at THEN last_used_at
+                 ELSE last_patched_at
+               END <= :cutoff
+             )
+             OR (
+               last_used_at IS NOT NULL
+               AND last_patched_at IS NULL
+               AND last_used_at <= :cutoff
+             )
+             OR (
+               last_used_at IS NULL
+               AND last_patched_at IS NOT NULL
+               AND last_patched_at <= :cutoff
+             )
+           )",
+        rusqlite::named_params! {
+            ":skill_name": skill_name,
+            ":to_state": LifecycleState::Stale.as_db_str(),
+            ":from_state": LifecycleState::Active.as_db_str(),
+            ":probe_writer": CreatedBy::ProbeWriter.as_db_str(),
+            ":curator": CreatedBy::Curator.as_db_str(),
+            ":cutoff": cutoff,
+        },
+    )?;
+    Ok(changed)
+}
+
+fn transition_stale_candidate_to_archived_if_eligible(
+    conn: &Connection,
+    skill_name: &str,
+    archive_cutoff: DateTime<Utc>,
+    archived_at: DateTime<Utc>,
+) -> Result<usize> {
+    let cutoff = archive_cutoff.to_rfc3339();
+    let archived_at = archived_at.to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE skill_lifecycle
+         SET state = :to_state, archived_at = :archived_at
+         WHERE skill_name = :skill_name
+           AND state = :from_state
+           AND pinned = 0
+           AND created_by IN (:probe_writer, :curator)
+           AND (
+             (
+               last_used_at IS NOT NULL
+               AND last_patched_at IS NOT NULL
+               AND CASE
+                 WHEN last_used_at >= last_patched_at THEN last_used_at
+                 ELSE last_patched_at
+               END <= :cutoff
+             )
+             OR (
+               last_used_at IS NOT NULL
+               AND last_patched_at IS NULL
+               AND last_used_at <= :cutoff
+             )
+             OR (
+               last_used_at IS NULL
+               AND last_patched_at IS NOT NULL
+               AND last_patched_at <= :cutoff
+             )
+           )",
+        rusqlite::named_params! {
+            ":skill_name": skill_name,
+            ":to_state": LifecycleState::Archived.as_db_str(),
+            ":archived_at": archived_at,
+            ":from_state": LifecycleState::Stale.as_db_str(),
+            ":probe_writer": CreatedBy::ProbeWriter.as_db_str(),
+            ":curator": CreatedBy::Curator.as_db_str(),
+            ":cutoff": cutoff,
+        },
+    )?;
     Ok(changed)
 }
 
@@ -392,9 +478,20 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    fn insert_lifecycle_row(
-        conn: &Connection,
-        skill_name: &str,
+    #[test]
+    fn lifecycle_enums_serialize_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&LifecycleState::Active).unwrap(),
+            "\"active\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CreatedBy::ProbeWriter).unwrap(),
+            "\"probe_writer\""
+        );
+    }
+
+    struct LifecycleRowFixture<'a> {
+        skill_name: &'a str,
         state: LifecycleState,
         pinned: bool,
         created_by: CreatedBy,
@@ -402,25 +499,72 @@ mod tests {
         patch_count: i64,
         last_used_at: Option<DateTime<Utc>>,
         last_patched_at: Option<DateTime<Utc>>,
-    ) {
-        conn.execute(
-            "INSERT INTO skill_lifecycle (
-                skill_name, state, pinned, created_by, use_count, patch_count,
-                created_at, last_used_at, last_patched_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            (
+    }
+
+    impl<'a> LifecycleRowFixture<'a> {
+        fn new(skill_name: &'a str) -> Self {
+            Self {
                 skill_name,
-                state.as_db_str(),
-                i64::from(pinned),
-                created_by.as_db_str(),
-                use_count,
-                patch_count,
-                utc("2026-04-01T00:00:00Z").to_rfc3339(),
-                last_used_at.map(|t| t.to_rfc3339()),
-                last_patched_at.map(|t| t.to_rfc3339()),
-            ),
-        )
-        .unwrap();
+                state: LifecycleState::Active,
+                pinned: false,
+                created_by: CreatedBy::Curator,
+                use_count: 0,
+                patch_count: 0,
+                last_used_at: None,
+                last_patched_at: None,
+            }
+        }
+
+        fn state(mut self, state: LifecycleState) -> Self {
+            self.state = state;
+            self
+        }
+
+        fn pinned(mut self, pinned: bool) -> Self {
+            self.pinned = pinned;
+            self
+        }
+
+        fn created_by(mut self, created_by: CreatedBy) -> Self {
+            self.created_by = created_by;
+            self
+        }
+
+        fn patch_count(mut self, patch_count: i64) -> Self {
+            self.patch_count = patch_count;
+            self
+        }
+
+        fn last_used_at(mut self, last_used_at: DateTime<Utc>) -> Self {
+            self.last_used_at = Some(last_used_at);
+            self
+        }
+
+        fn last_patched_at(mut self, last_patched_at: DateTime<Utc>) -> Self {
+            self.last_patched_at = Some(last_patched_at);
+            self
+        }
+
+        fn insert(self, conn: &Connection) {
+            conn.execute(
+                "INSERT INTO skill_lifecycle (
+                    skill_name, state, pinned, created_by, use_count, patch_count,
+                    created_at, last_used_at, last_patched_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                (
+                    self.skill_name,
+                    self.state.as_db_str(),
+                    i64::from(self.pinned),
+                    self.created_by.as_db_str(),
+                    self.use_count,
+                    self.patch_count,
+                    utc("2026-04-01T00:00:00Z").to_rfc3339(),
+                    self.last_used_at.map(|t| t.to_rfc3339()),
+                    self.last_patched_at.map(|t| t.to_rfc3339()),
+                ),
+            )
+            .unwrap();
+        }
     }
 
     #[test]
@@ -446,17 +590,11 @@ mod tests {
     fn bump_patch_preserves_existing_created_by() {
         let conn = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
-        insert_lifecycle_row(
-            &conn,
-            "rightx-demo",
-            LifecycleState::Stale,
-            false,
-            CreatedBy::Curator,
-            0,
-            2,
-            None,
-            None,
-        );
+        LifecycleRowFixture::new("rightx-demo")
+            .state(LifecycleState::Stale)
+            .created_by(CreatedBy::Curator)
+            .patch_count(2)
+            .insert(&conn);
 
         bump_patch(&conn, "rightx-demo", CreatedBy::ProbeWriter, now).unwrap();
 
@@ -486,17 +624,9 @@ mod tests {
     #[test]
     fn set_pinned_toggles_existing_row() {
         let conn = migrated_conn();
-        insert_lifecycle_row(
-            &conn,
-            "rightx-demo",
-            LifecycleState::Active,
-            false,
-            CreatedBy::Curator,
-            0,
-            0,
-            None,
-            None,
-        );
+        LifecycleRowFixture::new("rightx-demo")
+            .created_by(CreatedBy::Curator)
+            .insert(&conn);
 
         assert!(set_pinned(&conn, "rightx-demo", true).unwrap());
         assert!(get(&conn, "rightx-demo").unwrap().unwrap().pinned);
@@ -519,72 +649,33 @@ mod tests {
             archive_after: TimeDelta::days(30),
         };
 
-        insert_lifecycle_row(
-            &conn,
-            "candidate-probe",
-            LifecycleState::Active,
-            false,
-            CreatedBy::ProbeWriter,
-            0,
-            0,
-            Some(stale_old),
-            None,
-        );
-        insert_lifecycle_row(
-            &conn,
-            "old-stale-curator",
-            LifecycleState::Stale,
-            false,
-            CreatedBy::Curator,
-            0,
-            0,
-            Some(old),
-            None,
-        );
-        insert_lifecycle_row(
-            &conn,
-            "pinned-probe",
-            LifecycleState::Active,
-            true,
-            CreatedBy::ProbeWriter,
-            0,
-            0,
-            Some(old),
-            None,
-        );
-        insert_lifecycle_row(
-            &conn,
-            "foreground-old",
-            LifecycleState::Active,
-            false,
-            CreatedBy::Foreground,
-            0,
-            0,
-            Some(old),
-            None,
-        );
-        insert_lifecycle_row(
-            &conn,
-            "bundled-old",
-            LifecycleState::Active,
-            false,
-            CreatedBy::Bundled,
-            0,
-            0,
-            Some(old),
-            None,
-        );
-        insert_lifecycle_row(
-            &conn,
-            "recent-patch-wins",
-            LifecycleState::Active,
-            false,
-            CreatedBy::Curator,
-            0,
-            0,
-            Some(old),
-            Some(recent),
-        );
+        LifecycleRowFixture::new("candidate-probe")
+            .created_by(CreatedBy::ProbeWriter)
+            .last_used_at(stale_old)
+            .insert(&conn);
+        LifecycleRowFixture::new("old-stale-curator")
+            .state(LifecycleState::Stale)
+            .created_by(CreatedBy::Curator)
+            .last_used_at(old)
+            .insert(&conn);
+        LifecycleRowFixture::new("pinned-probe")
+            .pinned(true)
+            .created_by(CreatedBy::ProbeWriter)
+            .last_used_at(old)
+            .insert(&conn);
+        LifecycleRowFixture::new("foreground-old")
+            .created_by(CreatedBy::Foreground)
+            .last_used_at(old)
+            .insert(&conn);
+        LifecycleRowFixture::new("bundled-old")
+            .created_by(CreatedBy::Bundled)
+            .last_used_at(old)
+            .insert(&conn);
+        LifecycleRowFixture::new("recent-patch-wins")
+            .created_by(CreatedBy::Curator)
+            .last_used_at(old)
+            .last_patched_at(recent)
+            .insert(&conn);
 
         let updated = apply_automatic_transitions(&conn, now, config).unwrap();
 
@@ -618,23 +709,64 @@ mod tests {
             stale_after: TimeDelta::days(7),
             archive_after: TimeDelta::days(30),
         };
-        insert_lifecycle_row(
-            &conn,
-            "created-only-probe",
-            LifecycleState::Active,
-            false,
-            CreatedBy::ProbeWriter,
-            0,
-            0,
-            None,
-            None,
-        );
+        LifecycleRowFixture::new("created-only-probe")
+            .created_by(CreatedBy::ProbeWriter)
+            .insert(&conn);
 
         let updated = apply_automatic_transitions(&conn, now, config).unwrap();
 
         assert_eq!(updated, 0);
         assert_eq!(
             get(&conn, "created-only-probe").unwrap().unwrap().state,
+            LifecycleState::Active
+        );
+    }
+
+    #[test]
+    fn stale_transition_update_rechecks_current_pinned_and_activity() {
+        let conn = migrated_conn();
+        let now = utc("2026-05-23T12:00:00Z");
+        let old = now - TimeDelta::days(20);
+        let stale_cutoff = now - TimeDelta::days(7);
+
+        LifecycleRowFixture::new("pinned-after-selection")
+            .created_by(CreatedBy::ProbeWriter)
+            .last_used_at(old)
+            .insert(&conn);
+        LifecycleRowFixture::new("used-after-selection")
+            .created_by(CreatedBy::Curator)
+            .last_used_at(old)
+            .insert(&conn);
+        let selected = list(&conn).unwrap();
+        assert_eq!(selected.len(), 2);
+
+        set_pinned(&conn, "pinned-after-selection", true).unwrap();
+        bump_use(&conn, "used-after-selection", now).unwrap();
+
+        assert_eq!(
+            transition_active_candidate_to_stale_if_eligible(
+                &conn,
+                "pinned-after-selection",
+                stale_cutoff
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            transition_active_candidate_to_stale_if_eligible(
+                &conn,
+                "used-after-selection",
+                stale_cutoff
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            get(&conn, "pinned-after-selection").unwrap().unwrap().state,
+            LifecycleState::Active
+        );
+        assert_eq!(
+            get(&conn, "used-after-selection").unwrap().unwrap().state,
             LifecycleState::Active
         );
     }

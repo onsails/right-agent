@@ -12,3 +12,4 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 right-db = { path = "../right-db", version = "*" }
+serde_json = { workspace = true }
