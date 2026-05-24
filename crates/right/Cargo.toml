@@ -14,6 +14,7 @@ right-bot = { path = "../bot", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }
 right-config = { path = "../right-config", version = "*" }
 right-db = { path = "../right-db", version = "*" }
+right-lifecycle = { path = "../right-lifecycle", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
 right-memory = { path = "../right-memory", version = "*" }
 right-openshell = { path = "../right-openshell", version = "*" }

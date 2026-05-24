@@ -2856,6 +2856,7 @@ dependencies = [
  "right-codegen",
  "right-config",
  "right-db",
+ "right-lifecycle",
  "right-mcp",
  "right-memory",
  "right-openshell",

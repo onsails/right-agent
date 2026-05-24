@@ -232,6 +232,49 @@ impl RightBackend {
             .map_err(|e| anyhow::anyhow!("mutex poisoned: {e}"))
     }
 
+    async fn lifecycle_created_by(
+        &self,
+        invocation_id: &str,
+    ) -> Result<right_lifecycle::CreatedBy, CallToolResult> {
+        let (kind, _) = match self.progress.learning_send_target(invocation_id).await {
+            Ok(target) => target,
+            Err(crate::progress::ProgressError::Unavailable) => {
+                return Err(tool_error(
+                    "learning_unavailable",
+                    "learning messages are available only for a registered invocation",
+                    None,
+                ));
+            }
+            Err(crate::progress::ProgressError::Forbidden) => {
+                return Err(tool_error(
+                    "learning_unavailable",
+                    "learning messages are unavailable for this invocation kind",
+                    None,
+                ));
+            }
+            Err(crate::progress::ProgressError::RateLimited { .. }) => {
+                return Err(tool_error(
+                    "learning_send_failed",
+                    "internal error: learning target was rate limited",
+                    None,
+                ));
+            }
+        };
+
+        Ok(match kind {
+            crate::progress::ProgressInvocationKind::Foreground => {
+                right_lifecycle::CreatedBy::Foreground
+            }
+            crate::progress::ProgressInvocationKind::BackgroundReview => {
+                right_lifecycle::CreatedBy::Curator
+            }
+            #[cfg(test)]
+            crate::progress::ProgressInvocationKind::NonForeground => {
+                right_lifecycle::CreatedBy::Foreground
+            }
+        })
+    }
+
     // ------------------------------------------------------------------
     // Cron tools
     // ------------------------------------------------------------------
@@ -736,6 +779,15 @@ impl RightBackend {
             )?;
         }
 
+        let lifecycle_created_by = if params.status.is_success() {
+            match self.lifecycle_created_by(&invocation_id).await {
+                Ok(created_by) => Some(created_by),
+                Err(result) => return Ok(result),
+            }
+        } else {
+            None
+        };
+
         if params.status.is_success()
             && let Err(result) = crate::learning::send_learning_message(
                 &self.progress,
@@ -748,33 +800,30 @@ impl RightBackend {
             return Ok(result);
         }
 
-        // Update host-side .usage.json for the skill lifecycle subsystem.
-        // Foreground writes via this tool (skill_learning_finish) are tagged
-        // `created_by="foreground"`. Probe-writer/curator writes go through
-        // the same tool but the invocation context is not yet wired to
-        // differentiate; v1 falls back to "foreground" for all skill_learning_*
-        // invocations (probe-writer/curator are background callers that will
-        // be distinguished in a follow-up via a new invocation-kind hint).
-        if params.status.is_success() {
-            let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-            let usage_path = agent_dir.join(".claude/skills/.usage.json");
+        if let Some(created_by) = lifecycle_created_by {
+            let now_utc = chrono::Utc::now();
+            let conn_arc = self.get_conn(agent_name)?;
+            let conn = Self::lock_conn(&conn_arc)?;
             let outcome = match params.status.as_str() {
-                "created" => crate::skill_lifecycle::mark_created_foreground(
-                    &usage_path,
-                    &params.skill_name,
-                    &now_utc,
-                ),
+                "created" => {
+                    right_lifecycle::mark_created(&conn, &params.skill_name, created_by, now_utc)
+                }
                 "updated" => {
-                    crate::skill_lifecycle::bump_patch(&usage_path, &params.skill_name, &now_utc)
+                    right_lifecycle::bump_patch(&conn, &params.skill_name, created_by, now_utc)
                 }
                 _ => Ok(()),
             };
             if let Err(e) = outcome {
-                tracing::warn!(
+                tracing::error!(
                     agent = %agent_name,
                     skill = %params.skill_name,
-                    "skill lifecycle usage write failed: {e:#}"
+                    "skill lifecycle write failed: {e:#}"
                 );
+                return Ok(tool_error(
+                    "skill_lifecycle_write_failed",
+                    format!("{e:#}"),
+                    None,
+                ));
             }
         }
 
