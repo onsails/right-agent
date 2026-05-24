@@ -37,18 +37,8 @@ head -c "$3" "$file""#;
 pub(super) enum SkillDetailError {
     #[error(transparent)]
     Inventory(#[from] SkillInventoryError),
-    #[error(transparent)]
-    Lifecycle(#[from] SkillLifecycleReadError),
     #[error("sandbox skill detail failed: {0}")]
     Sandbox(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(super) enum SkillsOverviewError {
-    #[error(transparent)]
-    Inventory(#[from] SkillInventoryError),
-    #[error(transparent)]
-    Lifecycle(#[from] SkillLifecycleReadError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -81,11 +71,11 @@ pub(super) enum SkillLifecycleReadError {
 
 pub(super) async fn skills_response(
     state: &DashboardState,
-) -> Result<SkillsResponse, SkillsOverviewError> {
+) -> Result<SkillsResponse, SkillInventoryError> {
     if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
         match scan_sandbox_skills(&state.agent_name, sandbox_exec).await {
             Ok(mut response) => {
-                enrich_skills_response(state, &mut response).await?;
+                try_enrich_skills_response(state, &mut response).await;
                 return Ok(response);
             }
             Err(error) => {
@@ -99,7 +89,7 @@ pub(super) async fn skills_response(
                 response.warning = Some(format!(
                     "sandbox skill scan failed; showing host skills: {error:#}"
                 ));
-                enrich_skills_response(state, &mut response).await?;
+                try_enrich_skills_response(state, &mut response).await;
                 return Ok(response);
             }
         }
@@ -112,7 +102,7 @@ pub(super) async fn skills_response(
         "host",
         SKILL_PREVIEW_LIMIT_BYTES,
     )?;
-    enrich_skills_response(state, &mut response).await?;
+    try_enrich_skills_response(state, &mut response).await;
     Ok(response)
 }
 
@@ -124,7 +114,7 @@ pub(super) async fn skill_detail_response(
     if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
         let mut response =
             read_sandbox_skill_detail(&state.agent_name, sandbox_exec, skill_name).await?;
-        enrich_skill_summary(state, &mut response.skill).await?;
+        try_enrich_skill_summary(state, &mut response.skill).await;
         return Ok(response);
     }
 
@@ -135,7 +125,7 @@ pub(super) async fn skill_detail_response(
         right_codegen::BUILTIN_SKILL_NAMES,
         SKILL_PREVIEW_LIMIT_BYTES,
     )?;
-    enrich_skill_summary(state, &mut response.skill).await?;
+    try_enrich_skill_summary(state, &mut response.skill).await;
     Ok(response)
 }
 
@@ -317,26 +307,37 @@ fn push_skill_summary(
     }
 }
 
-async fn enrich_skills_response(
-    state: &DashboardState,
-    response: &mut SkillsResponse,
-) -> Result<(), SkillLifecycleReadError> {
-    let lifecycle_rows = lifecycle_rows_by_name(state.agent_dir.clone()).await?;
-    enrich_group(&mut response.groups.core, &lifecycle_rows);
-    enrich_group(&mut response.groups.learned, &lifecycle_rows);
-    enrich_group(&mut response.groups.other, &lifecycle_rows);
-    Ok(())
+async fn try_enrich_skills_response(state: &DashboardState, response: &mut SkillsResponse) {
+    match lifecycle_rows_by_name(state.agent_dir.clone()).await {
+        Ok(lifecycle_rows) => {
+            enrich_group(&mut response.groups.core, &lifecycle_rows);
+            enrich_group(&mut response.groups.learned, &lifecycle_rows);
+            enrich_group(&mut response.groups.other, &lifecycle_rows);
+        }
+        Err(error) => {
+            tracing::warn!(
+                agent = %state.agent_name,
+                "dashboard skill lifecycle enrichment skipped: {error:#}",
+            );
+        }
+    }
 }
 
-async fn enrich_skill_summary(
-    state: &DashboardState,
-    skill: &mut SkillSummary,
-) -> Result<(), SkillLifecycleReadError> {
-    let lifecycle_rows = lifecycle_rows_by_name(state.agent_dir.clone()).await?;
-    if let Some(row) = lifecycle_rows.get(&skill.name) {
-        skill.apply_lifecycle(row);
+async fn try_enrich_skill_summary(state: &DashboardState, skill: &mut SkillSummary) {
+    match lifecycle_rows_by_name(state.agent_dir.clone()).await {
+        Ok(lifecycle_rows) => {
+            if let Some(row) = lifecycle_rows.get(&skill.name) {
+                skill.apply_lifecycle(row);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                agent = %state.agent_name,
+                skill = %skill.name,
+                "dashboard skill lifecycle enrichment skipped: {error:#}",
+            );
+        }
     }
-    Ok(())
 }
 
 fn enrich_group(
