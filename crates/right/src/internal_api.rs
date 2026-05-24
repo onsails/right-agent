@@ -423,6 +423,10 @@ async fn handle_progress_register(
         ProgressInvocationKindDto::BackgroundReview => {
             crate::progress::ProgressInvocationKind::BackgroundReview
         }
+        ProgressInvocationKindDto::ProbeWriter => {
+            crate::progress::ProgressInvocationKind::ProbeWriter
+        }
+        ProgressInvocationKindDto::Curator => crate::progress::ProgressInvocationKind::Curator,
     };
     let conversation_scope = match (req.chat_id, req.thread_id) {
         (Some(chat_id), Some(thread_id)) => {
@@ -941,6 +945,54 @@ mod tests {
                 thread_id: 7
             }
         );
+    }
+
+    #[tokio::test]
+    async fn progress_invocation_kind_register_maps_probe_writer_and_curator() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path());
+        let cases = [
+            (
+                "probe-writer-inv",
+                "probe_writer",
+                crate::progress::ProgressInvocationKind::ProbeWriter,
+            ),
+            (
+                "curator-inv",
+                "curator",
+                crate::progress::ProgressInvocationKind::Curator,
+            ),
+        ];
+
+        for (invocation_id, kind_json, expected_kind) in cases {
+            let (status, body) = send_json(
+                app.clone(),
+                "/progress/register",
+                serde_json::json!({
+                    "agent": "test-agent",
+                    "invocation_id": invocation_id,
+                    "kind": kind_json,
+                    "bot_send_token": "send-token",
+                    "chat_id": 100,
+                    "thread_id": 7
+                }),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["ok"], true);
+            let progress = dispatcher
+                .agents
+                .get("test-agent")
+                .expect("test-agent registered")
+                .right
+                .progress_registry();
+            let actual_kind = progress
+                .learning_invocation_kind(invocation_id)
+                .await
+                .expect("background learning invocation registered");
+            assert_eq!(actual_kind, expected_kind);
+        }
     }
 
     #[tokio::test]

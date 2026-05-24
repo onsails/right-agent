@@ -102,11 +102,26 @@ async fn register_foreground_learning(
     invocation_id: &str,
     bot_socket_path: PathBuf,
 ) {
+    register_learning_kind(
+        backend,
+        invocation_id,
+        crate::progress::ProgressInvocationKind::Foreground,
+        bot_socket_path,
+    )
+    .await;
+}
+
+async fn register_learning_kind(
+    backend: &RightBackend,
+    invocation_id: &str,
+    kind: crate::progress::ProgressInvocationKind,
+    bot_socket_path: PathBuf,
+) {
     backend
         .progress_registry()
         .register(crate::progress::ProgressRegistration {
             invocation_id: invocation_id.to_owned(),
-            kind: crate::progress::ProgressInvocationKind::Foreground,
+            kind,
             bot_socket_path,
             bot_send_token: "send-token".to_owned(),
             conversation_scope: None,
@@ -884,6 +899,119 @@ async fn skill_learning_finish_updated_bumps_patch_and_preserves_created_by() {
     assert_eq!(row.patch_count, 1);
     assert_eq!(row.created_at, Some(created_at));
     assert!(row.last_patched_at.is_some(), "last_patched_at must be set");
+}
+
+#[tokio::test]
+async fn skill_learning_start_background_kinds_insert_events_without_telegram_delivery() {
+    let (backend, agents_dir, tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
+        .expect("write agent config");
+    let kinds = [
+        (
+            "inv-probe-start",
+            crate::progress::ProgressInvocationKind::ProbeWriter,
+        ),
+        (
+            "inv-curator-start",
+            crate::progress::ProgressInvocationKind::Curator,
+        ),
+    ];
+
+    for (invocation_id, kind) in kinds {
+        register_learning_kind(
+            &backend,
+            invocation_id,
+            kind,
+            tmp.path().join(format!("{invocation_id}-missing.sock")),
+        )
+        .await;
+
+        let result = backend
+            .tools_call(
+                "test-agent",
+                &agent_dir,
+                "skill_learning_start",
+                json!({
+                    "action": "create",
+                    "skill_name": format!("rightx-{invocation_id}"),
+                    "reason": "background learning should be recorded without Telegram delivery",
+                }),
+                crate::progress::ToolCallContext {
+                    invocation_id: Some(invocation_id.to_owned()),
+                },
+            )
+            .await
+            .expect("tool call should complete");
+
+        assert_eq!(result.is_error, Some(false));
+    }
+
+    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM skill_learning_events WHERE invocation_id IN ('inv-probe-start', 'inv-curator-start')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count learning events");
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn skill_learning_finish_background_kinds_update_lifecycle_without_telegram_delivery() {
+    let (backend, agents_dir, tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let cases = [
+        (
+            "inv-probe-finish",
+            "rightx-probe-finish",
+            crate::progress::ProgressInvocationKind::ProbeWriter,
+            right_lifecycle::CreatedBy::ProbeWriter,
+        ),
+        (
+            "inv-curator-finish",
+            "rightx-curator-finish",
+            crate::progress::ProgressInvocationKind::Curator,
+            right_lifecycle::CreatedBy::Curator,
+        ),
+    ];
+
+    for (invocation_id, skill_name, kind, expected_created_by) in cases {
+        create_host_skill_package(&agent_dir, skill_name);
+        register_learning_kind(
+            &backend,
+            invocation_id,
+            kind,
+            tmp.path().join(format!("{invocation_id}-missing.sock")),
+        )
+        .await;
+
+        let result = backend
+            .tools_call(
+                "test-agent",
+                &agent_dir,
+                "skill_learning_finish",
+                json!({
+                    "action": "create",
+                    "skill_name": skill_name,
+                    "status": "created",
+                    "message": "Background learning recorded this skill.",
+                }),
+                crate::progress::ToolCallContext {
+                    invocation_id: Some(invocation_id.to_owned()),
+                },
+            )
+            .await
+            .expect("tool call should complete");
+
+        assert_eq!(result.is_error, Some(false));
+        let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+        let row = right_lifecycle::get(&conn, skill_name)
+            .expect("read lifecycle")
+            .expect("lifecycle row");
+        assert_eq!(row.created_by, expected_created_by);
+    }
 }
 
 #[tokio::test]

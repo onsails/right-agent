@@ -313,10 +313,7 @@ pub(crate) fn validate_start_message(
     kind: crate::progress::ProgressInvocationKind,
     message: Option<&str>,
 ) -> Result<(), CallToolResult> {
-    if matches!(
-        kind,
-        crate::progress::ProgressInvocationKind::BackgroundReview
-    ) {
+    if !kind.sends_learning_messages() {
         return Ok(());
     }
     validate_nonempty_message("learning start message", message)
@@ -385,14 +382,24 @@ fn validate_nonempty_message(label: &str, message: Option<&str>) -> Result<(), C
     Ok(())
 }
 
+pub(crate) fn should_send_learning_message(
+    kind: crate::progress::ProgressInvocationKind,
+    phase: LearningMessagePhase,
+) -> bool {
+    let phase_sends = match phase {
+        LearningMessagePhase::Start | LearningMessagePhase::FinishSuccess => true,
+    };
+    kind.sends_learning_messages() && phase_sends
+}
+
 pub(crate) async fn send_learning_message(
     progress: &crate::progress::ProgressRegistry,
     invocation_id: &str,
     phase: LearningMessagePhase,
     message: Option<&str>,
 ) -> Result<(), CallToolResult> {
-    let (kind, target) = match progress.learning_send_target(invocation_id).await {
-        Ok(target) => target,
+    let kind = match progress.learning_invocation_kind(invocation_id).await {
+        Ok(kind) => kind,
         Err(crate::progress::ProgressError::Unavailable) => {
             return Err(tool_error(
                 "learning_unavailable",
@@ -416,11 +423,7 @@ pub(crate) async fn send_learning_message(
         }
     };
 
-    if matches!(
-        kind,
-        crate::progress::ProgressInvocationKind::BackgroundReview
-    ) && matches!(phase, LearningMessagePhase::Start)
-    {
+    if !should_send_learning_message(kind, phase) {
         return Ok(());
     }
 
@@ -441,6 +444,31 @@ pub(crate) async fn send_learning_message(
             None,
         ));
     }
+
+    let (_, target) = match progress.learning_send_target(invocation_id).await {
+        Ok(target) => target,
+        Err(crate::progress::ProgressError::Unavailable) => {
+            return Err(tool_error(
+                "learning_unavailable",
+                "learning messages are available only for a registered invocation",
+                None,
+            ));
+        }
+        Err(crate::progress::ProgressError::Forbidden) => {
+            return Err(tool_error(
+                "learning_unavailable",
+                "learning messages are unavailable for this invocation kind",
+                None,
+            ));
+        }
+        Err(crate::progress::ProgressError::RateLimited { .. }) => {
+            return Err(tool_error(
+                "learning_send_failed",
+                "internal error: learning target was rate limited",
+                None,
+            ));
+        }
+    };
 
     let client = InternalClient::new(target.bot_socket_path);
     let request = ProgressSendRequest {
