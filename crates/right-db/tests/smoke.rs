@@ -22,10 +22,10 @@ fn open_connection_applies_migrations() {
     );
     // After migrations, the current sessions table should exist.
     let count: i64 = conn
-        .query_row(
+        .query_one(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
-            [],
-            |r| r.get(0),
+            (),
+            |row| row.get(0),
         )
         .unwrap();
     assert_eq!(count, 1, "sessions table should exist");
@@ -66,15 +66,30 @@ fn open_connection_without_migration_preserves_existing_schema() {
 }
 
 #[test]
+fn libsql_open_connection_creates_file_and_preserves_local_path() {
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), false).unwrap();
+
+    assert!(
+        dir.path().join("data.db").exists(),
+        "local libsql open should create data.db",
+    );
+
+    conn.execute_batch("CREATE TABLE local_probe (id INTEGER PRIMARY KEY)")
+        .unwrap();
+    assert_eq!(query_table_count(&conn, "local_probe"), 1);
+}
+
+#[test]
 fn open_connection_sets_sqlite_pragmas() {
     let dir = tempdir().unwrap();
     let conn = open_connection(dir.path(), false).unwrap();
 
     let journal_mode: String = conn
-        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .query_one("PRAGMA journal_mode", (), |row| row.get(0))
         .unwrap();
     let busy_timeout_ms: i64 = conn
-        .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+        .query_one("PRAGMA busy_timeout", (), |row| row.get(0))
         .unwrap();
 
     assert_eq!(journal_mode.to_lowercase(), "wal");
@@ -82,15 +97,18 @@ fn open_connection_sets_sqlite_pragmas() {
 }
 
 #[test]
-fn open_connection_readonly_requires_existing_db() {
+fn libsql_open_connection_readonly_requires_existing_db() {
     let dir = tempdir().unwrap();
 
     let err = open_connection_readonly(dir.path()).expect_err("missing db should not open");
 
-    assert!(err.to_string().contains("unable to open database file"));
     assert!(
         !dir.path().join("data.db").exists(),
         "readonly open must not create data.db",
+    );
+    assert!(
+        err.is_open_error(),
+        "expected readonly open failure, got {err:?}"
     );
 }
 
@@ -106,7 +124,7 @@ fn open_connection_readonly_rejects_writes() {
     );
 
     let err = conn
-        .execute("CREATE TABLE write_probe (id INTEGER)", [])
+        .execute("CREATE TABLE write_probe (id INTEGER)", ())
         .expect_err("readonly connection should reject writes");
 
     assert!(err.to_string().contains("readonly database"));
@@ -126,12 +144,21 @@ fn migrations_static_runs_in_memory() {
     MIGRATIONS.to_latest(&mut conn).unwrap();
 }
 
-fn query_user_version(conn: &rusqlite::Connection) -> i64 {
-    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+fn query_user_version(conn: &right_db::Connection) -> i64 {
+    conn.query_one("PRAGMA user_version", (), |row| row.get(0))
         .unwrap()
 }
 
-fn query_table_count(conn: &rusqlite::Connection, table_name: &str) -> i64 {
+fn query_table_count(conn: &right_db::Connection, table_name: &str) -> i64 {
+    conn.query_one(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+        [table_name],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn query_rusqlite_table_count(conn: &rusqlite::Connection, table_name: &str) -> i64 {
     conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
         [table_name],
@@ -177,12 +204,12 @@ fn schema_has_conversation_messages_tables() {
     let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
 
     assert_eq!(
-        query_table_count(&conn, "conversation_messages"),
+        query_rusqlite_table_count(&conn, "conversation_messages"),
         1,
         "conversation_messages table should exist"
     );
     assert_eq!(
-        query_table_count(&conn, "conversation_messages_fts"),
+        query_rusqlite_table_count(&conn, "conversation_messages_fts"),
         1,
         "conversation_messages_fts table should exist"
     );
@@ -227,19 +254,19 @@ fn schema_has_async_runs_table_and_no_cron_runs_table() {
     let conn = right_db::open_connection(dir.path(), true).expect("open db");
 
     let async_count: i64 = conn
-        .query_row(
+        .query_one(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='async_runs'",
-            [],
-            |r| r.get(0),
+            (),
+            |row| row.get(0),
         )
         .unwrap();
     assert_eq!(async_count, 1, "async_runs table should exist");
 
     let cron_count: i64 = conn
-        .query_row(
+        .query_one(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='cron_runs'",
-            [],
-            |r| r.get(0),
+            (),
+            |row| row.get(0),
         )
         .unwrap();
     assert_eq!(cron_count, 0, "cron_runs table should be removed");
@@ -258,7 +285,7 @@ fn async_runs_insert_and_update() {
             'run-1', 'cron', 'deploy-check', 'run-1', -100, 'running',
             0, 'none', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z'
          )",
-        [],
+        (),
     )
     .unwrap();
 
@@ -266,15 +293,15 @@ fn async_runs_insert_and_update() {
         "UPDATE async_runs
          SET finished_at='2026-04-01T00:01:00Z', exit_code=0, status='success'
          WHERE id='run-1'",
-        [],
+        (),
     )
     .unwrap();
 
     let row: (Option<String>, Option<i64>, String) = conn
-        .query_row(
+        .query_one(
             "SELECT finished_at, exit_code, status FROM async_runs WHERE id='run-1'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            (),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
     assert_eq!(row.0.as_deref(), Some("2026-04-01T00:01:00Z"));
@@ -390,9 +417,9 @@ fn open_connection_returns_live_connection() {
     let conn = open_connection(dir.path(), true).unwrap();
     // Verify memories table is accessible
     let count: i64 = conn
-        .query_row(
+        .query_one(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memories'",
-            [],
+            (),
             |row| row.get(0),
         )
         .unwrap();
