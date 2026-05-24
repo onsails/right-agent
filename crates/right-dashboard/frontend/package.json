@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "vitest run",
     "typecheck": "vue-tsc --noEmit",
     "build": "vue-tsc --noEmit && vite build"
   },
@@ -14,5 +15,8 @@
     "vue": "latest",
     "vue-echarts": "^8.0.1",
     "vue-tsc": "latest"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.7"
   }
 }
