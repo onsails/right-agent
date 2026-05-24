@@ -521,13 +521,21 @@ pub struct SkillSummary {
     pub group: String,
     pub path: String,
     pub description: Option<String>,
+    #[serde(default)]
     pub state: Option<SkillLifecycleState>,
+    #[serde(default)]
     pub pinned: bool,
+    #[serde(default)]
     pub created_by: Option<SkillCreatedBy>,
+    #[serde(default)]
     pub use_count: i64,
+    #[serde(default)]
     pub patch_count: i64,
+    #[serde(default)]
     pub created_at: Option<String>,
+    #[serde(default)]
     pub last_used_at: Option<String>,
+    #[serde(default)]
     pub last_patched_at: Option<String>,
 }
 
@@ -773,6 +781,26 @@ mod dashboard_v2_tests {
                 "sandbox_stats": true,
             })
         );
+    }
+
+    #[test]
+    fn skill_lifecycle_summary_deserializes_minimal_legacy_json() {
+        let summary: SkillSummary = serde_json::from_value(json!({
+            "name": "rightx-oauth-debugging",
+            "group": "learned",
+            "path": ".claude/skills/rightx-oauth-debugging/SKILL.md",
+            "description": "Learned OAuth flow."
+        }))
+        .unwrap();
+
+        assert_eq!(summary.state, None);
+        assert!(!summary.pinned);
+        assert_eq!(summary.created_by, None);
+        assert_eq!(summary.use_count, 0);
+        assert_eq!(summary.patch_count, 0);
+        assert_eq!(summary.created_at, None);
+        assert_eq!(summary.last_used_at, None);
+        assert_eq!(summary.last_patched_at, None);
     }
 
     #[test]

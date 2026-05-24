@@ -568,11 +568,23 @@ async fn handle_pin_skill(
     AxumPath((agent, skill_name)): AxumPath<(String, String)>,
     State(state): State<DashboardState>,
     headers: HeaderMap,
-    Json(request): Json<PinSkillRequest>,
+    body: axum::body::Bytes,
 ) -> Response {
     if let Err(error) = authenticate_api(&state, &agent, &headers) {
         return error.into_response();
     }
+
+    let request: PinSkillRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(agent = %state.agent_name, skill = %skill_name, "dashboard skill pin rejected malformed request body: {error:#}");
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                Some("invalid pin request body"),
+            );
+        }
+    };
 
     match skills::pin_skill_response(&state, &skill_name, request.pinned).await {
         Ok(response) => Json(response).into_response(),
@@ -1074,6 +1086,36 @@ mod tests {
         (status, value)
     }
 
+    async fn patch_raw(
+        path: &str,
+        auth: Option<String>,
+        agent_dir: std::path::PathBuf,
+        body: &'static str,
+    ) -> (StatusCode, serde_json::Value) {
+        let router = super::build_dashboard_router(test_state(agent_dir));
+        let mut builder = Request::builder()
+            .uri(path)
+            .method("PATCH")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(auth) = auth {
+            builder = builder.header(header::AUTHORIZATION, format!("tma {auth}"));
+        }
+        let response = router
+            .oneshot(builder.body(Body::from(body)).expect("valid request"))
+            .await
+            .expect("router response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .expect("body bytes");
+        let value = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).expect("json response")
+        };
+        (status, value)
+    }
+
     fn write_skill(agent_dir: &std::path::Path, skill_name: &str) {
         let skill_dir = agent_dir.join(".claude").join("skills").join(skill_name);
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -1500,6 +1542,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skills_route_uses_neutral_lifecycle_when_db_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_skill(temp.path(), "rightx-oauth-debugging");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/knowledge/skills",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["groups"]["learned"][0]["name"],
+            "rightx-oauth-debugging"
+        );
+        assert_eq!(
+            body["groups"]["learned"][0]["state"],
+            serde_json::Value::Null
+        );
+        assert_eq!(body["groups"]["learned"][0]["pinned"], false);
+        assert_eq!(
+            body["groups"]["learned"][0]["created_by"],
+            serde_json::Value::Null
+        );
+        assert_eq!(body["groups"]["learned"][0]["use_count"], 0);
+        assert_eq!(body["groups"]["learned"][0]["patch_count"], 0);
+    }
+
+    #[tokio::test]
     async fn skill_detail_route_returns_host_skill_preview() {
         let temp = tempfile::tempdir().expect("tempdir");
         let skill_dir = temp
@@ -1538,6 +1610,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skill_detail_uses_neutral_lifecycle_when_table_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_skill(temp.path(), "rightx-oauth-debugging");
+        let _conn = right_db::open_connection(temp.path(), false).expect("open unmigrated db");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["skill"]["name"], "rightx-oauth-debugging");
+        assert_eq!(body["skill"]["state"], serde_json::Value::Null);
+        assert_eq!(body["skill"]["pinned"], false);
+        assert_eq!(body["skill"]["created_by"], serde_json::Value::Null);
+        assert_eq!(body["skill"]["use_count"], 0);
+        assert_eq!(body["skill"]["patch_count"], 0);
+    }
+
+    #[tokio::test]
     async fn skill_detail_route_rejects_invalid_skill_name() {
         let temp = tempfile::tempdir().expect("tempdir");
 
@@ -1561,6 +1655,22 @@ mod tests {
             None,
             temp.path().to_path_buf(),
             json!({ "pinned": true }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn dashboard_skill_pin_rejects_missing_auth_before_malformed_json() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let (status, body) = patch_raw(
+            "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging/pin",
+            None,
+            temp.path().to_path_buf(),
+            "{malformed",
         )
         .await;
 
