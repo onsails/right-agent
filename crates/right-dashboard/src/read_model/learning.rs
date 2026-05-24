@@ -972,83 +972,78 @@ fn recent_learning_signals(
     Ok(signals.into_iter().map(|(_, _, signal)| signal).collect())
 }
 
-/// Compute the skill-lifecycle overview from the host-side `.usage.json` file
-/// produced by the lifecycle subsystem. Returns empty counts when the file is
-/// absent or empty. Other I/O errors (permission denied, etc.) propagate per
-/// FAIL FAST.
+/// Compute the skill-lifecycle overview from the per-agent lifecycle table.
 pub fn skill_lifecycle_overview(
+    conn: &Connection,
     agent: &str,
-    usage_path: &std::path::Path,
 ) -> Result<crate::api_types::SkillLifecycleOverviewResponse, ReadModelError> {
-    let content = match std::fs::read_to_string(usage_path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let parsed: serde_json::Value = if content.trim().is_empty() {
-        serde_json::Value::Object(Default::default())
-    } else {
-        serde_json::from_str(&content)?
-    };
-
     let mut total_active = 0;
     let mut total_stale = 0;
     let mut total_archived = 0;
-    let mut agent_created_active = 0;
+    let mut pinned_count = 0;
+    let mut probe_writer_active = 0;
+    let mut curator_active = 0;
     let mut foreground_active = 0;
     let mut bundled_active = 0;
     let mut recently_used: Vec<crate::api_types::RecentSkill> = Vec::new();
 
-    if let Some(map) = parsed.as_object() {
-        for (name, record) in map {
-            let state = record
-                .get("state")
-                .and_then(|v| v.as_str())
-                .unwrap_or("active");
-            let created_by = record
-                .get("created_by")
-                .and_then(|v| v.as_str())
-                .unwrap_or("foreground");
-            match state {
-                "active" => total_active += 1,
-                "stale" => total_stale += 1,
-                "archived" => total_archived += 1,
+    let mut stmt = conn.prepare(
+        "SELECT skill_name, state, pinned, created_by, use_count, last_used_at
+         FROM skill_lifecycle",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let skill_name: String = row.get(0)?;
+        let state: String = row.get(1)?;
+        let pinned: i64 = row.get(2)?;
+        let created_by: String = row.get(3)?;
+        let use_count: i64 = row.get(4)?;
+        let last_used_at: Option<String> = row.get(5)?;
+
+        match state.as_str() {
+            "active" => total_active += 1,
+            "stale" => total_stale += 1,
+            "archived" => total_archived += 1,
+            _ => {}
+        }
+        if pinned != 0 {
+            pinned_count += 1;
+        }
+        if state == "active" {
+            match created_by.as_str() {
+                "probe_writer" => probe_writer_active += 1,
+                "curator" => curator_active += 1,
+                "foreground" => foreground_active += 1,
+                "bundled" => bundled_active += 1,
                 _ => {}
             }
-            if state == "active" {
-                match created_by {
-                    "probe_writer" | "curator" => agent_created_active += 1,
-                    "foreground" => foreground_active += 1,
-                    "bundled" => bundled_active += 1,
-                    _ => {}
-                }
-            }
-            let use_count = record
-                .get("use_count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let last_used_at = record
-                .get("last_used_at")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
-            if use_count > 0 {
-                recently_used.push(crate::api_types::RecentSkill {
-                    package_name: name.clone(),
-                    use_count,
-                    last_used_at,
-                });
-            }
+        }
+        if use_count > 0 {
+            recently_used.push(crate::api_types::RecentSkill {
+                package_name: skill_name,
+                use_count: use_count as u64,
+                last_used_at,
+            });
         }
     }
-    recently_used.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
+    recently_used.sort_by(|a, b| {
+        b.last_used_at
+            .cmp(&a.last_used_at)
+            .then_with(|| b.use_count.cmp(&a.use_count))
+            .then_with(|| a.package_name.cmp(&b.package_name))
+    });
     recently_used.truncate(20);
+    let agent_created_active = probe_writer_active + curator_active;
 
     Ok(crate::api_types::SkillLifecycleOverviewResponse {
         agent: agent.to_owned(),
         total_active,
         total_stale,
         total_archived,
+        pinned_count,
         agent_created_active,
+        probe_writer_active,
+        curator_active,
         foreground_active,
         bundled_active,
         recently_used,
@@ -2566,40 +2561,129 @@ mod tests {
     }
 
     #[test]
-    fn skill_lifecycle_overview_counts_by_state_and_provenance() {
-        use tempfile::TempDir;
+    fn skill_lifecycle_overview_reads_db_counts_and_provenance() {
+        let (_dir, conn) = fixture();
+        insert_skill_lifecycle_row(
+            &conn,
+            "rightx-foo",
+            "active",
+            true,
+            "probe_writer",
+            5,
+            0,
+            Some("2026-05-22T10:00:00Z"),
+            None,
+        );
+        insert_skill_lifecycle_row(
+            &conn,
+            "rightx-curated",
+            "active",
+            false,
+            "curator",
+            1,
+            2,
+            Some("2026-05-23T10:00:00Z"),
+            Some("2026-05-23T11:00:00Z"),
+        );
+        insert_skill_lifecycle_row(
+            &conn,
+            "rightx-bar",
+            "stale",
+            false,
+            "probe_writer",
+            0,
+            0,
+            None,
+            None,
+        );
+        insert_skill_lifecycle_row(
+            &conn,
+            "rightx-baz",
+            "archived",
+            false,
+            "probe_writer",
+            1,
+            0,
+            Some("2026-05-15T10:00:00Z"),
+            None,
+        );
+        insert_skill_lifecycle_row(
+            &conn,
+            "rightx-explicit",
+            "active",
+            false,
+            "foreground",
+            0,
+            0,
+            None,
+            None,
+        );
+        insert_skill_lifecycle_row(
+            &conn,
+            "rightx-bundled",
+            "active",
+            false,
+            "bundled",
+            0,
+            0,
+            None,
+            None,
+        );
 
-        let dir = TempDir::new().unwrap();
-        let usage_path = dir.path().join(".usage.json");
-        let json = r#"{
-            "rightx-foo": {"state": "active", "created_by": "probe_writer", "use_count": 5, "last_used_at": "2026-05-22T10:00:00Z"},
-            "rightx-bar": {"state": "stale", "created_by": "probe_writer", "use_count": 0},
-            "rightx-baz": {"state": "archived", "created_by": "probe_writer", "use_count": 1, "last_used_at": "2026-05-15T10:00:00Z"},
-            "rightx-explicit": {"state": "active", "created_by": "foreground"},
-            "rightx-bundled": {"state": "active", "created_by": "bundled"}
-        }"#;
-        std::fs::write(&usage_path, json).unwrap();
+        let resp = skill_lifecycle_overview(&conn, "right").unwrap();
 
-        let resp = skill_lifecycle_overview("right", &usage_path).unwrap();
-        assert_eq!(resp.total_active, 3); // foo + explicit + bundled
+        assert_eq!(resp.total_active, 4);
         assert_eq!(resp.total_stale, 1);
         assert_eq!(resp.total_archived, 1);
-        assert_eq!(resp.agent_created_active, 1); // foo only
-        assert_eq!(resp.foreground_active, 1); // explicit
+        assert_eq!(resp.pinned_count, 1);
+        assert_eq!(resp.agent_created_active, 2);
+        assert_eq!(resp.probe_writer_active, 1);
+        assert_eq!(resp.curator_active, 1);
+        assert_eq!(resp.foreground_active, 1);
         assert_eq!(resp.bundled_active, 1);
-        // recently_used includes only entries with use_count > 0; sorted by last_used_at desc.
-        assert_eq!(resp.recently_used.len(), 2);
-        assert_eq!(resp.recently_used[0].package_name, "rightx-foo");
+        assert_eq!(resp.recently_used.len(), 3);
+        assert_eq!(resp.recently_used[0].package_name, "rightx-curated");
+        assert_eq!(resp.recently_used[0].use_count, 1);
     }
 
     #[test]
-    fn skill_lifecycle_overview_empty_when_file_missing() {
-        let resp =
-            skill_lifecycle_overview("right", std::path::Path::new("/nonexistent/.usage.json"))
-                .unwrap();
+    fn skill_lifecycle_overview_empty_when_table_has_no_rows() {
+        let (_dir, conn) = fixture();
+        let resp = skill_lifecycle_overview(&conn, "right").unwrap();
         assert_eq!(resp.total_active, 0);
         assert_eq!(resp.total_stale, 0);
         assert_eq!(resp.total_archived, 0);
+        assert_eq!(resp.pinned_count, 0);
         assert!(resp.recently_used.is_empty());
+    }
+
+    fn insert_skill_lifecycle_row(
+        conn: &Connection,
+        skill_name: &str,
+        state: &str,
+        pinned: bool,
+        created_by: &str,
+        use_count: i64,
+        patch_count: i64,
+        last_used_at: Option<&str>,
+        last_patched_at: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO skill_lifecycle (
+                skill_name, state, pinned, created_by, use_count, patch_count,
+                created_at, last_used_at, last_patched_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '2026-04-01T00:00:00Z', ?7, ?8)",
+            (
+                skill_name,
+                state,
+                i64::from(pinned),
+                created_by,
+                use_count,
+                patch_count,
+                last_used_at,
+                last_patched_at,
+            ),
+        )
+        .unwrap();
     }
 }

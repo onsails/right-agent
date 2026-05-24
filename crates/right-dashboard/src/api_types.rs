@@ -521,6 +521,91 @@ pub struct SkillSummary {
     pub group: String,
     pub path: String,
     pub description: Option<String>,
+    pub state: Option<SkillLifecycleState>,
+    pub pinned: bool,
+    pub created_by: Option<SkillCreatedBy>,
+    pub use_count: i64,
+    pub patch_count: i64,
+    pub created_at: Option<String>,
+    pub last_used_at: Option<String>,
+    pub last_patched_at: Option<String>,
+}
+
+impl SkillSummary {
+    pub fn new(name: String, group: String, path: String, description: Option<String>) -> Self {
+        Self {
+            name,
+            group,
+            path,
+            description,
+            state: None,
+            pinned: false,
+            created_by: None,
+            use_count: 0,
+            patch_count: 0,
+            created_at: None,
+            last_used_at: None,
+            last_patched_at: None,
+        }
+    }
+
+    pub fn apply_lifecycle(&mut self, row: &right_lifecycle::SkillLifecycleRow) {
+        self.state = Some(row.state.into());
+        self.pinned = row.pinned;
+        self.created_by = Some(row.created_by.into());
+        self.use_count = row.use_count;
+        self.patch_count = row.patch_count;
+        self.created_at = row
+            .created_at
+            .as_ref()
+            .map(|timestamp| timestamp.to_rfc3339());
+        self.last_used_at = row
+            .last_used_at
+            .as_ref()
+            .map(|timestamp| timestamp.to_rfc3339());
+        self.last_patched_at = row
+            .last_patched_at
+            .as_ref()
+            .map(|timestamp| timestamp.to_rfc3339());
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillLifecycleState {
+    Active,
+    Stale,
+    Archived,
+}
+
+impl From<right_lifecycle::LifecycleState> for SkillLifecycleState {
+    fn from(value: right_lifecycle::LifecycleState) -> Self {
+        match value {
+            right_lifecycle::LifecycleState::Active => Self::Active,
+            right_lifecycle::LifecycleState::Stale => Self::Stale,
+            right_lifecycle::LifecycleState::Archived => Self::Archived,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillCreatedBy {
+    Foreground,
+    ProbeWriter,
+    Curator,
+    Bundled,
+}
+
+impl From<right_lifecycle::CreatedBy> for SkillCreatedBy {
+    fn from(value: right_lifecycle::CreatedBy) -> Self {
+        match value {
+            right_lifecycle::CreatedBy::Foreground => Self::Foreground,
+            right_lifecycle::CreatedBy::ProbeWriter => Self::ProbeWriter,
+            right_lifecycle::CreatedBy::Curator => Self::Curator,
+            right_lifecycle::CreatedBy::Bundled => Self::Bundled,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -529,6 +614,17 @@ pub struct SkillDetailResponse {
     pub skill: SkillSummary,
     pub content_preview: String,
     pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PinSkillRequest {
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PinSkillResponse {
+    pub skill_name: String,
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -621,7 +717,10 @@ pub struct SkillLifecycleOverviewResponse {
     pub total_active: i64,
     pub total_stale: i64,
     pub total_archived: i64,
+    pub pinned_count: i64,
     pub agent_created_active: i64,
+    pub probe_writer_active: i64,
+    pub curator_active: i64,
     pub foreground_active: i64,
     pub bundled_active: i64,
     pub recently_used: Vec<RecentSkill>,

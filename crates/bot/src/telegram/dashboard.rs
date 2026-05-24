@@ -4,9 +4,9 @@ use axum::Json;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, patch};
 use right_dashboard::api_types::{
-    ApiErrorBody, BootstrapResponse, DashboardFeatures, ForegroundActivity,
+    ApiErrorBody, BootstrapResponse, DashboardFeatures, ForegroundActivity, PinSkillRequest,
 };
 use right_dashboard::auth::{
     AuthError, DashboardUser, InitDataValidation, authorize_user, validate_init_data,
@@ -130,6 +130,10 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
         .route(
             "/dashboard/{agent}/api/v1/knowledge/skills/{skill_name}",
             get(handle_skill_detail),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/knowledge/skills/{skill_name}/pin",
+            patch(handle_pin_skill),
         )
         .route(
             "/dashboard/{agent}/api/v1/identity",
@@ -485,36 +489,22 @@ async fn handle_learning_skill_lifecycle(
         return error.into_response();
     }
 
-    // Lifecycle data is host-side .usage.json; no DB connection needed but the
-    // read is synchronous and must run off the tokio reactor.
-    let _ = agent;
     let agent_name = state.agent_name.clone();
-    let usage_path = state.agent_dir.join(".claude/skills/.usage.json");
-    let join_result =
-        tokio::task::spawn_blocking(move || skill_lifecycle_overview(&agent_name, &usage_path))
-            .await;
-    match join_result {
-        Ok(Ok(response)) => Json(response).into_response(),
-        Ok(Err(error)) => {
-            tracing::error!(
-                agent = %state.agent_name,
-                "dashboard skill_lifecycle read failed: {error:#}",
-            );
+    let agent_name_for_query = state.agent_name.clone();
+    match with_dashboard_conn(&state, move |conn| {
+        skill_lifecycle_overview(conn, &agent_name_for_query)
+    })
+    .await
+    {
+        Ok(response) => Json(response).into_response(),
+        Err(DashboardConnError::Open(error)) => error.into_response(),
+        Err(DashboardConnError::Join(error)) => error.into_response(),
+        Err(DashboardConnError::Work(error)) => {
+            tracing::error!(agent = %agent_name, "dashboard skill_lifecycle query failed: {error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "skill_lifecycle_failed",
                 Some("failed to read skill lifecycle"),
-            )
-        }
-        Err(join_error) => {
-            tracing::error!(
-                agent = %state.agent_name,
-                "dashboard skill_lifecycle task panicked: {join_error}",
-            );
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "skill_lifecycle_panic",
-                Some("skill lifecycle task panicked"),
             )
         }
     }
@@ -569,6 +559,48 @@ async fn handle_skill_detail(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "skill_failed",
                 Some("failed to read skill"),
+            )
+        }
+    }
+}
+
+async fn handle_pin_skill(
+    AxumPath((agent, skill_name)): AxumPath<(String, String)>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+    Json(request): Json<PinSkillRequest>,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    match skills::pin_skill_response(&state, &skill_name, request.pinned).await {
+        Ok(response) => Json(response).into_response(),
+        Err(skills::PinSkillError::Inventory(
+            right_dashboard::skill_inventory::SkillInventoryError::InvalidSkillName(_),
+        ))
+        | Err(skills::PinSkillError::NonRightx) => json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_skill_name",
+            Some("skill name is invalid"),
+        ),
+        Err(skills::PinSkillError::Inventory(
+            right_dashboard::skill_inventory::SkillInventoryError::NotFound(_),
+        ))
+        | Err(skills::PinSkillError::LifecycleMissing) => {
+            json_error(StatusCode::NOT_FOUND, "not_found", Some("skill not found"))
+        }
+        Err(skills::PinSkillError::NotCuratorManaged) => json_error(
+            StatusCode::CONFLICT,
+            "skill_not_curator_managed",
+            Some("skill is not curator-managed"),
+        ),
+        Err(error) => {
+            tracing::error!(agent = %state.agent_name, skill = %skill_name, "dashboard skill pin failed: {error:#}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "skill_pin_failed",
+                Some("failed to update skill pin state"),
             )
         }
     }
@@ -1008,6 +1040,65 @@ mod tests {
         (status, value)
     }
 
+    async fn patch_json(
+        path: &str,
+        auth: Option<String>,
+        agent_dir: std::path::PathBuf,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let router = super::build_dashboard_router(test_state(agent_dir));
+        let mut builder = Request::builder()
+            .uri(path)
+            .method("PATCH")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(auth) = auth {
+            builder = builder.header(header::AUTHORIZATION, format!("tma {auth}"));
+        }
+        let response = router
+            .oneshot(
+                builder
+                    .body(Body::from(body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .expect("body bytes");
+        let value = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).expect("json response")
+        };
+        (status, value)
+    }
+
+    fn write_skill(agent_dir: &std::path::Path, skill_name: &str) {
+        let skill_dir = agent_dir.join(".claude").join("skills").join(skill_name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {skill_name}\ndescription: Test skill.\n---\n# {skill_name}\n"),
+        )
+        .unwrap();
+    }
+
+    fn insert_lifecycle_row(
+        conn: &rusqlite::Connection,
+        skill_name: &str,
+        created_by: &str,
+        pinned: bool,
+    ) {
+        conn.execute(
+            "INSERT INTO skill_lifecycle (
+                skill_name, state, pinned, created_by, created_at
+             ) VALUES (?1, 'active', ?2, ?3, '2026-04-01T00:00:00Z')",
+            (skill_name, i64::from(pinned), created_by),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn dashboard_url_strips_scheme_and_trailing_slash() {
         let url = super::dashboard_url("https://right.example.com/", "alpha").unwrap();
@@ -1383,6 +1474,8 @@ mod tests {
             "---\nname: hub-browser\ndescription: Browser automation.\n---\n# Browser\n",
         )
         .unwrap();
+        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "curator", true);
 
         let (status, body) = get_json(
             "/dashboard/alpha/api/v1/knowledge/skills",
@@ -1394,10 +1487,15 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["source"], "host");
         assert_eq!(body["groups"]["core"][0]["name"], "right-cron");
+        assert_eq!(body["groups"]["core"][0]["state"], serde_json::Value::Null);
+        assert_eq!(body["groups"]["core"][0]["pinned"], false);
         assert_eq!(
             body["groups"]["learned"][0]["name"],
             "rightx-oauth-debugging"
         );
+        assert_eq!(body["groups"]["learned"][0]["state"], "active");
+        assert_eq!(body["groups"]["learned"][0]["pinned"], true);
+        assert_eq!(body["groups"]["learned"][0]["created_by"], "curator");
         assert_eq!(body["groups"]["other"][0]["name"], "hub-browser");
     }
 
@@ -1415,6 +1513,8 @@ mod tests {
             "---\nname: rightx-oauth-debugging\ndescription: Learned OAuth flow.\n---\n# OAuth\n",
         )
         .unwrap();
+        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "probe_writer", true);
 
         let (status, body) = get_json(
             "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging",
@@ -1426,6 +1526,9 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["skill"]["name"], "rightx-oauth-debugging");
         assert_eq!(body["skill"]["group"], "learned");
+        assert_eq!(body["skill"]["state"], "active");
+        assert_eq!(body["skill"]["pinned"], true);
+        assert_eq!(body["skill"]["created_by"], "probe_writer");
         assert!(
             body["content_preview"]
                 .as_str()
@@ -1447,6 +1550,148 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid_skill_name");
+    }
+
+    #[tokio::test]
+    async fn dashboard_skill_pin_requires_auth() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging/pin",
+            None,
+            temp.path().to_path_buf(),
+            json!({ "pinned": true }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn dashboard_skill_pin_sets_db_pinned_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_skill(temp.path(), "rightx-oauth-debugging");
+        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "curator", false);
+
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging/pin",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+            json!({ "pinned": true }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["skill_name"], "rightx-oauth-debugging");
+        assert_eq!(body["pinned"], true);
+        let row = right_lifecycle::get(&conn, "rightx-oauth-debugging")
+            .unwrap()
+            .unwrap();
+        assert!(row.pinned);
+    }
+
+    #[tokio::test]
+    async fn dashboard_skill_pin_clears_db_pinned_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_skill(temp.path(), "rightx-oauth-debugging");
+        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "probe_writer", true);
+
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging/pin",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+            json!({ "pinned": false }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["skill_name"], "rightx-oauth-debugging");
+        assert_eq!(body["pinned"], false);
+        let row = right_lifecycle::get(&conn, "rightx-oauth-debugging")
+            .unwrap()
+            .unwrap();
+        assert!(!row.pinned);
+    }
+
+    #[tokio::test]
+    async fn dashboard_skill_pin_returns_404_for_unknown_skill_package() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        insert_lifecycle_row(&conn, "rightx-missing", "curator", false);
+
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/knowledge/skills/rightx-missing/pin",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+            json!({ "pinned": true }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn dashboard_skill_pin_returns_404_for_missing_lifecycle_row() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_skill(temp.path(), "rightx-oauth-debugging");
+        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging/pin",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+            json!({ "pinned": true }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn dashboard_skill_pin_rejects_non_rightx_skill() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_skill(temp.path(), "right-cron");
+        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/knowledge/skills/right-cron/pin",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+            json!({ "pinned": true }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_skill_name");
+    }
+
+    #[tokio::test]
+    async fn dashboard_skill_pin_returns_409_for_non_curator_managed_rows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        for (skill_name, created_by) in [
+            ("rightx-foreground-owned", "foreground"),
+            ("rightx-bundled-owned", "bundled"),
+        ] {
+            write_skill(temp.path(), skill_name);
+            insert_lifecycle_row(&conn, skill_name, created_by, false);
+
+            let (status, body) = patch_json(
+                &format!("/dashboard/alpha/api/v1/knowledge/skills/{skill_name}/pin"),
+                Some(signed_init_data(42)),
+                temp.path().to_path_buf(),
+                json!({ "pinned": true }),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["error"], "skill_not_curator_managed");
+        }
     }
 
     #[tokio::test]

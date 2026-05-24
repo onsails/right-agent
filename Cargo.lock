@@ -3042,6 +3042,7 @@ dependencies = [
  "include_dir",
  "right-agent",
  "right-db",
+ "right-lifecycle",
  "rusqlite",
  "serde",
  "serde_json",
