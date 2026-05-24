@@ -10,6 +10,8 @@ import type {
   LearningOverviewResponse,
   LearningReportDetailResponse,
   OverviewResponse,
+  PinSkillRequest,
+  PinSkillResponse,
   RunDetailResponse,
   SkillDetailResponse,
   SkillsResponse,
@@ -89,6 +91,14 @@ export function skillDetail(skillName: string): Promise<SkillDetailResponse> {
   return requestJson<SkillDetailResponse>(`api/v1/knowledge/skills/${encodeURIComponent(skillName)}`)
 }
 
+export function setSkillPinned(skillName: string, pinned: boolean): Promise<PinSkillResponse> {
+  const body: PinSkillRequest = { pinned }
+  return requestJson<PinSkillResponse>(`api/v1/knowledge/skills/${encodeURIComponent(skillName)}/pin`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
 export function identityFiles(): Promise<IdentityResponse> {
   return requestJson<IdentityResponse>('api/v1/identity')
 }
@@ -105,14 +115,21 @@ export function sandboxStats(): Promise<SandboxStatsResponse> {
   return requestJson<SandboxStatsResponse>('api/v1/health/sandbox')
 }
 
-async function requestJson<T>(path: string): Promise<T> {
+async function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers)
+  headers.set('Authorization', `tma ${window.Telegram?.WebApp?.initData ?? ''}`)
+  if (!headers.has('Accept')) {
+    headers.set('Accept', 'application/json')
+  }
+  if (options.body !== undefined && options.body !== null && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+
   let response: Response
   try {
     response = await fetch(path, {
-      headers: {
-        Authorization: `tma ${window.Telegram?.WebApp?.initData ?? ''}`,
-        Accept: 'application/json',
-      },
+      ...options,
+      headers,
     })
   } catch {
     throw new DashboardApiError('Network unavailable', 0)

@@ -462,11 +462,23 @@ export interface SkillGroups {
   other: SkillSummary[]
 }
 
+export type SkillLifecycleState = 'active' | 'stale' | 'archived'
+
+export type SkillCreatedBy = 'foreground' | 'probe_writer' | 'curator' | 'bundled'
+
 export interface SkillSummary {
   name: string
   group: string
   path: string
   description: string | null
+  state: SkillLifecycleState | null
+  pinned: boolean
+  created_by: SkillCreatedBy | null
+  use_count: number
+  patch_count: number
+  created_at: string | null
+  last_used_at: string | null
+  last_patched_at: string | null
 }
 
 export interface SkillDetailResponse {
@@ -474,6 +486,15 @@ export interface SkillDetailResponse {
   skill: SkillSummary
   content_preview: string
   truncated: boolean
+}
+
+export interface PinSkillRequest {
+  pinned: boolean
+}
+
+export interface PinSkillResponse {
+  skill_name: string
+  pinned: boolean
 }
 
 export interface IdentityResponse {
