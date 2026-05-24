@@ -505,9 +505,9 @@ invocations. It sends a separate Telegram message (max 2000 characters), is
 rate limited to one message every 30 seconds per invocation, and returns
 tool-level errors such as `progress_unavailable`, `progress_forbidden`,
 `progress_rate_limited`, or `progress_send_failed`. Cron, delivery, reflection,
-and background-continuation turns deny foreground-only tools via
-`--disallowedTools`: `mcp__right__send_progress`,
-`mcp__right__skill_learning_start`, and
+and background-continuation turns deny live-invocation tools via
+`--disallowedTools`: foreground-only `mcp__right__send_progress` plus
+learning-invocation-only `mcp__right__skill_learning_start` and
 `mcp__right__skill_learning_finish`.
 
 `mcp__right__thread_search` and `mcp__right__chat_search` are local
@@ -523,10 +523,12 @@ conversation content, not instructions.
 `mcp__right__skill_learning_start` and
 `mcp__right__skill_learning_finish` are metadata/progress/receipt tools for
 the `/right-learn-skill` built-in skill. They validate skill-learning
-provenance, record events, and send foreground learning receipts; they do not
-move skill files from sandbox to host. The active agent writes skill package
-files under `.claude/skills/<skill_name>/`. Create and update both require
-`rightx-*` skill package names.
+provenance, record events, and update lifecycle state; foreground invocations
+also send Telegram learning receipts. Probe-writer and curator invocations
+record events/lifecycle without Telegram learning-message delivery. These tools
+do not move skill files from sandbox to host. The active agent writes skill
+package files under `.claude/skills/<skill_name>/`. Create and update both
+require `rightx-*` skill package names.
 
 Per-turn skill-learning pipeline (the prior fork-probe is removed): after
 every successful foreground reply, the worker runs a Haiku prefilter against
