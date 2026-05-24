@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { setSkillPinned } from '../api'
 import StatusPill from '../components/StatusPill.vue'
 import { shortDate } from '../format'
@@ -21,13 +21,15 @@ const emit = defineEmits<{
 }>()
 
 const pinningSkillName = ref<string | null>(null)
-const pinError = ref<string | null>(null)
+const pinError = ref<{ skillName: string, message: string } | null>(null)
 
 const selectedCanPin = computed(() => props.selectedSkill !== null && canPinSkill(props.selectedSkill.skill))
-const selectedIsPinning = computed(() => pinningSkillName.value === props.selectedSkill?.skill.name)
-
-watch(() => props.selectedSkillName, () => {
-  pinError.value = null
+const pinRequestInFlight = computed(() => pinningSkillName.value !== null)
+const selectedPinError = computed(() => {
+  if (pinError.value?.skillName !== props.selectedSkillName) {
+    return null
+  }
+  return pinError.value.message
 })
 
 function skillsFor(response: SkillsResponse | null, group: SkillGroupName): SkillSummary[] {
@@ -55,7 +57,7 @@ function lifecycleLabel(value: string | null): string {
 
 async function togglePinned(): Promise<void> {
   const skill = props.selectedSkill?.skill
-  if (!skill || !canPinSkill(skill) || pinningSkillName.value !== null) {
+  if (!skill || !canPinSkill(skill) || pinRequestInFlight.value) {
     return
   }
 
@@ -66,7 +68,10 @@ async function togglePinned(): Promise<void> {
     const response = await setSkillPinned(skill.name, targetPinned)
     applyPinnedState(response.skill_name, response.pinned)
   } catch (error) {
-    pinError.value = error instanceof Error ? error.message : 'Skill unavailable'
+    pinError.value = {
+      skillName: skill.name,
+      message: error instanceof Error ? error.message : 'Skill unavailable',
+    }
   } finally {
     if (pinningSkillName.value === skill.name) {
       pinningSkillName.value = null
@@ -139,7 +144,7 @@ function applyPinnedState(skillName: string, pinned: boolean): void {
         </div>
       </header>
       <p v-if="loading" class="muted-line">Loading</p>
-      <p v-else-if="error || pinError" class="notice inline">{{ error ?? pinError }}</p>
+      <p v-else-if="error || selectedPinError" class="notice inline">{{ error ?? selectedPinError }}</p>
       <p v-else-if="!selectedSkill" class="muted-line">No skill selected</p>
       <template v-if="selectedSkill">
         <p class="muted-line">{{ selectedSkill.skill.path }}</p>
@@ -147,10 +152,10 @@ function applyPinnedState(skillName: string, pinned: boolean): void {
           <button
             type="button"
             class="tool-button pin-toggle"
-            :disabled="selectedIsPinning"
+            :disabled="pinRequestInFlight"
             @click="togglePinned"
           >
-            {{ selectedIsPinning ? 'Saving' : (selectedSkill.skill.pinned ? 'Unpin' : 'Pin') }}
+            {{ pinRequestInFlight ? 'Saving' : (selectedSkill.skill.pinned ? 'Unpin' : 'Pin') }}
           </button>
         </div>
         <dl class="meta-grid compact">
