@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -66,6 +66,52 @@ fn create_agent_dir(agents_dir: &std::path::Path, name: &str) -> PathBuf {
     // open_connection will create the DB and run migrations
     let _conn = right_db::open_connection(&agent_dir, true).expect("open memory db");
     agent_dir
+}
+
+fn create_host_skill_package(agent_dir: &Path, skill_name: &str) {
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
+        .expect("write agent config");
+    let skill_dir = agent_dir.join(".claude/skills").join(skill_name);
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(skill_dir.join("SKILL.md"), "# Learned skill\n").expect("write skill");
+}
+
+async fn start_progress_sink(dir: &Path) -> PathBuf {
+    let socket_path = dir.join("progress-sink.sock");
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path).expect("remove stale progress sink socket");
+    }
+    let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind progress sink socket");
+    let app = axum::Router::new().route(
+        "/progress/send",
+        axum::routing::post(|| async {
+            axum::Json(right_mcp::internal_client::ProgressSendResponse {
+                ok: true,
+                message_id: Some(1),
+            })
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app.into_make_service()).await;
+    });
+    socket_path
+}
+
+async fn register_foreground_learning(
+    backend: &RightBackend,
+    invocation_id: &str,
+    bot_socket_path: PathBuf,
+) {
+    backend
+        .progress_registry()
+        .register(crate::progress::ProgressRegistration {
+            invocation_id: invocation_id.to_owned(),
+            kind: crate::progress::ProgressInvocationKind::Foreground,
+            bot_socket_path,
+            bot_send_token: "send-token".to_owned(),
+            conversation_scope: None,
+        })
+        .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -738,6 +784,153 @@ async fn skill_learning_finish_rejects_success_when_package_missing() {
     assert_eq!(result.is_error, Some(true));
     let body = extract_error_body(&result);
     assert_eq!(body["error"]["code"], "skill_package_missing");
+}
+
+#[tokio::test]
+async fn skill_learning_finish_created_updates_lifecycle_with_foreground_provenance() {
+    let (backend, agents_dir, tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let skill_name = "rightx-user-workflow";
+    create_host_skill_package(&agent_dir, skill_name);
+    let socket_path = start_progress_sink(tmp.path()).await;
+    register_foreground_learning(&backend, "inv-created", socket_path).await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_finish",
+            json!({
+                "action": "create",
+                "skill_name": skill_name,
+                "status": "created",
+                "message": "I learned rightx-user-workflow and will use it when this pattern appears again.",
+            }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-created".to_owned()),
+            },
+        )
+        .await
+        .expect("tool call should complete");
+
+    assert_eq!(result.is_error, Some(false));
+    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let row = right_lifecycle::get(&conn, skill_name)
+        .expect("read lifecycle")
+        .expect("lifecycle row");
+    assert_eq!(row.state, right_lifecycle::LifecycleState::Active);
+    assert_eq!(row.created_by, right_lifecycle::CreatedBy::Foreground);
+    assert_eq!(row.patch_count, 0);
+    assert!(row.created_at.is_some(), "created_at must be set");
+    assert_eq!(row.last_patched_at, None);
+
+    let audit_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM skill_learning_events WHERE invocation_id = 'inv-created'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count learning events");
+    assert_eq!(audit_count, 1);
+}
+
+#[tokio::test]
+async fn skill_learning_finish_updated_bumps_patch_and_preserves_created_by() {
+    let (backend, agents_dir, tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let skill_name = "rightx-user-workflow";
+    create_host_skill_package(&agent_dir, skill_name);
+    let created_at = chrono::DateTime::parse_from_rfc3339("2026-05-24T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    {
+        let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+        right_lifecycle::mark_created(
+            &conn,
+            skill_name,
+            right_lifecycle::CreatedBy::Curator,
+            created_at,
+        )
+        .expect("seed lifecycle");
+    }
+    let socket_path = start_progress_sink(tmp.path()).await;
+    register_foreground_learning(&backend, "inv-updated", socket_path).await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_finish",
+            json!({
+                "action": "update",
+                "skill_name": skill_name,
+                "status": "updated",
+                "message": "I updated rightx-user-workflow with the latest workflow details.",
+            }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-updated".to_owned()),
+            },
+        )
+        .await
+        .expect("tool call should complete");
+
+    assert_eq!(result.is_error, Some(false));
+    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let row = right_lifecycle::get(&conn, skill_name)
+        .expect("read lifecycle")
+        .expect("lifecycle row");
+    assert_eq!(row.state, right_lifecycle::LifecycleState::Active);
+    assert_eq!(row.created_by, right_lifecycle::CreatedBy::Curator);
+    assert_eq!(row.patch_count, 1);
+    assert_eq!(row.created_at, Some(created_at));
+    assert!(row.last_patched_at.is_some(), "last_patched_at must be set");
+}
+
+#[tokio::test]
+async fn skill_learning_finish_returns_error_when_lifecycle_write_fails() {
+    let (backend, agents_dir, tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let skill_name = "rightx-user-workflow";
+    create_host_skill_package(&agent_dir, skill_name);
+    {
+        let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+        conn.execute("DROP TABLE skill_lifecycle", [])
+            .expect("drop lifecycle table");
+    }
+    let socket_path = start_progress_sink(tmp.path()).await;
+    register_foreground_learning(&backend, "inv-lifecycle-fails", socket_path).await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_finish",
+            json!({
+                "action": "create",
+                "skill_name": skill_name,
+                "status": "created",
+                "message": "I learned rightx-user-workflow and will use it when this pattern appears again.",
+            }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-lifecycle-fails".to_owned()),
+            },
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "skill_lifecycle_write_failed");
+
+    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let audit_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM skill_learning_events WHERE invocation_id = 'inv-lifecycle-fails'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count learning events");
+    assert_eq!(audit_count, 1);
 }
 
 #[tokio::test]

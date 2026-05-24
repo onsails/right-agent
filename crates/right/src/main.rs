@@ -9,7 +9,6 @@ mod memory_server;
 pub(crate) mod progress;
 mod restore;
 pub(crate) mod right_backend;
-pub(crate) mod skill_lifecycle;
 mod wizard;
 
 /// Source-of-truth list for every interactive prompt label rendered from
@@ -3946,18 +3945,29 @@ async fn cmd_agent_destroy(
     Ok(())
 }
 
-/// Operator-only skill pin/unpin/list-pins helper. Mutates host-side
-/// `.usage.json` directly via [`crate::skill_lifecycle`].
+/// Operator-only skill pin/unpin/list-pins helper.
 fn cmd_agent_skill(home: &Path, command: AgentSkillCommands) -> miette::Result<()> {
     match command {
         AgentSkillCommands::Pin { agent, name } => {
             if !name.starts_with("rightx-") {
                 return Err(miette::miette!("skill name must start with `rightx-`"));
             }
-            let usage_path = right_config::agents_dir(home)
-                .join(&agent)
-                .join(".claude/skills/.usage.json");
-            crate::skill_lifecycle::set_pinned(&usage_path, &name, true)
+            let agent_dir = right_config::agents_dir(home).join(&agent);
+            let conn = right_db::open_connection(&agent_dir, false)
+                .map_err(|e| miette::miette!("open lifecycle db: {e:#}"))?;
+            if right_lifecycle::get(&conn, &name)
+                .map_err(|e| miette::miette!("get lifecycle row: {e:#}"))?
+                .is_none()
+            {
+                right_lifecycle::mark_created(
+                    &conn,
+                    &name,
+                    right_lifecycle::CreatedBy::Foreground,
+                    chrono::Utc::now(),
+                )
+                .map_err(|e| miette::miette!("mark_created: {e:#}"))?;
+            }
+            right_lifecycle::set_pinned(&conn, &name, true)
                 .map_err(|e| miette::miette!("set_pinned: {e:#}"))?;
             println!("pinned: {name}");
             Ok(())
@@ -3966,20 +3976,37 @@ fn cmd_agent_skill(home: &Path, command: AgentSkillCommands) -> miette::Result<(
             if !name.starts_with("rightx-") {
                 return Err(miette::miette!("skill name must start with `rightx-`"));
             }
-            let usage_path = right_config::agents_dir(home)
-                .join(&agent)
-                .join(".claude/skills/.usage.json");
-            crate::skill_lifecycle::set_pinned(&usage_path, &name, false)
+            let agent_dir = right_config::agents_dir(home).join(&agent);
+            let conn = right_db::open_connection(&agent_dir, false)
+                .map_err(|e| miette::miette!("open lifecycle db: {e:#}"))?;
+            if right_lifecycle::get(&conn, &name)
+                .map_err(|e| miette::miette!("get lifecycle row: {e:#}"))?
+                .is_none()
+            {
+                right_lifecycle::mark_created(
+                    &conn,
+                    &name,
+                    right_lifecycle::CreatedBy::Foreground,
+                    chrono::Utc::now(),
+                )
+                .map_err(|e| miette::miette!("mark_created: {e:#}"))?;
+            }
+            right_lifecycle::set_pinned(&conn, &name, false)
                 .map_err(|e| miette::miette!("set_pinned: {e:#}"))?;
             println!("unpinned: {name}");
             Ok(())
         }
         AgentSkillCommands::ListPins { agent } => {
-            let usage_path = right_config::agents_dir(home)
-                .join(&agent)
-                .join(".claude/skills/.usage.json");
-            let pins = crate::skill_lifecycle::list_pinned(&usage_path)
-                .map_err(|e| miette::miette!("list_pinned: {e:#}"))?;
+            let agent_dir = right_config::agents_dir(home).join(&agent);
+            let conn = right_db::open_connection(&agent_dir, false)
+                .map_err(|e| miette::miette!("open lifecycle db: {e:#}"))?;
+            let pins =
+                right_lifecycle::list(&conn).map_err(|e| miette::miette!("list_pinned: {e:#}"))?;
+            let pins: Vec<_> = pins
+                .into_iter()
+                .filter(|row| row.pinned)
+                .map(|row| row.skill_name)
+                .collect();
             if pins.is_empty() {
                 println!("(no pinned skills)");
             } else {
