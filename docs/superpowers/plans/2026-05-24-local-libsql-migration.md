@@ -536,7 +536,7 @@ Expected: FAIL until `MIGRATIONS` no longer depends on `rusqlite_migration`.
 In `crates/right-db/src/migrations.rs`, replace the exported `rusqlite_migration::Migrations` with project-owned types:
 
 ```rust
-pub const LATEST_SCHEMA_VERSION: u32 = 33;
+pub const LATEST_SCHEMA_VERSION: u32 = 32;
 
 pub struct Migration {
     pub version: u32,
@@ -553,7 +553,6 @@ pub static MIGRATIONS: Migrations = Migrations {
         Migration { version: 1, sql: V1_SCHEMA, hook: None },
         // Preserve every existing version in order.
         Migration { version: 32, sql: V32_SCHEMA, hook: None },
-        Migration { version: 33, sql: V33_SCHEMA, hook: None },
     ],
 };
 
