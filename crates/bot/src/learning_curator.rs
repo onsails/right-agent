@@ -364,35 +364,43 @@ pub(crate) async fn run_if_due(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let run_status = match tokio::time::timeout(CURATOR_TIMEOUT, cmd.output()).await {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            if let Some(b) = crate::cc::stream::parse_usage_full(&stdout)
-                && let Err(e) = right_agent::usage::insert::insert_learning_curator(&conn, &b)
-            {
-                tracing::warn!(agent = %ctx.agent_name, "curator usage insert failed: {e:#}");
+    let run_status = match right_process::ProcessGroupChild::spawn(cmd) {
+        Ok(child) => match crate::cc::invocation::wait_with_output_or_kill(child, CURATOR_TIMEOUT)
+            .await
+        {
+            Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                if let Some(b) = crate::cc::stream::parse_usage_full(&stdout)
+                    && let Err(e) = right_agent::usage::insert::insert_learning_curator(&conn, &b)
+                {
+                    tracing::warn!(agent = %ctx.agent_name, "curator usage insert failed: {e:#}");
+                }
+                if output.status.success() {
+                    "success".to_owned()
+                } else {
+                    tracing::warn!(
+                        agent = %ctx.agent_name,
+                        status = ?output.status,
+                        "curator exited non-zero"
+                    );
+                    "failed".to_owned()
+                }
             }
-            if output.status.success() {
-                "success".to_owned()
-            } else {
+            Ok(crate::cc::invocation::ChildOutput::TimedOut) => {
                 tracing::warn!(
                     agent = %ctx.agent_name,
-                    status = ?output.status,
-                    "curator exited non-zero"
+                    "curator timed out after {}s",
+                    CURATOR_TIMEOUT.as_secs()
                 );
                 "failed".to_owned()
             }
-        }
-        Ok(Err(e)) => {
+            Err(e) => {
+                tracing::warn!(agent = %ctx.agent_name, "curator wait failed: {e:#}");
+                "failed".to_owned()
+            }
+        },
+        Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "curator spawn failed: {e:#}");
-            "failed".to_owned()
-        }
-        Err(_) => {
-            tracing::warn!(
-                agent = %ctx.agent_name,
-                "curator timed out after {}s",
-                CURATOR_TIMEOUT.as_secs()
-            );
             "failed".to_owned()
         }
     };

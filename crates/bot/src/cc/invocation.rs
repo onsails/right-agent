@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::process::Output;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 
@@ -135,6 +137,7 @@ pub(crate) struct NonForegroundInvocationRegistration {
     pub(crate) thread_id: Option<i64>,
 }
 
+#[must_use = "registered invocations must be cleaned up with cleanup().await"]
 pub(crate) struct RegisteredNonForegroundInvocation {
     invocation_id: String,
     agent_name: String,
@@ -395,6 +398,30 @@ async fn remove_sandbox_invocation_mcp_config_file(
                 sandbox_path,
                 "sandbox invocation MCP config cleanup exec failed: {e:#}"
             );
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ChildOutput {
+    Completed(Output),
+    TimedOut,
+}
+
+pub(crate) async fn wait_with_output_or_kill(
+    mut child: right_process::ProcessGroupChild,
+    timeout: Duration,
+) -> anyhow::Result<ChildOutput> {
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(result) => result
+            .map(ChildOutput::Completed)
+            .context("wait for child process"),
+        Err(_) => {
+            if let Err(e) = child.kill().await {
+                tracing::debug!(error = %e, "timed out child kill returned an error");
+            }
+            drop(child);
+            Ok(ChildOutput::TimedOut)
         }
     }
 }
@@ -1101,6 +1128,83 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn background_invocation_cleanup_unregisters_and_removes_temp_config() {
+        let agent_dir = tempfile::tempdir().unwrap();
+        write_base_mcp_config(agent_dir.path());
+        let socket_dir = tempfile::tempdir().unwrap();
+        let socket_path = socket_dir.path().join("internal.sock");
+        let (mut requests, server) = spawn_progress_api(socket_path.clone(), 2);
+
+        let active = register_non_foreground_invocation(NonForegroundInvocationRegistration {
+            agent_name: "agent-1".to_owned(),
+            agent_dir: agent_dir.path().to_path_buf(),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+            internal_client: Arc::new(right_mcp::internal_client::InternalClient::new(
+                &socket_path,
+            )),
+            kind: right_mcp::internal_client::ProgressInvocationKindDto::ProbeWriter,
+            chat_id: Some(42),
+            thread_id: Some(7),
+        })
+        .await
+        .unwrap();
+
+        let register = requests.recv().await.unwrap();
+        let mcp_path = active.mcp_config_path().to_owned();
+        assert!(Path::new(&mcp_path).exists());
+
+        active.cleanup().await;
+
+        let unregister = requests.recv().await.unwrap();
+        assert_eq!(unregister.path, "/progress/unregister");
+        assert_eq!(
+            unregister.body["invocation_id"],
+            register.body["invocation_id"]
+        );
+        assert!(!Path::new(&mcp_path).exists());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_invocation_wait_with_output_or_kill_kills_process_group_on_timeout() {
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        let pid_path = pid_file.path().to_str().unwrap().to_owned();
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c")
+            .arg(format!("sleep 60 & echo $! > {pid_path}; wait"));
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let child = right_process::ProcessGroupChild::spawn(cmd).unwrap();
+        let parent_pid = child.id().expect("bash child should have pid");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let grandchild_pid = std::fs::read_to_string(pid_file.path())
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+
+        assert!(process_exists(parent_pid));
+        assert!(process_exists(grandchild_pid));
+
+        let outcome = wait_with_output_or_kill(child, std::time::Duration::from_millis(10))
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, ChildOutput::TimedOut));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !process_exists(parent_pid),
+            "timed out parent process should be killed"
+        );
+        assert!(
+            !process_exists(grandchild_pid),
+            "timed out child process group should be killed"
+        );
+    }
+
     #[test]
     fn resume_session() {
         let mut inv = minimal();
@@ -1304,5 +1408,14 @@ mod tests {
         assert!(args.contains(&"--debug".to_string()));
         // No --debug-file because we have no session UUID to put in the path.
         assert!(!args.iter().any(|a| a.starts_with("--debug-file=")));
+    }
+
+    fn process_exists(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     }
 }

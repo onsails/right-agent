@@ -14,6 +14,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use crate::telegram::SessionLocks;
 use crate::telegram::worker::ProbeAnchor;
 
+const PROBE_WRITER_INIT_TIMEOUT: Duration = Duration::from_secs(30);
 const PROBE_WRITER_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) const PROBE_WRITER_MAX_TURNS: u32 = 16;
 
@@ -186,7 +187,7 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = match cmd.spawn() {
+    let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -199,11 +200,12 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
         }
     };
 
-    let stdout = match child.stdout.take() {
+    let stdout = match child.stdout() {
         Some(s) => s,
         None => {
             tracing::warn!(agent = %ctx.agent_name, "probe-writer child has no stdout");
             let _ = child.kill().await;
+            drop(child);
             drop(_guard);
             active_invocation.cleanup().await;
             return;
@@ -211,7 +213,8 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
     };
 
     // Wait for system/init event, then release mutex by exiting this scope.
-    let init_observed = wait_for_system_init(stdout, &probe_session_id).await;
+    let init_observed =
+        wait_for_system_init(stdout, &probe_session_id, PROBE_WRITER_INIT_TIMEOUT).await;
     drop(_guard);
 
     if !init_observed {
@@ -220,6 +223,7 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
             "probe-writer never emitted system/init, killing"
         );
         let _ = child.kill().await;
+        drop(child);
         active_invocation.cleanup().await;
         return;
     }
@@ -231,44 +235,57 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
     let chat_id = ctx.chat_id;
     let thread_id = ctx.thread_id;
     tokio::spawn(async move {
-        let result = tokio::time::timeout(PROBE_WRITER_TIMEOUT, async {
-            match child.wait_with_output().await {
-                Ok(output) => {
-                    let stdout_str = String::from_utf8_lossy(&output.stdout).into_owned();
-                    if let Some(b) = crate::cc::stream::parse_usage_full(&stdout_str)
-                        && let Ok(conn) = right_db::open_connection(&agent_db_dir, false)
-                        && let Err(e) = right_agent::usage::insert::insert_learning_probe_writer(
-                            &conn, &b, chat_id, thread_id,
-                        )
-                    {
-                        tracing::warn!(agent = %agent_name, "probe-writer usage insert failed: {e:#}");
-                    }
-                    if !output.status.success() {
-                        tracing::warn!(
-                            agent = %agent_name,
-                            status = ?output.status,
-                            "probe-writer exited non-zero"
-                        );
-                    }
+        match crate::cc::invocation::wait_with_output_or_kill(child, PROBE_WRITER_TIMEOUT).await {
+            Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
+                let stdout_str = String::from_utf8_lossy(&output.stdout).into_owned();
+                if let Some(b) = crate::cc::stream::parse_usage_full(&stdout_str)
+                    && let Ok(conn) = right_db::open_connection(&agent_db_dir, false)
+                    && let Err(e) = right_agent::usage::insert::insert_learning_probe_writer(
+                        &conn, &b, chat_id, thread_id,
+                    )
+                {
+                    tracing::warn!(agent = %agent_name, "probe-writer usage insert failed: {e:#}");
                 }
-                Err(e) => {
-                    tracing::warn!(agent = %agent_name, "probe-writer wait failed: {e:#}");
+                if !output.status.success() {
+                    tracing::warn!(
+                        agent = %agent_name,
+                        status = ?output.status,
+                        "probe-writer exited non-zero"
+                    );
                 }
             }
-        })
-        .await;
-        if result.is_err() {
-            tracing::warn!(
-                agent = %agent_name,
-                "probe-writer timed out after {}s",
-                PROBE_WRITER_TIMEOUT.as_secs()
-            );
+            Ok(crate::cc::invocation::ChildOutput::TimedOut) => {
+                tracing::warn!(
+                    agent = %agent_name,
+                    "probe-writer timed out after {}s",
+                    PROBE_WRITER_TIMEOUT.as_secs()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(agent = %agent_name, "probe-writer wait failed: {e:#}");
+            }
         }
         active_invocation.cleanup().await;
     });
 }
 
-async fn wait_for_system_init<R: AsyncRead + Unpin>(stdout: R, expected_session_id: &str) -> bool {
+async fn wait_for_system_init<R: AsyncRead + Unpin>(
+    stdout: R,
+    expected_session_id: &str,
+    timeout: Duration,
+) -> bool {
+    tokio::time::timeout(
+        timeout,
+        wait_for_system_init_unbounded(stdout, expected_session_id),
+    )
+    .await
+    .unwrap_or(false)
+}
+
+async fn wait_for_system_init_unbounded<R: AsyncRead + Unpin>(
+    stdout: R,
+    expected_session_id: &str,
+) -> bool {
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -406,5 +423,17 @@ mod tests {
         assert!(p.contains("TOPIC HINT: git rebase recovery"));
         assert!(p.contains("new procedure"));
         assert!(p.contains("hint_outcome"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_invocation_probe_writer_init_wait_times_out_when_child_is_silent() {
+        let (_writer, reader) = tokio::io::duplex(64);
+
+        let observed = wait_for_system_init(reader, "probe-sid", Duration::from_secs(30)).await;
+
+        assert!(
+            !observed,
+            "silent probe-writer child should not hold the session lock forever"
+        );
     }
 }
