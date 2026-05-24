@@ -273,6 +273,15 @@ pub fn apply_automatic_transitions(
         };
 
         match row.state {
+            LifecycleState::Active if activity_at <= archive_cutoff => {
+                changed += transition_candidate_to_archived_if_eligible(
+                    &tx,
+                    &row.skill_name,
+                    LifecycleState::Active,
+                    archive_cutoff,
+                    now_utc,
+                )?;
+            }
             LifecycleState::Active if activity_at <= stale_cutoff => {
                 changed += transition_active_candidate_to_stale_if_eligible(
                     &tx,
@@ -281,9 +290,10 @@ pub fn apply_automatic_transitions(
                 )?;
             }
             LifecycleState::Stale if activity_at <= archive_cutoff => {
-                changed += transition_stale_candidate_to_archived_if_eligible(
+                changed += transition_candidate_to_archived_if_eligible(
                     &tx,
                     &row.skill_name,
+                    LifecycleState::Stale,
                     archive_cutoff,
                     now_utc,
                 )?;
@@ -314,19 +324,20 @@ fn transition_active_candidate_to_stale_if_eligible(
                last_used_at IS NOT NULL
                AND last_patched_at IS NOT NULL
                AND CASE
-                 WHEN last_used_at >= last_patched_at THEN last_used_at
-                 ELSE last_patched_at
-               END <= :cutoff
+                 WHEN julianday(last_used_at) >= julianday(last_patched_at)
+                 THEN julianday(last_used_at)
+                 ELSE julianday(last_patched_at)
+               END <= julianday(:cutoff)
              )
              OR (
                last_used_at IS NOT NULL
                AND last_patched_at IS NULL
-               AND last_used_at <= :cutoff
+               AND julianday(last_used_at) <= julianday(:cutoff)
              )
              OR (
                last_used_at IS NULL
                AND last_patched_at IS NOT NULL
-               AND last_patched_at <= :cutoff
+               AND julianday(last_patched_at) <= julianday(:cutoff)
              )
            )",
         rusqlite::named_params! {
@@ -341,9 +352,10 @@ fn transition_active_candidate_to_stale_if_eligible(
     Ok(changed)
 }
 
-fn transition_stale_candidate_to_archived_if_eligible(
+fn transition_candidate_to_archived_if_eligible(
     conn: &Connection,
     skill_name: &str,
+    from_state: LifecycleState,
     archive_cutoff: DateTime<Utc>,
     archived_at: DateTime<Utc>,
 ) -> Result<usize> {
@@ -361,26 +373,27 @@ fn transition_stale_candidate_to_archived_if_eligible(
                last_used_at IS NOT NULL
                AND last_patched_at IS NOT NULL
                AND CASE
-                 WHEN last_used_at >= last_patched_at THEN last_used_at
-                 ELSE last_patched_at
-               END <= :cutoff
+                 WHEN julianday(last_used_at) >= julianday(last_patched_at)
+                 THEN julianday(last_used_at)
+                 ELSE julianday(last_patched_at)
+               END <= julianday(:cutoff)
              )
              OR (
                last_used_at IS NOT NULL
                AND last_patched_at IS NULL
-               AND last_used_at <= :cutoff
+               AND julianday(last_used_at) <= julianday(:cutoff)
              )
              OR (
                last_used_at IS NULL
                AND last_patched_at IS NOT NULL
-               AND last_patched_at <= :cutoff
+               AND julianday(last_patched_at) <= julianday(:cutoff)
              )
            )",
         rusqlite::named_params! {
             ":skill_name": skill_name,
             ":to_state": LifecycleState::Archived.as_db_str(),
             ":archived_at": archived_at,
-            ":from_state": LifecycleState::Stale.as_db_str(),
+            ":from_state": from_state.as_db_str(),
             ":probe_writer": CreatedBy::ProbeWriter.as_db_str(),
             ":curator": CreatedBy::Curator.as_db_str(),
             ":cutoff": cutoff,
@@ -723,6 +736,28 @@ mod tests {
     }
 
     #[test]
+    fn active_rows_older_than_archive_after_archive_directly() {
+        let conn = migrated_conn();
+        let now = utc("2026-05-23T12:00:00Z");
+        let old = now - TimeDelta::days(45);
+        let config = TransitionConfig {
+            stale_after: TimeDelta::days(7),
+            archive_after: TimeDelta::days(30),
+        };
+        LifecycleRowFixture::new("ancient-active-curator")
+            .created_by(CreatedBy::Curator)
+            .last_used_at(old)
+            .insert(&conn);
+
+        let updated = apply_automatic_transitions(&conn, now, config).unwrap();
+
+        assert_eq!(updated, 1);
+        let row = get(&conn, "ancient-active-curator").unwrap().unwrap();
+        assert_eq!(row.state, LifecycleState::Archived);
+        assert_eq!(row.archived_at, Some(now));
+    }
+
+    #[test]
     fn stale_transition_update_rechecks_current_pinned_and_activity() {
         let conn = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
@@ -768,6 +803,32 @@ mod tests {
         assert_eq!(
             get(&conn, "used-after-selection").unwrap().unwrap().state,
             LifecycleState::Active
+        );
+    }
+
+    #[test]
+    fn stale_transition_predicate_compares_rfc3339_instants() {
+        let conn = migrated_conn();
+        let cutoff = utc("2026-05-23T12:00:00Z");
+        conn.execute(
+            "INSERT INTO skill_lifecycle (
+                skill_name, state, pinned, created_by, created_at, last_used_at
+             ) VALUES (
+                'offset-equivalent', 'active', 0, 'curator',
+                '2026-04-01T00:00:00Z', '2026-05-23T13:00:00+01:00'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let updated =
+            transition_active_candidate_to_stale_if_eligible(&conn, "offset-equivalent", cutoff)
+                .unwrap();
+
+        assert_eq!(updated, 1);
+        assert_eq!(
+            get(&conn, "offset-equivalent").unwrap().unwrap().state,
+            LifecycleState::Stale
         );
     }
 }
