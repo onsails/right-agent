@@ -7,28 +7,32 @@
 
 #![warn(unreachable_pub)]
 
+pub mod connection;
 pub mod conversation;
 pub mod error;
 pub mod migrations;
+pub mod params;
+pub mod row;
+pub mod transaction;
 
+pub use connection::Connection;
 pub use error::DbError;
 pub use migrations::MIGRATIONS;
+pub use transaction::Transaction;
 
 use std::path::Path;
-use std::time::Duration;
 
 /// Open the per-agent SQLite database, applying migrations if requested.
 ///
 /// Idempotent. WAL journal mode + 5s busy_timeout. The connection is
 /// returned for callers that need it; use [`open_db`] when you only
 /// want to ensure the file exists.
-pub fn open_connection(agent_path: &Path, migrate: bool) -> Result<rusqlite::Connection, DbError> {
+pub fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
     let db_path = agent_path.join("data.db");
-    let mut conn = rusqlite::Connection::open(&db_path)?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "busy_timeout", 5000)?;
+    let conn = Connection::open_local(db_path, true)?;
+    conn.apply_connection_pragmas()?;
     if migrate {
-        migrations::MIGRATIONS.to_latest(&mut conn)?;
+        conn.run_rusqlite_migrations()?;
     }
     Ok(conn)
 }
@@ -45,14 +49,9 @@ pub fn open_db(agent_path: &Path, migrate: bool) -> Result<(), DbError> {
 /// never runs migrations. It is intended for read-only consumers such as
 /// the Telegram Mini App dashboard, where the "do not create or mutate"
 /// guarantee must be structural, not advisory.
-pub fn open_connection_readonly(
-    agent_dir: impl AsRef<Path>,
-) -> rusqlite::Result<rusqlite::Connection> {
+pub fn open_connection_readonly(agent_dir: impl AsRef<Path>) -> Result<Connection, DbError> {
     let db_path = agent_dir.as_ref().join("data.db");
-    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-        | rusqlite::OpenFlags::SQLITE_OPEN_URI;
-    let conn = rusqlite::Connection::open_with_flags(&db_path, flags)?;
-    conn.busy_timeout(Duration::from_secs(5))?;
+    let conn = Connection::open_local(db_path, false)?;
+    conn.apply_readonly_pragmas()?;
     Ok(conn)
 }
