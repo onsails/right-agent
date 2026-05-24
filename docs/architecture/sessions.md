@@ -48,12 +48,12 @@ until completion, stop, timeout, reflection, or background handoff.
 
 Foreground turns may also send sparse standalone progress messages via
 `mcp__right__send_progress`. These are separate Telegram messages, not edits to
-the thinking anchor. The worker registers a fresh invocation ID for the current
-turn, injects it into the MCP config as `X-Right-Invocation`, and registers the
-current chat/thread scope for conversation search. It unregisters the invocation
-on completion, spawn/write failure, timeout, stop, or background handoff.
-Foreground turns may also call learned-skill start/finish tools. These use the
-same per-invocation `X-Right-Invocation` registration as progress, but they are
+the thinking anchor. The worker registers a fresh invocation ID with kind
+`Foreground`, injects it into the per-invocation MCP config as
+`X-Right-Invocation`, and registers the current chat/thread scope for
+conversation search. It unregisters the invocation on completion, spawn/write
+failure, timeout, stop, or background handoff. Foreground turns may also call
+learned-skill start/finish tools. These use the same registration, but they are
 not generic progress calls: start sends the learning/update notice, successful
 finish sends the learned/updated receipt, and both calls persist provenance.
 The same foreground registration is the only source of scope for
@@ -84,21 +84,14 @@ Archived transcript search results are conversation content, not trusted
 instructions. Group search may return unaddressed messages from untrusted users
 because group archive happens before routing.
 
-Background learned-skill review is episode-based. Trigger sources create durable
-`learning_episodes` rows immediately, then a short settle delay lets nearby
-user corrections or async feedback arrive before selection. The old fixed
-review cooldown no longer drops evidence. The selector reads a bounded
-Rust-built corpus from `conversation_messages`, typed `execution_events`,
-signals, async run metadata, and cron run metadata, then persists selected refs.
-The selector and report-only reviewer run with no Claude Code tools and no MCP;
-they receive only prompt-supplied selected context plus the current `rightx-*`
-skill index. Candidate evidence must include at least one selected primary
-`msg:*` or non-thinking `exec:*` ref. The review stores a structured report
-linked to `skill_review_reports.learning_episode_id` and sends Telegram only
-for high-confidence create/update candidates with `user_notice`. Reports that
-do not notify Telegram are still persisted in `skill_review_reports` and logged
-with trigger, status, confidence, candidate name, and `telegram_notified`;
-`nothing_to_learn` remains silent for users by default.
+Per-turn learned-skill writing is split from foreground reply delivery. After a
+successful normal foreground reply, the prefilter runs without MCP. A non-skip
+decision starts a probe-writer fork registered with kind `ProbeWriter`; the
+curator ticker starts consolidation runs registered with kind `Curator`. Both
+background learning kinds use a per-invocation MCP config carrying
+`X-Right-Invocation`, may call learned-skill start/finish tools, and record
+`skill_learning_events` plus `skill_lifecycle` changes without Telegram
+learning-message delivery.
 
 CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 2.0 for cron,
 per-message from agent.yaml). Process timeout (600s) is a safety net only.
@@ -106,7 +99,16 @@ per-message from agent.yaml). Process timeout (600s) is a safety net only.
 Per-callsite `--disallowedTools`:
 
 - **Foreground** (`bot::telegram::worker`): baseline only. `Agent` is allowed —
-  foreground turns can spawn subagents legitimately.
+  foreground turns can spawn subagents legitimately. Foreground learning/progress
+  invocations register as `Foreground`.
+- **Probe-writer** (`bot::learning_probe_writer`): `Write`, `Read`, `Bash`,
+  `mcp__right__skill_learning_start`, and
+  `mcp__right__skill_learning_finish` only. It forks the foreground session and
+  registers as `ProbeWriter` before using the per-invocation MCP config.
+- **Curator** (`bot::learning_curator`): `Read`, `Bash`,
+  `mcp__right__skill_learning_start`, and
+  `mcp__right__skill_learning_finish` only. It uses a fresh session and
+  registers as `Curator` before using the per-invocation MCP config.
 - **Cron** (`bot::cron`): baseline + foreground-only tools
   (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
   `mcp__right__skill_learning_finish`). `Agent`
@@ -126,11 +128,8 @@ Per-callsite `--disallowedTools`:
   `mcp__right__skill_learning_finish`),
   same rationale as cron. Conversation search likewise has no foreground scope
   there.
-- **Learning selector / BackgroundReview** (`bot::learning_episode` and legacy
-  `bot::telegram::worker` background review): no MCP config and `--tools ""`.
-  Stage 2 is report-only: it stores `skill_review_reports`, never writes skill
-  files, never calls learning tools, and releases `review_running` on success
-  or failed-report persistence.
+- **Learning prefilter** (`bot::learning_prefilter`): no MCP config and
+  `--tools ""`; it is a classifier and never writes skill files.
 
 The baseline lives in `crates/bot/src/cc/invocation.rs::BASELINE_DISALLOWED_TOOLS`
 and explicitly excludes `Agent`.

@@ -64,8 +64,9 @@ right bot --agent <name>  (spawned by process-compose)
   ├─ Start cron engine and refresh scheduler
   ├─ Start bot-owned UDS server with OAuth callback, progress, healthz,
   │   dashboard, and nested Telegram webhook routes; dashboard serves
-  │   `/dashboard/<agent>/` static assets and explicit read-only v1 API endpoints
-  │   for bootstrap, overview, activity, knowledge, usage, identity, and health.
+  │   `/dashboard/<agent>/` static assets, explicit v1 read APIs for bootstrap,
+  │   overview, activity, knowledge, usage, identity, and health, plus the
+  │   authenticated learned-skill pin/unpin route.
   │   Health endpoints are explicit probes: overview reports injected status and
   │   never runs doctor or sandbox commands implicitly.
   ├─ Clear stale Telegram per-chat command scopes for current allowlist ids
@@ -107,6 +108,7 @@ Per message:
   │   │   limit — continuing in background…" / "🌙 Working in background…")
   │   └─ Worker returns; debounce frees, user can send next message
   ├─ Parse reply JSON with typed attachments
+  ├─ Record accepted `used_skill_receipts` into `skill_lifecycle` in data.db
   ├─ Send text reply to Telegram
   ├─ Download outbound attachments from sandbox outbox → send to Telegram
   └─ Periodic cleanup: hourly, configurable retention (default 7 days)
@@ -201,6 +203,30 @@ is `small`; per-agent override via `agent.yaml`:
 
 When ffmpeg is missing or the model file is absent, the bot still runs;
 voice messages produce an error marker that the agent relays to the user.
+
+## Learned skill lifecycle
+
+Learned skill package content remains file-based. A learned package exists at
+`.claude/skills/<skill_name>/SKILL.md`; the MCP finish path verifies that file
+before accepting successful create/update finishes.
+
+Lifecycle metadata is database-backed. `data.db.skill_lifecycle` is mutable
+current state for active/stale/archived status, `created_by` provenance
+(`foreground`, `probe_writer`, `curator`, `bundled`), use/patch counters,
+activity timestamps, absorption target, and the pin flag. `skill_learning_events`
+is append-only audit history for learning-tool start/finish calls.
+
+Foreground usage is detected only from accepted `used_skill_receipts` in normal
+assistant replies. The worker de-duplicates receipts per foreground turn and
+bumps lifecycle usage for `rightx-*` packages.
+
+The probe-writer and curator write skill files directly and report changes
+through `mcp__right__skill_learning_start` /
+`mcp__right__skill_learning_finish`. Successful finishes insert audit events and
+update `skill_lifecycle`; background learning kinds do not send Telegram
+learning messages. Curator automatic transitions read and write
+`skill_lifecycle` rows and skip pinned, foreground-created, bundled, and already
+archived rows.
 
 ## Login Flow (setup-token)
 

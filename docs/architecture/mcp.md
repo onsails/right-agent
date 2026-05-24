@@ -179,13 +179,14 @@ Internal REST API on Unix socket (~/.right/run/internal.sock):
   - POST /set-token — deliver OAuth tokens after authentication
   - POST /mcp-list — list MCP servers with status
   - POST /mcp-instructions — fetch MCP server instructions markdown
-  - POST /progress/register — register a foreground invocation that may send progress
-  - POST /progress/unregister — remove that invocation when the foreground turn ends
+  - POST /progress/register — register an invocation for foreground progress,
+    foreground learning, probe-writer learning, curator learning, or search scope
+  - POST /progress/unregister — remove that invocation when the run ends
 
 Telegram bot uses InternalClient (hyper UDS) to call these endpoints.
 Agents cannot reach the Unix socket from inside the sandbox.
 
-## Foreground Progress Tool
+## Invocation-scoped MCP tools
 
 `mcp__right__send_progress` is a built-in RightBackend tool routed through the
 aggregator. It is available only when the current MCP request carries
@@ -193,11 +194,14 @@ aggregator. It is available only when the current MCP request carries
 config and uploading it into the sandbox before starting Claude Code.
 
 The bot registers the invocation with the aggregator over
-`/progress/register`. The registration stores the bot UDS path and a separate
-send token. On tool call, the aggregator validates that the invocation is
-active, foreground-only, and not within the 30-second per-invocation rate
-limit, then calls the bot's `POST /progress/send` endpoint. Telegram send
-failures surface as tool-level `progress_send_failed` errors.
+`/progress/register`. Foreground turns register as `Foreground`, probe-writer
+runs as `ProbeWriter`, and curator runs as `Curator`; all learning-capable
+invocations must use the per-invocation MCP config carrying
+`X-Right-Invocation`. The registration stores the bot UDS path and a separate
+send token. On `send_progress`, the aggregator validates that the invocation is
+active, `Foreground`, and not within the 30-second per-invocation rate limit,
+then calls the bot's `POST /progress/send` endpoint. Telegram send failures
+surface as tool-level `progress_send_failed` errors.
 
 Cron, delivery, reflection, and background-continuation calls pass
 foreground-only tools (`mcp__right__send_progress`,
@@ -205,10 +209,8 @@ foreground-only tools (`mcp__right__send_progress`,
 `mcp__right__skill_learning_finish`) via `--disallowedTools`; they have no live
 foreground invocation and must use their structured output delivery path.
 
-Stage 2 learning selector and reviewer calls are stricter: they omit MCP config
-and pass `--tools ""`, so no MCP or Claude Code tools are available. They
-receive only prompt-supplied selected context and the prebuilt learned-skill
-index.
+The learning prefilter is stricter: it omits MCP config and passes
+`--tools ""`, so no MCP or Claude Code tools are available.
 
 ## Learned Skill MCP Tools
 
@@ -216,26 +218,19 @@ index.
 `mcp__right__skill_learning_finish` are built-in RightBackend tools. They are
 metadata/progress/receipt tools: the active agent writes skill package files
 directly under `.claude/skills/<skill_name>/`; MCP validates the skill name,
-records learning events in `data.db`, verifies successful finishes by checking
-`.claude/skills/<skill_name>/SKILL.md`, and sends foreground learning messages
-through the existing bot UDS delivery path. In OpenShell mode that existence
-check runs inside the sandbox; in `sandbox: none` mode it checks the host agent
-directory. The receipt text is authored by the LLM and passed as the
-`message` argument to `mcp__right__skill_learning_finish`.
+records append-only `skill_learning_events`, updates mutable
+`skill_lifecycle` rows on successful finishes, verifies successful finishes by
+checking `.claude/skills/<skill_name>/SKILL.md`, and sends learning messages
+only for `Foreground` invocations. `ProbeWriter` and `Curator` invocations
+record lifecycle/events without Telegram learning-message delivery. In
+OpenShell mode that existence check runs inside the sandbox; in `sandbox: none`
+mode it checks the host agent directory. The receipt text is authored by the
+LLM and passed as the `message` argument to
+`mcp__right__skill_learning_finish`.
 
 Create and update both require `rightx-*`. The learning flow never patches
 custom/manual/hub/core/platform/bundled/codegen-owned non-`rightx-*` skills.
 
-Stage 2 background learned-skill review runs after `learning_episodes`
-selection and is report-only. Background review invocations do not expose or
-call `mcp__right__skill_learning_start` or
-`mcp__right__skill_learning_finish`; those remain foreground learning protocol
-tools. The selector and reviewer have no MCP or Claude Code tools; all context
-comes from the prompt bundle. The reviewer records `skill_review_reports` and
-sends Telegram only for high-confidence create/update candidates with
-`user_notice`. Candidate evidence must cite at least one selected primary
-`msg:*` or non-thinking `exec:*` ref from the selected episode. The reviewer
-prompt includes candidate decision rules: candidates must be reusable across
-future sessions, one-off task narrative must not become a skill, transient tool
-failures must not become persistent negative claims, and existing `rightx-*`
-skills should be updated before creating new candidates.
+Deprecated Stage 2 background review is report-only when encountered through
+legacy data; it is not a learning-capable invocation kind and does not expose
+learning MCP tools.

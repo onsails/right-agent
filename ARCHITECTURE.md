@@ -2,7 +2,7 @@
 
 ## Workspace
 
-Eighteen crates in a Cargo workspace:
+Nineteen crates in a Cargo workspace:
 
 | Crate | Path | Role |
 |-------|------|------|
@@ -17,6 +17,7 @@ Eighteen crates in a Cargo workspace:
 | **right-agent-config** | `crates/right-agent-config/` | Agent configuration DTOs, discovery DTOs, sandbox/memory/STT schema types |
 | **right-stt** | `crates/right-stt/` | Host-side STT model cache paths, ffmpeg detection, model download, cache warming |
 | **right-db** | `crates/right-db/` | Per-agent SQLite plumbing: `open_connection`, central migration registry, `sql/v*.sql` |
+| **right-lifecycle** | `crates/right-lifecycle/` | Learned-skill lifecycle state machine and DB operations over `skill_lifecycle` |
 | **right-mcp** | `crates/right-mcp/` | MCP aggregator backend, proxy, reconnect, credentials, token derivation, auth tokens |
 | **right-codegen** | `crates/right-codegen/` | Per-agent codegen: settings.json, .mcp.json, prompts, process-compose, cloudflared, sandbox policy, bundled skills |
 | **right-dashboard** | `crates/right-dashboard/` | Telegram Mini App dashboard DTOs, auth validation, read models, and static assets |
@@ -45,10 +46,12 @@ most-specific leaf crate.
 validation logic, read models, and static asset lookup. `right-bot` owns runtime
 route mounting, Telegram menu/button integration, allowlist lookup, and custody
 of the bot token used for server-side `initData` validation. The current v1
-dashboard API is read-only and covers overview, activity, knowledge, usage,
-identity, and health surfaces. Explicit health, identity, and knowledge-skill
-routes may run bounded bot-owned sandbox probes; overview must use injected
-runtime state and must not run doctor or sandbox commands implicitly.
+dashboard API covers overview, activity, knowledge, usage, identity, health,
+and authenticated learned-skill pin/unpin. Explicit health, identity, and
+knowledge-skill routes may run bounded bot-owned sandbox probes; overview must
+use injected runtime state and must not run doctor or sandbox commands
+implicitly. Dashboard pin/unpin is the operator surface for curator-managed
+learned skills; do not add CLI pinning.
 Future write routes must call bot-owned control-plane services instead of
 directly editing agent files, credentials, or aggregator state.
 
@@ -203,10 +206,11 @@ Per-turn skill-learning pipeline (replaces the prior fork-probe classifier):
    `min_cooldown_hours` floor blocks all triggers including the time
    fallback. Trigger evidence is captured in `last_spike_evidence_json`.
 
-Lifecycle state lives in host-side `<agent>/.claude/skills/.usage.json` and is
-written atomically (tempfile + rename + `fs4` advisory lock). The schema is
-authored by `bot::lifecycle::usage` and mirrored read-only by
-`right::skill_lifecycle` for the MCP backend's `skill_learning_finish` hook.
+Lifecycle mutable state lives in per-agent `data.db.skill_lifecycle` via
+`right-lifecycle`, not `.usage.json`. `skill_learning_events` remains the
+append-only audit log for start/finish tool calls, while skill package content
+remains under `.claude/skills/<skill_name>/SKILL.md`. Foreground usage is
+recorded only from `used_skill_receipts`.
 
 Stage 2 background selector/reviewer (`crates/bot/src/learning_episode.rs`,
 `crates/bot/src/learning_review.rs`) is deprecated; legacy fields
@@ -235,6 +239,9 @@ The post-turn probe-writer fork IS session-bearing — it forks the main session
 `--strict-mcp-config` and inherit the transcript via prompt cache. Tools are
 narrowed at runtime via `--allowedTools Write,Read,Bash,
 mcp__right__skill_learning_start,mcp__right__skill_learning_finish`.
+Before calling learning MCP tools, background learning writers MUST register an
+invocation identity (`ProbeWriter` or `Curator`) and use the resulting
+per-invocation MCP config with `X-Right-Invocation`.
 
 The Haiku prefilter and the periodic curator are independent CC invocations.
 The prefilter is non-session-bearing (`--tools ""`, JSON schema). The curator
@@ -383,11 +390,12 @@ dashboard `SOURCES` array pick it up; the dashboard test
 (`usage_overview_sources_match_learning_sources_constant`) enforces sync via
 a dev-dep cross-crate assertion.
 
-Skill lifecycle state (`<agent>/.claude/skills/.usage.json`) is the host-side
-source of truth for active/stale/archived status, `created_by` provenance
-(foreground / probe_writer / curator / bundled), and the operator pin flag.
-The dashboard `skill_lifecycle_overview` route reads from this file directly
-— no SQL involved.
+Skill lifecycle state lives in `data.db.skill_lifecycle`. It is the source of
+truth for active/stale/archived status, `created_by` provenance (foreground /
+probe_writer / curator / bundled), usage/patch counters, and the operator pin
+flag. The dashboard reads this table for lifecycle overview and is the only
+operator pin/unpin surface. Curator transitions read/write DB rows and skip
+pinned rows.
 
 ### Memory
 
@@ -413,7 +421,8 @@ Tables in per-agent `data.db`: `memories` / `memory_events` / `memories_fts`
 (legacy, unused but retained for migration compat), `telegram_sessions`,
 `cron_specs`, `async_runs`, `mcp_servers`, `auth_tokens`, `pending_retains`,
 `memory_alerts`, `curator_state` (singleton; `agent_singleton_id` PRIMARY KEY
-CHECK = 1). Run `sqlite3 data.db .schema` for column-level definitions.
+CHECK = 1), `skill_learning_events`, and `skill_lifecycle`. Run
+`sqlite3 data.db .schema` for column-level definitions.
 
 ## External Integrations
 
