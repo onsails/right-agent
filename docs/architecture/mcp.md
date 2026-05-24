@@ -204,13 +204,17 @@ then calls the bot's `POST /progress/send` endpoint. Telegram send failures
 surface as tool-level `progress_send_failed` errors.
 
 Cron, delivery, reflection, and background-continuation calls pass
-foreground-only tools (`mcp__right__send_progress`,
+invocation-scoped tools (`mcp__right__send_progress`,
 `mcp__right__skill_learning_start`, and
-`mcp__right__skill_learning_finish`) via `--disallowedTools`; they have no live
-foreground invocation and must use their structured output delivery path.
+`mcp__right__skill_learning_finish`) via `--disallowedTools`. `send_progress`
+is foreground-only. Learning tools are available only to registered
+`Foreground`, `ProbeWriter`, and `Curator` invocations, so ordinary background
+calls must use their structured output delivery path.
 
 The learning prefilter is stricter: it omits MCP config and passes
-`--tools ""`, so no MCP or Claude Code tools are available.
+`--tools ""`, so no MCP or Claude Code tools are available. Selector,
+reviewer, and report-only `BackgroundReview` paths are not learning
+invocations and cannot call learning tools.
 
 ## Learned Skill MCP Tools
 
