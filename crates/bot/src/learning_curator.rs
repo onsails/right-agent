@@ -305,10 +305,10 @@ pub(crate) async fn run_if_due(
             return;
         }
     };
-    let lifecycle_rows = match crate::lifecycle::usage::list(&conn) {
+    let lifecycle_rows = match right_lifecycle::list_curator_candidates(&conn) {
         Ok(rows) => rows,
         Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator lifecycle refresh failed: {e:#}");
+            tracing::warn!(agent = %ctx.agent_name, "curator lifecycle candidate read failed: {e:#}");
             return;
         }
     };
@@ -491,18 +491,12 @@ fn render_candidate_list(lifecycle_rows: &[right_lifecycle::SkillLifecycleRow]) 
     use std::fmt::Write;
     let mut s = String::from("<inventory>\n");
     for r in lifecycle_rows {
-        if matches!(
-            r.created_by,
-            right_lifecycle::CreatedBy::Foreground | right_lifecycle::CreatedBy::Bundled
-        ) {
-            continue;
-        }
-        if r.pinned {
-            continue;
-        }
+        let latest_activity = latest_activity_at(r)
+            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .unwrap_or_else(|| "none".to_owned());
         let _ = writeln!(
             s,
-            "- {name}: state={state:?} use={used} patch={patched} created_by={by:?} pinned={pinned}",
+            "- {name}: state={state:?} pinned={pinned} use_count={used} patch_count={patched} latest_activity={latest_activity} created_by={by:?}",
             name = r.skill_name,
             state = r.state,
             used = r.use_count,
@@ -515,14 +509,28 @@ fn render_candidate_list(lifecycle_rows: &[right_lifecycle::SkillLifecycleRow]) 
     s
 }
 
+fn latest_activity_at(row: &right_lifecycle::SkillLifecycleRow) -> Option<DateTime<Utc>> {
+    match (row.last_used_at, row.last_patched_at) {
+        (Some(used), Some(patched)) => Some(used.max(patched)),
+        (Some(used), None) => Some(used),
+        (None, Some(patched)) => Some(patched),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "learning_curator_curator_lifecycle_tests.rs"]
+mod curator_lifecycle_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
     fn open_test_conn() -> rusqlite::Connection {
-        let dir = tempdir().unwrap();
-        right_db::open_connection(dir.path(), true).unwrap()
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
     }
 
     #[test]
