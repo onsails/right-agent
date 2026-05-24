@@ -1180,6 +1180,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let curator_session_locks = Arc::clone(&session_locks);
         let curator_model = Arc::clone(&model_arc);
         let curator_shutdown = shutdown.clone();
+        let curator_internal_client = Arc::clone(&internal_client);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1202,6 +1203,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                     agent_name: curator_agent_name.clone(),
                     ssh_config_path: curator_ssh_config.clone(),
                     resolved_sandbox: curator_resolved.clone(),
+                    internal_client: Arc::clone(&curator_internal_client),
                     model: curator_model_str,
                     debug_flag: Arc::clone(&curator_debug),
                     session_locks: Arc::clone(&curator_session_locks),

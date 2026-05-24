@@ -30,13 +30,14 @@ pub(crate) enum ProbeWriterHint {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ProbeWriterContext {
     pub agent_dir: PathBuf,
     pub agent_db_dir: PathBuf,
     pub agent_name: String,
     pub ssh_config_path: Option<PathBuf>,
     pub resolved_sandbox: Option<String>,
+    pub internal_client: Arc<right_mcp::internal_client::InternalClient>,
     pub model: String,
     pub debug_flag: Arc<AtomicBool>,
     pub session_locks: SessionLocks,
@@ -102,13 +103,11 @@ pub(crate) fn build_invocation(
     main_session_uuid: &str,
     probe_session_id: &str,
     user_prompt: String,
+    mcp_config_path: String,
 ) -> crate::cc::invocation::ClaudeInvocation {
     use crate::cc::invocation::{ClaudeInvocation, OutputFormat};
     ClaudeInvocation {
-        mcp_config_path: Some(crate::cc::invocation::mcp_config_path(
-            ctx.ssh_config_path.as_deref(),
-            &ctx.agent_dir,
-        )),
+        mcp_config_path: Some(mcp_config_path),
         json_schema: None,
         output_format: OutputFormat::StreamJson,
         model: Some(ctx.model.clone()),
@@ -137,11 +136,35 @@ pub(crate) fn build_invocation(
 pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_index: String) {
     let probe_session_id = uuid::Uuid::new_v4().to_string();
     let user_prompt = build_user_prompt(&anchor, &skill_index, &ctx.incoming_hint);
+    let active_invocation = match crate::cc::invocation::register_non_foreground_invocation(
+        crate::cc::invocation::NonForegroundInvocationRegistration {
+            agent_name: ctx.agent_name.clone(),
+            agent_dir: ctx.agent_dir.clone(),
+            ssh_config_path: ctx.ssh_config_path.clone(),
+            resolved_sandbox: ctx.resolved_sandbox.clone(),
+            internal_client: Arc::clone(&ctx.internal_client),
+            kind: right_mcp::internal_client::ProgressInvocationKindDto::ProbeWriter,
+            chat_id: Some(ctx.chat_id),
+            thread_id: Some(ctx.thread_id),
+        },
+    )
+    .await
+    {
+        Ok(active) => active,
+        Err(e) => {
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                "probe-writer invocation registration failed: {e:#}"
+            );
+            return;
+        }
+    };
     let invocation = build_invocation(
         &ctx,
         &anchor.main_session_uuid,
         &probe_session_id,
         user_prompt,
+        active_invocation.mcp_config_path().to_owned(),
     );
     let args = invocation.into_args();
 
@@ -170,6 +193,8 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
                 agent = %ctx.agent_name,
                 "probe-writer spawn failed: {e:#}"
             );
+            drop(_guard);
+            active_invocation.cleanup().await;
             return;
         }
     };
@@ -179,6 +204,8 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
         None => {
             tracing::warn!(agent = %ctx.agent_name, "probe-writer child has no stdout");
             let _ = child.kill().await;
+            drop(_guard);
+            active_invocation.cleanup().await;
             return;
         }
     };
@@ -193,6 +220,7 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
             "probe-writer never emitted system/init, killing"
         );
         let _ = child.kill().await;
+        active_invocation.cleanup().await;
         return;
     }
 
@@ -203,7 +231,7 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
     let chat_id = ctx.chat_id;
     let thread_id = ctx.thread_id;
     tokio::spawn(async move {
-        let _ = tokio::time::timeout(PROBE_WRITER_TIMEOUT, async {
+        let result = tokio::time::timeout(PROBE_WRITER_TIMEOUT, async {
             match child.wait_with_output().await {
                 Ok(output) => {
                     let stdout_str = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -229,6 +257,14 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
             }
         })
         .await;
+        if result.is_err() {
+            tracing::warn!(
+                agent = %agent_name,
+                "probe-writer timed out after {}s",
+                PROBE_WRITER_TIMEOUT.as_secs()
+            );
+        }
+        active_invocation.cleanup().await;
     });
 }
 
@@ -275,6 +311,25 @@ mod tests {
         }
     }
 
+    fn context(agent_dir: PathBuf) -> ProbeWriterContext {
+        ProbeWriterContext {
+            agent_dir,
+            agent_db_dir: PathBuf::from("/tmp/db"),
+            agent_name: "agent-1".into(),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+            internal_client: std::sync::Arc::new(right_mcp::internal_client::InternalClient::new(
+                "/tmp/fake.sock",
+            )),
+            model: "claude-sonnet-4-5".into(),
+            debug_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            session_locks: SessionLocks::default(),
+            chat_id: 42,
+            thread_id: 7,
+            incoming_hint: default_hint(),
+        }
+    }
+
     #[test]
     fn build_user_prompt_includes_anchor_instructions_and_index() {
         let p = build_user_prompt(&anchor("hi", "bye"), "- rightx-foo: bar", &default_hint());
@@ -293,6 +348,32 @@ mod tests {
     #[test]
     fn probe_writer_max_turns_is_16() {
         assert_eq!(PROBE_WRITER_MAX_TURNS, 16);
+    }
+
+    #[test]
+    fn background_invocation_probe_writer_uses_invocation_scoped_mcp_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context(dir.path().to_path_buf());
+
+        let mcp_path = dir
+            .path()
+            .join(".claude")
+            .join("mcp-inv-1.json")
+            .to_string_lossy()
+            .into_owned();
+        let invocation = build_invocation(&ctx, "main-sid", "probe-sid", "prompt".into(), mcp_path);
+
+        let path = invocation
+            .mcp_config_path
+            .expect("probe-writer should pass an MCP config path");
+        assert!(
+            path.contains("/.claude/mcp-"),
+            "probe-writer path should include a generated invocation id: {path}"
+        );
+        assert!(
+            !path.ends_with("/mcp.json"),
+            "probe-writer must not use the static agent mcp.json: {path}"
+        );
     }
 
     #[test]
