@@ -69,11 +69,10 @@ fn open_connection_without_migration_preserves_existing_schema() {
 fn libsql_open_connection_creates_file_and_preserves_local_path() {
     let dir = tempdir().unwrap();
     let conn = open_connection(dir.path(), false).unwrap();
+    let db_path = dir.path().join("data.db");
 
-    assert!(
-        dir.path().join("data.db").exists(),
-        "local libsql open should create data.db",
-    );
+    assert!(db_path.exists(), "local libsql open should create data.db");
+    assert_eq!(conn.path(), db_path.as_path());
 
     conn.execute_batch("CREATE TABLE local_probe (id INTEGER PRIMARY KEY)")
         .unwrap();
