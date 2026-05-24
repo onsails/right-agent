@@ -169,7 +169,7 @@ function cronStatus(cron: CronCard): string {
           </div>
           <div>
             <dt>Delivery</dt>
-            <dd>{{ selectedRun.run.delivery_status }}</dd>
+            <dd>{{ deliveryLabel(selectedRun.run) }}</dd>
           </div>
           <div>
             <dt>Exit</dt>
