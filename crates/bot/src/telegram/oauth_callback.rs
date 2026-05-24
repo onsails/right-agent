@@ -212,8 +212,8 @@ async fn handle_oauth_callback(
     (
         axum::http::StatusCode::OK,
         axum::response::Html(
-            "<!DOCTYPE html><html><body><h1>Authentication complete</h1>\
-             <p>You may close this window. The token has been saved.</p></body></html>",
+            "<!DOCTYPE html><html><body><h1>Authorization received</h1>\
+             <p>You may close this window. Check Telegram for final status.</p></body></html>",
         ),
     )
         .into_response()
@@ -305,16 +305,21 @@ async fn complete_oauth_flow(
             notify_telegram(
                 &cb_state.bot,
                 &chat_ids,
-                &format!(
-                    "Authentication succeeded but token delivery failed for {} (agent {agent_name}): {e}",
-                    pending.server_name,
-                ),
+                &set_token_failure_message(&pending.server_name, agent_name, &e),
             )
             .await;
         }
     }
 
     Ok(())
+}
+
+fn set_token_failure_message(
+    server_name: &str,
+    agent_name: &str,
+    err: impl std::fmt::Display,
+) -> String {
+    format!("Could not finish OAuth for {server_name} (agent {agent_name}): {err}")
 }
 
 use super::broadcast_to_chats as notify_telegram;
@@ -555,5 +560,21 @@ mod tests {
             .map(|u| u.id)
             .collect();
         assert_eq!(user_ids, vec![100]);
+    }
+
+    #[test]
+    fn set_token_failure_message_does_not_claim_success() {
+        let msg = set_token_failure_message("composio", "him", "HTTP 502");
+        assert!(
+            !msg.contains("Authenticated"),
+            "failure message must not claim authenticated: {msg}",
+        );
+        assert!(
+            !msg.contains("succeeded"),
+            "failure message must not claim success: {msg}",
+        );
+        assert!(msg.contains("composio"));
+        assert!(msg.contains("him"));
+        assert!(msg.contains("HTTP 502"));
     }
 }
