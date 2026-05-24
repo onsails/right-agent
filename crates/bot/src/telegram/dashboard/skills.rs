@@ -57,6 +57,8 @@ pub(super) enum PinSkillError {
     Lifecycle(#[from] right_lifecycle::LifecycleError),
     #[error("pinning task panicked: {0}")]
     Join(#[from] tokio::task::JoinError),
+    #[error("sandbox skill probe failed: {0}")]
+    Sandbox(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -138,13 +140,22 @@ pub(super) async fn pin_skill_response(
     if !skill_name.starts_with("rightx-") {
         return Err(PinSkillError::NonRightx);
     }
-    read_host_skill_detail(
-        &state.agent_name,
-        &state.agent_dir,
-        skill_name,
-        right_codegen::BUILTIN_SKILL_NAMES,
-        SKILL_PREVIEW_LIMIT_BYTES,
-    )?;
+    // Guard against pinning an orphan lifecycle row whose SKILL.md was
+    // deleted out-of-band — surface as 404, not a silent pin. For
+    // sandboxed agents the learned-skill package lives in
+    // /sandbox/.claude/skills/<name>/SKILL.md, not under agent_dir, so
+    // probe the sandbox there instead of the host filesystem.
+    if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
+        probe_sandbox_skill_package(sandbox_exec, skill_name).await?;
+    } else {
+        read_host_skill_detail(
+            &state.agent_name,
+            &state.agent_dir,
+            skill_name,
+            right_codegen::BUILTIN_SKILL_NAMES,
+            SKILL_PREVIEW_LIMIT_BYTES,
+        )?;
+    }
 
     let agent_dir = state.agent_dir.clone();
     let skill_name = skill_name.to_owned();
@@ -162,6 +173,47 @@ pub(super) async fn pin_skill_response(
         Ok(PinSkillResponse { skill_name, pinned })
     })
     .await?
+}
+
+/// Cheap existence probe for a learned-skill package inside a sandbox.
+/// Mirrors `read_sandbox_skill_detail`'s shell-script pattern: positional
+/// arg passes the validated `skill_name` to `test -f` without string
+/// interpolation into the script body. Non-zero exit maps to
+/// `SkillInventoryError::NotFound` so the existing
+/// `PinSkillError::Inventory` → 404 mapping continues to work for the
+/// "SKILL.md was deleted out-of-band" case the host path also covers.
+/// Timeout / gRPC failures propagate as `PinSkillError::Sandbox` (500).
+async fn probe_sandbox_skill_package(
+    sandbox_exec: &SandboxExec,
+    skill_name: &str,
+) -> Result<(), PinSkillError> {
+    let skill_path = format!("{SANDBOX_SKILLS_PATH}/{skill_name}/SKILL.md");
+    let probe_command = [
+        "sh",
+        "-c",
+        r#"test -f "$1""#,
+        "dashboard-skill-pin",
+        skill_path.as_str(),
+    ];
+    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
+    let (_, exit_code) =
+        match tokio::time::timeout(timeout, sandbox_exec.exec(&probe_command)).await {
+            Ok(result) => result.map_err(|error| {
+                PinSkillError::Sandbox(format!("sandbox skill probe failed: {error:#}"))
+            })?,
+            Err(_) => {
+                return Err(PinSkillError::Sandbox(format!(
+                    "sandbox skill probe timed out after {}s",
+                    super::DASHBOARD_SANDBOX_TIMEOUT_SECS
+                )));
+            }
+        };
+    if exit_code != 0 {
+        return Err(PinSkillError::Inventory(SkillInventoryError::NotFound(
+            skill_name.to_owned(),
+        )));
+    }
+    Ok(())
 }
 
 async fn scan_sandbox_skills(

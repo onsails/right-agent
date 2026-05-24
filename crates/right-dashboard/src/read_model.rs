@@ -30,6 +30,8 @@ pub enum ReadModelError {
     ParseTimestamp(#[from] chrono::ParseError),
     #[error("invalid start-of-day for timestamp {0}")]
     InvalidStartOfDay(String),
+    #[error("invalid lifecycle row: {0}")]
+    InvalidLifecycle(String),
 }
 
 pub type OverviewInput = activity::ActivityOverviewInput;

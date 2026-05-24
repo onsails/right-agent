@@ -38,6 +38,7 @@ const emit = defineEmits<{
   selectEpisode: [episode: LearningEpisodeSummary]
   selectReport: [report: LearningReportSummary]
   selectSkill: [skill: SkillSummary]
+  skillPinned: [payload: { skillName: string, pinned: boolean }]
 }>()
 </script>
 
@@ -74,5 +75,6 @@ const emit = defineEmits<{
     :loading="loadingSkill"
     :error="skillError"
     @select-skill="emit('selectSkill', $event)"
+    @skill-pinned="emit('skillPinned', $event)"
   />
 </template>

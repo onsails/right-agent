@@ -232,67 +232,31 @@ impl RightBackend {
             .map_err(|e| anyhow::anyhow!("mutex poisoned: {e}"))
     }
 
-    async fn lifecycle_kind_and_created_by(
-        &self,
-        invocation_id: &str,
-    ) -> Result<
-        (
-            crate::progress::ProgressInvocationKind,
-            right_lifecycle::CreatedBy,
-        ),
-        CallToolResult,
-    > {
-        let kind = match self.progress.learning_invocation_kind(invocation_id).await {
-            Ok(kind) => kind,
-            Err(crate::progress::ProgressError::Unavailable) => {
-                return Err(tool_error(
-                    "learning_unavailable",
-                    "learning messages are available only for a registered invocation",
-                    None,
-                ));
-            }
-            Err(crate::progress::ProgressError::Forbidden) => {
-                return Err(tool_error(
-                    "learning_unavailable",
-                    "learning messages are unavailable for this invocation kind",
-                    None,
-                ));
-            }
-            Err(crate::progress::ProgressError::RateLimited { .. }) => {
-                return Err(tool_error(
-                    "learning_send_failed",
-                    "internal error: learning target was rate limited",
-                    None,
-                ));
-            }
-        };
-
-        let created_by = match kind {
+    fn invocation_kind_to_created_by(
+        kind: crate::progress::ProgressInvocationKind,
+    ) -> Result<right_lifecycle::CreatedBy, CallToolResult> {
+        match kind {
             crate::progress::ProgressInvocationKind::Foreground => {
-                right_lifecycle::CreatedBy::Foreground
+                Ok(right_lifecycle::CreatedBy::Foreground)
             }
             crate::progress::ProgressInvocationKind::ProbeWriter => {
-                right_lifecycle::CreatedBy::ProbeWriter
+                Ok(right_lifecycle::CreatedBy::ProbeWriter)
             }
-            crate::progress::ProgressInvocationKind::Curator => right_lifecycle::CreatedBy::Curator,
-            crate::progress::ProgressInvocationKind::BackgroundReview => {
-                return Err(tool_error(
-                    "learning_unavailable",
-                    "learning messages are unavailable for this invocation kind",
-                    None,
-                ));
+            crate::progress::ProgressInvocationKind::Curator => {
+                Ok(right_lifecycle::CreatedBy::Curator)
             }
+            crate::progress::ProgressInvocationKind::BackgroundReview => Err(tool_error(
+                "learning_unavailable",
+                "learning messages are unavailable for this invocation kind",
+                None,
+            )),
             #[cfg(test)]
-            crate::progress::ProgressInvocationKind::NonForeground => {
-                return Err(tool_error(
-                    "learning_unavailable",
-                    "learning messages are unavailable for this invocation kind",
-                    None,
-                ));
-            }
-        };
-
-        Ok((kind, created_by))
+            crate::progress::ProgressInvocationKind::NonForeground => Err(tool_error(
+                "learning_unavailable",
+                "learning messages are unavailable for this invocation kind",
+                None,
+            )),
+        }
     }
 
     // ------------------------------------------------------------------
@@ -799,36 +763,54 @@ impl RightBackend {
             )?;
         }
 
-        let lifecycle = if params.status.is_success() {
-            match self.lifecycle_kind_and_created_by(&invocation_id).await {
-                Ok(lifecycle) => Some(lifecycle),
+        let created_by = if params.status.is_success() {
+            let kind = match self.progress.learning_invocation_kind(&invocation_id).await {
+                Ok(kind) => kind,
+                Err(crate::progress::ProgressError::Unavailable) => {
+                    return Ok(tool_error(
+                        "learning_unavailable",
+                        "learning messages are available only for a registered invocation",
+                        None,
+                    ));
+                }
+                Err(crate::progress::ProgressError::Forbidden) => {
+                    return Ok(tool_error(
+                        "learning_unavailable",
+                        "learning messages are unavailable for this invocation kind",
+                        None,
+                    ));
+                }
+                Err(crate::progress::ProgressError::RateLimited { .. }) => {
+                    return Ok(tool_error(
+                        "learning_send_failed",
+                        "internal error: learning target was rate limited",
+                        None,
+                    ));
+                }
+            };
+            let created_by = match Self::invocation_kind_to_created_by(kind) {
+                Ok(c) => c,
                 Err(result) => return Ok(result),
-            }
-        } else {
-            None
-        };
-
-        if params.status.is_success()
-            && lifecycle
-                .map(|(kind, _)| {
-                    crate::learning::should_send_learning_message(
-                        kind,
-                        LearningMessagePhase::FinishSuccess,
-                    )
-                })
-                .unwrap_or(false)
-            && let Err(result) = crate::learning::send_learning_message(
+            };
+            if crate::learning::should_send_learning_message(
+                kind,
+                LearningMessagePhase::FinishSuccess,
+            ) && let Err(result) = crate::learning::send_learning_message(
                 &self.progress,
                 &invocation_id,
                 LearningMessagePhase::FinishSuccess,
                 params.message.as_deref(),
             )
             .await
-        {
-            return Ok(result);
-        }
+            {
+                return Ok(result);
+            }
+            Some(created_by)
+        } else {
+            None
+        };
 
-        if let Some((_, created_by)) = lifecycle {
+        if let Some(created_by) = created_by {
             let now_utc = chrono::Utc::now();
             let conn_arc = self.get_conn(agent_name)?;
             let conn = Self::lock_conn(&conn_arc)?;

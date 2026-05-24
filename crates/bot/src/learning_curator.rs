@@ -130,33 +130,6 @@ pub(crate) fn should_run_now(
     CuratorGateDecision::SkipNoTrigger
 }
 
-/// Count skills whose `created_at` OR `last_patched_at` is strictly after
-/// `since`. Used by the curator's skill-change-count trigger.
-fn count_changes_since(rows: &[right_lifecycle::SkillLifecycleRow], since: &str) -> u32 {
-    let since_dt: DateTime<Utc> = if since.is_empty() {
-        DateTime::UNIX_EPOCH
-    } else {
-        match DateTime::parse_from_rfc3339(since) {
-            Ok(dt) => dt.to_utc(),
-            Err(e) => {
-                tracing::warn!(
-                    "count_changes_since: unparseable `since` {:?}: {e:#}",
-                    since
-                );
-                DateTime::UNIX_EPOCH
-            }
-        }
-    };
-
-    rows.iter()
-        .filter(|row| {
-            let created_after = row.created_at.map(|dt| dt > since_dt).unwrap_or(false);
-            let patched_after = row.last_patched_at.map(|dt| dt > since_dt).unwrap_or(false);
-            created_after || patched_after
-        })
-        .count() as u32
-}
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -280,15 +253,29 @@ pub(crate) async fn run_if_due(
         }
     };
 
-    let lifecycle_rows = match right_lifecycle::list(&conn) {
-        Ok(rows) => rows,
+    // last_run_at is always Some(_) here — the first-run defer above writes
+    // it before any gate runs, so unwrap is structural, not assumed.
+    let last_run_at = state
+        .last_run_at
+        .as_deref()
+        .expect("last_run_at seeded by first-run defer");
+    let since = match DateTime::parse_from_rfc3339(last_run_at) {
+        Ok(dt) => dt.with_timezone(&Utc),
         Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator lifecycle read failed: {e:#}");
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                "curator: unparseable last_run_at {last_run_at:?}: {e:#}"
+            );
             return;
         }
     };
-    let since = state.last_run_at.as_deref().unwrap_or("");
-    let change_count = count_changes_since(&lifecycle_rows, since);
+    let change_count = match right_lifecycle::count_changes_since(&conn, since) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator change-count read failed: {e:#}");
+            return;
+        }
+    };
 
     let decision = should_run_now(
         ctx.config,
@@ -518,7 +505,7 @@ fn render_candidate_list(lifecycle_rows: &[right_lifecycle::SkillLifecycleRow]) 
     use std::fmt::Write;
     let mut s = String::from("<inventory>\n");
     for r in lifecycle_rows {
-        let latest_activity = latest_activity_at(r)
+        let latest_activity = right_lifecycle::latest_activity_at(r)
             .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
             .unwrap_or_else(|| "none".to_owned());
         let _ = writeln!(
@@ -534,15 +521,6 @@ fn render_candidate_list(lifecycle_rows: &[right_lifecycle::SkillLifecycleRow]) 
     }
     s.push_str("</inventory>");
     s
-}
-
-fn latest_activity_at(row: &right_lifecycle::SkillLifecycleRow) -> Option<DateTime<Utc>> {
-    match (row.last_used_at, row.last_patched_at) {
-        (Some(used), Some(patched)) => Some(used.max(patched)),
-        (Some(used), None) => Some(used),
-        (None, Some(patched)) => Some(patched),
-        (None, None) => None,
-    }
 }
 
 #[cfg(test)]
@@ -645,56 +623,6 @@ mod tests {
 
     fn dt(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
-    }
-
-    fn lifecycle_row(
-        skill_name: &str,
-        created_at: Option<&str>,
-        last_patched_at: Option<&str>,
-    ) -> right_lifecycle::SkillLifecycleRow {
-        right_lifecycle::SkillLifecycleRow {
-            skill_name: skill_name.to_owned(),
-            state: right_lifecycle::LifecycleState::Active,
-            pinned: false,
-            created_by: right_lifecycle::CreatedBy::ProbeWriter,
-            use_count: 0,
-            patch_count: 0,
-            created_at: created_at.map(dt),
-            last_used_at: None,
-            last_patched_at: last_patched_at.map(dt),
-            archived_at: None,
-            absorbed_into: None,
-        }
-    }
-
-    #[test]
-    fn count_changes_since_counts_skills_created_after_since() {
-        let rows = vec![
-            lifecycle_row("rightx-old", Some("2026-05-20T00:00:00Z"), None),
-            lifecycle_row("rightx-new", Some("2026-05-22T00:00:00Z"), None),
-        ];
-        assert_eq!(count_changes_since(&rows, "2026-05-21T00:00:00Z"), 1);
-    }
-
-    #[test]
-    fn count_changes_since_counts_skills_patched_after_since() {
-        let rows = vec![lifecycle_row(
-            "rightx-patched",
-            Some("2026-05-01T00:00:00Z"),
-            Some("2026-05-22T00:00:00Z"),
-        )];
-        assert_eq!(count_changes_since(&rows, "2026-05-21T00:00:00Z"), 1);
-    }
-
-    #[test]
-    fn count_changes_since_handles_mixed_rfc3339_since_formats() {
-        let rows = vec![lifecycle_row(
-            "rightx-same-second",
-            Some("2026-05-21T00:00:00Z"),
-            None,
-        )];
-        let since = "2026-05-21T00:00:00.123456789+00:00";
-        assert_eq!(count_changes_since(&rows, since), 0);
     }
 
     #[test]

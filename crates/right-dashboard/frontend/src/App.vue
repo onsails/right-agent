@@ -366,6 +366,29 @@ async function selectSkill(skill: SkillSummary): Promise<void> {
   }
 }
 
+function applySkillPinned({ skillName, pinned }: { skillName: string, pinned: boolean }): void {
+  if (selectedSkill.value && selectedSkill.value.skill.name === skillName) {
+    selectedSkill.value = {
+      ...selectedSkill.value,
+      skill: { ...selectedSkill.value.skill, pinned },
+    }
+  }
+  const current = skillsData.value
+  if (current === null) {
+    return
+  }
+  const updateGroup = (group: SkillSummary[]): SkillSummary[] =>
+    group.map((skill) => (skill.name === skillName ? { ...skill, pinned } : skill))
+  skillsData.value = {
+    ...current,
+    groups: {
+      core: updateGroup(current.groups.core),
+      learned: updateGroup(current.groups.learned),
+      other: updateGroup(current.groups.other),
+    },
+  }
+}
+
 async function selectIdentityFile(name: string): Promise<void> {
   loadingIdentity.value = true
   identityError.value = null
@@ -429,6 +452,7 @@ async function selectIdentityFile(name: string): Promise<void> {
       @select-episode="selectEpisode"
       @select-report="selectLearningReport"
       @select-skill="selectSkill"
+      @skill-pinned="applySkillPinned"
     />
     <UsageView v-else-if="activeTab === 'usage'" :usage="usageData" />
     <IdentityView

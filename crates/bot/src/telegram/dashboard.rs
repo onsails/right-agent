@@ -1745,6 +1745,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashboard_skill_pin_bypasses_host_check_when_sandbox_present() {
+        // Regression: when an agent runs sandboxed, learned-skill packages
+        // live in /sandbox/.claude/skills/<name>/SKILL.md, not under the
+        // host agent_dir. Pin must dispatch to the sandbox probe instead
+        // of returning 404 from a host SKILL.md check that can never see
+        // the sandbox file.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "curator", false);
+        // Deliberately do NOT call `write_skill`: the SKILL.md is absent
+        // on the host. The old code path returned 404 here; the fix must
+        // bypass that host check and go to the sandbox.
+
+        // Construct a SandboxExec pointing at a non-existent mTLS dir so
+        // the sandbox probe fails predictably at connect time. A 500
+        // (Sandbox error) — anything but 404 from the host-skill check —
+        // proves the host code path was bypassed. Wiring a real sandbox
+        // here would require OpenShell; that is the live integration
+        // test's job.
+        let fake_sandbox_exec = right_openshell::sandbox_exec::SandboxExec::new(
+            temp.path().join("nonexistent-mtls"),
+            "fake-sandbox".to_owned(),
+            "fake-sandbox-id".to_owned(),
+        );
+        let mut state = test_state(temp.path().to_path_buf());
+        state.sandbox_exec = Some(fake_sandbox_exec);
+        state.resolved_sandbox = Some("fake-sandbox".to_owned());
+
+        let router = super::build_dashboard_router(state);
+        let body = json!({ "pinned": true }).to_string();
+        let request = Request::builder()
+            .uri("/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging/pin")
+            .method("PATCH")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                header::AUTHORIZATION,
+                format!("tma {}", signed_init_data(42)),
+            )
+            .body(Body::from(body))
+            .expect("valid request");
+        let response = router.oneshot(request).await.expect("router response");
+        let status = response.status();
+
+        // The crucial assertion: NOT 404. With the bug, the host check
+        // would short-circuit to NOT_FOUND because the host SKILL.md is
+        // missing. With the fix, the host check is skipped, the sandbox
+        // probe is attempted, the fake mTLS connect fails, and we get a
+        // sandbox/internal error instead.
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "sandbox pin path must bypass the host SKILL.md check; got 404",
+        );
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        // Lifecycle row must remain unpinned — sandbox probe failed, no
+        // pin should have been written.
+        let row = right_lifecycle::get(&conn, "rightx-oauth-debugging")
+            .unwrap()
+            .unwrap();
+        assert!(!row.pinned);
+    }
+
+    #[tokio::test]
     async fn dashboard_skill_pin_returns_404_for_missing_lifecycle_row() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_skill(temp.path(), "rightx-oauth-debugging");

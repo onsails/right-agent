@@ -182,6 +182,27 @@ pub fn bump_patch(
 
 pub fn bump_use(conn: &Connection, skill_name: &str, now_utc: DateTime<Utc>) -> Result<()> {
     let now = now_utc.to_rfc3339();
+    bump_use_stmt(conn, skill_name, &now)?;
+    Ok(())
+}
+
+/// Bump usage counters for each name in one transaction. Empty iterators
+/// commit a no-op transaction (cheap).
+pub fn bump_use_many<I, S>(conn: &Connection, skill_names: I, now_utc: DateTime<Utc>) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let now = now_utc.to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
+    for name in skill_names {
+        bump_use_stmt(&tx, name.as_ref(), &now)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn bump_use_stmt(conn: &Connection, skill_name: &str, now_rfc3339: &str) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO skill_lifecycle (
             skill_name, state, created_by, use_count, created_at, last_used_at
@@ -196,7 +217,7 @@ pub fn bump_use(conn: &Connection, skill_name: &str, now_utc: DateTime<Utc>) -> 
             skill_name,
             LifecycleState::Active.as_db_str(),
             CreatedBy::Foreground.as_db_str(),
-            now
+            now_rfc3339
         ],
     )?;
     Ok(())
@@ -258,148 +279,79 @@ pub fn apply_automatic_transitions(
     now_utc: DateTime<Utc>,
     config: TransitionConfig,
 ) -> Result<usize> {
-    let stale_cutoff = now_utc - config.stale_after;
-    let archive_cutoff = now_utc - config.archive_after;
+    let stale_cutoff = (now_utc - config.stale_after).to_rfc3339();
+    let archive_cutoff = (now_utc - config.archive_after).to_rfc3339();
+    let now = now_utc.to_rfc3339();
     let tx = conn.unchecked_transaction()?;
-    let mut changed = 0;
 
-    for row in list(&tx)? {
-        if should_skip_automatic_transition(&row) {
-            continue;
-        }
+    // Archive first: any unpinned curator/probe-writer row (active OR stale)
+    // whose latest activity is older than the archive cutoff. Running archive
+    // before stale prevents an active-then-stale double hop in one call.
+    let archived = tx.execute(
+        &format!(
+            "UPDATE skill_lifecycle
+             SET state = :archived, archived_at = :now
+             WHERE state IN (:active, :stale)
+               AND pinned = 0
+               AND created_by IN (:probe_writer, :curator)
+               AND {ACTIVITY_BEFORE_CUTOFF}"
+        ),
+        rusqlite::named_params! {
+            ":archived": LifecycleState::Archived.as_db_str(),
+            ":active": LifecycleState::Active.as_db_str(),
+            ":stale": LifecycleState::Stale.as_db_str(),
+            ":probe_writer": CreatedBy::ProbeWriter.as_db_str(),
+            ":curator": CreatedBy::Curator.as_db_str(),
+            ":cutoff": archive_cutoff,
+            ":now": now,
+        },
+    )?;
 
-        let Some(activity_at) = latest_activity_at(&row) else {
-            continue;
-        };
-
-        match row.state {
-            LifecycleState::Active if activity_at < archive_cutoff => {
-                changed += transition_candidate_to_archived_if_eligible(
-                    &tx,
-                    &row.skill_name,
-                    LifecycleState::Active,
-                    archive_cutoff,
-                    now_utc,
-                )?;
-            }
-            LifecycleState::Active if activity_at < stale_cutoff => {
-                changed += transition_active_candidate_to_stale_if_eligible(
-                    &tx,
-                    &row.skill_name,
-                    stale_cutoff,
-                )?;
-            }
-            LifecycleState::Stale if activity_at < archive_cutoff => {
-                changed += transition_candidate_to_archived_if_eligible(
-                    &tx,
-                    &row.skill_name,
-                    LifecycleState::Stale,
-                    archive_cutoff,
-                    now_utc,
-                )?;
-            }
-            _ => {}
-        }
-    }
+    let staled = tx.execute(
+        &format!(
+            "UPDATE skill_lifecycle
+             SET state = :stale
+             WHERE state = :active
+               AND pinned = 0
+               AND created_by IN (:probe_writer, :curator)
+               AND {ACTIVITY_BEFORE_CUTOFF}"
+        ),
+        rusqlite::named_params! {
+            ":stale": LifecycleState::Stale.as_db_str(),
+            ":active": LifecycleState::Active.as_db_str(),
+            ":probe_writer": CreatedBy::ProbeWriter.as_db_str(),
+            ":curator": CreatedBy::Curator.as_db_str(),
+            ":cutoff": stale_cutoff,
+        },
+    )?;
 
     tx.commit()?;
-    Ok(changed)
+    Ok(archived + staled)
 }
 
-fn transition_active_candidate_to_stale_if_eligible(
-    conn: &Connection,
-    skill_name: &str,
-    stale_cutoff: DateTime<Utc>,
-) -> Result<usize> {
-    let cutoff = stale_cutoff.to_rfc3339();
-    let changed = conn.execute(
-        "UPDATE skill_lifecycle
-         SET state = :to_state
-         WHERE skill_name = :skill_name
-           AND state = :from_state
-           AND pinned = 0
-           AND created_by IN (:probe_writer, :curator)
-           AND (
-             (
-               last_used_at IS NOT NULL
-               AND last_patched_at IS NOT NULL
-               AND CASE
-                 WHEN julianday(last_used_at) >= julianday(last_patched_at)
-                 THEN julianday(last_used_at)
-                 ELSE julianday(last_patched_at)
-               END < julianday(:cutoff)
-             )
-             OR (
-               last_used_at IS NOT NULL
-               AND last_patched_at IS NULL
-               AND julianday(last_used_at) < julianday(:cutoff)
-             )
-             OR (
-               last_used_at IS NULL
-               AND last_patched_at IS NOT NULL
-               AND julianday(last_patched_at) < julianday(:cutoff)
-             )
-           )",
-        rusqlite::named_params! {
-            ":skill_name": skill_name,
-            ":to_state": LifecycleState::Stale.as_db_str(),
-            ":from_state": LifecycleState::Active.as_db_str(),
-            ":probe_writer": CreatedBy::ProbeWriter.as_db_str(),
-            ":curator": CreatedBy::Curator.as_db_str(),
-            ":cutoff": cutoff,
-        },
-    )?;
-    Ok(changed)
-}
+/// SQL fragment: true when `MAX(last_used_at, last_patched_at)` (treating
+/// NULLs as missing) is strictly before `:cutoff`. Compares via `julianday`
+/// to normalize across RFC3339 offsets; rows with both timestamps NULL never
+/// match.
+const ACTIVITY_BEFORE_CUTOFF: &str = "julianday(:cutoff) > COALESCE(
+    MAX(julianday(last_used_at), julianday(last_patched_at)),
+    julianday(last_used_at),
+    julianday(last_patched_at)
+)";
 
-fn transition_candidate_to_archived_if_eligible(
-    conn: &Connection,
-    skill_name: &str,
-    from_state: LifecycleState,
-    archive_cutoff: DateTime<Utc>,
-    archived_at: DateTime<Utc>,
-) -> Result<usize> {
-    let cutoff = archive_cutoff.to_rfc3339();
-    let archived_at = archived_at.to_rfc3339();
-    let changed = conn.execute(
-        "UPDATE skill_lifecycle
-         SET state = :to_state, archived_at = :archived_at
-         WHERE skill_name = :skill_name
-           AND state = :from_state
-           AND pinned = 0
-           AND created_by IN (:probe_writer, :curator)
-           AND (
-             (
-               last_used_at IS NOT NULL
-               AND last_patched_at IS NOT NULL
-               AND CASE
-                 WHEN julianday(last_used_at) >= julianday(last_patched_at)
-                 THEN julianday(last_used_at)
-                 ELSE julianday(last_patched_at)
-               END < julianday(:cutoff)
-             )
-             OR (
-               last_used_at IS NOT NULL
-               AND last_patched_at IS NULL
-               AND julianday(last_used_at) < julianday(:cutoff)
-             )
-             OR (
-               last_used_at IS NULL
-               AND last_patched_at IS NOT NULL
-               AND julianday(last_patched_at) < julianday(:cutoff)
-             )
-           )",
-        rusqlite::named_params! {
-            ":skill_name": skill_name,
-            ":to_state": LifecycleState::Archived.as_db_str(),
-            ":archived_at": archived_at,
-            ":from_state": from_state.as_db_str(),
-            ":probe_writer": CreatedBy::ProbeWriter.as_db_str(),
-            ":curator": CreatedBy::Curator.as_db_str(),
-            ":cutoff": cutoff,
-        },
+/// Count rows whose `created_at` OR `last_patched_at` is strictly after
+/// `since`. Aggregate query — no row materialization. Used by the curator's
+/// skill-change-count trigger.
+pub fn count_changes_since(conn: &Connection, since: DateTime<Utc>) -> Result<u32> {
+    let since = since.to_rfc3339();
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM skill_lifecycle
+         WHERE (created_at IS NOT NULL AND julianday(created_at) > julianday(?1))
+            OR (last_patched_at IS NOT NULL AND julianday(last_patched_at) > julianday(?1))",
+        [&since],
+        |row| row.get::<_, i64>(0),
     )?;
-    Ok(changed)
+    Ok(u32::try_from(count.max(0)).unwrap_or(u32::MAX))
 }
 
 fn list_where(conn: &Connection, sql: &str) -> Result<Vec<SkillLifecycleRow>> {
@@ -458,13 +410,7 @@ fn parse_timestamp(column: &'static str, value: Option<String>) -> Result<Option
         .transpose()
 }
 
-fn should_skip_automatic_transition(row: &SkillLifecycleRow) -> bool {
-    row.pinned
-        || row.state == LifecycleState::Archived
-        || matches!(row.created_by, CreatedBy::Foreground | CreatedBy::Bundled)
-}
-
-fn latest_activity_at(row: &SkillLifecycleRow) -> Option<DateTime<Utc>> {
+pub fn latest_activity_at(row: &SkillLifecycleRow) -> Option<DateTime<Utc>> {
     match (row.last_used_at, row.last_patched_at) {
         (Some(used), Some(patched)) => Some(used.max(patched)),
         (Some(used), None) => Some(used),
@@ -806,11 +752,14 @@ mod tests {
     }
 
     #[test]
-    fn stale_transition_update_rechecks_current_pinned_and_activity() {
+    fn automatic_transitions_skip_rows_pinned_or_used_between_selection_and_update() {
         let conn = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
         let old = now - TimeDelta::days(20);
-        let stale_cutoff = now - TimeDelta::days(7);
+        let config = TransitionConfig {
+            stale_after: TimeDelta::days(7),
+            archive_after: TimeDelta::days(30),
+        };
 
         LifecycleRowFixture::new("pinned-after-selection")
             .created_by(CreatedBy::ProbeWriter)
@@ -820,30 +769,16 @@ mod tests {
             .created_by(CreatedBy::Curator)
             .last_used_at(old)
             .insert(&conn);
-        let selected = list(&conn).unwrap();
-        assert_eq!(selected.len(), 2);
 
+        // Simulate a race: pin + foreground use happen between gate decision
+        // and UPDATE. The single-statement UPDATE re-evaluates the WHERE
+        // clause at execution time, so both rows must be skipped.
         set_pinned(&conn, "pinned-after-selection", true).unwrap();
         bump_use(&conn, "used-after-selection", now).unwrap();
 
-        assert_eq!(
-            transition_active_candidate_to_stale_if_eligible(
-                &conn,
-                "pinned-after-selection",
-                stale_cutoff
-            )
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            transition_active_candidate_to_stale_if_eligible(
-                &conn,
-                "used-after-selection",
-                stale_cutoff
-            )
-            .unwrap(),
-            0
-        );
+        let updated = apply_automatic_transitions(&conn, now, config).unwrap();
+
+        assert_eq!(updated, 0);
         assert_eq!(
             get(&conn, "pinned-after-selection").unwrap().unwrap().state,
             LifecycleState::Active
@@ -855,28 +790,89 @@ mod tests {
     }
 
     #[test]
-    fn stale_transition_predicate_compares_rfc3339_instants() {
+    fn stale_transition_predicate_compares_rfc3339_instants_across_offsets() {
         let conn = migrated_conn();
-        let cutoff = utc("2026-05-23T12:00:00Z");
+        let now = utc("2026-05-30T12:00:00Z");
+        let config = TransitionConfig {
+            stale_after: TimeDelta::days(7),
+            archive_after: TimeDelta::days(30),
+        };
+        // last_used_at is `now - 7 days` written with a +01:00 offset; the
+        // stale predicate must compare it as the same instant as the cutoff
+        // and not transition (boundary: `<`, not `<=`).
         conn.execute(
             "INSERT INTO skill_lifecycle (
                 skill_name, state, pinned, created_by, created_at, last_used_at
              ) VALUES (
                 'offset-equivalent', 'active', 0, 'curator',
-                '2026-04-01T00:00:00Z', '2026-05-23T12:59:59+01:00'
+                '2026-04-01T00:00:00Z', '2026-05-23T13:00:00+01:00'
+             )",
+            [],
+        )
+        .unwrap();
+        // last_used_at is `now - 8 days` with a +01:00 offset → must stale.
+        conn.execute(
+            "INSERT INTO skill_lifecycle (
+                skill_name, state, pinned, created_by, created_at, last_used_at
+             ) VALUES (
+                'offset-stale', 'active', 0, 'curator',
+                '2026-04-01T00:00:00Z', '2026-05-22T13:00:00+01:00'
              )",
             [],
         )
         .unwrap();
 
-        let updated =
-            transition_active_candidate_to_stale_if_eligible(&conn, "offset-equivalent", cutoff)
-                .unwrap();
+        let updated = apply_automatic_transitions(&conn, now, config).unwrap();
 
         assert_eq!(updated, 1);
         assert_eq!(
             get(&conn, "offset-equivalent").unwrap().unwrap().state,
+            LifecycleState::Active
+        );
+        assert_eq!(
+            get(&conn, "offset-stale").unwrap().unwrap().state,
             LifecycleState::Stale
         );
+    }
+
+    #[test]
+    fn count_changes_since_counts_rows_created_or_patched_after_cutoff() {
+        let conn = migrated_conn();
+        let since = utc("2026-05-21T00:00:00Z");
+
+        LifecycleRowFixture::new("rightx-old")
+            .created_by(CreatedBy::ProbeWriter)
+            .insert(&conn);
+        mark_created(
+            &conn,
+            "rightx-new",
+            CreatedBy::ProbeWriter,
+            utc("2026-05-22T00:00:00Z"),
+        )
+        .unwrap();
+        bump_patch(
+            &conn,
+            "rightx-patched-old",
+            CreatedBy::Curator,
+            utc("2026-05-22T00:00:00Z"),
+        )
+        .unwrap();
+
+        assert_eq!(count_changes_since(&conn, since).unwrap(), 2);
+    }
+
+    #[test]
+    fn bump_use_many_increments_in_a_single_transaction() {
+        let conn = migrated_conn();
+        let now = utc("2026-05-23T12:00:00Z");
+
+        bump_use_many(&conn, ["rightx-a", "rightx-b", "rightx-a"], now).unwrap();
+
+        assert_eq!(
+            get(&conn, "rightx-a").unwrap().unwrap().use_count,
+            2,
+            "duplicate names increment independently"
+        );
+        assert_eq!(get(&conn, "rightx-b").unwrap().unwrap().use_count, 1);
     }
 }
