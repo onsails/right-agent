@@ -1,6 +1,8 @@
-use std::time::Duration;
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
-use right_dashboard::api_types::{SkillDetailResponse, SkillGroups, SkillSummary, SkillsResponse};
+use right_dashboard::api_types::{
+    PinSkillResponse, SkillDetailResponse, SkillGroups, SkillSummary, SkillsResponse,
+};
 use right_dashboard::skill_inventory::{
     SkillInventoryError, classify_skill_group, parse_skill_description, read_host_skill_detail,
     scan_host_skills, sort_skill_groups, validate_skill_name,
@@ -35,16 +37,57 @@ head -c "$3" "$file""#;
 pub(super) enum SkillDetailError {
     #[error(transparent)]
     Inventory(#[from] SkillInventoryError),
+    #[error(transparent)]
+    Lifecycle(#[from] SkillLifecycleReadError),
     #[error("sandbox skill detail failed: {0}")]
     Sandbox(String),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SkillsOverviewError {
+    #[error(transparent)]
+    Inventory(#[from] SkillInventoryError),
+    #[error(transparent)]
+    Lifecycle(#[from] SkillLifecycleReadError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum PinSkillError {
+    #[error(transparent)]
+    Inventory(#[from] SkillInventoryError),
+    #[error("skill name is not a rightx learned skill")]
+    NonRightx,
+    #[error("skill lifecycle row is missing")]
+    LifecycleMissing,
+    #[error("skill is not curator-managed")]
+    NotCuratorManaged,
+    #[error("database open failed: {0}")]
+    DbOpen(#[from] right_db::DbError),
+    #[error("lifecycle operation failed: {0}")]
+    Lifecycle(#[from] right_lifecycle::LifecycleError),
+    #[error("pinning task panicked: {0}")]
+    Join(#[from] tokio::task::JoinError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SkillLifecycleReadError {
+    #[error("database open failed: {0}")]
+    DbOpen(#[from] rusqlite::Error),
+    #[error("lifecycle read failed: {0}")]
+    Lifecycle(#[from] right_lifecycle::LifecycleError),
+    #[error("lifecycle read task panicked: {0}")]
+    Join(#[from] tokio::task::JoinError),
+}
+
 pub(super) async fn skills_response(
     state: &DashboardState,
-) -> Result<SkillsResponse, SkillInventoryError> {
+) -> Result<SkillsResponse, SkillsOverviewError> {
     if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
         match scan_sandbox_skills(&state.agent_name, sandbox_exec).await {
-            Ok(response) => return Ok(response),
+            Ok(mut response) => {
+                enrich_skills_response(state, &mut response).await?;
+                return Ok(response);
+            }
             Err(error) => {
                 let mut response = scan_host_skills(
                     &state.agent_name,
@@ -56,18 +99,21 @@ pub(super) async fn skills_response(
                 response.warning = Some(format!(
                     "sandbox skill scan failed; showing host skills: {error:#}"
                 ));
+                enrich_skills_response(state, &mut response).await?;
                 return Ok(response);
             }
         }
     }
 
-    scan_host_skills(
+    let mut response = scan_host_skills(
         &state.agent_name,
         &state.agent_dir,
         right_codegen::BUILTIN_SKILL_NAMES,
         "host",
         SKILL_PREVIEW_LIMIT_BYTES,
-    )
+    )?;
+    enrich_skills_response(state, &mut response).await?;
+    Ok(response)
 }
 
 pub(super) async fn skill_detail_response(
@@ -76,16 +122,56 @@ pub(super) async fn skill_detail_response(
 ) -> Result<SkillDetailResponse, SkillDetailError> {
     validate_skill_name(skill_name)?;
     if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
-        return read_sandbox_skill_detail(&state.agent_name, sandbox_exec, skill_name).await;
+        let mut response =
+            read_sandbox_skill_detail(&state.agent_name, sandbox_exec, skill_name).await?;
+        enrich_skill_summary(state, &mut response.skill).await?;
+        return Ok(response);
     }
 
-    Ok(read_host_skill_detail(
+    let mut response = read_host_skill_detail(
         &state.agent_name,
         &state.agent_dir,
         skill_name,
         right_codegen::BUILTIN_SKILL_NAMES,
         SKILL_PREVIEW_LIMIT_BYTES,
-    )?)
+    )?;
+    enrich_skill_summary(state, &mut response.skill).await?;
+    Ok(response)
+}
+
+pub(super) async fn pin_skill_response(
+    state: &DashboardState,
+    skill_name: &str,
+    pinned: bool,
+) -> Result<PinSkillResponse, PinSkillError> {
+    validate_skill_name(skill_name)?;
+    if !skill_name.starts_with("rightx-") {
+        return Err(PinSkillError::NonRightx);
+    }
+    read_host_skill_detail(
+        &state.agent_name,
+        &state.agent_dir,
+        skill_name,
+        right_codegen::BUILTIN_SKILL_NAMES,
+        SKILL_PREVIEW_LIMIT_BYTES,
+    )?;
+
+    let agent_dir = state.agent_dir.clone();
+    let skill_name = skill_name.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let conn = right_db::open_connection(&agent_dir, false)?;
+        let row =
+            right_lifecycle::get(&conn, &skill_name)?.ok_or(PinSkillError::LifecycleMissing)?;
+        if !matches!(
+            row.created_by,
+            right_lifecycle::CreatedBy::ProbeWriter | right_lifecycle::CreatedBy::Curator
+        ) {
+            return Err(PinSkillError::NotCuratorManaged);
+        }
+        right_lifecycle::set_pinned(&conn, &skill_name, pinned)?;
+        Ok(PinSkillResponse { skill_name, pinned })
+    })
+    .await?
 }
 
 async fn scan_sandbox_skills(
@@ -192,12 +278,12 @@ async fn read_sandbox_skill_detail(
         );
     }
     let group = classify_skill_group(skill_name, right_codegen::BUILTIN_SKILL_NAMES).to_owned();
-    let skill = SkillSummary {
-        name: skill_name.to_owned(),
+    let skill = SkillSummary::new(
+        skill_name.to_owned(),
         group,
-        path: format!("{SANDBOX_SKILLS_PATH}/{skill_name}/SKILL.md"),
-        description: parse_skill_description(&content_preview),
-    };
+        format!("{SANDBOX_SKILLS_PATH}/{skill_name}/SKILL.md"),
+        parse_skill_description(&content_preview),
+    );
 
     Ok(SkillDetailResponse {
         agent: agent.to_owned(),
@@ -218,15 +304,62 @@ fn push_skill_summary(
     preview: &str,
 ) {
     let group = classify_skill_group(skill_name, right_codegen::BUILTIN_SKILL_NAMES);
-    let summary = SkillSummary {
-        name: skill_name.to_owned(),
-        group: group.to_owned(),
-        path: format!("{source_root}/.claude/skills/{skill_name}/SKILL.md"),
-        description: parse_skill_description(preview),
-    };
+    let summary = SkillSummary::new(
+        skill_name.to_owned(),
+        group.to_owned(),
+        format!("{source_root}/.claude/skills/{skill_name}/SKILL.md"),
+        parse_skill_description(preview),
+    );
     match group {
         "core" => groups.core.push(summary),
         "learned" => groups.learned.push(summary),
         _ => groups.other.push(summary),
     }
+}
+
+async fn enrich_skills_response(
+    state: &DashboardState,
+    response: &mut SkillsResponse,
+) -> Result<(), SkillLifecycleReadError> {
+    let lifecycle_rows = lifecycle_rows_by_name(state.agent_dir.clone()).await?;
+    enrich_group(&mut response.groups.core, &lifecycle_rows);
+    enrich_group(&mut response.groups.learned, &lifecycle_rows);
+    enrich_group(&mut response.groups.other, &lifecycle_rows);
+    Ok(())
+}
+
+async fn enrich_skill_summary(
+    state: &DashboardState,
+    skill: &mut SkillSummary,
+) -> Result<(), SkillLifecycleReadError> {
+    let lifecycle_rows = lifecycle_rows_by_name(state.agent_dir.clone()).await?;
+    if let Some(row) = lifecycle_rows.get(&skill.name) {
+        skill.apply_lifecycle(row);
+    }
+    Ok(())
+}
+
+fn enrich_group(
+    skills: &mut [SkillSummary],
+    lifecycle_rows: &BTreeMap<String, right_lifecycle::SkillLifecycleRow>,
+) {
+    for skill in skills {
+        if let Some(row) = lifecycle_rows.get(&skill.name) {
+            skill.apply_lifecycle(row);
+        }
+    }
+}
+
+async fn lifecycle_rows_by_name(
+    agent_dir: PathBuf,
+) -> Result<BTreeMap<String, right_lifecycle::SkillLifecycleRow>, SkillLifecycleReadError> {
+    tokio::task::spawn_blocking(move || {
+        let conn = right_db::open_connection_readonly(agent_dir)?;
+        let rows = right_lifecycle::list(&conn)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.skill_name.clone(), row))
+            .collect())
+    })
+    .await?
 }

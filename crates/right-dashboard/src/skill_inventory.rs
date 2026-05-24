@@ -40,16 +40,16 @@ pub fn scan_host_skills(
             }
             let (preview, _) = read_bounded_text(&skill_path, preview_limit_bytes)?;
             let group = classify_skill_group(&name, core_skill_names);
-            let summary = SkillSummary {
+            let summary = SkillSummary::new(
                 name,
-                group: group.to_owned(),
-                path: skill_path
+                group.to_owned(),
+                skill_path
                     .strip_prefix(agent_dir)
                     .unwrap_or(skill_path.as_path())
                     .to_string_lossy()
                     .into_owned(),
-                description: parse_skill_description(&preview),
-            };
+                parse_skill_description(&preview),
+            );
             match group {
                 "core" => groups.core.push(summary),
                 "learned" => groups.learned.push(summary),
@@ -85,16 +85,15 @@ pub fn read_host_skill_detail(
     }
     let (content_preview, truncated) = read_bounded_text(&path, preview_limit_bytes)?;
     let group = classify_skill_group(skill_name, core_skill_names).to_owned();
-    let skill = SkillSummary {
-        name: skill_name.to_owned(),
+    let skill = SkillSummary::new(
+        skill_name.to_owned(),
         group,
-        path: path
-            .strip_prefix(agent_dir)
+        path.strip_prefix(agent_dir)
             .unwrap_or(path.as_path())
             .to_string_lossy()
             .into_owned(),
-        description: parse_skill_description(&content_preview),
-    };
+        parse_skill_description(&content_preview),
+    );
 
     Ok(SkillDetailResponse {
         agent: agent.to_owned(),
