@@ -30,6 +30,13 @@ pub enum DbError {
         source: Box<DbError>,
     },
 
+    #[error("migration version {version} on {path}: {message}")]
+    MigrationVersion {
+        path: PathBuf,
+        version: u32,
+        message: String,
+    },
+
     #[error("sqlite compatibility error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 }
