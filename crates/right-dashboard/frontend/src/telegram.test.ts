@@ -9,7 +9,6 @@ import {
   readDashboardDisplayMode,
   saveDashboardDisplayMode,
   subscribeTelegramFullscreenChanges,
-  type DashboardDisplayMode,
   type TelegramWebApp,
 } from './telegram'
 
@@ -53,13 +52,6 @@ describe('Telegram dashboard display mode helpers', () => {
 
   test('exports the dashboard display mode storage key', () => {
     expect(DASHBOARD_DISPLAY_MODE_STORAGE_KEY).toBe('right-dashboard.display-mode')
-  })
-
-  test('supports normal and fullscreen display mode values', () => {
-    const normal: DashboardDisplayMode = 'normal'
-    const fullscreen: DashboardDisplayMode = 'fullscreen'
-
-    expect([normal, fullscreen]).toEqual(['normal', 'fullscreen'])
   })
 
   test('reads normal when no preference is stored', () => {
