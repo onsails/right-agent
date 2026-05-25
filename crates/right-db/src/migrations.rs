@@ -28,8 +28,9 @@ const V31_SCHEMA: &str = include_str!("sql/v31_skill_learning_events_dashboard_i
 const V32_SCHEMA: &str = include_str!("sql/v32_skill_lifecycle.sql");
 const V33_SCHEMA: &str = include_str!("sql/v33_mcp_oauth_resource.sql");
 const V34_SCHEMA: &str = include_str!("sql/v34_turso_fts_indexes.sql");
+const V35_SCHEMA: &str = include_str!("sql/v35_legacy_learning_cleanup.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 34;
+pub const LATEST_SCHEMA_VERSION: u32 = 35;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -873,6 +874,11 @@ pub static MIGRATIONS: Migrations = Migrations {
             sql: V34_SCHEMA,
             hook: Some(v34_turso_fts_indexes),
         },
+        Migration {
+            version: 35,
+            sql: V35_SCHEMA,
+            hook: None,
+        },
     ],
 };
 
@@ -1468,7 +1474,7 @@ mod tests {
 
             PRAGMA user_version = {};
             "#,
-            LATEST_SCHEMA_VERSION - 1
+            33
         );
         let conn = rusqlite::Connection::open(db_path).unwrap();
         conn.execute_batch(&legacy_sql).unwrap();
@@ -1662,7 +1668,7 @@ mod tests {
     #[tokio::test]
     async fn learning_episode_tables_exist() {
         let mut conn = Connection::open_in_memory().await.unwrap();
-        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+        MIGRATIONS.to_version(&mut conn, 24).await.unwrap();
         let events: String = conn
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='execution_events'",
@@ -1686,6 +1692,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_learning_cleanup_drops_deprecated_tables() {
+        let legacy_tables = [
+            "learning_episodes",
+            "skill_nudge_signals",
+            "skill_nudge_state",
+            "skill_review_reports",
+            "execution_events",
+        ];
+
+        let mut v34_conn = Connection::open_in_memory().await.unwrap();
+        MIGRATIONS.to_version(&mut v34_conn, 34).await.unwrap();
+
+        for table in legacy_tables {
+            let exists: i64 = v34_conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .await
+                .unwrap();
+            assert_eq!(exists, 1, "{table} must exist through v34");
+        }
+
+        let mut latest_conn = Connection::open_in_memory().await.unwrap();
+        MIGRATIONS.to_latest(&mut latest_conn).await.unwrap();
+
+        for table in legacy_tables {
+            let exists: i64 = latest_conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .await
+                .unwrap();
+            assert_eq!(exists, 0, "{table} must be dropped by latest migration");
+        }
+    }
+
+    #[tokio::test]
     async fn execution_events_do_not_create_fts() {
         let mut conn = Connection::open_in_memory().await.unwrap();
         MIGRATIONS.to_latest(&mut conn).await.unwrap();
@@ -1703,7 +1750,7 @@ mod tests {
     #[tokio::test]
     async fn skill_review_reports_links_learning_episode() {
         let mut conn = Connection::open_in_memory().await.unwrap();
-        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+        MIGRATIONS.to_version(&mut conn, 24).await.unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('skill_review_reports') WHERE name='learning_episode_id'",
@@ -2967,7 +3014,7 @@ continue background work',
     #[tokio::test]
     async fn learned_skills_migration_creates_event_tables() {
         let mut conn = Connection::open_in_memory().await.unwrap();
-        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+        MIGRATIONS.to_version(&mut conn, 20).await.unwrap();
 
         for table in [
             "skill_learning_events",
@@ -2989,7 +3036,7 @@ continue background work',
     #[tokio::test]
     async fn learned_skills_nudge_state_defaults_are_usable() {
         let mut conn = Connection::open_in_memory().await.unwrap();
-        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+        MIGRATIONS.to_version(&mut conn, 20).await.unwrap();
 
         conn.execute(
             "INSERT INTO skill_nudge_state (agent_name) VALUES ('right')",
@@ -3042,7 +3089,7 @@ continue background work',
     #[tokio::test]
     async fn skill_review_reports_migration_creates_report_table() {
         let mut conn = Connection::open_in_memory().await.unwrap();
-        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+        MIGRATIONS.to_version(&mut conn, 22).await.unwrap();
 
         let exists: i64 = conn
             .query_row(
@@ -3162,7 +3209,7 @@ continue background work',
     #[tokio::test]
     async fn skill_nudge_state_has_review_gate_defaults() {
         let mut conn = Connection::open_in_memory().await.unwrap();
-        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+        MIGRATIONS.to_version(&mut conn, 22).await.unwrap();
 
         conn.execute(
             "INSERT INTO skill_nudge_state (agent_name) VALUES ('right')",
@@ -3195,7 +3242,7 @@ continue background work',
         .await
         .unwrap();
 
-        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+        MIGRATIONS.to_version(&mut conn, 22).await.unwrap();
 
         let row: (i64, i64, Option<String>, Option<String>) = conn
             .query_row(
@@ -3228,7 +3275,7 @@ continue background work',
         .unwrap();
 
         MIGRATIONS
-            .to_latest(&mut conn)
+            .to_version(&mut conn, 22)
             .await
             .expect("v22 migration should tolerate pre-existing review columns");
 
@@ -3305,7 +3352,7 @@ continue background work',
     #[tokio::test]
     async fn v27_adds_source_column_to_skill_nudge_signals() {
         let mut conn = Connection::open_in_memory().await.unwrap();
-        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+        MIGRATIONS.to_version(&mut conn, 27).await.unwrap();
         let has_column: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('skill_nudge_signals') WHERE name = ?1",
@@ -3337,7 +3384,7 @@ continue background work',
     #[tokio::test]
     async fn v27_index_on_source_column_exists() {
         let mut conn = Connection::open_in_memory().await.unwrap();
-        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+        MIGRATIONS.to_version(&mut conn, 27).await.unwrap();
         let exists: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master \
