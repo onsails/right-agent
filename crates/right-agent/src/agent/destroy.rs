@@ -94,9 +94,9 @@ async fn run_backup(
         let backup_db = backup_dir.join("data.db");
         let db_display = db_path.display().to_string();
         let backup_path_sql = backup_db.display().to_string().replace('\'', "''");
-        let conn = rusqlite::Connection::open(&db_path)
+        let conn = right_db::open_database_path_readonly(&db_path)
             .map_err(|e| miette::miette!("failed to open {}: {e:#}", db_display))?;
-        conn.execute(&format!("VACUUM INTO '{backup_path_sql}'"), [])
+        conn.execute(&format!("VACUUM INTO '{backup_path_sql}'"), ())
             .map_err(|e| miette::miette!("VACUUM INTO failed: {e:#}"))?;
     }
 
@@ -423,6 +423,38 @@ mod tests {
             result.dir_removed,
             "agent dir should be removed after backup"
         );
+    }
+
+    #[tokio::test]
+    async fn destroy_with_backup_vacuum_copies_data_db() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+
+        let agents_dir = home.join("agents").join("backup-db");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+        let conn = right_db::open_connection(&agents_dir, true).unwrap();
+        conn.execute(
+            "INSERT INTO auth_tokens (token) VALUES (?1)",
+            right_db::params!["token-for-backup"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let options = DestroyOptions {
+            agent_name: "backup-db".into(),
+            backup: true,
+        };
+
+        let result = destroy_agent(home, &options).await.unwrap();
+        let backup_path = result.backup_path.expect("backup path must be recorded");
+        let backup_conn = right_db::open_database_path_readonly(backup_path.join("data.db"))
+            .expect("backup database must be readable");
+        let count: i64 = backup_conn
+            .query_row("SELECT COUNT(*) FROM auth_tokens", (), |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]
