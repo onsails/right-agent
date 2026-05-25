@@ -12,6 +12,7 @@
     sccache
     actionlint
     nodejs
+    git-lfs
   ] ++ lib.optionals pkgs.stdenv.isLinux [
     pkgs.bubblewrap
   ];

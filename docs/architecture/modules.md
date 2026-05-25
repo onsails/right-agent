@@ -83,7 +83,7 @@
 - `assets.rs` — embedded static dashboard asset lookup and content types.
 - `frontend/` — Vue/Vite source for the Mini App dashboard.
 - `frontend/src/components/charts/` — Vue/ECharts components for overview signal timeline, cost/learning river, usage spend chart, and learning flow.
-- `static/dashboard/` — checked-in built dashboard assets served by the bot.
+- `static/dashboard/` — checked-in generated dashboard output embedded into the Rust binary; Vite hashed chunks live under `generated/assets/` and are stored in Git LFS.
 
 ### right-memory
 

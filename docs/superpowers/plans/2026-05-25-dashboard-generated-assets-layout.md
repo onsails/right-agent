@@ -4,7 +4,7 @@
 
 **Goal:** Make committed dashboard static assets visibly generated, store generated chunks in Git LFS, and preserve the existing embedded dashboard serving model.
 
-**Architecture:** Keep `crates/right-dashboard/static/dashboard/index.html` at the static root so existing `/dashboard/<agent>/` routing and `include_dir!` embedding remain unchanged. Configure Vite to emit hashed JS/CSS chunks under `static/dashboard/generated/assets/`, mark all checked-in dashboard static output as generated for GitHub Linguist, and store only generated chunks in Git LFS. CI and release checkouts must fetch LFS objects before Rust compilation so `include_dir!` embeds real asset bytes instead of LFS pointer text.
+**Architecture:** Keep `crates/right-dashboard/static/dashboard/index.html` at the static root so existing `/dashboard/<agent>/` routing and `include_dir!` embedding remain unchanged. Configure Vite to emit hashed JS/CSS chunks under `static/dashboard/generated/assets/`, mark all checked-in dashboard static output as generated for GitHub Linguist, and store only generated chunks in Git LFS. CI, release, and Pages checkouts must fetch LFS objects before consuming dashboard static output so binaries and uploaded artifacts contain real asset bytes instead of LFS pointer text.
 
 **Tech Stack:** Vite, Vue, Git attributes, Git LFS, GitHub Actions, Rust `include_dir`, Axum static dashboard route.
 
@@ -27,6 +27,8 @@
   - Ensures Rust test jobs fetch Git LFS asset bytes.
 - Modify: `.github/workflows/release-plz.yml`
   - Ensures release-plz package and release jobs fetch Git LFS asset bytes.
+- Modify: `.github/workflows/static.yml`
+  - Ensures GitHub Pages uploads real Git LFS asset bytes.
 - Modify: `docs/architecture/modules.md`
   - Documents that dashboard static output is checked-in generated content and that hashed chunks are LFS-backed.
 
@@ -188,12 +190,13 @@ devenv shell -- bash -lc '! rg -n "^version https://git-lfs.github.com/spec/v1" 
 
 Expected: exit code 0.
 
-## Task 3: Fetch LFS Assets In CI And Release Workflows
+## Task 3: Fetch LFS Assets In CI, Release, And Pages Workflows
 
 **Files:**
 - Modify: `.github/workflows/build.yml`
 - Modify: `.github/workflows/tests.yml`
 - Modify: `.github/workflows/release-plz.yml`
+- Modify: `.github/workflows/static.yml`
 
 - [ ] **Step 1: Update release binary checkout**
 
@@ -236,15 +239,26 @@ In `.github/workflows/release-plz.yml`, change both checkout steps to:
           lfs: true
 ```
 
-- [ ] **Step 5: Verify relevant checkout steps request LFS**
+- [ ] **Step 5: Update GitHub Pages checkout**
+
+In `.github/workflows/static.yml`, change the checkout step to:
+
+```yaml
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          lfs: true
+```
+
+- [ ] **Step 6: Verify relevant checkout steps request LFS**
 
 Run:
 
 ```bash
-devenv shell -- rg -n "lfs: true" .github/workflows/build.yml .github/workflows/tests.yml .github/workflows/release-plz.yml
+devenv shell -- rg -n "lfs: true" .github/workflows/build.yml .github/workflows/tests.yml .github/workflows/release-plz.yml .github/workflows/static.yml
 ```
 
-Expected: five matches: one in `build.yml`, two in `tests.yml`, and two in `release-plz.yml`.
+Expected: six matches: one in `build.yml`, two in `tests.yml`, two in `release-plz.yml`, and one in `static.yml`.
 
 ## Task 4: Update Architecture Documentation
 
@@ -282,7 +296,7 @@ Expected: existing architecture text still describes the same crate boundary and
 ## Task 5: Verify And Commit
 
 **Files:**
-- Stage only `.gitattributes`, `devenv.nix`, `.github/workflows/build.yml`, `.github/workflows/tests.yml`, `.github/workflows/release-plz.yml`, `crates/right-dashboard/frontend/vite.config.ts`, `crates/right-dashboard/static/dashboard/`, and `docs/architecture/modules.md`.
+- Stage only `.gitattributes`, `devenv.nix`, `.github/workflows/build.yml`, `.github/workflows/tests.yml`, `.github/workflows/release-plz.yml`, `.github/workflows/static.yml`, `crates/right-dashboard/frontend/vite.config.ts`, `crates/right-dashboard/static/dashboard/`, `docs/architecture/modules.md`, and this spec/plan correction.
 
 - [ ] **Step 1: Verify Git LFS is available in devenv**
 
@@ -371,10 +385,13 @@ devenv.nix
 .github/workflows/build.yml
 .github/workflows/tests.yml
 .github/workflows/release-plz.yml
+.github/workflows/static.yml
 crates/right-dashboard/frontend/vite.config.ts
 crates/right-dashboard/static/dashboard/index.html
 crates/right-dashboard/static/dashboard/generated/assets/*
 docs/architecture/modules.md
+docs/superpowers/specs/2026-05-25-dashboard-generated-assets-layout-design.md
+docs/superpowers/plans/2026-05-25-dashboard-generated-assets-layout.md
 ```
 
 Expected unstaged paths may include unrelated work already present in the shared workspace. Leave them untouched.
@@ -384,7 +401,7 @@ Expected unstaged paths may include unrelated work already present in the shared
 Run:
 
 ```bash
-devenv shell -- git add -- .gitattributes devenv.nix .github/workflows/build.yml .github/workflows/tests.yml .github/workflows/release-plz.yml crates/right-dashboard/frontend/vite.config.ts crates/right-dashboard/static/dashboard docs/architecture/modules.md
+devenv shell -- git add -- .gitattributes devenv.nix .github/workflows/build.yml .github/workflows/tests.yml .github/workflows/release-plz.yml .github/workflows/static.yml crates/right-dashboard/frontend/vite.config.ts crates/right-dashboard/static/dashboard docs/architecture/modules.md docs/superpowers/specs/2026-05-25-dashboard-generated-assets-layout-design.md docs/superpowers/plans/2026-05-25-dashboard-generated-assets-layout.md
 devenv shell -- git commit -m "chore(dashboard): mark generated static assets"
 ```
 

@@ -30,6 +30,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          lfs: true
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo registry and target
@@ -74,6 +75,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          lfs: true
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo registry and target

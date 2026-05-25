@@ -77,8 +77,8 @@ lists them.
 Update build environments:
 
 - add `git-lfs` to `devenv.nix`;
-- set `lfs: true` on GitHub Actions checkouts that compile, test, package, or
-  release Rust code containing embedded dashboard assets.
+- set `lfs: true` on GitHub Actions checkouts that compile, test, package,
+  release, or publish repository content containing dashboard static assets.
 
 Update architecture docs on touch:
 
