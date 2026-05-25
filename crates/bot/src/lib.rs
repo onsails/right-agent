@@ -5,13 +5,10 @@ pub(crate) mod background;
 pub(crate) mod cc;
 mod config_watcher;
 pub(crate) mod cron;
-pub(crate) mod execution_events;
 mod keepalive;
 pub(crate) mod learning_curator;
-pub(crate) mod learning_episode;
 pub(crate) mod learning_prefilter;
 pub(crate) mod learning_probe_writer;
-pub(crate) mod learning_review;
 pub(crate) mod lifecycle;
 pub(crate) mod login;
 pub(crate) mod reflection;
@@ -941,11 +938,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         upgrade::run_startup_upgrade(cfg_path, &args.agent, sandbox).await;
     }
 
-    // Legacy Stage 2 selector/reviewer is no longer part of runtime. Keep a
-    // noop scheduler only so older call signatures can be unwound safely.
-    let learning_drain_scheduler = Arc::new(crate::learning_episode::DrainScheduler::noop());
-    let learning_drain_handle: Option<tokio::task::JoinHandle<()>> = None;
-
     // CRON-01: spawn cron task alongside Telegram dispatcher.
     // Cron results are persisted to DB; Telegram delivery is handled separately.
     let cron_agent_dir = agent_dir.clone();
@@ -957,8 +949,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let cron_sandbox = resolved_sandbox.clone();
     let cron_upgrade_lock = Arc::clone(&upgrade_lock);
     let cron_debug = Arc::clone(&debug_flag);
-    let cron_learning = config.learning.clone();
-    let cron_learning_drain_scheduler = Arc::clone(&learning_drain_scheduler);
     let cron_handle = tokio::spawn(async move {
         cron::run_cron_task(
             cron_agent_dir,
@@ -970,8 +960,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             cron_sandbox,
             cron_upgrade_lock,
             cron_debug,
-            cron_learning,
-            cron_learning_drain_scheduler,
         )
         .await;
     });
@@ -1023,9 +1011,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_upgrade_lock = Arc::clone(&upgrade_lock);
     let delivery_session_locks = Arc::clone(&session_locks);
     let delivery_debug = Arc::clone(&debug_flag);
-    let delivery_learning = config.learning.clone();
     let delivery_model = Arc::clone(&model_arc);
-    let delivery_learning_drain_scheduler = Arc::clone(&learning_drain_scheduler);
     let delivery_flush_args = (
         delivery_agent_dir.clone(),
         delivery_agent_name.clone(),
@@ -1039,8 +1025,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         Arc::clone(&delivery_upgrade_lock),
         Arc::clone(&delivery_session_locks),
         Arc::clone(&delivery_debug),
-        delivery_learning.clone(),
-        Arc::clone(&delivery_learning_drain_scheduler),
     );
     let delivery_handle = tokio::spawn(async move {
         async_delivery::run_delivery_loop(
@@ -1057,8 +1041,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             delivery_upgrade_lock,
             delivery_session_locks,
             delivery_debug,
-            delivery_learning,
-            delivery_learning_drain_scheduler,
         )
         .await;
     });
@@ -1191,7 +1173,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             Arc::clone(&bg_requests),
             Arc::clone(&dashboard_foreground),
             progress_state,
-            Arc::clone(&learning_drain_scheduler),
             update_listener,
         ) => result,
         result = axum_handle => result
@@ -1204,21 +1185,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     tracing::info!("waiting for cron to finish");
     let _ = cron_handle.await;
-    if let Some(handle) = learning_drain_handle {
-        tracing::info!("waiting for learning-episode drain to finish");
-        match tokio::time::timeout(crate::cron::SHUTDOWN_JOB_TIMEOUT, handle).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!("learning-episode drain task panicked: {e}");
-            }
-            Err(_) => {
-                tracing::warn!(
-                    timeout_secs = crate::cron::SHUTDOWN_JOB_TIMEOUT.as_secs(),
-                    "learning-episode drain task did not finish in time"
-                );
-            }
-        }
-    }
     tracing::info!("waiting for async delivery to finish");
     let mut delivery_handle = delivery_handle;
     let delivery_loop_finished = wait_for_delivery_loop_shutdown(
@@ -1244,8 +1210,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         flush_upgrade_lock,
         flush_session_locks,
         flush_debug,
-        flush_learning,
-        flush_learning_drain_scheduler,
     ) = delivery_flush_args;
     if delivery_loop_finished {
         async_delivery::flush_ready_deliveries_for_shutdown(
@@ -1261,8 +1225,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             flush_upgrade_lock,
             flush_session_locks,
             flush_debug,
-            flush_learning,
-            flush_learning_drain_scheduler,
         )
         .await;
     }

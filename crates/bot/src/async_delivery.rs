@@ -394,8 +394,6 @@ async fn run_delivery_once(
     upgrade_lock: &Arc<tokio::sync::RwLock<()>>,
     session_locks: &crate::telegram::SessionLocks,
     debug: &Arc<std::sync::atomic::AtomicBool>,
-    learning: &right_agent::agent::types::LearningConfig,
-    learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
     shutdown: DeliveryShutdownControl<'_>,
 ) -> bool {
     let pending = match fetch_next_pending(conn, &state.delivered_in_memory).await {
@@ -553,18 +551,6 @@ async fn run_delivery_once(
                 tracing::error!(run_id = %to_deliver.id, "delivery DB update failed: {e:#}");
                 state.delivered_in_memory.insert(to_deliver.id.clone());
             }
-            capture_async_delivery_seed(
-                conn,
-                agent_dir,
-                agent_name,
-                &to_deliver,
-                ssh_config_path,
-                resolved_sandbox,
-                debug,
-                learning,
-                crate::snapshot_model(model),
-                learning_drain_scheduler,
-            );
             let outbox_subdir = match to_deliver.kind.as_str() {
                 "background" => "background",
                 _ => "cron",
@@ -655,8 +641,6 @@ pub(crate) async fn run_delivery_loop(
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     session_locks: crate::telegram::SessionLocks,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    learning: right_agent::agent::types::LearningConfig,
-    learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
 ) {
     tracing::info!(agent = %agent_name, "async delivery loop started");
 
@@ -695,8 +679,6 @@ pub(crate) async fn run_delivery_loop(
             &upgrade_lock,
             &session_locks,
             &debug,
-            &learning,
-            &learning_drain_scheduler,
             DeliveryShutdownControl {
                 token: Some(&shutdown),
                 deadline: None,
@@ -819,8 +801,6 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     session_locks: crate::telegram::SessionLocks,
     debug: Arc<std::sync::atomic::AtomicBool>,
-    learning: right_agent::agent::types::LearningConfig,
-    learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
 ) {
     let mut conn = match right_db::open_connection(&agent_dir, false).await {
         Ok(c) => c,
@@ -852,8 +832,6 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
             &upgrade_lock,
             &session_locks,
             &debug,
-            &learning,
-            &learning_drain_scheduler,
             DeliveryShutdownControl {
                 token: None,
                 deadline: Some(deadline),
@@ -863,51 +841,6 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
         if !delivered {
             return;
         }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn capture_async_delivery_seed(
-    conn: &right_db::Connection,
-    agent_dir: &Path,
-    agent_name: &str,
-    delivered: &PendingAsyncResult,
-    ssh_config_path: Option<&Path>,
-    resolved_sandbox: Option<&str>,
-    debug: &Arc<std::sync::atomic::AtomicBool>,
-    learning: &right_agent::agent::types::LearningConfig,
-    inherited_model: Option<String>,
-    learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
-) {
-    if delivered.kind != "background" {
-        return;
-    }
-    let seed_ref = format!("async:{}", delivered.id);
-    let runtime = crate::learning_episode::LearningEpisodeRuntime::new(
-        agent_dir.to_path_buf(),
-        agent_dir.to_path_buf(),
-        agent_name.to_owned(),
-        inherited_model,
-        ssh_config_path.map(Path::to_path_buf),
-        resolved_sandbox.map(str::to_owned),
-        Arc::clone(debug),
-        learning.clone(),
-        Some(Arc::clone(learning_drain_scheduler)),
-        None,
-    );
-    if let Err(e) = runtime.capture_completion_seed(
-        conn,
-        right_agent::learning_episodes::LearningEpisodeKind::AsyncContinuation,
-        right_agent::learning_episodes::EpisodeSeedTriggerKind::AsyncResult,
-        &seed_ref,
-        delivered.target_chat_id,
-        delivered.target_thread_id,
-    ) {
-        tracing::warn!(
-            agent = %agent_name,
-            run_id = %delivered.id,
-            "async delivery learning episode seed capture failed: {e:#}"
-        );
     }
 }
 

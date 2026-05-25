@@ -4,6 +4,8 @@
 
 use crate::cc::worker_reply::is_rightx_skill;
 use crate::telegram::worker::ProbeAnchor;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 
 /// Decision returned by the prefilter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,8 +180,7 @@ num_turns: {turns}, cost: ${cost:.3}, elapsed: {elapsed_s}s",
 /// Parse Haiku's JSON output into a decision. Returns Skip on any parse error.
 pub(crate) fn parse_output(stdout: &str) -> PrefilterDecision {
     // CC --output-format json wraps assistant text. Strip the envelope first.
-    let inner = match crate::learning_review::unwrap_structured_output_payload(stdout, "prefilter")
-    {
+    let inner = match unwrap_structured_output_payload(stdout, "prefilter") {
         Ok(v) => v,
         Err(_) => {
             return PrefilterDecision::Skip {
@@ -241,11 +242,162 @@ pub(crate) fn parse_output(stdout: &str) -> PrefilterDecision {
     }
 }
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 const PREFILTER_TIMEOUT: Duration = Duration::from_secs(30);
 const PREFILTER_LOG_EXCERPT_MAX_CHARS: usize = 2048;
+const TRUNCATED_SUFFIX: &str = "... [truncated]";
+const SKILL_INDEX_DESC_MAX_CHARS: usize = 120;
+const SKILL_EXCERPT_MAX_BYTES: usize = 4_096;
+const SKILL_EXCERPT_MAX_CHARS: usize = 4_096;
+const SKILL_EXCERPT_MAX_LINES: usize = 120;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LearnedSkillSummary {
+    name: String,
+    excerpt: String,
+}
+
+fn unwrap_structured_output_payload(
+    stdout: &str,
+    label: &str,
+) -> Result<serde_json::Value, String> {
+    let root: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("parse {label} stdout JSON: {e}"))?;
+    let selected = root
+        .get("structured_output")
+        .filter(|value| !value.is_null())
+        .or_else(|| root.get("result").filter(|value| !value.is_null()))
+        .unwrap_or(&root);
+    match selected.as_str() {
+        Some(json) => serde_json::from_str(json)
+            .map_err(|e| format!("parse {label} stdout wrapper JSON string: {e}")),
+        None => Ok(selected.clone()),
+    }
+}
+
+fn bounded_text(value: &str, max_chars: usize, suffix: &str) -> String {
+    let mut chars = value.chars().filter(|c| *c != '\0');
+    let mut out: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        out.push_str(suffix);
+    }
+    out
+}
+
+fn collect_host_rightx_skill_index(agent_dir: &Path) -> std::io::Result<Vec<LearnedSkillSummary>> {
+    let skills_dir = agent_dir.join(".claude/skills");
+    let entries = match std::fs::read_dir(&skills_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    let mut skills = Vec::new();
+
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_rightx_skill(&name) {
+            continue;
+        }
+
+        let skill_path = entry.path().join("SKILL.md");
+        let excerpt = match read_bounded_skill_excerpt(&skill_path) {
+            Ok(Some(excerpt)) => excerpt,
+            Ok(None) => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        skills.push(LearnedSkillSummary { name, excerpt });
+    }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(skills)
+}
+
+fn read_bounded_skill_excerpt(path: &Path) -> std::io::Result<Option<String>> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Ok(None);
+    }
+
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file).take(SKILL_EXCERPT_MAX_BYTES as u64);
+    let mut bytes = Vec::with_capacity(SKILL_EXCERPT_MAX_BYTES);
+    reader.read_to_end(&mut bytes)?;
+    let content = String::from_utf8_lossy(&bytes);
+    Ok(Some(bounded_skill_excerpt(&content)))
+}
+
+fn bounded_skill_excerpt(content: &str) -> String {
+    let mut out = String::new();
+    let mut chars = 0;
+    let mut first = true;
+
+    for line in content.lines().take(SKILL_EXCERPT_MAX_LINES) {
+        if !first && !push_bounded_skill_char(&mut out, '\n', &mut chars) {
+            break;
+        }
+        first = false;
+
+        for ch in line.chars() {
+            if !push_bounded_skill_char(&mut out, ch, &mut chars) {
+                return out.trim().to_owned();
+            }
+        }
+    }
+
+    out.trim().to_owned()
+}
+
+fn push_bounded_skill_char(out: &mut String, ch: char, chars: &mut usize) -> bool {
+    if *chars >= SKILL_EXCERPT_MAX_CHARS || out.len() + ch.len_utf8() > SKILL_EXCERPT_MAX_BYTES {
+        return false;
+    }
+    out.push(ch);
+    *chars += 1;
+    true
+}
+
+fn render_skill_index_summary(skills: &[LearnedSkillSummary]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    for skill in skills {
+        let desc_line = extract_skill_description(&skill.excerpt)
+            .chars()
+            .take(SKILL_INDEX_DESC_MAX_CHARS)
+            .collect::<String>();
+        let _ = writeln!(s, "- {name}: {desc_line}", name = skill.name);
+    }
+    s
+}
+
+fn extract_skill_description(excerpt: &str) -> &str {
+    const DESCRIPTION_PREFIX: &str = "description:";
+    let mut lines = excerpt.lines();
+    if lines.next().is_some_and(|line| line.trim() == "---") {
+        for line in lines.by_ref() {
+            if line.trim() == "---" {
+                break;
+            }
+            if let Some(rest) = line.strip_prefix(DESCRIPTION_PREFIX) {
+                return rest.trim();
+            }
+        }
+    }
+
+    for line in excerpt.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && trimmed != "---" && !trimmed.starts_with("```") {
+            return trimmed;
+        }
+    }
+    ""
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PrefilterFailureDiagnostics {
@@ -287,11 +439,7 @@ fn redact_prefilter_args(args: &[String]) -> Vec<String> {
 
 fn prefilter_log_excerpt(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
-    crate::learning_review::bounded_text(
-        &text,
-        PREFILTER_LOG_EXCERPT_MAX_CHARS,
-        crate::learning_review::TRUNCATED_SUFFIX,
-    )
+    bounded_text(&text, PREFILTER_LOG_EXCERPT_MAX_CHARS, TRUNCATED_SUFFIX)
 }
 
 fn prefilter_failure_diagnostics(
@@ -354,7 +502,7 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
         }
     };
 
-    let skills = match crate::learning_review::collect_host_rightx_skill_index(&ctx.agent_dir) {
+    let skills = match collect_host_rightx_skill_index(&ctx.agent_dir) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "prefilter skill index failed: {e:#}");
@@ -363,7 +511,7 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
             };
         }
     };
-    let summary = crate::learning_review::render_skill_index_summary(&skills);
+    let summary = render_skill_index_summary(&skills);
 
     let prompt = build_prompt(&anchor, &baselines, &summary);
     let invocation = ClaudeInvocation {
@@ -573,11 +721,11 @@ mod tests {
         assert_eq!(diagnostics.stderr_bytes, stderr.len());
         assert!(
             diagnostics.stdout_excerpt.chars().count()
-                <= PREFILTER_LOG_EXCERPT_MAX_CHARS + crate::learning_review::TRUNCATED_SUFFIX.len()
+                <= PREFILTER_LOG_EXCERPT_MAX_CHARS + TRUNCATED_SUFFIX.len()
         );
         assert!(
             diagnostics.stderr_excerpt.chars().count()
-                <= PREFILTER_LOG_EXCERPT_MAX_CHARS + crate::learning_review::TRUNCATED_SUFFIX.len()
+                <= PREFILTER_LOG_EXCERPT_MAX_CHARS + TRUNCATED_SUFFIX.len()
         );
     }
 
@@ -651,8 +799,7 @@ mod tests {
     }
 
     /// Wrap raw JSON in the CC `--output-format json` envelope the parser
-    /// expects (`result` field). Implementation borrows from
-    /// `learning_review::unwrap_structured_output_payload`.
+    /// expects (`result` field).
     fn wrap_cc_envelope(inner_json: &str) -> String {
         serde_json::json!({
             "type": "result",
