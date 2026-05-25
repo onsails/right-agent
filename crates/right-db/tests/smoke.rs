@@ -97,6 +97,28 @@ fn open_connection_sync_api_works_inside_tokio_runtime() {
 }
 
 #[test]
+fn open_connection_readonly_missing_db_returns_error_inside_tokio_runtime() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    runtime.block_on(async {
+        let dir = tempdir().unwrap();
+        let err = open_connection_readonly(dir.path()).expect_err("missing db should not open");
+
+        assert!(
+            !dir.path().join("data.db").exists(),
+            "readonly open must not create data.db",
+        );
+        assert!(
+            err.is_open_error(),
+            "expected readonly open failure, got {err:?}"
+        );
+    });
+}
+
+#[test]
 fn execute_accepts_rusqlite_style_empty_params_array() {
     let dir = tempdir().unwrap();
     let conn = open_connection(dir.path(), false).unwrap();

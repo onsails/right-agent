@@ -11,7 +11,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct Connection {
     db_path: PathBuf,
     inner: libsql::Connection,
-    runtime: Option<tokio::runtime::Runtime>,
+    runtime: LibsqlRuntime,
 }
 
 impl fmt::Debug for Connection {
@@ -24,10 +24,7 @@ impl fmt::Debug for Connection {
 
 impl Connection {
     pub(crate) fn open_local(db_path: PathBuf, create: bool) -> Result<Self, DbError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("right-db libsql runtime should initialize");
+        let runtime = LibsqlRuntime::new();
         let flags = if create {
             libsql::OpenFlags::default()
         } else {
@@ -45,8 +42,9 @@ impl Connection {
         // mutex-protected connection handles. This skips that temporary assert
         // only. Remove it when Task 3 removes the rusqlite migration bridge.
         let builder = unsafe { builder.skip_safety_assert(true) };
-        let database =
-            block_on_runtime_safe(&runtime, builder.build()).map_err(|source| DbError::Open {
+        let database = runtime
+            .block_on(builder.build())
+            .map_err(|source| DbError::Open {
                 path: db_path.clone(),
                 source,
             })?;
@@ -58,7 +56,7 @@ impl Connection {
         Ok(Self {
             db_path,
             inner,
-            runtime: Some(runtime),
+            runtime,
         })
     }
 
@@ -133,21 +131,7 @@ impl Connection {
         &self,
         future: impl Future<Output = libsql::Result<T>> + Send,
     ) -> Result<T, DbError> {
-        block_on_runtime_safe(self.runtime(), future).map_err(Into::into)
-    }
-
-    fn runtime(&self) -> &tokio::runtime::Runtime {
-        self.runtime
-            .as_ref()
-            .expect("right-db runtime should live until Connection::drop")
-    }
-}
-
-impl Drop for Connection {
-    fn drop(&mut self) {
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
-        }
+        self.runtime.block_on(future).map_err(Into::into)
     }
 }
 
@@ -167,4 +151,41 @@ where
             Err(payload) => panic::resume_unwind(payload),
         }
     })
+}
+
+struct LibsqlRuntime {
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl LibsqlRuntime {
+    fn new() -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("right-db libsql runtime should initialize");
+
+        Self {
+            runtime: Some(runtime),
+        }
+    }
+
+    fn block_on<F, T>(&self, future: F) -> T
+    where
+        F: Future<Output = T> + Send,
+        T: Send,
+    {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .expect("right-db libsql runtime should live until guard drop");
+        block_on_runtime_safe(runtime, future)
+    }
+}
+
+impl Drop for LibsqlRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
 }
