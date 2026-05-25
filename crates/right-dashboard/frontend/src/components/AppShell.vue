@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { shortDate } from '../format'
+import type { DashboardDisplayMode } from '../telegram'
 import StatusPill from './StatusPill.vue'
 
 export interface ShellTab {
@@ -15,21 +16,33 @@ defineProps<{
   lastUpdatedAt: string | null
   tabs: ShellTab[]
   activeTab: string
+  displayMode: DashboardDisplayMode
 }>()
 
 const emit = defineEmits<{
   select: [tab: string]
+  toggleDisplayMode: []
 }>()
 </script>
 
 <template>
-  <main class="app-shell">
+  <main class="app-shell" :class="`display-${displayMode}`">
     <header class="topbar">
       <div>
         <p class="eyebrow">Right Agent</p>
         <h1>{{ agent }}</h1>
       </div>
-      <StatusPill :status="connectionState" />
+      <div class="topbar-actions">
+        <button
+          type="button"
+          class="display-mode-button"
+          :aria-label="displayMode === 'fullscreen' ? 'Use normal view' : 'Use fullscreen view'"
+          @click="emit('toggleDisplayMode')"
+        >
+          {{ displayMode === 'fullscreen' ? 'Normal' : 'Fullscreen' }}
+        </button>
+        <StatusPill :status="connectionState" />
+      </div>
     </header>
 
     <section v-if="connectionState !== 'live'" class="notice" :class="connectionState">
