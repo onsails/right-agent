@@ -3609,7 +3609,6 @@ version = "0.2.15"
 dependencies = [
  "chrono",
  "right-db",
- "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3632,7 +3631,6 @@ dependencies = [
  "reqwest 0.13.3",
  "right-db",
  "rmcp",
- "rusqlite",
  "rustls 0.23.40",
  "serde",
  "serde_json",

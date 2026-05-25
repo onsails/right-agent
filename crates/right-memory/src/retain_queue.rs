@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use rusqlite::{Connection, params};
+use right_db::{Connection, params};
 
 use super::{ErrorKind, MemoryError};
 
@@ -40,46 +40,46 @@ pub fn enqueue(
         .map_err(|e| MemoryError::HindsightOther(format!("tags_json: {e:#}")))?;
     let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-    let tx = conn.unchecked_transaction()?;
+    conn.with_immediate_transaction(|tx| {
+        // Delete (count - (cap - 1)) oldest rows if over-cap, so we're at cap-1 before insert.
+        tx.execute(
+            "DELETE FROM pending_retains WHERE id IN (
+                SELECT id FROM pending_retains ORDER BY created_at ASC
+                    LIMIT MAX(0, (SELECT COUNT(*) FROM pending_retains) - ?1)
+             )",
+            [(QUEUE_CAP as i64) - 1],
+        )?;
 
-    // Delete (count - (cap - 1)) oldest rows if over-cap, so we're at cap-1 before insert.
-    tx.execute(
-        "DELETE FROM pending_retains WHERE id IN (
-            SELECT id FROM pending_retains ORDER BY created_at ASC
-                LIMIT MAX(0, (SELECT COUNT(*) FROM pending_retains) - ?1)
-         )",
-        [(QUEUE_CAP as i64) - 1],
-    )?;
+        tx.execute(
+            "INSERT INTO pending_retains
+                (content, context, document_id, update_mode, tags_json, created_at, attempts, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+            params![
+                content,
+                context,
+                document_id,
+                update_mode,
+                tags_json,
+                created_at,
+                source,
+            ],
+        )?;
 
-    tx.execute(
-        "INSERT INTO pending_retains
-            (content, context, document_id, update_mode, tags_json, created_at, attempts, source)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
-        params![
-            content,
-            context,
-            document_id,
-            update_mode,
-            tags_json,
-            created_at,
-            source,
-        ],
-    )?;
-
-    tx.commit()?;
+        Ok(())
+    })?;
     Ok(())
 }
 
 /// Current row count.
 pub fn count(conn: &Connection) -> Result<usize, MemoryError> {
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))?;
+    let n: i64 = conn.query_one("SELECT COUNT(*) FROM pending_retains", (), |r| r.get(0))?;
     Ok(n as usize)
 }
 
 /// Age of the oldest row (None if queue empty).
 pub fn oldest_age(conn: &Connection) -> Result<Option<Duration>, MemoryError> {
     let iso: Option<String> =
-        conn.query_row("SELECT MIN(created_at) FROM pending_retains", [], |r| {
+        conn.query_one("SELECT MIN(created_at) FROM pending_retains", (), |r| {
             r.get(0)
         })?;
     let Some(iso) = iso else { return Ok(None) };
@@ -187,7 +187,7 @@ where
                 if let Err(e) = conn.execute(
                     "UPDATE pending_retains SET attempts = attempts + 1, \
                        last_attempt_at = ?1, last_error = ?2 WHERE id = ?3",
-                    params![now.to_rfc3339(), "classified_transient", entry.id],
+                    (now.to_rfc3339(), "classified_transient", entry.id),
                 ) {
                     tracing::error!(id = entry.id, error = %e, "drain: attempts UPDATE failed");
                 }
@@ -201,12 +201,11 @@ where
 }
 
 fn load_batch(conn: &Connection, limit: usize) -> Result<Vec<PendingRetain>, MemoryError> {
-    let mut stmt = conn.prepare(
+    conn.query_all(
         "SELECT id, content, context, document_id, update_mode, tags_json, created_at, attempts
            FROM pending_retains ORDER BY created_at ASC LIMIT ?1",
-    )?;
-    let rows: Result<Vec<PendingRetain>, rusqlite::Error> = stmt
-        .query_map([limit as i64], |row| {
+        [limit as i64],
+        |row| {
             let tags_json: Option<String> = row.get(5)?;
             let tags = match tags_json {
                 Some(s) => match serde_json::from_str::<Vec<String>>(&s) {
@@ -228,9 +227,9 @@ fn load_batch(conn: &Connection, limit: usize) -> Result<Vec<PendingRetain>, Mem
                 created_at: row.get(6)?,
                 attempts: row.get(7)?,
             })
-        })?
-        .collect();
-    Ok(rows?)
+        },
+    )
+    .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -272,9 +271,9 @@ mod tests {
         assert_eq!(count(&conn).unwrap(), QUEUE_CAP);
         // Oldest remaining rows should not include the first 5.
         let oldest_content: String = conn
-            .query_row(
+            .query_one(
                 "SELECT content FROM pending_retains ORDER BY created_at ASC LIMIT 1",
-                [],
+                (),
                 |r| r.get(0),
             )
             .unwrap();
@@ -284,9 +283,9 @@ mod tests {
         );
         // The first inserted entry ("content-0") must be evicted.
         let first_gone: i64 = conn
-            .query_row(
+            .query_one(
                 "SELECT COUNT(*) FROM pending_retains WHERE content = 'content-0'",
-                [],
+                (),
                 |r| r.get(0),
             )
             .unwrap();
@@ -305,7 +304,7 @@ mod tests {
         let tags = vec!["chat:42".to_string(), "user:7".to_string()];
         enqueue(&conn, "bot", "c", None, None, None, Some(&tags)).unwrap();
         let json: String = conn
-            .query_row("SELECT tags_json FROM pending_retains LIMIT 1", [], |r| {
+            .query_one("SELECT tags_json FROM pending_retains LIMIT 1", (), |r| {
                 r.get(0)
             })
             .unwrap();
@@ -388,9 +387,9 @@ mod tests {
         assert_eq!(report.deleted, 0);
         assert_eq!(report.bumped_attempts, 1);
         let attempts: i64 = conn
-            .query_row(
+            .query_one(
                 "SELECT attempts FROM pending_retains WHERE content = 'first'",
-                [],
+                (),
                 |r| r.get(0),
             )
             .unwrap();

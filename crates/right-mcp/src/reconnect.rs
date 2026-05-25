@@ -575,8 +575,6 @@ mod tests {
         let entry = make_entry(format!("{}/token", server.uri()));
 
         let tmp = tempfile::tempdir().unwrap();
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
 
         let token_arc: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
         let backend = Arc::new(ProxyBackend::new(
