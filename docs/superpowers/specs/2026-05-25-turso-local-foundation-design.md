@@ -13,8 +13,9 @@ available, while leaving cloud URLs, credentials, push/pull calls, UI, CLI, bot
 commands, and schedulers out of this stage.
 
 The first implementation probe found a blocker for a pure driver swap:
-`turso 0.7.0-pre.3` opens the existing database file, but rejects SQLite FTS5
-virtual tables with `Parse error: no such module: fts5`. Turso's current Rust
+`turso 0.7.0-pre.3` opens the existing database file, but cannot resolve a
+legacy SQLite FTS5 schema reliably: tables that appear after an old FTS5
+virtual table may be invisible to Turso's schema resolver. Turso's current Rust
 surface provides a different FTS model: enable
 `Builder::experimental_index_method(true)` and create indexes with
 `CREATE INDEX ... USING fts (...)`.
@@ -39,6 +40,8 @@ Relevant upstream references:
   push/pull backup work.
 - Enable Turso's experimental index method on every local database open.
 - Replace SQLite FTS5 virtual-table based search with Turso FTS indexes.
+- Remove legacy SQLite FTS5 virtual tables and sync triggers before Turso
+  migrates old database files.
 - Preserve the existing `<agent>/data.db` path, migration runner, and
   project-owned public API shape as far as Turso permits.
 - Keep raw driver types hidden inside `right-db`.
@@ -68,16 +71,21 @@ Use a local Turso migration with explicit FTS conversion:
 4. Port the runtime wrapper from `libsql` to `turso`.
 5. Change fresh schema SQL to create Turso FTS indexes instead of SQLite FTS5
    virtual tables and sync triggers.
-6. Add a new migration for existing databases that drops old FTS5 sync triggers
-   and creates Turso FTS indexes over the base tables.
-7. Rewrite search queries to search base tables with Turso `MATCH`.
-8. Remove runtime and test dependency on `libsql` after the gates no longer need
+6. Add a pre-Turso legacy scrubber inside `right-db` that uses bundled
+   `rusqlite` only to drop old SQLite FTS5 virtual tables and sync triggers
+   before migrated Turso opens.
+7. Add a new migration for existing databases that drops any remaining old FTS5
+   sync triggers/tables and creates Turso FTS indexes over the base tables.
+8. Rewrite search queries to search base tables with Turso `MATCH`.
+9. Remove runtime and test dependency on `libsql` after the gates no longer need
    it.
 
-The old SQLite FTS5 virtual tables may remain in legacy database files. They
-should not be queried or written by current code. Dropping those virtual tables
-is only allowed if a test proves Turso can drop them safely without loading the
-FTS5 module.
+The old SQLite FTS5 virtual tables must not remain in legacy database files
+after a migrated open. Turso cannot perform that cleanup itself on real legacy
+schemas, so the scrubber is the only allowed non-Turso database operation in
+runtime code. It must be private to `right-db`, run only for
+`open_connection(..., migrate: true)`, and drop only the known legacy FTS5
+objects.
 
 ## Architecture
 
@@ -162,10 +170,10 @@ ON conversation_messages USING fts(content);
 ```
 
 Legacy databases created by earlier versions may still contain
-`memories_fts`, `conversation_messages_fts`, and their sync triggers. The new
-migration should drop the triggers so writes no longer try to maintain SQLite
-FTS5 virtual tables under Turso, then create the Turso FTS indexes over the base
-tables.
+`memories_fts`, `conversation_messages_fts`, and their sync triggers. The
+pre-Turso scrubber removes those real SQLite FTS5 objects before Turso opens the
+file. Migration v34 remains idempotent for partially migrated or synthetic
+legacy schemas and creates the Turso FTS indexes over the base tables.
 
 ### Search Queries
 
@@ -237,7 +245,9 @@ Before removing `libsql`, the implementation must prove:
   transaction rollback.
 - Fresh schema under Turso creates Turso FTS indexes and no longer depends on
   SQLite FTS5 modules.
-- Legacy-style FTS5 sync triggers are removed by migration v34.
+- Real legacy FTS5 virtual tables and sync triggers are removed before Turso
+  opens the database for migration; v34 handles any remaining idempotent cleanup
+  and creates Turso FTS indexes.
 - Legacy database writes after v34 do not attempt to write old FTS5 virtual
   tables.
 - Conversation search and memory search return rows through Turso FTS.
@@ -322,10 +332,12 @@ devenv shell -- cargo build --workspace
 
 ## Acceptance Criteria
 
-- Runtime `right-db` uses `turso` with the `sync` feature instead of `libsql`.
+- Runtime `right-db` uses `turso` with the `sync` feature instead of `libsql`;
+  bundled `rusqlite` is limited to the pre-Turso legacy FTS5 scrubber.
 - Every local Turso open enables `experimental_index_method(true)`.
 - Fresh databases use Turso FTS indexes, not SQLite FTS5 virtual tables.
-- Legacy FTS5 sync triggers are removed by migration v34.
+- Legacy FTS5 virtual tables and sync triggers are removed during migrated
+  opens.
 - Conversation and memory search use Turso FTS over base tables.
 - Existing callers keep using project-owned `right_db` APIs.
 - No cloud sync behavior, credentials, UI, CLI, bot command, or scheduler is

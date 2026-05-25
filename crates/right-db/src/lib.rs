@@ -25,6 +25,9 @@ pub use row::Row;
 pub use transaction::Transaction;
 
 use std::path::Path;
+use std::time::Duration;
+
+const LEGACY_SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub trait OptionalExtension<T> {
     fn optional(self) -> Result<Option<T>, DbError>;
@@ -63,12 +66,74 @@ impl<T> OptionalExtension<T> for Result<T, DbError> {
 ///   force the second opener to time out.
 pub fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
     let db_path = agent_path.join("data.db");
+    if migrate && legacy_fts5_schema_exists(&db_path)? {
+        scrub_legacy_fts5_schema(&db_path)?;
+    }
     let conn = Connection::open_local(db_path, true)?;
     conn.apply_connection_pragmas()?;
     if migrate {
         migrations::MIGRATIONS.to_latest(&conn)?;
     }
     Ok(conn)
+}
+
+fn legacy_fts5_schema_exists(db_path: &Path) -> Result<bool, DbError> {
+    if !db_path.exists() {
+        return Ok(false);
+    }
+
+    let conn = Connection::open_local(db_path.to_path_buf(), false)?;
+    conn.apply_readonly_pragmas()?;
+    let legacy_object_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM sqlite_master
+         WHERE type = 'table'
+           AND name IN ('memories_fts', 'conversation_messages_fts')
+           AND lower(sql) LIKE 'create virtual table%using fts5%'",
+        (),
+        |row| row.get(0),
+    )?;
+    Ok(legacy_object_count > 0)
+}
+
+fn scrub_legacy_fts5_schema(db_path: &Path) -> Result<(), DbError> {
+    // Turso cannot resolve every table in legacy schemas that contain SQLite
+    // FTS5 virtual tables. Remove only those known legacy objects with SQLite
+    // before handing the file to Turso.
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(|source| DbError::LegacySqlite {
+                path: db_path.to_path_buf(),
+                source,
+            })?;
+    conn.busy_timeout(LEGACY_SQLITE_BUSY_TIMEOUT)
+        .map_err(|source| DbError::LegacySqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+
+         DROP TRIGGER IF EXISTS memories_ai;
+         DROP TRIGGER IF EXISTS memories_ad;
+         DROP TRIGGER IF EXISTS memories_au;
+
+         DROP TRIGGER IF EXISTS conversation_messages_ai;
+         DROP TRIGGER IF EXISTS conversation_messages_ad;
+         DROP TRIGGER IF EXISTS conversation_messages_au;
+
+         DROP TABLE IF EXISTS memories_fts;
+         DROP TABLE IF EXISTS conversation_messages_fts;
+
+         COMMIT;",
+    )
+    .map_err(|source| DbError::LegacySqlite {
+        path: db_path.to_path_buf(),
+        source,
+    })?;
+
+    Ok(())
 }
 
 /// Open the per-agent SQLite database, dropping the connection.

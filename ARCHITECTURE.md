@@ -489,10 +489,12 @@ opens must enable Turso's experimental index-method feature because
 conversation and memory search use `CREATE INDEX ... USING fts`. Other crates
 must use project-owned `right_db` types and must not expose raw `turso`
 connection, transaction, row, error, value, or parameter types in public APIs.
+`right-db` may use bundled `rusqlite` only for the pre-Turso legacy FTS5
+scrubber described below; it is not a general runtime database boundary.
 
 ### Migration Ownership
 
-Both the MCP aggregator (`right-mcp-server`) and bot processes run schema migrations on per-agent `data.db` via `right_db::open_connection(path, migrate: true)`. Migrations are idempotent — concurrent callers are safe (WAL mode + busy_timeout). CLI commands and other processes open with `migrate: false` or read-only helpers. Bot processes still declare `depends_on: right-mcp-server` for MCP readiness, but no longer depend on it for schema migrations. The migration registry (`right_db::migrations::MIGRATIONS`) is the sole place to add new tables.
+Both the MCP aggregator (`right-mcp-server`) and bot processes run schema migrations on per-agent `data.db` via `right_db::open_connection(path, migrate: true)`. Before Turso opens an existing database for migration, `right-db` runs a narrow bundled-`rusqlite` scrubber that drops only the legacy SQLite FTS5 virtual tables and sync triggers; Turso cannot resolve all later tables in those old schemas until that cleanup is done. Migrations are idempotent — concurrent callers are safe (WAL mode + busy_timeout). CLI commands and other processes open with `migrate: false` or read-only helpers and do not run the scrubber. Bot processes still declare `depends_on: right-mcp-server` for MCP readiness, but no longer depend on it for schema migrations. The migration registry (`right_db::migrations::MIGRATIONS`) is the sole place to add new tables.
 
 All pending migrations run inside a single immediate transaction. Rollback is all-or-nothing: a failure at migration N rolls back every prior migration in the same batch and leaves `user_version` unchanged. A concurrent caller that opens the database during a cold-boot batch blocks on that transaction for the full batch duration, not just the next pending version, and may exhaust the 5s `busy_timeout` under WAL. Tests must not assume per-version commit boundaries; see `migration_runner_semantics_rolls_back_all_pending_migrations_on_later_failure`.
 
