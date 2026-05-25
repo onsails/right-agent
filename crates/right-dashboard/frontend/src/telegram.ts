@@ -2,6 +2,9 @@ export type DashboardDisplayMode = 'normal' | 'fullscreen'
 
 export const DASHBOARD_DISPLAY_MODE_STORAGE_KEY = 'right-dashboard.display-mode'
 
+const FULLSCREEN_CHANGED_EVENT = 'fullscreenChanged'
+type FullscreenChangedEvent = typeof FULLSCREEN_CHANGED_EVENT
+
 type DashboardDisplayModeStorage = Pick<Storage, 'getItem' | 'setItem'>
 type TelegramFullscreenChangedHandler = () => void
 
@@ -12,8 +15,8 @@ export interface TelegramWebApp {
   exitFullscreen?: () => void
   expand?: () => void
   isFullscreen?: boolean
-  onEvent?: (eventType: 'fullscreenChanged', eventHandler: TelegramFullscreenChangedHandler) => void
-  offEvent?: (eventType: 'fullscreenChanged', eventHandler: TelegramFullscreenChangedHandler) => void
+  onEvent?: (eventType: FullscreenChangedEvent, eventHandler: TelegramFullscreenChangedHandler) => void
+  offEvent?: (eventType: FullscreenChangedEvent, eventHandler: TelegramFullscreenChangedHandler) => void
 }
 
 declare global {
@@ -68,12 +71,35 @@ export function saveDashboardDisplayMode(
   try {
     storage?.setItem(DASHBOARD_DISPLAY_MODE_STORAGE_KEY, mode)
   } catch {
-    // Storage may be unavailable or blocked; Telegram display changes should still proceed.
+    /* empty */
   }
 }
 
 export function nextDashboardDisplayModePreference(mode: DashboardDisplayMode): DashboardDisplayMode {
   return mode === 'fullscreen' ? 'normal' : 'fullscreen'
+}
+
+// Telegram's requestFullscreen/exitFullscreen are async — the new state arrives via fullscreenChanged.
+// Return the requested mode optimistically; subscribeTelegramFullscreenChanges corrects if the client denies.
+function tryRequestFullscreen(webApp: TelegramWebApp | undefined): DashboardDisplayMode {
+  if (typeof webApp?.requestFullscreen !== 'function') {
+    return actualDisplayMode(webApp, 'normal')
+  }
+  try {
+    webApp.requestFullscreen()
+    return 'fullscreen'
+  } catch {
+    return actualDisplayMode(webApp, 'normal')
+  }
+}
+
+function tryExitFullscreen(webApp: TelegramWebApp | undefined): DashboardDisplayMode {
+  try {
+    webApp?.exitFullscreen?.()
+    return 'normal'
+  } catch {
+    return actualDisplayMode(webApp, 'fullscreen')
+  }
 }
 
 export function initializeTelegramWebApp(
@@ -86,18 +112,7 @@ export function initializeTelegramWebApp(
   if (preferredMode !== 'fullscreen') {
     return actualDisplayMode(webApp, 'normal')
   }
-
-  if (typeof webApp?.requestFullscreen !== 'function') {
-    return actualDisplayMode(webApp, 'normal')
-  }
-
-  try {
-    webApp.requestFullscreen()
-  } catch {
-    return actualDisplayMode(webApp, 'normal')
-  }
-
-  return actualDisplayMode(webApp, 'fullscreen')
+  return tryRequestFullscreen(webApp)
 }
 
 export function applyTelegramDisplayMode(
@@ -106,21 +121,7 @@ export function applyTelegramDisplayMode(
   storage: DashboardDisplayModeStorage | undefined = defaultStorage(),
 ): DashboardDisplayMode {
   saveDashboardDisplayMode(mode, storage)
-
-  try {
-    if (mode === 'fullscreen') {
-      if (typeof webApp?.requestFullscreen !== 'function') {
-        return actualDisplayMode(webApp, 'normal')
-      }
-      webApp.requestFullscreen()
-    } else {
-      webApp?.exitFullscreen?.()
-    }
-  } catch {
-    return actualDisplayMode(webApp, 'normal')
-  }
-
-  return actualDisplayMode(webApp, mode)
+  return mode === 'fullscreen' ? tryRequestFullscreen(webApp) : tryExitFullscreen(webApp)
 }
 
 export function subscribeTelegramFullscreenChanges(
@@ -132,16 +133,16 @@ export function subscribeTelegramFullscreenChanges(
   }
 
   try {
-    webApp?.onEvent?.('fullscreenChanged', handler)
+    webApp?.onEvent?.(FULLSCREEN_CHANGED_EVENT, handler)
   } catch {
-    // Telegram event APIs vary by client; display mode tracking is opportunistic.
+    /* empty */
   }
 
   return () => {
     try {
-      webApp?.offEvent?.('fullscreenChanged', handler)
+      webApp?.offEvent?.(FULLSCREEN_CHANGED_EVENT, handler)
     } catch {
-      // Cleanup must not break dashboard teardown when a client rejects offEvent.
+      /* empty */
     }
   }
 }
