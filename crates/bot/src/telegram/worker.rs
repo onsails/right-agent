@@ -3473,7 +3473,8 @@ async fn invoke_cc(
     routed_message_ids: &[i32],
     ctx: &WorkerContext,
 ) -> Result<CcReply, InvokeCcFailure> {
-    // Open per-worker DB connection (rusqlite is !Send — each worker opens its own)
+    // Keep DB access per worker; the sync right-db wrapper is not shared across
+    // concurrent worker tasks.
     let conn = right_db::open_connection(&ctx.agent_dir, false)
         .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
 
