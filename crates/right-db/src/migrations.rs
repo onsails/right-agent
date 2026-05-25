@@ -935,6 +935,33 @@ mod tests {
     }
 
     #[test]
+    fn migration_runner_semantics_libsql_rolls_back_all_pending_migrations_on_later_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::open_connection(dir.path(), false).unwrap();
+
+        let err = FAILING_MIGRATIONS
+            .to_latest(&conn)
+            .expect_err("second migration should fail");
+
+        assert!(
+            err.to_string().contains("migration 2"),
+            "expected migration 2 context, got {err:?}",
+        );
+        let user_version: i64 = conn
+            .query_one("PRAGMA user_version", (), |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 0);
+        let table_count: i64 = conn
+            .query_one(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='synthetic_probe'",
+                (),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0);
+    }
+
+    #[test]
     fn migration_runner_semantics_rejects_target_after_highest_known_version() {
         let conn = Connection::open_in_memory().unwrap();
 

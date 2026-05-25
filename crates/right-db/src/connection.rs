@@ -31,6 +31,15 @@ impl Connection {
             libsql::OpenFlags::SQLITE_OPEN_READ_ONLY
         };
         let builder = libsql::Builder::new_local(&db_path).flags(flags);
+        // SAFETY: right-db is only using local libSQL through synchronous
+        // wrappers that drive each async operation to completion. During the
+        // staged libSQL migration this crate still links and uses rusqlite in
+        // conversation storage and tests, so rusqlite can initialize SQLite
+        // before libSQL's one-time serialized-mode assertion runs. The project
+        // still uses serialized, mutex-protected handles; this skips only that
+        // temporary global init assertion until the remaining right-db rusqlite
+        // surfaces are removed.
+        let builder = unsafe { builder.skip_safety_assert(true) };
         let database = runtime
             .block_on(builder.build())
             .map_err(|source| DbError::Open {
