@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use right_db::{Connection, DbError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -109,7 +109,7 @@ pub enum LifecycleError {
     },
 
     #[error("database error: {0}")]
-    Database(#[from] rusqlite::Error),
+    Database(#[from] DbError),
 }
 
 struct RawSkillLifecycleRow {
@@ -143,12 +143,12 @@ pub fn mark_created(
             created_at = excluded.created_at,
             archived_at = NULL,
             absorbed_into = NULL",
-        params![
+        (
             skill_name,
             LifecycleState::Active.as_db_str(),
             created_by.as_db_str(),
-            now
-        ],
+            now,
+        ),
     )?;
     Ok(())
 }
@@ -170,12 +170,12 @@ pub fn bump_patch(
             last_patched_at = excluded.last_patched_at,
             archived_at = NULL,
             absorbed_into = NULL",
-        params![
+        (
             skill_name,
             LifecycleState::Active.as_db_str(),
             created_by.as_db_str(),
-            now
-        ],
+            now,
+        ),
     )?;
     Ok(())
 }
@@ -194,17 +194,23 @@ where
     S: AsRef<str>,
 {
     let now = now_utc.to_rfc3339();
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn.transaction()?;
     for name in skill_names {
-        bump_use_stmt(&tx, name.as_ref(), &now)?;
+        tx.execute(
+            BUMP_USE_SQL,
+            (
+                name.as_ref(),
+                LifecycleState::Active.as_db_str(),
+                CreatedBy::Foreground.as_db_str(),
+                now.as_str(),
+            ),
+        )?;
     }
     tx.commit()?;
     Ok(())
 }
 
-fn bump_use_stmt(conn: &Connection, skill_name: &str, now_rfc3339: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT INTO skill_lifecycle (
+const BUMP_USE_SQL: &str = "INSERT INTO skill_lifecycle (
             skill_name, state, created_by, use_count, created_at, last_used_at
          ) VALUES (?1, ?2, ?3, 1, ?4, ?4)
          ON CONFLICT(skill_name) DO UPDATE SET
@@ -212,13 +218,17 @@ fn bump_use_stmt(conn: &Connection, skill_name: &str, now_rfc3339: &str) -> rusq
             use_count = skill_lifecycle.use_count + 1,
             last_used_at = excluded.last_used_at,
             archived_at = NULL,
-            absorbed_into = NULL",
-        params![
+            absorbed_into = NULL";
+
+fn bump_use_stmt(conn: &Connection, skill_name: &str, now_rfc3339: &str) -> Result<()> {
+    conn.execute(
+        BUMP_USE_SQL,
+        (
             skill_name,
             LifecycleState::Active.as_db_str(),
             CreatedBy::Foreground.as_db_str(),
-            now_rfc3339
-        ],
+            now_rfc3339,
+        ),
     )?;
     Ok(())
 }
@@ -229,14 +239,14 @@ pub fn set_pinned(conn: &Connection, skill_name: &str, pinned: bool) -> Result<b
         "UPDATE skill_lifecycle
          SET pinned = ?2
          WHERE skill_name = ?1 AND pinned != ?2",
-        params![skill_name, pinned_value],
+        (skill_name, pinned_value),
     )?;
     Ok(changed > 0)
 }
 
 pub fn get(conn: &Connection, skill_name: &str) -> Result<Option<SkillLifecycleRow>> {
     let raw = conn
-        .query_row(
+        .query_one(
             "SELECT
                 skill_name, state, pinned, created_by, use_count, patch_count,
                 created_at, last_used_at, last_patched_at, archived_at, absorbed_into
@@ -245,7 +255,11 @@ pub fn get(conn: &Connection, skill_name: &str) -> Result<Option<SkillLifecycleR
             [skill_name],
             raw_row_from_sql,
         )
-        .optional()?;
+        .map(Some)
+        .or_else(|err| match err {
+            DbError::NotFound => Ok(None),
+            other => Err(other),
+        })?;
     raw.map(row_from_raw).transpose()
 }
 
@@ -282,7 +296,7 @@ pub fn apply_automatic_transitions(
     let stale_cutoff = (now_utc - config.stale_after).to_rfc3339();
     let archive_cutoff = (now_utc - config.archive_after).to_rfc3339();
     let now = now_utc.to_rfc3339();
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn.transaction()?;
 
     // Archive first: any unpinned curator/probe-writer row (active OR stale)
     // whose latest activity is older than the archive cutoff. Running archive
@@ -290,39 +304,39 @@ pub fn apply_automatic_transitions(
     let archived = tx.execute(
         &format!(
             "UPDATE skill_lifecycle
-             SET state = :archived, archived_at = :now
-             WHERE state IN (:active, :stale)
+             SET state = ?1, archived_at = ?2
+             WHERE state IN (?3, ?4)
                AND pinned = 0
-               AND created_by IN (:probe_writer, :curator)
-               AND {ACTIVITY_BEFORE_CUTOFF}"
+               AND created_by IN (?5, ?6)
+               AND {ACTIVITY_BEFORE_CUTOFF_ARCHIVE}"
         ),
-        rusqlite::named_params! {
-            ":archived": LifecycleState::Archived.as_db_str(),
-            ":active": LifecycleState::Active.as_db_str(),
-            ":stale": LifecycleState::Stale.as_db_str(),
-            ":probe_writer": CreatedBy::ProbeWriter.as_db_str(),
-            ":curator": CreatedBy::Curator.as_db_str(),
-            ":cutoff": archive_cutoff,
-            ":now": now,
-        },
+        (
+            LifecycleState::Archived.as_db_str(),
+            now.as_str(),
+            LifecycleState::Active.as_db_str(),
+            LifecycleState::Stale.as_db_str(),
+            CreatedBy::ProbeWriter.as_db_str(),
+            CreatedBy::Curator.as_db_str(),
+            archive_cutoff.as_str(),
+        ),
     )?;
 
     let staled = tx.execute(
         &format!(
             "UPDATE skill_lifecycle
-             SET state = :stale
-             WHERE state = :active
+             SET state = ?1
+             WHERE state = ?2
                AND pinned = 0
-               AND created_by IN (:probe_writer, :curator)
-               AND {ACTIVITY_BEFORE_CUTOFF}"
+               AND created_by IN (?3, ?4)
+               AND {ACTIVITY_BEFORE_CUTOFF_STALE}"
         ),
-        rusqlite::named_params! {
-            ":stale": LifecycleState::Stale.as_db_str(),
-            ":active": LifecycleState::Active.as_db_str(),
-            ":probe_writer": CreatedBy::ProbeWriter.as_db_str(),
-            ":curator": CreatedBy::Curator.as_db_str(),
-            ":cutoff": stale_cutoff,
-        },
+        (
+            LifecycleState::Stale.as_db_str(),
+            LifecycleState::Active.as_db_str(),
+            CreatedBy::ProbeWriter.as_db_str(),
+            CreatedBy::Curator.as_db_str(),
+            stale_cutoff.as_str(),
+        ),
     )?;
 
     tx.commit()?;
@@ -330,10 +344,16 @@ pub fn apply_automatic_transitions(
 }
 
 /// SQL fragment: true when `MAX(last_used_at, last_patched_at)` (treating
-/// NULLs as missing) is strictly before `:cutoff`. Compares via `julianday`
+/// NULLs as missing) is strictly before the cutoff parameter. Compares via `julianday`
 /// to normalize across RFC3339 offsets; rows with both timestamps NULL never
 /// match.
-const ACTIVITY_BEFORE_CUTOFF: &str = "julianday(:cutoff) > COALESCE(
+const ACTIVITY_BEFORE_CUTOFF_ARCHIVE: &str = "julianday(?7) > COALESCE(
+    MAX(julianday(last_used_at), julianday(last_patched_at)),
+    julianday(last_used_at),
+    julianday(last_patched_at)
+)";
+
+const ACTIVITY_BEFORE_CUTOFF_STALE: &str = "julianday(?5) > COALESCE(
     MAX(julianday(last_used_at), julianday(last_patched_at)),
     julianday(last_used_at),
     julianday(last_patched_at)
@@ -344,27 +364,25 @@ const ACTIVITY_BEFORE_CUTOFF: &str = "julianday(:cutoff) > COALESCE(
 /// skill-change-count trigger.
 pub fn count_changes_since(conn: &Connection, since: DateTime<Utc>) -> Result<u32> {
     let since = since.to_rfc3339();
-    let count: i64 = conn.query_row(
+    let count: i64 = conn.query_one(
         "SELECT COUNT(*) FROM skill_lifecycle
          WHERE (created_at IS NOT NULL AND julianday(created_at) > julianday(?1))
             OR (last_patched_at IS NOT NULL AND julianday(last_patched_at) > julianday(?1))",
         [&since],
-        |row| row.get::<_, i64>(0),
+        |row| row.get(0),
     )?;
     Ok(u32::try_from(count.max(0)).unwrap_or(u32::MAX))
 }
 
 fn list_where(conn: &Connection, sql: &str) -> Result<Vec<SkillLifecycleRow>> {
-    let mut stmt = conn.prepare(sql)?;
-    let mut rows = stmt.query([])?;
-    let mut lifecycle_rows = Vec::new();
-    while let Some(row) = rows.next()? {
-        lifecycle_rows.push(row_from_raw(raw_row_from_sql(row)?)?);
-    }
-    Ok(lifecycle_rows)
+    conn.query_all(sql, (), raw_row_from_sql)
+        .map_err(Into::into)
+        .and_then(|rows| rows.into_iter().map(row_from_raw).collect())
 }
 
-fn raw_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawSkillLifecycleRow> {
+fn raw_row_from_sql(
+    row: &right_db::row::Row<'_>,
+) -> std::result::Result<RawSkillLifecycleRow, DbError> {
     Ok(RawSkillLifecycleRow {
         skill_name: row.get(0)?,
         state: row.get(1)?,
@@ -423,11 +441,10 @@ pub fn latest_activity_at(row: &SkillLifecycleRow) -> Option<DateTime<Utc>> {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
-    use rusqlite::Connection;
 
     fn migrated_conn() -> Connection {
-        let mut conn = Connection::open_in_memory().unwrap();
-        right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let (dir, conn) = right_db::test_support::migrated_connection();
+        let _path = dir.keep();
         conn
     }
 

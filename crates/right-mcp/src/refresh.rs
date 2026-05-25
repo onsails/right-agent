@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use right_db::Connection;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -687,8 +687,7 @@ mod tests {
 
     #[test]
     fn load_oauth_entries_from_db_test() {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let (_dir, conn) = right_db::test_support::migrated_connection();
         conn.execute(
             "INSERT INTO mcp_servers (name, url, auth_type, auth_token, refresh_token, \
              token_endpoint, client_id, expires_at) \

@@ -76,6 +76,29 @@ impl<A: IntoValue, B: IntoValue, C: IntoValue, D: IntoValue> IntoParams for (A, 
     }
 }
 
+macro_rules! tuple_into_params {
+    ($($name:ident),+ $(,)?) => {
+        impl<$($name: IntoValue),+> IntoParams for ($($name,)+) {
+            #[allow(non_snake_case)]
+            fn into_params(self) -> Result<Params, DbError> {
+                let ($($name,)+) = self;
+                Ok(Params(libsql::params::Params::Positional(vec![
+                    $($name.into_value()?,)+
+                ])))
+            }
+        }
+    };
+}
+
+tuple_into_params!(A, B, C, D, E);
+tuple_into_params!(A, B, C, D, E, F);
+tuple_into_params!(A, B, C, D, E, F, G);
+tuple_into_params!(A, B, C, D, E, F, G, H);
+tuple_into_params!(A, B, C, D, E, F, G, H, I);
+tuple_into_params!(A, B, C, D, E, F, G, H, I, J);
+tuple_into_params!(A, B, C, D, E, F, G, H, I, J, K);
+tuple_into_params!(A, B, C, D, E, F, G, H, I, J, K, L);
+
 macro_rules! array_into_params {
     ($($len:expr),+ $(,)?) => {
         $(

@@ -6,10 +6,10 @@ publish = false
 
 [dependencies]
 chrono = { workspace = true }
-rusqlite = { workspace = true }
+right-db = { path = "../right-db", version = "*" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-right-db = { path = "../right-db", version = "*" }
+right-db = { path = "../right-db", version = "*", features = ["test-support"] }
 serde_json = { workspace = true }
