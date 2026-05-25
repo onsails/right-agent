@@ -3790,7 +3790,7 @@ async fn cmd_agent_backup(
         let db_path = agent_dir.join("data.db");
         if db_path.exists() {
             let backup_db = backup_dir.join("data.db");
-            let conn = right_db::open_database_path_readonly(&db_path)
+            let conn = right_db::open_connection(&agent_dir, false)
                 .into_diagnostic()
                 .map_err(|e| miette::miette!("failed to open data.db: {e:#}"))?;
             conn.execute(

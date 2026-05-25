@@ -94,7 +94,7 @@ async fn run_backup(
         let backup_db = backup_dir.join("data.db");
         let db_display = db_path.display().to_string();
         let backup_path_sql = backup_db.display().to_string().replace('\'', "''");
-        let conn = right_db::open_database_path_readonly(&db_path)
+        let conn = right_db::open_connection(agent_dir, false)
             .map_err(|e| miette::miette!("failed to open {}: {e:#}", db_display))?;
         conn.execute(&format!("VACUUM INTO '{backup_path_sql}'"), ())
             .map_err(|e| miette::miette!("VACUUM INTO failed: {e:#}"))?;
