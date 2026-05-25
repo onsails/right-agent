@@ -16,10 +16,10 @@ use std::collections::BTreeMap;
 /// Canonical list of `usage_events.source` values produced by the learning
 /// pipeline.
 ///
-/// Single source of truth shared between the review gate's daily-budget query
-/// (`right_agent::learned_skills`) and the dashboard's `SOURCES` array
-/// (`right_dashboard::read_model::usage`). New learning-adjacent sources must
-/// be added here; the dashboard test asserts every entry is rendered.
+/// Single source of truth shared between learning usage writers and the
+/// dashboard's `SOURCES` array (`right_dashboard::read_model::usage`). New
+/// learning-adjacent sources must be added here; the dashboard test asserts
+/// every entry is rendered.
 pub const LEARNING_SOURCES: &[&str] = &[
     "learning_prefilter",
     "learning_probe_writer",

@@ -23,7 +23,8 @@ pub(crate) enum ChangeKind {
     /// File contents bytewise unchanged — fs noise (mtime touch, atomic
     /// rename, etc.). Skip silently.
     NoChange,
-    /// Only `model` and/or `debug` changed — apply in-memory and continue running.
+    /// Only `model`, `debug`, and/or ignored legacy fields changed — apply
+    /// in-memory runtime fields and continue running.
     HotReloadable {
         /// `Some(v)` = yaml field present with value `v`. `None` = field absent;
         /// watcher stores `None` into the ArcSwap, meaning "use default model".
@@ -38,9 +39,10 @@ pub(crate) enum ChangeKind {
 
 /// Decide whether a change can be hot-reloaded or requires a restart.
 ///
-/// Compares old + new yaml as parsed `AgentConfig` values with `model` and
-/// `debug` nulled out on both sides. If the rest is equal, hot-reload;
-/// else restart. Parse failure on either side fails-safe to restart.
+/// Compares old + new yaml as parsed `AgentConfig` values after nulling
+/// hot-reloadable and ignored legacy fields on both sides. If the rest is
+/// equal, hot-reload; else restart. Parse failure on either side fails-safe
+/// to restart.
 pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
     if old_yaml == new_yaml {
         return ChangeKind::NoChange;
@@ -67,8 +69,8 @@ pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
     };
     let new_model = new.model.take();
     let new_debug = new.debug.take();
-    old.model = None;
-    old.debug = None;
+    normalize_for_reload_diff(&mut old);
+    normalize_for_reload_diff(&mut new);
     if old == new {
         ChangeKind::HotReloadable {
             new_model,
@@ -79,10 +81,24 @@ pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
     }
 }
 
+fn normalize_for_reload_diff(config: &mut AgentConfig) {
+    config.model = None;
+    config.debug = None;
+    config.learning.fork_probe_enabled = None;
+    config.learning.fork_probe_model = None;
+    config.learning.legacy_probe_model = None;
+    config.learning.background_review_enabled = None;
+    config.learning.episode_selector_model = None;
+    config.learning.episode_selector_max_budget_usd = None;
+    config.learning.episode_settle_seconds = None;
+    config.learning.circuit_failure_threshold = None;
+    config.learning.circuit_cooldown_minutes = None;
+}
+
 /// Spawn a blocking thread that watches `agent.yaml` for modifications.
 ///
 /// On change:
-/// - `HotReloadable` → store new model into `model_swap`, log info, do not cancel.
+/// - `HotReloadable` → store new runtime fields, log info, do not cancel.
 /// - `RestartRequired` → set `config_changed`, cancel `token` (existing path).
 ///
 /// `initial_debug` is the value of the `--debug` CLI flag at process start.
@@ -162,7 +178,7 @@ pub(crate) fn spawn_config_watcher(
                             tracing::info!(
                                 model = ?new_model.as_deref().unwrap_or("default"),
                                 debug = ?new_debug,
-                                "agent.yaml: model/debug-only change — hot-reloading"
+                                "agent.yaml: model/debug or ignored legacy change — hot-reloading"
                             );
                             model_swap.store(Arc::new(new_model));
                             // yaml `debug:` present → use that value; absent → revert to boot-time CLI flag.
@@ -251,9 +267,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn diff_learning_change_requires_restart() {
-        let old = "restart: never\nlearning:\n  episode_settle_seconds: 90\n";
-        let new = "restart: never\nlearning:\n  episode_settle_seconds: 180\n";
+    async fn diff_deprecated_learning_change_is_ignored_for_reload() {
+        let old = r#"restart: never
+learning:
+  fork_probe_enabled: true
+  fork_probe_model: claude-sonnet-4-6
+  probe_model: claude-haiku-4-5
+  background_review_enabled: true
+  episode_selector_model: claude-sonnet-4-6
+  episode_selector_max_budget_usd: 1.0
+  episode_settle_seconds: 90
+  circuit_failure_threshold: 3
+  circuit_cooldown_minutes: 20
+"#;
+        let new = r#"restart: never
+learning:
+  fork_probe_enabled: false
+  fork_probe_model: claude-opus-4-1
+  probe_model: claude-sonnet-4-6
+  background_review_enabled: false
+  episode_selector_model: claude-haiku-4-5
+  episode_selector_max_budget_usd: 2.0
+  episode_settle_seconds: 180
+  circuit_failure_threshold: 9
+  circuit_cooldown_minutes: 60
+"#;
+        assert!(matches!(
+            classify(old, new),
+            ChangeKind::HotReloadable { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn diff_current_learning_change_requires_restart() {
+        let old = "restart: never\nlearning:\n  max_daily_budget_usd: 2.0\n";
+        let new = "restart: never\nlearning:\n  max_daily_budget_usd: 3.0\n";
         assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
     }
 
