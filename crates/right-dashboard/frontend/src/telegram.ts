@@ -3,8 +3,7 @@ export type DashboardDisplayMode = 'normal' | 'fullscreen'
 export const DASHBOARD_DISPLAY_MODE_STORAGE_KEY = 'right-dashboard.display-mode'
 
 type DashboardDisplayModeStorage = Pick<Storage, 'getItem' | 'setItem'>
-type TelegramFullscreenChangedEvent = { is_fullscreen: boolean }
-type TelegramFullscreenChangedHandler = (event: TelegramFullscreenChangedEvent) => void
+type TelegramFullscreenChangedHandler = () => void
 
 export interface TelegramWebApp {
   initData?: string
@@ -13,8 +12,8 @@ export interface TelegramWebApp {
   exitFullscreen?: () => void
   expand?: () => void
   isFullscreen?: boolean
-  onEvent?: (eventType: 'fullscreen_changed', eventHandler: TelegramFullscreenChangedHandler) => void
-  offEvent?: (eventType: 'fullscreen_changed', eventHandler: TelegramFullscreenChangedHandler) => void
+  onEvent?: (eventType: 'fullscreenChanged', eventHandler: TelegramFullscreenChangedHandler) => void
+  offEvent?: (eventType: 'fullscreenChanged', eventHandler: TelegramFullscreenChangedHandler) => void
 }
 
 declare global {
@@ -117,19 +116,19 @@ export function subscribeTelegramFullscreenChanges(
   webApp: TelegramWebApp | undefined,
   onChange: (mode: DashboardDisplayMode) => void,
 ): () => void {
-  const handler: TelegramFullscreenChangedHandler = (event) => {
-    onChange(event.is_fullscreen ? 'fullscreen' : 'normal')
+  const handler: TelegramFullscreenChangedHandler = () => {
+    onChange(webApp?.isFullscreen ? 'fullscreen' : 'normal')
   }
 
   try {
-    webApp?.onEvent?.('fullscreen_changed', handler)
+    webApp?.onEvent?.('fullscreenChanged', handler)
   } catch {
     // Telegram event APIs vary by client; display mode tracking is opportunistic.
   }
 
   return () => {
     try {
-      webApp?.offEvent?.('fullscreen_changed', handler)
+      webApp?.offEvent?.('fullscreenChanged', handler)
     } catch {
       // Cleanup must not break dashboard teardown when a client rejects offEvent.
     }

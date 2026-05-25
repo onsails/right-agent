@@ -194,22 +194,25 @@ describe('Telegram dashboard display mode helpers', () => {
   })
 
   test('subscribes to fullscreen changes and unsubscribes with offEvent', () => {
-    let handler: ((event: { is_fullscreen: boolean }) => void) | undefined
+    let handler: (() => void) | undefined
     const onChange = vi.fn()
     const webApp: TelegramWebApp = {
+      isFullscreen: false,
       onEvent: vi.fn((eventName, nextHandler) => {
-        expect(eventName).toBe('fullscreen_changed')
-        handler = nextHandler as (event: { is_fullscreen: boolean }) => void
+        expect(eventName).toBe('fullscreenChanged')
+        handler = nextHandler
       }),
       offEvent: vi.fn((eventName, nextHandler) => {
-        expect(eventName).toBe('fullscreen_changed')
+        expect(eventName).toBe('fullscreenChanged')
         expect(nextHandler).toBe(handler)
       }),
     }
 
     const unsubscribe = subscribeTelegramFullscreenChanges(webApp, onChange)
-    handler?.({ is_fullscreen: true })
-    handler?.({ is_fullscreen: false })
+    webApp.isFullscreen = true
+    handler?.()
+    webApp.isFullscreen = false
+    handler?.()
     unsubscribe()
 
     expect(onChange).toHaveBeenNthCalledWith(1, 'fullscreen')
