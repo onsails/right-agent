@@ -10,8 +10,8 @@ use rmcp::ServiceExt as _;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ClientJsonRpcMessage, Tool};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::streamable_http_client::{
-    StreamableHttpClient, StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
-    StreamableHttpError, StreamableHttpPostResponse,
+    AuthRequiredError, StreamableHttpClient, StreamableHttpClientTransport,
+    StreamableHttpClientTransportConfig, StreamableHttpError, StreamableHttpPostResponse,
 };
 use sse_stream::{Error as SseError, Sse};
 use thiserror::Error;
@@ -90,15 +90,28 @@ impl std::fmt::Display for BackendStatus {
 }
 
 /// How a proxy backend authenticates with the upstream MCP server.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub enum AuthMethod {
     /// `Authorization: Bearer <token>` header (default for OAuth and static bearer keys).
     #[default]
     Bearer,
     /// Custom header, e.g. `X-Api-Key: <token>`.
     Header(String),
+    /// Static set of HTTP headers persisted as separate encrypted secrets.
+    Headers(Vec<crate::credentials::HttpHeaderSecret>),
     /// Key is embedded in the URL query string. No header injection needed.
     QueryString,
+}
+
+impl std::fmt::Debug for AuthMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bearer => f.write_str("Bearer"),
+            Self::Header(name) => f.debug_tuple("Header").field(name).finish(),
+            Self::Headers(headers) => f.debug_tuple("Headers").field(headers).finish(),
+            Self::QueryString => f.write_str("QueryString"),
+        }
+    }
 }
 
 impl AuthMethod {
@@ -110,6 +123,18 @@ impl AuthMethod {
             _ => Self::Bearer,
         }
     }
+
+    /// Parse from DB string fields plus multi-header secrets.
+    pub fn from_db_with_headers(
+        auth_type: Option<&str>,
+        auth_header: Option<&str>,
+        headers: Vec<crate::credentials::HttpHeaderSecret>,
+    ) -> Self {
+        match auth_type {
+            Some("headers") => Self::Headers(headers),
+            _ => Self::from_db(auth_type, auth_header),
+        }
+    }
 }
 
 impl std::fmt::Display for AuthMethod {
@@ -117,6 +142,7 @@ impl std::fmt::Display for AuthMethod {
         match self {
             Self::Bearer => f.write_str("bearer"),
             Self::Header(_) => f.write_str("header"),
+            Self::Headers(_) => f.write_str("headers"),
             Self::QueryString => f.write_str("query_string"),
         }
     }
@@ -131,6 +157,7 @@ impl std::fmt::Display for AuthMethod {
 ///
 /// For [`AuthMethod::Bearer`], the token is passed as the `auth_token` parameter.
 /// For [`AuthMethod::Header`], the token is injected as a custom header.
+/// For [`AuthMethod::Headers`], stored header secrets are injected directly.
 /// For [`AuthMethod::QueryString`], no header injection is needed.
 #[derive(Clone)]
 pub(crate) struct DynamicAuthClient {
@@ -152,26 +179,49 @@ impl DynamicAuthClient {
         }
     }
 
+    fn auth_required_error(reason: impl Into<String>) -> StreamableHttpError<reqwest::Error> {
+        StreamableHttpError::AuthRequired(AuthRequiredError::new(reason.into()))
+    }
+
     /// Build auth token and custom headers based on auth method.
-    async fn build_auth(&self) -> (Option<String>, Vec<(HeaderName, HeaderValue)>) {
+    async fn build_auth(
+        &self,
+    ) -> Result<(Option<String>, Vec<(HeaderName, HeaderValue)>), StreamableHttpError<reqwest::Error>>
+    {
         match &self.auth_method {
             AuthMethod::Bearer => {
                 let token = self.token.read().await.clone();
-                (token, Vec::new())
+                Ok((token, Vec::new()))
             }
             AuthMethod::Header(header_name) => {
                 let mut extra = Vec::new();
-                if let Some(ref token) = *self.token.read().await
-                    && let (Ok(name), Ok(value)) = (
-                        HeaderName::from_bytes(header_name.as_bytes()),
-                        HeaderValue::from_str(token),
-                    )
-                {
+                if let Some(ref token) = *self.token.read().await {
+                    let name = HeaderName::from_bytes(header_name.as_bytes()).map_err(|_| {
+                        Self::auth_required_error("stored legacy auth header name is invalid")
+                    })?;
+                    let mut value = HeaderValue::from_str(token).map_err(|_| {
+                        Self::auth_required_error("stored legacy auth header value is invalid")
+                    })?;
+                    value.set_sensitive(true);
                     extra.push((name, value));
                 }
-                (None, extra)
+                Ok((None, extra))
             }
-            AuthMethod::QueryString => (None, Vec::new()),
+            AuthMethod::Headers(headers) => {
+                let mut extra = Vec::new();
+                for header in headers {
+                    let name = HeaderName::from_bytes(header.name().as_bytes()).map_err(|_| {
+                        Self::auth_required_error("stored HTTP header name is invalid")
+                    })?;
+                    let mut value = HeaderValue::from_str(header.value()).map_err(|_| {
+                        Self::auth_required_error("stored HTTP header value is invalid")
+                    })?;
+                    value.set_sensitive(true);
+                    extra.push((name, value));
+                }
+                Ok((None, extra))
+            }
+            AuthMethod::QueryString => Ok((None, Vec::new())),
         }
     }
 }
@@ -192,7 +242,7 @@ impl StreamableHttpClient for DynamicAuthClient {
                 "DynamicAuthClient: ignoring caller-provided auth_token for post_message"
             );
         }
-        let (dynamic_auth, extra_headers) = self.build_auth().await;
+        let (dynamic_auth, extra_headers) = self.build_auth().await?;
         for (k, v) in extra_headers {
             custom_headers.insert(k, v);
         }
@@ -213,7 +263,7 @@ impl StreamableHttpClient for DynamicAuthClient {
                 "DynamicAuthClient: ignoring caller-provided auth_token for delete_session"
             );
         }
-        let (dynamic_auth, extra_headers) = self.build_auth().await;
+        let (dynamic_auth, extra_headers) = self.build_auth().await?;
         for (k, v) in extra_headers {
             custom_headers.insert(k, v);
         }
@@ -235,7 +285,7 @@ impl StreamableHttpClient for DynamicAuthClient {
                 "DynamicAuthClient: ignoring caller-provided auth_token for get_stream"
             );
         }
-        let (dynamic_auth, extra_headers) = self.build_auth().await;
+        let (dynamic_auth, extra_headers) = self.build_auth().await?;
         for (k, v) in extra_headers {
             custom_headers.insert(k, v);
         }
@@ -303,24 +353,34 @@ impl ProxyBackend {
             StreamableHttpClientTransport::<DynamicAuthClient>::with_client(dynamic, config);
 
         // `()` is a minimal no-op ClientHandler — we don't need server→client notifications.
-        let client: RunningService<RoleClient, ()> =
-            ().serve(transport)
-                .await
-                .map_err(|e| ProxyError::InitFailed {
+        let client: RunningService<RoleClient, ()> = match ().serve(transport).await {
+            Ok(client) => client,
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if let Some(err) = self.auth_required_connect_error(&msg, "initialize").await {
+                    return Err(err);
+                }
+                return Err(ProxyError::InitFailed {
                     server: self.server_name.clone(),
                     source: e,
-                })?;
+                });
+            }
+        };
 
         // Fetch and cache upstream tools, filtering out internal tools (contain `__`).
-        let tools =
-            client
-                .peer()
-                .list_all_tools()
-                .await
-                .map_err(|e| ProxyError::ListToolsFailed {
+        let tools = match client.peer().list_all_tools().await {
+            Ok(tools) => tools,
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if let Some(err) = self.auth_required_connect_error(&msg, "list_tools").await {
+                    return Err(err);
+                }
+                return Err(ProxyError::ListToolsFailed {
                     server: self.server_name.clone(),
                     source: e,
-                })?;
+                });
+            }
+        };
 
         let filtered: Vec<Tool> = tools
             .into_iter()
@@ -362,6 +422,22 @@ impl ProxyBackend {
         );
 
         Ok(instructions)
+    }
+
+    async fn auth_required_connect_error(&self, msg: &str, phase: &str) -> Option<ProxyError> {
+        if !is_upstream_auth_error(msg) {
+            return None;
+        }
+
+        tracing::warn!(
+            server = %self.server_name,
+            phase,
+            "upstream returned auth-required during connect; flipping backend to NeedsAuth"
+        );
+        *self.status.write().await = BackendStatus::NeedsAuth;
+        Some(ProxyError::NeedsAuth {
+            server: self.server_name.clone(),
+        })
     }
 
     /// Forward a tool call to the upstream MCP server.
@@ -509,6 +585,22 @@ mod tests {
     }
 
     #[test]
+    fn auth_method_display_redacts_headers() {
+        let headers = vec![
+            crate::credentials::HttpHeaderSecret::new("Authorization", "Bearer secret").unwrap(),
+            crate::credentials::HttpHeaderSecret::new("connection-id", "conn_123").unwrap(),
+        ];
+        let method = AuthMethod::Headers(headers);
+
+        assert_eq!(method.to_string(), "headers");
+        let debug = format!("{method:?}");
+        assert!(debug.contains("authorization"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("Bearer secret"));
+        assert!(!debug.contains("conn_123"));
+    }
+
+    #[test]
     fn auth_method_from_db() {
         assert_eq!(AuthMethod::from_db(None, None), AuthMethod::Bearer);
         assert_eq!(
@@ -573,6 +665,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proxy_backend_connect_auth_required_sets_needs_auth() {
+        setup_crypto();
+        let tmp = tempfile::tempdir().unwrap();
+        let token = Arc::new(RwLock::new(Some("secret".to_string())));
+        let backend = ProxyBackend::new(
+            "notion".into(),
+            tmp.path().to_path_buf(),
+            "http://localhost:9999/mcp".into(),
+            token,
+            AuthMethod::Header("bad header".into()),
+        );
+
+        let result = backend.connect(reqwest::Client::new()).await;
+
+        let err = result.expect_err("invalid stored auth should require reauth");
+        assert!(
+            matches!(&err, ProxyError::NeedsAuth { server } if server == "notion"),
+            "expected NeedsAuth, got: {err:#}"
+        );
+        assert_eq!(backend.status().await, BackendStatus::NeedsAuth);
+    }
+
+    #[tokio::test]
     async fn proxy_backend_unreachable_rejects_calls() {
         let tmp = tempfile::tempdir().unwrap();
         let token = Arc::new(RwLock::new(None));
@@ -602,16 +717,16 @@ mod tests {
         let client =
             DynamicAuthClient::new(reqwest::Client::new(), token.clone(), AuthMethod::Bearer);
 
-        let (auth, extra) = client.build_auth().await;
+        let (auth, extra) = client.build_auth().await.unwrap();
         assert_eq!(auth, Some("initial-token".to_string()));
         assert!(extra.is_empty());
 
         *token.write().await = Some("refreshed-token".to_string());
-        let (auth, _) = client.build_auth().await;
+        let (auth, _) = client.build_auth().await.unwrap();
         assert_eq!(auth, Some("refreshed-token".to_string()));
 
         *token.write().await = None;
-        let (auth, _) = client.build_auth().await;
+        let (auth, _) = client.build_auth().await.unwrap();
         assert_eq!(auth, None);
     }
 
@@ -625,11 +740,15 @@ mod tests {
             AuthMethod::Header("X-Api-Key".into()),
         );
 
-        let (auth, extra) = client.build_auth().await;
+        let (auth, extra) = client.build_auth().await.unwrap();
         assert_eq!(auth, None, "Header auth should not set auth_token");
         assert_eq!(extra.len(), 1);
         assert_eq!(extra[0].0.as_str(), "x-api-key");
         assert_eq!(extra[0].1.to_str().unwrap(), "my-api-key");
+        assert!(
+            extra[0].1.is_sensitive(),
+            "custom auth header value must be marked sensitive"
+        );
     }
 
     #[tokio::test]
@@ -642,9 +761,89 @@ mod tests {
             AuthMethod::Header("X-Api-Key".into()),
         );
 
-        let (auth, extra) = client.build_auth().await;
+        let (auth, extra) = client.build_auth().await.unwrap();
         assert_eq!(auth, None);
         assert!(extra.is_empty(), "no token means no custom header");
+    }
+
+    #[tokio::test]
+    async fn dynamic_auth_header_invalid_legacy_header_fails_closed() {
+        setup_crypto();
+        let token = Arc::new(RwLock::new(Some("secret".to_string())));
+        let client = DynamicAuthClient::new(
+            reqwest::Client::new(),
+            token,
+            AuthMethod::Header("bad header".into()),
+        );
+
+        let result = tokio::spawn(async move { client.build_auth().await })
+            .await
+            .expect("invalid stored legacy header auth must not panic");
+        let err = result.expect_err("invalid stored legacy header auth must fail closed");
+        let msg = format!("{err}");
+        assert!(
+            is_upstream_auth_error(&msg),
+            "expected auth-required error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_auth_header_invalid_legacy_token_fails_closed() {
+        setup_crypto();
+        let token = Arc::new(RwLock::new(Some("bad\nvalue".to_string())));
+        let client = DynamicAuthClient::new(
+            reqwest::Client::new(),
+            token,
+            AuthMethod::Header("X-Api-Key".into()),
+        );
+
+        let result = tokio::spawn(async move { client.build_auth().await })
+            .await
+            .expect("invalid stored legacy header token must not panic");
+        let err = result.expect_err("invalid stored legacy header token must fail closed");
+        let msg = format!("{err}");
+        assert!(
+            is_upstream_auth_error(&msg),
+            "expected auth-required error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_auth_headers_injects_multiple_headers() {
+        setup_crypto();
+        let token = Arc::new(RwLock::new(Some("unused-token".to_string())));
+        let client = DynamicAuthClient::new(
+            reqwest::Client::new(),
+            token,
+            AuthMethod::Headers(vec![
+                crate::credentials::HttpHeaderSecret::new("Authorization", "Bearer env-secret")
+                    .unwrap(),
+                crate::credentials::HttpHeaderSecret::new("connection-id", "conn_123").unwrap(),
+                crate::credentials::HttpHeaderSecret::new("provider-config-key", "github").unwrap(),
+            ]),
+        );
+
+        let (auth, extra) = client.build_auth().await.unwrap();
+        assert_eq!(auth, None);
+        assert_eq!(extra.len(), 3);
+        for (_, value) in &extra {
+            assert!(
+                value.is_sensitive(),
+                "stored auth header values must be marked sensitive"
+            );
+        }
+        let headers = extra
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_string(),
+                    value.to_str().unwrap().to_string(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(headers["authorization"], "Bearer env-secret");
+        assert_eq!(headers["connection-id"], "conn_123");
+        assert_eq!(headers["provider-config-key"], "github");
     }
 
     #[tokio::test]
@@ -653,7 +852,7 @@ mod tests {
         let token = Arc::new(RwLock::new(Some("key-in-url".to_string())));
         let client = DynamicAuthClient::new(reqwest::Client::new(), token, AuthMethod::QueryString);
 
-        let (auth, extra) = client.build_auth().await;
+        let (auth, extra) = client.build_auth().await.unwrap();
         assert_eq!(auth, None, "QueryString should not set auth_token");
         assert!(extra.is_empty(), "QueryString should not inject headers");
     }
