@@ -52,7 +52,8 @@ The legacy `store_record` / `query_records` / `search_records` / `delete_record`
 tools are removed from the surface; their backing tables (`memories`,
 `memory_events`) are retained for migration compat. Fresh local schemas index
 `memories.content` with a Turso FTS index; older databases may still contain
-the legacy `memories_fts` virtual table until the legacy cleanup migration.
+the legacy `memories_fts` virtual table, but v34 removes the old sync triggers
+and adds the Turso FTS index used by base-table search.
 
 ## Transcript Search
 
