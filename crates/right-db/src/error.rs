@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     #[error("database error: {0}")]
-    Database(#[from] libsql::Error),
+    Database(#[from] turso::Error),
 
     #[error("database row not found")]
     NotFound,
@@ -19,7 +19,7 @@ pub enum DbError {
     Open {
         path: PathBuf,
         #[source]
-        source: libsql::Error,
+        source: turso::Error,
     },
 
     #[error("migration {version} on {path}: {source}")]
@@ -46,27 +46,15 @@ impl DbError {
     pub fn is_constraint_violation(&self) -> bool {
         match self {
             Self::Constraint(_) => true,
-            Self::Database(error) => is_libsql_constraint(error),
+            Self::Database(error) => is_turso_constraint(error),
             Self::Migration { source, .. } => source.is_constraint_violation(),
             _ => false,
         }
     }
 }
 
-/// SQLite primary result code for constraint violations
-/// (`SQLITE_CONSTRAINT = 19`). Extended codes encode subtype in the high
-/// byte (e.g. `SQLITE_CONSTRAINT_UNIQUE = 2067`); the primary code is
-/// always `code & 0xff`.
-const SQLITE_CONSTRAINT: i32 = 19;
-
-fn is_libsql_constraint(error: &libsql::Error) -> bool {
-    match error {
-        libsql::Error::SqliteFailure(code, _) => (*code as i32) & 0xff == SQLITE_CONSTRAINT,
-        libsql::Error::RemoteSqliteFailure(code, extended, _) => {
-            *code == SQLITE_CONSTRAINT || (*extended & 0xff) == SQLITE_CONSTRAINT
-        }
-        _ => false,
-    }
+fn is_turso_constraint(error: &turso::Error) -> bool {
+    matches!(error, turso::Error::Constraint(_))
 }
 
 #[cfg(test)]
