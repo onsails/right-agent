@@ -223,6 +223,67 @@ fn libsql_migrations_static_runs_with_right_db_connection() {
     );
 }
 
+#[test]
+fn libsql_supports_conversation_fts_triggers() {
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), true).unwrap();
+
+    conn.execute(
+        "INSERT INTO conversation_messages (chat_id, thread_id, role, content)
+         VALUES (1, 0, 'user', ?)",
+        ["needle phrase"],
+    )
+    .unwrap();
+
+    let count: i64 = conn
+        .query_one(
+            "SELECT COUNT(*) FROM conversation_messages_fts WHERE conversation_messages_fts MATCH ?",
+            ["needle"],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn libsql_supports_returning_clause() {
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), true).unwrap();
+
+    let id: i64 = conn
+        .query_one(
+            "INSERT INTO conversation_messages (chat_id, thread_id, role, content)
+             VALUES (1, 0, 'assistant', 'returning probe')
+             RETURNING id",
+            (),
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert!(id > 0);
+}
+
+#[test]
+fn libsql_transaction_rolls_back_on_error() {
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), true).unwrap();
+    conn.execute_batch("CREATE TABLE rollback_probe (id INTEGER PRIMARY KEY, value TEXT UNIQUE)")
+        .unwrap();
+
+    let result = conn.with_immediate_transaction(|tx| {
+        tx.execute_batch("INSERT INTO rollback_probe (value) VALUES ('same')")?;
+        tx.execute_batch("INSERT INTO rollback_probe (value) VALUES ('same')")?;
+        Ok(())
+    });
+
+    assert!(result.is_err());
+    let count: i64 = conn
+        .query_one("SELECT COUNT(*) FROM rollback_probe", (), |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
 fn query_user_version(conn: &right_db::Connection) -> i64 {
     conn.query_one("PRAGMA user_version", (), |row| row.get(0))
         .unwrap()
