@@ -26,7 +26,7 @@ pub struct LearningOverviewInput {
 fn learning_capabilities() -> LearningCapabilities {
     LearningCapabilities {
         learning_metrics: true,
-        learning_evidence_snippets: true,
+        learning_evidence_snippets: false,
         learning_commands: false,
     }
 }
