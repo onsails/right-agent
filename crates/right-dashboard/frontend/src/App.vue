@@ -123,7 +123,7 @@ onBeforeUnmount(() => {
 })
 
 function toggleDisplayMode(): void {
-  const nextMode = nextDashboardDisplayModePreference(displayMode.value)
+  const nextMode = nextDashboardDisplayModePreference(preferredDisplayMode.value)
   preferredDisplayMode.value = nextMode
   displayMode.value = applyTelegramDisplayMode(nextMode)
 }
@@ -440,6 +440,7 @@ async function selectIdentityFile(name: string): Promise<void> {
     :tabs="tabs"
     :active-tab="activeTab"
     :display-mode="displayMode"
+    :preferred-display-mode="preferredDisplayMode"
     @select="setActiveTab"
     @toggle-display-mode="toggleDisplayMode"
   >
