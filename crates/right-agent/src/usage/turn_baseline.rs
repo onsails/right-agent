@@ -2,7 +2,7 @@
 
 use crate::usage::error::UsageError;
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use right_db::{Connection, params};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnBaselines {
@@ -26,23 +26,23 @@ pub fn compute(
     min_sample: u32,
 ) -> Result<TurnBaselines, UsageError> {
     let window_cutoff = (Utc::now() - chrono::Duration::days(window_days as i64)).to_rfc3339();
-    let mut stmt = conn.prepare(
+    let rows = conn.query_all(
         "SELECT total_cost_usd, num_turns, wall_elapsed_ms \
          FROM usage_events \
          WHERE source = 'interactive' AND ts >= ?1",
+        [&window_cutoff],
+        |r| {
+            Ok((
+                r.get::<_, f64>(0)?,
+                r.get::<_, i64>(1)? as u32,
+                r.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+            ))
+        },
     )?;
-    let rows = stmt.query_map([&window_cutoff], |r| {
-        Ok((
-            r.get::<_, f64>(0)?,
-            r.get::<_, i64>(1)? as u32,
-            r.get::<_, Option<i64>>(2)?.map(|v| v as u64),
-        ))
-    })?;
     let mut costs: Vec<f64> = Vec::new();
     let mut turns: Vec<u32> = Vec::new();
     let mut elapsed: Vec<u64> = Vec::new();
-    for row in rows {
-        let (c, t, e) = row?;
+    for (c, t, e) in rows {
         costs.push(c);
         turns.push(t);
         if let Some(v) = e {
@@ -150,13 +150,14 @@ pub fn check_probe_writer_cost_spike(
     let window_start = (now - chrono::Duration::days(baseline_days as i64))
         .format("%Y-%m-%dT00:00:00Z")
         .to_string();
-    let mut stmt = conn.prepare(
+    let rows = conn.query_all(
         "SELECT SUM(total_cost_usd) FROM usage_events \
          WHERE source = 'learning_probe_writer' AND ts >= ?1 AND ts < ?2 \
          GROUP BY substr(ts, 1, 10)",
+        params![window_start, today_start],
+        |r| r.get(0),
     )?;
-    let rows = stmt.query_map([&window_start, &today_start], |r| r.get::<_, f64>(0))?;
-    let mut daily: Vec<f64> = rows.collect::<Result<_, _>>()?;
+    let mut daily: Vec<f64> = rows;
     if daily.is_empty() {
         // No probe_writer history in the baseline window — defer to other
         // triggers (skill-change-count or time-fallback) rather than firing

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rusqlite::OptionalExtension as _;
+use right_db::OptionalExtension as _;
 use teloxide::payloads::SendMessageSetters as _;
 
 use crate::cc::markdown_utils::strip_html_tags;
@@ -24,15 +24,15 @@ pub(crate) struct PendingAsyncResult {
 /// Query the oldest undelivered async result with a non-null delivery_json.
 #[cfg(test)]
 pub(crate) fn fetch_pending(
-    conn: &rusqlite::Connection,
-) -> Result<Option<PendingAsyncResult>, rusqlite::Error> {
+    conn: &right_db::Connection,
+) -> Result<Option<PendingAsyncResult>, right_db::DbError> {
     Ok(fetch_pending_batch(conn, 1)?.into_iter().next())
 }
 
 fn fetch_pending_batch(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     limit: usize,
-) -> Result<Vec<PendingAsyncResult>, rusqlite::Error> {
+) -> Result<Vec<PendingAsyncResult>, right_db::DbError> {
     let mut stmt = conn.prepare(
         "SELECT id, kind, producer_ref, delivery_json, COALESCE(run_note, ''), status, \
                 NULLIF(target_chat_id, 0), target_thread_id \
@@ -44,11 +44,11 @@ fn fetch_pending_batch(
          ORDER BY finished_at ASC \
          LIMIT ?1",
     )?;
-    stmt.query_map(rusqlite::params![limit.max(1) as i64], pending_from_row)?
+    stmt.query_map(right_db::params![limit.max(1) as i64], pending_from_row)?
         .collect()
 }
 
-fn pending_from_row(row: &rusqlite::Row<'_>) -> Result<PendingAsyncResult, rusqlite::Error> {
+fn pending_from_row(row: &right_db::row::Row<'_>) -> Result<PendingAsyncResult, right_db::DbError> {
     Ok(PendingAsyncResult {
         id: row.get(0)?,
         kind: row.get(1)?,
@@ -62,9 +62,9 @@ fn pending_from_row(row: &rusqlite::Row<'_>) -> Result<PendingAsyncResult, rusql
 }
 
 pub(crate) fn fetch_next_pending(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     delivered_in_memory: &HashSet<String>,
-) -> Result<Option<PendingAsyncResult>, rusqlite::Error> {
+) -> Result<Option<PendingAsyncResult>, right_db::DbError> {
     let limit = PENDING_FETCH_BATCH_SIZE.max(delivered_in_memory.len().saturating_add(1));
     let batch = fetch_pending_batch(conn, limit)?;
     let mut in_memory_ids = Vec::new();
@@ -95,19 +95,19 @@ pub(crate) fn fetch_next_pending(
 ///
 /// Single UPDATE sets both `delivery_status` and `delivered_at` atomically.
 fn mark_delivery_outcome(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     run_id: &str,
     status: &str,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), right_db::DbError> {
     let now = chrono::Utc::now().to_rfc3339();
     let rows = conn.execute(
         "UPDATE async_runs \
          SET delivery_status = ?1, delivered_at = ?2, updated_at = ?2 \
          WHERE id = ?3",
-        rusqlite::params![status, now, run_id],
+        right_db::params![status, now, run_id],
     )?;
     if rows == 0 {
-        return Err(rusqlite::Error::QueryReturnedNoRows);
+        return Err(right_db::DbError::NotFound);
     }
     Ok(())
 }
@@ -115,9 +115,9 @@ fn mark_delivery_outcome(
 /// Deduplicate: for a given job, find the latest undelivered result and mark all
 /// older undelivered results as delivered. Returns (latest_result, skipped_count).
 pub(crate) fn deduplicate_job(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     producer_ref: &str,
-) -> Result<Option<(PendingAsyncResult, u32)>, rusqlite::Error> {
+) -> Result<Option<(PendingAsyncResult, u32)>, right_db::DbError> {
     let latest = conn
         .query_row(
             "SELECT id, kind, producer_ref, delivery_json, COALESCE(run_note, ''), status, \
@@ -131,7 +131,7 @@ pub(crate) fn deduplicate_job(
                AND delivery_json IS NOT NULL \
              ORDER BY finished_at DESC \
              LIMIT 1",
-            rusqlite::params![producer_ref],
+            right_db::params![producer_ref],
             pending_from_row,
         )
         .optional()?;
@@ -150,16 +150,16 @@ pub(crate) fn deduplicate_job(
            AND delivery_required = 1 \
            AND delivery_status IN ('pending', 'retryable') \
            AND status IN ('success', 'failed')",
-        rusqlite::params![now, producer_ref, latest.id],
+        right_db::params![now, producer_ref, &latest.id],
     )?;
 
     Ok(Some((latest, count as u32)))
 }
 
 pub(crate) fn select_delivery_candidate(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     pending: PendingAsyncResult,
-) -> Result<Option<(PendingAsyncResult, u32)>, rusqlite::Error> {
+) -> Result<Option<(PendingAsyncResult, u32)>, right_db::DbError> {
     if pending.kind == "cron"
         && let Some(producer_ref) = pending.producer_ref.as_deref()
     {
@@ -373,7 +373,7 @@ fn pending_label(pending: &PendingAsyncResult) -> &str {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_delivery_once(
-    conn: &mut rusqlite::Connection,
+    conn: &mut right_db::Connection,
     state: &mut DeliveryLoopState,
     mode: DeliveryMode,
     agent_dir: &Path,
@@ -857,7 +857,7 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
 
 #[allow(clippy::too_many_arguments)]
 fn capture_async_delivery_seed(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     agent_dir: &Path,
     agent_name: &str,
     delivered: &PendingAsyncResult,
@@ -1380,7 +1380,7 @@ mod tests {
         assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    fn setup_db() -> (tempfile::TempDir, rusqlite::Connection) {
+    fn setup_db() -> (tempfile::TempDir, right_db::Connection) {
         let dir = tempfile::tempdir().unwrap();
         let conn = right_db::open_connection(dir.path(), true).unwrap();
         (dir, conn)
@@ -1423,7 +1423,7 @@ mod tests {
         }
     }
 
-    fn insert_async_cron_run(conn: &rusqlite::Connection, run: TestCronRun) {
+    fn insert_async_cron_run(conn: &right_db::Connection, run: TestCronRun) {
         let delivery_required = run.delivery_required.unwrap_or(run.delivery_json.is_some());
         let delivery_status =
             run.delivery_status
@@ -1439,7 +1439,7 @@ mod tests {
                 ?5, ?6, ?7, ?8, ?9, ?10,
                 ?11, ?12, ?13, ?6, ?14
              )",
-            rusqlite::params![
+            right_db::params![
                 run.id,
                 run.job_name,
                 run.target_chat_id.unwrap_or(0),
@@ -1460,7 +1460,7 @@ mod tests {
     }
 
     fn insert_async_background_run(
-        conn: &rusqlite::Connection,
+        conn: &right_db::Connection,
         id: &str,
         started_at: &str,
         status: &str,
@@ -1478,7 +1478,7 @@ mod tests {
                 ?3, ?4, ?5, '/log', 'summary', ?6,
                 1, 'pending', NULL, ?4, ?4
              )",
-            rusqlite::params![
+            right_db::params![
                 id,
                 target_chat_id,
                 status,

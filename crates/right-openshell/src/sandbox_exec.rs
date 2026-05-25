@@ -57,7 +57,7 @@ impl SandboxExec {
             })
             .await?;
         let mut guard = mutex.lock().await;
-        crate::openshell::exec_in_sandbox(&mut *guard, &self.sandbox_id, cmd, timeout_seconds).await
+        crate::openshell::exec_in_sandbox(&mut guard, &self.sandbox_id, cmd, timeout_seconds).await
     }
 
     /// Sandbox name for CLI operations (upload_file).

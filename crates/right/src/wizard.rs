@@ -2036,8 +2036,8 @@ mod learning_yaml_tests {
             (parsed.learning.max_daily_budget_usd - learning.max_daily_budget_usd).abs()
                 < f64::EPSILON
         );
-        assert_eq!(parsed.learning.prefilter_enabled, false);
-        assert_eq!(parsed.learning.probe_writer_enabled, true);
+        assert!(!parsed.learning.prefilter_enabled);
+        assert!(parsed.learning.probe_writer_enabled);
         assert_eq!(parsed.learning.curator_interval_hours, 48);
         assert_eq!(parsed.learning.curator_stale_after_days, 14);
         assert_eq!(parsed.learning.curator_archive_after_days, 60);

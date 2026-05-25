@@ -2,7 +2,7 @@
 
 use crate::usage::{ModelTotals, UsageError, WindowSummary};
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use right_db::{Connection, params};
 use std::collections::BTreeMap;
 
 /// Aggregate rows for one (source, window) pair. `since=None` → all-time.
@@ -35,7 +35,7 @@ pub fn aggregate(
              FROM usage_events
              WHERE source = ?1
                AND (?2 IS NULL OR ts >= ?2)",
-            rusqlite::params![source, since_str],
+            params![source, &since_str],
             |r| Ok((
                 r.get(0)?, r.get(1)?, r.get(2)?,
                 r.get(3)?, r.get(4)?,
@@ -68,17 +68,15 @@ fn aggregate_per_model(
     since_str: &Option<String>,
     source: &str,
 ) -> Result<BTreeMap<String, ModelTotals>, UsageError> {
-    let mut stmt = conn.prepare(
+    let rows = conn.query_all(
         "SELECT model_usage_json FROM usage_events
          WHERE source = ?1 AND (?2 IS NULL OR ts >= ?2)",
+        params![source, since_str],
+        |r| r.get::<_, String>(0),
     )?;
-    let rows = stmt.query_map(rusqlite::params![source, since_str], |r| {
-        r.get::<_, String>(0)
-    })?;
 
     let mut out: BTreeMap<String, ModelTotals> = BTreeMap::new();
-    for row in rows {
-        let json = row?;
+    for json in rows {
         let v: serde_json::Value = match serde_json::from_str(&json) {
             Ok(v) => v,
             Err(e) => {

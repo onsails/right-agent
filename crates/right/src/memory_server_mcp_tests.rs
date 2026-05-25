@@ -32,7 +32,7 @@ fn insert_cron_run(
             started_at, status, log_path, delivery_required, delivery_status,
             created_at, updated_at
          ) VALUES (?1, 'cron', ?2, ?1, -100, ?3, ?4, ?5, 0, 'none', ?3, ?3)",
-        rusqlite::params![id, job_name, started_at, status, format!("/tmp/{id}.log")],
+        right_db::params![id, job_name, started_at, status, format!("/tmp/{id}.log")],
     )
     .expect("insert async cron run");
 }

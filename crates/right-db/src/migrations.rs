@@ -232,10 +232,8 @@ impl MigrationTarget for &crate::Connection {
     }
 }
 
-#[cfg(test)]
 impl sealed::MigrationConnection for rusqlite::Connection {}
 
-#[cfg(test)]
 impl MigrationConnection for rusqlite::Connection {
     fn execute_batch(&self, sql: &str) -> Result<(), crate::DbError> {
         rusqlite::Connection::execute_batch(self, sql)?;
@@ -254,10 +252,8 @@ impl MigrationConnection for rusqlite::Connection {
     }
 }
 
-#[cfg(test)]
 impl sealed::MigrationConnection for rusqlite::Transaction<'_> {}
 
-#[cfg(test)]
 impl MigrationConnection for rusqlite::Transaction<'_> {
     fn execute_batch(&self, sql: &str) -> Result<(), crate::DbError> {
         rusqlite::Connection::execute_batch(self, sql)?;
@@ -276,10 +272,8 @@ impl MigrationConnection for rusqlite::Transaction<'_> {
     }
 }
 
-#[cfg(test)]
 impl sealed::MigrationTarget for &rusqlite::Connection {}
 
-#[cfg(test)]
 impl MigrationTarget for &rusqlite::Connection {
     fn migration_path(&self) -> &Path {
         Path::new(":memory:")
@@ -309,10 +303,8 @@ impl MigrationTarget for &rusqlite::Connection {
     }
 }
 
-#[cfg(test)]
 impl sealed::MigrationTarget for &mut rusqlite::Connection {}
 
-#[cfg(test)]
 impl MigrationTarget for &mut rusqlite::Connection {
     fn migration_path(&self) -> &Path {
         Path::new(":memory:")

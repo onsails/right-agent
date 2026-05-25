@@ -46,6 +46,15 @@ impl DbError {
         matches!(self, Self::Open { .. })
     }
 
+    pub fn is_constraint_violation(&self) -> bool {
+        match self {
+            Self::Constraint(_) => true,
+            Self::Database(error) => error.to_string().to_lowercase().contains("constraint"),
+            Self::Migration { source, .. } => source.is_constraint_violation(),
+            _ => false,
+        }
+    }
+
     pub fn not_found() -> Self {
         Self::NotFound
     }

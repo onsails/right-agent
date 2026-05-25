@@ -2,7 +2,7 @@
 
 use crate::usage::{UsageBreakdown, UsageError};
 use chrono::Utc;
-use rusqlite::{Connection, params};
+use right_db::{Connection, params};
 
 /// Insert a row for an interactive (Telegram worker) invocation.
 ///
@@ -163,7 +163,7 @@ fn insert_row(
             chat_id,
             thread_id,
             job_name,
-            b.session_uuid,
+            b.session_uuid.as_str(),
             b.total_cost_usd,
             b.num_turns as i64,
             b.input_tokens as i64,
@@ -172,8 +172,8 @@ fn insert_row(
             b.cache_read_tokens as i64,
             b.web_search_requests as i64,
             b.web_fetch_requests as i64,
-            b.model_usage_json,
-            b.api_key_source,
+            b.model_usage_json.as_str(),
+            b.api_key_source.as_str(),
             b.wall_elapsed_ms.map(|v| v as i64),
         ],
     )?;
@@ -212,7 +212,7 @@ mod tests {
         let (source, chat_id, thread_id, job_name, cost): (String, Option<i64>, Option<i64>, Option<String>, f64) =
             conn.query_row(
                 "SELECT source, chat_id, thread_id, job_name, total_cost_usd FROM usage_events LIMIT 1",
-                [],
+                (),
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             ).unwrap();
         assert_eq!(source, "interactive");

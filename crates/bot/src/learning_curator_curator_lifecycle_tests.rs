@@ -1,8 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
 
-fn open_test_conn() -> rusqlite::Connection {
-    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-    right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
+fn open_test_conn() -> right_db::Connection {
+    let conn = right_db::Connection::open_in_memory().unwrap();
+    right_db::MIGRATIONS.to_latest(&conn).unwrap();
     conn
 }
 
@@ -10,8 +10,9 @@ fn dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_skill_lifecycle_row(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     skill_name: &str,
     state: right_lifecycle::LifecycleState,
     pinned: bool,
@@ -26,7 +27,7 @@ fn insert_skill_lifecycle_row(
             skill_name, state, pinned, created_by, use_count, patch_count,
             created_at, last_used_at, last_patched_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '2026-01-01T00:00:00Z', ?7, ?8)",
-        rusqlite::params![
+        right_db::params![
             skill_name,
             state.as_db_str(),
             if pinned { 1 } else { 0 },

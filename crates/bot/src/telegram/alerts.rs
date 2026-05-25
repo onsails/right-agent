@@ -22,7 +22,7 @@ pub(crate) fn should_fire(db: &Path, alert_type: &str) -> bool {
         |r| r.get(0),
     ) {
         Ok(v) => Some(v),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(right_db::DbError::NotFound) => None,
         Err(e) => {
             tracing::warn!("alerts::should_fire query failed: {e:#}");
             return false;

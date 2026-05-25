@@ -40,7 +40,7 @@ pub fn read_host_identity_files(
 }
 
 pub fn validate_identity_file_name(name: &str) -> Result<(), IdentityFilesError> {
-    if IDENTITY_FILE_NAMES.iter().any(|allowed| *allowed == name) {
+    if IDENTITY_FILE_NAMES.contains(&name) {
         Ok(())
     } else {
         Err(IdentityFilesError::InvalidFileName(name.to_owned()))

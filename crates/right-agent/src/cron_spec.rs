@@ -3,6 +3,8 @@ use std::path::Path;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use right_db::params::ParamsBuilder;
+use right_db::{Connection, DbError, params};
 use right_platform_knobs::IDLE_THRESHOLD_MIN;
 
 /// Default budget cap per cron invocation (USD).
@@ -274,7 +276,7 @@ fn resolve_schedule_fields(
 
 /// Insert a new cron spec into DB. Returns error message if job exists.
 pub fn create_spec(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     job_name: &str,
     schedule: &str,
     prompt: &str,
@@ -289,7 +291,7 @@ pub fn create_spec(
     let result = conn.execute(
         "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![job_name, schedule, prompt, lock_ttl, budget, now, now],
+        params![job_name, schedule, prompt, lock_ttl, budget, &now, &now],
     );
 
     match result {
@@ -297,11 +299,7 @@ pub fn create_spec(
             message: format!("Created cron job '{job_name}'."),
             warning: schedule_warning,
         }),
-        Err(rusqlite::Error::SqliteFailure(err, _))
-            if err.code == rusqlite::ffi::ErrorCode::ConstraintViolation =>
-        {
-            Err(format!("job '{job_name}' already exists"))
-        }
+        Err(e) if e.is_constraint_violation() => Err(format!("job '{job_name}' already exists")),
         Err(e) => Err(format!("insert failed: {e:#}")),
     }
 }
@@ -313,7 +311,7 @@ pub fn create_spec(
 /// reconcile tick then auto-deletes.
 #[allow(clippy::too_many_arguments)]
 pub fn create_spec_v2(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     job_name: &str,
     schedule: Option<&str>,
     prompt: &str,
@@ -346,7 +344,7 @@ pub fn create_spec_v2(
     let result = conn.execute(
         "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        rusqlite::params![job_name, db_schedule, prompt, lock_ttl, budget, db_recurring, db_run_at, target_chat_id, target_thread_id, now, now],
+        params![job_name, db_schedule, prompt, lock_ttl, budget, db_recurring, db_run_at, target_chat_id, target_thread_id, &now, &now],
     );
 
     match result {
@@ -354,18 +352,14 @@ pub fn create_spec_v2(
             message: format!("Created cron job '{job_name}'."),
             warning: schedule_warning,
         }),
-        Err(rusqlite::Error::SqliteFailure(err, _))
-            if err.code == rusqlite::ffi::ErrorCode::ConstraintViolation =>
-        {
-            Err(format!("job '{job_name}' already exists"))
-        }
+        Err(e) if e.is_constraint_violation() => Err(format!("job '{job_name}' already exists")),
         Err(e) => Err(format!("insert failed: {e:#}")),
     }
 }
 
 /// Update an existing cron spec. Returns error if job not found.
 pub fn update_spec(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     job_name: &str,
     schedule: &str,
     prompt: &str,
@@ -381,7 +375,7 @@ pub fn update_spec(
         .execute(
             "UPDATE cron_specs SET schedule = ?2, prompt = ?3, lock_ttl = ?4, max_budget_usd = ?5, updated_at = ?6 \
              WHERE job_name = ?1",
-            rusqlite::params![job_name, schedule, prompt, lock_ttl, budget, now],
+            params![job_name, schedule, prompt, lock_ttl, budget, now],
         )
         .map_err(|e| format!("update failed: {e:#}"))?;
 
@@ -403,7 +397,7 @@ pub fn update_spec(
 /// - No fields → error
 #[allow(clippy::too_many_arguments)]
 pub fn update_spec_partial(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     job_name: &str,
     schedule: Option<&str>,
     run_at: Option<&str>,
@@ -456,11 +450,13 @@ pub fn update_spec_partial(
 
     // Build dynamic UPDATE
     let mut sets = Vec::new();
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut values = ParamsBuilder::new();
 
     if let Some(sched) = schedule {
         sets.push("schedule = ?");
-        params.push(Box::new(sched.to_string()));
+        values
+            .push(sched)
+            .map_err(|e| format!("invalid parameter: {e:#}"))?;
         sets.push("run_at = NULL");
         let rec = if recurring.unwrap_or(true) {
             1i64
@@ -468,38 +464,54 @@ pub fn update_spec_partial(
             0i64
         };
         sets.push("recurring = ?");
-        params.push(Box::new(rec));
+        values
+            .push(rec)
+            .map_err(|e| format!("invalid parameter: {e:#}"))?;
     } else if let Some(rat) = run_at {
         sets.push("run_at = ?");
-        params.push(Box::new(rat.to_string()));
+        values
+            .push(rat)
+            .map_err(|e| format!("invalid parameter: {e:#}"))?;
         sets.push("schedule = ''");
         sets.push("recurring = 0");
     } else if let Some(rec) = recurring {
         sets.push("recurring = ?");
-        params.push(Box::new(if rec { 1i64 } else { 0i64 }));
+        values
+            .push(if rec { 1i64 } else { 0i64 })
+            .map_err(|e| format!("invalid parameter: {e:#}"))?;
     }
 
     if let Some(p) = prompt {
         sets.push("prompt = ?");
-        params.push(Box::new(p.to_string()));
+        values
+            .push(p)
+            .map_err(|e| format!("invalid parameter: {e:#}"))?;
     }
     if let Some(ttl) = lock_ttl {
         sets.push("lock_ttl = ?");
-        params.push(Box::new(ttl.to_string()));
+        values
+            .push(ttl)
+            .map_err(|e| format!("invalid parameter: {e:#}"))?;
     }
     if let Some(budget) = max_budget_usd {
         sets.push("max_budget_usd = ?");
-        params.push(Box::new(budget));
+        values
+            .push(budget)
+            .map_err(|e| format!("invalid parameter: {e:#}"))?;
     }
     if let Some(chat) = target_chat_id {
         sets.push("target_chat_id = ?");
-        params.push(Box::new(chat));
+        values
+            .push(chat)
+            .map_err(|e| format!("invalid parameter: {e:#}"))?;
     }
     if let Some(thread_opt) = target_thread_id {
         match thread_opt {
             Some(t) => {
                 sets.push("target_thread_id = ?");
-                params.push(Box::new(t));
+                values
+                    .push(t)
+                    .map_err(|e| format!("invalid parameter: {e:#}"))?;
             }
             None => {
                 sets.push("target_thread_id = NULL");
@@ -508,9 +520,13 @@ pub fn update_spec_partial(
     }
 
     sets.push("updated_at = ?");
-    params.push(Box::new(chrono::Utc::now().to_rfc3339()));
+    values
+        .push(chrono::Utc::now().to_rfc3339())
+        .map_err(|e| format!("invalid parameter: {e:#}"))?;
 
-    params.push(Box::new(job_name.to_string()));
+    values
+        .push(job_name)
+        .map_err(|e| format!("invalid parameter: {e:#}"))?;
 
     let sql = format!(
         "UPDATE cron_specs SET {} WHERE job_name = ?",
@@ -523,12 +539,11 @@ pub fn update_spec_partial(
     let target_changed = target_chat_id.is_some() || target_thread_id.is_some();
 
     let tx = conn
-        .unchecked_transaction()
+        .transaction()
         .map_err(|e| format!("begin transaction failed: {e:#}"))?;
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let rows = tx
-        .execute(&sql, param_refs.as_slice())
+        .execute(&sql, values)
         .map_err(|e| format!("update failed: {e:#}"))?;
 
     if rows == 0 {
@@ -543,7 +558,7 @@ pub fn update_spec_partial(
         let (new_chat, new_thread): (Option<i64>, Option<i64>) = tx
             .query_row(
                 "SELECT target_chat_id, target_thread_id FROM cron_specs WHERE job_name = ?1",
-                rusqlite::params![job_name],
+                params![job_name],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|e| format!("read-back failed: {e:#}"))?;
@@ -552,7 +567,7 @@ pub fn update_spec_partial(
              WHERE kind = 'cron'
                AND producer_ref = ?3
                AND delivery_status IN ('pending', 'retryable')",
-            rusqlite::params![new_chat, new_thread, job_name],
+            params![new_chat, new_thread, job_name],
         )
         .map_err(|e| format!("async cron run target propagation failed: {e:#}"))?;
     }
@@ -567,15 +582,11 @@ pub fn update_spec_partial(
 }
 
 /// Delete a cron spec and its lock file. Returns error if not found.
-pub fn delete_spec(
-    conn: &rusqlite::Connection,
-    job_name: &str,
-    agent_dir: &Path,
-) -> Result<String, String> {
+pub fn delete_spec(conn: &Connection, job_name: &str, agent_dir: &Path) -> Result<String, String> {
     let rows = conn
         .execute(
             "DELETE FROM cron_specs WHERE job_name = ?1",
-            rusqlite::params![job_name],
+            params![job_name],
         )
         .map_err(|e| format!("delete failed: {e:#}"))?;
 
@@ -598,9 +609,9 @@ pub fn delete_spec(
 }
 
 /// List all cron specs as a JSON string.
-pub fn list_specs(conn: &rusqlite::Connection) -> Result<String, String> {
-    let mut stmt = conn
-        .prepare(
+pub fn list_specs(conn: &Connection) -> Result<String, String> {
+    let rows: Vec<serde_json::Value> = conn
+        .query_all(
             "SELECT s.job_name, s.schedule, s.prompt, s.lock_ttl, s.max_budget_usd, \
                     s.created_at, s.updated_at, s.recurring, s.run_at, \
                     s.target_chat_id, s.target_thread_id, \
@@ -613,10 +624,8 @@ pub fn list_specs(conn: &rusqlite::Connection) -> Result<String, String> {
                  WHERE kind = 'cron' \
              ) r ON r.producer_ref = s.job_name AND r.rn = 1 \
              ORDER BY s.job_name",
-        )
-        .map_err(|e| format!("prepare failed: {e:#}"))?;
-    let rows: Vec<serde_json::Value> = stmt
-        .query_map([], |row| {
+            (),
+            |row| {
             Ok(serde_json::json!({
                 "job_name": row.get::<_, String>(0)?,
                 "schedule": row.get::<_, String>(1)?,
@@ -634,9 +643,7 @@ pub fn list_specs(conn: &rusqlite::Connection) -> Result<String, String> {
                 "last_status": row.get::<_, Option<String>>(13)?,
             }))
         })
-        .map_err(|e| format!("query failed: {e:#}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("row read failed: {e:#}"))?;
+        .map_err(|e| format!("query failed: {e:#}"))?;
     serde_json::to_string_pretty(&rows).map_err(|e| format!("serialization error: {e:#}"))
 }
 
@@ -652,15 +659,12 @@ pub fn format_result(result: &CronSpecResult) -> String {
 /// Load all cron specs from the `cron_specs` table.
 ///
 /// Logs warnings for schedules that hit round minutes.
-pub fn load_specs_from_db(
-    conn: &rusqlite::Connection,
-) -> Result<HashMap<String, CronSpec>, rusqlite::Error> {
+pub fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, CronSpec>, DbError> {
     let mut specs = HashMap::new();
-    let mut stmt = conn.prepare(
+    let rows = conn.query_all(
         "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, recurring, run_at, target_chat_id, target_thread_id FROM cron_specs",
-    )?;
-
-    let rows = stmt.query_map([], |row| {
+        (),
+        |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -687,7 +691,7 @@ pub fn load_specs_from_db(
             run_at,
             target_chat_id,
             target_thread_id,
-        ) = row?;
+        ) = row;
 
         let schedule_kind = match ScheduleKind::from_db_row(&schedule, run_at.as_deref(), recurring)
         {
@@ -729,12 +733,12 @@ pub fn describe_schedule(schedule: &str) -> String {
 }
 
 /// Mark a cron spec for immediate execution on the next engine tick.
-pub fn trigger_spec(conn: &rusqlite::Connection, job_name: &str) -> Result<String, String> {
+pub fn trigger_spec(conn: &Connection, job_name: &str) -> Result<String, String> {
     let now = chrono::Utc::now().to_rfc3339();
     let rows = conn
         .execute(
             "UPDATE cron_specs SET triggered_at = ?2 WHERE job_name = ?1",
-            rusqlite::params![job_name, now],
+            params![job_name, now],
         )
         .map_err(|e| format!("trigger failed: {e:#}"))?;
     if rows == 0 {
@@ -744,10 +748,10 @@ pub fn trigger_spec(conn: &rusqlite::Connection, job_name: &str) -> Result<Strin
 }
 
 /// Clear the `triggered_at` timestamp after a triggered run completes.
-pub fn clear_triggered_at(conn: &rusqlite::Connection, job_name: &str) -> Result<(), String> {
+pub fn clear_triggered_at(conn: &Connection, job_name: &str) -> Result<(), String> {
     conn.execute(
         "UPDATE cron_specs SET triggered_at = NULL WHERE job_name = ?1",
-        rusqlite::params![job_name],
+        params![job_name],
     )
     .map_err(|e| format!("clear trigger failed: {e:#}"))?;
     Ok(())
@@ -770,13 +774,13 @@ pub struct CronSpecDetail {
 
 /// Fetch full detail for a single cron spec by name.
 pub fn get_spec_detail(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     job_name: &str,
 ) -> Result<Option<CronSpecDetail>, String> {
     let result = conn.query_row(
         "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, created_at, updated_at, recurring, run_at \
          FROM cron_specs WHERE job_name = ?1",
-        rusqlite::params![job_name],
+        params![job_name],
         |row| {
             Ok(CronSpecDetail {
                 job_name: row.get(0)?,
@@ -794,7 +798,7 @@ pub fn get_spec_detail(
     );
     match result {
         Ok(detail) => Ok(Some(detail)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(DbError::NotFound) => Ok(None),
         Err(e) => Err(format!("query failed: {e:#}")),
     }
 }
@@ -811,31 +815,28 @@ pub struct CronRunSummary {
 
 /// Fetch recent runs for a job, ordered by most recent first.
 pub fn get_recent_runs(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     job_name: &str,
     limit: i64,
 ) -> Result<Vec<CronRunSummary>, String> {
-    let mut stmt = conn
-        .prepare(
+    let rows = conn
+        .query_all(
             "SELECT id, started_at, finished_at, exit_code, status \
              FROM async_runs \
              WHERE kind = 'cron' AND producer_ref = ?1 \
              ORDER BY started_at DESC LIMIT ?2",
+            params![job_name, limit],
+            |row| {
+                Ok(CronRunSummary {
+                    id: row.get(0)?,
+                    started_at: row.get(1)?,
+                    finished_at: row.get(2)?,
+                    exit_code: row.get(3)?,
+                    status: row.get(4)?,
+                })
+            },
         )
-        .map_err(|e| format!("prepare failed: {e:#}"))?;
-    let rows = stmt
-        .query_map(rusqlite::params![job_name, limit], |row| {
-            Ok(CronRunSummary {
-                id: row.get(0)?,
-                started_at: row.get(1)?,
-                finished_at: row.get(2)?,
-                exit_code: row.get(3)?,
-                status: row.get(4)?,
-            })
-        })
-        .map_err(|e| format!("query failed: {e:#}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("row read failed: {e:#}"))?;
+        .map_err(|e| format!("query failed: {e:#}"))?;
     Ok(rows)
 }
 

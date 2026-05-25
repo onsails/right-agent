@@ -13,16 +13,16 @@ pub(crate) struct ExecutionEventScope<'a> {
 }
 
 pub(crate) fn persist_stream_line(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     scope: &ExecutionEventScope<'_>,
     seq: i64,
     line: &str,
-) -> Result<Option<i64>, rusqlite::Error> {
+) -> Result<Option<i64>, right_db::DbError> {
     let events = crate::cc::stream::parse_persisted_stream_events(line);
     if events.is_empty() {
         return Ok(None);
     };
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn.transaction()?;
     let mut first_id = None;
     for (block_index, event) in events.into_iter().enumerate() {
         let id = insert_stream_event(&tx, scope, seq, block_index, event)?;
@@ -33,12 +33,12 @@ pub(crate) fn persist_stream_line(
 }
 
 fn insert_stream_event(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     scope: &ExecutionEventScope<'_>,
     seq: i64,
     block_index: usize,
     event: crate::cc::stream::PersistedStreamEvent,
-) -> Result<i64, rusqlite::Error> {
+) -> Result<i64, right_db::DbError> {
     let crate::cc::stream::PersistedStreamEvent {
         kind: raw_kind,
         tool_name,
@@ -355,9 +355,9 @@ mod tests {
         assert_eq!(redacted["safe"], "visible");
     }
 
-    fn conn() -> rusqlite::Connection {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
+    fn conn() -> right_db::Connection {
+        let conn = right_db::Connection::open_in_memory().unwrap();
+        right_db::MIGRATIONS.to_latest(&conn).unwrap();
         conn
     }
 
@@ -382,6 +382,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        #[allow(clippy::type_complexity)]
         let row: (
             String,
             Option<String>,
@@ -552,7 +553,7 @@ mod tests {
 
         let err = persist_stream_line(&conn, &scope(), 9, line).unwrap_err();
         assert!(
-            matches!(err, rusqlite::Error::SqliteFailure(_, _)),
+            err.is_constraint_violation(),
             "expected sqlite constraint failure, got {err:?}"
         );
 

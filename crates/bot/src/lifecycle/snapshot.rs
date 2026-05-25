@@ -14,7 +14,7 @@ impl From<walkdir::Error> for SnapshotError {
     fn from(e: walkdir::Error) -> Self {
         Self::Io(
             e.into_io_error()
-                .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "walkdir error")),
+                .unwrap_or_else(|| std::io::Error::other("walkdir error")),
         )
     }
 }

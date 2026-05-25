@@ -2,7 +2,7 @@ use crate::api_types::{
     LearningEpisodeDetailResponse, LearningEpisodeSummary, LearningEpisodesResponse,
     LearningReportSummary, LearningSelectorDetail,
 };
-use rusqlite::{Connection, OptionalExtension as _, params};
+use right_db::{Connection, params};
 
 use super::ReadModelError;
 use super::learning::{parse_string_array, report_summary_from_row};
@@ -39,10 +39,10 @@ pub fn learning_episodes(
     )?;
     let rows = stmt
         .query_map(
-            params![input.agent, RECENT_EPISODE_LIMIT],
+            params![input.agent.as_str(), RECENT_EPISODE_LIMIT],
             episode_summary_from_row,
         )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     let mut episodes = Vec::with_capacity(rows.len());
     for mut episode in rows {
         episode.reports = reports_for_episode(conn, &input.agent, episode.id)?;
@@ -91,9 +91,8 @@ fn load_episode_detail(
     agent: &str,
     episode_id: i64,
 ) -> Result<Option<EpisodeDetailRow>, ReadModelError> {
-    let row = conn
-        .query_row(
-            "SELECT id, kind, seed_trigger_kind, seed_ref, status,
+    let row = match conn.query_row(
+        "SELECT id, kind, seed_trigger_kind, seed_ref, status,
                     target_chat_id, target_thread_id, start_ref, end_ref,
                     confidence, context_incomplete, last_evidence_at,
                     created_at, updated_at, selector_model,
@@ -101,18 +100,21 @@ fn load_episode_detail(
                     execution_event_refs_json
              FROM learning_episodes
              WHERE agent_name=?1 AND id=?2",
-            params![agent, episode_id],
-            |row| {
-                Ok((
-                    episode_summary_from_row(row)?,
-                    row.get::<_, Option<String>>(14)?,
-                    row.get::<_, Option<String>>(15)?,
-                    row.get::<_, String>(16)?,
-                    row.get::<_, String>(17)?,
-                ))
-            },
-        )
-        .optional()?;
+        params![agent, episode_id],
+        |row| {
+            Ok((
+                episode_summary_from_row(row)?,
+                row.get::<_, Option<String>>(14)?,
+                row.get::<_, Option<String>>(15)?,
+                row.get::<_, String>(16)?,
+                row.get::<_, String>(17)?,
+            ))
+        },
+    ) {
+        Ok(row) => Some(row),
+        Err(right_db::DbError::NotFound) => None,
+        Err(error) => return Err(error.into()),
+    };
 
     row.map(
         |(episode, selector_model, boundary_rationale, message_refs_json, execution_refs_json)| {
@@ -128,7 +130,9 @@ fn load_episode_detail(
     .transpose()
 }
 
-fn episode_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningEpisodeSummary> {
+fn episode_summary_from_row(
+    row: &right_db::row::Row<'_>,
+) -> Result<LearningEpisodeSummary, right_db::DbError> {
     Ok(LearningEpisodeSummary {
         id: row.get(0)?,
         kind: row.get(1)?,
@@ -166,7 +170,7 @@ fn reports_for_episode(
             params![agent, episode_id, REPORTS_PER_EPISODE_LIMIT],
             report_summary_from_row,
         )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
@@ -268,7 +272,7 @@ mod tests {
                     ?1, 'right', ?2, 7, 'learning_signal',
                     'nothing_to_learn', 'medium', '[]', '{}', ?3
                  )",
-                rusqlite::params![
+                right_db::params![
                     id,
                     format!("inv-{id}"),
                     format!("2026-05-20T11:{id:02}:00Z")

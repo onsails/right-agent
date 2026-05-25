@@ -19,7 +19,6 @@ use right_agent::learning_episodes::{
     EpisodeSeedTriggerKind, ExecutionEventKind, LearningEpisodeKind, LearningEpisodeRow,
     LearningEpisodeStatus, NewLearningEpisodeSeed, SelectedEpisodeUpdate,
 };
-use rusqlite::OptionalExtension as _;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -64,7 +63,7 @@ pub(crate) struct EpisodeSeedInput<'a> {
 /// `tx.send(())`; the spawned task collapses N rapid notifications into one
 /// drain pass after `settle` elapses. This replaces the previous per-seed
 /// `tokio::spawn(sleep + drain)` pattern which spawned a fresh timer (and a
-/// fresh `rusqlite::Connection`) for every seed captured in a burst.
+/// fresh `right_db::Connection`) for every seed captured in a burst.
 ///
 /// This is retained for legacy tests and historical tooling. Startup uses
 /// `noop()` and must not spawn a runtime drain task.
@@ -232,13 +231,13 @@ impl LearningEpisodeRuntime {
     /// config fields cannot create new `learning_episodes` rows.
     pub(crate) fn capture_completion_seed(
         &self,
-        conn: &rusqlite::Connection,
+        conn: &right_db::Connection,
         kind: LearningEpisodeKind,
         seed_trigger_kind: EpisodeSeedTriggerKind,
         seed_ref: &str,
         target_chat_id: Option<i64>,
         target_thread_id: Option<i64>,
-    ) -> Result<i64, rusqlite::Error> {
+    ) -> Result<i64, right_db::DbError> {
         let _ = (
             conn,
             kind,
@@ -264,9 +263,9 @@ impl LearningEpisodeRuntime {
 }
 
 pub(crate) fn capture_episode_seed(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     input: EpisodeSeedInput<'_>,
-) -> Result<i64, rusqlite::Error> {
+) -> Result<i64, right_db::DbError> {
     let now = chrono::DateTime::parse_from_rfc3339(input.now)
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .unwrap_or_else(|_| chrono::Utc::now());
@@ -729,7 +728,7 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
 /// counter.  Returns `Some((new_count, opened_now))` when `record_failure =
 /// true`, `None` otherwise.
 fn mark_claimed_episode_failed(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     runtime: &LearningEpisodeRuntime,
     episode_id: i64,
     reason: &str,
@@ -738,7 +737,7 @@ fn mark_claimed_episode_failed(
 ) -> anyhow::Result<Option<(i64, bool)>> {
     // First write: mark the episode row failed.
     {
-        let tx = conn.unchecked_transaction()?;
+        let tx = conn.transaction()?;
         right_agent::learning_episodes::mark_episode_failed(&tx, episode_id, reason)
             .with_context(|| format!("mark learning episode {episode_id} failed"))?;
         tx.commit()?;
@@ -778,7 +777,7 @@ fn spawn_circuit_open_alert(runtime: &LearningEpisodeRuntime, reason: &str) {
 }
 
 fn record_selector_output(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     runtime: &LearningEpisodeRuntime,
     episode: &LearningEpisodeRow,
     corpus: &SelectorCorpus,
@@ -798,7 +797,7 @@ fn record_selector_output(
                     "duplicate_status": status,
                     "episode_hash": episode_hash,
                 });
-                let tx = conn.unchecked_transaction()?;
+                let tx = conn.transaction()?;
                 right_agent::learning_episodes::mark_episode_terminal(
                     &tx,
                     episode.id,
@@ -826,7 +825,7 @@ fn record_selector_output(
             Ok(true)
         }
         "no_episode" => {
-            let tx = conn.unchecked_transaction()?;
+            let tx = conn.transaction()?;
             right_agent::learning_episodes::mark_episode_terminal(
                 &tx,
                 episode.id,
@@ -838,7 +837,7 @@ fn record_selector_output(
             Ok(false)
         }
         "insufficient_context" => {
-            let tx = conn.unchecked_transaction()?;
+            let tx = conn.transaction()?;
             right_agent::learning_episodes::mark_episode_terminal(
                 &tx,
                 episode.id,
@@ -850,7 +849,7 @@ fn record_selector_output(
             Ok(false)
         }
         "failed" => {
-            let tx = conn.unchecked_transaction()?;
+            let tx = conn.transaction()?;
             right_agent::learning_episodes::mark_episode_failed(
                 &tx,
                 episode.id,
@@ -860,7 +859,7 @@ fn record_selector_output(
             tx.commit()?;
             Ok(false)
         }
-        status => return Err(anyhow!("selector returned invalid status {status:?}")),
+        status => Err(anyhow!("selector returned invalid status {status:?}")),
     }
 }
 
@@ -903,11 +902,11 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 fn find_duplicate_episode_status(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     agent_name: &str,
     current_episode_id: i64,
     episode_hash: &str,
-) -> Result<Option<String>, rusqlite::Error> {
+) -> Result<Option<String>, right_db::DbError> {
     conn.query_row(
         "SELECT status FROM learning_episodes
          WHERE agent_name=?1
@@ -916,7 +915,7 @@ fn find_duplicate_episode_status(
            AND status IN ('pending','selecting','selected','reviewing','reviewed')
          ORDER BY CASE status WHEN 'reviewed' THEN 0 ELSE 1 END, id ASC
          LIMIT 1",
-        rusqlite::params![agent_name, episode_hash, current_episode_id],
+        right_db::params![agent_name, episode_hash, current_episode_id],
         |row| row.get(0),
     )
     .optional()
@@ -1012,7 +1011,7 @@ async fn run_episode_reviewer_inner(
         // report writes first, then record_review_failure in its own tx.
         // Atomicity loss is acceptable (independent tables, self-healing).
         {
-            let tx = conn.unchecked_transaction()?;
+            let tx = conn.transaction()?;
             insert_skill_review_report(&tx, &report)
                 .with_context(|| format!("insert learning episode {episode_id} review report"))?;
             right_agent::learning_episodes::mark_episode_failed(
@@ -1043,7 +1042,7 @@ async fn run_episode_reviewer_inner(
         }
         return Ok(());
     }
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn.transaction()?;
     insert_skill_review_report(&tx, &report)
         .with_context(|| format!("insert learning episode {episode_id} review report"))?;
     mark_episode_reviewed(&tx, episode_id)
@@ -1158,7 +1157,7 @@ struct SelectedReviewEvidence {
 }
 
 fn load_selected_episode_for_review(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     episode_id: i64,
 ) -> anyhow::Result<SelectedEpisodeForReview> {
     let row = conn
@@ -1199,7 +1198,7 @@ fn load_selected_episode_for_review(
 }
 
 fn load_selected_review_evidence(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     episode: &SelectedEpisodeForReview,
 ) -> anyhow::Result<SelectedReviewEvidence> {
     let mut evidence_index = crate::learning_review::EpisodeEvidenceIndex::default();
@@ -1306,7 +1305,7 @@ struct BatchedReviewExecutionEventRow {
 }
 
 fn load_review_messages_batched(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     ids: &[i64],
 ) -> anyhow::Result<HashMap<i64, BatchedReviewMessageRow>> {
     let mut rows: HashMap<i64, BatchedReviewMessageRow> = HashMap::with_capacity(ids.len());
@@ -1321,7 +1320,7 @@ fn load_review_messages_batched(
          FROM conversation_messages WHERE id IN ({placeholders})"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut mapped = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+    let mapped = stmt.query_map(right_db::params_from_iter(ids.iter()), |row| {
         let id: i64 = row.get(0)?;
         let role: String = row.get(1)?;
         let content: String = row.get(2)?;
@@ -1337,7 +1336,7 @@ fn load_review_messages_batched(
             },
         ))
     })?;
-    while let Some(item) = mapped.next() {
+    for item in mapped {
         let (id, row) = item?;
         rows.insert(id, row);
     }
@@ -1345,7 +1344,7 @@ fn load_review_messages_batched(
 }
 
 fn load_review_execution_events_batched(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     ids: &[i64],
 ) -> anyhow::Result<HashMap<i64, BatchedReviewExecutionEventRow>> {
     let mut rows: HashMap<i64, BatchedReviewExecutionEventRow> = HashMap::with_capacity(ids.len());
@@ -1360,7 +1359,7 @@ fn load_review_execution_events_batched(
          FROM execution_events WHERE id IN ({placeholders})"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut mapped = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+    let mapped = stmt.query_map(right_db::params_from_iter(ids.iter()), |row| {
         let id: i64 = row.get(0)?;
         let event_kind: String = row.get(1)?;
         let trust_label: String = row.get(2)?;
@@ -1376,7 +1375,7 @@ fn load_review_execution_events_batched(
             },
         ))
     })?;
-    while let Some(item) = mapped.next() {
+    for item in mapped {
         let (id, row) = item?;
         rows.insert(id, row);
     }
@@ -1384,7 +1383,7 @@ fn load_review_execution_events_batched(
 }
 
 fn load_episode_review_learning_events(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     source_invocation_id: &str,
 ) -> anyhow::Result<Vec<String>> {
     if source_invocation_id.starts_with("episode:") {
@@ -1395,7 +1394,7 @@ fn load_episode_review_learning_events(
          FROM skill_learning_events WHERE invocation_id = ?1 ORDER BY id LIMIT ?2",
     )?;
     let rows = stmt.query_map(
-        rusqlite::params![source_invocation_id, EPISODE_REVIEW_LEARNING_EVENTS_LIMIT],
+        right_db::params![source_invocation_id, EPISODE_REVIEW_LEARNING_EVENTS_LIMIT],
         |row| {
             let action: String = row.get(0)?;
             let skill_name: String = row.get(1)?;
@@ -1428,20 +1427,20 @@ async fn collect_episode_review_skill_index(
     }
 }
 
-fn mark_episode_reviewing(conn: &rusqlite::Connection, episode_id: i64) -> anyhow::Result<()> {
+fn mark_episode_reviewing(conn: &right_db::Connection, episode_id: i64) -> anyhow::Result<()> {
     match right_agent::learning_episodes::mark_episode_reviewing(conn, episode_id) {
         Ok(()) => Ok(()),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Err(anyhow!(
+        Err(right_db::DbError::NotFound) => Err(anyhow!(
             "learning episode {episode_id} could not enter reviewing"
         )),
         Err(e) => Err(anyhow::Error::from(e)),
     }
 }
 
-fn mark_episode_reviewed(conn: &rusqlite::Connection, episode_id: i64) -> anyhow::Result<()> {
+fn mark_episode_reviewed(conn: &right_db::Connection, episode_id: i64) -> anyhow::Result<()> {
     match right_agent::learning_episodes::mark_episode_reviewed(conn, episode_id) {
         Ok(()) => Ok(()),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Err(anyhow!(
+        Err(right_db::DbError::NotFound) => Err(anyhow!(
             "learning episode {episode_id} could not be marked reviewed"
         )),
         Err(e) => Err(anyhow::Error::from(e)),
@@ -1458,7 +1457,7 @@ fn mark_episode_review_failed_and_finish(
         .with_context(|| format!("open {} data.db for review failure", runtime.agent_name))?;
     // First write: mark the episode row failed (its own transaction).
     {
-        let tx = conn.unchecked_transaction()?;
+        let tx = conn.transaction()?;
         right_agent::learning_episodes::mark_episode_failed(&tx, episode_id, reason)
             .with_context(|| format!("mark learning episode {episode_id} failed"))?;
         tx.commit()?;
@@ -1513,9 +1512,9 @@ fn parse_seed_trigger_kind(value: &str) -> anyhow::Result<EpisodeSeedTriggerKind
 }
 
 fn load_selector_corpus(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     episode: &LearningEpisodeRow,
-) -> Result<SelectorCorpus, rusqlite::Error> {
+) -> Result<SelectorCorpus, right_db::DbError> {
     let messages = match (episode.target_chat_id, episode.target_thread_id) {
         (Some(chat_id), Some(thread_id)) => load_corpus_messages(conn, chat_id, thread_id)?,
         (Some(chat_id), None) => load_corpus_messages(conn, chat_id, 0)?,
@@ -1539,10 +1538,10 @@ fn load_selector_corpus(
 }
 
 fn load_corpus_messages(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     chat_id: i64,
     thread_id: i64,
-) -> Result<Vec<CorpusMessage>, rusqlite::Error> {
+) -> Result<Vec<CorpusMessage>, right_db::DbError> {
     let mut stmt = conn.prepare(
         "SELECT id, role, content, addressed_to_bot, routed_to_agent, root_session_id, turn_id, created_at
          FROM conversation_messages
@@ -1550,7 +1549,7 @@ fn load_corpus_messages(
          ORDER BY created_at DESC
          LIMIT 40",
     )?;
-    stmt.query_map(rusqlite::params![chat_id, thread_id], |row| {
+    stmt.query_map(right_db::params![chat_id, thread_id], |row| {
         let addressed_to_bot: i64 = row.get(3)?;
         let routed_to_agent: i64 = row.get(4)?;
         Ok(CorpusMessage {
@@ -1568,14 +1567,14 @@ fn load_corpus_messages(
 }
 
 fn load_corpus_execution_events(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     agent_name: &str,
     root_session_id: Option<&str>,
     invocation_id: Option<&str>,
     async_run_id: Option<&str>,
     cron_run_id: Option<&str>,
     messages: &[CorpusMessage],
-) -> Result<Vec<CorpusExecutionEvent>, rusqlite::Error> {
+) -> Result<Vec<CorpusExecutionEvent>, right_db::DbError> {
     let turn_pairs: Vec<(&str, i64)> = messages
         .iter()
         .filter_map(|message| Some((message.root_session_id.as_deref()?, message.turn_id?)))
@@ -1595,27 +1594,18 @@ fn load_corpus_execution_events(
          ORDER BY seq ASC, id ASC
          LIMIT 120"
     );
-    let mut params: Vec<rusqlite::types::Value> = vec![
-        rusqlite::types::Value::Text(agent_name.to_owned()),
-        root_session_id
-            .map(|value| rusqlite::types::Value::Text(value.to_owned()))
-            .unwrap_or(rusqlite::types::Value::Null),
-        invocation_id
-            .map(|value| rusqlite::types::Value::Text(value.to_owned()))
-            .unwrap_or(rusqlite::types::Value::Null),
-        async_run_id
-            .map(|value| rusqlite::types::Value::Text(value.to_owned()))
-            .unwrap_or(rusqlite::types::Value::Null),
-        cron_run_id
-            .map(|value| rusqlite::types::Value::Text(value.to_owned()))
-            .unwrap_or(rusqlite::types::Value::Null),
-    ];
+    let mut params = right_db::params::ParamsBuilder::new();
+    params.push(agent_name)?;
+    params.push(root_session_id)?;
+    params.push(invocation_id)?;
+    params.push(async_run_id)?;
+    params.push(cron_run_id)?;
     for (root_session_id, turn_id) in &turn_pairs {
-        params.push(rusqlite::types::Value::Text((*root_session_id).to_owned()));
-        params.push(rusqlite::types::Value::Integer(*turn_id));
+        params.push(*root_session_id)?;
+        params.push(*turn_id)?;
     }
     let mut stmt = conn.prepare(&sql)?;
-    stmt.query_map(rusqlite::params_from_iter(params), |row| {
+    stmt.query_map(params, |row| {
         Ok(CorpusExecutionEvent {
             id: row.get(0)?,
             event_kind: parse_execution_event_kind(row.get::<_, String>(1)?.as_str()),
@@ -1729,11 +1719,11 @@ fn parse_selector_process_stdout(stdout: &str) -> Result<EpisodeSelectorOutput, 
 }
 
 fn requeue_episode(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     episode_id: i64,
     now: chrono::DateTime<chrono::Utc>,
     settle_seconds: u64,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), right_db::DbError> {
     let ready_after = (now + chrono::Duration::seconds(settle_seconds as i64))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
@@ -1741,7 +1731,7 @@ fn requeue_episode(
 }
 
 fn requeue_episode_or_fail(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     runtime: &LearningEpisodeRuntime,
     episode_id: i64,
     now: chrono::DateTime<chrono::Utc>,
@@ -1750,7 +1740,7 @@ fn requeue_episode_or_fail(
 ) -> anyhow::Result<()> {
     match requeue_episode(conn, episode_id, now, settle_seconds) {
         Ok(()) => Ok(()),
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
+        Err(right_db::DbError::NotFound) => {
             // Row moved out of 'selecting' under us. This helper is used after
             // Skip(AlreadyRunning/DailyBudget/CircuitOpen), so we do not own the review gate
             // and must leave it untouched.
@@ -1771,25 +1761,25 @@ fn requeue_episode_or_fail(
 }
 
 pub(crate) fn recover_stale_inflight_episodes(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     agent_name: &str,
     now: &str,
-) -> Result<usize, rusqlite::Error> {
+) -> Result<usize, right_db::DbError> {
     right_agent::learning_episodes::recover_stale_inflight_episodes(conn, agent_name, now)
 }
 
 pub(crate) fn has_ready_pending_episodes(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     agent_name: &str,
     now: &str,
-) -> Result<bool, rusqlite::Error> {
+) -> Result<bool, right_db::DbError> {
     conn.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM learning_episodes
             WHERE agent_name=?1 AND status='pending' AND ready_after <= ?2
             LIMIT 1
         )",
-        rusqlite::params![agent_name, now],
+        right_db::params![agent_name, now],
         |row| row.get::<_, i64>(0),
     )
     .map(|value| value != 0)
@@ -1936,8 +1926,8 @@ pub(crate) fn deprecation_warn_message(agent_name: &str) -> String {
 
 /// Detect whether the agent has `learning_episodes` rows newer than 24h.
 pub(crate) fn has_recent_legacy_activity(
-    conn: &rusqlite::Connection,
-) -> Result<bool, rusqlite::Error> {
+    conn: &right_db::Connection,
+) -> Result<bool, right_db::DbError> {
     let now = chrono::Utc::now();
     let cutoff = (now - chrono::Duration::hours(24))
         .format("%Y-%m-%dT%H:%M:%SZ")
@@ -1966,3 +1956,4 @@ mod deprecation_warn_tests {
 #[cfg(test)]
 #[path = "learning_episode_tests.rs"]
 mod tests;
+use right_db::OptionalExtension as _;

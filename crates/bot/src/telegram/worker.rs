@@ -163,6 +163,7 @@ fn build_thinking_anchor_render(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_thinking_anchor(
     ctx: &WorkerContext,
     tg_chat_id: teloxide::types::ChatId,
@@ -707,7 +708,7 @@ fn background_banner(reason: BgReason) -> &'static str {
 }
 
 fn create_background_run(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     chat_id: i64,
     thread_id: i64,
     main_session_id: &str,
@@ -1081,7 +1082,7 @@ fn log_result_timing(ctx: &InvocationLogContext, timing: &crate::cc::stream::Res
 }
 
 fn cleanup_unspawned_first_call_session(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     chat_id: i64,
     eff_thread_id: i64,
     is_first_call: bool,
@@ -2604,9 +2605,9 @@ async fn remove_sandbox_progress_config_file(
 }
 
 fn load_skill_review_gate_snapshot(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     agent_name: &str,
-) -> Result<(i64, i64, i64), rusqlite::Error> {
+) -> Result<(i64, i64, i64), right_db::DbError> {
     right_agent::learned_skills::ensure_nudge_state(conn, agent_name)?;
     conn.query_row(
         "SELECT tool_iters_since_review, turns_since_review, skill_issue_hints_since_review \
@@ -2618,9 +2619,9 @@ fn load_skill_review_gate_snapshot(
 
 #[allow(dead_code)]
 fn load_learning_episode_effort_snapshot(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     agent_name: &str,
-) -> Result<(i64, i64), rusqlite::Error> {
+) -> Result<(i64, i64), right_db::DbError> {
     right_agent::learned_skills::ensure_nudge_state(conn, agent_name)?;
     conn.query_row(
         "SELECT tool_iters_since_review, creation_review_interval \
@@ -2701,7 +2702,7 @@ fn bounded_review_failure_excerpt(value: Option<&str>) -> Option<String> {
 }
 
 fn maybe_spawn_learned_skill_review(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     ctx: &WorkerContext,
     chat_id: i64,
     eff_thread_id: i64,
@@ -2865,7 +2866,7 @@ fn maybe_spawn_learned_skill_review(
 
 #[allow(clippy::type_complexity)]
 const _: fn(
-    &rusqlite::Connection,
+    &right_db::Connection,
     &WorkerContext,
     i64,
     i64,
@@ -2908,7 +2909,7 @@ fn foreground_episode_seed_trigger_kind(
 
 #[allow(dead_code)]
 fn maybe_capture_learning_episode_seed(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     ctx: &WorkerContext,
     chat_id: i64,
     eff_thread_id: i64,
@@ -3396,7 +3397,7 @@ fn load_review_learning_events(
          FROM skill_learning_events WHERE invocation_id = ?1 ORDER BY id LIMIT ?2",
     )?;
     let rows = stmt.query_map(
-        rusqlite::params![
+        right_db::params![
             source_invocation_id,
             BACKGROUND_REVIEW_LEARNING_EVENTS_LIMIT
         ],
@@ -3873,7 +3874,7 @@ async fn invoke_cc(
         // are logged and the loop continues, so the transaction is intentionally
         // not used for rollback semantics — we always want to commit whatever
         // succeeded, since partial routing data is better than none.
-        let tx_result = conn.unchecked_transaction().and_then(|tx| {
+        let tx_result = conn.transaction().and_then(|tx| {
             for routed_message_id in routed_message_ids {
                 match right_db::conversation::mark_routed(
                     &tx,
@@ -6177,7 +6178,7 @@ mod background_continuation_tests {
     use super::*;
     use right_db::open_connection;
 
-    fn open_marker_conn(path: &std::path::Path) -> rusqlite::Connection {
+    fn open_marker_conn(path: &std::path::Path) -> right_db::Connection {
         open_connection(path, true).unwrap()
     }
 
@@ -6244,7 +6245,7 @@ mod background_continuation_tests {
         }
     }
 
-    fn insert_marker_run(conn: &rusqlite::Connection, run: MarkerRun<'_>) {
+    fn insert_marker_run(conn: &right_db::Connection, run: MarkerRun<'_>) {
         let finished_at = matches!(run.status, "success" | "failed").then_some(run.started_at);
         let delivery_required = matches!(run.status, "success" | "failed");
         let delivery_status = if run.delivered_at.is_some() {
@@ -6264,7 +6265,7 @@ mod background_continuation_tests {
                 ?5, ?6, ?7, '/log', ?8, ?9,
                 ?10, ?11, ?6, ?6
              )",
-            rusqlite::params![
+            right_db::params![
                 run.id,
                 run.kind,
                 run.job_name,
@@ -6348,7 +6349,7 @@ mod background_continuation_tests {
             .query_row(
                 "SELECT kind, producer_ref, source_session_id, run_session_id, target_chat_id, target_thread_id, status, handoff_state \
                  FROM async_runs WHERE id = ?1",
-                rusqlite::params![run_id],
+                right_db::params![&run_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
             )
             .unwrap();

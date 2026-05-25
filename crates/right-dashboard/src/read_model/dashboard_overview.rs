@@ -4,7 +4,7 @@ use crate::api_types::{
     OverviewDoctorStatus, OverviewSandboxStatus, UsageSourcePoint,
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use rusqlite::{Connection, params};
+use right_db::{Connection, params};
 use std::collections::BTreeMap;
 
 use super::{
@@ -516,17 +516,16 @@ fn median(sorted: &[f64]) -> f64 {
     }
 }
 
+type CuratorProjection = (
+    Vec<DashboardSignal>,
+    Vec<LearningMarker>,
+    Vec<DashboardDataWarning>,
+);
+
 fn curator_projection(
     conn: &Connection,
     generated_at: &DateTime<Utc>,
-) -> Result<
-    (
-        Vec<DashboardSignal>,
-        Vec<LearningMarker>,
-        Vec<DashboardDataWarning>,
-    ),
-    ReadModelError,
-> {
+) -> Result<CuratorProjection, ReadModelError> {
     let row = conn.query_row(
         "SELECT last_run_at, last_run_status, consecutive_failures,
                 circuit_open_until, last_spike_evidence_json
@@ -544,7 +543,7 @@ fn curator_projection(
     );
     let state = match row {
         Ok(state) => state,
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
+        Err(right_db::DbError::NotFound) => {
             return Ok((
                 Vec::new(),
                 Vec::new(),
@@ -864,7 +863,7 @@ mod tests {
     use super::*;
     use tempfile::{TempDir, tempdir};
 
-    fn fixture() -> (TempDir, rusqlite::Connection) {
+    fn fixture() -> (TempDir, right_db::Connection) {
         let dir = tempdir().expect("tempdir");
         let conn = right_db::open_connection(dir.path(), true).expect("open db");
         (dir, conn)

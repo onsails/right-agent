@@ -9,6 +9,7 @@ chrono = { workspace = true }
 hmac = { workspace = true }
 include_dir = { workspace = true }
 right-lifecycle = { path = "../right-lifecycle", version = "*" }
+right-db = { path = "../right-db", version = "*" }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,5 +21,4 @@ url = { workspace = true }
 
 [dev-dependencies]
 right-agent = { path = "../right-agent", version = "*" }
-right-db = { path = "../right-db", version = "*" }
 tempfile = { workspace = true }

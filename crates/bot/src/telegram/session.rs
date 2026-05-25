@@ -36,33 +36,31 @@ pub fn truncate_label(s: &str) -> &str {
 
 /// Get the active session for (chat_id, thread_id), or None.
 pub fn get_active_session(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     chat_id: i64,
     thread_id: i64,
-) -> Result<Option<SessionRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached(
+) -> Result<Option<SessionRow>, right_db::DbError> {
+    let rows = conn.query_all(
         "SELECT id, chat_id, thread_id, root_session_id, label, is_active, created_at, last_used_at \
          FROM sessions WHERE chat_id = ?1 AND thread_id = ?2 AND is_active = 1",
+        right_db::params![chat_id, thread_id],
+        row_to_session,
     )?;
-    let mut rows = stmt.query(rusqlite::params![chat_id, thread_id])?;
-    match rows.next()? {
-        Some(row) => Ok(Some(row_to_session(row)?)),
-        None => Ok(None),
-    }
+    Ok(rows.into_iter().next())
 }
 
 /// Create a new active session. Returns the row id.
 pub fn create_session(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     chat_id: i64,
     thread_id: i64,
     session_uuid: &str,
     label: Option<&str>,
-) -> Result<i64, rusqlite::Error> {
+) -> Result<i64, right_db::DbError> {
     conn.execute(
         "INSERT INTO sessions (chat_id, thread_id, root_session_id, label, is_active) \
          VALUES (?1, ?2, ?3, ?4, 1)",
-        rusqlite::params![chat_id, thread_id, session_uuid, label],
+        right_db::params![chat_id, thread_id, session_uuid, label],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -70,14 +68,14 @@ pub fn create_session(
 /// Deactivate the current active session for (chat_id, thread_id).
 /// Returns the previous session's root_session_id, or None if no active session.
 pub fn deactivate_current(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     chat_id: i64,
     thread_id: i64,
-) -> Result<Option<String>, rusqlite::Error> {
+) -> Result<Option<String>, right_db::DbError> {
     let prev = get_active_session(conn, chat_id, thread_id)?;
     conn.execute(
         "UPDATE sessions SET is_active = 0 WHERE chat_id = ?1 AND thread_id = ?2 AND is_active = 1",
-        rusqlite::params![chat_id, thread_id],
+        right_db::params![chat_id, thread_id],
     )?;
     Ok(prev.map(|s| s.root_session_id))
 }
@@ -87,46 +85,49 @@ pub fn deactivate_current(
 /// Atomically deactivates any other active session for the same (chat_id, thread_id),
 /// activates the target, and updates its `last_used_at`. Single transaction, two statements.
 pub fn activate_session(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     session_id: i64,
-) -> Result<(), rusqlite::Error> {
-    let tx = conn.unchecked_transaction()?;
+) -> Result<(), right_db::DbError> {
+    let tx = conn.transaction()?;
     // Deactivate others via a CTE to avoid double subquery
     tx.execute(
         "WITH target AS (SELECT chat_id, thread_id FROM sessions WHERE id = ?1) \
          UPDATE sessions SET is_active = 0 WHERE is_active = 1 AND \
          chat_id = (SELECT chat_id FROM target) AND \
          thread_id = (SELECT thread_id FROM target)",
-        rusqlite::params![session_id],
+        right_db::params![session_id],
     )?;
     tx.execute(
         "UPDATE sessions SET is_active = 1, last_used_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?1",
-        rusqlite::params![session_id],
+        right_db::params![session_id],
     )?;
     tx.commit()?;
     Ok(())
 }
 
 /// Update last_used_at for a session by row id.
-pub fn touch_session(conn: &rusqlite::Connection, session_id: i64) -> Result<(), rusqlite::Error> {
+pub fn touch_session(
+    conn: &right_db::Connection,
+    session_id: i64,
+) -> Result<(), right_db::DbError> {
     conn.execute(
         "UPDATE sessions SET last_used_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?1",
-        rusqlite::params![session_id],
+        right_db::params![session_id],
     )?;
     Ok(())
 }
 
 /// List all sessions for (chat_id, thread_id) ordered by last_used_at DESC.
 pub fn list_sessions(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     chat_id: i64,
     thread_id: i64,
-) -> Result<Vec<SessionRow>, rusqlite::Error> {
+) -> Result<Vec<SessionRow>, right_db::DbError> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, chat_id, thread_id, root_session_id, label, is_active, created_at, last_used_at \
          FROM sessions WHERE chat_id = ?1 AND thread_id = ?2 ORDER BY last_used_at DESC",
     )?;
-    let rows = stmt.query_map(rusqlite::params![chat_id, thread_id], |row| {
+    let rows = stmt.query_map(right_db::params![chat_id, thread_id], |row| {
         row_to_session(row)
     })?;
     rows.collect()
@@ -134,23 +135,23 @@ pub fn list_sessions(
 
 /// Find sessions matching a partial UUID or label for (chat_id, thread_id).
 pub fn find_sessions_by_uuid(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     chat_id: i64,
     thread_id: i64,
     partial: &str,
-) -> Result<Vec<SessionRow>, rusqlite::Error> {
+) -> Result<Vec<SessionRow>, right_db::DbError> {
     let pattern = format!("%{partial}%");
     let mut stmt = conn.prepare_cached(
         "SELECT id, chat_id, thread_id, root_session_id, label, is_active, created_at, last_used_at \
          FROM sessions WHERE chat_id = ?1 AND thread_id = ?2 AND (root_session_id LIKE ?3 OR label LIKE ?3)",
     )?;
-    let rows = stmt.query_map(rusqlite::params![chat_id, thread_id, pattern], |row| {
+    let rows = stmt.query_map(right_db::params![chat_id, thread_id, pattern], |row| {
         row_to_session(row)
     })?;
     rows.collect()
 }
 
-fn row_to_session(row: &rusqlite::Row) -> Result<SessionRow, rusqlite::Error> {
+fn row_to_session(row: &right_db::row::Row) -> Result<SessionRow, right_db::DbError> {
     Ok(SessionRow {
         id: row.get(0)?,
         chat_id: row.get(1)?,
@@ -169,7 +170,7 @@ mod tests {
     use right_db::open_connection;
     use tempfile::tempdir;
 
-    fn test_conn() -> (tempfile::TempDir, rusqlite::Connection) {
+    fn test_conn() -> (tempfile::TempDir, right_db::Connection) {
         let dir = tempdir().unwrap();
         let conn = open_connection(dir.path(), true).unwrap();
         (dir, conn)
@@ -247,7 +248,7 @@ mod tests {
         // Pin uuid-old to a known past timestamp so uuid-new sorts after it.
         conn.execute(
             "UPDATE sessions SET last_used_at = '2020-01-01T00:00:00Z' WHERE id = ?1",
-            rusqlite::params![old_id],
+            right_db::params![old_id],
         )
         .unwrap();
         deactivate_current(&conn, 100, 0).unwrap();

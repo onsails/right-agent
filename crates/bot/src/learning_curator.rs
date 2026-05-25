@@ -140,7 +140,9 @@ use crate::telegram::SessionLocks;
 const CURATOR_TIMEOUT: StdDuration = StdDuration::from_secs(900);
 const CURATOR_MAX_TURNS: u32 = 9999;
 
-pub(crate) fn load_state_db(conn: &rusqlite::Connection) -> Result<CuratorState, rusqlite::Error> {
+pub(crate) fn load_state_db(
+    conn: &right_db::Connection,
+) -> Result<CuratorState, right_db::DbError> {
     let row = conn.query_row(
         "SELECT last_run_at, last_run_status, consecutive_failures, \
                 circuit_open_until, last_spike_evidence_json \
@@ -158,26 +160,26 @@ pub(crate) fn load_state_db(conn: &rusqlite::Connection) -> Result<CuratorState,
     );
     match row {
         Ok(s) => Ok(s),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(CuratorState::default()),
+        Err(right_db::DbError::NotFound) => Ok(CuratorState::default()),
         Err(e) => Err(e),
     }
 }
 
 pub(crate) fn save_state_db(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     state: &CuratorState,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), right_db::DbError> {
     conn.execute(
         "INSERT OR REPLACE INTO curator_state \
             (agent_singleton_id, last_run_at, last_run_status, \
              consecutive_failures, circuit_open_until, last_spike_evidence_json) \
          VALUES (1, ?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![
-            state.last_run_at,
-            state.last_run_status,
+        right_db::params![
+            state.last_run_at.as_deref(),
+            state.last_run_status.as_deref(),
             state.consecutive_failures as i64,
-            state.circuit_open_until,
-            state.last_spike_evidence_json,
+            state.circuit_open_until.as_deref(),
+            state.last_spike_evidence_json.as_deref(),
         ],
     )?;
     Ok(())
@@ -532,9 +534,9 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn open_test_conn() -> rusqlite::Connection {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
+    fn open_test_conn() -> right_db::Connection {
+        let conn = right_db::Connection::open_in_memory().unwrap();
+        right_db::MIGRATIONS.to_latest(&conn).unwrap();
         conn
     }
 

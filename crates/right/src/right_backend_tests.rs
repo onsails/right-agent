@@ -147,7 +147,7 @@ fn insert_async_run(
             started_at, status, log_path, delivery_required, delivery_status,
             created_at, updated_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, -100, ?6, ?7, ?8, ?9, ?10, ?6, ?6)",
-        rusqlite::params![
+        right_db::params![
             id,
             kind,
             producer_ref,
@@ -444,7 +444,7 @@ async fn chat_search_rejects_query_without_searchable_terms() {
     assert_eq!(body["error"]["code"], "invalid_argument");
 }
 
-fn archive_search_fixture(conn: &rusqlite::Connection) {
+fn archive_search_fixture(conn: &right_db::Connection) {
     for (chat_id, thread_id, message_id, content) in [
         (100, 7, 1, "needle in current thread"),
         (100, 8, 2, "needle in other thread"),
