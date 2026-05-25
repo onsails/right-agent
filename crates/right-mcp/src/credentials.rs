@@ -2,6 +2,7 @@ use std::io::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
+use http::{HeaderName, HeaderValue};
 use right_db::{Connection, DbError, OptionalExtension, params};
 use serde_json::json;
 use tempfile::NamedTempFile;
@@ -27,6 +28,10 @@ pub enum CredentialError {
     InvalidServerName(String),
     #[error("invalid server URL: {0}")]
     InvalidServerUrl(String),
+    #[error("invalid auth header: {0}")]
+    InvalidAuthHeader(String),
+    #[error("invalid auth type: {0}")]
+    InvalidAuthType(String),
 }
 
 impl From<DbError> for CredentialError {
@@ -160,6 +165,56 @@ pub fn set_server_header(
         .insert(header_name.to_string(), json!(header_value));
 
     write_json_atomic(mcp_json_path, &root)
+}
+
+/// Secret value for one HTTP header credential.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HttpHeaderSecret {
+    name: String,
+    value: String,
+}
+
+impl std::fmt::Debug for HttpHeaderSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpHeaderSecret")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+impl HttpHeaderSecret {
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Result<Self, CredentialError> {
+        let name = name.into();
+        let value = value.into();
+        let name = canonical_header_name(&name)?;
+        if value.is_empty() {
+            return Err(CredentialError::InvalidAuthHeader(
+                "header value must not be empty".to_string(),
+            ));
+        }
+        HeaderValue::from_str(&value)
+            .map_err(|_| CredentialError::InvalidAuthHeader("invalid header value".to_string()))?;
+        Ok(Self { name, value })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+pub fn validate_header_name(name: &str) -> Result<(), CredentialError> {
+    canonical_header_name(name).map(drop)
+}
+
+fn canonical_header_name(name: &str) -> Result<String, CredentialError> {
+    HeaderName::from_bytes(name.as_bytes())
+        .map(|name| name.to_string())
+        .map_err(|e| CredentialError::InvalidAuthHeader(format!("invalid header name: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -378,21 +433,172 @@ pub async fn db_set_auth(
     auth_header: Option<&str>,
     auth_token: Option<&str>,
 ) -> Result<(), CredentialError> {
-    let changed = conn.execute(
-        "UPDATE mcp_servers SET auth_type = ?1, auth_header = ?2, auth_token = ?3 WHERE name = ?4",
-        params![auth_type, auth_header, auth_token, name],
-    )
-    .await?;
-    if changed == 0 {
-        return Err(CredentialError::ServerNotFound(name.to_string()));
+    if auth_type == "headers" {
+        return Err(CredentialError::InvalidAuthType(
+            "'headers' auth must be configured with db_set_http_headers".to_string(),
+        ));
     }
-    Ok(())
+
+    let tx = conn.transaction().await?;
+    let result: Result<(), CredentialError> = async {
+        let changed = tx
+            .execute(
+                "UPDATE mcp_servers
+             SET auth_type = ?1,
+                 auth_header = ?2,
+                 auth_token = ?3,
+                 refresh_token = NULL,
+                 token_endpoint = NULL,
+                 client_id = NULL,
+                 client_secret = NULL,
+                 expires_at = NULL,
+                 oauth_resource = NULL
+             WHERE name = ?4",
+                params![auth_type, auth_header, auth_token, name],
+            )
+            .await?;
+        if changed == 0 {
+            return Err(CredentialError::ServerNotFound(name.to_string()));
+        }
+
+        if auth_type != "headers" {
+            tx.execute(
+                "DELETE FROM mcp_http_headers WHERE server_name = ?1",
+                [name],
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            tx.commit().await?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = tx.rollback().await {
+                tracing::warn!(
+                    operation_error = format!("{err:#}"),
+                    rollback_error = format!("{rollback_err:#}"),
+                    "mcp auth transaction rollback failed; returning original operation error",
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Replace all stored HTTP header credentials for an MCP server.
+///
+/// Header values are stored only for proxy injection. Use
+/// [`db_list_http_header_names`] for user-facing output.
+pub async fn db_set_http_headers(
+    conn: &Connection,
+    server_name: &str,
+    headers: &[HttpHeaderSecret],
+) -> Result<(), CredentialError> {
+    let tx = conn.transaction().await?;
+    let result: Result<(), CredentialError> = async {
+        let changed = tx
+            .execute(
+                "UPDATE mcp_servers
+             SET auth_type = 'headers',
+                 auth_header = NULL,
+                 auth_token = NULL,
+                 refresh_token = NULL,
+                 token_endpoint = NULL,
+                 client_id = NULL,
+                 client_secret = NULL,
+                 expires_at = NULL,
+                 oauth_resource = NULL
+             WHERE name = ?1",
+                [server_name],
+            )
+            .await?;
+        if changed == 0 {
+            return Err(CredentialError::ServerNotFound(server_name.to_string()));
+        }
+
+        tx.execute(
+            "DELETE FROM mcp_http_headers WHERE server_name = ?1",
+            [server_name],
+        )
+        .await?;
+        for header in headers {
+            tx.execute(
+                "INSERT INTO mcp_http_headers (server_name, header_name, header_value)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(server_name, header_name) DO UPDATE SET
+                    header_value = excluded.header_value,
+                    updated_at = datetime('now')",
+                params![server_name, header.name(), header.value()],
+            )
+            .await?;
+        }
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            tx.commit().await?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = tx.rollback().await {
+                tracing::warn!(
+                    operation_error = format!("{err:#}"),
+                    rollback_error = format!("{rollback_err:#}"),
+                    "mcp http header transaction rollback failed; returning original operation error",
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
+/// List stored HTTP header names for a server without exposing values.
+pub async fn db_list_http_header_names(
+    conn: &Connection,
+    server_name: &str,
+) -> Result<Vec<String>, CredentialError> {
+    Ok(conn
+        .query_all(
+            "SELECT header_name FROM mcp_http_headers WHERE server_name = ?1 ORDER BY header_name",
+            [server_name],
+            |row| row.get(0),
+        )
+        .await?)
+}
+
+/// List stored HTTP header credentials for proxy injection.
+pub async fn db_list_http_headers(
+    conn: &Connection,
+    server_name: &str,
+) -> Result<Vec<HttpHeaderSecret>, CredentialError> {
+    let rows: Vec<(String, String)> = conn
+        .query_all(
+            "SELECT header_name, header_value FROM mcp_http_headers
+         WHERE server_name = ?1
+         ORDER BY header_name",
+            [server_name],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .await?;
+
+    rows.into_iter()
+        .map(|(name, value)| HttpHeaderSecret::new(name, value))
+        .collect()
 }
 
 /// Set full OAuth state for an MCP server.
 ///
-/// Sets `auth_type` to `"oauth"`. Returns `CredentialError::ServerNotFound` if
-/// no matching row exists.
+/// Sets `auth_type` to `"oauth"` and stores the current access token plus
+/// refresh metadata. Empty access tokens are stored as NULL. Returns
+/// `CredentialError::ServerNotFound` if no matching row exists.
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
 pub async fn db_set_oauth_state(
@@ -406,27 +612,55 @@ pub async fn db_set_oauth_state(
     expires_at: &str,
     oauth_resource: &str,
 ) -> Result<(), CredentialError> {
-    let changed = conn
-        .execute(
-            "UPDATE mcp_servers SET auth_type = 'oauth', auth_token = ?1, refresh_token = ?2, \
-         token_endpoint = ?3, client_id = ?4, client_secret = ?5, expires_at = ?6, \
-         oauth_resource = ?7 WHERE name = ?8",
-            params![
-                access_token,
-                refresh_token,
-                token_endpoint,
-                client_id,
-                client_secret,
-                expires_at,
-                oauth_resource,
-                name
-            ],
+    let auth_token = (!access_token.is_empty()).then_some(access_token);
+    let tx = conn.transaction().await?;
+    let result: Result<(), CredentialError> = async {
+        let changed = tx
+            .execute(
+                "UPDATE mcp_servers SET auth_type = 'oauth', auth_header = NULL, auth_token = ?1, \
+             refresh_token = ?2, token_endpoint = ?3, client_id = ?4, client_secret = ?5, \
+             expires_at = ?6, oauth_resource = ?7 WHERE name = ?8",
+                params![
+                    auth_token,
+                    refresh_token,
+                    token_endpoint,
+                    client_id,
+                    client_secret,
+                    expires_at,
+                    oauth_resource,
+                    name
+                ],
+            )
+            .await?;
+        if changed == 0 {
+            return Err(CredentialError::ServerNotFound(name.to_string()));
+        }
+
+        tx.execute(
+            "DELETE FROM mcp_http_headers WHERE server_name = ?1",
+            [name],
         )
         .await?;
-    if changed == 0 {
-        return Err(CredentialError::ServerNotFound(name.to_string()));
+        Ok(())
     }
-    Ok(())
+    .await;
+
+    match result {
+        Ok(()) => {
+            tx.commit().await?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = tx.rollback().await {
+                tracing::warn!(
+                    operation_error = format!("{err:#}"),
+                    rollback_error = format!("{rollback_err:#}"),
+                    "mcp oauth transaction rollback failed; returning original operation error",
+                );
+            }
+            Err(err)
+        }
+    }
 }
 
 /// Update just the access token and expiry for an OAuth MCP server (used by
@@ -748,6 +982,339 @@ mod db_tests {
     }
 
     #[tokio::test]
+    async fn db_set_auth_rejects_raw_headers_auth_type_without_mutating_row() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "nango", "https://api.nango.dev/mcp")
+            .await
+            .unwrap();
+
+        let err = db_set_auth(&conn, "nango", "headers", Some("X-Api-Key"), Some("secret"))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            &err,
+            CredentialError::InvalidAuthType(message) if message.contains("headers")
+        ));
+        assert!(err.to_string().contains("headers"));
+        assert!(
+            !err.to_string().contains("secret"),
+            "error must not expose credential values"
+        );
+
+        let servers = db_list_servers(&conn).await.unwrap();
+        let server = &servers[0];
+        assert!(server.auth_type.is_none());
+        assert!(server.auth_header.is_none());
+        assert!(server.auth_token.is_none());
+
+        let count: i64 = conn
+            .query_one(
+                "SELECT COUNT(*) FROM mcp_http_headers WHERE server_name = ?1",
+                ["nango"],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn db_set_auth_to_bearer_clears_http_headers() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "nango", "https://api.nango.dev/mcp")
+            .await
+            .unwrap();
+        db_set_http_headers(
+            &conn,
+            "nango",
+            &[HttpHeaderSecret::new("authorization", "Bearer env-secret").unwrap()],
+        )
+        .await
+        .unwrap();
+
+        db_set_auth(&conn, "nango", "bearer", None, Some("Bearer legacy"))
+            .await
+            .unwrap();
+
+        assert!(
+            db_list_http_headers(&conn, "nango")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let count: i64 = conn
+            .query_one(
+                "SELECT COUNT(*) FROM mcp_http_headers WHERE server_name = ?1",
+                ["nango"],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn db_set_auth_to_header_clears_http_headers() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "nango", "https://api.nango.dev/mcp")
+            .await
+            .unwrap();
+        db_set_http_headers(
+            &conn,
+            "nango",
+            &[HttpHeaderSecret::new("authorization", "Bearer env-secret").unwrap()],
+        )
+        .await
+        .unwrap();
+
+        db_set_auth(
+            &conn,
+            "nango",
+            "header",
+            Some("authorization"),
+            Some("Bearer legacy"),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            db_list_http_headers(&conn, "nango")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let count: i64 = conn
+            .query_one(
+                "SELECT COUNT(*) FROM mcp_http_headers WHERE server_name = ?1",
+                ["nango"],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn db_set_auth_to_bearer_clears_stale_oauth_fields() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+            .await
+            .unwrap();
+        db_set_oauth_state(
+            &conn,
+            "notion",
+            "access-tok",
+            Some("refresh-tok"),
+            "https://accounts.notion.com/oauth/token",
+            "client-123",
+            Some("client-secret"),
+            "2026-04-13T12:00:00Z",
+            "https://mcp.notion.com/mcp",
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mcp_http_headers (server_name, header_name, header_value)
+             VALUES (?1, ?2, ?3)",
+            params!["notion", "authorization", "Bearer stale"],
+        )
+        .await
+        .unwrap();
+
+        db_set_auth(&conn, "notion", "bearer", None, Some("Bearer legacy"))
+            .await
+            .unwrap();
+
+        assert!(
+            db_list_http_headers(&conn, "notion")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let count: i64 = conn
+            .query_one(
+                "SELECT COUNT(*) FROM mcp_http_headers WHERE server_name = ?1",
+                ["notion"],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let servers = db_list_servers(&conn).await.unwrap();
+        let server = &servers[0];
+        assert_eq!(server.auth_type.as_deref(), Some("bearer"));
+        assert!(server.auth_header.is_none());
+        assert_eq!(server.auth_token.as_deref(), Some("Bearer legacy"));
+        assert!(server.refresh_token.is_none());
+        assert!(server.token_endpoint.is_none());
+        assert!(server.client_id.is_none());
+        assert!(server.client_secret.is_none());
+        assert!(server.expires_at.is_none());
+        assert!(server.oauth_resource.is_none());
+    }
+
+    #[test]
+    fn http_header_secret_canonicalizes_header_name() {
+        let header = HttpHeaderSecret::new("Authorization", "Bearer x").unwrap();
+
+        assert_eq!(header.name(), "authorization");
+    }
+
+    #[tokio::test]
+    async fn db_set_http_headers_replaces_values_and_lists_names_only() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "nango", "https://api.nango.dev/mcp")
+            .await
+            .unwrap();
+        db_set_auth(
+            &conn,
+            "nango",
+            "bearer",
+            Some("Authorization"),
+            Some("Bearer legacy"),
+        )
+        .await
+        .unwrap();
+
+        db_set_http_headers(
+            &conn,
+            "nango",
+            &[
+                HttpHeaderSecret::new("Authorization", "Bearer env-secret").unwrap(),
+                HttpHeaderSecret::new("connection-id", "conn_123").unwrap(),
+                HttpHeaderSecret::new("provider-config-key", "github").unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let servers = db_list_servers(&conn).await.unwrap();
+        assert_eq!(servers[0].auth_type.as_deref(), Some("headers"));
+        assert!(servers[0].auth_header.is_none());
+        assert!(servers[0].auth_token.is_none());
+
+        let names = db_list_http_header_names(&conn, "nango").await.unwrap();
+        assert_eq!(
+            names,
+            vec!["authorization", "connection-id", "provider-config-key"]
+        );
+
+        let secrets = db_list_http_headers(&conn, "nango").await.unwrap();
+        assert_eq!(secrets.len(), 3);
+        assert_eq!(secrets[0].name(), "authorization");
+        assert_eq!(secrets[0].value(), "Bearer env-secret");
+
+        db_set_http_headers(
+            &conn,
+            "nango",
+            &[HttpHeaderSecret::new("connection-id", "conn_replaced").unwrap()],
+        )
+        .await
+        .unwrap();
+        let names = db_list_http_header_names(&conn, "nango").await.unwrap();
+        assert_eq!(names, vec!["connection-id"]);
+        let secrets = db_list_http_headers(&conn, "nango").await.unwrap();
+        assert_eq!(secrets[0].value(), "conn_replaced");
+    }
+
+    #[tokio::test]
+    async fn db_set_http_headers_clears_stale_oauth_fields() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+            .await
+            .unwrap();
+        db_set_oauth_state(
+            &conn,
+            "notion",
+            "access-tok",
+            Some("refresh-tok"),
+            "https://accounts.notion.com/oauth/token",
+            "client-123",
+            Some("client-secret"),
+            "2026-04-13T12:00:00Z",
+            "https://mcp.notion.com/mcp",
+        )
+        .await
+        .unwrap();
+
+        db_set_http_headers(
+            &conn,
+            "notion",
+            &[HttpHeaderSecret::new("authorization", "Bearer env-secret").unwrap()],
+        )
+        .await
+        .unwrap();
+
+        let servers = db_list_servers(&conn).await.unwrap();
+        let server = &servers[0];
+        assert_eq!(server.auth_type.as_deref(), Some("headers"));
+        assert!(server.auth_header.is_none());
+        assert!(server.auth_token.is_none());
+        assert!(server.refresh_token.is_none());
+        assert!(server.token_endpoint.is_none());
+        assert!(server.client_id.is_none());
+        assert!(server.client_secret.is_none());
+        assert!(server.expires_at.is_none());
+        assert!(server.oauth_resource.is_none());
+    }
+
+    #[tokio::test]
+    async fn db_set_http_headers_canonicalizes_duplicate_case_names() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "nango", "https://api.nango.dev/mcp")
+            .await
+            .unwrap();
+
+        db_set_http_headers(
+            &conn,
+            "nango",
+            &[
+                HttpHeaderSecret::new("Authorization", "Bearer first").unwrap(),
+                HttpHeaderSecret::new("authorization", "Bearer second").unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let secrets = db_list_http_headers(&conn, "nango").await.unwrap();
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(secrets[0].name(), "authorization");
+        assert_eq!(secrets[0].value(), "Bearer second");
+    }
+
+    #[test]
+    fn db_set_http_headers_rejects_bad_header_name() {
+        let err = HttpHeaderSecret::new("bad header", "secret").unwrap_err();
+        assert!(matches!(err, CredentialError::InvalidAuthHeader(_)));
+    }
+
+    #[test]
+    fn db_set_http_headers_rejects_bad_header_value() {
+        let err = HttpHeaderSecret::new("authorization", "Bearer good\nInjected: bad").unwrap_err();
+
+        assert!(matches!(err, CredentialError::InvalidAuthHeader(_)));
+        assert!(
+            !err.to_string().contains("Bearer good"),
+            "error must not expose header value"
+        );
+    }
+
+    #[tokio::test]
+    async fn db_set_http_headers_rejects_missing_server() {
+        let (_dir, conn) = setup_db().await;
+
+        let err = db_set_http_headers(
+            &conn,
+            "ghost",
+            &[HttpHeaderSecret::new("Authorization", "Bearer x").unwrap()],
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CredentialError::ServerNotFound(_)));
+    }
+
+    #[tokio::test]
     async fn db_set_oauth_state_test() {
         let (_dir, conn) = setup_db().await;
         db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
@@ -769,12 +1336,140 @@ mod db_tests {
         let servers = db_list_servers(&conn).await.unwrap();
         let s = &servers[0];
         assert_eq!(s.auth_type.as_deref(), Some("oauth"));
+        assert!(s.auth_header.is_none());
         assert_eq!(s.auth_token.as_deref(), Some("access-tok"));
         assert_eq!(s.refresh_token.as_deref(), Some("refresh-tok"));
         assert_eq!(
             s.oauth_resource.as_deref(),
             Some("https://mcp.notion.com/mcp")
         );
+    }
+
+    #[tokio::test]
+    async fn db_set_oauth_state_clears_legacy_single_header_auth() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+            .await
+            .unwrap();
+        db_set_auth(&conn, "notion", "header", Some("X-Api-Key"), Some("secret"))
+            .await
+            .unwrap();
+
+        db_set_oauth_state(
+            &conn,
+            "notion",
+            "access-tok",
+            Some("refresh-tok"),
+            "https://accounts.notion.com/oauth/token",
+            "client-123",
+            Some("client-secret"),
+            "2026-04-13T12:00:00Z",
+            "https://mcp.notion.com/mcp",
+        )
+        .await
+        .unwrap();
+
+        let servers = db_list_servers(&conn).await.unwrap();
+        let server = &servers[0];
+        assert_eq!(server.auth_type.as_deref(), Some("oauth"));
+        assert!(server.auth_header.is_none());
+        assert_eq!(server.auth_token.as_deref(), Some("access-tok"));
+        assert_eq!(server.refresh_token.as_deref(), Some("refresh-tok"));
+        assert_eq!(
+            server.token_endpoint.as_deref(),
+            Some("https://accounts.notion.com/oauth/token")
+        );
+        assert_eq!(server.client_id.as_deref(), Some("client-123"));
+        assert_eq!(server.client_secret.as_deref(), Some("client-secret"));
+        assert_eq!(server.expires_at.as_deref(), Some("2026-04-13T12:00:00Z"));
+        assert_eq!(
+            server.oauth_resource.as_deref(),
+            Some("https://mcp.notion.com/mcp")
+        );
+    }
+
+    #[tokio::test]
+    async fn db_set_oauth_state_clears_http_headers() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+            .await
+            .unwrap();
+        db_set_http_headers(
+            &conn,
+            "notion",
+            &[HttpHeaderSecret::new("authorization", "Bearer env-secret").unwrap()],
+        )
+        .await
+        .unwrap();
+
+        db_set_oauth_state(
+            &conn,
+            "notion",
+            "access-tok",
+            Some("refresh-tok"),
+            "https://accounts.notion.com/oauth/token",
+            "client-123",
+            Some("client-secret"),
+            "2026-04-13T12:00:00Z",
+            "https://mcp.notion.com/mcp",
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            db_list_http_headers(&conn, "notion")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let count: i64 = conn
+            .query_one(
+                "SELECT COUNT(*) FROM mcp_http_headers WHERE server_name = ?1",
+                ["notion"],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let servers = db_list_servers(&conn).await.unwrap();
+        let server = &servers[0];
+        assert_eq!(server.auth_type.as_deref(), Some("oauth"));
+        assert!(server.auth_header.is_none());
+        assert_eq!(server.auth_token.as_deref(), Some("access-tok"));
+        assert_eq!(server.refresh_token.as_deref(), Some("refresh-tok"));
+        assert_eq!(
+            server.oauth_resource.as_deref(),
+            Some("https://mcp.notion.com/mcp")
+        );
+    }
+
+    #[tokio::test]
+    async fn db_set_oauth_state_empty_access_token_stores_null() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+            .await
+            .unwrap();
+
+        db_set_oauth_state(
+            &conn,
+            "notion",
+            "",
+            Some("refresh-tok"),
+            "https://accounts.notion.com/oauth/token",
+            "client-123",
+            Some("client-secret"),
+            "2026-04-13T12:00:00Z",
+            "https://mcp.notion.com/mcp",
+        )
+        .await
+        .unwrap();
+
+        let servers = db_list_servers(&conn).await.unwrap();
+        let server = &servers[0];
+        assert_eq!(server.auth_type.as_deref(), Some("oauth"));
+        assert!(server.auth_token.is_none());
+        assert_eq!(server.refresh_token.as_deref(), Some("refresh-tok"));
     }
 
     #[tokio::test]
