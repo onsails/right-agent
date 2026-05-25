@@ -8,6 +8,8 @@
     grpcurl
     protobuf
     ffmpeg
+    pkg-config
+    openssl
     cmake            # required by whisper-rs-sys build script
     sccache
     actionlint
