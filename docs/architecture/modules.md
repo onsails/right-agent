@@ -82,8 +82,7 @@
 - `read_model.rs` — read-only `right-db` projection facade for activity overview/run detail and the public activity compatibility entry points.
 - `read_model/activity.rs` — activity projections over async runs, usage rows, cron specs, run notifications, and bounded run logs.
 - `read_model/dashboard_overview.rs` — top-level Mini App overview aggregation over active work, recent failures, today's usage, learning candidates, and injected runtime health summaries.
-- `read_model/learning.rs` — learned-skill metrics and report-detail projections over `learning_episodes`, `skill_review_reports`, `skill_learning_events`, `execution_events`, and trusted `messages`.
-- `read_model/learning_episodes.rs` — learning-episode list/detail projections with report links and selected evidence refs.
+- `read_model/learning.rs` — learned-skill overview projections over `skill_learning_events`, `skill_lifecycle`, `curator_state`, usage, and trusted conversation data. It must not query removed Stage 2 tables.
 - `read_model/usage.rs` — usage/cost projections over `usage_events`, including time-window totals, source splits, and model summaries.
 - `skill_inventory.rs` — bounded host-side skill inventory/detail helpers grouped as core, learned, and other.
 - `identity_files.rs` — bounded host-side identity-file summary/detail helpers for `IDENTITY.md`, `SOUL.md`, and `USER.md`.

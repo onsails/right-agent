@@ -45,17 +45,6 @@ Composite-prompt CC invocation paths use `build_prompt_assembly_script()`:
 | Delivery (async cron/background results) | `async_delivery.rs` | `Normal` | reply-schema.json | agent config |
 | Reflection (post-failure summary) | `reflection.rs` | `Normal` | reply-schema.json | agent config |
 
-Background learned-skill review is the exception: it is a separate
-`BackgroundReview` Claude Code JSON invocation, not a normal composite-prompt
-reply path. It does not resume or fork the foreground session. Trigger sources
-create durable `learning_episodes` rows immediately; a short settle delay lets
-nearby user corrections or async feedback arrive before selection, and there is
-no fixed cooldown that drops later evidence. The selector reads a bounded
-Rust-built corpus from conversation messages, typed execution events, signals,
-async run metadata, and cron run metadata, then persists selected episode refs.
-The report-only reviewer receives those selected refs plus the current
-`rightx-*` skill index and stores the structured output as a review report.
-
 `cron::execute_job` always uses `CRON_SCHEMA_JSON` with no fork. Telegram
 background handoff is not cron-backed: `background::spawn_background_continuation`
 uses `BG_CONTINUATION_SCHEMA_JSON` and supplies the explicit
@@ -540,22 +529,10 @@ gate (cost spike, skill-change count, or time fallback), and forks a fresh CC
 session with `CURATOR_SYSTEM_PROMPT` for consolidation work. See
 `ARCHITECTURE.md` for the full per-turn + curator pipeline.
 
-Deprecated Stage 2 background learned-skill review (selector/reviewer with
-`background_review_enabled`) is no longer wired into the runtime. The
-field is accepted as `Option<bool>` for backward-compatibility but
-silently ignored. Runtime completion seed capture is a defensive no-op, so no
-new `learning_episodes`, `skill_nudge_signals`, or `skill_review_reports` rows
-are produced by this path. Historical reports remain read-only dashboard data.
-The reviewer, when used only in legacy tests or historical tooling, must not
-create, patch, archive, or delete skill package files. It does not expose or call
-`mcp__right__skill_learning_start` or
-`mcp__right__skill_learning_finish`. The reviewer prompt explicitly prefers
-reusable future-session workflows, rejects one-off task narrative, avoids
-persistent claims from transient failures, prefers update candidates for
-existing `rightx-*` skills when applicable, and treats typed execution events
-with `event_kind = 'thinking'` and low-trust messages as secondary context that
-cannot be the only candidate evidence. Candidate evidence must cite at least
-one selected primary `msg:*` or non-thinking `exec:*` ref.
+The old Stage 2 background learned-skill review is removed from runtime and
+schema. Deprecated config fields such as `background_review_enabled` remain
+accepted for upgrade compatibility and warn at load time, but they do not
+enable selector/reviewer invocations or historical dashboard report data.
 
 ## Upstream MCP Server Instructions
 

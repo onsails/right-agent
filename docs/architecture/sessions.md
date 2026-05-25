@@ -14,11 +14,8 @@ For cron jobs, stdout is tee'd into an NDJSON log inside the sandbox at
 via `Read`). Per-job retention keeps the last 10 cron logs.
 
 Foreground, background-continuation, delivery, and cron stream-json lines are
-normalized into typed `execution_events` for learning episode selection.
-Persisted events cover assistant text/thinking, tool calls, tool results/errors,
-and invocation results; untyped stream lines are skipped. Thinking is secondary
-context and has no FTS. Stream JSON is redacted before storage, and runtime DB
-write failures are logged without aborting the user-facing run.
+written to host or sandbox NDJSON logs for debugging. The removed Stage 2
+learning episode selector no longer normalizes these lines into a DB table.
 
 High-value foreground invocation logs include `chat_id`, `eff_thread_id`, the
 full `(chat_id, eff_thread_id)` key, `session_uuid`, and the per-invocation
@@ -129,9 +126,7 @@ Per-callsite `--disallowedTools`:
   same rationale as cron. Conversation search likewise has no foreground scope
   there.
 - **Learning prefilter** (`bot::learning_prefilter`): no MCP config and
-  `--tools ""`; it is a classifier and never writes skill files. Selector,
-  reviewer, and report-only `BackgroundReview` paths are likewise not learning
-  invocations and cannot call learning tools.
+  `--tools ""`; it is a classifier and never writes skill files.
 
 The baseline lives in `crates/bot/src/cc/invocation.rs::BASELINE_DISALLOWED_TOOLS`
 and explicitly excludes `Agent`.
