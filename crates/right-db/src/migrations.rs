@@ -29,8 +29,9 @@ const V32_SCHEMA: &str = include_str!("sql/v32_skill_lifecycle.sql");
 const V33_SCHEMA: &str = include_str!("sql/v33_mcp_oauth_resource.sql");
 const V34_SCHEMA: &str = include_str!("sql/v34_turso_fts_indexes.sql");
 const V35_SCHEMA: &str = include_str!("sql/v35_legacy_learning_cleanup.sql");
+const V36_SCHEMA: &str = include_str!("sql/v36_mcp_http_headers.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 35;
+pub const LATEST_SCHEMA_VERSION: u32 = 36;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -877,6 +878,11 @@ pub static MIGRATIONS: Migrations = Migrations {
         Migration {
             version: 35,
             sql: V35_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 36,
+            sql: V36_SCHEMA,
             hook: None,
         },
     ],
@@ -1909,6 +1915,58 @@ mod tests {
             cols.contains(&"oauth_resource".to_string()),
             "oauth_resource column missing"
         );
+    }
+
+    #[tokio::test]
+    async fn v36_mcp_http_headers_table() {
+        let mut conn = Connection::open_in_memory().await.unwrap();
+        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+
+        conn.execute(
+            "INSERT INTO mcp_servers (name, url) VALUES (?1, ?2)",
+            ("nango", "https://api.nango.dev/mcp"),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mcp_http_headers (server_name, header_name, header_value)
+             VALUES (?1, ?2, ?3)",
+            ("nango", "connection-id", "conn_123"),
+        )
+        .await
+        .unwrap();
+        let duplicate_case = conn
+            .execute(
+                "INSERT INTO mcp_http_headers (server_name, header_name, header_value)
+             VALUES (?1, ?2, ?3)",
+                ("nango", "Connection-ID", "conn_duplicate"),
+            )
+            .await;
+        assert!(
+            duplicate_case.is_err(),
+            "header_name uniqueness must be case-insensitive"
+        );
+
+        let value: String = conn
+            .query_one(
+                "SELECT header_value FROM mcp_http_headers WHERE server_name = ?1 AND header_name = ?2",
+                ("nango", "connection-id"),
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(value, "conn_123");
+
+        conn.execute("DELETE FROM mcp_servers WHERE name = ?1", ["nango"])
+            .await
+            .unwrap();
+        let count: i64 = conn
+            .query_one("SELECT COUNT(*) FROM mcp_http_headers", (), |row| {
+                row.get(0)
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "headers must be deleted with their MCP server");
     }
 
     #[tokio::test]
