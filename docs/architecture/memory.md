@@ -54,8 +54,8 @@ tools are removed from the surface; their backing tables (`memories`,
 
 ## Transcript Search
 
-Conversation transcript search is local SQLite FTS5 over archived Telegram
-messages, not Hindsight. `mcp__right__thread_search` and
+Conversation transcript search is SQLite FTS5 over archived Telegram messages
+via `right-db`'s local libSQL driver, not Hindsight. `mcp__right__thread_search` and
 `mcp__right__chat_search` return archived transcript snippets scoped by the
 current foreground Telegram invocation. Use these tools, not
 `mcp__right__memory_recall`, when the user asks what was said or asks for past
@@ -73,9 +73,9 @@ from older Telegram history or Claude session JSONL.
   stable known state and every turn should retry; the first 2xx after top-up
   is the natural recovery signal.
 - classified retries (Transient/RateLimited yes; Auth/Client/Malformed/Quota no)
-- SQLite-backed `pending_retains` queue (1000-row cap, 24h age cap). Auth and
-  Quota failures bypass the queue entirely (no entry that could only drain
-  after user action).
+- local `data.db` `pending_retains` queue through `right-db` (1000-row cap,
+  24h age cap). Auth and Quota failures bypass the queue entirely (no entry
+  that could only drain after user action).
 - `watch::Sender<MemoryStatus>` signalling
   Healthy/Degraded/QuotaExhausted/AuthFailed. `QuotaExhausted` is sticky
   against itself and against `refresh_status`; only an explicit 2xx success
@@ -83,8 +83,8 @@ from older Telegram history or Claude session JSONL.
   `QuotaExhausted`.
 
 The bot runs a single drain task (30s interval, batch 20, stop on first
-non-Client failure). The aggregator shares the same SQLite queue via the
-per-agent `data.db`; it enqueues on failure but never drains.
+non-Client failure). The aggregator shares the same local `data.db` queue
+through `right-db`; it enqueues on failure but never drains.
 
 Telegram alerts (`memory_alerts` table, 24h dedup, 1h startup cleanup) fire
 on:

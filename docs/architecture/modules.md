@@ -61,6 +61,13 @@
 - `runtime/` — process-compose REST client and dependency checks. Runtime-state primitives live in `right-runtime-state`.
 - Single-file modules: `doctor.rs`, `init.rs`, `rebootstrap.rs`, `cron_spec.rs`, `tunnel/`, `usage/`.
 
+### right-db
+
+- `Connection`, `Transaction`, `DbError` — project-owned boundary over the local libSQL driver for per-agent SQLite-compatible `data.db`.
+- `migrations.rs` — ordered idempotent migration runner.
+- `conversation.rs` — transcript archive and FTS search storage helpers.
+- `test_support.rs` — migrated temp `data.db` fixtures for crate tests.
+
 ### right-codegen
 
 - `pipeline.rs` — per-agent and cross-agent codegen orchestration.
@@ -72,7 +79,7 @@
 
 - `auth.rs` — Telegram Mini App `initData` validation and allowlist authorization helpers.
 - `api_types.rs` — dashboard DTOs for bootstrap, overview, activity, knowledge, usage, identity, health, feature/capability flags, and error response bodies.
-- `read_model.rs` — read-only SQLite projection facade for activity overview/run detail and the public activity compatibility entry points.
+- `read_model.rs` — read-only `right-db` projection facade for activity overview/run detail and the public activity compatibility entry points.
 - `read_model/activity.rs` — activity projections over async runs, usage rows, cron specs, run notifications, and bounded run logs.
 - `read_model/dashboard_overview.rs` — top-level Mini App overview aggregation over active work, recent failures, today's usage, learning candidates, and injected runtime health summaries.
 - `read_model/learning.rs` — learned-skill metrics and report-detail projections over `learning_episodes`, `skill_review_reports`, `skill_learning_events`, `execution_events`, and trusted `messages`.
@@ -90,7 +97,7 @@
 - `hindsight.rs` — Hindsight Cloud API client and DTOs.
 - `resilient.rs`, `circuit.rs`, `classify.rs`, `status.rs` — memory failure handling, circuit state, classification, and status reporting.
 - `prefetch.rs` — recall prefetch cache.
-- `retain_queue.rs` — SQLite-backed pending-retain queue using `right-db` migrations.
+- `retain_queue.rs` — `right-db` backed pending-retain queue in per-agent `data.db`.
 - `error.rs` — semantic-memory error type and `right-db` boundary.
 
 ### right-mcp
