@@ -22,7 +22,8 @@ const ACTIVE_BACKGROUND_RUN_LIMIT: usize = 50;
 
 const RUN_SUMMARY_COLUMNS: &str =
     "ar.id, ar.kind, ar.producer_ref, ar.status, ar.started_at, ar.finished_at,
-        ar.exit_code, ar.delivery_status, costs.cost_usd";
+        ar.exit_code, ar.delivery_status, ar.delivery_required, ar.delivery_json,
+        ar.run_note, costs.cost_usd";
 
 const RUN_SUMMARY_FROM: &str = "FROM async_runs ar
  LEFT JOIN (
@@ -112,7 +113,7 @@ pub fn activity_run_detail(
     max_lines: usize,
 ) -> Result<Option<RunDetailResponse>, ReadModelError> {
     let sql = format!(
-        "SELECT {RUN_SUMMARY_COLUMNS}, ar.run_note, ar.delivery_json, ar.error_json, ar.log_path
+        "SELECT {RUN_SUMMARY_COLUMNS}, ar.delivery_json, ar.error_json, ar.log_path
          {RUN_SUMMARY_FROM}
          WHERE ar.id = ?1"
     );
@@ -120,17 +121,17 @@ pub fn activity_run_detail(
         .query_row(&sql, params![run_id], |row| {
             Ok((
                 run_summary_from_row(row)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
-                row.get::<_, Option<String>>(11)?,
                 row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, Option<String>>(14)?,
             ))
         })
         .optional()?;
 
-    let Some((run, run_note, delivery_json, error_json, log_path)) = row else {
+    let Some((run, delivery_json, error_json, log_path)) = row else {
         return Ok(None);
     };
+    let run_note = run.run_note.clone();
     let (delivery, delivery_error) = parse_delivery_json(delivery_json);
     let error_message = extract_error_message(error_json);
 
@@ -187,8 +188,16 @@ fn run_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary>
         finished_at: row.get(5)?,
         exit_code: row.get(6)?,
         delivery_status: row.get(7)?,
-        cost_usd: row.get(8)?,
+        delivery_required: row.get::<_, i64>(8)? != 0,
+        delivery_kind: delivery_kind_from_json(row.get::<_, Option<String>>(9)?.as_deref()),
+        run_note: row.get(10)?,
+        cost_usd: row.get(11)?,
     })
+}
+
+fn delivery_kind_from_json(json: Option<&str>) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(json?).ok()?;
+    value.get("kind")?.as_str().map(ToOwned::to_owned)
 }
 
 pub(super) fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f64, ReadModelError> {

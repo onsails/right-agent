@@ -26,6 +26,7 @@ pub struct OAuthServerState {
     pub client_secret: Option<String>,
     pub expires_at: chrono::DateTime<chrono::Utc>,
     pub server_url: String,
+    pub resource: String,
 }
 
 /// Message sent to refresh scheduler (new token or removal).
@@ -93,6 +94,15 @@ pub fn load_oauth_entries_from_db(
                 client_id: client_id.clone(),
                 client_secret: s.client_secret.clone(),
                 expires_at,
+                resource: s
+                    .oauth_resource
+                    .as_deref()
+                    .filter(|r| !r.trim().is_empty())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| {
+                        crate::oauth::canonical_resource_uri(&s.url)
+                            .unwrap_or_else(|_| s.url.clone())
+                    }),
                 server_url: s.url.clone(),
             },
         ));
@@ -247,6 +257,7 @@ pub async fn run_refresh_scheduler(
                                     &entry_state.client_id,
                                     entry_state.client_secret.as_deref(),
                                     &expires_at,
+                                    &entry_state.resource,
                                 ) {
                                     tracing::error!("failed to persist OAuth state: {e:#}");
                                 }
@@ -690,6 +701,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, "notion");
         assert_eq!(entries[0].1.client_id, "cid");
+        assert_eq!(entries[0].1.resource, "https://mcp.notion.com/mcp");
     }
 
     #[test]
@@ -701,6 +713,7 @@ mod tests {
             client_secret: None,
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
             server_url: "https://example.com/mcp".into(),
+            resource: "https://example.com/mcp".into(),
         };
         // Margin = min(MAX=3600s, 1800s/2=900s) = 900s. due ≈ 1800s - 900s = 900s.
         let due = refresh_due_in(&entry);
@@ -720,6 +733,7 @@ mod tests {
             client_secret: None,
             expires_at: chrono::Utc::now() - chrono::Duration::minutes(5),
             server_url: "https://example.com/mcp".into(),
+            resource: "https://example.com/mcp".into(),
         };
         let due = refresh_due_in(&entry);
         assert_eq!(due, Duration::ZERO);
@@ -736,6 +750,7 @@ mod tests {
             // Margin must clamp to lifetime/2 = 150s; due = 300s - 150s = 150s.
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
             server_url: "https://example.com/mcp".into(),
+            resource: "https://example.com/mcp".into(),
         };
         let due = refresh_due_in(&entry);
         assert!(
@@ -756,6 +771,7 @@ mod tests {
             // due = 24h - 1h = 23h.
             expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
             server_url: "https://example.com/mcp".into(),
+            resource: "https://example.com/mcp".into(),
         };
         let due = refresh_due_in(&entry);
         // 23 hours = 82800s. Allow a few seconds of clock skew.
@@ -815,6 +831,7 @@ mod tests {
             // Already expired -> fires immediately.
             expires_at: chrono::Utc::now() - chrono::Duration::minutes(5),
             server_url: "https://x/mcp".into(),
+            resource: "https://x/mcp".into(),
         };
         let token_arc: Arc<tokio::sync::RwLock<Option<String>>> =
             Arc::new(tokio::sync::RwLock::new(Some("old".into())));
@@ -886,6 +903,7 @@ mod tests {
             client_secret: None,
             expires_at: chrono::Utc::now() - chrono::Duration::minutes(5),
             server_url: "https://x/mcp".into(),
+            resource: "https://x/mcp".into(),
         };
         let token_arc: Arc<tokio::sync::RwLock<Option<String>>> =
             Arc::new(tokio::sync::RwLock::new(Some("old".into())));
@@ -988,6 +1006,7 @@ mod tests {
             // Already expired -> fires immediately.
             expires_at: chrono::Utc::now() - chrono::Duration::minutes(5),
             server_url: "https://x/a/mcp".into(),
+            resource: "https://x/a/mcp".into(),
         };
         let entry_b = OAuthServerState {
             refresh_token: Some("rt-b".into()),
@@ -996,6 +1015,7 @@ mod tests {
             client_secret: None,
             expires_at: chrono::Utc::now() - chrono::Duration::minutes(5),
             server_url: "https://x/b/mcp".into(),
+            resource: "https://x/b/mcp".into(),
         };
         let token_a: Arc<tokio::sync::RwLock<Option<String>>> =
             Arc::new(tokio::sync::RwLock::new(Some("old-a".into())));

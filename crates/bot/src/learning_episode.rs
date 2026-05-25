@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
@@ -55,7 +57,7 @@ pub(crate) struct EpisodeSeedInput<'a> {
     pub(crate) now: &'a str,
 }
 
-/// Single per-agent debounced drain scheduler.
+/// Legacy per-agent debounced drain scheduler.
 ///
 /// A `Notify`-style coalescing trigger backed by an unbounded `mpsc` channel.
 /// Each call to [`schedule_drain`](Self::schedule_drain) is a non-blocking
@@ -64,15 +66,11 @@ pub(crate) struct EpisodeSeedInput<'a> {
 /// `tokio::spawn(sleep + drain)` pattern which spawned a fresh timer (and a
 /// fresh `rusqlite::Connection`) for every seed captured in a burst.
 ///
-/// Lifetime: spawned once at bot startup, cancelled via `CancellationToken`
-/// on shutdown. The `Arc<DrainScheduler>` is threaded through every callsite
-/// that captures an episode seed.
+/// This is retained for legacy tests and historical tooling. Startup uses
+/// `noop()` and must not spawn a runtime drain task.
 ///
 /// A `noop()` variant carries `tx = None` and short-circuits
-/// `schedule_drain`. This is used when `learning.background_review_enabled =
-/// false` so the legacy Stage 2 selector/reviewer pipeline never runs;
-/// per-seed captures and reviewer requeues still call into this struct, they
-/// just do nothing.
+/// `schedule_drain`; this is the only runtime variant.
 #[derive(Debug)]
 pub(crate) struct DrainScheduler {
     tx: Option<mpsc::UnboundedSender<()>>,
@@ -106,7 +104,7 @@ impl DrainScheduler {
     }
 
     /// Inactive scheduler. `schedule_drain` is a cheap no-op; no task is
-    /// spawned. Use when `learning.background_review_enabled = false`.
+    /// spawned. Runtime uses this because Stage 2 is deprecated.
     pub(crate) fn noop() -> Self {
         Self { tx: None }
     }
@@ -227,10 +225,11 @@ impl LearningEpisodeRuntime {
         }
     }
 
-    /// Build an `EpisodeSeedInput` from this runtime + per-callsite fields,
-    /// insert the seed row, and notify the per-agent debounced drain task.
-    /// Centralises the `chrono::Utc::now()` formatting and `EpisodeSeedInput`
-    /// construction shared by every completion-seed callsite.
+    /// Legacy Stage 2 completion seed capture.
+    ///
+    /// The selector/reviewer drain no longer ships in runtime. Keep this method
+    /// as a defensive no-op while older callsites are being unwound so stale
+    /// config fields cannot create new `learning_episodes` rows.
     pub(crate) fn capture_completion_seed(
         &self,
         conn: &rusqlite::Connection,
@@ -240,23 +239,19 @@ impl LearningEpisodeRuntime {
         target_chat_id: Option<i64>,
         target_thread_id: Option<i64>,
     ) -> Result<i64, rusqlite::Error> {
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let input = EpisodeSeedInput {
-            agent_name: &self.agent_name,
+        let _ = (
+            conn,
             kind,
             seed_trigger_kind,
             seed_ref,
             target_chat_id,
             target_thread_id,
-            // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
-            settle_seconds: self.learning.episode_settle_seconds.unwrap_or(90),
-            now: &now,
-        };
-        let episode_id = capture_episode_seed(conn, input)?;
-        if let Some(scheduler) = &self.scheduler {
-            scheduler.schedule_drain();
-        }
-        Ok(episode_id)
+        );
+        tracing::debug!(
+            agent = %self.agent_name,
+            "legacy learning episode completion seed skipped"
+        );
+        Ok(0)
     }
 
     /// Trigger a debounced drain pass on the per-agent scheduler. No-op when
@@ -1928,14 +1923,14 @@ fn execution_event_ref(id: i64) -> String {
     format!("exec:{id}")
 }
 
-/// Build the deprecation WARN text for an agent whose `learning_episodes`
-/// table has fresh activity but whose `background_review_enabled = false`.
+/// Build the legacy deprecation WARN text for an agent whose
+/// `learning_episodes` table has fresh activity.
 pub(crate) fn deprecation_warn_message(agent_name: &str) -> String {
     format!(
-        "agent {agent_name}: background learning is deprecated and disabled by default. \
-         Set `learning.background_review_enabled: true` in agents/{agent_name}/agent.yaml \
-         to restore the prior pipeline; otherwise post-turn fork-probe takes over. \
-         Cleanup spec will drop the background code in a future release."
+        "agent {agent_name}: legacy background learning rows are present, but Stage 2 \
+         selector/reviewer runtime is disabled and `learning.background_review_enabled` \
+         is ignored. Clear legacy rows from agents/{agent_name}/data.db if they should \
+         not appear in diagnostics."
     )
 }
 
@@ -1964,7 +1959,7 @@ mod deprecation_warn_tests {
         let msg = deprecation_warn_message("agent-b");
         assert!(msg.contains("agent-b"));
         assert!(msg.contains("background_review_enabled"));
-        assert!(msg.contains("agents/agent-b/agent.yaml"));
+        assert!(msg.contains("agents/agent-b/data.db"));
     }
 }
 

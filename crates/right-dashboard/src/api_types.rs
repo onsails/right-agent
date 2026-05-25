@@ -267,6 +267,9 @@ pub struct RunSummary {
     pub finished_at: Option<String>,
     pub exit_code: Option<i64>,
     pub delivery_status: String,
+    pub delivery_required: bool,
+    pub delivery_kind: Option<String>,
+    pub run_note: Option<String>,
     pub cost_usd: Option<f64>,
 }
 

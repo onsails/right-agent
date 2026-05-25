@@ -1067,6 +1067,17 @@ async fn main() -> miette::Result<()> {
                                                 client_secret: s.client_secret.clone(),
                                                 expires_at,
                                                 server_url: s.url.clone(),
+                                                resource: s
+                                                    .oauth_resource
+                                                    .as_deref()
+                                                    .filter(|r| !r.trim().is_empty())
+                                                    .map(ToOwned::to_owned)
+                                                    .unwrap_or_else(|| {
+                                                        right_mcp::oauth::canonical_resource_uri(
+                                                            &s.url,
+                                                        )
+                                                        .unwrap_or_else(|_| s.url.clone())
+                                                    }),
                                             },
                                             token.clone(),
                                         ));

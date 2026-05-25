@@ -19,6 +19,12 @@ custom-header recommendation; the user can override with `HeaderName: token`.
 `URL as-is` registers the exact original URL without token/header injection,
 preserving query-string credentials.
 
+OAuth-capable HTTP MCP servers can advertise a canonical resource URI through
+RFC 9728 protected-resource metadata. Right persists that resource with the
+OAuth state and sends it during authorization-code exchange and refresh-token
+requests. Rows created before `oauth_resource` existed fall back to the
+canonicalized MCP server URL.
+
 URL validation has two modes. Public detection accepts network-routable HTTP and
 HTTPS URLs, excludes loopback/private/link-local hosts, and returns a short
 `Plain HTTP: trusted/encrypted networks only.` warning when plain HTTP is
@@ -31,11 +37,11 @@ broad private/link-local ranges remain rejected.
 ```
 OAuth callback (bot) → POST /set-token to Aggregator (Unix socket)
   → Aggregator updates DynamicAuthClient.token in-memory
-  → Aggregator saves token fields to mcp_servers SQLite table
+  → Aggregator saves token fields and oauth_resource to mcp_servers SQLite table
   → Aggregator schedules refresh timer (see "Refresh margin" below)
   → Aggregator retries MCP reconnect readiness with the fresh token
     and returns success only if that reconnect succeeds
-  → on timer: POST refresh_token to token_endpoint
+  → on timer: POST refresh_token + resource to token_endpoint
   → classify outcome (success / Transient / Permanent)
   → on success: update DynamicAuthClient.token in-memory, persist to SQLite
     (db_update_oauth_token), reset retry counter, reschedule next refresh
@@ -253,6 +259,6 @@ LLM and passed as the `message` argument to
 Create and update both require `rightx-*`. The learning flow never patches
 custom/manual/hub/core/platform/bundled/codegen-owned non-`rightx-*` skills.
 
-Deprecated Stage 2 background review is report-only when encountered through
-legacy data; it is not a learning-capable invocation kind and does not expose
-learning MCP tools.
+Deprecated Stage 2 background review is historical/read-only when encountered
+through legacy data; runtime no longer creates its episode/report rows. It is
+not a learning-capable invocation kind and does not expose learning MCP tools.

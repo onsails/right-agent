@@ -139,6 +139,11 @@ The heuristic is a recommendation; the user's button choice is authoritative.
 registration allows HTTP/HTTPS and warns for plain HTTP; broad private/link-local
 ranges remain blocked by default.
 
+MCP OAuth uses Resource Indicators. Right discovers the canonical MCP resource
+URI from protected-resource metadata when available, includes it in auth-code
+and refresh-token requests, and persists it with the OAuth state. Existing rows
+without `oauth_resource` fall back to the canonicalized server URL.
+
 ### MCP Aggregator
 
 One shared aggregator process serves all agents on TCP `:8100/mcp` with
@@ -216,8 +221,10 @@ Stage 2 background selector/reviewer (`crates/bot/src/learning_episode.rs`,
 `crates/bot/src/learning_review.rs`) is deprecated; legacy fields
 (`fork_probe_enabled`, `background_review_enabled`, `episode_settle_seconds`,
 `circuit_*`, `probe_model`) in `agent.yaml` are accepted and silently warned
-about by `LearningConfig::warn_on_deprecated`. New deployments configure
-`prefilter_*` / `probe_writer_*` / `curator_*` via the `right config` wizard.
+about by `LearningConfig::warn_on_deprecated`. Runtime completion seed capture
+is a no-op and startup must not spawn the Stage 2 drain scheduler. New
+deployments configure `prefilter_*` / `probe_writer_*` / `curator_*` via the
+`right config` wizard.
 
 See `PROMPT_SYSTEM.md` for full documentation.
 
@@ -250,8 +257,8 @@ narrow tool whitelist.
 
 Deprecated Stage 2 selector/reviewer calls (when `background_review_enabled`
 was set) were not session-bearing and intentionally omitted `--mcp-config` /
-`--strict-mcp-config`. That path no longer ships; the field is silently
-ignored.
+`--strict-mcp-config`. That path no longer ships; the field is silently ignored
+and must not re-enable seed writes or the drain scheduler.
 
 **Optional per-callsite:**
 - `--model` — override default model

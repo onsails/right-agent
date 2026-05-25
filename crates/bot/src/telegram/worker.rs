@@ -26,9 +26,8 @@ use crate::cc::worker_reply::{
 };
 use crate::reflection::FailureKind;
 use right_agent::learned_skills::{
-    NudgeSignalKind, NudgeSignalRecord, ReviewGateDecision, ReviewGateInput, ReviewStatus,
-    ReviewTriggerKind, SkillReviewReport, clear_review_running, increment_turn_nudge_counters,
-    insert_skill_review_report, mark_review_finished, record_nudge_signal, select_reply_signal,
+    NudgeSignalKind, ReviewGateDecision, ReviewGateInput, ReviewStatus, ReviewTriggerKind,
+    SkillReviewReport, clear_review_running, insert_skill_review_report, mark_review_finished,
     try_mark_review_started,
 };
 
@@ -2341,10 +2340,10 @@ pub(crate) struct CcReply {
     /// `true` if this invocation created a brand-new CC session
     /// (i.e. the worker's first turn in this chat/thread).
     pub(crate) is_first_call: bool,
-    /// `true` if the reply produced an accepted nudge signal (reply_field source).
-    /// Drives the post-turn fork-probe gate (skip when reply already self-emitted).
+    /// Legacy reply-signal marker. Always false; retained until callers stop
+    /// carrying this field through the worker tuple.
     pub(crate) reply_has_accepted_signal: bool,
-    /// Prompt mode used for this invocation. Fork-probe runs only for `Normal`.
+    /// Prompt mode used for this invocation. Probe-writer runs only for `Normal`.
     pub(crate) prompt_mode: crate::cc::prompt::PromptMode,
     /// Usage stats extracted from the CC `result` event.
     pub(crate) usage: crate::cc::stream::StreamUsage,
@@ -2617,6 +2616,7 @@ fn load_skill_review_gate_snapshot(
     )
 }
 
+#[allow(dead_code)]
 fn load_learning_episode_effort_snapshot(
     conn: &rusqlite::Connection,
     agent_name: &str,
@@ -2874,6 +2874,7 @@ const _: fn(
     Option<(NudgeSignalKind, serde_json::Value)>,
 ) = maybe_spawn_learned_skill_review;
 
+#[allow(dead_code)]
 fn foreground_episode_seed_trigger_kind(
     accepted_signal: Option<&(NudgeSignalKind, serde_json::Value)>,
     tool_iters_since_review: i64,
@@ -2905,6 +2906,7 @@ fn foreground_episode_seed_trigger_kind(
     }
 }
 
+#[allow(dead_code)]
 fn maybe_capture_learning_episode_seed(
     conn: &rusqlite::Connection,
     ctx: &WorkerContext,
@@ -4772,100 +4774,12 @@ async fn invoke_cc(
             // Bootstrap completion is now detected by file presence after
             // reverse_sync in spawn_worker — no bootstrap_complete field needed.
 
-            if let Err(e) =
-                increment_turn_nudge_counters(&conn, &ctx.agent_name, i64::from(usage.num_turns))
-            {
-                tracing::warn!(
-                    ?chat_id,
-                    agent = %ctx.agent_name,
-                    "skill nudge counter increment failed: {e:#}"
-                );
-            }
-
-            let mut accepted_review_signal: Option<(NudgeSignalKind, serde_json::Value)> = None;
-            if let Some(invocation_id) = learning_invocation_id.as_deref() {
-                let learning_signal_json = match reply_output.learning_signal.as_ref() {
-                    Some(signal) => match serde_json::to_value(signal) {
-                        Ok(value) => Some(value),
-                        Err(e) => {
-                            tracing::warn!(
-                                ?chat_id,
-                                invocation_id,
-                                "learning signal JSON conversion failed: {e:#}"
-                            );
-                            None
-                        }
-                    },
-                    None => None,
-                };
-                let skill_issue_signal_json = match reply_output.skill_issue_signal.as_ref() {
-                    Some(signal) => match serde_json::to_value(signal) {
-                        Ok(value) => Some(value),
-                        Err(e) => {
-                            tracing::warn!(
-                                ?chat_id,
-                                invocation_id,
-                                "skill issue signal JSON conversion failed: {e:#}"
-                            );
-                            None
-                        }
-                    },
-                    None => None,
-                };
-
-                match select_reply_signal(
-                    &conn,
-                    invocation_id,
-                    learning_signal_json,
-                    skill_issue_signal_json,
-                ) {
-                    Ok(Some((signal_kind, payload_json))) => {
-                        accepted_review_signal = Some((signal_kind, payload_json.clone()));
-                        let record = NudgeSignalRecord {
-                            invocation_id: invocation_id.to_owned(),
-                            agent_name: ctx.agent_name.clone(),
-                            root_session_id: Some(session_uuid.clone()),
-                            chat_id: Some(chat_id),
-                            thread_id: Some(eff_thread_id),
-                            signal_kind,
-                            payload_json,
-                        };
-                        if let Err(e) = record_nudge_signal(&conn, &record) {
-                            tracing::warn!(
-                                ?chat_id,
-                                invocation_id,
-                                signal_kind = signal_kind.as_str(),
-                                "skill nudge signal record failed: {e:#}"
-                            );
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!(
-                            ?chat_id,
-                            invocation_id,
-                            "skill nudge signal selection failed: {e:#}"
-                        );
-                    }
-                }
-            }
-
-            maybe_capture_learning_episode_seed(
-                &conn,
-                ctx,
-                chat_id,
-                eff_thread_id,
-                learning_invocation_id.as_deref(),
-                accepted_review_signal.as_ref(),
-            );
-
-            let reply_has_accepted_signal = accepted_review_signal.is_some();
             Ok(CcReply {
                 output: Some(reply_output),
                 session_uuid,
                 turn_id,
                 is_first_call,
-                reply_has_accepted_signal,
+                reply_has_accepted_signal: false,
                 prompt_mode,
                 usage,
                 wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,

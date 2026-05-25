@@ -271,6 +271,7 @@ pub struct McpServerEntry {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub expires_at: Option<String>,
+    pub oauth_resource: Option<String>,
 }
 
 /// Register (or update) an external MCP server in the SQLite registry.
@@ -326,7 +327,7 @@ pub fn db_update_instructions(
 
 /// Shared SELECT columns for server queries.
 const SERVER_COLUMNS: &str = "name, url, instructions, auth_type, auth_header, auth_token, \
-    refresh_token, token_endpoint, client_id, client_secret, expires_at";
+    refresh_token, token_endpoint, client_id, client_secret, expires_at, oauth_resource";
 
 /// Collect rows from a prepared statement into `McpServerEntry` values.
 fn collect_server_rows(
@@ -346,6 +347,7 @@ fn collect_server_rows(
                 client_id: row.get(8)?,
                 client_secret: row.get(9)?,
                 expires_at: row.get(10)?,
+                oauth_resource: row.get(11)?,
             })
         })
         .map_err(map_db_err)?;
@@ -400,12 +402,13 @@ pub fn db_set_oauth_state(
     client_id: &str,
     client_secret: Option<&str>,
     expires_at: &str,
+    oauth_resource: &str,
 ) -> Result<(), CredentialError> {
     let changed = conn
         .execute(
             "UPDATE mcp_servers SET auth_type = 'oauth', auth_token = ?1, refresh_token = ?2, \
-             token_endpoint = ?3, client_id = ?4, client_secret = ?5, expires_at = ?6 \
-             WHERE name = ?7",
+             token_endpoint = ?3, client_id = ?4, client_secret = ?5, expires_at = ?6, \
+             oauth_resource = ?7 WHERE name = ?8",
             rusqlite::params![
                 access_token,
                 refresh_token,
@@ -413,6 +416,7 @@ pub fn db_set_oauth_state(
                 client_id,
                 client_secret,
                 expires_at,
+                oauth_resource,
                 name
             ],
         )
@@ -726,6 +730,7 @@ mod db_tests {
             "client-123",
             None,
             "2026-04-13T12:00:00Z",
+            "https://mcp.notion.com/mcp",
         )
         .unwrap();
         let servers = db_list_servers(&conn).unwrap();
@@ -733,6 +738,10 @@ mod db_tests {
         assert_eq!(s.auth_type.as_deref(), Some("oauth"));
         assert_eq!(s.auth_token.as_deref(), Some("access-tok"));
         assert_eq!(s.refresh_token.as_deref(), Some("refresh-tok"));
+        assert_eq!(
+            s.oauth_resource.as_deref(),
+            Some("https://mcp.notion.com/mcp")
+        );
     }
 
     #[test]
@@ -748,6 +757,7 @@ mod db_tests {
             "c",
             None,
             "2026-04-13T12:00:00Z",
+            "https://mcp.notion.com/mcp",
         )
         .unwrap();
         db_update_oauth_token(
@@ -780,6 +790,7 @@ mod db_tests {
             "c",
             None,
             "2026-04-13T12:00:00Z",
+            "https://mcp.notion.com/mcp",
         )
         .unwrap();
         // Pass None — should keep "rt-original"
@@ -801,6 +812,7 @@ mod db_tests {
             "c",
             None,
             "2026-04-13T12:00:00Z",
+            "https://a.com/mcp",
         )
         .unwrap();
         db_add_server(&conn, "bearer-srv", "https://b.com/mcp").unwrap();
@@ -808,6 +820,10 @@ mod db_tests {
         let oauth = db_list_oauth_servers(&conn).unwrap();
         assert_eq!(oauth.len(), 1);
         assert_eq!(oauth[0].name, "oauth-srv");
+        assert_eq!(
+            oauth[0].oauth_resource.as_deref(),
+            Some("https://a.com/mcp")
+        );
     }
 
     #[test]

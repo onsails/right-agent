@@ -318,9 +318,9 @@ sandbox restore, on bot startup, and after normal CC invocations.
 ## JSON Schemas
 
 ### reply-schema.json (normal mode)
-Required: `content` (string|null).
-Optional: `reply_to_message_id`, `attachments`, `used_skill_receipts`,
-`learning_signal`, `skill_issue_signal`.
+Required: `content` (string|null), `used_skill_receipts` (array; empty
+allowed).
+Optional: `reply_to_message_id`, `attachments`.
 
 **Attachments.** Each item in `attachments` accepts an optional `media_group_id`
 (nullable string). Items sharing the same value are delivered as a single
@@ -328,19 +328,17 @@ Telegram media group (album). Validation and degradation rules match Telegram's
 `sendMediaGroup` constraints — see `### Media Groups (Albums)` in
 `OPERATING_INSTRUCTIONS.md` for the full rules shown to the agent.
 
-**Learned-skill metadata.** `used_skill_receipts` is an optional nullable array
-of `{ package_name, message }`; receipt messages are appended to the Telegram
-reply. `learning_signal` is an optional nullable `create_candidate` object for
-candidate skill creation, and `skill_issue_signal` is an optional nullable
-`update_candidate` object for candidate skill updates. Both signals require
-non-empty `event_refs` and enum-constrained reason/type fields; the bot may
-drop ambiguous or low-evidence signals without affecting reply delivery.
+**Learned-skill metadata.** `used_skill_receipts` is a required non-null array
+of `{ package_name, message }`; use `[]` when no `rightx-*` skill materially
+guided the answer. Receipt messages are appended to the Telegram reply and
+drive lifecycle usage accounting. Legacy `learning_signal` and
+`skill_issue_signal` reply fields are not in the schema and are ignored if a
+stale client emits them.
 
 ### bootstrap-schema.json (bootstrap mode)
 Required: `content` (string|null) and `bootstrap_complete` (boolean).
 Optional: `reply_to_message_id`, `attachments`. Bootstrap mode does not include
-normal-mode learned-skill fields (`used_skill_receipts`, `learning_signal`,
-`skill_issue_signal`).
+normal-mode learned-skill fields (`used_skill_receipts`).
 Server-side validation: `bootstrap_complete: true` is ignored unless
 IDENTITY.md, SOUL.md, and USER.md are verified. For sandboxed agents, the worker
 first reconciles those files from `/sandbox` into the host mirror; no-sandbox
@@ -545,9 +543,11 @@ session with `CURATOR_SYSTEM_PROMPT` for consolidation work. See
 Deprecated Stage 2 background learned-skill review (selector/reviewer with
 `background_review_enabled`) is no longer wired into the runtime. The
 field is accepted as `Option<bool>` for backward-compatibility but
-silently ignored. The reviewer may record high-confidence create/update candidates
-from a selected learning episode, but it must not create, patch, archive, or
-delete skill package files. It does not expose or call
+silently ignored. Runtime completion seed capture is a defensive no-op, so no
+new `learning_episodes`, `skill_nudge_signals`, or `skill_review_reports` rows
+are produced by this path. Historical reports remain read-only dashboard data.
+The reviewer, when used only in legacy tests or historical tooling, must not
+create, patch, archive, or delete skill package files. It does not expose or call
 `mcp__right__skill_learning_start` or
 `mcp__right__skill_learning_finish`. The reviewer prompt explicitly prefers
 reusable future-session workflows, rejects one-off task narrative, avoids

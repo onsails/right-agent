@@ -24,6 +24,8 @@ use tokio::sync::Mutex;
 use right_mcp::internal_client::{InternalClient, SetTokenRequest};
 use right_mcp::oauth::{PendingAuth, exchange_token, verify_state};
 
+use super::markdown::html_escape;
+
 /// Shared in-memory map of OAuth state -> pending auth session.
 /// Key is the PKCE state parameter (random, one-shot).
 pub type PendingAuthMap = Arc<Mutex<HashMap<String, PendingAuth>>>;
@@ -239,6 +241,7 @@ async fn complete_oauth_flow(
         &pending.client_id,
         pending.client_secret.as_deref(),
         &pending.code_verifier,
+        &pending.resource,
     )
     .await
     .map_err(|e| miette::miette!("token exchange failed: {e:#}"))?;
@@ -260,6 +263,7 @@ async fn complete_oauth_flow(
         expires_in: token_resp.expires_in.unwrap_or(3600) as u64,
         token_endpoint: pending.token_endpoint.clone(),
         client_id: pending.client_id.clone(),
+        resource: pending.resource.clone(),
         client_secret: pending.client_secret.clone(),
     };
 
@@ -302,7 +306,7 @@ async fn complete_oauth_flow(
                 .iter()
                 .map(|u| u.id)
                 .collect();
-            notify_telegram(
+            notify_html_telegram(
                 &cb_state.bot,
                 &chat_ids,
                 &set_token_failure_message(&pending.server_name, agent_name, &e),
@@ -319,9 +323,15 @@ fn set_token_failure_message(
     agent_name: &str,
     err: impl std::fmt::Display,
 ) -> String {
-    format!("Could not finish OAuth for {server_name} (agent {agent_name}): {err}")
+    format!(
+        "Could not finish OAuth for {} (agent {}). Token exchange completed, but MCP readiness failed:\n<pre>{}</pre>",
+        html_escape(server_name),
+        html_escape(agent_name),
+        html_escape(&err.to_string()),
+    )
 }
 
+use super::broadcast_html_to_chats as notify_html_telegram;
 use super::broadcast_to_chats as notify_telegram;
 
 /// Bind axum to a Unix socket at `socket_path` and serve the bot's UDS app.
@@ -418,6 +428,7 @@ mod tests {
         PendingAuth {
             server_name: "test-server".to_string(),
             server_url: "https://example.com/mcp".to_string(),
+            resource: "https://example.com/mcp".to_string(),
             code_verifier: "verifier123".to_string(),
             state: state_val.to_string(),
             token_endpoint: "https://example.com/token".to_string(),
@@ -576,5 +587,14 @@ mod tests {
         assert!(msg.contains("composio"));
         assert!(msg.contains("agent-b"));
         assert!(msg.contains("HTTP 502"));
+    }
+
+    #[test]
+    fn set_token_failure_message_wraps_detail_in_pre() {
+        let msg = set_token_failure_message("composio", "agent-b", "<bad>&\"detail\"");
+        assert!(msg.contains("<pre>"));
+        assert!(msg.contains("</pre>"));
+        assert!(msg.contains("&lt;bad&gt;&amp;\"detail\""));
+        assert!(!msg.contains("<bad>"));
     }
 }

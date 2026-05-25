@@ -239,6 +239,9 @@ export interface RunSummary {
   finished_at: string | null
   exit_code: number | null
   delivery_status: string
+  delivery_required: boolean
+  delivery_kind: string | null
+  run_note: string | null
   cost_usd: number | null
 }
 
