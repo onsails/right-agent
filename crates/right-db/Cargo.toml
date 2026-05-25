@@ -10,6 +10,7 @@ tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+turso = { workspace = true }
 
 [features]
 test-support = ["dep:tempfile"]
