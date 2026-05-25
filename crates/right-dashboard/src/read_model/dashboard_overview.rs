@@ -866,9 +866,10 @@ async fn learning_candidate_count(
     let (coarse_since, coarse_until) = coarse_timestamp_bounds(&since, &now);
     let mut stmt = conn.prepare(
         "SELECT created_at
-         FROM skill_review_reports
+         FROM skill_learning_events
          WHERE agent_name = ?1
-           AND status IN ('create_candidate', 'update_candidate')
+           AND phase = 'finish'
+           AND status IN ('created', 'updated')
            AND created_at >= ?2
            AND created_at <= ?3",
     )?;
@@ -937,14 +938,13 @@ mod tests {
         .await
         .unwrap();
         conn.execute(
-            "INSERT INTO skill_review_reports (
-                agent_name, source_invocation_id, trigger_kind, status,
-                confidence, candidate_skill_name, evidence_refs_json,
-                review_output_json, created_at
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                hint_outcome, reason, message, summary, event_refs_json, created_at
              ) VALUES (
-                'alpha', 'inv-1', 'learning_signal', 'create_candidate',
-                'high', 'rightx-debugging', '[]', '{}',
-                '2026-05-20T09:00:00Z'
+                'inv-1', 'alpha', 'create', 'rightx-debugging', 'finish', 'created',
+                'applied_as_hinted', 'captured workflow', 'Created skill',
+                'Reusable workflow', '[]', '2026-05-20T09:00:00Z'
              )",
             [],
         )
@@ -1136,15 +1136,16 @@ mod tests {
         .await
         .unwrap();
         conn.execute(
-            "INSERT INTO skill_review_reports (
-                agent_name, source_invocation_id, trigger_kind, status,
-                confidence, candidate_skill_name, evidence_refs_json,
-                review_output_json, created_at
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                hint_outcome, reason, message, summary, event_refs_json, created_at
              ) VALUES
-                ('alpha', 'inv-current', 'learning_signal', 'create_candidate',
-                 'high', 'rightx-current', '[]', '{}', '2026-05-23T09:00:00Z'),
-                ('alpha', 'inv-future', 'learning_signal', 'create_candidate',
-                 'high', 'rightx-future', '[]', '{}', '2026-05-23T11:00:00Z')",
+                ('inv-current', 'alpha', 'create', 'rightx-current', 'finish', 'created',
+                 'applied_as_hinted', 'captured workflow', 'Created skill',
+                 'Reusable workflow', '[]', '2026-05-23T09:00:00Z'),
+                ('inv-future', 'alpha', 'create', 'rightx-future', 'finish', 'created',
+                 'applied_as_hinted', 'future workflow', 'Created skill',
+                 'Future workflow', '[]', '2026-05-23T11:00:00Z')",
             [],
         )
         .await
