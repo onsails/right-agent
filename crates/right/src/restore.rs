@@ -60,13 +60,13 @@ struct RestoreSource {
     resolved_bank_id: Option<String>,
 }
 
-pub(crate) fn build_backup_manifest(
+pub(crate) async fn build_backup_manifest(
     source_agent: &str,
     config: Option<&AgentConfig>,
     db_path: Option<&Path>,
 ) -> miette::Result<BackupManifest> {
     let memory = backup_memory_manifest(source_agent, config);
-    let explicit_state = explicit_state_manifest(config, db_path)?;
+    let explicit_state = explicit_state_manifest(config, db_path).await?;
     Ok(BackupManifest {
         schema_version: 1,
         source_agent: source_agent.to_string(),
@@ -149,7 +149,7 @@ pub(crate) fn infer_legacy_source_agent(home: &Path, backup_dir: &Path) -> Optio
     Some(source)
 }
 
-pub(crate) fn decide_restore(
+pub(crate) async fn decide_restore(
     home: &Path,
     target_agent: &str,
     backup_dir: &Path,
@@ -162,7 +162,7 @@ pub(crate) fn decide_restore(
     let explicit_state = if let Some(manifest) = manifest.as_ref() {
         manifest.explicit_state.clone()
     } else {
-        explicit_state_manifest(Some(config), Some(&backup_dir.join("data.db")))?
+        explicit_state_manifest(Some(config), Some(&backup_dir.join("data.db"))).await?
     };
     let warnings = explicit_state_warnings(
         source.source_agent.as_deref(),
@@ -265,7 +265,7 @@ fn decide_memory_action(
     }
 }
 
-pub(crate) fn explicit_state_manifest(
+pub(crate) async fn explicit_state_manifest(
     config: Option<&AgentConfig>,
     db_path: Option<&Path>,
 ) -> miette::Result<ExplicitStateManifest> {
@@ -278,24 +278,26 @@ pub(crate) fn explicit_state_manifest(
     };
 
     let conn = right_db::open_database_path_readonly(db_path)
+        .await
         .into_diagnostic()
         .map_err(|e| miette::miette!("open {}: {e:#}", db_path.display()))?;
 
     Ok(ExplicitStateManifest {
         has_telegram_token,
-        has_mcp_servers: table_has_rows(&conn, "mcp_servers")?,
-        has_mcp_auth_tokens: table_has_rows(&conn, "auth_tokens")?,
-        has_cron_specs: table_has_rows(&conn, "cron_specs")?,
+        has_mcp_servers: table_has_rows(&conn, "mcp_servers").await?,
+        has_mcp_auth_tokens: table_has_rows(&conn, "auth_tokens").await?,
+        has_cron_specs: table_has_rows(&conn, "cron_specs").await?,
     })
 }
 
-fn table_has_rows(conn: &right_db::Connection, table: &str) -> miette::Result<bool> {
+async fn table_has_rows(conn: &right_db::Connection, table: &str) -> miette::Result<bool> {
     let exists: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
             right_db::params![table],
             |row| row.get(0),
         )
+        .await
         .into_diagnostic()
         .map_err(|e| miette::miette!("inspect sqlite schema: {e:#}"))?;
     if exists == 0 {
@@ -304,6 +306,7 @@ fn table_has_rows(conn: &right_db::Connection, table: &str) -> miette::Result<bo
 
     let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)");
     conn.query_row(&sql, [], |row| row.get::<_, bool>(0))
+        .await
         .into_diagnostic()
         .map_err(|e| miette::miette!("inspect sqlite table {table}: {e:#}"))
 }
@@ -367,10 +370,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn manifest_records_implicit_hindsight_bank_without_secret_key() {
+    #[tokio::test]
+    async fn manifest_records_implicit_hindsight_bank_without_secret_key() {
         let config = hindsight_config(None);
-        let manifest = build_backup_manifest("right", Some(&config), None).unwrap();
+        let manifest = build_backup_manifest("right", Some(&config), None)
+            .await
+            .unwrap();
 
         assert_eq!(manifest.source_agent, "right");
         assert_eq!(manifest.memory.provider, "hindsight");
@@ -384,11 +389,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn write_and_read_backup_manifest_roundtrips() {
+    #[tokio::test]
+    async fn write_and_read_backup_manifest_roundtrips() {
         let dir = tempdir().unwrap();
         let config = hindsight_config(Some("shared-bank"));
-        let manifest = build_backup_manifest("right", Some(&config), None).unwrap();
+        let manifest = build_backup_manifest("right", Some(&config), None)
+            .await
+            .unwrap();
 
         write_backup_manifest(dir.path(), &manifest).unwrap();
 
@@ -401,11 +408,11 @@ mod tests {
         assert_eq!(restored.as_ref(), Some(&manifest));
     }
 
-    #[test]
-    fn explicit_state_manifest_detects_db_tables_without_reading_secrets() {
+    #[tokio::test]
+    async fn explicit_state_manifest_detects_db_tables_without_reading_secrets() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("data.db");
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
         conn.execute_batch(
             r#"
             INSERT INTO mcp_servers (name, url) VALUES ('linear', 'https://mcp.example.test');
@@ -414,6 +421,7 @@ mod tests {
             VALUES ('daily', '0 9 * * *', 'secret prompt', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
             "#,
         )
+        .await
         .unwrap();
         let config = AgentConfig {
             telegram_token: Some("telegram_secret".to_string()),
@@ -421,7 +429,9 @@ mod tests {
         };
         drop(conn);
 
-        let manifest = build_backup_manifest("right", Some(&config), Some(&db_path)).unwrap();
+        let manifest = build_backup_manifest("right", Some(&config), Some(&db_path))
+            .await
+            .unwrap();
 
         assert!(manifest.explicit_state.has_telegram_token);
         assert!(manifest.explicit_state.has_mcp_servers);
@@ -434,8 +444,8 @@ mod tests {
         assert!(!json.contains("secret prompt"));
     }
 
-    #[test]
-    fn infers_legacy_source_agent_from_right_home_backup_layout() {
+    #[tokio::test]
+    async fn infers_legacy_source_agent_from_right_home_backup_layout() {
         let dir = tempdir().unwrap();
         let backup = dir
             .path()
@@ -450,8 +460,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn legacy_source_inference_returns_none_for_path_outside_right_home_backups() {
+    #[tokio::test]
+    async fn legacy_source_inference_returns_none_for_path_outside_right_home_backups() {
         let dir = tempdir().unwrap();
         let backup_root = dir.path().join("backups");
         std::fs::create_dir_all(&backup_root).unwrap();
@@ -465,8 +475,8 @@ mod tests {
         assert_eq!(infer_legacy_source_agent(dir.path(), &outside), None);
     }
 
-    #[test]
-    fn legacy_source_inference_returns_none_for_extra_nested_components() {
+    #[tokio::test]
+    async fn legacy_source_inference_returns_none_for_extra_nested_components() {
         let dir = tempdir().unwrap();
         let backup = dir
             .path()
@@ -479,8 +489,8 @@ mod tests {
         assert_eq!(infer_legacy_source_agent(dir.path(), &backup), None);
     }
 
-    #[test]
-    fn legacy_source_inference_returns_none_when_backup_path_does_not_exist() {
+    #[tokio::test]
+    async fn legacy_source_inference_returns_none_when_backup_path_does_not_exist() {
         let dir = tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("backups")).unwrap();
         let missing = dir
@@ -492,8 +502,8 @@ mod tests {
         assert_eq!(infer_legacy_source_agent(dir.path(), &missing), None);
     }
 
-    #[test]
-    fn direct_restore_requires_mode_for_cross_name_implicit_hindsight() {
+    #[tokio::test]
+    async fn direct_restore_requires_mode_for_cross_name_implicit_hindsight() {
         let dir = tempdir().unwrap();
         let backup = dir.path().join("elsewhere");
         std::fs::create_dir_all(&backup).unwrap();
@@ -506,6 +516,7 @@ mod tests {
             &config,
             RestoreBindingMode::DirectUnspecified,
         )
+        .await
         .expect_err("cross-name implicit Hindsight restore must require a mode");
 
         assert!(
@@ -514,8 +525,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn preserve_mode_materializes_source_bank_from_legacy_path() {
+    #[tokio::test]
+    async fn preserve_mode_materializes_source_bank_from_legacy_path() {
         let dir = tempdir().unwrap();
         let backup = dir
             .path()
@@ -532,6 +543,7 @@ mod tests {
             &config,
             RestoreBindingMode::PreserveSource,
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -540,8 +552,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rebind_mode_leaves_implicit_bank_omitted() {
+    #[tokio::test]
+    async fn rebind_mode_leaves_implicit_bank_omitted() {
         let dir = tempdir().unwrap();
         let backup = dir
             .path()
@@ -558,13 +570,14 @@ mod tests {
             &config,
             RestoreBindingMode::RebindToTarget,
         )
+        .await
         .unwrap();
 
         assert_eq!(decision.memory_action, RestoreMemoryAction::Noop);
     }
 
-    #[test]
-    fn explicit_override_writes_supplied_bank() {
+    #[tokio::test]
+    async fn explicit_override_writes_supplied_bank() {
         let dir = tempdir().unwrap();
         let backup = dir.path().join("backup");
         std::fs::create_dir_all(&backup).unwrap();
@@ -577,6 +590,7 @@ mod tests {
             &config,
             RestoreBindingMode::MemoryBankId("manual-bank".to_string()),
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -585,8 +599,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn explicit_bank_is_preserved_without_override() {
+    #[tokio::test]
+    async fn explicit_bank_is_preserved_without_override() {
         let dir = tempdir().unwrap();
         let backup = dir.path().join("backup");
         std::fs::create_dir_all(&backup).unwrap();
@@ -599,13 +613,14 @@ mod tests {
             &config,
             RestoreBindingMode::DirectUnspecified,
         )
+        .await
         .unwrap();
 
         assert_eq!(decision.memory_action, RestoreMemoryAction::Noop);
     }
 
-    #[test]
-    fn explicit_state_warnings_only_for_clone_restore() {
+    #[tokio::test]
+    async fn explicit_state_warnings_only_for_clone_restore() {
         let state = ExplicitStateManifest {
             has_telegram_token: true,
             has_mcp_servers: true,
@@ -622,8 +637,8 @@ mod tests {
         assert!(warnings.iter().any(|w| w.contains("MCP server")));
     }
 
-    #[test]
-    fn apply_memory_action_writes_bank_id_and_preserves_recall_defaults() {
+    #[tokio::test]
+    async fn apply_memory_action_writes_bank_id_and_preserves_recall_defaults() {
         let dir = tempdir().unwrap();
         let agent_yaml = dir.path().join("agent.yaml");
         std::fs::write(
@@ -649,8 +664,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn preserve_mode_normalizes_yaml_to_source_bank() {
+    #[tokio::test]
+    async fn preserve_mode_normalizes_yaml_to_source_bank() {
         let dir = tempdir().unwrap();
         let backup = dir
             .path()
@@ -672,6 +687,7 @@ mod tests {
             &config,
             RestoreBindingMode::PreserveSource,
         )
+        .await
         .unwrap();
 
         apply_memory_action(&agent_yaml, config, decision.memory_action).unwrap();

@@ -1,15 +1,15 @@
 use super::*;
 use uuid::Uuid;
 
-#[test]
-fn validate_job_name_valid() {
+#[tokio::test]
+async fn validate_job_name_valid() {
     assert!(validate_job_name("health-check").is_ok());
     assert!(validate_job_name("a").is_ok());
     assert!(validate_job_name("deploy-check-123").is_ok());
 }
 
-#[test]
-fn validate_job_name_invalid() {
+#[tokio::test]
+async fn validate_job_name_invalid() {
     assert!(validate_job_name("").is_err());
     assert!(validate_job_name("-leading").is_err());
     assert!(validate_job_name("UPPER").is_err());
@@ -17,44 +17,44 @@ fn validate_job_name_invalid() {
     assert!(validate_job_name("under_score").is_err());
 }
 
-#[test]
-fn validate_schedule_valid() {
+#[tokio::test]
+async fn validate_schedule_valid() {
     assert!(validate_schedule("*/5 * * * *").is_ok());
     assert!(validate_schedule("17 9 * * 1-5").is_ok());
 }
 
-#[test]
-fn validate_schedule_invalid() {
+#[tokio::test]
+async fn validate_schedule_invalid() {
     assert!(validate_schedule("not a cron").is_err());
     assert!(validate_schedule("").is_err());
 }
 
-#[test]
-fn validate_schedule_round_minutes_warning() {
+#[tokio::test]
+async fn validate_schedule_round_minutes_warning() {
     assert!(validate_schedule("0 9 * * *").unwrap().is_some());
     assert!(validate_schedule("30 9 * * *").unwrap().is_some());
     assert!(validate_schedule("17 9 * * *").unwrap().is_none());
 }
 
-#[test]
-fn validate_lock_ttl_valid() {
+#[tokio::test]
+async fn validate_lock_ttl_valid() {
     assert!(validate_lock_ttl("30m").is_ok());
     assert!(validate_lock_ttl("1h").is_ok());
 }
 
-#[test]
-fn validate_lock_ttl_invalid() {
+#[tokio::test]
+async fn validate_lock_ttl_invalid() {
     assert!(validate_lock_ttl("bad").is_err());
     assert!(validate_lock_ttl("30").is_err());
     assert!(validate_lock_ttl("").is_err());
 }
 
-fn setup_db() -> (tempfile::TempDir, right_db::Connection) {
-    right_db::test_support::migrated_connection()
+async fn setup_db() -> (tempfile::TempDir, right_db::Connection) {
+    right_db::test_support::migrated_connection().await
 }
 
 #[allow(clippy::too_many_arguments)]
-fn insert_async_cron_run(
+async fn insert_async_cron_run(
     conn: &right_db::Connection,
     id: &str,
     job_name: &str,
@@ -95,13 +95,16 @@ fn insert_async_cron_run(
             delivered_at,
         ],
     )
+    .await
     .expect("insert async cron run");
 }
 
-#[test]
-fn create_spec_success() {
-    let (_dir, conn) = setup_db();
-    let result = create_spec(&conn, "my-job", "*/5 * * * *", "do stuff", None, None).unwrap();
+#[tokio::test]
+async fn create_spec_success() {
+    let (_dir, conn) = setup_db().await;
+    let result = create_spec(&conn, "my-job", "*/5 * * * *", "do stuff", None, None)
+        .await
+        .unwrap();
     assert!(result.message.contains("Created"));
     assert!(result.warning.is_none());
 
@@ -112,44 +115,73 @@ fn create_spec_success() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(count, 1);
 }
 
-#[test]
-fn create_spec_with_warning() {
-    let (_dir, conn) = setup_db();
-    let result = create_spec(&conn, "my-job", "0 9 * * *", "do stuff", None, None).unwrap();
+#[tokio::test]
+async fn create_spec_with_warning() {
+    let (_dir, conn) = setup_db().await;
+    let result = create_spec(&conn, "my-job", "0 9 * * *", "do stuff", None, None)
+        .await
+        .unwrap();
     assert!(result.warning.is_some());
 }
 
-#[test]
-fn create_spec_duplicate_error() {
-    let (_dir, conn) = setup_db();
-    create_spec(&conn, "dup", "*/5 * * * *", "prompt", None, None).unwrap();
-    let err = create_spec(&conn, "dup", "*/5 * * * *", "prompt", None, None).unwrap_err();
+#[tokio::test]
+async fn create_spec_duplicate_error() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "dup", "*/5 * * * *", "prompt", None, None)
+        .await
+        .unwrap();
+    let err = create_spec(&conn, "dup", "*/5 * * * *", "prompt", None, None)
+        .await
+        .unwrap_err();
     assert!(err.contains("already exists"));
 }
 
-#[test]
-fn create_spec_validation_errors() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn create_spec_validation_errors() {
+    let (_dir, conn) = setup_db().await;
     // Bad job name
-    assert!(create_spec(&conn, "BAD NAME", "*/5 * * * *", "p", None, None).is_err());
+    assert!(
+        create_spec(&conn, "BAD NAME", "*/5 * * * *", "p", None, None)
+            .await
+            .is_err()
+    );
     // Empty prompt
-    assert!(create_spec(&conn, "ok", "*/5 * * * *", "  ", None, None).is_err());
+    assert!(
+        create_spec(&conn, "ok", "*/5 * * * *", "  ", None, None)
+            .await
+            .is_err()
+    );
     // Bad schedule
-    assert!(create_spec(&conn, "ok", "not-cron", "p", None, None).is_err());
+    assert!(
+        create_spec(&conn, "ok", "not-cron", "p", None, None)
+            .await
+            .is_err()
+    );
     // Bad lock_ttl
-    assert!(create_spec(&conn, "ok", "*/5 * * * *", "p", Some("bad"), None).is_err());
+    assert!(
+        create_spec(&conn, "ok", "*/5 * * * *", "p", Some("bad"), None)
+            .await
+            .is_err()
+    );
     // Negative budget
-    assert!(create_spec(&conn, "ok", "*/5 * * * *", "p", None, Some(-1.0)).is_err());
+    assert!(
+        create_spec(&conn, "ok", "*/5 * * * *", "p", None, Some(-1.0))
+            .await
+            .is_err()
+    );
 }
 
-#[test]
-fn update_spec_success() {
-    let (_dir, conn) = setup_db();
-    create_spec(&conn, "upd", "*/5 * * * *", "old", None, None).unwrap();
+#[tokio::test]
+async fn update_spec_success() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "upd", "*/5 * * * *", "old", None, None)
+        .await
+        .unwrap();
     let result = update_spec(
         &conn,
         "upd",
@@ -158,6 +190,7 @@ fn update_spec_success() {
         Some("1h"),
         Some(2.0),
     )
+    .await
     .unwrap();
     assert!(result.message.contains("Updated"));
 
@@ -167,23 +200,28 @@ fn update_spec_success() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(prompt, "new prompt");
 }
 
-#[test]
-fn update_spec_not_found() {
-    let (_dir, conn) = setup_db();
-    let err = update_spec(&conn, "ghost", "*/5 * * * *", "prompt", None, None).unwrap_err();
+#[tokio::test]
+async fn update_spec_not_found() {
+    let (_dir, conn) = setup_db().await;
+    let err = update_spec(&conn, "ghost", "*/5 * * * *", "prompt", None, None)
+        .await
+        .unwrap_err();
     assert!(err.contains("not found"));
 }
 
-#[test]
-fn delete_spec_success() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn delete_spec_success() {
+    let (_dir, conn) = setup_db().await;
     let tmp = tempfile::tempdir().unwrap();
-    create_spec(&conn, "del", "*/5 * * * *", "p", None, None).unwrap();
-    let msg = delete_spec(&conn, "del", tmp.path()).unwrap();
+    create_spec(&conn, "del", "*/5 * * * *", "p", None, None)
+        .await
+        .unwrap();
+    let msg = delete_spec(&conn, "del", tmp.path()).await.unwrap();
     assert!(msg.contains("Deleted"));
 
     let count: i64 = conn
@@ -192,22 +230,25 @@ fn delete_spec_success() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(count, 0);
 }
 
-#[test]
-fn delete_spec_not_found() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn delete_spec_not_found() {
+    let (_dir, conn) = setup_db().await;
     let tmp = tempfile::tempdir().unwrap();
-    let err = delete_spec(&conn, "nope", tmp.path()).unwrap_err();
+    let err = delete_spec(&conn, "nope", tmp.path()).await.unwrap_err();
     assert!(err.contains("not found"));
 }
 
-#[test]
-fn list_specs_json() {
-    let (_dir, conn) = setup_db();
-    create_spec(&conn, "a-job", "*/5 * * * *", "prompt a", None, None).unwrap();
+#[tokio::test]
+async fn list_specs_json() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "a-job", "*/5 * * * *", "prompt a", None, None)
+        .await
+        .unwrap();
     create_spec(
         &conn,
         "b-job",
@@ -216,8 +257,9 @@ fn list_specs_json() {
         Some("30m"),
         Some(2.5),
     )
+    .await
     .unwrap();
-    let output = list_specs(&conn).unwrap();
+    let output = list_specs(&conn).await.unwrap();
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed.len(), 2);
     assert_eq!(parsed[0]["job_name"], "a-job");
@@ -232,10 +274,12 @@ fn list_specs_json() {
     assert!(parsed[1]["last_status"].is_null());
 }
 
-#[test]
-fn list_specs_reads_last_run_from_async_runs() {
-    let (_dir, conn) = setup_db();
-    create_spec(&conn, "a-job", "*/5 * * * *", "prompt a", None, None).unwrap();
+#[tokio::test]
+async fn list_specs_reads_last_run_from_async_runs() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "a-job", "*/5 * * * *", "prompt a", None, None)
+        .await
+        .unwrap();
     insert_async_cron_run(
         &conn,
         "run-old",
@@ -247,7 +291,8 @@ fn list_specs_reads_last_run_from_async_runs() {
         -100,
         None,
         "none",
-    );
+    )
+    .await;
     insert_async_cron_run(
         &conn,
         "run-new",
@@ -259,7 +304,8 @@ fn list_specs_reads_last_run_from_async_runs() {
         -100,
         None,
         "none",
-    );
+    )
+    .await;
     conn.execute(
         "INSERT INTO async_runs (
             id, kind, producer_ref, source_session_id, run_session_id, target_chat_id,
@@ -271,8 +317,9 @@ fn list_specs_reads_last_run_from_async_runs() {
          )",
         [],
     )
+    .await
     .unwrap();
-    let output = list_specs(&conn).unwrap();
+    let output = list_specs(&conn).await.unwrap();
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0]["last_run_id"], "run-new");
@@ -280,29 +327,31 @@ fn list_specs_reads_last_run_from_async_runs() {
     assert_eq!(parsed[0]["last_status"], "failed");
 }
 
-#[test]
-fn load_specs_from_db_empty() {
-    let (_dir, conn) = setup_db();
-    let specs = load_specs_from_db(&conn).unwrap();
+#[tokio::test]
+async fn load_specs_from_db_empty() {
+    let (_dir, conn) = setup_db().await;
+    let specs = load_specs_from_db(&conn).await.unwrap();
     assert!(specs.is_empty());
 }
 
-#[test]
-fn load_specs_from_db_returns_all() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn load_specs_from_db_returns_all() {
+    let (_dir, conn) = setup_db().await;
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
              VALUES ('job1', '*/5 * * * *', 'do stuff', 0.5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
             [],
         )
+        .await
         .unwrap();
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at) \
              VALUES ('job2', '17 9 * * *', 'other', '1h', 1.0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
             [],
         )
+        .await
         .unwrap();
-    let specs = load_specs_from_db(&conn).unwrap();
+    let specs = load_specs_from_db(&conn).await.unwrap();
     assert_eq!(specs.len(), 2);
     assert_eq!(
         specs["job1"].schedule_kind.cron_schedule().unwrap(),
@@ -312,24 +361,26 @@ fn load_specs_from_db_returns_all() {
     assert_eq!(specs["job2"].lock_ttl.as_deref(), Some("1h"));
 }
 
-#[test]
-fn load_specs_skips_legacy_bg_schedule_rows() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn load_specs_skips_legacy_bg_schedule_rows() {
+    let (_dir, conn) = setup_db().await;
     let main = Uuid::new_v4();
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
              VALUES ('legacy-bg', ?1, 'old background prompt', 1.0, 0, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
             right_db::params![format!("@bg:{main}")],
         )
+        .await
         .unwrap();
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
              VALUES ('normal', '*/5 * * * *', 'normal cron prompt', 1.0, 1, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
             [],
         )
+        .await
         .unwrap();
 
-    let specs = load_specs_from_db(&conn).unwrap();
+    let specs = load_specs_from_db(&conn).await.unwrap();
 
     assert!(!specs.contains_key("legacy-bg"));
     assert!(matches!(
@@ -338,23 +389,25 @@ fn load_specs_skips_legacy_bg_schedule_rows() {
     ));
 }
 
-#[test]
-fn load_specs_skips_non_bg_malformed_rows() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn load_specs_skips_non_bg_malformed_rows() {
+    let (_dir, conn) = setup_db().await;
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
              VALUES ('bad-run-at', '', 'bad run_at prompt', 1.0, 0, 'not-a-date', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
             [],
         )
+        .await
         .unwrap();
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
              VALUES ('normal', '*/5 * * * *', 'normal cron prompt', 1.0, 1, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
             [],
         )
+        .await
         .unwrap();
 
-    let specs = load_specs_from_db(&conn).unwrap();
+    let specs = load_specs_from_db(&conn).await.unwrap();
 
     assert!(!specs.contains_key("bad-run-at"));
     assert!(matches!(
@@ -363,11 +416,13 @@ fn load_specs_skips_non_bg_malformed_rows() {
     ));
 }
 
-#[test]
-fn trigger_spec_sets_timestamp() {
-    let (_dir, conn) = setup_db();
-    create_spec(&conn, "trig-job", "*/5 * * * *", "do stuff", None, None).unwrap();
-    let msg = trigger_spec(&conn, "trig-job").unwrap();
+#[tokio::test]
+async fn trigger_spec_sets_timestamp() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "trig-job", "*/5 * * * *", "do stuff", None, None)
+        .await
+        .unwrap();
+    let msg = trigger_spec(&conn, "trig-job").await.unwrap();
     assert!(msg.contains("Triggered"));
     let ts: Option<String> = conn
         .query_row(
@@ -375,64 +430,71 @@ fn trigger_spec_sets_timestamp() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert!(ts.is_some(), "triggered_at should be set");
 }
 
-#[test]
-fn trigger_spec_nonexistent_job() {
-    let (_dir, conn) = setup_db();
-    let err = trigger_spec(&conn, "ghost").unwrap_err();
+#[tokio::test]
+async fn trigger_spec_nonexistent_job() {
+    let (_dir, conn) = setup_db().await;
+    let err = trigger_spec(&conn, "ghost").await.unwrap_err();
     assert!(err.contains("not found"));
 }
 
-#[test]
-fn trigger_spec_idempotent() {
-    let (_dir, conn) = setup_db();
-    create_spec(&conn, "idem-job", "*/5 * * * *", "do stuff", None, None).unwrap();
-    trigger_spec(&conn, "idem-job").unwrap();
-    trigger_spec(&conn, "idem-job").unwrap();
+#[tokio::test]
+async fn trigger_spec_idempotent() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "idem-job", "*/5 * * * *", "do stuff", None, None)
+        .await
+        .unwrap();
+    trigger_spec(&conn, "idem-job").await.unwrap();
+    trigger_spec(&conn, "idem-job").await.unwrap();
     let ts: Option<String> = conn
         .query_row(
             "SELECT triggered_at FROM cron_specs WHERE job_name = 'idem-job'",
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert!(ts.is_some());
 }
 
-#[test]
-fn clear_triggered_at_clears() {
-    let (_dir, conn) = setup_db();
-    create_spec(&conn, "clr-job", "*/5 * * * *", "do stuff", None, None).unwrap();
-    trigger_spec(&conn, "clr-job").unwrap();
-    clear_triggered_at(&conn, "clr-job").unwrap();
+#[tokio::test]
+async fn clear_triggered_at_clears() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "clr-job", "*/5 * * * *", "do stuff", None, None)
+        .await
+        .unwrap();
+    trigger_spec(&conn, "clr-job").await.unwrap();
+    clear_triggered_at(&conn, "clr-job").await.unwrap();
     let ts: Option<String> = conn
         .query_row(
             "SELECT triggered_at FROM cron_specs WHERE job_name = 'clr-job'",
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert!(ts.is_none(), "triggered_at should be cleared");
 }
 
-#[test]
-fn describe_schedule_returns_description() {
+#[tokio::test]
+async fn describe_schedule_returns_description() {
     let desc = describe_schedule("*/5 * * * *");
     assert!(!desc.is_empty());
 }
 
-#[test]
-fn describe_schedule_fallback_on_invalid() {
+#[tokio::test]
+async fn describe_schedule_fallback_on_invalid() {
     let desc = describe_schedule("not-valid-cron");
     assert_eq!(desc, "not-valid-cron");
 }
 
-#[test]
-fn get_spec_detail_found() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn get_spec_detail_found() {
+    let (_dir, conn) = setup_db().await;
     create_spec(
         &conn,
         "detail-job",
@@ -441,8 +503,9 @@ fn get_spec_detail_found() {
         Some("1h"),
         Some(2.5),
     )
+    .await
     .unwrap();
-    let detail = get_spec_detail(&conn, "detail-job").unwrap().unwrap();
+    let detail = get_spec_detail(&conn, "detail-job").await.unwrap().unwrap();
     assert_eq!(detail.job_name, "detail-job");
     assert_eq!(detail.schedule, "*/5 * * * *");
     assert_eq!(detail.prompt, "do stuff");
@@ -450,16 +513,16 @@ fn get_spec_detail_found() {
     assert!((detail.max_budget_usd - 2.5).abs() < f64::EPSILON);
 }
 
-#[test]
-fn get_spec_detail_not_found() {
-    let (_dir, conn) = setup_db();
-    let detail = get_spec_detail(&conn, "ghost").unwrap();
+#[tokio::test]
+async fn get_spec_detail_not_found() {
+    let (_dir, conn) = setup_db().await;
+    let detail = get_spec_detail(&conn, "ghost").await.unwrap();
     assert!(detail.is_none());
 }
 
-#[test]
-fn get_recent_runs_returns_ordered() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn get_recent_runs_returns_ordered() {
+    let (_dir, conn) = setup_db().await;
     insert_async_cron_run(
         &conn,
         "r1",
@@ -471,7 +534,8 @@ fn get_recent_runs_returns_ordered() {
         -100,
         None,
         "none",
-    );
+    )
+    .await;
     insert_async_cron_run(
         &conn,
         "r2",
@@ -483,24 +547,25 @@ fn get_recent_runs_returns_ordered() {
         -100,
         None,
         "none",
-    );
-    let runs = get_recent_runs(&conn, "runs-job", 5).unwrap();
+    )
+    .await;
+    let runs = get_recent_runs(&conn, "runs-job", 5).await.unwrap();
     assert_eq!(runs.len(), 2);
     assert_eq!(runs[0].id, "r2");
     assert_eq!(runs[1].id, "r1");
     assert_eq!(runs[0].status, "failed");
 }
 
-#[test]
-fn get_recent_runs_empty() {
-    let (_dir, conn) = setup_db();
-    let runs = get_recent_runs(&conn, "no-such-job", 5).unwrap();
+#[tokio::test]
+async fn get_recent_runs_empty() {
+    let (_dir, conn) = setup_db().await;
+    let runs = get_recent_runs(&conn, "no-such-job", 5).await.unwrap();
     assert!(runs.is_empty());
 }
 
-#[test]
-fn get_recent_runs_respects_limit() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn get_recent_runs_respects_limit() {
+    let (_dir, conn) = setup_db().await;
     for i in 0..10 {
         insert_async_cron_run(
             &conn,
@@ -513,9 +578,10 @@ fn get_recent_runs_respects_limit() {
             -100,
             None,
             "none",
-        );
+        )
+        .await;
     }
-    let runs = get_recent_runs(&conn, "limit-job", 3).unwrap();
+    let runs = get_recent_runs(&conn, "limit-job", 3).await.unwrap();
     assert_eq!(runs.len(), 3);
 }
 
@@ -523,8 +589,8 @@ fn get_recent_runs_respects_limit() {
 /// The reconciler compares old vs new specs to detect config changes.
 /// If triggered_at participates in PartialEq, triggering a job causes the
 /// reconciler to abort and respawn the job scheduler in an infinite loop.
-#[test]
-fn triggered_at_does_not_affect_equality() {
+#[tokio::test]
+async fn triggered_at_does_not_affect_equality() {
     let base = CronSpec {
         schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
         prompt: "do stuff".into(),
@@ -541,8 +607,8 @@ fn triggered_at_does_not_affect_equality() {
     assert_eq!(base, triggered, "triggered_at must not affect equality");
 }
 
-#[test]
-fn spec_equality_detects_real_changes() {
+#[tokio::test]
+async fn spec_equality_detects_real_changes() {
     let base = CronSpec {
         schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
         prompt: "do stuff".into(),
@@ -577,33 +643,37 @@ fn spec_equality_detects_real_changes() {
     );
 }
 
-#[test]
-fn load_specs_includes_triggered_at() {
-    let (_dir, conn) = setup_db();
-    create_spec(&conn, "tr-load", "*/5 * * * *", "p", None, None).unwrap();
-    trigger_spec(&conn, "tr-load").unwrap();
-    let specs = load_specs_from_db(&conn).unwrap();
+#[tokio::test]
+async fn load_specs_includes_triggered_at() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "tr-load", "*/5 * * * *", "p", None, None)
+        .await
+        .unwrap();
+    trigger_spec(&conn, "tr-load").await.unwrap();
+    let specs = load_specs_from_db(&conn).await.unwrap();
     assert!(specs["tr-load"].triggered_at.is_some());
 }
 
-#[test]
-fn load_specs_from_db_carries_target_fields() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn load_specs_from_db_carries_target_fields() {
+    let (_dir, conn) = setup_db().await;
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, target_chat_id, target_thread_id, created_at, updated_at) \
              VALUES ('with-target', '*/5 * * * *', 'p', NULL, 1.0, 1, -555, 9, ?1, ?1)",
             [&now],
         )
+        .await
         .unwrap();
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, created_at, updated_at) \
              VALUES ('no-target', '*/5 * * * *', 'p', NULL, 1.0, 1, ?1, ?1)",
             [&now],
         )
+        .await
         .unwrap();
 
-    let specs = load_specs_from_db(&conn).unwrap();
+    let specs = load_specs_from_db(&conn).await.unwrap();
     let with = &specs["with-target"];
     assert_eq!(with.target_chat_id, Some(-555));
     assert_eq!(with.target_thread_id, Some(9));
@@ -613,9 +683,9 @@ fn load_specs_from_db_carries_target_fields() {
     assert_eq!(without.target_thread_id, None);
 }
 
-#[test]
-fn create_spec_v2_with_run_at_succeeds() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn create_spec_v2_with_run_at_succeeds() {
+    let (_dir, conn) = setup_db().await;
     let result = create_spec_v2(
         &conn,
         "run-at-job",
@@ -629,13 +699,14 @@ fn create_spec_v2_with_run_at_succeeds() {
         None,
         false,
     )
+    .await
     .unwrap();
     assert!(result.message.contains("Created"));
 }
 
-#[test]
-fn create_spec_v2_with_both_schedule_and_run_at_fails() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn create_spec_v2_with_both_schedule_and_run_at_fails() {
+    let (_dir, conn) = setup_db().await;
     let err = create_spec_v2(
         &conn,
         "both-job",
@@ -649,13 +720,14 @@ fn create_spec_v2_with_both_schedule_and_run_at_fails() {
         None,
         false,
     )
+    .await
     .unwrap_err();
     assert!(err.contains("mutually exclusive"));
 }
 
-#[test]
-fn create_spec_v2_with_neither_schedule_nor_run_at_fails() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn create_spec_v2_with_neither_schedule_nor_run_at_fails() {
+    let (_dir, conn) = setup_db().await;
     let err = create_spec_v2(
         &conn,
         "neither-job",
@@ -669,13 +741,14 @@ fn create_spec_v2_with_neither_schedule_nor_run_at_fails() {
         None,
         false,
     )
+    .await
     .unwrap_err();
     assert!(err.contains("one of"));
 }
 
-#[test]
-fn create_spec_v2_with_invalid_run_at_fails() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn create_spec_v2_with_invalid_run_at_fails() {
+    let (_dir, conn) = setup_db().await;
     let err = create_spec_v2(
         &conn,
         "bad-time",
@@ -689,13 +762,14 @@ fn create_spec_v2_with_invalid_run_at_fails() {
         None,
         false,
     )
+    .await
     .unwrap_err();
     assert!(err.contains("invalid"));
 }
 
-#[test]
-fn create_spec_v2_with_past_run_at_succeeds() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn create_spec_v2_with_past_run_at_succeeds() {
+    let (_dir, conn) = setup_db().await;
     let result = create_spec_v2(
         &conn,
         "past-job",
@@ -709,13 +783,14 @@ fn create_spec_v2_with_past_run_at_succeeds() {
         None,
         false,
     )
+    .await
     .unwrap();
     assert!(result.message.contains("Created"));
 }
 
-#[test]
-fn create_spec_v2_recurring_false_stored_as_one_shot_cron() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn create_spec_v2_recurring_false_stored_as_one_shot_cron() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "oneshot-cron",
@@ -729,17 +804,18 @@ fn create_spec_v2_recurring_false_stored_as_one_shot_cron() {
         None,
         false,
     )
+    .await
     .unwrap();
-    let specs = load_specs_from_db(&conn).unwrap();
+    let specs = load_specs_from_db(&conn).await.unwrap();
     assert!(matches!(
         specs["oneshot-cron"].schedule_kind,
         ScheduleKind::OneShotCron(_)
     ));
 }
 
-#[test]
-fn load_specs_round_trips_all_schedule_kinds() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn load_specs_round_trips_all_schedule_kinds() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "recurring",
@@ -753,6 +829,7 @@ fn load_specs_round_trips_all_schedule_kinds() {
         None,
         false,
     )
+    .await
     .unwrap();
     create_spec_v2(
         &conn,
@@ -767,6 +844,7 @@ fn load_specs_round_trips_all_schedule_kinds() {
         None,
         false,
     )
+    .await
     .unwrap();
     create_spec_v2(
         &conn,
@@ -781,9 +859,10 @@ fn load_specs_round_trips_all_schedule_kinds() {
         None,
         false,
     )
+    .await
     .unwrap();
 
-    let specs = load_specs_from_db(&conn).unwrap();
+    let specs = load_specs_from_db(&conn).await.unwrap();
     assert!(matches!(
         specs["recurring"].schedule_kind,
         ScheduleKind::Recurring(_)
@@ -798,9 +877,9 @@ fn load_specs_round_trips_all_schedule_kinds() {
     ));
 }
 
-#[test]
-fn update_spec_partial_prompt_only() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn update_spec_partial_prompt_only() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "partial",
@@ -814,6 +893,7 @@ fn update_spec_partial_prompt_only() {
         None,
         false,
     )
+    .await
     .unwrap();
     update_spec_partial(
         &conn,
@@ -827,16 +907,17 @@ fn update_spec_partial_prompt_only() {
         None,
         None,
     )
+    .await
     .unwrap();
-    let detail = get_spec_detail(&conn, "partial").unwrap().unwrap();
+    let detail = get_spec_detail(&conn, "partial").await.unwrap().unwrap();
     assert_eq!(detail.prompt, "new prompt");
     assert_eq!(detail.schedule, "*/5 * * * *");
     assert!((detail.max_budget_usd - 1.5).abs() < f64::EPSILON);
 }
 
-#[test]
-fn update_spec_partial_schedule_clears_run_at() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn update_spec_partial_schedule_clears_run_at() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "switch",
@@ -850,6 +931,7 @@ fn update_spec_partial_schedule_clears_run_at() {
         None,
         false,
     )
+    .await
     .unwrap();
     update_spec_partial(
         &conn,
@@ -863,17 +945,18 @@ fn update_spec_partial_schedule_clears_run_at() {
         None,
         None,
     )
+    .await
     .unwrap();
-    let specs = load_specs_from_db(&conn).unwrap();
+    let specs = load_specs_from_db(&conn).await.unwrap();
     assert!(matches!(
         specs["switch"].schedule_kind,
         ScheduleKind::Recurring(_)
     ));
 }
 
-#[test]
-fn update_spec_partial_run_at_clears_schedule() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn update_spec_partial_run_at_clears_schedule() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "switch2",
@@ -887,6 +970,7 @@ fn update_spec_partial_run_at_clears_schedule() {
         None,
         false,
     )
+    .await
     .unwrap();
     update_spec_partial(
         &conn,
@@ -900,17 +984,18 @@ fn update_spec_partial_run_at_clears_schedule() {
         None,
         None,
     )
+    .await
     .unwrap();
-    let specs = load_specs_from_db(&conn).unwrap();
+    let specs = load_specs_from_db(&conn).await.unwrap();
     assert!(matches!(
         specs["switch2"].schedule_kind,
         ScheduleKind::RunAt(_)
     ));
 }
 
-#[test]
-fn update_spec_partial_both_schedule_and_run_at_fails() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn update_spec_partial_both_schedule_and_run_at_fails() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "both",
@@ -924,6 +1009,7 @@ fn update_spec_partial_both_schedule_and_run_at_fails() {
         None,
         false,
     )
+    .await
     .unwrap();
     let err = update_spec_partial(
         &conn,
@@ -937,13 +1023,14 @@ fn update_spec_partial_both_schedule_and_run_at_fails() {
         None,
         None,
     )
+    .await
     .unwrap_err();
     assert!(err.contains("mutually exclusive"));
 }
 
-#[test]
-fn update_spec_partial_no_fields_fails() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn update_spec_partial_no_fields_fails() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "empty",
@@ -957,17 +1044,19 @@ fn update_spec_partial_no_fields_fails() {
         None,
         false,
     )
+    .await
     .unwrap();
     let err = update_spec_partial(
         &conn, "empty", None, None, None, None, None, None, None, None,
     )
+    .await
     .unwrap_err();
     assert!(err.contains("at least one"));
 }
 
-#[test]
-fn update_spec_partial_not_found() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn update_spec_partial_not_found() {
+    let (_dir, conn) = setup_db().await;
     let err = update_spec_partial(
         &conn,
         "ghost",
@@ -980,13 +1069,14 @@ fn update_spec_partial_not_found() {
         None,
         None,
     )
+    .await
     .unwrap_err();
     assert!(err.contains("not found"));
 }
 
-#[test]
-fn create_spec_v2_persists_target_fields() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn create_spec_v2_persists_target_fields() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "with-target",
@@ -1000,6 +1090,7 @@ fn create_spec_v2_persists_target_fields() {
         Some(7),
         false,
     )
+    .await
     .unwrap();
 
     let (chat, thread): (Option<i64>, Option<i64>) = conn
@@ -1008,14 +1099,15 @@ fn create_spec_v2_persists_target_fields() {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
+            .await
             .unwrap();
     assert_eq!(chat, Some(-100));
     assert_eq!(thread, Some(7));
 }
 
-#[test]
-fn create_spec_v2_persists_null_target_when_omitted() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn create_spec_v2_persists_null_target_when_omitted() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "no-target",
@@ -1029,6 +1121,7 @@ fn create_spec_v2_persists_null_target_when_omitted() {
         None,
         false,
     )
+    .await
     .unwrap();
 
     let (chat, thread): (Option<i64>, Option<i64>) = conn
@@ -1037,14 +1130,15 @@ fn create_spec_v2_persists_null_target_when_omitted() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .await
         .unwrap();
     assert!(chat.is_none());
     assert!(thread.is_none());
 }
 
-#[test]
-fn update_spec_partial_sets_target_chat_id() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn update_spec_partial_sets_target_chat_id() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "j1",
@@ -1058,6 +1152,7 @@ fn update_spec_partial_sets_target_chat_id() {
         None,
         false,
     )
+    .await
     .unwrap();
     update_spec_partial(
         &conn,
@@ -1071,6 +1166,7 @@ fn update_spec_partial_sets_target_chat_id() {
         Some(-555),
         None,
     )
+    .await
     .unwrap();
     let chat: Option<i64> = conn
         .query_row(
@@ -1078,13 +1174,14 @@ fn update_spec_partial_sets_target_chat_id() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(chat, Some(-555));
 }
 
-#[test]
-fn update_spec_partial_clears_target_thread_id() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn update_spec_partial_clears_target_thread_id() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "j1",
@@ -1098,6 +1195,7 @@ fn update_spec_partial_clears_target_thread_id() {
         Some(42),
         false,
     )
+    .await
     .unwrap();
     // Outer Some = field present; inner None = clear to NULL.
     update_spec_partial(
@@ -1112,6 +1210,7 @@ fn update_spec_partial_clears_target_thread_id() {
         None,
         Some(None),
     )
+    .await
     .unwrap();
     let thread: Option<i64> = conn
         .query_row(
@@ -1119,13 +1218,14 @@ fn update_spec_partial_clears_target_thread_id() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert!(thread.is_none(), "thread must be cleared");
 }
 
-#[test]
-fn update_spec_partial_leaves_target_when_omitted() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn update_spec_partial_leaves_target_when_omitted() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "j1",
@@ -1139,6 +1239,7 @@ fn update_spec_partial_leaves_target_when_omitted() {
         Some(42),
         false,
     )
+    .await
     .unwrap();
     // Update only the prompt; targets must stay.
     update_spec_partial(
@@ -1153,6 +1254,7 @@ fn update_spec_partial_leaves_target_when_omitted() {
         None,
         None,
     )
+    .await
     .unwrap();
     let (chat, thread): (Option<i64>, Option<i64>) = conn
         .query_row(
@@ -1160,36 +1262,38 @@ fn update_spec_partial_leaves_target_when_omitted() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .await
         .unwrap();
     assert_eq!(chat, Some(-1));
     assert_eq!(thread, Some(42));
 }
 
-#[test]
-fn load_specs_round_trips_immediate() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn load_specs_round_trips_immediate() {
+    let (_dir, conn) = setup_db().await;
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
              VALUES ('imm', '@immediate', 'do it now', 5.0, 0, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
             [],
         )
+        .await
         .unwrap();
-    let specs = load_specs_from_db(&conn).unwrap();
+    let specs = load_specs_from_db(&conn).await.unwrap();
     assert!(matches!(
         specs["imm"].schedule_kind,
         ScheduleKind::Immediate
     ));
 }
 
-#[test]
-fn immediate_is_one_shot() {
+#[tokio::test]
+async fn immediate_is_one_shot() {
     assert!(ScheduleKind::Immediate.is_one_shot());
     assert!(ScheduleKind::Immediate.cron_schedule().is_none());
 }
 
-#[test]
-fn list_specs_includes_target_fields() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn list_specs_includes_target_fields() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "j1",
@@ -1203,16 +1307,17 @@ fn list_specs_includes_target_fields() {
         Some(5),
         false,
     )
+    .await
     .unwrap();
-    let json = list_specs(&conn).unwrap();
+    let json = list_specs(&conn).await.unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     let row = &value.as_array().unwrap()[0];
     assert_eq!(row["target_chat_id"].as_i64(), Some(-100));
     assert_eq!(row["target_thread_id"].as_i64(), Some(5));
 }
 
-#[test]
-fn resolve_schedule_fields_immediate_mutex() {
+#[tokio::test]
+async fn resolve_schedule_fields_immediate_mutex() {
     use super::resolve_schedule_fields;
     // immediate + schedule → error
     assert!(resolve_schedule_fields(Some("*/5 * * * *"), None, None, true).is_err());
@@ -1225,9 +1330,9 @@ fn resolve_schedule_fields_immediate_mutex() {
     assert!(run_at.is_none());
 }
 
-#[test]
-fn create_spec_v2_immediate_inserts_sentinel() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn create_spec_v2_immediate_inserts_sentinel() {
+    let (_dir, conn) = setup_db().await;
     create_spec_v2(
         &conn,
         "bg-test",
@@ -1241,6 +1346,7 @@ fn create_spec_v2_immediate_inserts_sentinel() {
         Some(7),
         true,
     )
+    .await
     .unwrap();
     let stored: (String, i64, Option<String>, Option<i64>, Option<i64>) = conn
             .query_row(
@@ -1248,6 +1354,7 @@ fn create_spec_v2_immediate_inserts_sentinel() {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
+            .await
             .unwrap();
     assert_eq!(stored.0, IMMEDIATE_SENTINEL);
     assert_eq!(stored.1, 0);
@@ -1259,9 +1366,9 @@ fn create_spec_v2_immediate_inserts_sentinel() {
 /// Regression: changing `target_chat_id` via `update_spec_partial` must
 /// redirect pending/retryable async cron deliveries to the new chat.
 /// Completed delivery rows keep the target snapshot that was actually sent.
-#[test]
-fn update_spec_target_propagates_to_undelivered_async_runs() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn update_spec_target_propagates_to_undelivered_async_runs() {
+    let (_dir, conn) = setup_db().await;
 
     // Insert spec with original target chat 100.
     conn.execute(
@@ -1269,6 +1376,7 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
              VALUES ('redirect', '*/5 * * * *', 'p', 1.0, 1, NULL, 100, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
             [],
         )
+        .await
         .unwrap();
 
     insert_async_cron_run(
@@ -1282,7 +1390,8 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
         100,
         None,
         "pending",
-    );
+    )
+    .await;
     insert_async_cron_run(
         &conn,
         "run-retryable",
@@ -1294,7 +1403,8 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
         100,
         None,
         "retryable",
-    );
+    )
+    .await;
     insert_async_cron_run(
         &conn,
         "run-delivered",
@@ -1306,7 +1416,8 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
         100,
         None,
         "delivered",
-    );
+    )
+    .await;
     insert_async_cron_run(
         &conn,
         "run-none",
@@ -1318,7 +1429,8 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
         100,
         None,
         "none",
-    );
+    )
+    .await;
 
     update_spec_partial(
         &conn,
@@ -1332,6 +1444,7 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
         Some(200),
         None,
     )
+    .await
     .unwrap();
 
     // Spec target updated.
@@ -1341,6 +1454,7 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(spec_chat, Some(200));
 
@@ -1350,6 +1464,7 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(
         pending_chat,
@@ -1363,6 +1478,7 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(
         retryable_chat,
@@ -1376,6 +1492,7 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(
         delivered_chat,
@@ -1389,6 +1506,7 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(
         none_chat,
@@ -1399,15 +1517,16 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
 
 /// Updating only `target_thread_id` (chat unchanged) must propagate the
 /// new thread to undelivered runs while preserving the spec's chat.
-#[test]
-fn update_spec_partial_propagates_thread_only_change() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn update_spec_partial_propagates_thread_only_change() {
+    let (_dir, conn) = setup_db().await;
 
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
              VALUES ('thr', '*/5 * * * *', 'p', 1.0, 1, NULL, 500, 7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
             [],
         )
+        .await
         .unwrap();
     insert_async_cron_run(
         &conn,
@@ -1420,7 +1539,8 @@ fn update_spec_partial_propagates_thread_only_change() {
         500,
         Some(7),
         "pending",
-    );
+    )
+    .await;
 
     update_spec_partial(
         &conn,
@@ -1434,6 +1554,7 @@ fn update_spec_partial_propagates_thread_only_change() {
         None,
         Some(Some(99)),
     )
+    .await
     .unwrap();
 
     let (run_chat, run_thread): (Option<i64>, Option<i64>) = conn
@@ -1442,6 +1563,7 @@ fn update_spec_partial_propagates_thread_only_change() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .await
         .unwrap();
     assert_eq!(run_chat, Some(500), "chat must be preserved");
     assert_eq!(run_thread, Some(99), "thread must be redirected");
@@ -1450,15 +1572,16 @@ fn update_spec_partial_propagates_thread_only_change() {
 /// Updates that don't touch target columns (e.g. prompt-only) must NOT
 /// rewrite async cron runs — those rows should retain the run-time snapshot
 /// untouched.
-#[test]
-fn update_spec_partial_non_target_change_leaves_runs_alone() {
-    let (_dir, conn) = setup_db();
+#[tokio::test]
+async fn update_spec_partial_non_target_change_leaves_runs_alone() {
+    let (_dir, conn) = setup_db().await;
 
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
              VALUES ('np', '*/5 * * * *', 'p', 1.0, 1, NULL, 100, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
             [],
         )
+        .await
         .unwrap();
     // Run snapshotted with a *different* (stale) target — simulates a run
     // that captured the spec target before some hypothetical earlier
@@ -1474,7 +1597,8 @@ fn update_spec_partial_non_target_change_leaves_runs_alone() {
         77,
         Some(3),
         "pending",
-    );
+    )
+    .await;
 
     update_spec_partial(
         &conn,
@@ -1488,6 +1612,7 @@ fn update_spec_partial_non_target_change_leaves_runs_alone() {
         None,
         None,
     )
+    .await
     .unwrap();
 
     let (run_chat, run_thread): (Option<i64>, Option<i64>) = conn
@@ -1496,43 +1621,44 @@ fn update_spec_partial_non_target_change_leaves_runs_alone() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .await
         .unwrap();
     assert_eq!(run_chat, Some(77));
     assert_eq!(run_thread, Some(3));
 }
 
-#[test]
-fn from_db_row_recurring() {
+#[tokio::test]
+async fn from_db_row_recurring() {
     let kind = ScheduleKind::from_db_row("*/5 * * * *", None, 1).unwrap();
     assert!(matches!(kind, ScheduleKind::Recurring(s) if s == "*/5 * * * *"));
 }
 
-#[test]
-fn from_db_row_one_shot_cron() {
+#[tokio::test]
+async fn from_db_row_one_shot_cron() {
     let kind = ScheduleKind::from_db_row("0 9 * * *", None, 0).unwrap();
     assert!(matches!(kind, ScheduleKind::OneShotCron(s) if s == "0 9 * * *"));
 }
 
-#[test]
-fn from_db_row_run_at() {
+#[tokio::test]
+async fn from_db_row_run_at() {
     let kind = ScheduleKind::from_db_row("", Some("2026-12-25T00:00:00Z"), 0).unwrap();
     assert!(matches!(kind, ScheduleKind::RunAt(_)));
 }
 
-#[test]
-fn from_db_row_immediate_sentinel() {
+#[tokio::test]
+async fn from_db_row_immediate_sentinel() {
     let kind = ScheduleKind::from_db_row(IMMEDIATE_SENTINEL, None, 0).unwrap();
     assert!(matches!(kind, ScheduleKind::Immediate));
 }
 
-#[test]
-fn from_db_row_invalid_run_at_returns_err() {
+#[tokio::test]
+async fn from_db_row_invalid_run_at_returns_err() {
     let err = ScheduleKind::from_db_row("", Some("not-a-date"), 0);
     assert!(err.is_err());
 }
 
-#[test]
-fn from_db_row_legacy_bg_schedule_errors() {
+#[tokio::test]
+async fn from_db_row_legacy_bg_schedule_errors() {
     let main = uuid::Uuid::new_v4();
     let err = ScheduleKind::from_db_row(&format!("@bg:{main}"), None, 0).unwrap_err();
     assert!(err.contains("no longer schedulable"));

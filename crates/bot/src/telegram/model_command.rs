@@ -249,16 +249,16 @@ pub(crate) async fn handle_model_callback(
 mod tests {
     use super::*;
 
-    #[test]
-    fn aliases_unique() {
+    #[tokio::test]
+    async fn aliases_unique() {
         let mut seen = std::collections::HashSet::new();
         for c in MODEL_CHOICES {
             assert!(seen.insert(c.alias), "duplicate alias: {}", c.alias);
         }
     }
 
-    #[test]
-    fn aliases_short_enough_for_callback_data() {
+    #[tokio::test]
+    async fn aliases_short_enough_for_callback_data() {
         // "model:" prefix = 6 bytes; Telegram limit = 64.
         for c in MODEL_CHOICES {
             assert!(
@@ -270,47 +270,47 @@ mod tests {
         }
     }
 
-    #[test]
-    fn lookup_known_alias() {
+    #[tokio::test]
+    async fn lookup_known_alias() {
         let c = lookup("sonnet").unwrap();
         assert_eq!(c.model_id, Some("claude-sonnet-4-6"));
     }
 
-    #[test]
-    fn lookup_unknown_alias_returns_none() {
+    #[tokio::test]
+    async fn lookup_unknown_alias_returns_none() {
         assert!(lookup("nonsense").is_none());
     }
 
-    #[test]
-    fn active_choice_none_has_no_default() {
+    #[tokio::test]
+    async fn active_choice_none_has_no_default() {
         assert!(active_choice(None).is_none());
     }
 
-    #[test]
-    fn opus_1m_choice_is_explicit_model() {
+    #[tokio::test]
+    async fn opus_1m_choice_is_explicit_model() {
         let c = lookup("opus1m").unwrap();
         assert_eq!(c.model_id, Some("claude-opus-4-7[1m]"));
     }
 
-    #[test]
-    fn active_choice_canonical_model() {
+    #[tokio::test]
+    async fn active_choice_canonical_model() {
         let c = active_choice(Some("claude-haiku-4-5")).unwrap();
         assert_eq!(c.alias, "haiku");
     }
 
-    #[test]
-    fn active_choice_one_m_suffix() {
+    #[tokio::test]
+    async fn active_choice_one_m_suffix() {
         let c = active_choice(Some("claude-sonnet-4-6[1m]")).unwrap();
         assert_eq!(c.alias, "sonnet1m");
     }
 
-    #[test]
-    fn active_choice_custom_model_returns_none() {
+    #[tokio::test]
+    async fn active_choice_custom_model_returns_none() {
         assert!(active_choice(Some("claude-opus-4-old")).is_none());
     }
 
-    #[test]
-    fn menu_body_shows_checkmark_on_active() {
+    #[tokio::test]
+    async fn menu_body_shows_checkmark_on_active() {
         let body = render_menu_body(Some("claude-sonnet-4-6"));
         assert!(
             body.contains("✓ Sonnet"),
@@ -322,8 +322,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn menu_body_has_no_default_when_none() {
+    #[tokio::test]
+    async fn menu_body_has_no_default_when_none() {
         let body = render_menu_body(None);
         assert!(
             !body.contains("Default"),
@@ -339,8 +339,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn menu_body_shows_custom_prefix_for_non_canonical() {
+    #[tokio::test]
+    async fn menu_body_shows_custom_prefix_for_non_canonical() {
         let body = render_menu_body(Some("claude-opus-4-old"));
         assert!(
             body.contains("Current: claude-opus-4-old (custom)"),
@@ -352,16 +352,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn render_keyboard_has_4_buttons_in_2_rows() {
+    #[tokio::test]
+    async fn render_keyboard_has_4_buttons_in_2_rows() {
         let kb = render_keyboard(None);
         assert_eq!(kb.inline_keyboard.len(), 2);
         assert_eq!(kb.inline_keyboard[0].len(), 2);
         assert_eq!(kb.inline_keyboard[1].len(), 2);
     }
 
-    #[test]
-    fn render_keyboard_callback_data_format() {
+    #[tokio::test]
+    async fn render_keyboard_callback_data_format() {
         let kb = render_keyboard(None);
         let data: Vec<String> = kb
             .inline_keyboard

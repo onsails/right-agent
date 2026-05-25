@@ -61,15 +61,15 @@ impl<T> OptionalExtension<T> for Result<T, DbError> {
 ///   transaction for the full batch duration, not just the next pending
 ///   version. Under WAL + 5s `busy_timeout`, a slow first-boot batch can
 ///   force the second opener to time out.
-pub fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
+pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
     let db_path = agent_path.join("data.db");
     if legacy_fts5_schema_exists(&db_path)? {
         scrub_legacy_fts5_schema(&db_path)?;
     }
-    let conn = Connection::open_local(db_path, true)?;
-    conn.apply_connection_pragmas()?;
+    let conn = Connection::open_local(db_path, true).await?;
+    conn.apply_connection_pragmas().await?;
     if migrate {
-        migrations::MIGRATIONS.to_latest(&conn)?;
+        migrations::MIGRATIONS.to_latest(&conn).await?;
     }
     Ok(conn)
 }
@@ -85,21 +85,47 @@ fn legacy_fts5_schema_exists(db_path: &Path) -> Result<bool, DbError> {
         return Ok(false);
     }
 
-    let conn = Connection::open_local(db_path.to_path_buf(), false)?;
-    conn.apply_readonly_pragmas()?;
-    let user_version: i64 = conn.query_row("PRAGMA user_version", (), |row| row.get(0))?;
+    // Probe via bundled rusqlite, NOT Turso: Turso cannot resolve every
+    // table in legacy schemas containing SQLite FTS5 virtual tables, so we
+    // must not open the file through Turso before the scrubber runs. The
+    // current Turso reads happen to work only because `PRAGMA user_version`
+    // and `sqlite_master` scans don't materialize FTS5 column lists --
+    // implicit, not structural. Use the same rusqlite path the scrubber uses.
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|source| DbError::LegacySqlite {
+                path: db_path.to_path_buf(),
+                source,
+            })?;
+    conn.busy_timeout(connection::BUSY_TIMEOUT)
+        .map_err(|source| DbError::LegacySqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+
+    let user_version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|source| DbError::LegacySqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
     if user_version >= LEGACY_FTS5_SCRUBBED_AT_USER_VERSION {
         return Ok(false);
     }
-    let legacy_object_count: i64 = conn.query_row(
-        "SELECT COUNT(*)
-         FROM sqlite_master
-         WHERE type = 'table'
-           AND name IN ('memories_fts', 'conversation_messages_fts')
-           AND lower(sql) LIKE 'create virtual table%using fts5%'",
-        (),
-        |row| row.get(0),
-    )?;
+    let legacy_object_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN ('memories_fts', 'conversation_messages_fts')
+               AND lower(sql) LIKE 'create virtual table%using fts5%'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|source| DbError::LegacySqlite {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
     Ok(legacy_object_count > 0)
 }
 
@@ -145,8 +171,8 @@ fn scrub_legacy_fts5_schema(db_path: &Path) -> Result<(), DbError> {
 
 /// Open the per-agent SQLite database, dropping the connection.
 /// Used when the caller only needs the file created and migrated.
-pub fn open_db(agent_path: &Path, migrate: bool) -> Result<(), DbError> {
-    open_connection(agent_path, migrate).map(drop)
+pub async fn open_db(agent_path: &Path, migrate: bool) -> Result<(), DbError> {
+    open_connection(agent_path, migrate).await.map(drop)
 }
 
 /// Open the per-agent SQLite database in read-only mode.
@@ -155,18 +181,18 @@ pub fn open_db(agent_path: &Path, migrate: bool) -> Result<(), DbError> {
 /// never runs migrations. It is intended for read-only consumers such as
 /// the Telegram Mini App dashboard, where the "do not create or mutate"
 /// guarantee must be structural, not advisory.
-pub fn open_connection_readonly(agent_dir: impl AsRef<Path>) -> Result<Connection, DbError> {
+pub async fn open_connection_readonly(agent_dir: impl AsRef<Path>) -> Result<Connection, DbError> {
     let db_path = agent_dir.as_ref().join("data.db");
-    open_database_path_readonly(db_path)
+    open_database_path_readonly(db_path).await
 }
 
 /// Open an explicit SQLite database path in read-only mode.
 ///
 /// This never creates the database file and never runs migrations. Use
 /// [`open_connection_readonly`] for the standard per-agent `data.db` path.
-pub fn open_database_path_readonly(db_path: impl AsRef<Path>) -> Result<Connection, DbError> {
+pub async fn open_database_path_readonly(db_path: impl AsRef<Path>) -> Result<Connection, DbError> {
     let db_path = db_path.as_ref().to_path_buf();
-    let conn = Connection::open_local(db_path, false)?;
-    conn.apply_readonly_pragmas()?;
+    let conn = Connection::open_local(db_path, false).await?;
+    conn.apply_readonly_pragmas().await?;
     Ok(conn)
 }

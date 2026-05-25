@@ -71,8 +71,8 @@ mod tests {
 
     /// Lock the env.sh contract to the constants: any change to paths
     /// without a matching shell-string change should fail here.
-    #[test]
-    fn env_file_content_uses_const_paths() {
+    #[tokio::test]
+    async fn env_file_content_uses_const_paths() {
         let content = env_file_content();
         assert!(content.contains(SANDBOX_LOCAL_BIN));
         assert!(content.contains(SANDBOX_NPM_CACHE));
@@ -83,15 +83,15 @@ mod tests {
     /// a missing env.sh deployment yields a silently different environment.
     /// Fast smoke check; the semantic-drift gate is
     /// `inline_fallback_and_env_file_export_same_env`.
-    #[test]
-    fn inline_fallback_references_same_paths_as_env_file() {
+    #[tokio::test]
+    async fn inline_fallback_references_same_paths_as_env_file() {
         assert!(INLINE_FALLBACK_SCRIPT.contains(SANDBOX_LOCAL_BIN));
         assert!(INLINE_FALLBACK_SCRIPT.contains(SANDBOX_NPM_CACHE));
         assert!(INLINE_FALLBACK_SCRIPT.contains(SANDBOX_ENV_PATH));
     }
 
-    #[test]
-    fn bashrc_source_block_is_marker_delimited() {
+    #[tokio::test]
+    async fn bashrc_source_block_is_marker_delimited() {
         let block = bashrc_source_block();
         assert!(block.contains(MANAGED_ENV_START_MARKER));
         assert!(block.contains(MANAGED_ENV_END_MARKER));
@@ -110,8 +110,8 @@ mod tests {
     /// fallback's `if [ -f .../env.sh ]; then ... fi` is forced into the
     /// else branch because the rewritten path under the tempdir does not
     /// exist when the inline-fallback script runs.
-    #[test]
-    fn inline_fallback_and_env_file_export_same_env() {
+    #[tokio::test]
+    async fn inline_fallback_and_env_file_export_same_env() {
         use std::process::Command;
 
         let tmp = tempfile::tempdir().expect("create tempdir");

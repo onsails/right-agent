@@ -37,7 +37,7 @@ pub(crate) async fn request_token(
     token_rx: oneshot::Receiver<String>,
 ) {
     // Delete stale token if present
-    match open_db_and_delete_stale(agent_dir) {
+    match open_db_and_delete_stale(agent_dir).await {
         Ok(()) => {}
         Err(e) => {
             let _ = event_tx
@@ -76,7 +76,7 @@ pub(crate) async fn request_token(
     );
 
     // Save token
-    match save_token(agent_dir, &token) {
+    match save_token(agent_dir, &token).await {
         Ok(()) => {
             let _ = event_tx.send(LoginEvent::Done).await;
         }
@@ -89,17 +89,23 @@ pub(crate) async fn request_token(
 }
 
 /// Open DB and delete any existing auth token (it's stale if we're here).
-fn open_db_and_delete_stale(agent_dir: &Path) -> Result<(), String> {
-    let conn = right_db::open_connection(agent_dir, false).map_err(|e| format!("open db: {e}"))?;
+async fn open_db_and_delete_stale(agent_dir: &Path) -> Result<(), String> {
+    let conn = right_db::open_connection(agent_dir, false)
+        .await
+        .map_err(|e| format!("open db: {e}"))?;
     right_mcp::credentials::delete_auth_token(&conn)
+        .await
         .map_err(|e| format!("delete stale token: {e}"))?;
     Ok(())
 }
 
 /// Save token to DB.
-fn save_token(agent_dir: &Path, token: &str) -> Result<(), String> {
-    let conn = right_db::open_connection(agent_dir, false).map_err(|e| format!("open db: {e}"))?;
+async fn save_token(agent_dir: &Path, token: &str) -> Result<(), String> {
+    let conn = right_db::open_connection(agent_dir, false)
+        .await
+        .map_err(|e| format!("open db: {e}"))?;
     right_mcp::credentials::save_auth_token(&conn, token)
+        .await
         .map_err(|e| format!("save token: {e}"))?;
     Ok(())
 }
@@ -107,9 +113,12 @@ fn save_token(agent_dir: &Path, token: &str) -> Result<(), String> {
 /// Read the auth token from DB, if any.
 ///
 /// `agent_dir` is the agent directory (data.db lives inside it).
-pub(crate) fn load_auth_token(agent_dir: &Path) -> Option<String> {
-    let conn = right_db::open_connection(agent_dir, false).ok()?;
-    right_mcp::credentials::get_auth_token(&conn).ok().flatten()
+pub(crate) async fn load_auth_token(agent_dir: &Path) -> Option<String> {
+    let conn = right_db::open_connection(agent_dir, false).await.ok()?;
+    right_mcp::credentials::get_auth_token(&conn)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Instruction message sent to user when auth is needed.
@@ -123,30 +132,35 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::{mpsc, oneshot};
 
-    fn init_db(dir: &std::path::Path) {
-        right_db::open_db(dir, true).unwrap();
+    async fn init_db(dir: &std::path::Path) {
+        right_db::open_connection(dir, true).await.unwrap();
     }
 
-    #[test]
-    fn load_auth_token_returns_none_when_no_token() {
+    #[tokio::test]
+    async fn load_auth_token_returns_none_when_no_token() {
         let dir = tempdir().unwrap();
-        init_db(dir.path());
-        assert!(load_auth_token(dir.path()).is_none());
+        init_db(dir.path()).await;
+        assert!(load_auth_token(dir.path()).await.is_none());
     }
 
-    #[test]
-    fn load_auth_token_returns_saved_token() {
+    #[tokio::test]
+    async fn load_auth_token_returns_saved_token() {
         let dir = tempdir().unwrap();
-        init_db(dir.path());
-        let conn = right_db::open_connection(dir.path(), false).unwrap();
-        right_mcp::credentials::save_auth_token(&conn, "my-token").unwrap();
-        assert_eq!(load_auth_token(dir.path()).as_deref(), Some("my-token"));
+        init_db(dir.path()).await;
+        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
+        right_mcp::credentials::save_auth_token(&conn, "my-token")
+            .await
+            .unwrap();
+        assert_eq!(
+            load_auth_token(dir.path()).await.as_deref(),
+            Some("my-token")
+        );
     }
 
     #[tokio::test]
     async fn request_token_saves_and_signals_done() {
         let dir = tempdir().unwrap();
-        init_db(dir.path());
+        init_db(dir.path()).await;
 
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let (token_tx, token_rx) = oneshot::channel();
@@ -161,13 +175,16 @@ mod tests {
 
         let event = event_rx.recv().await.unwrap();
         assert!(matches!(event, LoginEvent::Done));
-        assert_eq!(load_auth_token(dir.path()).as_deref(), Some("my-new-token"));
+        assert_eq!(
+            load_auth_token(dir.path()).await.as_deref(),
+            Some("my-new-token")
+        );
     }
 
     #[tokio::test]
     async fn request_token_rejects_empty_token() {
         let dir = tempdir().unwrap();
-        init_db(dir.path());
+        init_db(dir.path()).await;
 
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let (token_tx, token_rx) = oneshot::channel();
@@ -187,14 +204,19 @@ mod tests {
     #[tokio::test]
     async fn request_token_deletes_stale_before_waiting() {
         let dir = tempdir().unwrap();
-        init_db(dir.path());
+        init_db(dir.path()).await;
 
         // Pre-seed a stale token
         {
-            let conn = right_db::open_connection(dir.path(), false).unwrap();
-            right_mcp::credentials::save_auth_token(&conn, "stale-token").unwrap();
+            let conn = right_db::open_connection(dir.path(), false).await.unwrap();
+            right_mcp::credentials::save_auth_token(&conn, "stale-token")
+                .await
+                .unwrap();
         }
-        assert_eq!(load_auth_token(dir.path()).as_deref(), Some("stale-token"));
+        assert_eq!(
+            load_auth_token(dir.path()).await.as_deref(),
+            Some("stale-token")
+        );
 
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let (token_tx, token_rx) = oneshot::channel::<String>();
@@ -212,7 +234,7 @@ mod tests {
 
         // Stale token should now be gone
         assert!(
-            load_auth_token(dir.path()).is_none(),
+            load_auth_token(dir.path()).await.is_none(),
             "stale token should be deleted before request_token awaits the new token"
         );
 
@@ -221,11 +243,14 @@ mod tests {
 
         let event = event_rx.recv().await.unwrap();
         assert!(matches!(event, LoginEvent::Done));
-        assert_eq!(load_auth_token(dir.path()).as_deref(), Some("fresh-token"));
+        assert_eq!(
+            load_auth_token(dir.path()).await.as_deref(),
+            Some("fresh-token")
+        );
     }
 
-    #[test]
-    fn auth_instruction_message_mentions_setup_token() {
+    #[tokio::test]
+    async fn auth_instruction_message_mentions_setup_token() {
         assert!(
             auth_instruction_message().contains("claude setup-token"),
             "instruction message must mention `claude setup-token`"

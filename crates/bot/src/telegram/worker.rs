@@ -382,7 +382,7 @@ async fn should_accept_bootstrap_for_paths(
     }
 }
 
-fn record_used_skill_receipts(
+async fn record_used_skill_receipts(
     agent_db_dir: &Path,
     receipts: &[UsedSkillReceipt],
     now_utc: DateTime<Utc>,
@@ -392,8 +392,11 @@ fn record_used_skill_receipts(
         return Ok(used_skill_names);
     }
 
-    let conn = right_db::open_connection(agent_db_dir, false).context("open lifecycle database")?;
+    let conn = right_db::open_connection(agent_db_dir, false)
+        .await
+        .context("open lifecycle database")?;
     right_lifecycle::bump_use_many(&conn, &used_skill_names, now_utc)
+        .await
         .context("bump lifecycle usage")?;
 
     Ok(used_skill_names)
@@ -707,7 +710,7 @@ fn background_banner(reason: BgReason) -> &'static str {
     }
 }
 
-fn create_background_run(
+async fn create_background_run(
     conn: &right_db::Connection,
     chat_id: i64,
     thread_id: i64,
@@ -727,6 +730,7 @@ fn create_background_run(
             created_at: &now,
         },
     )
+    .await
     .map_err(|e| {
         tracing::error!(
             chat_id,
@@ -819,8 +823,11 @@ fn build_memory_marker(
 /// Best-effort: a DB failure here would block the foreground turn for an
 /// observability tail. We log at WARN and return `None` so the agent still
 /// gets its reply.
-fn build_bg_marker_for_chat(agent_dir: &std::path::Path, target_chat_id: i64) -> Option<String> {
-    let conn = match right_db::open_connection(agent_dir, false) {
+async fn build_bg_marker_for_chat(
+    agent_dir: &std::path::Path,
+    target_chat_id: i64,
+) -> Option<String> {
+    let conn = match right_db::open_connection(agent_dir, false).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(?target_chat_id, "bg marker: open_connection failed: {e:#}");
@@ -847,14 +854,17 @@ fn build_bg_marker_for_chat(agent_dir: &std::path::Path, target_chat_id: i64) ->
             return None;
         }
     };
-    let row_iter = match stmt.query_map([target_chat_id], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-        ))
-    }) {
+    let row_iter = match stmt
+        .query_map([target_chat_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .await
+    {
         Ok(it) => it,
         Err(e) => {
             tracing::warn!(?target_chat_id, "bg marker: query failed: {e:#}");
@@ -1081,7 +1091,7 @@ fn log_result_timing(ctx: &InvocationLogContext, timing: &crate::cc::stream::Res
     );
 }
 
-fn cleanup_unspawned_first_call_session(
+async fn cleanup_unspawned_first_call_session(
     conn: &right_db::Connection,
     chat_id: i64,
     eff_thread_id: i64,
@@ -1090,7 +1100,7 @@ fn cleanup_unspawned_first_call_session(
     if !is_first_call {
         return;
     }
-    if let Err(e) = deactivate_current(conn, chat_id, eff_thread_id) {
+    if let Err(e) = deactivate_current(conn, chat_id, eff_thread_id).await {
         tracing::warn!(
             chat_id,
             eff_thread_id,
@@ -1438,8 +1448,9 @@ pub fn spawn_worker(
             {
                 tracing::info!(key = ?key, "bootstrap complete — identity files verified");
                 // Open a short-lived connection to deactivate the session.
-                if let Ok(conn) = right_db::open_connection(&ctx.agent_dir, false) {
+                if let Ok(conn) = right_db::open_connection(&ctx.agent_dir, false).await {
                     deactivate_current(&conn, chat_id, eff_thread_id)
+                        .await
                         .map_err(|e| {
                             tracing::error!(
                                 key = ?key,
@@ -1490,7 +1501,9 @@ pub fn spawn_worker(
                                 &ctx.agent_dir,
                                 receipts,
                                 chrono::Utc::now(),
-                            ) {
+                            )
+                            .await
+                            {
                                 Ok(names) => names,
                                 Err(e) => {
                                     tracing::warn!(
@@ -1842,13 +1855,16 @@ pub fn spawn_worker(
                         BgHandoffGateRelease::new(Arc::clone(&ctx.bg_handoff_gates), key);
 
                     let run_id_result = {
-                        match right_db::open_connection(&ctx.agent_dir, false) {
-                            Ok(conn) => create_background_run(
-                                &conn,
-                                chat_id,
-                                eff_thread_id,
-                                &main_session_id,
-                            ),
+                        match right_db::open_connection(&ctx.agent_dir, false).await {
+                            Ok(conn) => {
+                                create_background_run(
+                                    &conn,
+                                    chat_id,
+                                    eff_thread_id,
+                                    &main_session_id,
+                                )
+                                .await
+                            }
                             Err(e) => {
                                 tracing::error!(?key, "DB open for bg run create failed: {e:#}");
                                 Err("database unavailable".to_string())
@@ -1963,7 +1979,7 @@ pub fn spawn_worker(
 
                 tokio::spawn(async move {
                     let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-                    let conn = match right_db::open_connection(&agent_db_dir, false) {
+                    let conn = match right_db::open_connection(&agent_db_dir, false).await {
                         Ok(c) => c,
                         Err(e) => {
                             tracing::warn!(agent = %agent_name, "prefilter budget gate: open_connection failed: {e:#}");
@@ -1972,7 +1988,9 @@ pub fn spawn_worker(
                     };
                     let today_spend = match crate::learning_prefilter::today_spend_usd(
                         &conn, &now_utc,
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(v) => v,
                         Err(e) => {
                             tracing::warn!(agent = %agent_name, "prefilter budget gate: today_spend query failed: {e:#}");
@@ -2604,31 +2622,33 @@ async fn remove_sandbox_progress_config_file(
     }
 }
 
-fn load_skill_review_gate_snapshot(
+async fn load_skill_review_gate_snapshot(
     conn: &right_db::Connection,
     agent_name: &str,
 ) -> Result<(i64, i64, i64), right_db::DbError> {
-    right_agent::learned_skills::ensure_nudge_state(conn, agent_name)?;
+    right_agent::learned_skills::ensure_nudge_state(conn, agent_name).await?;
     conn.query_row(
         "SELECT tool_iters_since_review, turns_since_review, skill_issue_hints_since_review \
          FROM skill_nudge_state WHERE agent_name = ?1",
         [agent_name],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )
+    .await
 }
 
 #[allow(dead_code)]
-fn load_learning_episode_effort_snapshot(
+async fn load_learning_episode_effort_snapshot(
     conn: &right_db::Connection,
     agent_name: &str,
 ) -> Result<(i64, i64), right_db::DbError> {
-    right_agent::learned_skills::ensure_nudge_state(conn, agent_name)?;
+    right_agent::learned_skills::ensure_nudge_state(conn, agent_name).await?;
     conn.query_row(
         "SELECT tool_iters_since_review, creation_review_interval \
          FROM skill_nudge_state WHERE agent_name = ?1",
         [agent_name],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
+    .await
 }
 
 #[derive(Debug)]
@@ -2701,7 +2721,7 @@ fn bounded_review_failure_excerpt(value: Option<&str>) -> Option<String> {
     ))
 }
 
-fn maybe_spawn_learned_skill_review(
+async fn maybe_spawn_learned_skill_review(
     conn: &right_db::Connection,
     ctx: &WorkerContext,
     chat_id: i64,
@@ -2715,7 +2735,7 @@ fn maybe_spawn_learned_skill_review(
     };
 
     let (tool_iters_since_review, turns_since_review, skill_issue_hints_since_review) =
-        match load_skill_review_gate_snapshot(conn, &ctx.agent_name) {
+        match load_skill_review_gate_snapshot(conn, &ctx.agent_name).await {
             Ok(snapshot) => snapshot,
             Err(e) => {
                 tracing::warn!(
@@ -2747,7 +2767,9 @@ fn maybe_spawn_learned_skill_review(
             now_utc: &now_utc,
             daily_budget_usd: ctx.learning.max_daily_budget_usd,
         },
-    ) {
+    )
+    .await
+    {
         Ok(gate) => gate,
         Err(e) => {
             tracing::warn!(
@@ -2775,7 +2797,6 @@ fn maybe_spawn_learned_skill_review(
     let source_invocation_id = source_invocation_id.to_owned();
     let root_session_id = root_session_id.to_owned();
     let tg_chat_id = teloxide::types::ChatId(chat_id);
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     let failure_threshold = ctx.learning.circuit_failure_threshold.unwrap_or(5);
     let cooldown_minutes = ctx.learning.circuit_cooldown_minutes.unwrap_or(60);
 
@@ -2807,7 +2828,7 @@ fn maybe_spawn_learned_skill_review(
                 // process group. No `skill_review_reports` row is written
                 // for a cancelled review — just clear the running gate so
                 // the next eligible turn can spawn another review.
-                clear_background_review_gate_on_shutdown(&agent_db_dir, &agent_name);
+                clear_background_review_gate_on_shutdown(&agent_db_dir, &agent_name).await;
                 return;
             }
             result = review_future => result,
@@ -2858,22 +2879,12 @@ fn maybe_spawn_learned_skill_review(
                     error,
                     stdout,
                     stderr,
-                );
+                )
+                .await;
             }
         }
     }));
 }
-
-#[allow(clippy::type_complexity)]
-const _: fn(
-    &right_db::Connection,
-    &WorkerContext,
-    i64,
-    i64,
-    &str,
-    Option<&str>,
-    Option<(NudgeSignalKind, serde_json::Value)>,
-) = maybe_spawn_learned_skill_review;
 
 #[allow(dead_code)]
 fn foreground_episode_seed_trigger_kind(
@@ -2908,7 +2919,7 @@ fn foreground_episode_seed_trigger_kind(
 }
 
 #[allow(dead_code)]
-fn maybe_capture_learning_episode_seed(
+async fn maybe_capture_learning_episode_seed(
     conn: &right_db::Connection,
     ctx: &WorkerContext,
     chat_id: i64,
@@ -2921,7 +2932,7 @@ fn maybe_capture_learning_episode_seed(
     };
 
     let (tool_iters_since_review, creation_review_interval) =
-        match load_learning_episode_effort_snapshot(conn, &ctx.agent_name) {
+        match load_learning_episode_effort_snapshot(conn, &ctx.agent_name).await {
             Ok(snapshot) => snapshot,
             Err(e) => {
                 tracing::warn!(
@@ -2979,8 +2990,8 @@ fn maybe_capture_learning_episode_seed(
 /// Uses `clear_review_running` (not `mark_review_finished`) so the timestamp
 /// and status from any prior real review remain intact: no review
 /// actually finished here, only got interrupted.
-fn clear_background_review_gate_on_shutdown(agent_db_dir: &Path, agent_name: &str) {
-    let conn = match right_db::open_connection(agent_db_dir, false) {
+async fn clear_background_review_gate_on_shutdown(agent_db_dir: &Path, agent_name: &str) {
+    let conn = match right_db::open_connection(agent_db_dir, false).await {
         Ok(conn) => conn,
         Err(e) => {
             tracing::warn!(
@@ -2991,7 +3002,7 @@ fn clear_background_review_gate_on_shutdown(agent_db_dir: &Path, agent_name: &st
             return;
         }
     };
-    if let Err(e) = clear_review_running(&conn, agent_name) {
+    if let Err(e) = clear_review_running(&conn, agent_name).await {
         tracing::warn!(
             agent = %agent_name,
             "learned-skill shutdown gate-clear failed: {:#}",
@@ -3002,7 +3013,7 @@ fn clear_background_review_gate_on_shutdown(agent_db_dir: &Path, agent_name: &st
 
 // `agent_dir` is the host-side agent root: `load_auth_token` opens its
 // `data.db` to fetch the OAuth token, matching `cc::invocation::build_claude_command`.
-fn build_background_review_claude_command(
+async fn build_background_review_claude_command(
     args: &[String],
     agent_dir: &Path,
     ssh_config_path: Option<&Path>,
@@ -3014,7 +3025,7 @@ fn build_background_review_claude_command(
         })?;
         let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sandbox_name);
         let mut script = String::new();
-        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
             script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
         }
@@ -3033,9 +3044,7 @@ fn build_background_review_claude_command(
         cmd.arg(script);
         Ok(cmd)
     } else {
-        Ok(crate::cc::invocation::build_claude_command(
-            args, agent_dir, None, None,
-        ))
+        Ok(crate::cc::invocation::build_claude_command(args, agent_dir, None, None).await)
     }
 }
 
@@ -3081,6 +3090,7 @@ async fn run_background_learned_skill_review(
         ));
     }
     let learning_events = load_review_learning_events(agent_db_dir, &source_invocation_id)
+        .await
         .map_err(|e| BackgroundReviewFailure::new(format!("load review learning events: {e:#}")))?;
     let episode_execution_events = event_timeline
         .into_iter()
@@ -3132,7 +3142,8 @@ async fn run_background_learned_skill_review(
         agent_dir,
         ssh_config_path.as_deref(),
         resolved_sandbox.as_deref(),
-    )?;
+    )
+    .await?;
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     let mut child = right_process::ProcessGroupChild::spawn(cmd).map_err(|e| {
@@ -3180,11 +3191,13 @@ async fn run_background_learned_skill_review(
         })
     });
     if let Some(breakdown) = crate::cc::stream::parse_usage_full(&stdout) {
-        match right_db::open_connection(agent_db_dir, false) {
+        match right_db::open_connection(agent_db_dir, false).await {
             Ok(conn) => {
                 if let Err(e) = right_agent::usage::insert::insert_learning_skill_review(
                     &conn, &breakdown, chat_id, thread_id,
-                ) {
+                )
+                .await
+                {
                     tracing::warn!(
                         agent = %agent_name,
                         "insert_learning_skill_review failed: {e:#}"
@@ -3226,7 +3239,7 @@ async fn record_successful_background_review<F, Fut, E>(
     Fut: std::future::Future<Output = Result<(), E>>,
     E: std::fmt::Display,
 {
-    let conn = match right_db::open_connection(agent_db_dir, false) {
+    let conn = match right_db::open_connection(agent_db_dir, false).await {
         Ok(conn) => conn,
         Err(e) => {
             tracing::warn!(
@@ -3253,7 +3266,7 @@ async fn record_successful_background_review<F, Fut, E>(
 
     let trigger_kind = report.trigger_kind;
     let status = report.status;
-    if let Err(e) = insert_skill_review_report(&conn, &report) {
+    if let Err(e) = insert_skill_review_report(&conn, &report).await {
         tracing::warn!(
             agent = %agent_name,
             source_invocation_id = %report.source_invocation_id,
@@ -3268,7 +3281,9 @@ async fn record_successful_background_review<F, Fut, E>(
             &now_utc,
             failure_threshold,
             cooldown_minutes,
-        ) {
+        )
+        .await
+        {
             Ok((_count, opened)) => {
                 if opened {
                     crate::telegram::learning_alerts::spawn_circuit_open_alert(
@@ -3287,7 +3302,8 @@ async fn record_successful_background_review<F, Fut, E>(
                 "learned-skill review record_review_failure failed: {e:#}"
             ),
         }
-    } else if let Err(e) = mark_review_finished(&conn, agent_name, trigger_kind, status, true) {
+    } else if let Err(e) = mark_review_finished(&conn, agent_name, trigger_kind, status, true).await
+    {
         tracing::warn!(
             agent = %agent_name,
             "learned-skill review finish mark failed: {e:#}"
@@ -3306,7 +3322,7 @@ async fn record_successful_background_review<F, Fut, E>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn record_failed_background_review(
+async fn record_failed_background_review(
     agent_db_dir: &Path,
     agent_dir: &Path,
     agent_name: String,
@@ -3322,7 +3338,7 @@ fn record_failed_background_review(
     stdout: Option<String>,
     stderr: Option<String>,
 ) {
-    let conn = match right_db::open_connection(agent_db_dir, false) {
+    let conn = match right_db::open_connection(agent_db_dir, false).await {
         Ok(conn) => conn,
         Err(e) => {
             tracing::warn!(
@@ -3352,7 +3368,7 @@ fn record_failed_background_review(
         ),
         telegram_notified: false,
     };
-    if let Err(e) = insert_skill_review_report(&conn, &report) {
+    if let Err(e) = insert_skill_review_report(&conn, &report).await {
         tracing::warn!(
             agent = %agent_name,
             source_invocation_id = %report.source_invocation_id,
@@ -3366,7 +3382,9 @@ fn record_failed_background_review(
         &now_utc,
         failure_threshold,
         cooldown_minutes,
-    ) {
+    )
+    .await
+    {
         Ok((_count, opened)) => {
             if opened {
                 crate::telegram::learning_alerts::spawn_circuit_open_alert(
@@ -3387,31 +3405,33 @@ fn record_failed_background_review(
     }
 }
 
-fn load_review_learning_events(
+async fn load_review_learning_events(
     agent_db_dir: &Path,
     source_invocation_id: &str,
 ) -> anyhow::Result<Vec<String>> {
-    let conn = right_db::open_connection(agent_db_dir, false)?;
+    let conn = right_db::open_connection(agent_db_dir, false).await?;
     let mut stmt = conn.prepare(
         "SELECT action, skill_name, phase, COALESCE(status, ''), COALESCE(summary, '') \
          FROM skill_learning_events WHERE invocation_id = ?1 ORDER BY id LIMIT ?2",
     )?;
-    let rows = stmt.query_map(
-        right_db::params![
-            source_invocation_id,
-            BACKGROUND_REVIEW_LEARNING_EVENTS_LIMIT
-        ],
-        |row| {
-            let action: String = row.get(0)?;
-            let skill_name: String = row.get(1)?;
-            let phase: String = row.get(2)?;
-            let status: String = row.get(3)?;
-            let summary: String = row.get(4)?;
-            Ok(format!(
-                "{phase} {action} {skill_name} status={status} summary={summary}"
-            ))
-        },
-    )?;
+    let rows = stmt
+        .query_map(
+            right_db::params![
+                source_invocation_id,
+                BACKGROUND_REVIEW_LEARNING_EVENTS_LIMIT
+            ],
+            |row| {
+                let action: String = row.get(0)?;
+                let skill_name: String = row.get(1)?;
+                let phase: String = row.get(2)?;
+                let status: String = row.get(3)?;
+                let summary: String = row.get(4)?;
+                Ok(format!(
+                    "{phase} {action} {skill_name} status={status} summary={summary}"
+                ))
+            },
+        )
+        .await?;
     let mut events = Vec::new();
     for row in rows {
         events.push(row?);
@@ -3473,14 +3493,13 @@ async fn invoke_cc(
     routed_message_ids: &[i32],
     ctx: &WorkerContext,
 ) -> Result<CcReply, InvokeCcFailure> {
-    // Keep DB access per worker; the sync right-db wrapper is not shared across
-    // concurrent worker tasks.
     let conn = right_db::open_connection(&ctx.agent_dir, false)
+        .await
         .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
 
     // Session lookup / create (SES-02, SES-03)
     let (cmd_args, is_first_call, session_uuid) =
-        match get_active_session(&conn, chat_id, eff_thread_id) {
+        match get_active_session(&conn, chat_id, eff_thread_id).await {
             Ok(Some(SessionRow {
                 root_session_id, ..
             })) => {
@@ -3493,6 +3512,7 @@ async fn invoke_cc(
                 let new_uuid = Uuid::new_v4().to_string();
                 let label = first_text.map(truncate_label);
                 create_session(&conn, chat_id, eff_thread_id, &new_uuid, label)
+                    .await
                     .map_err(|e| format!("⚠️ Agent error: session create failed: {:#}", e))?;
                 let uuid = new_uuid.clone();
                 (vec!["--session-id".to_string(), new_uuid], true, uuid)
@@ -3670,7 +3690,7 @@ async fn invoke_cc(
         };
 
         let marker = build_memory_marker(wrapper_status, client_drops_24h);
-        let bg_marker = build_bg_marker_for_chat(&ctx.agent_dir, chat_id);
+        let bg_marker = build_bg_marker_for_chat(&ctx.agent_dir, chat_id).await;
         match (
             recall_content.as_deref(),
             marker.as_deref(),
@@ -3750,7 +3770,7 @@ async fn invoke_cc(
             memory_mode.as_ref(),
         );
         // Inject auth token as env var in the remote shell
-        if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir) {
+        if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
             let escaped_token = token.replace('\'', "'\\''");
             assembly_script =
                 format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped_token}'\n{assembly_script}");
@@ -3795,7 +3815,7 @@ async fn invoke_cc(
         c.arg(&assembly_script);
         c.env("HOME", &ctx.agent_dir);
         c.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir) {
+        if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
             c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
         }
         c.current_dir(&ctx.agent_dir);
@@ -3829,7 +3849,7 @@ async fn invoke_cc(
         // Remove the stop_token regardless of which path we take below — stale
         // entries would confuse subsequent batches.
         ctx.stop_tokens.remove(&(chat_id, eff_thread_id));
-        cleanup_unspawned_first_call_session(&conn, chat_id, eff_thread_id, is_first_call);
+        cleanup_unspawned_first_call_session(&conn, chat_id, eff_thread_id, is_first_call).await;
         if let Some(active) = active_progress.take() {
             finish_progress_invocation(ctx, active).await;
         }
@@ -3875,7 +3895,8 @@ async fn invoke_cc(
         // are logged and the loop continues, so the transaction is intentionally
         // not used for rollback semantics — we always want to commit whatever
         // succeeded, since partial routing data is better than none.
-        let tx_result = conn.transaction().and_then(|tx| {
+        let tx_result: Result<(), right_db::DbError> = async {
+            let tx = conn.transaction().await?;
             for routed_message_id in routed_message_ids {
                 match right_db::conversation::mark_routed(
                     &tx,
@@ -3885,7 +3906,9 @@ async fn invoke_cc(
                     *routed_message_id,
                     &session_uuid,
                     turn_id,
-                ) {
+                )
+                .await
+                {
                     Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(
@@ -3900,8 +3923,9 @@ async fn invoke_cc(
                     }
                 }
             }
-            tx.commit()
-        });
+            tx.commit().await
+        }
+        .await;
         if let Err(e) = tx_result {
             tracing::warn!(
                 chat_id = log_ctx.chat_id,
@@ -4112,7 +4136,9 @@ async fn invoke_cc(
                             &execution_event_scope,
                             execution_event_seq,
                             &line,
-                        ) {
+                        )
+                        .await
+                        {
                             tracing::warn!(
                                 chat_id = log_ctx.chat_id,
                                 eff_thread_id = log_ctx.eff_thread_id,
@@ -4170,6 +4196,7 @@ async fn invoke_cc(
                                                 chat_id,
                                                 eff_thread_id,
                                             )
+                                            .await
                                         {
                                             tracing::warn!(
                                                 chat_id = log_ctx.chat_id,
@@ -4607,6 +4634,7 @@ async fn invoke_cc(
             // Deactivate the session created before invoke_cc — it's from a failed auth
             // attempt and must not be resumed. Next message will start fresh.
             deactivate_current(&conn, chat_id, eff_thread_id)
+                .await
                 .map_err(|e| {
                     tracing::error!(
                         chat_id = log_ctx.chat_id,
@@ -4718,6 +4746,7 @@ async fn invoke_cc(
         // --resume a session that doesn't exist on the CC side.
         if is_first_call {
             deactivate_current(&conn, chat_id, eff_thread_id)
+                .await
                 .map_err(|e| {
                     tracing::error!(
                         chat_id = log_ctx.chat_id,
@@ -4755,20 +4784,22 @@ async fn invoke_cc(
     match parse_reply_output(&stdout_str) {
         Ok((reply_output, session_id_from_cc)) => {
             // D-15: verify session_id at debug level only
-            if let (Some(cc_sid), true) = (session_id_from_cc, is_first_call)
-                && let Ok(Some(active)) = get_active_session(&conn, chat_id, eff_thread_id)
-                && cc_sid != active.root_session_id
-            {
-                tracing::warn!(
-                    ?chat_id,
-                    cc_session_id = %cc_sid,
-                    stored_session_id = %active.root_session_id,
-                    "session_id mismatch between CC and stored — not blocking"
-                );
+            if let (Some(cc_sid), true) = (session_id_from_cc, is_first_call) {
+                if let Ok(Some(active)) = get_active_session(&conn, chat_id, eff_thread_id).await
+                    && cc_sid != active.root_session_id
+                {
+                    tracing::warn!(
+                        ?chat_id,
+                        cc_session_id = %cc_sid,
+                        stored_session_id = %active.root_session_id,
+                        "session_id mismatch between CC and stored — not blocking"
+                    );
+                }
             }
             // Update last_used_at (non-fatal: log error but do not fail the reply)
-            if let Ok(Some(active)) = get_active_session(&conn, chat_id, eff_thread_id) {
+            if let Ok(Some(active)) = get_active_session(&conn, chat_id, eff_thread_id).await {
                 touch_session(&conn, active.id)
+                    .await
                     .map_err(|e| tracing::error!(?chat_id, "touch_session failed: {:#}", e))
                     .ok();
             }
@@ -4892,10 +4923,10 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    #[test]
-    fn used_skill_receipts_record_rightx_usage_once_per_turn_in_db() {
+    #[tokio::test]
+    async fn used_skill_receipts_record_rightx_usage_once_per_turn_in_db() {
         let temp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(temp.path(), true).unwrap();
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
         drop(conn);
         let receipts = vec![
             used_skill_receipt("rightx-demo"),
@@ -4904,34 +4935,48 @@ mod tests {
         ];
 
         let used_names =
-            record_used_skill_receipts(temp.path(), &receipts, used_skill_receipts_now()).unwrap();
+            record_used_skill_receipts(temp.path(), &receipts, used_skill_receipts_now())
+                .await
+                .unwrap();
 
         assert_eq!(
             used_names.into_iter().collect::<Vec<_>>(),
             vec!["rightx-demo".to_owned()]
         );
-        let conn = right_db::open_connection(temp.path(), false).unwrap();
+        let conn = right_db::open_connection(temp.path(), false).await.unwrap();
         let row = right_lifecycle::get(&conn, "rightx-demo")
+            .await
             .unwrap()
             .expect("rightx receipt should create lifecycle row");
         assert_eq!(row.use_count, 1);
         assert_eq!(row.created_by, right_lifecycle::CreatedBy::Foreground);
         assert_eq!(row.last_used_at, Some(used_skill_receipts_now()));
-        assert!(right_lifecycle::get(&conn, "not-rightx").unwrap().is_none());
+        assert!(
+            right_lifecycle::get(&conn, "not-rightx")
+                .await
+                .unwrap()
+                .is_none()
+        );
 
-        record_used_skill_receipts(temp.path(), &receipts, used_skill_receipts_now()).unwrap();
-        let row = right_lifecycle::get(&conn, "rightx-demo").unwrap().unwrap();
+        record_used_skill_receipts(temp.path(), &receipts, used_skill_receipts_now())
+            .await
+            .unwrap();
+        let row = right_lifecycle::get(&conn, "rightx-demo")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.use_count, 2);
     }
 
-    #[test]
-    fn used_skill_receipts_return_error_when_lifecycle_db_cannot_open() {
+    #[tokio::test]
+    async fn used_skill_receipts_return_error_when_lifecycle_db_cannot_open() {
         let temp = tempfile::tempdir().unwrap();
         let missing_agent_dir = temp.path().join("missing-agent");
         let receipts = vec![used_skill_receipt("rightx-demo")];
 
         let err =
             record_used_skill_receipts(&missing_agent_dir, &receipts, used_skill_receipts_now())
+                .await
                 .expect_err("missing DB directory should return an error");
 
         assert!(
@@ -4940,21 +4985,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cleanup_unspawned_first_call_session_only_deactivates_new_session() {
+    #[tokio::test]
+    async fn cleanup_unspawned_first_call_session_only_deactivates_new_session() {
         let temp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(temp.path(), true).unwrap();
-        create_session(&conn, 42, 0, "session-1", Some("hello")).unwrap();
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+        create_session(&conn, 42, 0, "session-1", Some("hello"))
+            .await
+            .unwrap();
 
-        cleanup_unspawned_first_call_session(&conn, 42, 0, false);
-        assert!(get_active_session(&conn, 42, 0).unwrap().is_some());
+        cleanup_unspawned_first_call_session(&conn, 42, 0, false).await;
+        assert!(get_active_session(&conn, 42, 0).await.unwrap().is_some());
 
-        cleanup_unspawned_first_call_session(&conn, 42, 0, true);
-        assert!(get_active_session(&conn, 42, 0).unwrap().is_none());
+        cleanup_unspawned_first_call_session(&conn, 42, 0, true).await;
+        assert!(get_active_session(&conn, 42, 0).await.unwrap().is_none());
     }
 
-    #[test]
-    fn stop_token_registration_makes_turn_visible_before_spawn() {
+    #[tokio::test]
+    async fn stop_token_registration_makes_turn_visible_before_spawn() {
         let stop_tokens: super::super::StopTokens = Arc::new(DashMap::new());
         let key = (42, 0);
 
@@ -4969,8 +5016,8 @@ mod tests {
         assert!(stop_tokens.get(&key).unwrap().value().1.is_cancelled());
     }
 
-    #[test]
-    fn clear_foreground_handoff_controls_removes_shutdown_handoff_state() {
+    #[tokio::test]
+    async fn clear_foreground_handoff_controls_removes_shutdown_handoff_state() {
         let stop_tokens: super::super::StopTokens = Arc::new(DashMap::new());
         let bg_requests: super::super::BgRequests = Arc::new(DashMap::new());
         let bg_handoff_gates: super::super::BgHandoffGates = Arc::new(DashMap::new());
@@ -4996,12 +5043,15 @@ mod tests {
     #[tokio::test]
     async fn record_failed_background_review_persists_failure_and_finishes_gate() {
         let temp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(temp.path(), true).unwrap();
-        right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+        right_agent::learned_skills::ensure_nudge_state(&conn, "right")
+            .await
+            .unwrap();
         conn.execute(
             "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name = 'right'",
             [],
         )
+        .await
         .unwrap();
         drop(conn);
 
@@ -5023,9 +5073,10 @@ mod tests {
             ),
             Some(format!("stdout-head{}STDOUT-TAIL", "x".repeat(9000))),
             Some(format!("stderr-head{}STDERR-TAIL", "y".repeat(9000))),
-        );
+        )
+        .await;
 
-        let conn = right_db::open_connection(temp.path(), false).unwrap();
+        let conn = right_db::open_connection(temp.path(), false).await.unwrap();
         let report: (String, String, String, String, String) = conn
             .query_row(
                 "SELECT trigger_kind, status, confidence, source_invocation_id, review_output_json \
@@ -5033,6 +5084,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
+            .await
             .unwrap();
         assert_eq!(report.0, "skill_issue_signal");
         assert_eq!(report.1, "failed");
@@ -5083,6 +5135,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
+            .await
             .unwrap();
         // record_review_failure clears the running gate and increments the
         // failure counter; it intentionally does NOT update last_review_status.
@@ -5092,12 +5145,15 @@ mod tests {
     #[tokio::test]
     async fn record_successful_background_review_persists_notified_false_when_send_fails() {
         let temp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(temp.path(), true).unwrap();
-        right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+        right_agent::learned_skills::ensure_nudge_state(&conn, "right")
+            .await
+            .unwrap();
         conn.execute(
             "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name = 'right'",
             [],
         )
+        .await
         .unwrap();
         drop(conn);
 
@@ -5138,7 +5194,7 @@ mod tests {
         )
         .await;
 
-        let conn = right_db::open_connection(temp.path(), false).unwrap();
+        let conn = right_db::open_connection(temp.path(), false).await.unwrap();
         let row: (i64, i64, String) = conn
             .query_row(
                 "SELECT r.telegram_notified, s.review_running, s.last_review_status \
@@ -5148,6 +5204,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row, (0, 0, "create_candidate".to_owned()));
     }
@@ -5155,12 +5212,15 @@ mod tests {
     #[tokio::test]
     async fn record_successful_background_review_sends_notice_and_persists_notified_true() {
         let temp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(temp.path(), true).unwrap();
-        right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+        right_agent::learned_skills::ensure_nudge_state(&conn, "right")
+            .await
+            .unwrap();
         conn.execute(
             "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name = 'right'",
             [],
         )
+        .await
         .unwrap();
         drop(conn);
 
@@ -5212,7 +5272,7 @@ mod tests {
 
         assert_eq!(sent.lock().unwrap().as_slice(), ["notice"]);
 
-        let conn = right_db::open_connection(temp.path(), false).unwrap();
+        let conn = right_db::open_connection(temp.path(), false).await.unwrap();
         let row: (i64, i64, String) = conn
             .query_row(
                 "SELECT r.telegram_notified, s.review_running, s.last_review_status \
@@ -5222,13 +5282,14 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
+            .await
             .unwrap();
 
         assert_eq!(row, (1, 0, "create_candidate".to_owned()));
     }
 
-    #[test]
-    fn background_review_sandbox_command_disables_ssh_controlmaster() {
+    #[tokio::test]
+    async fn background_review_sandbox_command_disables_ssh_controlmaster() {
         let temp = tempfile::tempdir().unwrap();
         let args = vec![
             "claude".to_owned(),
@@ -5243,6 +5304,7 @@ mod tests {
             Some(Path::new("ssh.config")),
             Some("right-demo"),
         )
+        .await
         .expect("sandbox name provided");
         let std_cmd = cmd.as_std();
         let ssh_args: Vec<String> = std_cmd
@@ -5265,8 +5327,8 @@ mod tests {
         assert!(!ssh_args[8].contains("--fork-session"));
     }
 
-    #[test]
-    fn background_review_sandbox_command_sources_user_local_env() {
+    #[tokio::test]
+    async fn background_review_sandbox_command_sources_user_local_env() {
         let temp = tempfile::tempdir().unwrap();
         let args = vec![
             "claude".to_owned(),
@@ -5281,6 +5343,7 @@ mod tests {
             Some(Path::new("ssh.config")),
             Some("right-demo"),
         )
+        .await
         .expect("sandbox name provided");
         let std_cmd = cmd.as_std();
         let ssh_args: Vec<String> = std_cmd
@@ -5304,8 +5367,8 @@ mod tests {
         assert!(script.contains("/sandbox/.local/bin"));
     }
 
-    #[test]
-    fn invocation_log_context_carries_thread_session_and_turn() {
+    #[tokio::test]
+    async fn invocation_log_context_carries_thread_session_and_turn() {
         let ctx = InvocationLogContext::new(
             -1003977763163,
             458,
@@ -5320,8 +5383,8 @@ mod tests {
         assert_eq!(ctx.turn_id, 42);
     }
 
-    #[test]
-    fn invocation_log_context_distinguishes_parallel_topics_in_same_chat() {
+    #[tokio::test]
+    async fn invocation_log_context_distinguishes_parallel_topics_in_same_chat() {
         let agenda =
             InvocationLogContext::new(-1003977763163, 458, "agenda-session".to_owned(), 10);
         let danilo = InvocationLogContext::new(-1003977763163, 2, "danilo-session".to_owned(), 11);
@@ -5333,8 +5396,8 @@ mod tests {
         assert_ne!(agenda.turn_id, danilo.turn_id);
     }
 
-    #[test]
-    fn invoking_claude_log_includes_topic_session_and_turn() {
+    #[tokio::test]
+    async fn invoking_claude_log_includes_topic_session_and_turn() {
         let ctx = InvocationLogContext::new(
             -1003977763163,
             458,
@@ -5357,8 +5420,8 @@ mod tests {
         assert!(log.contains("sandboxed=true"), "{log}");
     }
 
-    #[test]
-    fn stream_update_log_includes_topic_session_and_assistant_turn() {
+    #[tokio::test]
+    async fn stream_update_log_includes_topic_session_and_assistant_turn() {
         let ctx = InvocationLogContext::new(-1003977763163, 2, "2f4a29c9".to_owned(), 43);
 
         let log = capture_worker_log(|| log_stream_update(&ctx, 5, "tool call"));
@@ -5372,8 +5435,8 @@ mod tests {
         assert!(log.contains("assistant_turn=5"), "{log}");
     }
 
-    #[test]
-    fn claude_finished_log_includes_topic_session_turn_and_stream_log() {
+    #[tokio::test]
+    async fn claude_finished_log_includes_topic_session_turn_and_stream_log() {
         let ctx = InvocationLogContext::new(-1003977763163, 458, "f7d5a319".to_owned(), 44);
         let stream_log = std::path::Path::new("/tmp/f7d5a319.ndjson");
 
@@ -5443,8 +5506,8 @@ esac
     }
 
     // format_error_reply tests
-    #[test]
-    fn error_reply_contains_exit_code_and_stderr() {
+    #[tokio::test]
+    async fn error_reply_contains_exit_code_and_stderr() {
         let reply = format_error_reply(1, "something failed");
         assert!(reply.contains("⚠️ Agent error (exit 1):"));
         assert!(reply.contains("something failed"));
@@ -5452,8 +5515,8 @@ esac
         assert!(reply.contains("</pre>"));
     }
 
-    #[test]
-    fn error_reply_truncates_long_stderr() {
+    #[tokio::test]
+    async fn error_reply_truncates_long_stderr() {
         let long_stderr = "y".repeat(500); // use 'y' — no collision with "exit" containing 'x'
         let reply = format_error_reply(2, &long_stderr);
         // The y-block in the reply should not exceed 300 chars of stderr
@@ -5461,8 +5524,8 @@ esac
         assert_eq!(y_block.len(), 300);
     }
 
-    #[test]
-    fn error_reply_escapes_html_special_chars() {
+    #[tokio::test]
+    async fn error_reply_escapes_html_special_chars() {
         let stderr = "status: <FailedPrecondition> & \"sandbox is not ready\"";
         let reply = format_error_reply(255, stderr);
         // raw special characters must not leak through as active HTML
@@ -5472,62 +5535,62 @@ esac
     }
 
     // is_auth_error tests
-    #[test]
-    fn is_auth_error_detects_403() {
+    #[tokio::test]
+    async fn is_auth_error_detects_403() {
         let stdout = r#"{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate. API Error: 403 status code (no body)"}"#;
         assert!(is_auth_error(stdout));
     }
 
-    #[test]
-    fn is_auth_error_detects_401() {
+    #[tokio::test]
+    async fn is_auth_error_detects_401() {
         let stdout = r#"{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate. API Error: 401 Unauthorized"}"#;
         assert!(is_auth_error(stdout));
     }
 
-    #[test]
-    fn is_auth_error_detects_not_logged_in() {
+    #[tokio::test]
+    async fn is_auth_error_detects_not_logged_in() {
         let stdout = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;
         assert!(is_auth_error(stdout));
     }
 
-    #[test]
-    fn is_auth_error_detects_please_run_login() {
+    #[tokio::test]
+    async fn is_auth_error_detects_please_run_login() {
         let stdout = r#"{"type":"result","subtype":"success","is_error":true,"result":"Please run /login · API Error: 403"}"#;
         assert!(is_auth_error(stdout));
     }
 
-    #[test]
-    fn is_auth_error_false_for_normal_error() {
+    #[tokio::test]
+    async fn is_auth_error_false_for_normal_error() {
         let stdout = r#"{"type":"result","subtype":"success","is_error":true,"result":"Tool execution failed: timeout"}"#;
         assert!(!is_auth_error(stdout));
     }
 
-    #[test]
-    fn is_auth_error_false_for_success() {
+    #[tokio::test]
+    async fn is_auth_error_false_for_success() {
         let stdout = r#"{"type":"result","subtype":"success","is_error":false,"result":{"content":"hello"}}"#;
         assert!(!is_auth_error(stdout));
     }
 
-    #[test]
-    fn is_auth_error_false_for_non_json() {
+    #[tokio::test]
+    async fn is_auth_error_false_for_non_json() {
         assert!(!is_auth_error("Not logged in. Run claude auth login."));
     }
 
-    #[test]
-    fn is_auth_error_false_for_empty() {
+    #[tokio::test]
+    async fn is_auth_error_false_for_empty() {
         assert!(!is_auth_error(""));
     }
 
-    #[test]
-    fn progress_sandbox_mcp_path_points_inside_sandbox_claude_dir() {
+    #[tokio::test]
+    async fn progress_sandbox_mcp_path_points_inside_sandbox_claude_dir() {
         assert_eq!(
             progress_sandbox_mcp_path("inv-1"),
             "/sandbox/.claude/mcp-inv-1.json"
         );
     }
 
-    #[test]
-    fn progress_registration_target_uses_effective_thread_id() {
+    #[tokio::test]
+    async fn progress_registration_target_uses_effective_thread_id() {
         let target = crate::telegram::progress::ProgressTarget {
             invocation_id: "inv-1".to_owned(),
             token: "token".to_owned(),
@@ -5540,8 +5603,8 @@ esac
 
     // build_memory_marker tests
 
-    #[test]
-    fn marker_quota_exhausted_includes_topup_instruction() {
+    #[tokio::test]
+    async fn marker_quota_exhausted_includes_topup_instruction() {
         let status = right_memory::MemoryStatus::QuotaExhausted {
             since: std::time::Instant::now(),
         };
@@ -5560,15 +5623,15 @@ esac
         );
     }
 
-    #[test]
-    fn marker_healthy_no_drops_returns_none() {
+    #[tokio::test]
+    async fn marker_healthy_no_drops_returns_none() {
         let status = right_memory::MemoryStatus::Healthy;
         assert!(build_memory_marker(status, 0).is_none());
     }
 
     // extract_auth_url tests
-    #[test]
-    fn extract_auth_url_finds_anthropic_url() {
+    #[tokio::test]
+    async fn extract_auth_url_finds_anthropic_url() {
         let lines = vec![
             "Initializing...".to_string(),
             "Open this URL to authenticate: https://console.anthropic.com/oauth/authorize?client_id=abc".to_string(),
@@ -5579,16 +5642,16 @@ esac
         assert!(url.unwrap().contains("console.anthropic.com"));
     }
 
-    #[test]
-    fn extract_auth_url_finds_claude_ai_url() {
+    #[tokio::test]
+    async fn extract_auth_url_finds_claude_ai_url() {
         let lines = vec!["Please visit: https://claude.ai/oauth/login?token=xyz".to_string()];
         let url = extract_auth_url(&lines);
         assert!(url.is_some());
         assert!(url.unwrap().contains("claude.ai"));
     }
 
-    #[test]
-    fn extract_auth_url_finds_claude_com_url() {
+    #[tokio::test]
+    async fn extract_auth_url_finds_claude_com_url() {
         // Real URL from `claude auth login --claudeai` inside sandbox.
         let lines = vec![
             "Opening browser to sign in…\r".to_string(),
@@ -5599,8 +5662,8 @@ esac
         assert!(url.unwrap().contains("claude.com/cai/oauth/"));
     }
 
-    #[test]
-    fn extract_auth_url_returns_none_when_no_url() {
+    #[tokio::test]
+    async fn extract_auth_url_returns_none_when_no_url() {
         let lines = vec![
             "Starting up...".to_string(),
             "Checking credentials...".to_string(),
@@ -5608,20 +5671,20 @@ esac
         assert!(extract_auth_url(&lines).is_none());
     }
 
-    #[test]
-    fn extract_auth_url_ignores_non_auth_urls() {
+    #[tokio::test]
+    async fn extract_auth_url_ignores_non_auth_urls() {
         let lines = vec!["Connecting to https://api.example.com/v1".to_string()];
         assert!(extract_auth_url(&lines).is_none());
     }
 
-    #[test]
-    fn extract_auth_url_handles_empty() {
+    #[tokio::test]
+    async fn extract_auth_url_handles_empty() {
         let lines: Vec<String> = vec![];
         assert!(extract_auth_url(&lines).is_none());
     }
 
-    #[test]
-    fn extract_auth_url_ignores_non_oauth_anthropic_url() {
+    #[tokio::test]
+    async fn extract_auth_url_ignores_non_oauth_anthropic_url() {
         // The "supported countries" link from error messages must not be picked up.
         let lines = vec![
             "Check supported countries at https://anthropic.com/supported-countries".to_string(),
@@ -5629,8 +5692,8 @@ esac
         assert!(extract_auth_url(&lines).is_none());
     }
 
-    #[test]
-    fn extract_auth_url_extracts_just_url_from_line() {
+    #[tokio::test]
+    async fn extract_auth_url_extracts_just_url_from_line() {
         let lines = vec![
             "Go to https://console.anthropic.com/oauth/authorize?foo=bar to continue".to_string(),
         ];
@@ -5656,8 +5719,8 @@ esac
             .collect()
     }
 
-    #[test]
-    fn working_keyboard_modes_render_expected_buttons() {
+    #[tokio::test]
+    async fn working_keyboard_modes_render_expected_buttons() {
         for (chat, thread, mode, expected) in [
             (
                 12345,
@@ -5698,8 +5761,8 @@ esac
         }
     }
 
-    #[test]
-    fn thinking_keyboard_mode_maps_visibility_and_chat_type() {
+    #[tokio::test]
+    async fn thinking_keyboard_mode_maps_visibility_and_chat_type() {
         assert_eq!(
             thinking_keyboard_mode(false, false),
             ThinkingKeyboardMode::Collapsed
@@ -5718,8 +5781,8 @@ esac
         );
     }
 
-    #[test]
-    fn thinking_anchor_text_collapsed_is_static_working_message() {
+    #[tokio::test]
+    async fn thinking_anchor_text_collapsed_is_static_working_message() {
         let events = VecDeque::new();
         let usage = crate::cc::stream::StreamUsage::default();
 
@@ -5729,8 +5792,8 @@ esac
         );
     }
 
-    #[test]
-    fn thinking_anchor_text_expanded_uses_stream_formatter() {
+    #[tokio::test]
+    async fn thinking_anchor_text_expanded_uses_stream_formatter() {
         let mut events = VecDeque::new();
         events.push_back(crate::cc::stream::StreamEvent::Thinking);
         let usage = crate::cc::stream::StreamUsage {
@@ -5743,8 +5806,8 @@ esac
         assert!(text.contains("Turn 1"));
     }
 
-    #[test]
-    fn thinking_anchor_render_collapsed_uses_working_text_and_keyboard() {
+    #[tokio::test]
+    async fn thinking_anchor_render_collapsed_uses_working_text_and_keyboard() {
         let mut events = VecDeque::new();
         events.push_back(crate::cc::stream::StreamEvent::Text(
             "hidden while collapsed".into(),
@@ -5773,8 +5836,8 @@ esac
         );
     }
 
-    #[test]
-    fn thinking_anchor_render_empty_expanded_starts_without_stream_event() {
+    #[tokio::test]
+    async fn thinking_anchor_render_empty_expanded_starts_without_stream_event() {
         let events = VecDeque::new();
         let usage = crate::cc::stream::StreamUsage::default();
 
@@ -5798,8 +5861,8 @@ esac
         );
     }
 
-    #[test]
-    fn thinking_anchor_render_expanded_group_uses_preview_and_group_keyboard() {
+    #[tokio::test]
+    async fn thinking_anchor_render_expanded_group_uses_preview_and_group_keyboard() {
         let mut events = VecDeque::new();
         events.push_back(crate::cc::stream::StreamEvent::ToolUse {
             tool: "Bash".into(),
@@ -5827,8 +5890,8 @@ esac
         );
     }
 
-    #[test]
-    fn append_system_notification_wraps_notice_once() {
+    #[tokio::test]
+    async fn append_system_notification_wraps_notice_once() {
         let mut prompt = "base".to_owned();
         append_system_notification(&mut prompt, "repair complete");
 
@@ -5838,15 +5901,15 @@ esac
         );
     }
 
-    #[test]
-    fn missing_repair_notice_leaves_system_prompt_unchanged() {
+    #[tokio::test]
+    async fn missing_repair_notice_leaves_system_prompt_unchanged() {
         let prompt = append_repair_notice_to_system_prompt("base system prompt".to_owned(), None);
 
         assert_eq!(prompt, "base system prompt");
     }
 
-    #[test]
-    fn should_trigger_mcp_repair_from_init_only_for_unhealthy_right() {
+    #[tokio::test]
+    async fn should_trigger_mcp_repair_from_init_only_for_unhealthy_right() {
         let bad = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"right","status":"needs-auth"}]}"#;
         let good = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"right","status":"connected"}]}"#;
         let other = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
@@ -5856,8 +5919,8 @@ esac
         assert!(!should_trigger_mcp_repair_from_init(other));
     }
 
-    #[test]
-    fn foreground_seed_trigger_derives_without_review_gate() {
+    #[tokio::test]
+    async fn foreground_seed_trigger_derives_without_review_gate() {
         let accepted_learning = (
             NudgeSignalKind::Learning,
             serde_json::json!({"kind": "create_candidate"}),
@@ -5874,46 +5937,46 @@ esac
         assert_eq!(foreground_episode_seed_trigger_kind(None, 9, 10), None);
     }
 
-    #[test]
-    fn truncate_to_chars_short_string() {
+    #[tokio::test]
+    async fn truncate_to_chars_short_string() {
         assert_eq!(truncate_to_chars("hello", 800), "hello");
     }
 
-    #[test]
-    fn truncate_to_chars_exact_limit() {
+    #[tokio::test]
+    async fn truncate_to_chars_exact_limit() {
         let s = "a".repeat(800);
         assert_eq!(truncate_to_chars(&s, 800).chars().count(), 800);
     }
 
-    #[test]
-    fn truncate_to_chars_over_limit() {
+    #[tokio::test]
+    async fn truncate_to_chars_over_limit() {
         let s = "a".repeat(1000);
         assert_eq!(truncate_to_chars(&s, 800).chars().count(), 800);
     }
 
-    #[test]
-    fn truncate_to_chars_multibyte() {
+    #[tokio::test]
+    async fn truncate_to_chars_multibyte() {
         let s = "é".repeat(1000);
         let truncated = truncate_to_chars(&s, 800);
         assert_eq!(truncated.chars().count(), 800);
         assert_eq!(truncated.len(), 1600);
     }
 
-    #[test]
-    fn truncate_to_chars_emoji() {
+    #[tokio::test]
+    async fn truncate_to_chars_emoji() {
         let s = "🎯".repeat(1000);
         let truncated = truncate_to_chars(&s, 800);
         assert_eq!(truncated.chars().count(), 800);
         assert_eq!(truncated.len(), 3200);
     }
 
-    #[test]
-    fn truncate_to_chars_empty() {
+    #[tokio::test]
+    async fn truncate_to_chars_empty() {
         assert_eq!(truncate_to_chars("", 800), "");
     }
 
-    #[test]
-    fn truncate_to_chars_cyrillic() {
+    #[tokio::test]
+    async fn truncate_to_chars_cyrillic() {
         let s = "я".repeat(500);
         let truncated = truncate_to_chars(&s, 800);
         assert_eq!(truncated.chars().count(), 500);
@@ -5958,8 +6021,8 @@ esac
         }
     }
 
-    #[test]
-    fn build_input_message_passes_quoted_text() {
+    #[tokio::test]
+    async fn build_input_message_passes_quoted_text() {
         let mut msg = debug_msg(7, None);
         msg.text = Some("what do you mean?".into());
         msg.reply_to_id = Some(6);
@@ -5971,15 +6034,15 @@ esac
         assert_eq!(input.quoted_text.as_deref(), Some("selected fragment"));
     }
 
-    #[test]
-    fn routed_message_ids_preserve_batch_order() {
+    #[tokio::test]
+    async fn routed_message_ids_preserve_batch_order() {
         let batch = vec![debug_msg(10, None), debug_msg(11, None)];
 
         assert_eq!(routed_message_ids(&batch), vec![10, 11]);
     }
 
-    #[test]
-    fn assistant_text_was_delivered_accepts_caption_or_message() {
+    #[tokio::test]
+    async fn assistant_text_was_delivered_accepts_caption_or_message() {
         assert!(assistant_text_was_delivered(true, false));
         assert!(assistant_text_was_delivered(false, true));
         assert!(!assistant_text_was_delivered(false, false));
@@ -6094,22 +6157,22 @@ esac
         assert_eq!(batch.len(), 3);
     }
 
-    #[test]
-    fn batch_is_addressed_drops_all_none_group_batch() {
+    #[tokio::test]
+    async fn batch_is_addressed_drops_all_none_group_batch() {
         let batch = vec![debug_msg(1, Some("alb")), debug_msg(2, Some("alb"))];
         assert!(!batch_is_addressed(&batch));
     }
 
-    #[test]
-    fn batch_is_addressed_passes_when_one_sibling_addressed() {
+    #[tokio::test]
+    async fn batch_is_addressed_passes_when_one_sibling_addressed() {
         let mut a = debug_msg(1, Some("alb"));
         a.address = Some(super::super::mention::AddressKind::GroupMentionText);
         let batch = vec![a, debug_msg(2, Some("alb"))];
         assert!(batch_is_addressed(&batch));
     }
 
-    #[test]
-    fn batch_is_addressed_drops_lone_forward() {
+    #[tokio::test]
+    async fn batch_is_addressed_drops_lone_forward() {
         // A forward admitted by the routing filter (address: None) on its own
         // must NOT pass the worker-level addressed gate.
         let mut fwd = debug_msg(1, None);
@@ -6124,8 +6187,8 @@ esac
         assert!(!batch_is_addressed(&[fwd]));
     }
 
-    #[test]
-    fn batch_is_addressed_admits_addressed_plus_forward() {
+    #[tokio::test]
+    async fn batch_is_addressed_admits_addressed_plus_forward() {
         // Mixed batch — an addressed comment alongside an admitted forward —
         // passes the gate because at least one sibling carries an address.
         let mut comment = debug_msg(1, None);
@@ -6149,26 +6212,26 @@ esac
 mod tag_tests {
     use super::*;
 
-    #[test]
-    fn dm_tags_have_chat_only() {
+    #[tokio::test]
+    async fn dm_tags_have_chat_only() {
         let t = retain_tags(42, Some(42), 0, false);
         assert_eq!(t, vec!["chat:42"]);
     }
 
-    #[test]
-    fn group_tags_have_user_and_topic() {
+    #[tokio::test]
+    async fn group_tags_have_user_and_topic() {
         let t = retain_tags(-1001, Some(100), 7, true);
         assert_eq!(t, vec!["chat:-1001", "user:100", "topic:7"]);
     }
 
-    #[test]
-    fn group_tags_no_topic_when_thread_zero() {
+    #[tokio::test]
+    async fn group_tags_no_topic_when_thread_zero() {
         let t = retain_tags(-1001, Some(100), 0, true);
         assert_eq!(t, vec!["chat:-1001", "user:100"]);
     }
 
-    #[test]
-    fn recall_tags_unchanged_by_group() {
+    #[tokio::test]
+    async fn recall_tags_unchanged_by_group() {
         let t = recall_tags(-1001);
         assert_eq!(t, vec!["chat:-1001"]);
     }
@@ -6179,8 +6242,8 @@ mod background_continuation_tests {
     use super::*;
     use right_db::open_connection;
 
-    fn open_marker_conn(path: &std::path::Path) -> right_db::Connection {
-        open_connection(path, true).unwrap()
+    async fn open_marker_conn(path: &std::path::Path) -> right_db::Connection {
+        open_connection(path, true).await.unwrap()
     }
 
     struct MarkerRun<'a> {
@@ -6246,7 +6309,7 @@ mod background_continuation_tests {
         }
     }
 
-    fn insert_marker_run(conn: &right_db::Connection, run: MarkerRun<'_>) {
+    async fn insert_marker_run(conn: &right_db::Connection, run: MarkerRun<'_>) {
         let finished_at = matches!(run.status, "success" | "failed").then_some(run.started_at);
         let delivery_required = matches!(run.status, "success" | "failed");
         let delivery_status = if run.delivered_at.is_some() {
@@ -6280,11 +6343,12 @@ mod background_continuation_tests {
                 run.delivered_at,
             ],
         )
+        .await
         .unwrap();
     }
 
-    #[test]
-    fn continuation_prompt_auto_timeout_includes_focus_hint() {
+    #[tokio::test]
+    async fn continuation_prompt_auto_timeout_includes_focus_hint() {
         let p = build_continuation_prompt(BgReason::AutoTimeout, "<message>hello</message>");
         assert!(p.contains("10-minute safety limit"));
         assert!(p.contains("MOST RECENT MESSAGE"));
@@ -6294,31 +6358,31 @@ mod background_continuation_tests {
         assert!(p.contains("<message>hello</message>"));
     }
 
-    #[test]
-    fn continuation_prompt_user_requested_uses_correct_reason() {
+    #[tokio::test]
+    async fn continuation_prompt_user_requested_uses_correct_reason() {
         let p = build_continuation_prompt(BgReason::UserRequested, "hello");
         assert!(p.contains("user moved this work to background"));
         assert!(p.contains("MOST RECENT MESSAGE"));
     }
 
-    #[test]
-    fn continuation_prompt_mentions_shutdown_reason() {
+    #[tokio::test]
+    async fn continuation_prompt_mentions_shutdown_reason() {
         let p = build_continuation_prompt(BgReason::Shutdown, "shutdown input");
         assert!(p.contains("the bot process is shutting down"));
         assert!(p.contains("MOST RECENT MESSAGE"));
         assert!(p.contains("shutdown input"));
     }
 
-    #[test]
-    fn background_banner_distinguishes_shutdown() {
+    #[tokio::test]
+    async fn background_banner_distinguishes_shutdown() {
         assert_eq!(
             background_banner(BgReason::Shutdown),
             "Shutting down — continuing in background. Will reply when ready"
         );
     }
 
-    #[test]
-    fn build_continuation_prompt_forbids_silence() {
+    #[tokio::test]
+    async fn build_continuation_prompt_forbids_silence() {
         let p = build_continuation_prompt(BgReason::AutoTimeout, "hello");
         assert!(
             p.contains("Silence is not a valid outcome"),
@@ -6328,12 +6392,15 @@ mod background_continuation_tests {
         assert!(q.contains("Silence is not a valid outcome"));
     }
 
-    #[test]
-    fn create_background_run_inserts_async_background_without_cron_spec() {
+    #[tokio::test]
+    async fn create_background_run_inserts_async_background_without_cron_spec() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_connection(tmp.path(), true).expect("open_connection must succeed");
+        let conn = open_connection(tmp.path(), true)
+            .await
+            .expect("open_connection must succeed");
         let main = uuid::Uuid::new_v4().to_string();
         let run_id = create_background_run(&conn, -42, 7, &main)
+            .await
             .expect("create background run must succeed");
         uuid::Uuid::parse_str(&run_id).expect("run id must be a UUID");
 
@@ -6353,6 +6420,7 @@ mod background_continuation_tests {
                 right_db::params![&run_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
             )
+            .await
             .unwrap();
         assert_eq!(kind, "background");
         assert_eq!(producer_ref.as_deref(), Some("background"));
@@ -6365,6 +6433,7 @@ mod background_continuation_tests {
 
         let cron_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM cron_specs", [], |r| r.get(0))
+            .await
             .unwrap();
         assert_eq!(
             cron_count, 0,
@@ -6372,50 +6441,56 @@ mod background_continuation_tests {
         );
     }
 
-    #[test]
-    fn build_bg_marker_returns_none_when_no_runs() {
+    #[tokio::test]
+    async fn build_bg_marker_returns_none_when_no_runs() {
         let tmp = tempfile::tempdir().unwrap();
-        let _conn = open_marker_conn(tmp.path());
-        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        let _conn = open_marker_conn(tmp.path()).await;
+        let m = build_bg_marker_for_chat(tmp.path(), -100).await;
         assert!(m.is_none(), "no rows → no marker; got {m:?}");
     }
 
-    #[test]
-    fn build_bg_marker_includes_running_run_for_chat() {
+    #[tokio::test]
+    async fn build_bg_marker_includes_running_run_for_chat() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_marker_conn(tmp.path());
+        let conn = open_marker_conn(tmp.path()).await;
         let now = chrono::Utc::now().to_rfc3339();
         insert_marker_run(
             &conn,
             MarkerRun::background("run-A", "bg-job-A", &now, "running", -100, None),
-        );
+        )
+        .await;
         drop(conn);
-        let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
+        let m = build_bg_marker_for_chat(tmp.path(), -100)
+            .await
+            .expect("marker present");
         assert!(m.starts_with("<background-jobs>"), "got {m:?}");
         assert!(m.contains("bg-job-A"));
         assert!(m.contains("run-A"));
         assert!(m.contains("running"));
     }
 
-    #[test]
-    fn build_bg_marker_includes_undelivered_success_run() {
+    #[tokio::test]
+    async fn build_bg_marker_includes_undelivered_success_run() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_marker_conn(tmp.path());
+        let conn = open_marker_conn(tmp.path()).await;
         let now = chrono::Utc::now().to_rfc3339();
         insert_marker_run(
             &conn,
             MarkerRun::background("run-B", "bg-job-B", &now, "success", -100, None),
-        );
+        )
+        .await;
         drop(conn);
-        let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
+        let m = build_bg_marker_for_chat(tmp.path(), -100)
+            .await
+            .expect("marker present");
         assert!(m.contains("bg-job-B"));
         assert!(m.contains("success"));
     }
 
-    #[test]
-    fn build_bg_marker_excludes_finished_pending_without_delivery_json() {
+    #[tokio::test]
+    async fn build_bg_marker_excludes_finished_pending_without_delivery_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_marker_conn(tmp.path());
+        let conn = open_marker_conn(tmp.path()).await;
         let now = chrono::Utc::now().to_rfc3339();
         insert_marker_run(
             &conn,
@@ -6428,20 +6503,21 @@ mod background_continuation_tests {
                 None,
             )
             .with_delivery_json(None),
-        );
+        )
+        .await;
         drop(conn);
 
-        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        let m = build_bg_marker_for_chat(tmp.path(), -100).await;
         assert!(
             m.is_none(),
             "finished background row without delivery_json is not delivery-eligible; got {m:?}"
         );
     }
 
-    #[test]
-    fn build_bg_marker_includes_recovered_failed_handoff_without_started_at() {
+    #[tokio::test]
+    async fn build_bg_marker_includes_recovered_failed_handoff_without_started_at() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_marker_conn(tmp.path());
+        let conn = open_marker_conn(tmp.path()).await;
         right_agent::async_runs::insert_queued_background_run(
             &conn,
             right_agent::async_runs::NewBackgroundRun {
@@ -6454,55 +6530,63 @@ mod background_continuation_tests {
                 created_at: "2026-05-18T10:00:00Z",
             },
         )
+        .await
         .unwrap();
-        crate::background::mark_interrupted_handoffs(&conn).unwrap();
+        crate::background::mark_interrupted_handoffs(&conn)
+            .await
+            .unwrap();
         drop(conn);
 
-        let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
+        let m = build_bg_marker_for_chat(tmp.path(), -100)
+            .await
+            .expect("marker present");
         assert!(m.contains("bg-recovered"), "got {m:?}");
         assert!(m.contains("failed"), "got {m:?}");
     }
 
-    #[test]
-    fn build_bg_marker_excludes_other_chat() {
+    #[tokio::test]
+    async fn build_bg_marker_excludes_other_chat() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_marker_conn(tmp.path());
+        let conn = open_marker_conn(tmp.path()).await;
         let now = chrono::Utc::now().to_rfc3339();
         insert_marker_run(
             &conn,
             MarkerRun::background("run-other", "bg-other", &now, "running", -999, None),
-        );
+        )
+        .await;
         drop(conn);
-        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        let m = build_bg_marker_for_chat(tmp.path(), -100).await;
         assert!(m.is_none(), "row for other chat must not appear; got {m:?}");
     }
 
-    #[test]
-    fn build_bg_marker_excludes_delivered_run() {
+    #[tokio::test]
+    async fn build_bg_marker_excludes_delivered_run() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_marker_conn(tmp.path());
+        let conn = open_marker_conn(tmp.path()).await;
         let now = chrono::Utc::now().to_rfc3339();
         insert_marker_run(
             &conn,
             MarkerRun::background("run-D", "bg-D", &now, "success", -100, Some(&now)),
-        );
+        )
+        .await;
         drop(conn);
-        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        let m = build_bg_marker_for_chat(tmp.path(), -100).await;
         assert!(m.is_none(), "delivered run must not appear; got {m:?}");
     }
 
-    #[test]
-    fn build_bg_marker_excludes_cron_runs() {
+    #[tokio::test]
+    async fn build_bg_marker_excludes_cron_runs() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_marker_conn(tmp.path());
+        let conn = open_marker_conn(tmp.path()).await;
         let now = chrono::Utc::now().to_rfc3339();
         insert_marker_run(
             &conn,
             MarkerRun::new("cron", "cron-run", "cron-job", &now, "running", -100, None),
-        );
+        )
+        .await;
         drop(conn);
 
-        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        let m = build_bg_marker_for_chat(tmp.path(), -100).await;
         assert!(
             m.is_none(),
             "cron rows must not appear in bg marker; got {m:?}"
@@ -6520,14 +6604,14 @@ mod bg_request_race_tests {
         Arc::new(DashMap::new())
     }
 
-    #[test]
-    fn empty_map_returns_false() {
+    #[tokio::test]
+    async fn empty_map_returns_false() {
         let bg = empty_bg_map();
         assert_eq!(consume_bg_request(&bg, (1, 0), 42), None);
     }
 
-    #[test]
-    fn matching_turn_id_returns_true_and_removes_entry() {
+    #[tokio::test]
+    async fn matching_turn_id_returns_true_and_removes_entry() {
         let bg = empty_bg_map();
         bg.insert(
             (1, 0),
@@ -6546,8 +6630,8 @@ mod bg_request_race_tests {
         );
     }
 
-    #[test]
-    fn shutdown_bg_request_consumes_matching_turn_id() {
+    #[tokio::test]
+    async fn shutdown_bg_request_consumes_matching_turn_id() {
         let bg: super::super::BgRequests = Arc::new(DashMap::new());
         bg.insert(
             (1, 0),
@@ -6562,8 +6646,8 @@ mod bg_request_race_tests {
         assert!(bg.get(&(1, 0)).is_none());
     }
 
-    #[test]
-    fn stale_turn_id_returns_false_and_removes_entry() {
+    #[tokio::test]
+    async fn stale_turn_id_returns_false_and_removes_entry() {
         // The race we're guarding against: a bg click from turn id 999 lands
         // in the map (e.g. the previous turn's exit path leaked it, or a click
         // raced a normal stream-end completion). The current turn (id=1) must
@@ -6588,8 +6672,8 @@ mod bg_request_race_tests {
         );
     }
 
-    #[test]
-    fn stale_shutdown_bg_request_is_removed_and_ignored() {
+    #[tokio::test]
+    async fn stale_shutdown_bg_request_is_removed_and_ignored() {
         let bg: super::super::BgRequests = Arc::new(DashMap::new());
         bg.insert(
             (1, 0),
@@ -6604,8 +6688,8 @@ mod bg_request_race_tests {
         assert!(bg.get(&(1, 0)).is_none());
     }
 
-    #[test]
-    fn next_turn_id_is_monotonic() {
+    #[tokio::test]
+    async fn next_turn_id_is_monotonic() {
         let a = super::super::next_turn_id();
         let b = super::super::next_turn_id();
         let c = super::super::next_turn_id();
@@ -6616,8 +6700,8 @@ mod bg_request_race_tests {
     // The current turn produced a valid reply — honoring bg here would silently
     // drop that reply and spawn a duplicate continuation. The gate must
     // clear was_bg_request so the worker delivers the reply normally.
-    #[test]
-    fn bg_click_after_success_is_ignored() {
+    #[tokio::test]
+    async fn bg_click_after_success_is_ignored() {
         assert!(
             !should_honor_bg_request(
                 Some(BgReason::UserRequested),
@@ -6629,24 +6713,24 @@ mod bg_request_race_tests {
         );
     }
 
-    #[test]
-    fn shutdown_bg_request_after_success_is_honored() {
+    #[tokio::test]
+    async fn shutdown_bg_request_after_success_is_honored() {
         assert!(
             should_honor_bg_request(Some(BgReason::Shutdown), false, 0, "{\"result\":\"hi\"}"),
             "shutdown handoff must win even when stdout finishes first"
         );
     }
 
-    #[test]
-    fn bg_click_on_timeout_is_honored() {
+    #[tokio::test]
+    async fn bg_click_on_timeout_is_honored() {
         assert!(
             should_honor_bg_request(Some(BgReason::UserRequested), true, -1, ""),
             "auto-timeout with bg flag must be honored"
         );
     }
 
-    #[test]
-    fn bg_click_with_empty_stdout_is_honored() {
+    #[tokio::test]
+    async fn bg_click_with_empty_stdout_is_honored() {
         // Exit 0 but no result line — there is no reply to deliver, so honor.
         assert!(
             should_honor_bg_request(Some(BgReason::UserRequested), false, 0, ""),
@@ -6654,8 +6738,8 @@ mod bg_request_race_tests {
         );
     }
 
-    #[test]
-    fn bg_click_with_nonzero_exit_is_honored() {
+    #[tokio::test]
+    async fn bg_click_with_nonzero_exit_is_honored() {
         // CC failed; the worker would otherwise route to reflection. Bg wins
         // because the user explicitly asked to background.
         assert!(
@@ -6669,8 +6753,8 @@ mod bg_request_race_tests {
         );
     }
 
-    #[test]
-    fn no_bg_flag_short_circuits() {
+    #[tokio::test]
+    async fn no_bg_flag_short_circuits() {
         // When consume_bg_request already returned false the gate is a no-op.
         assert!(!should_honor_bg_request(None, false, 0, "reply"));
         assert!(!should_honor_bg_request(None, true, -1, ""));
@@ -6790,17 +6874,17 @@ mod auto_retain_tests {
         (handle, url)
     }
 
-    fn make_resilient(base_url: &str) -> Arc<ResilientHindsight> {
+    async fn make_resilient(base_url: &str) -> Arc<ResilientHindsight> {
         let dir = tempfile::tempdir().unwrap().keep();
-        let _ = right_db::open_connection(&dir, true).unwrap();
+        let _ = right_db::open_connection(&dir, true).await.unwrap();
         let client = HindsightClient::new("hs_test", "test-bank", "high", 1024, Some(base_url));
         Arc::new(ResilientHindsight::new(client, dir, "bot"))
     }
 
     // --- pure helper ---
 
-    #[test]
-    fn build_retain_content_with_assistant_includes_both_roles() {
+    #[tokio::test]
+    async fn build_retain_content_with_assistant_includes_both_roles() {
         let s = build_retain_content("hi", Some("hello"), "2026-05-05T00:00:00Z");
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         let arr = v.as_array().unwrap();
@@ -6811,8 +6895,8 @@ mod auto_retain_tests {
         assert_eq!(arr[1]["content"], "hello");
     }
 
-    #[test]
-    fn build_retain_content_user_only_omits_assistant() {
+    #[tokio::test]
+    async fn build_retain_content_user_only_omits_assistant() {
         let s = build_retain_content("user only", None, "2026-05-05T00:00:00Z");
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         let arr = v.as_array().unwrap();
@@ -6833,7 +6917,7 @@ mod auto_retain_tests {
     async fn backgrounded_arm_retains_user_message_only() {
         setup_crypto();
         let (handle, url) = mock_one_shot().await;
-        let hs = make_resilient(&url);
+        let hs = make_resilient(&url).await;
 
         let user_text = "what is 2+2?".to_string();
         let main_session_id = "main-session-uuid-bg".to_string();

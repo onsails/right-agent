@@ -182,7 +182,8 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
         &ctx.agent_dir,
         ctx.ssh_config_path.as_deref(),
         ctx.resolved_sandbox.as_deref(),
-    );
+    )
+    .await;
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -239,10 +240,11 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
             Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
                 let stdout_str = String::from_utf8_lossy(&output.stdout).into_owned();
                 if let Some(b) = crate::cc::stream::parse_usage_full(&stdout_str)
-                    && let Ok(conn) = right_db::open_connection(&agent_db_dir, false)
+                    && let Ok(conn) = right_db::open_connection(&agent_db_dir, false).await
                     && let Err(e) = right_agent::usage::insert::insert_learning_probe_writer(
                         &conn, &b, chat_id, thread_id,
                     )
+                    .await
                 {
                     tracing::warn!(agent = %agent_name, "probe-writer usage insert failed: {e:#}");
                 }
@@ -347,8 +349,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_user_prompt_includes_anchor_instructions_and_index() {
+    #[tokio::test]
+    async fn build_user_prompt_includes_anchor_instructions_and_index() {
         let p = build_user_prompt(&anchor("hi", "bye"), "- rightx-foo: bar", &default_hint());
         assert!(p.contains("hi"));
         assert!(p.contains("bye"));
@@ -356,19 +358,19 @@ mod tests {
         assert!(p.contains("hint_outcome"));
     }
 
-    #[test]
-    fn build_user_prompt_empty_index_uses_placeholder() {
+    #[tokio::test]
+    async fn build_user_prompt_empty_index_uses_placeholder() {
         let p = build_user_prompt(&anchor("a", "b"), "", &default_hint());
         assert!(p.contains("no existing rightx-* skills"));
     }
 
-    #[test]
-    fn probe_writer_max_turns_is_16() {
+    #[tokio::test]
+    async fn probe_writer_max_turns_is_16() {
         assert_eq!(PROBE_WRITER_MAX_TURNS, 16);
     }
 
-    #[test]
-    fn background_invocation_probe_writer_uses_invocation_scoped_mcp_config() {
+    #[tokio::test]
+    async fn background_invocation_probe_writer_uses_invocation_scoped_mcp_config() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = context(dir.path().to_path_buf());
 
@@ -393,8 +395,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_user_prompt_includes_patch_block_for_patch_hint() {
+    #[tokio::test]
+    async fn build_user_prompt_includes_patch_block_for_patch_hint() {
         let p = build_user_prompt(
             &anchor("u", "a"),
             "- rightx-foo: ...",
@@ -409,8 +411,8 @@ mod tests {
         assert!(p.contains("hint_outcome"));
     }
 
-    #[test]
-    fn build_user_prompt_includes_create_block_for_create_hint() {
+    #[tokio::test]
+    async fn build_user_prompt_includes_create_block_for_create_hint() {
         let p = build_user_prompt(
             &anchor("u", "a"),
             "- rightx-foo: ...",

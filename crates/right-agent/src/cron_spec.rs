@@ -275,7 +275,7 @@ fn resolve_schedule_fields(
 }
 
 /// Insert a new cron spec into DB. Returns error message if job exists.
-pub fn create_spec(
+pub async fn create_spec(
     conn: &Connection,
     job_name: &str,
     schedule: &str,
@@ -292,7 +292,8 @@ pub fn create_spec(
         "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![job_name, schedule, prompt, lock_ttl, budget, &now, &now],
-    );
+    )
+    .await;
 
     match result {
         Ok(_) => Ok(CronSpecResult {
@@ -310,7 +311,7 @@ pub fn create_spec(
 /// `run_at` implies `recurring=false`. `immediate=true` fires on the next
 /// reconcile tick then auto-deletes.
 #[allow(clippy::too_many_arguments)]
-pub fn create_spec_v2(
+pub async fn create_spec_v2(
     conn: &Connection,
     job_name: &str,
     schedule: Option<&str>,
@@ -345,7 +346,8 @@ pub fn create_spec_v2(
         "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![job_name, db_schedule, prompt, lock_ttl, budget, db_recurring, db_run_at, target_chat_id, target_thread_id, &now, &now],
-    );
+    )
+    .await;
 
     match result {
         Ok(_) => Ok(CronSpecResult {
@@ -358,7 +360,7 @@ pub fn create_spec_v2(
 }
 
 /// Update an existing cron spec. Returns error if job not found.
-pub fn update_spec(
+pub async fn update_spec(
     conn: &Connection,
     job_name: &str,
     schedule: &str,
@@ -377,6 +379,7 @@ pub fn update_spec(
              WHERE job_name = ?1",
             params![job_name, schedule, prompt, lock_ttl, budget, now],
         )
+        .await
         .map_err(|e| format!("update failed: {e:#}"))?;
 
     if rows == 0 {
@@ -396,7 +399,7 @@ pub fn update_spec(
 /// - Both set → error
 /// - No fields → error
 #[allow(clippy::too_many_arguments)]
-pub fn update_spec_partial(
+pub async fn update_spec_partial(
     conn: &Connection,
     job_name: &str,
     schedule: Option<&str>,
@@ -540,10 +543,12 @@ pub fn update_spec_partial(
 
     let tx = conn
         .transaction()
+        .await
         .map_err(|e| format!("begin transaction failed: {e:#}"))?;
 
     let rows = tx
         .execute(&sql, values)
+        .await
         .map_err(|e| format!("update failed: {e:#}"))?;
 
     if rows == 0 {
@@ -561,6 +566,7 @@ pub fn update_spec_partial(
                 params![job_name],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
+            .await
             .map_err(|e| format!("read-back failed: {e:#}"))?;
         tx.execute(
             "UPDATE async_runs SET target_chat_id = ?1, target_thread_id = ?2
@@ -569,10 +575,12 @@ pub fn update_spec_partial(
                AND delivery_status IN ('pending', 'retryable')",
             params![new_chat, new_thread, job_name],
         )
+        .await
         .map_err(|e| format!("async cron run target propagation failed: {e:#}"))?;
     }
 
     tx.commit()
+        .await
         .map_err(|e| format!("commit transaction failed: {e:#}"))?;
 
     Ok(CronSpecResult {
@@ -582,12 +590,17 @@ pub fn update_spec_partial(
 }
 
 /// Delete a cron spec and its lock file. Returns error if not found.
-pub fn delete_spec(conn: &Connection, job_name: &str, agent_dir: &Path) -> Result<String, String> {
+pub async fn delete_spec(
+    conn: &Connection,
+    job_name: &str,
+    agent_dir: &Path,
+) -> Result<String, String> {
     let rows = conn
         .execute(
             "DELETE FROM cron_specs WHERE job_name = ?1",
             params![job_name],
         )
+        .await
         .map_err(|e| format!("delete failed: {e:#}"))?;
 
     if rows == 0 {
@@ -609,7 +622,7 @@ pub fn delete_spec(conn: &Connection, job_name: &str, agent_dir: &Path) -> Resul
 }
 
 /// List all cron specs as a JSON string.
-pub fn list_specs(conn: &Connection) -> Result<String, String> {
+pub async fn list_specs(conn: &Connection) -> Result<String, String> {
     let rows: Vec<serde_json::Value> = conn
         .query_all(
             "SELECT s.job_name, s.schedule, s.prompt, s.lock_ttl, s.max_budget_usd, \
@@ -643,6 +656,7 @@ pub fn list_specs(conn: &Connection) -> Result<String, String> {
                 "last_status": row.get::<_, Option<String>>(13)?,
             }))
         })
+        .await
         .map_err(|e| format!("query failed: {e:#}"))?;
     serde_json::to_string_pretty(&rows).map_err(|e| format!("serialization error: {e:#}"))
 }
@@ -659,7 +673,7 @@ pub fn format_result(result: &CronSpecResult) -> String {
 /// Load all cron specs from the `cron_specs` table.
 ///
 /// Logs warnings for schedules that hit round minutes.
-pub fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, CronSpec>, DbError> {
+pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, CronSpec>, DbError> {
     let mut specs = HashMap::new();
     let rows = conn.query_all(
         "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, recurring, run_at, target_chat_id, target_thread_id FROM cron_specs",
@@ -677,7 +691,8 @@ pub fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, CronSpec>
             row.get::<_, Option<i64>>(8)?,
             row.get::<_, Option<i64>>(9)?,
         ))
-    })?;
+    })
+    .await?;
 
     for row in rows {
         let (
@@ -733,13 +748,14 @@ pub fn describe_schedule(schedule: &str) -> String {
 }
 
 /// Mark a cron spec for immediate execution on the next engine tick.
-pub fn trigger_spec(conn: &Connection, job_name: &str) -> Result<String, String> {
+pub async fn trigger_spec(conn: &Connection, job_name: &str) -> Result<String, String> {
     let now = chrono::Utc::now().to_rfc3339();
     let rows = conn
         .execute(
             "UPDATE cron_specs SET triggered_at = ?2 WHERE job_name = ?1",
             params![job_name, now],
         )
+        .await
         .map_err(|e| format!("trigger failed: {e:#}"))?;
     if rows == 0 {
         return Err(format!("job '{job_name}' not found"));
@@ -748,11 +764,12 @@ pub fn trigger_spec(conn: &Connection, job_name: &str) -> Result<String, String>
 }
 
 /// Clear the `triggered_at` timestamp after a triggered run completes.
-pub fn clear_triggered_at(conn: &Connection, job_name: &str) -> Result<(), String> {
+pub async fn clear_triggered_at(conn: &Connection, job_name: &str) -> Result<(), String> {
     conn.execute(
         "UPDATE cron_specs SET triggered_at = NULL WHERE job_name = ?1",
         params![job_name],
     )
+    .await
     .map_err(|e| format!("clear trigger failed: {e:#}"))?;
     Ok(())
 }
@@ -773,7 +790,7 @@ pub struct CronSpecDetail {
 }
 
 /// Fetch full detail for a single cron spec by name.
-pub fn get_spec_detail(
+pub async fn get_spec_detail(
     conn: &Connection,
     job_name: &str,
 ) -> Result<Option<CronSpecDetail>, String> {
@@ -796,6 +813,7 @@ pub fn get_spec_detail(
             })
         },
     )
+    .await
     .optional()
     .map_err(|e| format!("query failed: {e:#}"))
 }
@@ -811,7 +829,7 @@ pub struct CronRunSummary {
 }
 
 /// Fetch recent runs for a job, ordered by most recent first.
-pub fn get_recent_runs(
+pub async fn get_recent_runs(
     conn: &Connection,
     job_name: &str,
     limit: i64,
@@ -833,6 +851,7 @@ pub fn get_recent_runs(
                 })
             },
         )
+        .await
         .map_err(|e| format!("query failed: {e:#}"))?;
     Ok(rows)
 }

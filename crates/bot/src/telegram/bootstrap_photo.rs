@@ -75,16 +75,16 @@ pub(crate) async fn send_if_needed(
 mod tests {
     use super::*;
 
-    #[test]
-    fn predicate_only_true_when_both_flags_true() {
+    #[tokio::test]
+    async fn predicate_only_true_when_both_flags_true() {
         assert!(!should_send(false, false));
         assert!(!should_send(false, true));
         assert!(!should_send(true, false));
         assert!(should_send(true, true));
     }
 
-    #[test]
-    fn welcome_png_starts_with_png_magic() {
+    #[tokio::test]
+    async fn welcome_png_starts_with_png_magic() {
         // PNG signature: 89 50 4E 47 0D 0A 1A 0A
         assert!(WELCOME_PNG.len() > 8, "PNG asset is empty or truncated");
         assert_eq!(

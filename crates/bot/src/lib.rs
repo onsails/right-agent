@@ -247,7 +247,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // even after a config change triggered restart.
     let self_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("right"));
     let agent_def = right_agent::agent::discover_single_agent(&agent_dir)?;
-    right_codegen::run_single_agent_codegen(&home, &agent_def, &self_exe, args.debug)?;
+    right_codegen::run_single_agent_codegen(&home, &agent_def, &self_exe, args.debug).await?;
     tracing::info!(agent = %args.agent, "per-agent codegen complete");
 
     // Parse config after codegen (secret may have been generated in agent.yaml).
@@ -438,11 +438,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Open data.db (creates if absent, applies migrations)
     let conn = right_db::open_connection(&agent_dir, true)
+        .await
         .map_err(|e| miette::miette!("failed to open data.db: {:#}", e))?;
     tracing::info!(agent = %args.agent, "data.db opened");
 
-    let interrupted_handoffs =
-        crate::background::mark_interrupted_handoffs(&conn).map_err(|e| {
+    let interrupted_handoffs = crate::background::mark_interrupted_handoffs(&conn)
+        .await
+        .map_err(|e| {
             miette::miette!("failed to recover interrupted background handoffs: {:#}", e)
         })?;
     if interrupted_handoffs > 0 {
@@ -481,8 +483,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Log registered MCP servers at startup.
     {
         let conn = right_db::open_connection(&agent_dir, false)
+            .await
             .map_err(|e| miette::miette!("failed to open data.db for MCP check: {e:#}"))?;
-        match right_mcp::credentials::db_list_servers(&conn) {
+        match right_mcp::credentials::db_list_servers(&conn).await {
             Ok(servers) => {
                 for s in &servers {
                     tracing::info!(
@@ -653,7 +656,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     });
 
     // One-time migration: oauth-state.json → SQLite
-    migrate_oauth_state_to_db(&agent_dir);
+    migrate_oauth_state_to_db(&agent_dir).await;
 
     // --- OpenShell sandbox lifecycle (when sandbox mode is active) ---
     let (ssh_config_path, sandbox_ctx): (
@@ -1358,7 +1361,7 @@ async fn run_drain_loop(
         if !matches!(wrapper.status(), right_memory::MemoryStatus::Healthy) {
             continue;
         }
-        let conn = match right_db::open_connection(&agent_db, false) {
+        let conn = match right_db::open_connection(&agent_db, false).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("drain: open_connection failed: {e:#}");
@@ -1389,7 +1392,7 @@ async fn run_drain_loop(
 
 /// Migrate OAuth state from oauth-state.json to SQLite (one-time).
 /// Non-fatal — logs warnings and continues on error.
-fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
+async fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
     let json_path = agent_dir.join("oauth-state.json");
     if !json_path.exists() {
         return;
@@ -1410,7 +1413,7 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
         }
     };
 
-    let conn = match right_db::open_connection(agent_dir, false) {
+    let conn = match right_db::open_connection(agent_dir, false).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("failed to open DB for oauth-state migration: {e:#}");
@@ -1451,7 +1454,9 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
                 client_secret,
                 expires_at,
                 oauth_resource,
-            ) {
+            )
+            .await
+            {
                 tracing::warn!(server = %name, "skipping oauth-state migration: {e:#}");
                 all_succeeded = false;
             }
@@ -1531,8 +1536,8 @@ mod tests {
     }
 
     /// Production constants stay sane (3 retries, in ms, ascending).
-    #[test]
-    fn resolve_host_ips_backoff_constants() {
+    #[tokio::test]
+    async fn resolve_host_ips_backoff_constants() {
         assert_eq!(RESOLVE_HOST_IPS_BACKOFFS_MS, &[200u64, 500, 1000]);
     }
 

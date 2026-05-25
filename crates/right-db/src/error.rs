@@ -152,21 +152,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn is_constraint_violation_detects_unique_violation() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
+    #[tokio::test]
+    async fn is_constraint_violation_detects_unique_violation() {
+        let conn = Connection::open_in_memory()
+            .await
+            .expect("open in-memory db");
         conn.execute_batch(
             "CREATE TABLE constraint_probe (
                  id INTEGER PRIMARY KEY,
                  name TEXT NOT NULL UNIQUE
              )",
         )
+        .await
         .expect("create table");
 
         conn.execute(
             "INSERT INTO constraint_probe (name) VALUES (?1)",
             params!["duplicate-name"],
         )
+        .await
         .expect("first insert succeeds");
 
         let err = conn
@@ -174,6 +178,7 @@ mod tests {
                 "INSERT INTO constraint_probe (name) VALUES (?1)",
                 params!["duplicate-name"],
             )
+            .await
             .expect_err("duplicate insert must fail");
 
         assert!(

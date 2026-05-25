@@ -255,9 +255,11 @@ mod tests {
         }
     }
 
-    fn run_codegen_for(home: &Path, agent: &AgentDef) {
+    async fn run_codegen_for(home: &Path, agent: &AgentDef) {
         let self_exe = PathBuf::from("/usr/local/bin/right");
-        crate::run_single_agent_codegen(home, agent, &self_exe, false).unwrap();
+        crate::run_single_agent_codegen(home, agent, &self_exe, false)
+            .await
+            .unwrap();
     }
 
     fn sha256(path: &Path) -> String {
@@ -267,8 +269,8 @@ mod tests {
         hash.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    #[test]
-    fn write_regenerated_overwrites_existing() {
+    #[tokio::test]
+    async fn write_regenerated_overwrites_existing() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("sub/file.txt");
         write_regenerated(&path, "first").unwrap();
@@ -277,16 +279,16 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
     }
 
-    #[test]
-    fn write_regenerated_creates_parent_dirs() {
+    #[tokio::test]
+    async fn write_regenerated_creates_parent_dirs() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("a/b/c/file.txt");
         write_regenerated(&path, "hello").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
     }
 
-    #[test]
-    fn write_regenerated_detect_change_reports_new_file() {
+    #[tokio::test]
+    async fn write_regenerated_detect_change_reports_new_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("sub/file.txt");
 
@@ -296,8 +298,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
     }
 
-    #[test]
-    fn write_regenerated_detect_change_reports_same_content_unchanged() {
+    #[tokio::test]
+    async fn write_regenerated_detect_change_reports_same_content_unchanged() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("sub/file.txt");
 
@@ -308,8 +310,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
     }
 
-    #[test]
-    fn write_regenerated_detect_change_reports_different_content_changed() {
+    #[tokio::test]
+    async fn write_regenerated_detect_change_reports_different_content_changed() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("sub/file.txt");
 
@@ -320,8 +322,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
     }
 
-    #[test]
-    fn write_regenerated_detect_change_overwrites_non_utf8_existing_file() {
+    #[tokio::test]
+    async fn write_regenerated_detect_change_overwrites_non_utf8_existing_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("sub/file.txt");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -333,8 +335,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "repaired");
     }
 
-    #[test]
-    fn write_regenerated_bytes_overwrites_existing() {
+    #[tokio::test]
+    async fn write_regenerated_bytes_overwrites_existing() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("sub/blob.bin");
         write_regenerated_bytes(&path, &[0u8, 1, 2, 0xff]).unwrap();
@@ -343,16 +345,16 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), vec![0xaa, 0xbb]);
     }
 
-    #[test]
-    fn write_agent_owned_creates_when_absent() {
+    #[tokio::test]
+    async fn write_agent_owned_creates_when_absent() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("TOOLS.md");
         write_agent_owned(&path, "# default").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# default");
     }
 
-    #[test]
-    fn write_agent_owned_preserves_when_present() {
+    #[tokio::test]
+    async fn write_agent_owned_preserves_when_present() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("TOOLS.md");
         std::fs::write(&path, "agent-edited content").unwrap();
@@ -363,8 +365,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn write_merged_rmw_passes_existing_content() {
+    #[tokio::test]
+    async fn write_merged_rmw_passes_existing_content() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.json");
         std::fs::write(&path, r#"{"a":1}"#).unwrap();
@@ -377,8 +379,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"a":1}+merged"#);
     }
 
-    #[test]
-    fn write_merged_rmw_passes_none_when_absent() {
+    #[tokio::test]
+    async fn write_merged_rmw_passes_none_when_absent() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("new.json");
         write_merged_rmw(&path, |existing| {
@@ -389,16 +391,16 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
     }
 
-    #[test]
-    fn write_merged_rmw_creates_parent_dirs() {
+    #[tokio::test]
+    async fn write_merged_rmw_creates_parent_dirs() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("nested/new.json");
         write_merged_rmw(&path, |_| Ok("{}".to_owned())).unwrap();
         assert!(path.exists());
     }
 
-    #[test]
-    fn codegen_registry_has_all_expected_categories() {
+    #[tokio::test]
+    async fn codegen_registry_has_all_expected_categories() {
         let dir = tempdir().unwrap();
         let reg = codegen_registry(dir.path());
         assert!(reg.iter().any(|f| matches!(f.kind, CodegenKind::MergedRMW)));
@@ -416,13 +418,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn regenerated_files_are_idempotent() {
+    #[tokio::test]
+    async fn regenerated_files_are_idempotent() {
         let dir = tempdir().unwrap();
         let home = dir.path().to_owned();
         let agent = minimal_agent_fixture(&home, "t1");
 
-        run_codegen_for(&home, &agent);
+        run_codegen_for(&home, &agent).await;
 
         // Re-discover to pick up the persisted secret; otherwise the stale
         // in-memory `AgentDef` makes `ensure_agent_secret` mint a fresh one on
@@ -438,7 +440,7 @@ mod tests {
             .map(|f| (f.path.clone(), sha256(&f.path)))
             .collect();
 
-        run_codegen_for(&home, &agent);
+        run_codegen_for(&home, &agent).await;
 
         for (path, old_hash) in &first {
             let new_hash = sha256(path);
@@ -451,8 +453,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn agent_owned_files_preserved_across_codegen() {
+    #[tokio::test]
+    async fn agent_owned_files_preserved_across_codegen() {
         let dir = tempdir().unwrap();
         let home = dir.path().to_owned();
         let agent = minimal_agent_fixture(&home, "t2");
@@ -461,7 +463,7 @@ mod tests {
         std::fs::create_dir_all(settings_local.parent().unwrap()).unwrap();
         std::fs::write(&settings_local, r#"{"__AGENT__":true}"#).unwrap();
 
-        run_codegen_for(&home, &agent);
+        run_codegen_for(&home, &agent).await;
 
         assert_eq!(
             std::fs::read_to_string(&settings_local).unwrap(),
@@ -470,8 +472,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn merged_rmw_preserves_unknown_fields_in_claude_json() {
+    #[tokio::test]
+    async fn merged_rmw_preserves_unknown_fields_in_claude_json() {
         let dir = tempdir().unwrap();
         let home = dir.path().to_owned();
         let agent = minimal_agent_fixture(&home, "t3");
@@ -483,7 +485,7 @@ mod tests {
         )
         .unwrap();
 
-        run_codegen_for(&home, &agent);
+        run_codegen_for(&home, &agent).await;
 
         let content = std::fs::read_to_string(&claude_json).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -528,8 +530,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn registry_covers_all_per_agent_writes() {
+    #[tokio::test]
+    async fn registry_covers_all_per_agent_writes() {
         let dir = tempdir().unwrap();
         let home = dir.path().to_owned();
         let agent = minimal_agent_fixture(&home, "t4");
@@ -540,7 +542,7 @@ mod tests {
         walk_files_rel(&agent.path, &agent.path, &mut before);
         let before: std::collections::HashSet<PathBuf> = before.into_iter().collect();
 
-        run_codegen_for(&home, &agent);
+        run_codegen_for(&home, &agent).await;
 
         let reg_paths: std::collections::HashSet<PathBuf> = codegen_registry(&agent.path)
             .into_iter()
@@ -598,8 +600,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn registry_covers_all_crossagent_writes() {
+    #[tokio::test]
+    async fn registry_covers_all_crossagent_writes() {
         let dir = tempdir().unwrap();
         let home = dir.path().to_owned();
         let agent = minimal_agent_fixture(&home, "t5");

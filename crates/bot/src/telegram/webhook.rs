@@ -72,8 +72,8 @@ mod tests {
         Url::parse("https://example.com/tg/test/").unwrap()
     }
 
-    #[test]
-    fn allowed_updates_lists_message_edited_callback() {
+    #[tokio::test]
+    async fn allowed_updates_lists_message_edited_callback() {
         let allowed = webhook_allowed_updates();
         assert!(allowed.contains(&AllowedUpdate::Message));
         assert!(allowed.contains(&AllowedUpdate::EditedMessage));

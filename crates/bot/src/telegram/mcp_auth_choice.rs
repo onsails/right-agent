@@ -279,8 +279,8 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn parse_auth_choice_callback_data_accepts_valid_choices() {
+    #[tokio::test]
+    async fn parse_auth_choice_callback_data_accepts_valid_choices() {
         assert_eq!(
             parse_auth_choice_callback_data("mcpauth:42:oauth"),
             Some((42, McpAuthChoice::OAuth))
@@ -295,8 +295,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_auth_choice_callback_data_rejects_invalid_data() {
+    #[tokio::test]
+    async fn parse_auth_choice_callback_data_rejects_invalid_data() {
         for bad in [
             "",
             "model:42:oauth",
@@ -309,8 +309,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn render_auth_choice_keyboard_marks_recommended_button() {
+    #[tokio::test]
+    async fn render_auth_choice_keyboard_marks_recommended_button() {
         let rows = button_rows(render_auth_choice_keyboard(7, McpAuthChoice::Header));
         assert_eq!(rows.len(), 1);
         assert_eq!(
@@ -323,8 +323,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn recommend_auth_choice_prefers_query_string_over_oauth() {
+    #[tokio::test]
+    async fn recommend_auth_choice_prefers_query_string_over_oauth() {
         let rec = recommend_auth_choice(AuthChoiceSignals {
             has_query: true,
             oauth_discovered: true,
@@ -341,8 +341,8 @@ mod tests {
         assert_eq!(rec.header_name, None);
     }
 
-    #[test]
-    fn recommend_auth_choice_uses_oauth_when_discovered_without_query() {
+    #[tokio::test]
+    async fn recommend_auth_choice_uses_oauth_when_discovered_without_query() {
         let rec = recommend_auth_choice(AuthChoiceSignals {
             has_query: false,
             oauth_discovered: true,
@@ -354,8 +354,8 @@ mod tests {
         assert_eq!(rec.choice, McpAuthChoice::OAuth);
     }
 
-    #[test]
-    fn recommend_auth_choice_uses_detected_custom_header() {
+    #[tokio::test]
+    async fn recommend_auth_choice_uses_detected_custom_header() {
         let rec = recommend_auth_choice(AuthChoiceSignals {
             has_query: false,
             oauth_discovered: false,
@@ -372,8 +372,8 @@ mod tests {
         assert_eq!(rec.header_name.as_deref(), Some("X-Api-Key"));
     }
 
-    #[test]
-    fn recommend_auth_choice_uses_header_for_public_detection_failure() {
+    #[tokio::test]
+    async fn recommend_auth_choice_uses_header_for_public_detection_failure() {
         let rec = recommend_auth_choice(AuthChoiceSignals {
             has_query: false,
             oauth_discovered: false,
@@ -387,8 +387,8 @@ mod tests {
         assert_eq!(rec.header_name, None);
     }
 
-    #[test]
-    fn recommend_auth_choice_uses_url_as_is_for_loopback() {
+    #[tokio::test]
+    async fn recommend_auth_choice_uses_url_as_is_for_loopback() {
         let rec = recommend_auth_choice(AuthChoiceSignals {
             has_query: false,
             oauth_discovered: false,
@@ -568,8 +568,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pending_request_has_query_ignores_url_normalization() {
+    #[tokio::test]
+    async fn pending_request_has_query_ignores_url_normalization() {
         let pending = PendingMcpAuthChoiceRequest {
             original_url: "https://example.com".to_string(),
             bare_url: "https://example.com/".to_string(),
@@ -579,8 +579,8 @@ mod tests {
         assert!(!pending.has_query());
     }
 
-    #[test]
-    fn parse_token_input_supports_custom_header_override() {
+    #[tokio::test]
+    async fn parse_token_input_supports_custom_header_override() {
         let parsed = parse_token_input("X-Api-Key: secret".to_string(), "bearer".to_string(), None);
 
         assert_eq!(parsed.token, "secret");
@@ -588,8 +588,8 @@ mod tests {
         assert_eq!(parsed.auth_header.as_deref(), Some("X-Api-Key"));
     }
 
-    #[test]
-    fn parse_token_input_supports_custom_header_without_space() {
+    #[tokio::test]
+    async fn parse_token_input_supports_custom_header_without_space() {
         let parsed = parse_token_input("X-Api-Key:secret".to_string(), "bearer".to_string(), None);
 
         assert_eq!(parsed.token, "secret");
@@ -597,8 +597,8 @@ mod tests {
         assert_eq!(parsed.auth_header.as_deref(), Some("X-Api-Key"));
     }
 
-    #[test]
-    fn parse_token_input_keeps_raw_token_when_header_value_empty() {
+    #[tokio::test]
+    async fn parse_token_input_keeps_raw_token_when_header_value_empty() {
         let parsed = parse_token_input("X-Api-Key:   ".to_string(), "bearer".to_string(), None);
 
         assert_eq!(parsed.token, "X-Api-Key:   ");
@@ -606,8 +606,8 @@ mod tests {
         assert_eq!(parsed.auth_header, None);
     }
 
-    #[test]
-    fn parse_token_input_keeps_raw_token_when_prefix_is_not_header() {
+    #[tokio::test]
+    async fn parse_token_input_keeps_raw_token_when_prefix_is_not_header() {
         let parsed = parse_token_input(
             "Bearer token with spaces".to_string(),
             "bearer".to_string(),
@@ -619,8 +619,8 @@ mod tests {
         assert_eq!(parsed.auth_header, None);
     }
 
-    #[test]
-    fn parse_token_input_keeps_raw_token_when_value_contains_colon_no_space() {
+    #[tokio::test]
+    async fn parse_token_input_keeps_raw_token_when_value_contains_colon_no_space() {
         // Tokens like Stripe `sk_live_abc:def` or Basic auth `user:pass` look like
         // `is_header_name(prefix)` matches but no hyphen and no space-after-colon
         // means the user is pasting a single token, not a header/value pair.

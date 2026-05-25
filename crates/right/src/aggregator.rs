@@ -1169,13 +1169,15 @@ mod tests {
         (handle, url)
     }
 
-    fn make_hindsight_backend(url: &str) -> (tempfile::TempDir, std::sync::Arc<HindsightBackend>) {
+    async fn make_hindsight_backend(
+        url: &str,
+    ) -> (tempfile::TempDir, std::sync::Arc<HindsightBackend>) {
         setup_crypto();
         use right_memory::ResilientHindsight;
         use right_memory::hindsight::HindsightClient;
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
-        let _ = right_db::open_connection(&dir, true).unwrap();
+        let _ = right_db::open_connection(&dir, true).await.unwrap();
         let client = HindsightClient::new("hs_x", "bank-1", "high", 1024, Some(url));
         let resilient = std::sync::Arc::new(ResilientHindsight::new(client, dir, "test"));
         (tmp, std::sync::Arc::new(HindsightBackend::new(resilient)))
@@ -1184,7 +1186,7 @@ mod tests {
     #[tokio::test]
     async fn memory_retain_auth_returns_upstream_auth() {
         let (_h, url) = mock_hindsight(r#"{"error": "unauthorized"}"#, 401).await;
-        let (_tmp, backend) = make_hindsight_backend(&url);
+        let (_tmp, backend) = make_hindsight_backend(&url).await;
         let result = backend
             .tools_call("memory_retain", serde_json::json!({ "content": "x" }))
             .await
@@ -1197,7 +1199,7 @@ mod tests {
     #[tokio::test]
     async fn memory_retain_client_returns_upstream_invalid() {
         let (_h, url) = mock_hindsight(r#"{"error": "bad request"}"#, 400).await;
-        let (_tmp, backend) = make_hindsight_backend(&url);
+        let (_tmp, backend) = make_hindsight_backend(&url).await;
         let result = backend
             .tools_call("memory_retain", serde_json::json!({ "content": "x" }))
             .await
@@ -1209,7 +1211,7 @@ mod tests {
     #[tokio::test]
     async fn memory_retain_transient_remains_queued_success() {
         let (_h, url) = mock_hindsight(r#"{"error": "bad gateway"}"#, 502).await;
-        let (_tmp, backend) = make_hindsight_backend(&url);
+        let (_tmp, backend) = make_hindsight_backend(&url).await;
         let result = backend
             .tools_call("memory_retain", serde_json::json!({ "content": "x" }))
             .await
@@ -1223,7 +1225,7 @@ mod tests {
     #[tokio::test]
     async fn memory_recall_auth_returns_upstream_auth() {
         let (_h, url) = mock_hindsight(r#"{"error": "unauthorized"}"#, 401).await;
-        let (_tmp, backend) = make_hindsight_backend(&url);
+        let (_tmp, backend) = make_hindsight_backend(&url).await;
         let result = backend
             .tools_call("memory_recall", serde_json::json!({ "query": "test" }))
             .await
@@ -1235,7 +1237,7 @@ mod tests {
     #[tokio::test]
     async fn memory_recall_transient_returns_upstream_unreachable() {
         let (_h, url) = mock_hindsight(r#"{"error": "bad gateway"}"#, 502).await;
-        let (_tmp, backend) = make_hindsight_backend(&url);
+        let (_tmp, backend) = make_hindsight_backend(&url).await;
         let result = backend
             .tools_call("memory_recall", serde_json::json!({ "query": "test" }))
             .await

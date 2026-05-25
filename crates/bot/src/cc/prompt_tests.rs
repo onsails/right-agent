@@ -14,8 +14,8 @@ fn test_script(base: &str, mode: PromptMode, args: &[String], mcp: Option<&str>)
     )
 }
 
-#[test]
-fn script_bootstrap_includes_bootstrap_md() {
+#[tokio::test]
+async fn script_bootstrap_includes_bootstrap_md() {
     let script = test_script(
         "Base prompt",
         PromptMode::Bootstrap,
@@ -45,8 +45,8 @@ fn script_bootstrap_includes_bootstrap_md() {
     );
 }
 
-#[test]
-fn script_normal_includes_all_identity_files() {
+#[tokio::test]
+async fn script_normal_includes_all_identity_files() {
     let script = test_script(
         "Base prompt",
         PromptMode::Normal,
@@ -67,8 +67,8 @@ fn script_normal_includes_all_identity_files() {
     );
 }
 
-#[test]
-fn script_escapes_single_quotes_in_base() {
+#[tokio::test]
+async fn script_escapes_single_quotes_in_base() {
     let script = test_script(
         "It's a test",
         PromptMode::Bootstrap,
@@ -80,8 +80,8 @@ fn script_escapes_single_quotes_in_base() {
     assert!(script.contains("It"), "content must still be present");
 }
 
-#[test]
-fn script_shell_escapes_claude_args() {
+#[tokio::test]
+async fn script_shell_escapes_claude_args() {
     let script = test_script(
         "Base",
         PromptMode::Normal,
@@ -98,15 +98,15 @@ fn script_shell_escapes_claude_args() {
     assert!(script.contains("type"));
 }
 
-#[test]
-fn script_writes_to_prompt_file_and_uses_system_prompt_file() {
+#[tokio::test]
+async fn script_writes_to_prompt_file_and_uses_system_prompt_file() {
     let script = test_script("X", PromptMode::Normal, &["claude".into()], None);
     assert!(script.contains("/tmp/right-system-prompt.md"));
     assert!(script.contains("--system-prompt-file /tmp/right-system-prompt.md"));
 }
 
-#[test]
-fn script_custom_paths() {
+#[tokio::test]
+async fn script_custom_paths() {
     let script = build_prompt_assembly_script(
         "Base\n",
         PromptMode::Normal,
@@ -131,8 +131,8 @@ fn script_custom_paths() {
     );
 }
 
-#[test]
-fn script_bootstrap_mode_same_regardless_of_paths() {
+#[tokio::test]
+async fn script_bootstrap_mode_same_regardless_of_paths() {
     let script = build_prompt_assembly_script(
         "Base\n",
         PromptMode::Bootstrap,
@@ -155,8 +155,8 @@ fn script_bootstrap_mode_same_regardless_of_paths() {
     );
 }
 
-#[test]
-fn script_includes_mcp_instructions() {
+#[tokio::test]
+async fn script_includes_mcp_instructions() {
     let script = test_script(
         "Base",
         PromptMode::Normal,
@@ -169,14 +169,14 @@ fn script_includes_mcp_instructions() {
     assert!(script.contains("printf '%s\\n'"));
 }
 
-#[test]
-fn script_none_mcp_instructions_omitted() {
+#[tokio::test]
+async fn script_none_mcp_instructions_omitted() {
     let script = test_script("Base", PromptMode::Normal, &["claude".into()], None);
     assert!(!script.contains("MCP Server Instructions"));
 }
 
-#[test]
-fn script_mcp_instructions_with_custom_paths() {
+#[tokio::test]
+async fn script_mcp_instructions_with_custom_paths() {
     let script = build_prompt_assembly_script(
         "Base\n",
         PromptMode::Normal,
@@ -192,8 +192,8 @@ fn script_mcp_instructions_with_custom_paths() {
     assert!(script.contains("Notion tools."));
 }
 
-#[test]
-fn script_bootstrap_uses_compiled_constant() {
+#[tokio::test]
+async fn script_bootstrap_uses_compiled_constant() {
     let script = test_script(
         "Base prompt",
         PromptMode::Bootstrap,
@@ -215,8 +215,8 @@ fn script_bootstrap_uses_compiled_constant() {
     );
 }
 
-#[test]
-fn script_normal_has_operating_instructions_before_identity() {
+#[tokio::test]
+async fn script_normal_has_operating_instructions_before_identity() {
     let script = test_script("Base prompt", PromptMode::Normal, &["claude".into()], None);
     let op_instr_pos = script
         .find("Operating Instructions")
@@ -228,8 +228,8 @@ fn script_normal_has_operating_instructions_before_identity() {
     );
 }
 
-#[test]
-fn script_includes_memory_section_for_file_mode() {
+#[tokio::test]
+async fn script_includes_memory_section_for_file_mode() {
     let script = build_prompt_assembly_script(
         "Base",
         PromptMode::Normal,
@@ -251,8 +251,8 @@ fn script_includes_memory_section_for_file_mode() {
     );
 }
 
-#[test]
-fn script_includes_composite_memory_for_hindsight_mode() {
+#[tokio::test]
+async fn script_includes_composite_memory_for_hindsight_mode() {
     let hs_mode = MemoryMode::Hindsight {
         composite_memory_path: "/sandbox/.claude/composite-memory.md".to_owned(),
     };
@@ -273,8 +273,8 @@ fn script_includes_composite_memory_for_hindsight_mode() {
     assert!(script.contains("if [ -s"), "must check file exists");
 }
 
-#[test]
-fn script_no_memory_section_when_none() {
+#[tokio::test]
+async fn script_no_memory_section_when_none() {
     let script = build_prompt_assembly_script(
         "Base",
         PromptMode::Normal,
@@ -289,8 +289,8 @@ fn script_no_memory_section_when_none() {
     assert!(!script.contains("composite-memory"));
 }
 
-#[test]
-fn script_memory_section_is_last() {
+#[tokio::test]
+async fn script_memory_section_is_last() {
     let script = build_prompt_assembly_script(
         "Base",
         PromptMode::Normal,
@@ -309,8 +309,8 @@ fn script_memory_section_is_last() {
     );
 }
 
-#[test]
-fn script_file_mode_wraps_memory_md_with_ironclaw_markers() {
+#[tokio::test]
+async fn script_file_mode_wraps_memory_md_with_ironclaw_markers() {
     let script = build_prompt_assembly_script(
         "Base",
         PromptMode::Normal,
@@ -343,8 +343,8 @@ fn script_file_mode_wraps_memory_md_with_ironclaw_markers() {
     );
 }
 
-#[test]
-fn script_file_mode_sed_escape_produces_actual_zwsp_at_runtime() {
+#[tokio::test]
+async fn script_file_mode_sed_escape_produces_actual_zwsp_at_runtime() {
     use std::io::Write;
     use std::process::Command;
 
@@ -411,8 +411,8 @@ fn script_file_mode_sed_escape_produces_actual_zwsp_at_runtime() {
     );
 }
 
-#[test]
-fn script_bootstrap_no_memory() {
+#[tokio::test]
+async fn script_bootstrap_no_memory() {
     let script = build_prompt_assembly_script(
         "Base",
         PromptMode::Bootstrap,
@@ -429,8 +429,8 @@ fn script_bootstrap_no_memory() {
     );
 }
 
-#[test]
-fn deploy_composite_memory_format_wraps_content_in_external_content_markers() {
+#[tokio::test]
+async fn deploy_composite_memory_format_wraps_content_in_external_content_markers() {
     // Pure formatting test: the file body produced by the format
     // pipeline must wrap the recall content with ironclaw's wrap
     // (BEGIN/END EXTERNAL CONTENT markers), not the legacy
@@ -460,8 +460,8 @@ fn deploy_composite_memory_format_wraps_content_in_external_content_markers() {
     );
 }
 
-#[test]
-fn deploy_composite_memory_format_appends_status_marker_outside_wrap() {
+#[tokio::test]
+async fn deploy_composite_memory_format_appends_status_marker_outside_wrap() {
     let content = "stuff";
     let formatted = format_composite_memory(
         content,
@@ -477,8 +477,8 @@ fn deploy_composite_memory_format_appends_status_marker_outside_wrap() {
     );
 }
 
-#[test]
-fn composite_memory_section_is_last_in_assembled_script() {
+#[tokio::test]
+async fn composite_memory_section_is_last_in_assembled_script() {
     // With a hindsight-like memory_mode, the memory block must be the final
     // appended section of the prompt-assembly script to preserve cache.
     let script = build_prompt_assembly_script(
@@ -517,8 +517,8 @@ fn composite_memory_section_is_last_in_assembled_script() {
     }
 }
 
-#[test]
-fn cron_mode_includes_cron_delivery_contract() {
+#[tokio::test]
+async fn cron_mode_includes_cron_delivery_contract() {
     let script = test_script(
         "Base prompt",
         PromptMode::Cron,
@@ -535,8 +535,8 @@ fn cron_mode_includes_cron_delivery_contract() {
     );
 }
 
-#[test]
-fn cron_mode_includes_operating_instructions_before_contract() {
+#[tokio::test]
+async fn cron_mode_includes_operating_instructions_before_contract() {
     let script = test_script(
         "Base prompt",
         PromptMode::Cron,
@@ -555,8 +555,8 @@ fn cron_mode_includes_operating_instructions_before_contract() {
     );
 }
 
-#[test]
-fn cron_mode_contract_appears_before_identity_files() {
+#[tokio::test]
+async fn cron_mode_contract_appears_before_identity_files() {
     let script = test_script(
         "Base prompt",
         PromptMode::Cron,
@@ -578,8 +578,8 @@ fn cron_mode_contract_appears_before_identity_files() {
     );
 }
 
-#[test]
-fn normal_mode_omits_cron_delivery_contract() {
+#[tokio::test]
+async fn normal_mode_omits_cron_delivery_contract() {
     let script = test_script(
         "Base prompt",
         PromptMode::Normal,
@@ -592,8 +592,8 @@ fn normal_mode_omits_cron_delivery_contract() {
     );
 }
 
-#[test]
-fn bootstrap_mode_omits_cron_delivery_contract() {
+#[tokio::test]
+async fn bootstrap_mode_omits_cron_delivery_contract() {
     let script = test_script(
         "Base prompt",
         PromptMode::Bootstrap,
@@ -606,8 +606,8 @@ fn bootstrap_mode_omits_cron_delivery_contract() {
     );
 }
 
-#[test]
-fn cron_mode_does_not_emit_memory_section_when_memory_mode_none() {
+#[tokio::test]
+async fn cron_mode_does_not_emit_memory_section_when_memory_mode_none() {
     let script = build_prompt_assembly_script(
         "Base",
         PromptMode::Cron,
@@ -628,8 +628,8 @@ fn cron_mode_does_not_emit_memory_section_when_memory_mode_none() {
     );
 }
 
-#[test]
-fn sandbox_script_sources_user_local_env_before_claude() {
+#[tokio::test]
+async fn sandbox_script_sources_user_local_env_before_claude() {
     let script = build_prompt_assembly_script(
         "Base",
         PromptMode::Normal,
@@ -663,8 +663,8 @@ fn sandbox_script_sources_user_local_env_before_claude() {
     assert!(script.contains("/sandbox/.local/bin"));
 }
 
-#[test]
-fn no_sandbox_script_does_not_reference_sandbox_user_local_env() {
+#[tokio::test]
+async fn no_sandbox_script_does_not_reference_sandbox_user_local_env() {
     let script = build_prompt_assembly_script(
         "Base",
         PromptMode::Normal,

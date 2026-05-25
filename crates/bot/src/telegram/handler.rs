@@ -518,9 +518,11 @@ pub async fn handle_new(
     let key: SessionKey = (chat_id.0, eff_thread_id);
 
     let conn = right_db::open_connection(&agent_dir.0, false)
+        .await
         .map_err(|e| to_request_err(format!("new: open DB: {:#}", e)))?;
 
     let prev_uuid = deactivate_current(&conn, chat_id.0, eff_thread_id)
+        .await
         .map_err(|e| to_request_err(format!("new: deactivate: {:#}", e)))?;
 
     // Kill worker — channel closes, CC subprocess killed via kill_on_drop
@@ -533,6 +535,7 @@ pub async fn handle_new(
         let new_uuid = uuid::Uuid::new_v4().to_string();
         let label = truncate_label(&name);
         create_session(&conn, chat_id.0, eff_thread_id, &new_uuid, Some(label))
+            .await
             .map_err(|e| to_request_err(format!("new: create session: {:#}", e)))?;
         reply.push_str(&format!("New session: {name}\n"));
     } else {
@@ -569,9 +572,11 @@ pub async fn handle_list(
     let eff_thread_id = effective_thread_id(&msg);
 
     let conn = right_db::open_connection(&agent_dir.0, false)
+        .await
         .map_err(|e| to_request_err(format!("list: open DB: {:#}", e)))?;
 
     let sessions = list_sessions(&conn, chat_id.0, eff_thread_id)
+        .await
         .map_err(|e| to_request_err(format!("list: query: {:#}", e)))?;
 
     if sessions.is_empty() {
@@ -658,9 +663,11 @@ pub async fn handle_switch(
     }
 
     let conn = right_db::open_connection(&agent_dir.0, false)
+        .await
         .map_err(|e| to_request_err(format!("switch: open DB: {:#}", e)))?;
 
     let matches = find_sessions_by_uuid(&conn, chat_id.0, eff_thread_id, &uuid)
+        .await
         .map_err(|e| to_request_err(format!("switch: query: {:#}", e)))?;
 
     match matches.len() {
@@ -684,6 +691,7 @@ pub async fn handle_switch(
 
             // activate_session atomically deactivates any other active session
             activate_session(&conn, target.id)
+                .await
                 .map_err(|e| to_request_err(format!("switch: activate: {:#}", e)))?;
 
             worker_map.remove(&key);
@@ -1646,7 +1654,8 @@ async fn detect_auth_type_via_haiku(
         agent_dir,
         ssh_config_path,
         resolved_sandbox,
-    );
+    )
+    .await;
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -1778,9 +1787,11 @@ async fn handle_cron_list(
     agent_dir: &Path,
 ) -> Result<(), RequestError> {
     let conn = right_db::open_connection(agent_dir, false)
+        .await
         .map_err(|e| to_request_err(format!("DB open failed: {e:#}")))?;
 
     let specs = right_agent::cron_spec::load_specs_from_db(&conn)
+        .await
         .map_err(|e| to_request_err(format!("load specs failed: {e:#}")))?;
 
     if specs.is_empty() {
@@ -1805,6 +1816,7 @@ async fn handle_cron_list(
         };
 
         let last_run = right_agent::cron_spec::get_recent_runs(&conn, name, 1)
+            .await
             .map_err(|e| to_request_err(format!("get runs failed: {e:#}")))?;
 
         let status_str = match last_run.first() {
@@ -1834,9 +1846,11 @@ async fn handle_cron_detail(
     agent_dir: &Path,
 ) -> Result<(), RequestError> {
     let conn = right_db::open_connection(agent_dir, false)
+        .await
         .map_err(|e| to_request_err(format!("DB open failed: {e:#}")))?;
 
     let detail = right_agent::cron_spec::get_spec_detail(&conn, job_name)
+        .await
         .map_err(|e| to_request_err(format!("query failed: {e:#}")))?;
 
     let Some(detail) = detail else {
@@ -1860,6 +1874,7 @@ async fn handle_cron_detail(
     }
 
     let runs = right_agent::cron_spec::get_recent_runs(&conn, job_name, 5)
+        .await
         .map_err(|e| to_request_err(format!("get runs failed: {e:#}")))?;
 
     if runs.is_empty() {
@@ -1913,7 +1928,7 @@ pub async fn handle_doctor(bot: BotType, msg: Message, home: Arc<RightHome>) -> 
         return Ok(());
     }
     tracing::info!("handle_doctor: running diagnostics");
-    let checks = right_agent::doctor::run_doctor(&home.0);
+    let checks = right_agent::doctor::run_doctor(&home.0).await;
     for text in format_doctor_result_messages(&checks) {
         if let Err(e) = bot
             .send_message(msg.chat.id, &text)
@@ -2303,8 +2318,8 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn is_private_chat_detects_dm() {
+    #[tokio::test]
+    async fn is_private_chat_detects_dm() {
         assert!(is_private_chat(&make_private_chat_kind()));
         assert!(!is_private_chat(&make_group_chat_kind()));
     }
@@ -2313,8 +2328,8 @@ mod tests {
     /// If they shared the same type (e.g., both Arc<PathBuf>), dptree would overwrite
     /// the first registration with the second, causing all handlers to receive the
     /// wrong path for one of the two parameters.
-    #[test]
-    fn agent_dir_and_right_home_have_distinct_type_ids() {
+    #[tokio::test]
+    async fn agent_dir_and_right_home_have_distinct_type_ids() {
         assert_ne!(
             TypeId::of::<AgentDir>(),
             TypeId::of::<RightHome>(),
@@ -2322,8 +2337,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn agent_dir_and_right_home_hold_independent_paths() {
+    #[tokio::test]
+    async fn agent_dir_and_right_home_hold_independent_paths() {
         let agent = AgentDir(PathBuf::from("/agents/myagent"));
         let home = RightHome(PathBuf::from("/home/user/.right"));
 
@@ -2332,8 +2347,8 @@ mod tests {
         assert_ne!(agent.0, home.0);
     }
 
-    #[test]
-    fn parse_stop_callback_data_valid() {
+    #[tokio::test]
+    async fn parse_stop_callback_data_valid() {
         let data = "stop:12345:678";
         let parts: Vec<&str> = data.splitn(3, ':').collect();
         assert_eq!(parts.len(), 3);
@@ -2342,22 +2357,22 @@ mod tests {
         assert_eq!(parts[2].parse::<i64>().unwrap(), 678);
     }
 
-    #[test]
-    fn parse_stop_callback_data_zero_thread() {
+    #[tokio::test]
+    async fn parse_stop_callback_data_zero_thread() {
         let data = "stop:12345:0";
         let parts: Vec<&str> = data.splitn(3, ':').collect();
         assert_eq!(parts[2].parse::<i64>().unwrap(), 0);
     }
 
-    #[test]
-    fn parse_stop_callback_data_invalid() {
+    #[tokio::test]
+    async fn parse_stop_callback_data_invalid() {
         let data = "stop:notanumber:0";
         let parts: Vec<&str> = data.splitn(3, ':').collect();
         assert!(parts[1].parse::<i64>().is_err());
     }
 
-    #[test]
-    fn token_request_prompt_formats_header_override_as_code() {
+    #[tokio::test]
+    async fn token_request_prompt_formats_header_override_as_code() {
         let text = format_token_request_prompt("the X<Api> token", "obs<idian>");
 
         assert!(text.contains("<code>HeaderName: token</code>"));
@@ -2366,8 +2381,8 @@ mod tests {
         assert!(!text.contains("or HeaderName: token"));
     }
 
-    #[test]
-    fn mcp_add_reply_formats_success_and_warning_as_telegram_status_blocks() {
+    #[tokio::test]
+    async fn mcp_add_reply_formats_success_and_warning_as_telegram_status_blocks() {
         let text = format_mcp_add_reply(
             "obsidian",
             None,
@@ -2382,8 +2397,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn format_doctor_result_messages_splits_long_output_for_telegram() {
+    #[tokio::test]
+    async fn format_doctor_result_messages_splits_long_output_for_telegram() {
         let checks: Vec<_> = (0..40)
             .map(|i| right_agent::doctor::DoctorCheck {
                 name: format!("long-check-{i}"),
@@ -2413,8 +2428,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn stop_token_cancel_via_dashmap_lookup() {
+    #[tokio::test]
+    async fn stop_token_cancel_via_dashmap_lookup() {
         use dashmap::DashMap;
         use tokio_util::sync::CancellationToken;
 
@@ -2435,8 +2450,8 @@ mod tests {
         assert!(map.get(&key).is_none());
     }
 
-    #[test]
-    fn agent_dir_and_right_home_clone_independently() {
+    #[tokio::test]
+    async fn agent_dir_and_right_home_clone_independently() {
         let agent = AgentDir(PathBuf::from("/agents/myagent"));
         let home = RightHome(PathBuf::from("/home/user/.right"));
 
@@ -2447,64 +2462,64 @@ mod tests {
         assert_eq!(home.0, home2.0);
     }
 
-    #[test]
-    fn format_relative_time_just_now() {
+    #[tokio::test]
+    async fn format_relative_time_just_now() {
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         assert_eq!(format_relative_time(&now), "just now");
     }
 
-    #[test]
-    fn format_relative_time_minutes() {
+    #[tokio::test]
+    async fn format_relative_time_minutes() {
         let then = (chrono::Utc::now() - chrono::Duration::minutes(15))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
         assert_eq!(format_relative_time(&then), "15m ago");
     }
 
-    #[test]
-    fn format_relative_time_hours() {
+    #[tokio::test]
+    async fn format_relative_time_hours() {
         let then = (chrono::Utc::now() - chrono::Duration::hours(3))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
         assert_eq!(format_relative_time(&then), "3h ago");
     }
 
-    #[test]
-    fn format_relative_time_days() {
+    #[tokio::test]
+    async fn format_relative_time_days() {
         let then = (chrono::Utc::now() - chrono::Duration::days(5))
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
         assert_eq!(format_relative_time(&then), "5d ago");
     }
 
-    #[test]
-    fn format_relative_time_malformed() {
+    #[tokio::test]
+    async fn format_relative_time_malformed() {
         assert_eq!(format_relative_time("not-a-timestamp"), "not-a-timestamp");
     }
 
-    #[test]
-    fn format_duration_seconds() {
+    #[tokio::test]
+    async fn format_duration_seconds() {
         assert_eq!(
             format_duration("2026-04-11T10:00:00Z", "2026-04-11T10:00:12Z"),
             " (12s)"
         );
     }
 
-    #[test]
-    fn format_duration_minutes() {
+    #[tokio::test]
+    async fn format_duration_minutes() {
         assert_eq!(
             format_duration("2026-04-11T10:00:00Z", "2026-04-11T10:02:30Z"),
             " (2m 30s)"
         );
     }
 
-    #[test]
-    fn format_duration_malformed() {
+    #[tokio::test]
+    async fn format_duration_malformed() {
         assert_eq!(format_duration("bad", "2026-04-11T10:00:00Z"), "");
     }
 
-    #[test]
-    fn parse_bg_callback_data_valid() {
+    #[tokio::test]
+    async fn parse_bg_callback_data_valid() {
         let data = "bg:42:7";
         let parts: Vec<&str> = data.splitn(3, ':').collect();
         assert_eq!(parts[0], "bg");
@@ -2512,8 +2527,8 @@ mod tests {
         assert_eq!(parts[2].parse::<i64>().unwrap(), 7);
     }
 
-    #[test]
-    fn parse_bg_callback_data_malformed() {
+    #[tokio::test]
+    async fn parse_bg_callback_data_malformed() {
         for bad in ["", "bg", "bg:", "bg:abc:0", "bg:1", "stop:1:2"] {
             let parts: Vec<&str> = bad.splitn(3, ':').collect();
             let valid = parts.len() == 3
@@ -2524,8 +2539,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn thinking_toggle_show_updates_active_visibility() {
+    #[tokio::test]
+    async fn thinking_toggle_show_updates_active_visibility() {
         let map: super::ThinkingVisibility = Arc::new(DashMap::new());
         let key = (42_i64, 7_i64);
         map.insert(key, false);
@@ -2536,8 +2551,8 @@ mod tests {
         assert!(*map.get(&key).unwrap().value());
     }
 
-    #[test]
-    fn thinking_toggle_hide_updates_active_visibility() {
+    #[tokio::test]
+    async fn thinking_toggle_hide_updates_active_visibility() {
         let map: super::ThinkingVisibility = Arc::new(DashMap::new());
         let key = (42_i64, 7_i64);
         map.insert(key, true);
@@ -2548,16 +2563,16 @@ mod tests {
         assert!(!*map.get(&key).unwrap().value());
     }
 
-    #[test]
-    fn thinking_toggle_after_finish_reports_already_finished() {
+    #[tokio::test]
+    async fn thinking_toggle_after_finish_reports_already_finished() {
         let map: super::ThinkingVisibility = Arc::new(DashMap::new());
 
         let text = apply_thinking_toggle_callback(&map, "think:42:7:show");
         assert_eq!(text, Some("Already finished"));
     }
 
-    #[test]
-    fn thinking_toggle_malformed_callback_returns_none() {
+    #[tokio::test]
+    async fn thinking_toggle_malformed_callback_returns_none() {
         let map: super::ThinkingVisibility = Arc::new(DashMap::new());
 
         assert_eq!(apply_thinking_toggle_callback(&map, "think:42:7"), None);

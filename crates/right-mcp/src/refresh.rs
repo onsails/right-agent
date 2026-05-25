@@ -64,10 +64,11 @@ impl std::fmt::Debug for RefreshMessage {
 }
 
 /// Load OAuth server entries from SQLite for refresh scheduling.
-pub fn load_oauth_entries_from_db(
+pub async fn load_oauth_entries_from_db(
     conn: &Connection,
 ) -> miette::Result<Vec<(String, OAuthServerState)>> {
     let servers = crate::credentials::db_list_oauth_servers(conn)
+        .await
         .map_err(|e| miette::miette!("failed to list OAuth servers: {e:#}"))?;
 
     let mut entries = Vec::new();
@@ -245,7 +246,7 @@ pub async fn run_refresh_scheduler(
                         let current_token = token.read().await.clone().unwrap_or_default();
 
                         // Persist to SQLite
-                        match right_db::open_connection(&agent_dir, false) {
+                        match right_db::open_connection(&agent_dir, false).await {
                             Ok(conn) => {
                                 let expires_at = entry_state.expires_at.to_rfc3339();
                                 if let Err(e) = crate::credentials::db_set_oauth_state(
@@ -258,7 +259,9 @@ pub async fn run_refresh_scheduler(
                                     entry_state.client_secret.as_deref(),
                                     &expires_at,
                                     &entry_state.resource,
-                                ) {
+                                )
+                                .await
+                                {
                                     tracing::error!("failed to persist OAuth state: {e:#}");
                                 }
                             }
@@ -394,7 +397,7 @@ pub async fn run_refresh_scheduler(
                                 let due = refresh_due_in(&new_entry);
                                 timers.insert(name.clone(), tokio::time::Instant::now() + due);
 
-                                match right_db::open_connection(&agent_dir, false) {
+                                match right_db::open_connection(&agent_dir, false).await {
                                     Ok(conn) => {
                                         let expires_at = new_entry.expires_at.to_rfc3339();
                                         if let Err(e) = crate::credentials::db_update_oauth_token(
@@ -403,7 +406,9 @@ pub async fn run_refresh_scheduler(
                                             &access_token,
                                             new_entry.refresh_token.as_deref(),
                                             &expires_at,
-                                        ) {
+                                        )
+                                        .await
+                                        {
                                             tracing::error!("failed to persist refreshed token: {e:#}");
                                         }
                                     }
@@ -561,11 +566,13 @@ mod tests {
     async fn wait_for_scheduler_entry(agent_dir: &std::path::Path, server_name: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let found = right_db::open_connection(agent_dir, false)
-                .ok()
-                .and_then(|conn| load_oauth_entries_from_db(&conn).ok())
-                .map(|entries| entries.iter().any(|(name, _)| name == server_name))
-                .unwrap_or(false);
+            let found = match right_db::open_connection(agent_dir, false).await {
+                Ok(conn) => load_oauth_entries_from_db(&conn)
+                    .await
+                    .map(|entries| entries.iter().any(|(name, _)| name == server_name))
+                    .unwrap_or(false),
+                Err(_) => false,
+            };
             if found {
                 return;
             }
@@ -685,9 +692,9 @@ mod tests {
         assert_eq!(transient_backoff_secs(999), TRANSIENT_BACKOFF_CAP_SECS);
     }
 
-    #[test]
-    fn load_oauth_entries_from_db_test() {
-        let (_dir, conn) = right_db::test_support::migrated_connection();
+    #[tokio::test]
+    async fn load_oauth_entries_from_db_test() {
+        let (_dir, conn) = right_db::test_support::migrated_connection().await;
         conn.execute(
             "INSERT INTO mcp_servers (name, url, auth_type, auth_token, refresh_token, \
              token_endpoint, client_id, expires_at) \
@@ -695,8 +702,9 @@ mod tests {
              'https://ex.com/token', 'cid', '2026-04-13T12:00:00+00:00')",
             [],
         )
+        .await
         .unwrap();
-        let entries = load_oauth_entries_from_db(&conn).unwrap();
+        let entries = load_oauth_entries_from_db(&conn).await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, "notion");
         assert_eq!(entries[0].1.client_id, "cid");
@@ -814,11 +822,12 @@ mod tests {
             .await;
 
         let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).await.unwrap();
         conn.execute(
             "INSERT INTO mcp_servers (name, url, auth_type) VALUES ('s', 'https://x/mcp', 'oauth')",
             [],
         )
+        .await
         .unwrap();
         drop(conn);
 
@@ -887,11 +896,12 @@ mod tests {
             .await;
 
         let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).await.unwrap();
         conn.execute(
             "INSERT INTO mcp_servers (name, url, auth_type) VALUES ('s', 'https://x/mcp', 'oauth')",
             [],
         )
+        .await
         .unwrap();
         drop(conn);
 
@@ -987,13 +997,14 @@ mod tests {
             .await;
 
         let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).await.unwrap();
         conn.execute(
             "INSERT INTO mcp_servers (name, url, auth_type) VALUES \
              ('a', 'https://x/a/mcp', 'oauth'), \
              ('b', 'https://x/b/mcp', 'oauth')",
             [],
         )
+        .await
         .unwrap();
         drop(conn);
 

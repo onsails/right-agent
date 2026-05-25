@@ -20,25 +20,27 @@ pub enum BaselineMetric<T> {
     Available { p50: T, p90: T, p99: T },
 }
 
-pub fn compute(
+pub async fn compute(
     conn: &Connection,
     window_days: u32,
     min_sample: u32,
 ) -> Result<TurnBaselines, UsageError> {
     let window_cutoff = (Utc::now() - chrono::Duration::days(window_days as i64)).to_rfc3339();
-    let rows = conn.query_all(
-        "SELECT total_cost_usd, num_turns, wall_elapsed_ms \
+    let rows = conn
+        .query_all(
+            "SELECT total_cost_usd, num_turns, wall_elapsed_ms \
          FROM usage_events \
          WHERE source = 'interactive' AND ts >= ?1",
-        [&window_cutoff],
-        |r| {
-            Ok((
-                r.get::<_, f64>(0)?,
-                r.get::<_, i64>(1)? as u32,
-                r.get::<_, Option<i64>>(2)?.map(|v| v as u64),
-            ))
-        },
-    )?;
+            [&window_cutoff],
+            |r| {
+                Ok((
+                    r.get::<_, f64>(0)?,
+                    r.get::<_, i64>(1)? as u32,
+                    r.get::<_, Option<i64>>(2)?.map(|v| v as u64),
+                ))
+            },
+        )
+        .await?;
     let mut costs: Vec<f64> = Vec::new();
     let mut turns: Vec<u32> = Vec::new();
     let mut elapsed: Vec<u64> = Vec::new();
@@ -129,7 +131,7 @@ pub struct CostSpikeEvidence {
 
 /// Return `Some(evidence)` iff today's probe-writer spend exceeds both `k *
 /// baseline_p50` and `min_floor_usd`. Both conditions must hold.
-pub fn check_probe_writer_cost_spike(
+pub async fn check_probe_writer_cost_spike(
     conn: &Connection,
     now: DateTime<Utc>,
     baseline_days: u32,
@@ -137,12 +139,14 @@ pub fn check_probe_writer_cost_spike(
     min_floor_usd: f64,
 ) -> Result<Option<CostSpikeEvidence>, UsageError> {
     let today_start = now.format("%Y-%m-%dT00:00:00Z").to_string();
-    let today_cost: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(total_cost_usd), 0.0) FROM usage_events \
+    let today_cost: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(total_cost_usd), 0.0) FROM usage_events \
          WHERE source = 'learning_probe_writer' AND ts >= ?1",
-        [&today_start],
-        |r| r.get(0),
-    )?;
+            [&today_start],
+            |r| r.get(0),
+        )
+        .await?;
     if today_cost < min_floor_usd {
         return Ok(None);
     }
@@ -150,13 +154,15 @@ pub fn check_probe_writer_cost_spike(
     let window_start = (now - chrono::Duration::days(baseline_days as i64))
         .format("%Y-%m-%dT00:00:00Z")
         .to_string();
-    let rows = conn.query_all(
-        "SELECT SUM(total_cost_usd) FROM usage_events \
+    let rows = conn
+        .query_all(
+            "SELECT SUM(total_cost_usd) FROM usage_events \
          WHERE source = 'learning_probe_writer' AND ts >= ?1 AND ts < ?2 \
          GROUP BY substr(ts, 1, 10)",
-        params![window_start, today_start],
-        |r| r.get(0),
-    )?;
+            params![window_start, today_start],
+            |r| r.get(0),
+        )
+        .await?;
     let mut daily: Vec<f64> = rows;
     if daily.is_empty() {
         // No probe_writer history in the baseline window — defer to other
@@ -203,14 +209,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn compute_returns_insufficient_when_below_min_sample() {
+    #[tokio::test]
+    async fn compute_returns_insufficient_when_below_min_sample() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
         for i in 0..5 {
-            insert_interactive(&conn, &sample(0.01, 1, Some(i * 100)), 1, 0).unwrap();
+            insert_interactive(&conn, &sample(0.01, 1, Some(i * 100)), 1, 0)
+                .await
+                .unwrap();
         }
-        let b = compute(&conn, 14, 20).unwrap();
+        let b = compute(&conn, 14, 20).await.unwrap();
         assert_eq!(b.sample_size, 5);
         assert_eq!(b.window_days, 14);
         assert!(matches!(
@@ -224,10 +232,10 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn compute_returns_available_when_at_least_min_sample() {
+    #[tokio::test]
+    async fn compute_returns_available_when_at_least_min_sample() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
         for i in 0..50 {
             let cost = 0.01 * (i + 1) as f64;
             insert_interactive(
@@ -236,9 +244,10 @@ mod tests {
                 1,
                 0,
             )
+            .await
             .unwrap();
         }
-        let b = compute(&conn, 14, 20).unwrap();
+        let b = compute(&conn, 14, 20).await.unwrap();
         assert_eq!(b.sample_size, 50);
         let cost_available = matches!(b.cost_usd, BaselineMetric::Available { .. });
         assert!(cost_available);
@@ -252,22 +261,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn compute_excludes_non_foreground_sources() {
+    #[tokio::test]
+    async fn compute_excludes_non_foreground_sources() {
         use crate::usage::insert::{insert_cron, insert_learning_curator};
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
         // 25 foreground + 25 cron + 25 curator; baseline counts only foreground.
         for _ in 0..25 {
-            insert_interactive(&conn, &sample(0.10, 5, Some(1000)), 1, 0).unwrap();
+            insert_interactive(&conn, &sample(0.10, 5, Some(1000)), 1, 0)
+                .await
+                .unwrap();
         }
         for _ in 0..25 {
-            insert_cron(&conn, &sample(0.99, 99, None), "j").unwrap();
+            insert_cron(&conn, &sample(0.99, 99, None), "j")
+                .await
+                .unwrap();
         }
         for _ in 0..25 {
-            insert_learning_curator(&conn, &sample(0.99, 99, None)).unwrap();
+            insert_learning_curator(&conn, &sample(0.99, 99, None))
+                .await
+                .unwrap();
         }
-        let b = compute(&conn, 14, 20).unwrap();
+        let b = compute(&conn, 14, 20).await.unwrap();
         assert_eq!(b.sample_size, 25);
         if let BaselineMetric::Available { p50, .. } = b.cost_usd {
             assert!(
@@ -279,11 +294,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn compute_returns_insufficient_with_zero_sample_on_empty_db() {
+    #[tokio::test]
+    async fn compute_returns_insufficient_with_zero_sample_on_empty_db() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        let b = compute(&conn, 14, 20).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        let b = compute(&conn, 14, 20).await.unwrap();
         assert_eq!(b.sample_size, 0);
         assert!(matches!(
             b.cost_usd,
@@ -299,18 +314,22 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn compute_excludes_null_wall_elapsed_from_elapsed_baseline_only() {
+    #[tokio::test]
+    async fn compute_excludes_null_wall_elapsed_from_elapsed_baseline_only() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
         // 30 rows total, 10 with NULL elapsed, 20 with elapsed.
         for _ in 0..10 {
-            insert_interactive(&conn, &sample(0.05, 2, None), 1, 0).unwrap();
+            insert_interactive(&conn, &sample(0.05, 2, None), 1, 0)
+                .await
+                .unwrap();
         }
         for i in 0..20 {
-            insert_interactive(&conn, &sample(0.05, 2, Some((i + 1) * 100)), 1, 0).unwrap();
+            insert_interactive(&conn, &sample(0.05, 2, Some((i + 1) * 100)), 1, 0)
+                .await
+                .unwrap();
         }
-        let b = compute(&conn, 14, 20).unwrap();
+        let b = compute(&conn, 14, 20).await.unwrap();
         assert_eq!(b.sample_size, 30);
         assert!(matches!(b.cost_usd, BaselineMetric::Available { .. }));
         // Elapsed baseline has 20 samples; passes min_sample=20.
@@ -346,23 +365,31 @@ mod cost_spike_tests {
         }
     }
 
-    #[test]
-    fn returns_none_when_today_below_floor() {
+    #[tokio::test]
+    async fn returns_none_when_today_below_floor() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        insert_learning_probe_writer(&conn, &b(0.01), 1, 0).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_learning_probe_writer(&conn, &b(0.01), 1, 0)
+            .await
+            .unwrap();
         let now = Utc::now();
-        let r = check_probe_writer_cost_spike(&conn, now, 14, 3.0, 0.05).unwrap();
+        let r = check_probe_writer_cost_spike(&conn, now, 14, 3.0, 0.05)
+            .await
+            .unwrap();
         assert!(r.is_none());
     }
 
-    #[test]
-    fn returns_none_when_no_baseline_history() {
+    #[tokio::test]
+    async fn returns_none_when_no_baseline_history() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        insert_learning_probe_writer(&conn, &b(0.20), 1, 0).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_learning_probe_writer(&conn, &b(0.20), 1, 0)
+            .await
+            .unwrap();
         let now = Utc::now();
-        let r = check_probe_writer_cost_spike(&conn, now, 14, 3.0, 0.05).unwrap();
+        let r = check_probe_writer_cost_spike(&conn, now, 14, 3.0, 0.05)
+            .await
+            .unwrap();
         // No prior probe_writer days in the baseline window — must not fire.
         // Skill-change-count or time-fallback triggers handle the new-agent case.
         assert!(r.is_none());
@@ -373,10 +400,10 @@ mod cost_spike_tests {
     /// Old code: threshold = k * max(p50, floor) = 3 * 0.05 = 0.15 → 0.08 < 0.15 → None (bug).
     ///
     /// The baseline query groups by day and sums; one row per day at 0.02 gives p50=0.02.
-    #[test]
-    fn fires_when_today_exceeds_k_times_p50_and_floor_independently() {
+    #[tokio::test]
+    async fn fires_when_today_exceeds_k_times_p50_and_floor_independently() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
         // One row per day for 7 days in the baseline window, each costing 0.02.
         // p50 of [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02] = 0.02.
         for day in 1..=7u32 {
@@ -392,12 +419,17 @@ mod cost_spike_tests {
                  VALUES ('s', 'learning_probe_writer', ?1, 0.02, 1, 0, 0, 0, 0, 0, 0, '{}', 'none')",
                 [&ts],
             )
+            .await
             .unwrap();
         }
         // Today's spend: 0.08 >= k*p50=0.06 AND 0.08 >= floor=0.05 → must fire.
-        insert_learning_probe_writer(&conn, &b(0.08), 1, 0).unwrap();
+        insert_learning_probe_writer(&conn, &b(0.08), 1, 0)
+            .await
+            .unwrap();
         let now = Utc::now();
-        let r = check_probe_writer_cost_spike(&conn, now, 14, 3.0, 0.05).unwrap();
+        let r = check_probe_writer_cost_spike(&conn, now, 14, 3.0, 0.05)
+            .await
+            .unwrap();
         assert!(
             r.is_some(),
             "expected Some: today=0.08 >= k*p50=0.06 and >= floor=0.05"

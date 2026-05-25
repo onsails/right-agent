@@ -335,17 +335,18 @@ impl ProxyBackend {
             .peer()
             .peer_info()
             .and_then(|info| info.instructions.clone());
-        let conn = right_db::open_connection(&self.agent_dir, false).map_err(|e| {
-            ProxyError::InstructionsCacheFailed {
+        let conn = right_db::open_connection(&self.agent_dir, false)
+            .await
+            .map_err(|e| ProxyError::InstructionsCacheFailed {
                 server: self.server_name.clone(),
                 source: e.into(),
-            }
-        })?;
+            })?;
         crate::credentials::db_update_instructions(
             &conn,
             &self.server_name,
             instructions.as_deref(),
         )
+        .await
         .map_err(|e| ProxyError::InstructionsCacheFailed {
             server: self.server_name.clone(),
             source: e.into(),

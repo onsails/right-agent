@@ -590,7 +590,7 @@ pub(crate) fn mcp_config_path(ssh_config_path: Option<&Path>, agent_dir: &Path) 
 /// via env var.
 ///
 /// Stdio is NOT configured — caller must set stdin/stdout/stderr after.
-pub(crate) fn build_claude_command(
+pub(crate) async fn build_claude_command(
     args: &[String],
     agent_dir: &Path,
     ssh_config_path: Option<&Path>,
@@ -599,7 +599,7 @@ pub(crate) fn build_claude_command(
     if let Some(ssh_config) = ssh_config_path {
         let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut script = String::new();
-        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
             script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
         }
@@ -618,7 +618,7 @@ pub(crate) fn build_claude_command(
         c.args(&args[1..]);
         c.env("HOME", agent_dir);
         c.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
         }
         c.current_dir(agent_dir);
@@ -739,8 +739,8 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn minimal_invocation_has_invariants() {
+    #[tokio::test]
+    async fn minimal_invocation_has_invariants() {
         let args = minimal().into_args();
         assert_eq!(args[0], "claude");
         assert_eq!(args[1], "-p");
@@ -753,23 +753,23 @@ mod tests {
         assert!(args.contains(&"--json-schema".to_string()));
     }
 
-    #[test]
-    fn prompt_comes_after_double_dash() {
+    #[tokio::test]
+    async fn prompt_comes_after_double_dash() {
         let args = minimal().into_args();
         let dash_pos = args.iter().position(|a| a == "--").unwrap();
         assert_eq!(args[dash_pos + 1], "hello");
     }
 
-    #[test]
-    fn no_prompt_no_double_dash() {
+    #[tokio::test]
+    async fn no_prompt_no_double_dash() {
         let mut inv = minimal();
         inv.prompt = None;
         let args = inv.into_args();
         assert!(!args.contains(&"--".to_string()));
     }
 
-    #[test]
-    fn ssh_invocation_quotes_claude_argv_as_one_remote_script() {
+    #[tokio::test]
+    async fn ssh_invocation_quotes_claude_argv_as_one_remote_script() {
         let temp = tempfile::tempdir().unwrap();
         let args = vec![
             "claude".to_string(),
@@ -783,7 +783,8 @@ mod tests {
             temp.path(),
             Some(Path::new("config")),
             Some("example"),
-        );
+        )
+        .await;
         let std_cmd = cmd.as_std();
         let ssh_args: Vec<String> = std_cmd
             .get_args()
@@ -822,8 +823,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn optional_model() {
+    #[tokio::test]
+    async fn optional_model() {
         let mut inv = minimal();
         inv.model = Some("claude-haiku-4-5-20251001".into());
         let args = inv.into_args();
@@ -831,8 +832,8 @@ mod tests {
         assert_eq!(args[pos + 1], "claude-haiku-4-5-20251001");
     }
 
-    #[test]
-    fn optional_budget() {
+    #[tokio::test]
+    async fn optional_budget() {
         let mut inv = minimal();
         inv.max_budget_usd = Some(1.5);
         let args = inv.into_args();
@@ -840,8 +841,8 @@ mod tests {
         assert_eq!(args[pos + 1], "1.50");
     }
 
-    #[test]
-    fn optional_max_turns() {
+    #[tokio::test]
+    async fn optional_max_turns() {
         let mut inv = minimal();
         inv.max_turns = Some(10);
         let args = inv.into_args();
@@ -849,8 +850,8 @@ mod tests {
         assert_eq!(args[pos + 1], "10");
     }
 
-    #[test]
-    fn disallowed_tools_expanded() {
+    #[tokio::test]
+    async fn disallowed_tools_expanded() {
         let mut inv = minimal();
         inv.disallowed_tools = vec!["CronCreate".into(), "CronList".into()];
         let args = inv.into_args();
@@ -859,8 +860,8 @@ mod tests {
         assert_eq!(args[pos + 2], "CronList");
     }
 
-    #[test]
-    fn disable_all_tools_args_emit_empty_tools_flag() {
+    #[tokio::test]
+    async fn disable_all_tools_args_emit_empty_tools_flag() {
         let mut inv = minimal();
         inv.extra_args = disable_all_tools_args();
 
@@ -870,8 +871,8 @@ mod tests {
         assert_eq!(args[pos + 1], "");
     }
 
-    #[test]
-    fn baseline_disallowed_tools_blocks_harness_self_loops() {
+    #[tokio::test]
+    async fn baseline_disallowed_tools_blocks_harness_self_loops() {
         let baseline = baseline_disallowed_tools();
         for required in [
             "ScheduleWakeup",
@@ -901,8 +902,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn invocation_mcp_config_adds_progress_header_and_preserves_authorization() {
+    #[tokio::test]
+    async fn invocation_mcp_config_adds_progress_header_and_preserves_authorization() {
         let config = serde_json::json!({
             "mcpServers": {
                 "right": {
@@ -923,16 +924,16 @@ mod tests {
         assert_eq!(updated["other"], true);
     }
 
-    #[test]
-    fn disallow_progress_adds_full_mcp_tool_name() {
+    #[tokio::test]
+    async fn disallow_progress_adds_full_mcp_tool_name() {
         let tools = disallow_send_progress(vec!["Agent".to_owned()]);
 
         assert!(tools.iter().any(|tool| tool == SEND_PROGRESS_MCP_TOOL));
         assert!(tools.iter().any(|tool| tool == "Agent"));
     }
 
-    #[test]
-    fn disallow_send_progress_is_idempotent() {
+    #[tokio::test]
+    async fn disallow_send_progress_is_idempotent() {
         let tools = disallow_send_progress(disallow_send_progress(Vec::new()));
         let count = tools
             .iter()
@@ -942,8 +943,8 @@ mod tests {
         assert_eq!(count, 1);
     }
 
-    #[test]
-    fn disallow_learning_tools_adds_full_mcp_tool_names() {
+    #[tokio::test]
+    async fn disallow_learning_tools_adds_full_mcp_tool_names() {
         let tools = disallow_learning_tools(vec!["Agent".to_owned()]);
 
         assert!(
@@ -959,8 +960,8 @@ mod tests {
         assert!(tools.iter().any(|tool| tool == "Agent"));
     }
 
-    #[test]
-    fn disallow_foreground_only_tools_is_idempotent() {
+    #[tokio::test]
+    async fn disallow_foreground_only_tools_is_idempotent() {
         let tools = disallow_foreground_only_tools(disallow_foreground_only_tools(Vec::new()));
 
         for tool_name in [
@@ -978,8 +979,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn write_invocation_mcp_config_writes_agent_scoped_file() {
+    #[tokio::test]
+    async fn write_invocation_mcp_config_writes_agent_scoped_file() {
         let temp = tempfile::tempdir().unwrap();
         let claude_dir = temp.path().join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
@@ -1201,8 +1202,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resume_session() {
+    #[tokio::test]
+    async fn resume_session() {
         let mut inv = minimal();
         inv.resume_session_id = Some("abc-123".into());
         let args = inv.into_args();
@@ -1210,8 +1211,8 @@ mod tests {
         assert_eq!(args[pos + 1], "abc-123");
     }
 
-    #[test]
-    fn new_session() {
+    #[tokio::test]
+    async fn new_session() {
         let mut inv = minimal();
         inv.new_session_id = Some("def-456".into());
         let args = inv.into_args();
@@ -1220,8 +1221,8 @@ mod tests {
         assert!(!args.contains(&"--resume".to_string()));
     }
 
-    #[test]
-    fn json_output_format() {
+    #[tokio::test]
+    async fn json_output_format() {
         let mut inv = minimal();
         inv.output_format = OutputFormat::Json;
         let args = inv.into_args();
@@ -1230,8 +1231,8 @@ mod tests {
         assert!(!args.contains(&"--verbose".to_string()));
     }
 
-    #[test]
-    fn allowed_tools_joined() {
+    #[tokio::test]
+    async fn allowed_tools_joined() {
         let mut inv = minimal();
         inv.allowed_tools = vec!["WebSearch".into(), "WebFetch".into()];
         let args = inv.into_args();
@@ -1239,8 +1240,8 @@ mod tests {
         assert_eq!(args[pos + 1], "WebSearch,WebFetch");
     }
 
-    #[test]
-    fn no_mcp_no_schema() {
+    #[tokio::test]
+    async fn no_mcp_no_schema() {
         let mut inv = minimal();
         inv.mcp_config_path = None;
         inv.json_schema = None;
@@ -1250,8 +1251,8 @@ mod tests {
         assert!(!args.contains(&"--json-schema".to_string()));
     }
 
-    #[test]
-    fn mcp_config_path_sandbox() {
+    #[tokio::test]
+    async fn mcp_config_path_sandbox() {
         let path = mcp_config_path(
             Some(Path::new("/tmp/ssh.config")),
             Path::new("/home/user/agents/foo"),
@@ -1259,15 +1260,15 @@ mod tests {
         assert_eq!(path, right_openshell::openshell::SANDBOX_MCP_JSON_PATH);
     }
 
-    #[test]
-    fn mcp_config_path_no_sandbox() {
+    #[tokio::test]
+    async fn mcp_config_path_no_sandbox() {
         let agent_dir = PathBuf::from("/home/user/agents/foo");
         let path = mcp_config_path(None, &agent_dir);
         assert_eq!(path, "/home/user/agents/foo/mcp.json");
     }
 
-    #[test]
-    fn fork_session_emits_resume_fork_and_session_id() {
+    #[tokio::test]
+    async fn fork_session_emits_resume_fork_and_session_id() {
         let mut inv = minimal();
         inv.resume_session_id = Some("main-uuid".into());
         inv.new_session_id = Some("fork-uuid".into());
@@ -1299,8 +1300,8 @@ mod tests {
         assert_eq!(args[session_pos + 1], "fork-uuid");
     }
 
-    #[test]
-    fn fork_session_without_resume_does_not_emit_flag() {
+    #[tokio::test]
+    async fn fork_session_without_resume_does_not_emit_flag() {
         let mut inv = minimal();
         inv.new_session_id = Some("only-new".into());
         inv.fork_session = true;
@@ -1309,8 +1310,8 @@ mod tests {
         assert!(!args.contains(&"--resume".to_string()));
     }
 
-    #[test]
-    fn debug_flag_true_appends_debug_and_debug_file() {
+    #[tokio::test]
+    async fn debug_flag_true_appends_debug_and_debug_file() {
         let mut inv = minimal();
         inv.new_session_id = Some("abc-123".into());
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1327,8 +1328,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn debug_flag_false_omits_debug_and_debug_file() {
+    #[tokio::test]
+    async fn debug_flag_false_omits_debug_and_debug_file() {
         let mut inv = minimal();
         inv.new_session_id = Some("abc-123".into());
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1338,8 +1339,8 @@ mod tests {
         assert!(!args.iter().any(|a| a.starts_with("--debug-file=")));
     }
 
-    #[test]
-    fn debug_flag_absent_omits_debug() {
+    #[tokio::test]
+    async fn debug_flag_absent_omits_debug() {
         // No debug_flag set at all (None) — should behave like false.
         let mut inv = minimal();
         inv.new_session_id = Some("abc-123".into());
@@ -1347,8 +1348,8 @@ mod tests {
         assert!(!args.contains(&"--debug".to_string()));
     }
 
-    #[test]
-    fn debug_flag_uses_resume_session_id_when_no_fork() {
+    #[tokio::test]
+    async fn debug_flag_uses_resume_session_id_when_no_fork() {
         let mut inv = minimal();
         inv.resume_session_id = Some("resume-uuid".into());
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1361,8 +1362,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn debug_flag_uses_new_session_id_when_forking() {
+    #[tokio::test]
+    async fn debug_flag_uses_new_session_id_when_forking() {
         let mut inv = minimal();
         inv.resume_session_id = Some("old-uuid".into());
         inv.new_session_id = Some("new-uuid".into());
@@ -1377,8 +1378,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn debug_flag_runtime_toggle_picked_up_at_build_time() {
+    #[tokio::test]
+    async fn debug_flag_runtime_toggle_picked_up_at_build_time() {
         let mut inv = minimal();
         inv.new_session_id = Some("abc-123".into());
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1392,8 +1393,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn debug_flag_no_session_id_omits_debug_file_but_still_emits_debug() {
+    #[tokio::test]
+    async fn debug_flag_no_session_id_omits_debug_file_but_still_emits_debug() {
         let mut inv = minimal();
         // Neither resume nor new session id set.
         inv.resume_session_id = None;

@@ -2,41 +2,41 @@ use super::*;
 use crate::test_support::setup_crypto;
 use tempfile::tempdir;
 
-#[test]
-fn check_binary_returns_fail_for_missing_binary() {
+#[tokio::test]
+async fn check_binary_returns_fail_for_missing_binary() {
     let check = check_binary("right-absolutely-nonexistent-binary-xyz", None);
     assert_eq!(check.status, CheckStatus::Fail);
     assert!(check.detail.contains("not found"));
 }
 
-#[test]
-fn check_binary_returns_pass_for_present_binary() {
+#[tokio::test]
+async fn check_binary_returns_pass_for_present_binary() {
     // "sh" is always present on Unix
     let check = check_binary("sh", None);
     assert_eq!(check.status, CheckStatus::Pass);
     assert!(!check.detail.contains("not found"));
 }
 
-#[test]
-fn check_binary_includes_fix_hint_on_failure() {
+#[tokio::test]
+async fn check_binary_includes_fix_hint_on_failure() {
     let check = check_binary("right-nonexistent-xyz", Some("https://example.com/install"));
     assert_eq!(check.status, CheckStatus::Fail);
     assert_eq!(check.fix.as_deref(), Some("https://example.com/install"));
 }
 
-#[test]
-fn check_binary_no_fix_on_success() {
+#[tokio::test]
+async fn check_binary_no_fix_on_success() {
     let check = check_binary("sh", Some("should not appear"));
     assert_eq!(check.status, CheckStatus::Pass);
     assert!(check.fix.is_none());
 }
 
-#[test]
-fn run_doctor_with_empty_agents_dir_reports_fail() {
+#[tokio::test]
+async fn run_doctor_with_empty_agents_dir_reports_fail() {
     let dir = tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("agents")).unwrap();
 
-    let checks = run_doctor(dir.path());
+    let checks = run_doctor(dir.path()).await;
 
     let agent_checks: Vec<_> = checks
         .iter()
@@ -49,8 +49,8 @@ fn run_doctor_with_empty_agents_dir_reports_fail() {
     assert_eq!(agent_checks[0].status, CheckStatus::Fail);
 }
 
-#[test]
-fn run_doctor_with_valid_agent_reports_pass() {
+#[tokio::test]
+async fn run_doctor_with_valid_agent_reports_pass() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("right");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -58,7 +58,7 @@ fn run_doctor_with_valid_agent_reports_pass() {
     std::fs::write(agent_dir.join("SOUL.md"), "# Soul").unwrap();
     std::fs::write(agent_dir.join("USER.md"), "# User").unwrap();
 
-    let checks = run_doctor(dir.path());
+    let checks = run_doctor(dir.path()).await;
 
     let agent_check = checks
         .iter()
@@ -68,12 +68,12 @@ fn run_doctor_with_valid_agent_reports_pass() {
     assert!(agent_check.detail.contains("valid agent"));
 }
 
-#[test]
-fn run_doctor_with_missing_agents_dir_reports_fail() {
+#[tokio::test]
+async fn run_doctor_with_missing_agents_dir_reports_fail() {
     let dir = tempdir().unwrap();
     // No agents/ directory at all
 
-    let checks = run_doctor(dir.path());
+    let checks = run_doctor(dir.path()).await;
 
     let agent_check = checks
         .iter()
@@ -82,14 +82,14 @@ fn run_doctor_with_missing_agents_dir_reports_fail() {
     assert!(agent_check.detail.contains("not found"));
 }
 
-#[test]
-fn run_doctor_reports_bootstrap_pending() {
+#[tokio::test]
+async fn run_doctor_reports_bootstrap_pending() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("right");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(agent_dir.join("BOOTSTRAP.md"), "# Onboarding").unwrap();
 
-    let checks = run_doctor(dir.path());
+    let checks = run_doctor(dir.path()).await;
 
     let bootstrap_check = checks
         .iter()
@@ -99,8 +99,8 @@ fn run_doctor_reports_bootstrap_pending() {
     assert!(bootstrap_check.detail.contains("onboarding pending"));
 }
 
-#[test]
-fn run_doctor_reports_missing_identity() {
+#[tokio::test]
+async fn run_doctor_reports_missing_identity() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("broken");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -108,7 +108,7 @@ fn run_doctor_reports_missing_identity() {
     std::fs::write(agent_dir.join("TOOLS.md"), "# Tools").unwrap();
     std::fs::write(agent_dir.join("agent.yaml"), "{}").unwrap();
 
-    let checks = run_doctor(dir.path());
+    let checks = run_doctor(dir.path()).await;
 
     // Without IDENTITY.md (and no BOOTSTRAP.md), doctor warns about missing IDENTITY.md
     let identity_check = checks
@@ -119,8 +119,8 @@ fn run_doctor_reports_missing_identity() {
     assert!(identity_check.detail.contains("IDENTITY.md missing"));
 }
 
-#[test]
-fn doctor_check_to_ui_line_shows_name_status_detail() {
+#[tokio::test]
+async fn doctor_check_to_ui_line_shows_name_status_detail() {
     use right_ui::Theme;
     let check = DoctorCheck {
         name: "test-binary".to_string(),
@@ -134,8 +134,8 @@ fn doctor_check_to_ui_line_shows_name_status_detail() {
     assert!(rendered.contains("/usr/bin/test-binary"));
 }
 
-#[test]
-fn doctor_check_to_ui_line_shows_fix_on_failure() {
+#[tokio::test]
+async fn doctor_check_to_ui_line_shows_fix_on_failure() {
     use right_ui::Theme;
     let check = DoctorCheck {
         name: "missing".to_string(),
@@ -148,10 +148,10 @@ fn doctor_check_to_ui_line_shows_fix_on_failure() {
     assert!(rendered.contains("install it"));
 }
 
-#[test]
-fn run_doctor_always_checks_all_three_binaries() {
+#[tokio::test]
+async fn run_doctor_always_checks_all_three_binaries() {
     let dir = tempdir().unwrap();
-    let checks = run_doctor(dir.path());
+    let checks = run_doctor(dir.path()).await;
 
     let binary_names: Vec<&str> = checks
         .iter()
@@ -171,8 +171,8 @@ fn run_doctor_always_checks_all_three_binaries() {
     );
 }
 
-#[test]
-fn check_bwrap_sandbox_returns_doctor_check() {
+#[tokio::test]
+async fn check_bwrap_sandbox_returns_doctor_check() {
     // Call the function directly -- will pass or fail depending on host,
     // but must not panic and must return correct shape.
     let check = check_bwrap_sandbox();
@@ -185,8 +185,8 @@ fn check_bwrap_sandbox_returns_doctor_check() {
     );
 }
 
-#[test]
-fn bwrap_fix_guidance_contains_apparmor_profile() {
+#[tokio::test]
+async fn bwrap_fix_guidance_contains_apparmor_profile() {
     let guidance = bwrap_fix_guidance();
     assert!(
         guidance.contains("apparmor_parser"),
@@ -209,10 +209,10 @@ fn bwrap_fix_guidance_contains_apparmor_profile() {
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn run_doctor_includes_bwrap_socat_on_linux() {
+#[tokio::test]
+async fn run_doctor_includes_bwrap_socat_on_linux() {
     let dir = tempdir().unwrap();
-    let checks = run_doctor(dir.path());
+    let checks = run_doctor(dir.path()).await;
 
     let check_names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
     assert!(
@@ -226,10 +226,10 @@ fn run_doctor_includes_bwrap_socat_on_linux() {
 }
 
 #[cfg(not(target_os = "linux"))]
-#[test]
-fn run_doctor_skips_bwrap_socat_on_non_linux() {
+#[tokio::test]
+async fn run_doctor_skips_bwrap_socat_on_non_linux() {
     let dir = tempdir().unwrap();
-    let checks = run_doctor(dir.path());
+    let checks = run_doctor(dir.path()).await;
 
     let check_names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
     assert!(
@@ -244,8 +244,8 @@ fn run_doctor_skips_bwrap_socat_on_non_linux() {
 
 // ---- check_managed_settings tests ----
 
-#[test]
-fn check_managed_settings_returns_none_when_file_absent() {
+#[tokio::test]
+async fn check_managed_settings_returns_none_when_file_absent() {
     let result = check_managed_settings("/nonexistent-rightclaw-test/managed-settings.json");
     assert!(
         result.is_none(),
@@ -253,8 +253,8 @@ fn check_managed_settings_returns_none_when_file_absent() {
     );
 }
 
-#[test]
-fn check_managed_settings_returns_warn_with_strict_message_when_flag_true() {
+#[tokio::test]
+async fn check_managed_settings_returns_warn_with_strict_message_when_flag_true() {
     let tmp = tempdir().unwrap();
     let path = tmp.path().join("managed-settings.json");
     std::fs::write(&path, "{\"allowManagedDomainsOnly\": true}\n").unwrap();
@@ -274,8 +274,8 @@ fn check_managed_settings_returns_warn_with_strict_message_when_flag_true() {
     );
 }
 
-#[test]
-fn check_managed_settings_returns_warn_with_generic_message_when_flag_false() {
+#[tokio::test]
+async fn check_managed_settings_returns_warn_with_generic_message_when_flag_false() {
     let tmp = tempdir().unwrap();
     let path = tmp.path().join("managed-settings.json");
     std::fs::write(&path, "{\"allowManagedDomainsOnly\": false}").unwrap();
@@ -290,8 +290,8 @@ fn check_managed_settings_returns_warn_with_generic_message_when_flag_false() {
     );
 }
 
-#[test]
-fn check_managed_settings_returns_warn_with_generic_message_for_invalid_json() {
+#[tokio::test]
+async fn check_managed_settings_returns_warn_with_generic_message_for_invalid_json() {
     let tmp = tempdir().unwrap();
     let path = tmp.path().join("managed-settings.json");
     std::fs::write(&path, "not valid json at all!!!").unwrap();
@@ -306,8 +306,8 @@ fn check_managed_settings_returns_warn_with_generic_message_for_invalid_json() {
     );
 }
 
-#[test]
-fn check_managed_settings_returns_warn_with_generic_message_when_key_absent() {
+#[tokio::test]
+async fn check_managed_settings_returns_warn_with_generic_message_when_key_absent() {
     let tmp = tempdir().unwrap();
     let path = tmp.path().join("managed-settings.json");
     std::fs::write(&path, "{\"someOtherKey\": true}").unwrap();
@@ -322,8 +322,8 @@ fn check_managed_settings_returns_warn_with_generic_message_when_key_absent() {
     );
 }
 
-#[test]
-fn check_managed_settings_fix_hint_contains_sudo_command_when_flag_true() {
+#[tokio::test]
+async fn check_managed_settings_fix_hint_contains_sudo_command_when_flag_true() {
     let tmp = tempdir().unwrap();
     let path = tmp.path().join("managed-settings.json");
     std::fs::write(&path, "{\"allowManagedDomainsOnly\": true}").unwrap();
@@ -336,12 +336,12 @@ fn check_managed_settings_fix_hint_contains_sudo_command_when_flag_true() {
     );
 }
 
-#[test]
-fn run_doctor_includes_sqlite3_check() {
+#[tokio::test]
+async fn run_doctor_includes_sqlite3_check() {
     let dir = tempdir().unwrap();
     // Need agents/ dir to avoid unrelated Fail masking the check
     std::fs::create_dir_all(dir.path().join("agents")).unwrap();
-    let checks = run_doctor(dir.path());
+    let checks = run_doctor(dir.path()).await;
     let sqlite3_check = checks
         .iter()
         .find(|c| c.name == "sqlite3")
@@ -359,8 +359,8 @@ fn run_doctor_includes_sqlite3_check() {
     );
 }
 
-#[test]
-fn sqlite3_check_is_warn_not_fail_when_absent() {
+#[tokio::test]
+async fn sqlite3_check_is_warn_not_fail_when_absent() {
     // Simulate missing binary by calling check_binary with a guaranteed-absent name,
     // then verify the status override logic produces Warn.
     let raw = check_binary("right-absolutely-nonexistent-sqlite3-xyz", None);
@@ -395,8 +395,8 @@ fn webhook_info(url: &str) -> WebhookInfo {
     }
 }
 
-#[test]
-fn make_webhook_check_fail_when_url_empty() {
+#[tokio::test]
+async fn make_webhook_check_fail_when_url_empty() {
     let check = make_webhook_check("mybot", EXPECTED_URL, Ok(webhook_info("")));
     assert_eq!(check.name, "telegram-webhook/mybot");
     assert_eq!(check.status, CheckStatus::Fail);
@@ -412,8 +412,8 @@ fn make_webhook_check_fail_when_url_empty() {
     );
 }
 
-#[test]
-fn make_webhook_check_fail_when_url_mismatch() {
+#[tokio::test]
+async fn make_webhook_check_fail_when_url_mismatch() {
     let check = make_webhook_check(
         "mybot",
         EXPECTED_URL,
@@ -441,8 +441,8 @@ fn make_webhook_check_fail_when_url_mismatch() {
     );
 }
 
-#[test]
-fn make_webhook_check_pass_when_url_matches() {
+#[tokio::test]
+async fn make_webhook_check_pass_when_url_matches() {
     let check = make_webhook_check("mybot", EXPECTED_URL, Ok(webhook_info(EXPECTED_URL)));
     assert_eq!(check.name, "telegram-webhook/mybot");
     assert_eq!(check.status, CheckStatus::Pass);
@@ -454,8 +454,8 @@ fn make_webhook_check_pass_when_url_matches() {
     assert!(check.fix.is_none());
 }
 
-#[test]
-fn make_webhook_check_warn_when_pending_high() {
+#[tokio::test]
+async fn make_webhook_check_warn_when_pending_high() {
     let info = WebhookInfo {
         url: EXPECTED_URL.to_string(),
         pending_update_count: 250,
@@ -470,8 +470,8 @@ fn make_webhook_check_warn_when_pending_high() {
     );
 }
 
-#[test]
-fn make_webhook_check_warn_when_last_error_present() {
+#[tokio::test]
+async fn make_webhook_check_warn_when_last_error_present() {
     let info = WebhookInfo {
         url: EXPECTED_URL.to_string(),
         pending_update_count: 0,
@@ -486,8 +486,8 @@ fn make_webhook_check_warn_when_last_error_present() {
     );
 }
 
-#[test]
-fn make_webhook_check_warn_when_http_error() {
+#[tokio::test]
+async fn make_webhook_check_warn_when_http_error() {
     let check = make_webhook_check(
         "mybot",
         EXPECTED_URL,
@@ -516,8 +516,8 @@ async fn fetch_webhook_info_does_not_panic_in_async_context() {
     // If we reach here without panicking, the fix works.
 }
 
-#[test]
-fn check_webhook_info_for_agents_skips_agents_without_token() {
+#[tokio::test]
+async fn check_webhook_info_for_agents_skips_agents_without_token() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("mybot");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -533,8 +533,8 @@ fn check_webhook_info_for_agents_skips_agents_without_token() {
     );
 }
 
-#[test]
-fn check_webhook_info_for_agents_skips_when_no_agents_dir() {
+#[tokio::test]
+async fn check_webhook_info_for_agents_skips_when_no_agents_dir() {
     let dir = tempdir().unwrap();
     // No agents/ directory
     let checks = check_webhook_info_for_agents(dir.path());
@@ -546,28 +546,30 @@ fn check_webhook_info_for_agents_skips_when_no_agents_dir() {
 
 // ---- check_mcp_tokens tests (REFRESH-03, REFRESH-04) ----
 
-#[test]
-fn check_mcp_tokens_pass_no_agents_dir() {
+#[tokio::test]
+async fn check_mcp_tokens_pass_no_agents_dir() {
     // No agents/ dir at all — should Pass
     let dir = tempdir().unwrap();
 
-    let result = check_mcp_tokens_impl(dir.path());
+    let result = check_mcp_tokens_impl(dir.path()).await;
     assert_eq!(result.status, CheckStatus::Pass);
     assert_eq!(result.name, "mcp-tokens");
 }
 
-#[test]
-fn check_mcp_tokens_counts_registered_servers() {
+#[tokio::test]
+async fn check_mcp_tokens_counts_registered_servers() {
     // Agent with servers in SQLite — doctor reports count
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("agent1");
     std::fs::create_dir_all(&agent_dir).unwrap();
 
     // Create data.db with a registered server
-    let conn = right_db::open_connection(&agent_dir, true).unwrap();
-    right_mcp::credentials::db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
+    let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
+    right_mcp::credentials::db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+        .await
+        .unwrap();
 
-    let result = check_mcp_tokens_impl(dir.path());
+    let result = check_mcp_tokens_impl(dir.path()).await;
     assert_eq!(result.status, CheckStatus::Pass);
     assert_eq!(result.name, "mcp-tokens");
     assert!(
@@ -577,25 +579,25 @@ fn check_mcp_tokens_counts_registered_servers() {
     );
 }
 
-#[test]
-fn check_mcp_tokens_pass_no_servers() {
+#[tokio::test]
+async fn check_mcp_tokens_pass_no_servers() {
     // Agent dir exists but no servers registered — 0 servers
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("agent1");
     std::fs::create_dir_all(&agent_dir).unwrap();
 
     // Create data.db but register no servers
-    let _conn = right_db::open_connection(&agent_dir, true).unwrap();
+    let _conn = right_db::open_connection(&agent_dir, true).await.unwrap();
 
-    let result = check_mcp_tokens_impl(dir.path());
+    let result = check_mcp_tokens_impl(dir.path()).await;
     assert_eq!(result.status, CheckStatus::Pass);
     assert_eq!(result.name, "mcp-tokens");
 }
 
 // ── tunnel state checks (unified) ───────────────────────────────────────────
 
-#[test]
-fn tunnel_state_credentials_present_passes() {
+#[tokio::test]
+async fn tunnel_state_credentials_present_passes() {
     let dir = tempdir().unwrap();
     let creds_file = dir.path().join("creds.json");
     std::fs::write(&creds_file, "{}").unwrap();
@@ -621,8 +623,8 @@ fn tunnel_state_credentials_present_passes() {
     );
 }
 
-#[test]
-fn tunnel_state_credentials_missing_fails() {
+#[tokio::test]
+async fn tunnel_state_credentials_missing_fails() {
     let dir = tempdir().unwrap();
     let config = right_config::GlobalConfig {
         tunnel: right_config::TunnelConfig {
@@ -650,24 +652,24 @@ fn tunnel_state_credentials_missing_fails() {
 // mcp_auth_issues tests
 // ---------------------------------------------------------------------------
 
-#[test]
-fn mcp_auth_issues_returns_none_when_no_agents_dir() {
+#[tokio::test]
+async fn mcp_auth_issues_returns_none_when_no_agents_dir() {
     let dir = tempdir().unwrap();
     // No agents/ subdir — check_mcp_tokens returns Pass → mcp_auth_issues returns None
-    let result = mcp_auth_issues(dir.path());
+    let result = mcp_auth_issues(dir.path()).await;
     assert!(result.is_none(), "expected None, got {result:?}");
 }
 
-#[test]
-fn mcp_auth_issues_returns_none_when_agents_dir_empty() {
+#[tokio::test]
+async fn mcp_auth_issues_returns_none_when_agents_dir_empty() {
     let dir = tempdir().unwrap();
     std::fs::create_dir(dir.path().join("agents")).unwrap();
-    let result = mcp_auth_issues(dir.path());
+    let result = mcp_auth_issues(dir.path()).await;
     assert!(result.is_none(), "expected None for empty agents dir");
 }
 
-#[test]
-fn mcp_auth_issues_returns_some_when_mcp_tokens_warn() {
+#[tokio::test]
+async fn mcp_auth_issues_returns_some_when_mcp_tokens_warn() {
     // Craft a scenario where mcp.json has a URL server but no Bearer token → Missing → Warn
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("myagent");
@@ -679,7 +681,7 @@ fn mcp_auth_issues_returns_some_when_mcp_tokens_warn() {
     )
     .unwrap();
 
-    let check = check_mcp_tokens_impl(dir.path());
+    let check = check_mcp_tokens_impl(dir.path()).await;
     // Only test mcp_auth_issues parsing logic if the check is actually Warn.
     // On systems where detection differs, skip rather than assert the wrong thing.
     if check.status == CheckStatus::Warn {
@@ -700,8 +702,8 @@ fn mcp_auth_issues_returns_some_when_mcp_tokens_warn() {
     }
 }
 
-#[test]
-fn mcp_auth_issues_prefix_constant_matches_detail_format() {
+#[tokio::test]
+async fn mcp_auth_issues_prefix_constant_matches_detail_format() {
     // Ensure MCP_ISSUES_PREFIX is exactly the prefix used by check_mcp_tokens_impl/check_mcp_tokens.
     // If the format string changes, this test catches it.
     assert_eq!(MCP_ISSUES_PREFIX, "missing: ");
@@ -716,15 +718,15 @@ fn mcp_auth_issues_prefix_constant_matches_detail_format() {
 
 // ---- identity file checks ----
 
-#[test]
-fn doctor_warns_missing_identity_files_no_bootstrap() {
+#[tokio::test]
+async fn doctor_warns_missing_identity_files_no_bootstrap() {
     let dir = tempdir().unwrap();
     let home = dir.path();
     let agent_dir = home.join("agents").join("test");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(agent_dir.join("TOOLS.md"), "# Tools").unwrap();
 
-    let checks = check_agent_structure(home);
+    let checks = check_agent_structure(home).await;
     assert!(
         checks
             .iter()
@@ -742,8 +744,8 @@ fn doctor_warns_missing_identity_files_no_bootstrap() {
     );
 }
 
-#[test]
-fn doctor_passes_with_all_identity_files() {
+#[tokio::test]
+async fn doctor_passes_with_all_identity_files() {
     let dir = tempdir().unwrap();
     let home = dir.path();
     let agent_dir = home.join("agents").join("test");
@@ -752,7 +754,7 @@ fn doctor_passes_with_all_identity_files() {
     std::fs::write(agent_dir.join("SOUL.md"), "# Soul").unwrap();
     std::fs::write(agent_dir.join("USER.md"), "# User").unwrap();
 
-    let checks = check_agent_structure(home);
+    let checks = check_agent_structure(home).await;
     assert!(
         !checks.iter().any(|c| c.detail.contains("missing")),
         "should not warn when all files present, got: {:?}",
@@ -760,15 +762,15 @@ fn doctor_passes_with_all_identity_files() {
     );
 }
 
-#[test]
-fn doctor_bootstrap_pending_skips_identity_checks() {
+#[tokio::test]
+async fn doctor_bootstrap_pending_skips_identity_checks() {
     let dir = tempdir().unwrap();
     let home = dir.path();
     let agent_dir = home.join("agents").join("test");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(agent_dir.join("BOOTSTRAP.md"), "# Bootstrap").unwrap();
 
-    let checks = check_agent_structure(home);
+    let checks = check_agent_structure(home).await;
     assert!(
         checks
             .iter()
@@ -790,21 +792,21 @@ mod memory_tests {
     use right_db::open_connection;
     use tempfile::tempdir;
 
-    #[test]
-    fn check_memory_passes_on_empty_queue() {
+    #[tokio::test]
+    async fn check_memory_passes_on_empty_queue() {
         let dir = tempdir().unwrap();
-        let _ = open_connection(dir.path(), true).unwrap();
-        let checks = check_memory(dir.path());
+        let _ = open_connection(dir.path(), true).await.unwrap();
+        let checks = check_memory(dir.path()).await;
         assert!(
             checks.iter().all(|c| matches!(c.status, CheckStatus::Pass)),
             "expected all pass, got {checks:#?}"
         );
     }
 
-    #[test]
-    fn check_memory_warns_on_500_rows() {
+    #[tokio::test]
+    async fn check_memory_warns_on_500_rows() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
         for i in 0..600 {
             right_memory::retain_queue::enqueue(
                 &conn,
@@ -815,9 +817,10 @@ mod memory_tests {
                 None,
                 None,
             )
+            .await
             .unwrap();
         }
-        let checks = check_memory(dir.path());
+        let checks = check_memory(dir.path()).await;
         assert!(
             checks
                 .iter()
@@ -826,10 +829,10 @@ mod memory_tests {
         );
     }
 
-    #[test]
-    fn check_memory_fails_on_901_rows() {
+    #[tokio::test]
+    async fn check_memory_fails_on_901_rows() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
         for i in 0..901 {
             right_memory::retain_queue::enqueue(
                 &conn,
@@ -840,9 +843,10 @@ mod memory_tests {
                 None,
                 None,
             )
+            .await
             .unwrap();
         }
-        let checks = check_memory(dir.path());
+        let checks = check_memory(dir.path()).await;
         assert!(
             checks
                 .iter()
@@ -851,16 +855,17 @@ mod memory_tests {
         );
     }
 
-    #[test]
-    fn check_memory_fails_on_24h_auth_alert() {
+    #[tokio::test]
+    async fn check_memory_fails_on_24h_auth_alert() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
         conn.execute(
             "INSERT INTO memory_alerts(alert_type, first_sent_at) VALUES ('auth_failed', datetime('now','-25 hours'))",
             [],
         )
+        .await
         .unwrap();
-        let checks = check_memory(dir.path());
+        let checks = check_memory(dir.path()).await;
         assert!(
             checks
                 .iter()

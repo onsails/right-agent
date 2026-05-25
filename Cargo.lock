@@ -3885,6 +3885,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tokio",
  "tracing",
  "walkdir",
  "which 8.0.2",
@@ -3919,6 +3920,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "url",
 ]
@@ -3946,6 +3948,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

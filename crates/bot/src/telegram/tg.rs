@@ -30,8 +30,8 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn severity_lines_have_telegram_status_icons() {
+    #[tokio::test]
+    async fn severity_lines_have_telegram_status_icons() {
         assert_eq!(success("Added MCP server."), "✅ Added MCP server.");
         assert_eq!(
             warning("Plain HTTP: trusted/encrypted networks only."),
@@ -44,8 +44,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn message_blocks_are_separated_for_scanability() {
+    #[tokio::test]
+    async fn message_blocks_are_separated_for_scanability() {
         assert_eq!(
             blocks([
                 success("Added MCP server. 15 tools available."),

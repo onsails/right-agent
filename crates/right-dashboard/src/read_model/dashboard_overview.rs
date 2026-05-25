@@ -24,21 +24,21 @@ pub struct DashboardOverviewInput {
     pub sandbox: OverviewSandboxStatus,
 }
 
-pub fn dashboard_overview(
+pub async fn dashboard_overview(
     conn: &Connection,
     input: DashboardOverviewInput,
 ) -> Result<DashboardOverviewResponse, ReadModelError> {
     let active_runs =
-        active_async_run_count(conn, &input.generated_at)? + input.foreground_active_count;
-    let recent_failures = recent_failure_count(conn, &input.generated_at)?;
-    let today_cost_usd = today_cost_usd(conn, &input.generated_at)?;
+        active_async_run_count(conn, &input.generated_at).await? + input.foreground_active_count;
+    let recent_failures = recent_failure_count(conn, &input.generated_at).await?;
+    let today_cost_usd = today_cost_usd(conn, &input.generated_at).await?;
     let learning_candidates_24h =
-        learning_candidate_count(conn, &input.agent, &input.generated_at)?;
+        learning_candidate_count(conn, &input.agent, &input.generated_at).await?;
     let generated_at_utc = parse_utc(&input.generated_at)?;
     let (mut cost_learning_river, mut warnings) =
-        cost_learning_river(conn, &input.generated_at, &input.agent)?;
+        cost_learning_river(conn, &input.generated_at, &input.agent).await?;
     let (curator_signals, curator_markers, curator_warnings) =
-        curator_projection(conn, &generated_at_utc)?;
+        curator_projection(conn, &generated_at_utc).await?;
     cost_learning_river.markers.extend(curator_markers);
     warnings.extend(curator_warnings);
     let mut signals = overview_signals(
@@ -49,7 +49,8 @@ pub fn dashboard_overview(
         &input.sandbox,
         &cost_learning_river,
         curator_signals,
-    )?;
+    )
+    .await?;
     signals.truncate(SIGNAL_LIMIT);
 
     Ok(DashboardOverviewResponse {
@@ -73,7 +74,10 @@ pub fn dashboard_overview(
     })
 }
 
-fn active_async_run_count(conn: &Connection, generated_at: &str) -> Result<i64, ReadModelError> {
+async fn active_async_run_count(
+    conn: &Connection,
+    generated_at: &str,
+) -> Result<i64, ReadModelError> {
     let now = parse_utc(generated_at)?;
     let coarse_until = (now + Duration::days(1)).to_rfc3339();
     let mut stmt = conn.prepare(
@@ -82,7 +86,9 @@ fn active_async_run_count(conn: &Connection, generated_at: &str) -> Result<i64, 
          WHERE status IN ('queued', 'running')
            AND COALESCE(started_at, updated_at, created_at) <= ?1",
     )?;
-    let rows = stmt.query_map(params![coarse_until], |row| row.get::<_, String>(0))?;
+    let rows = stmt
+        .query_map(params![coarse_until], |row| row.get::<_, String>(0))
+        .await?;
     let mut count = 0;
     for row in rows {
         let active_at = parse_utc(&row?)?;
@@ -93,7 +99,7 @@ fn active_async_run_count(conn: &Connection, generated_at: &str) -> Result<i64, 
     Ok(count)
 }
 
-fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f64, ReadModelError> {
+async fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f64, ReadModelError> {
     let now = parse_utc(generated_at)?;
     let start_naive = now
         .date_naive()
@@ -107,9 +113,11 @@ fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f64, ReadMode
          FROM usage_events
          WHERE ts >= ?1 AND ts <= ?2",
     )?;
-    let rows = stmt.query_map(params![coarse_since, coarse_until], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
-    })?;
+    let rows = stmt
+        .query_map(params![coarse_since, coarse_until], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })
+        .await?;
 
     let mut cost = 0.0;
     for row in rows {
@@ -122,7 +130,7 @@ fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f64, ReadMode
     Ok(cost)
 }
 
-fn overview_signals(
+async fn overview_signals(
     conn: &Connection,
     agent: &str,
     generated_at: &str,
@@ -135,8 +143,8 @@ fn overview_signals(
     let since = now - Duration::hours(24);
     let mut signals = Vec::new();
 
-    signals.extend(run_failure_signals(conn, &since, &now)?);
-    signals.extend(learning_outcome_signals(conn, agent, &since, &now)?);
+    signals.extend(run_failure_signals(conn, &since, &now).await?);
+    signals.extend(learning_outcome_signals(conn, agent, &since, &now).await?);
     signals.extend(cost_spike_signals(river));
     signals.extend(curator_signals);
 
@@ -190,7 +198,7 @@ fn overview_signals(
     Ok(signals)
 }
 
-fn run_failure_signals(
+async fn run_failure_signals(
     conn: &Connection,
     since: &DateTime<Utc>,
     now: &DateTime<Utc>,
@@ -204,14 +212,16 @@ fn run_failure_signals(
            AND COALESCE(finished_at, updated_at, created_at) <= ?2
          ORDER BY COALESCE(finished_at, updated_at, created_at) DESC",
     )?;
-    let rows = stmt.query_map(params![coarse_since, coarse_until], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, String>(3)?,
-        ))
-    })?;
+    let rows = stmt
+        .query_map(params![coarse_since, coarse_until], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .await?;
 
     let mut signals = Vec::new();
     for row in rows {
@@ -240,7 +250,7 @@ fn run_failure_signals(
     Ok(signals)
 }
 
-fn learning_outcome_signals(
+async fn learning_outcome_signals(
     conn: &Connection,
     agent: &str,
     since: &DateTime<Utc>,
@@ -256,17 +266,19 @@ fn learning_outcome_signals(
            AND created_at <= ?3
          ORDER BY created_at DESC",
     )?;
-    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, Option<String>>(5)?,
-            row.get::<_, String>(6)?,
-        ))
-    })?;
+    let rows = stmt
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .await?;
 
     let mut signals = Vec::new();
     for row in rows {
@@ -294,7 +306,7 @@ fn learning_outcome_signals(
     Ok(signals)
 }
 
-fn cost_learning_river(
+async fn cost_learning_river(
     conn: &Connection,
     generated_at: &str,
     agent: &str,
@@ -326,15 +338,17 @@ fn cost_learning_river(
          WHERE ts >= ?1 AND ts <= ?2
          ORDER BY ts ASC",
     )?;
-    let rows = stmt.query_map(params![coarse_since, coarse_until], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, f64>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, String>(4)?,
-        ))
-    })?;
+    let rows = stmt
+        .query_map(params![coarse_since, coarse_until], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .await?;
 
     let mut source_totals = BTreeMap::<(String, String), UsageSourcePoint>::new();
     for row in rows {
@@ -384,7 +398,7 @@ fn cost_learning_river(
     }
 
     let series = build_cost_series(&points);
-    let markers = learning_markers(conn, agent, &start_utc, &now)?;
+    let markers = learning_markers(conn, agent, &start_utc, &now).await?;
     Ok((
         CostLearningRiver {
             window: RIVER_WINDOW.to_owned(),
@@ -422,7 +436,7 @@ fn build_cost_series(points: &[CostLearningPoint]) -> Vec<CostLearningSeries> {
         .collect()
 }
 
-fn learning_markers(
+async fn learning_markers(
     conn: &Connection,
     agent: &str,
     since: &DateTime<Utc>,
@@ -438,16 +452,18 @@ fn learning_markers(
            AND created_at <= ?3
          ORDER BY created_at DESC",
     )?;
-    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, String>(5)?,
-        ))
-    })?;
+    let rows = stmt
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .await?;
 
     let mut markers = Vec::new();
     for row in rows {
@@ -522,7 +538,7 @@ type CuratorProjection = (
     Vec<DashboardDataWarning>,
 );
 
-fn curator_projection(
+async fn curator_projection(
     conn: &Connection,
     generated_at: &DateTime<Utc>,
 ) -> Result<CuratorProjection, ReadModelError> {
@@ -542,6 +558,7 @@ fn curator_projection(
                 })
             },
         )
+        .await
         .optional()?
     else {
         return Ok((
@@ -817,7 +834,10 @@ fn curator_status_title(status: &str) -> &'static str {
     }
 }
 
-fn recent_failure_count(conn: &Connection, generated_at: &str) -> Result<i64, ReadModelError> {
+async fn recent_failure_count(
+    conn: &Connection,
+    generated_at: &str,
+) -> Result<i64, ReadModelError> {
     let now = parse_utc(generated_at)?;
     let since = now - Duration::hours(24);
     let (coarse_since, coarse_until) = coarse_timestamp_bounds(&since, &now);
@@ -828,13 +848,15 @@ fn recent_failure_count(conn: &Connection, generated_at: &str) -> Result<i64, Re
            AND COALESCE(finished_at, updated_at, created_at) >= ?1
            AND COALESCE(finished_at, updated_at, created_at) <= ?2",
     )?;
-    let rows = stmt.query_map(params![coarse_since, coarse_until], |row| {
-        row.get::<_, String>(0)
-    })?;
+    let rows = stmt
+        .query_map(params![coarse_since, coarse_until], |row| {
+            row.get::<_, String>(0)
+        })
+        .await?;
     count_parsed_window_rows(rows, &since, &now)
 }
 
-fn learning_candidate_count(
+async fn learning_candidate_count(
     conn: &Connection,
     agent: &str,
     generated_at: &str,
@@ -850,9 +872,11 @@ fn learning_candidate_count(
            AND created_at >= ?2
            AND created_at <= ?3",
     )?;
-    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
-        row.get::<_, String>(0)
-    })?;
+    let rows = stmt
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            row.get::<_, String>(0)
+        })
+        .await?;
     count_parsed_window_rows(rows, &since, &now)
 }
 
@@ -861,15 +885,17 @@ mod tests {
     use super::*;
     use tempfile::{TempDir, tempdir};
 
-    fn fixture() -> (TempDir, right_db::Connection) {
+    async fn fixture() -> (TempDir, right_db::Connection) {
         let dir = tempdir().expect("tempdir");
-        let conn = right_db::open_connection(dir.path(), true).expect("open db");
+        let conn = right_db::open_connection(dir.path(), true)
+            .await
+            .expect("open db");
         (dir, conn)
     }
 
-    #[test]
-    fn dashboard_overview_summarizes_activity_usage_and_learning() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn dashboard_overview_summarizes_activity_usage_and_learning() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO async_runs (
                 id, kind, producer_ref, run_session_id, target_chat_id,
@@ -882,6 +908,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO async_runs (
@@ -895,6 +922,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO usage_events (
@@ -906,6 +934,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -919,6 +948,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         let response = dashboard_overview(
             &conn,
@@ -932,6 +962,7 @@ mod tests {
                 },
             },
         )
+        .await
         .unwrap();
 
         assert_eq!(response.agent, "alpha");
@@ -943,9 +974,9 @@ mod tests {
         assert_eq!(response.sandbox.state, "configured");
     }
 
-    #[test]
-    fn dashboard_overview_builds_signal_timeline_and_cost_river() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn dashboard_overview_builds_signal_timeline_and_cost_river() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO async_runs (
                 id, kind, producer_ref, run_session_id, target_chat_id,
@@ -958,6 +989,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO usage_events (
@@ -969,6 +1001,7 @@ mod tests {
                 ('2026-05-23T08:00:00Z', 'learning_probe_writer', 1, 0, NULL, 's3', 1.00, 1, '{}', 'none')",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_learning_events (
@@ -981,6 +1014,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         let response = dashboard_overview(
             &conn,
@@ -994,6 +1028,7 @@ mod tests {
                 },
             },
         )
+        .await
         .unwrap();
 
         assert!(response.signals.len() >= 3);
@@ -1029,9 +1064,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dashboard_overview_uses_contract_signal_values() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn dashboard_overview_uses_contract_signal_values() {
+        let (_dir, conn) = fixture().await;
 
         let response = dashboard_overview(
             &conn,
@@ -1045,6 +1080,7 @@ mod tests {
                 },
             },
         )
+        .await
         .unwrap();
 
         assert!(response.signals.iter().all(|signal| matches!(
@@ -1080,9 +1116,9 @@ mod tests {
         assert_eq!(health.severity, "bad");
     }
 
-    #[test]
-    fn dashboard_overview_excludes_future_rows_from_snapshot_counts() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn dashboard_overview_excludes_future_rows_from_snapshot_counts() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO async_runs (
                 id, kind, producer_ref, run_session_id, target_chat_id,
@@ -1097,6 +1133,7 @@ mod tests {
                  '2026-05-23T11:00:00Z', '2026-05-23T11:00:00Z')",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -1110,6 +1147,7 @@ mod tests {
                  'high', 'rightx-future', '[]', '{}', '2026-05-23T11:00:00Z')",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO usage_events (
@@ -1120,6 +1158,7 @@ mod tests {
                 ('2026-05-23T11:00:00Z', 'interactive', 1, 0, NULL, 'usage-future', 9.75, 1, '{}', 'none')",
             [],
         )
+        .await
         .unwrap();
 
         let response = dashboard_overview(
@@ -1134,6 +1173,7 @@ mod tests {
                 },
             },
         )
+        .await
         .unwrap();
 
         assert_eq!(response.recent_failures, 1);
@@ -1141,9 +1181,9 @@ mod tests {
         assert_eq!(response.today_cost_usd, 1.25);
     }
 
-    #[test]
-    fn dashboard_overview_excludes_future_active_async_runs() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn dashboard_overview_excludes_future_active_async_runs() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO async_runs (
                 id, kind, producer_ref, run_session_id, target_chat_id,
@@ -1158,6 +1198,7 @@ mod tests {
                  '2026-05-23T11:00:00Z', '2026-05-23T11:00:00Z')",
             [],
         )
+        .await
         .unwrap();
 
         let response = dashboard_overview(
@@ -1172,14 +1213,15 @@ mod tests {
                 },
             },
         )
+        .await
         .unwrap();
 
         assert_eq!(response.active_runs, 3);
     }
 
-    #[test]
-    fn dashboard_overview_projects_refused_learning_outcomes() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn dashboard_overview_projects_refused_learning_outcomes() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_learning_events (
                 invocation_id, agent_name, action, skill_name, phase, status,
@@ -1191,6 +1233,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
         let response = dashboard_overview(
@@ -1205,6 +1248,7 @@ mod tests {
                 },
             },
         )
+        .await
         .unwrap();
 
         assert!(response.signals.iter().any(|signal| {
@@ -1220,9 +1264,9 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn dashboard_overview_cost_spikes_use_true_even_median() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn dashboard_overview_cost_spikes_use_true_even_median() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO usage_events (
                 ts, source, chat_id, thread_id, job_name, session_uuid,
@@ -1234,6 +1278,7 @@ mod tests {
                 ('2026-05-23T08:00:00Z', 'interactive', 1, 0, NULL, 's4', 8.00, 1, '{}', 'none')",
             [],
         )
+        .await
         .unwrap();
 
         let response = dashboard_overview(
@@ -1248,6 +1293,7 @@ mod tests {
                 },
             },
         )
+        .await
         .unwrap();
 
         assert!(
@@ -1260,9 +1306,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dashboard_overview_projects_curator_state_and_warns_on_malformed_evidence() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn dashboard_overview_projects_curator_state_and_warns_on_malformed_evidence() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT OR REPLACE INTO curator_state (
                 agent_singleton_id, last_run_at, last_run_status,
@@ -1274,6 +1320,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
         let response = dashboard_overview(
@@ -1288,6 +1335,7 @@ mod tests {
                 },
             },
         )
+        .await
         .unwrap();
 
         assert!(response.signals.iter().any(|signal| {
@@ -1316,6 +1364,7 @@ mod tests {
              SET last_spike_evidence_json = '{not json'",
             [],
         )
+        .await
         .unwrap();
         let response = dashboard_overview(
             &conn,
@@ -1329,6 +1378,7 @@ mod tests {
                 },
             },
         )
+        .await
         .unwrap();
 
         assert!(response.warnings.iter().any(|warning| {
@@ -1337,9 +1387,9 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn dashboard_overview_projects_non_cost_curator_trigger_evidence() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn dashboard_overview_projects_non_cost_curator_trigger_evidence() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT OR REPLACE INTO curator_state (
                 agent_singleton_id, last_run_at, last_run_status,
@@ -1350,6 +1400,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
         let response = dashboard_overview(
@@ -1364,6 +1415,7 @@ mod tests {
                 },
             },
         )
+        .await
         .unwrap();
 
         assert!(response.signals.iter().any(|signal| {
@@ -1382,6 +1434,7 @@ mod tests {
                 '{\"trigger\":\"time_fallback\",\"computed_at\":\"2026-05-23T09:30:00Z\",\"details\":{\"interval_hours\":24}}'",
             [],
         )
+        .await
         .unwrap();
         let response = dashboard_overview(
             &conn,
@@ -1395,6 +1448,7 @@ mod tests {
                 },
             },
         )
+        .await
         .unwrap();
 
         assert!(response.signals.iter().any(|signal| {
@@ -1404,9 +1458,9 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn dashboard_overview_logs_malformed_curator_evidence() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn dashboard_overview_logs_malformed_curator_evidence() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT OR REPLACE INTO curator_state (
                 agent_singleton_id, last_run_at, last_run_status,
@@ -1414,24 +1468,25 @@ mod tests {
              ) VALUES (1, NULL, NULL, 0, NULL, '{not json')",
             [],
         )
+        .await
         .unwrap();
         let subscriber = WarnCounter::default();
         let warn_count = subscriber.warn_count.clone();
 
-        let response = tracing::subscriber::with_default(subscriber, || {
-            dashboard_overview(
-                &conn,
-                DashboardOverviewInput {
-                    agent: "alpha".to_string(),
-                    generated_at: "2026-05-23T10:00:00Z".to_string(),
-                    foreground_active_count: 0,
-                    sandbox: crate::api_types::OverviewSandboxStatus {
-                        state: "configured".to_string(),
-                        detail: None,
-                    },
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let response = dashboard_overview(
+            &conn,
+            DashboardOverviewInput {
+                agent: "alpha".to_string(),
+                generated_at: "2026-05-23T10:00:00Z".to_string(),
+                foreground_active_count: 0,
+                sandbox: crate::api_types::OverviewSandboxStatus {
+                    state: "configured".to_string(),
+                    detail: None,
                 },
-            )
-        })
+            },
+        )
+        .await
         .unwrap();
 
         assert!(response.warnings.iter().any(|warning| {
@@ -1441,9 +1496,9 @@ mod tests {
         assert_eq!(warn_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    #[test]
-    fn dashboard_overview_warns_on_malformed_curator_timestamps() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn dashboard_overview_warns_on_malformed_curator_timestamps() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT OR REPLACE INTO curator_state (
                 agent_singleton_id, last_run_at, last_run_status,
@@ -1453,24 +1508,25 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         let subscriber = WarnCounter::default();
         let warn_count = subscriber.warn_count.clone();
 
-        let response = tracing::subscriber::with_default(subscriber, || {
-            dashboard_overview(
-                &conn,
-                DashboardOverviewInput {
-                    agent: "alpha".to_string(),
-                    generated_at: "2026-05-23T10:00:00Z".to_string(),
-                    foreground_active_count: 0,
-                    sandbox: crate::api_types::OverviewSandboxStatus {
-                        state: "configured".to_string(),
-                        detail: None,
-                    },
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let response = dashboard_overview(
+            &conn,
+            DashboardOverviewInput {
+                agent: "alpha".to_string(),
+                generated_at: "2026-05-23T10:00:00Z".to_string(),
+                foreground_active_count: 0,
+                sandbox: crate::api_types::OverviewSandboxStatus {
+                    state: "configured".to_string(),
+                    detail: None,
                 },
-            )
-        })
+            },
+        )
+        .await
         .unwrap();
 
         assert!(response.warnings.iter().any(|warning| {
@@ -1512,9 +1568,9 @@ mod tests {
         fn exit(&self, _span: &tracing::span::Id) {}
     }
 
-    #[test]
-    fn dashboard_overview_warns_when_curator_state_row_is_absent() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn dashboard_overview_warns_when_curator_state_row_is_absent() {
+        let (_dir, conn) = fixture().await;
 
         let response = dashboard_overview(
             &conn,
@@ -1528,6 +1584,7 @@ mod tests {
                 },
             },
         )
+        .await
         .unwrap();
 
         assert!(response.signals.is_empty());

@@ -126,7 +126,7 @@ struct RawSkillLifecycleRow {
     absorbed_into: Option<String>,
 }
 
-pub fn mark_created(
+pub async fn mark_created(
     conn: &Connection,
     skill_name: &str,
     created_by: CreatedBy,
@@ -149,11 +149,12 @@ pub fn mark_created(
             created_by.as_db_str(),
             now,
         ),
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-pub fn bump_patch(
+pub async fn bump_patch(
     conn: &Connection,
     skill_name: &str,
     created_by: CreatedBy,
@@ -176,25 +177,30 @@ pub fn bump_patch(
             created_by.as_db_str(),
             now,
         ),
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-pub fn bump_use(conn: &Connection, skill_name: &str, now_utc: DateTime<Utc>) -> Result<()> {
+pub async fn bump_use(conn: &Connection, skill_name: &str, now_utc: DateTime<Utc>) -> Result<()> {
     let now = now_utc.to_rfc3339();
-    bump_use_stmt(conn, skill_name, &now)?;
+    bump_use_stmt(conn, skill_name, &now).await?;
     Ok(())
 }
 
 /// Bump usage counters for each name in one transaction. Empty iterators
 /// commit a no-op transaction (cheap).
-pub fn bump_use_many<I, S>(conn: &Connection, skill_names: I, now_utc: DateTime<Utc>) -> Result<()>
+pub async fn bump_use_many<I, S>(
+    conn: &Connection,
+    skill_names: I,
+    now_utc: DateTime<Utc>,
+) -> Result<()>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
     let now = now_utc.to_rfc3339();
-    let tx = conn.transaction()?;
+    let tx = conn.transaction().await?;
     for name in skill_names {
         tx.execute(
             BUMP_USE_SQL,
@@ -204,9 +210,10 @@ where
                 CreatedBy::Foreground.as_db_str(),
                 now.as_str(),
             ),
-        )?;
+        )
+        .await?;
     }
-    tx.commit()?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -220,7 +227,7 @@ const BUMP_USE_SQL: &str = "INSERT INTO skill_lifecycle (
             archived_at = NULL,
             absorbed_into = NULL";
 
-fn bump_use_stmt(conn: &Connection, skill_name: &str, now_rfc3339: &str) -> Result<()> {
+async fn bump_use_stmt(conn: &Connection, skill_name: &str, now_rfc3339: &str) -> Result<()> {
     conn.execute(
         BUMP_USE_SQL,
         (
@@ -229,22 +236,25 @@ fn bump_use_stmt(conn: &Connection, skill_name: &str, now_rfc3339: &str) -> Resu
             CreatedBy::Foreground.as_db_str(),
             now_rfc3339,
         ),
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-pub fn set_pinned(conn: &Connection, skill_name: &str, pinned: bool) -> Result<bool> {
+pub async fn set_pinned(conn: &Connection, skill_name: &str, pinned: bool) -> Result<bool> {
     let pinned_value = i64::from(pinned);
-    let changed = conn.execute(
-        "UPDATE skill_lifecycle
+    let changed = conn
+        .execute(
+            "UPDATE skill_lifecycle
          SET pinned = ?2
          WHERE skill_name = ?1 AND pinned != ?2",
-        (skill_name, pinned_value),
-    )?;
+            (skill_name, pinned_value),
+        )
+        .await?;
     Ok(changed > 0)
 }
 
-pub fn get(conn: &Connection, skill_name: &str) -> Result<Option<SkillLifecycleRow>> {
+pub async fn get(conn: &Connection, skill_name: &str) -> Result<Option<SkillLifecycleRow>> {
     let raw = conn
         .query_one(
             "SELECT
@@ -255,11 +265,12 @@ pub fn get(conn: &Connection, skill_name: &str) -> Result<Option<SkillLifecycleR
             [skill_name],
             raw_row_from_sql,
         )
+        .await
         .optional()?;
     raw.map(row_from_raw).transpose()
 }
 
-pub fn list(conn: &Connection) -> Result<Vec<SkillLifecycleRow>> {
+pub async fn list(conn: &Connection) -> Result<Vec<SkillLifecycleRow>> {
     list_where(
         conn,
         "SELECT
@@ -268,9 +279,10 @@ pub fn list(conn: &Connection) -> Result<Vec<SkillLifecycleRow>> {
          FROM skill_lifecycle
          ORDER BY skill_name",
     )
+    .await
 }
 
-pub fn list_curator_candidates(conn: &Connection) -> Result<Vec<SkillLifecycleRow>> {
+pub async fn list_curator_candidates(conn: &Connection) -> Result<Vec<SkillLifecycleRow>> {
     list_where(
         conn,
         "SELECT
@@ -282,9 +294,10 @@ pub fn list_curator_candidates(conn: &Connection) -> Result<Vec<SkillLifecycleRo
            AND created_by IN ('probe_writer', 'curator')
          ORDER BY skill_name",
     )
+    .await
 }
 
-pub fn apply_automatic_transitions(
+pub async fn apply_automatic_transitions(
     conn: &Connection,
     now_utc: DateTime<Utc>,
     config: TransitionConfig,
@@ -292,52 +305,56 @@ pub fn apply_automatic_transitions(
     let stale_cutoff = (now_utc - config.stale_after).to_rfc3339();
     let archive_cutoff = (now_utc - config.archive_after).to_rfc3339();
     let now = now_utc.to_rfc3339();
-    let tx = conn.transaction()?;
+    let tx = conn.transaction().await?;
 
     // Archive first: any unpinned curator/probe-writer row (active OR stale)
     // whose latest activity is older than the archive cutoff. Running archive
     // before stale prevents an active-then-stale double hop in one call.
-    let archived = tx.execute(
-        &format!(
-            "UPDATE skill_lifecycle
+    let archived = tx
+        .execute(
+            &format!(
+                "UPDATE skill_lifecycle
              SET state = ?1, archived_at = ?2
              WHERE state IN (?3, ?4)
                AND pinned = 0
                AND created_by IN (?5, ?6)
                AND {}",
-            activity_before_cutoff("?7"),
-        ),
-        (
-            LifecycleState::Archived.as_db_str(),
-            now.as_str(),
-            LifecycleState::Active.as_db_str(),
-            LifecycleState::Stale.as_db_str(),
-            CreatedBy::ProbeWriter.as_db_str(),
-            CreatedBy::Curator.as_db_str(),
-            archive_cutoff.as_str(),
-        ),
-    )?;
+                activity_before_cutoff("?7"),
+            ),
+            (
+                LifecycleState::Archived.as_db_str(),
+                now.as_str(),
+                LifecycleState::Active.as_db_str(),
+                LifecycleState::Stale.as_db_str(),
+                CreatedBy::ProbeWriter.as_db_str(),
+                CreatedBy::Curator.as_db_str(),
+                archive_cutoff.as_str(),
+            ),
+        )
+        .await?;
 
-    let staled = tx.execute(
-        &format!(
-            "UPDATE skill_lifecycle
+    let staled = tx
+        .execute(
+            &format!(
+                "UPDATE skill_lifecycle
              SET state = ?1
              WHERE state = ?2
                AND pinned = 0
                AND created_by IN (?3, ?4)
                AND {}",
-            activity_before_cutoff("?5"),
-        ),
-        (
-            LifecycleState::Stale.as_db_str(),
-            LifecycleState::Active.as_db_str(),
-            CreatedBy::ProbeWriter.as_db_str(),
-            CreatedBy::Curator.as_db_str(),
-            stale_cutoff.as_str(),
-        ),
-    )?;
+                activity_before_cutoff("?5"),
+            ),
+            (
+                LifecycleState::Stale.as_db_str(),
+                LifecycleState::Active.as_db_str(),
+                CreatedBy::ProbeWriter.as_db_str(),
+                CreatedBy::Curator.as_db_str(),
+                stale_cutoff.as_str(),
+            ),
+        )
+        .await?;
 
-    tx.commit()?;
+    tx.commit().await?;
     Ok(archived + staled)
 }
 
@@ -359,22 +376,23 @@ fn activity_before_cutoff(cutoff_placeholder: &str) -> String {
 /// Count rows whose `created_at` OR `last_patched_at` is strictly after
 /// `since`. Aggregate query — no row materialization. Used by the curator's
 /// skill-change-count trigger.
-pub fn count_changes_since(conn: &Connection, since: DateTime<Utc>) -> Result<u32> {
+pub async fn count_changes_since(conn: &Connection, since: DateTime<Utc>) -> Result<u32> {
     let since = since.to_rfc3339();
-    let count: i64 = conn.query_one(
-        "SELECT COUNT(*) FROM skill_lifecycle
+    let count: i64 = conn
+        .query_one(
+            "SELECT COUNT(*) FROM skill_lifecycle
          WHERE (created_at IS NOT NULL AND julianday(created_at) > julianday(?1))
             OR (last_patched_at IS NOT NULL AND julianday(last_patched_at) > julianday(?1))",
-        [&since],
-        |row| row.get(0),
-    )?;
+            [&since],
+            |row| row.get(0),
+        )
+        .await?;
     Ok(u32::try_from(count.max(0)).unwrap_or(u32::MAX))
 }
 
-fn list_where(conn: &Connection, sql: &str) -> Result<Vec<SkillLifecycleRow>> {
-    conn.query_all(sql, (), raw_row_from_sql)
-        .map_err(Into::into)
-        .and_then(|rows| rows.into_iter().map(row_from_raw).collect())
+async fn list_where(conn: &Connection, sql: &str) -> Result<Vec<SkillLifecycleRow>> {
+    let rows = conn.query_all(sql, (), raw_row_from_sql).await?;
+    rows.into_iter().map(row_from_raw).collect()
 }
 
 fn raw_row_from_sql(
@@ -439,8 +457,8 @@ mod tests {
     use super::*;
     use chrono::TimeDelta;
 
-    fn migrated_conn() -> (tempfile::TempDir, Connection) {
-        right_db::test_support::migrated_connection()
+    async fn migrated_conn() -> (tempfile::TempDir, Connection) {
+        right_db::test_support::migrated_connection().await
     }
 
     fn utc(value: &str) -> DateTime<Utc> {
@@ -449,8 +467,8 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    #[test]
-    fn lifecycle_enums_serialize_as_snake_case() {
+    #[tokio::test]
+    async fn lifecycle_enums_serialize_as_snake_case() {
         assert_eq!(
             serde_json::to_string(&LifecycleState::Active).unwrap(),
             "\"active\""
@@ -516,7 +534,7 @@ mod tests {
             self
         }
 
-        fn insert(self, conn: &Connection) {
+        async fn insert(self, conn: &Connection) {
             conn.execute(
                 "INSERT INTO skill_lifecycle (
                     skill_name, state, pinned, created_by, use_count, patch_count,
@@ -534,18 +552,21 @@ mod tests {
                     self.last_patched_at.map(|t| t.to_rfc3339()),
                 ),
             )
+            .await
             .unwrap();
         }
     }
 
-    #[test]
-    fn mark_created_inserts_active_row_with_provenance() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn mark_created_inserts_active_row_with_provenance() {
+        let (_dir, conn) = migrated_conn().await;
         let now = utc("2026-05-23T12:00:00Z");
 
-        mark_created(&conn, "rightx-demo", CreatedBy::ProbeWriter, now).unwrap();
+        mark_created(&conn, "rightx-demo", CreatedBy::ProbeWriter, now)
+            .await
+            .unwrap();
 
-        let row = get(&conn, "rightx-demo").unwrap().unwrap();
+        let row = get(&conn, "rightx-demo").await.unwrap().unwrap();
         assert_eq!(row.skill_name, "rightx-demo");
         assert_eq!(row.state, LifecycleState::Active);
         assert!(!row.pinned);
@@ -557,33 +578,36 @@ mod tests {
         assert_eq!(row.absorbed_into, None);
     }
 
-    #[test]
-    fn bump_patch_preserves_existing_created_by() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn bump_patch_preserves_existing_created_by() {
+        let (_dir, conn) = migrated_conn().await;
         let now = utc("2026-05-23T12:00:00Z");
         LifecycleRowFixture::new("rightx-demo")
             .state(LifecycleState::Stale)
             .created_by(CreatedBy::Curator)
             .patch_count(2)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
 
-        bump_patch(&conn, "rightx-demo", CreatedBy::ProbeWriter, now).unwrap();
+        bump_patch(&conn, "rightx-demo", CreatedBy::ProbeWriter, now)
+            .await
+            .unwrap();
 
-        let row = get(&conn, "rightx-demo").unwrap().unwrap();
+        let row = get(&conn, "rightx-demo").await.unwrap().unwrap();
         assert_eq!(row.state, LifecycleState::Active);
         assert_eq!(row.created_by, CreatedBy::Curator);
         assert_eq!(row.patch_count, 3);
         assert_eq!(row.last_patched_at, Some(now));
     }
 
-    #[test]
-    fn bump_use_creates_foreground_row_when_missing() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn bump_use_creates_foreground_row_when_missing() {
+        let (_dir, conn) = migrated_conn().await;
         let now = utc("2026-05-23T12:00:00Z");
 
-        bump_use(&conn, "rightx-demo", now).unwrap();
+        bump_use(&conn, "rightx-demo", now).await.unwrap();
 
-        let row = get(&conn, "rightx-demo").unwrap().unwrap();
+        let row = get(&conn, "rightx-demo").await.unwrap().unwrap();
         assert_eq!(row.state, LifecycleState::Active);
         assert_eq!(row.created_by, CreatedBy::Foreground);
         assert_eq!(row.use_count, 1);
@@ -592,25 +616,26 @@ mod tests {
         assert_eq!(row.last_used_at, Some(now));
     }
 
-    #[test]
-    fn set_pinned_toggles_existing_row() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn set_pinned_toggles_existing_row() {
+        let (_dir, conn) = migrated_conn().await;
         LifecycleRowFixture::new("rightx-demo")
             .created_by(CreatedBy::Curator)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
 
-        assert!(set_pinned(&conn, "rightx-demo", true).unwrap());
-        assert!(get(&conn, "rightx-demo").unwrap().unwrap().pinned);
-        assert!(set_pinned(&conn, "rightx-demo", false).unwrap());
-        assert!(!get(&conn, "rightx-demo").unwrap().unwrap().pinned);
+        assert!(set_pinned(&conn, "rightx-demo", true).await.unwrap());
+        assert!(get(&conn, "rightx-demo").await.unwrap().unwrap().pinned);
+        assert!(set_pinned(&conn, "rightx-demo", false).await.unwrap());
+        assert!(!get(&conn, "rightx-demo").await.unwrap().unwrap().pinned);
 
-        assert!(!set_pinned(&conn, "missing", true).unwrap());
-        assert!(get(&conn, "missing").unwrap().is_none());
+        assert!(!set_pinned(&conn, "missing", true).await.unwrap());
+        assert!(get(&conn, "missing").await.unwrap().is_none());
     }
 
-    #[test]
-    fn automatic_transitions_skip_pinned_foreground_and_bundled_rows() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn automatic_transitions_skip_pinned_foreground_and_bundled_rows() {
+        let (_dir, conn) = migrated_conn().await;
         let now = utc("2026-05-23T12:00:00Z");
         let old = now - TimeDelta::days(45);
         let stale_old = now - TimeDelta::days(20);
@@ -623,39 +648,47 @@ mod tests {
         LifecycleRowFixture::new("candidate-probe")
             .created_by(CreatedBy::ProbeWriter)
             .last_used_at(stale_old)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
         LifecycleRowFixture::new("old-stale-curator")
             .state(LifecycleState::Stale)
             .created_by(CreatedBy::Curator)
             .last_used_at(old)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
         LifecycleRowFixture::new("pinned-probe")
             .pinned(true)
             .created_by(CreatedBy::ProbeWriter)
             .last_used_at(old)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
         LifecycleRowFixture::new("foreground-old")
             .created_by(CreatedBy::Foreground)
             .last_used_at(old)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
         LifecycleRowFixture::new("bundled-old")
             .created_by(CreatedBy::Bundled)
             .last_used_at(old)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
         LifecycleRowFixture::new("recent-patch-wins")
             .created_by(CreatedBy::Curator)
             .last_used_at(old)
             .last_patched_at(recent)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
 
-        let updated = apply_automatic_transitions(&conn, now, config).unwrap();
+        let updated = apply_automatic_transitions(&conn, now, config)
+            .await
+            .unwrap();
 
         assert_eq!(updated, 2);
         assert_eq!(
-            get(&conn, "candidate-probe").unwrap().unwrap().state,
+            get(&conn, "candidate-probe").await.unwrap().unwrap().state,
             LifecycleState::Stale
         );
-        let archived = get(&conn, "old-stale-curator").unwrap().unwrap();
+        let archived = get(&conn, "old-stale-curator").await.unwrap().unwrap();
         assert_eq!(archived.state, LifecycleState::Archived);
         assert_eq!(archived.archived_at, Some(now));
         for skill_name in [
@@ -665,16 +698,16 @@ mod tests {
             "recent-patch-wins",
         ] {
             assert_eq!(
-                get(&conn, skill_name).unwrap().unwrap().state,
+                get(&conn, skill_name).await.unwrap().unwrap().state,
                 LifecycleState::Active,
                 "{skill_name} must not transition"
             );
         }
     }
 
-    #[test]
-    fn automatic_transitions_leave_rows_without_activity_unchanged() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn automatic_transitions_leave_rows_without_activity_unchanged() {
+        let (_dir, conn) = migrated_conn().await;
         let now = utc("2026-05-23T12:00:00Z");
         let config = TransitionConfig {
             stale_after: TimeDelta::days(7),
@@ -682,20 +715,27 @@ mod tests {
         };
         LifecycleRowFixture::new("created-only-probe")
             .created_by(CreatedBy::ProbeWriter)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
 
-        let updated = apply_automatic_transitions(&conn, now, config).unwrap();
+        let updated = apply_automatic_transitions(&conn, now, config)
+            .await
+            .unwrap();
 
         assert_eq!(updated, 0);
         assert_eq!(
-            get(&conn, "created-only-probe").unwrap().unwrap().state,
+            get(&conn, "created-only-probe")
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
             LifecycleState::Active
         );
     }
 
-    #[test]
-    fn active_rows_older_than_archive_after_archive_directly() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn active_rows_older_than_archive_after_archive_directly() {
+        let (_dir, conn) = migrated_conn().await;
         let now = utc("2026-05-23T12:00:00Z");
         let old = now - TimeDelta::days(45);
         let config = TransitionConfig {
@@ -705,19 +745,22 @@ mod tests {
         LifecycleRowFixture::new("ancient-active-curator")
             .created_by(CreatedBy::Curator)
             .last_used_at(old)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
 
-        let updated = apply_automatic_transitions(&conn, now, config).unwrap();
+        let updated = apply_automatic_transitions(&conn, now, config)
+            .await
+            .unwrap();
 
         assert_eq!(updated, 1);
-        let row = get(&conn, "ancient-active-curator").unwrap().unwrap();
+        let row = get(&conn, "ancient-active-curator").await.unwrap().unwrap();
         assert_eq!(row.state, LifecycleState::Archived);
         assert_eq!(row.archived_at, Some(now));
     }
 
-    #[test]
-    fn automatic_transitions_do_not_fire_at_exact_thresholds() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn automatic_transitions_do_not_fire_at_exact_thresholds() {
+        let (_dir, conn) = migrated_conn().await;
         let now = utc("2026-05-23T12:00:00Z");
         let config = TransitionConfig {
             stale_after: TimeDelta::days(7),
@@ -726,22 +769,28 @@ mod tests {
         LifecycleRowFixture::new("active-at-stale-boundary")
             .created_by(CreatedBy::Curator)
             .last_used_at(now - config.stale_after)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
         LifecycleRowFixture::new("active-at-archive-boundary")
             .created_by(CreatedBy::Curator)
             .last_used_at(now - config.archive_after)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
         LifecycleRowFixture::new("stale-at-archive-boundary")
             .state(LifecycleState::Stale)
             .created_by(CreatedBy::ProbeWriter)
             .last_used_at(now - config.archive_after)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
 
-        let updated = apply_automatic_transitions(&conn, now, config).unwrap();
+        let updated = apply_automatic_transitions(&conn, now, config)
+            .await
+            .unwrap();
 
         assert_eq!(updated, 1);
         assert_eq!(
             get(&conn, "active-at-stale-boundary")
+                .await
                 .unwrap()
                 .unwrap()
                 .state,
@@ -749,6 +798,7 @@ mod tests {
         );
         assert_eq!(
             get(&conn, "active-at-archive-boundary")
+                .await
                 .unwrap()
                 .unwrap()
                 .state,
@@ -756,6 +806,7 @@ mod tests {
         );
         assert_eq!(
             get(&conn, "stale-at-archive-boundary")
+                .await
                 .unwrap()
                 .unwrap()
                 .state,
@@ -763,9 +814,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn automatic_transitions_skip_rows_pinned_or_used_between_selection_and_update() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn automatic_transitions_skip_rows_pinned_or_used_between_selection_and_update() {
+        let (_dir, conn) = migrated_conn().await;
         let now = utc("2026-05-23T12:00:00Z");
         let old = now - TimeDelta::days(20);
         let config = TransitionConfig {
@@ -776,34 +827,48 @@ mod tests {
         LifecycleRowFixture::new("pinned-after-selection")
             .created_by(CreatedBy::ProbeWriter)
             .last_used_at(old)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
         LifecycleRowFixture::new("used-after-selection")
             .created_by(CreatedBy::Curator)
             .last_used_at(old)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
 
         // Simulate a race: pin + foreground use happen between gate decision
         // and UPDATE. The single-statement UPDATE re-evaluates the WHERE
         // clause at execution time, so both rows must be skipped.
-        set_pinned(&conn, "pinned-after-selection", true).unwrap();
-        bump_use(&conn, "used-after-selection", now).unwrap();
+        set_pinned(&conn, "pinned-after-selection", true)
+            .await
+            .unwrap();
+        bump_use(&conn, "used-after-selection", now).await.unwrap();
 
-        let updated = apply_automatic_transitions(&conn, now, config).unwrap();
+        let updated = apply_automatic_transitions(&conn, now, config)
+            .await
+            .unwrap();
 
         assert_eq!(updated, 0);
         assert_eq!(
-            get(&conn, "pinned-after-selection").unwrap().unwrap().state,
+            get(&conn, "pinned-after-selection")
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
             LifecycleState::Active
         );
         assert_eq!(
-            get(&conn, "used-after-selection").unwrap().unwrap().state,
+            get(&conn, "used-after-selection")
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
             LifecycleState::Active
         );
     }
 
-    #[test]
-    fn stale_transition_predicate_compares_rfc3339_instants_across_offsets() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn stale_transition_predicate_compares_rfc3339_instants_across_offsets() {
+        let (_dir, conn) = migrated_conn().await;
         let now = utc("2026-05-30T12:00:00Z");
         let config = TransitionConfig {
             stale_after: TimeDelta::days(7),
@@ -821,6 +886,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         // last_used_at is `now - 8 days` with a +01:00 offset → must stale.
         conn.execute(
@@ -832,35 +898,44 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let updated = apply_automatic_transitions(&conn, now, config).unwrap();
+        let updated = apply_automatic_transitions(&conn, now, config)
+            .await
+            .unwrap();
 
         assert_eq!(updated, 1);
         assert_eq!(
-            get(&conn, "offset-equivalent").unwrap().unwrap().state,
+            get(&conn, "offset-equivalent")
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
             LifecycleState::Active
         );
         assert_eq!(
-            get(&conn, "offset-stale").unwrap().unwrap().state,
+            get(&conn, "offset-stale").await.unwrap().unwrap().state,
             LifecycleState::Stale
         );
     }
 
-    #[test]
-    fn count_changes_since_counts_rows_created_or_patched_after_cutoff() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn count_changes_since_counts_rows_created_or_patched_after_cutoff() {
+        let (_dir, conn) = migrated_conn().await;
         let since = utc("2026-05-21T00:00:00Z");
 
         LifecycleRowFixture::new("rightx-old")
             .created_by(CreatedBy::ProbeWriter)
-            .insert(&conn);
+            .insert(&conn)
+            .await;
         mark_created(
             &conn,
             "rightx-new",
             CreatedBy::ProbeWriter,
             utc("2026-05-22T00:00:00Z"),
         )
+        .await
         .unwrap();
         bump_patch(
             &conn,
@@ -868,23 +943,26 @@ mod tests {
             CreatedBy::Curator,
             utc("2026-05-22T00:00:00Z"),
         )
+        .await
         .unwrap();
 
-        assert_eq!(count_changes_since(&conn, since).unwrap(), 2);
+        assert_eq!(count_changes_since(&conn, since).await.unwrap(), 2);
     }
 
-    #[test]
-    fn bump_use_many_increments_in_a_single_transaction() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn bump_use_many_increments_in_a_single_transaction() {
+        let (_dir, conn) = migrated_conn().await;
         let now = utc("2026-05-23T12:00:00Z");
 
-        bump_use_many(&conn, ["rightx-a", "rightx-b", "rightx-a"], now).unwrap();
+        bump_use_many(&conn, ["rightx-a", "rightx-b", "rightx-a"], now)
+            .await
+            .unwrap();
 
         assert_eq!(
-            get(&conn, "rightx-a").unwrap().unwrap().use_count,
+            get(&conn, "rightx-a").await.unwrap().unwrap().use_count,
             2,
             "duplicate names increment independently"
         );
-        assert_eq!(get(&conn, "rightx-b").unwrap().unwrap().use_count, 1);
+        assert_eq!(get(&conn, "rightx-b").await.unwrap().unwrap().use_count, 1);
     }
 }

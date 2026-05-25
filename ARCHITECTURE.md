@@ -489,6 +489,10 @@ opens must enable Turso's experimental index-method feature because
 conversation and memory search use `CREATE INDEX ... USING fts`. Other crates
 must use project-owned `right_db` types and must not expose raw `turso`
 connection, transaction, row, error, value, or parameter types in public APIs.
+The runtime database API is async-first: `open_connection`, `open_db`,
+`execute`, `query_*`, migrations, and transactions are awaited directly by
+callers. Do not add sync facades, runtime `block_on` bridges, or shared-runtime
+adapters around `right-db`.
 `right-db` may use bundled `rusqlite` only for the pre-Turso legacy FTS5
 scrubber described below; it is not a general runtime database boundary.
 
@@ -500,7 +504,14 @@ All pending migrations run inside a single immediate transaction. Rollback is al
 
 ### Transaction Rule
 
-Any operation that performs 2+ writes (INSERT, UPDATE, DELETE) MUST use a single immediate transaction. Prefer `Connection::with_immediate_transaction` so rollback-on-error is centralized; use explicit `Connection::transaction()` only when the transaction must be passed through helper boundaries or committed manually. Single-statement writes don't need a transaction. Migrations are the sole exception because the `right-db` migration runner wraps each migration batch.
+Any operation that performs 2+ writes (INSERT, UPDATE, DELETE) MUST use a
+single immediate transaction from `Connection::transaction().await`, then
+commit explicitly with `Transaction::commit().await` after all writes succeed.
+If a caller intentionally aborts a transaction before other connections may
+write, it must call `Transaction::rollback().await`; dropping a Turso
+transaction only schedules rollback on the next use of that same connection.
+Single-statement writes don't need a transaction. Migrations are the sole
+exception because the `right-db` migration runner wraps each migration batch.
 
 ### Idempotent Migrations
 

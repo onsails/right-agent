@@ -193,8 +193,8 @@ mod transcribe_or_marker_tests {
 mod combine_tests {
     use super::*;
 
-    #[test]
-    fn no_markers_returns_user_text() {
+    #[tokio::test]
+    async fn no_markers_returns_user_text() {
         assert_eq!(
             combine_markers_with_text(&[], Some("hi")),
             Some("hi".into())
@@ -202,15 +202,15 @@ mod combine_tests {
         assert_eq!(combine_markers_with_text(&[], None), None);
     }
 
-    #[test]
-    fn marker_only_when_no_text() {
+    #[tokio::test]
+    async fn marker_only_when_no_text() {
         let m = vec!["[m]".to_string()];
         assert_eq!(combine_markers_with_text(&m, None), Some("[m]".into()));
         assert_eq!(combine_markers_with_text(&m, Some("")), Some("[m]".into()));
     }
 
-    #[test]
-    fn marker_prepended_with_blank_line_above_text() {
+    #[tokio::test]
+    async fn marker_prepended_with_blank_line_above_text() {
         let m = vec!["[m]".to_string()];
         assert_eq!(
             combine_markers_with_text(&m, Some("hello")),
@@ -218,8 +218,8 @@ mod combine_tests {
         );
     }
 
-    #[test]
-    fn multiple_markers_each_on_own_line() {
+    #[tokio::test]
+    async fn multiple_markers_each_on_own_line() {
         let m = vec!["[a]".to_string(), "[b]".to_string()];
         assert_eq!(
             combine_markers_with_text(&m, Some("x")),

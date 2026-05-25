@@ -573,8 +573,8 @@ mod tests {
         assert_eq!(user_ids, vec![100]);
     }
 
-    #[test]
-    fn set_token_failure_message_does_not_claim_success() {
+    #[tokio::test]
+    async fn set_token_failure_message_does_not_claim_success() {
         let msg = set_token_failure_message("composio", "him", "HTTP 502");
         assert!(
             !msg.contains("Authenticated"),
@@ -589,8 +589,8 @@ mod tests {
         assert!(msg.contains("HTTP 502"));
     }
 
-    #[test]
-    fn set_token_failure_message_wraps_detail_in_pre() {
+    #[tokio::test]
+    async fn set_token_failure_message_wraps_detail_in_pre() {
         let msg = set_token_failure_message("composio", "him", "<bad>&\"detail\"");
         assert!(msg.contains("<pre>"));
         assert!(msg.contains("</pre>"));

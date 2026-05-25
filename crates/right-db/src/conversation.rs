@@ -45,7 +45,7 @@ pub struct ConversationSearchResult {
     pub root_session_id: Option<String>,
 }
 
-pub fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> Result<i64> {
+pub async fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> Result<i64> {
     let content = trimmed_content(message.content)?;
     let role = message.role.as_str();
     let turn_id = checked_turn_id(message.turn_id)?;
@@ -53,8 +53,9 @@ pub fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> R
     let routed_to_agent = i64::from(message.routed_to_agent);
 
     if matches!(message.role, ConversationRole::Assistant) || message.message_id.is_none() {
-        return conn.query_one(
-            "INSERT INTO conversation_messages (
+        return conn
+            .query_one(
+                "INSERT INTO conversation_messages (
                 platform, chat_id, thread_id, message_id, sender_user_id, sender_name,
                 addressed_to_bot, routed_to_agent, root_session_id, turn_id, role, content
              ) VALUES (
@@ -62,21 +63,22 @@ pub fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> R
                 ?, ?, ?, ?, ?, ?
              )
              RETURNING id",
-            crate::params![
-                message.platform,
-                message.chat_id,
-                message.thread_id,
-                message.sender_user_id,
-                message.sender_name,
-                addressed_to_bot,
-                routed_to_agent,
-                message.root_session_id,
-                turn_id,
-                role,
-                content,
-            ],
-            |r| r.get(0),
-        );
+                crate::params![
+                    message.platform,
+                    message.chat_id,
+                    message.thread_id,
+                    message.sender_user_id,
+                    message.sender_name,
+                    addressed_to_bot,
+                    routed_to_agent,
+                    message.root_session_id,
+                    turn_id,
+                    role,
+                    content,
+                ],
+                |r| r.get(0),
+            )
+            .await;
     }
 
     conn.query_one(
@@ -117,6 +119,7 @@ pub fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> R
         ],
         |r| r.get(0),
     )
+    .await
 }
 
 // UPSERT, not UPDATE: closes the race where worker turn-start beats the
@@ -124,7 +127,7 @@ pub fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> R
 // no searchable terms. Once the archive INSERT lands, ON CONFLICT DO UPDATE
 // replaces content while OR/COALESCE in archive_message preserves routing
 // fields regardless of which write wins.
-pub fn mark_routed(
+pub async fn mark_routed(
     conn: &Connection,
     platform: &str,
     chat_id: i64,
@@ -161,9 +164,10 @@ pub fn mark_routed(
             turn_id
         ],
     )
+    .await
 }
 
-pub fn search_thread(
+pub async fn search_thread(
     conn: &Connection,
     query: &str,
     limit: usize,
@@ -193,9 +197,10 @@ pub fn search_thread(
         crate::params![query, chat_id, thread_id, limit],
         search_result_from_row,
     )
+    .await
 }
 
-pub fn search_chat(
+pub async fn search_chat(
     conn: &Connection,
     query: &str,
     limit: usize,
@@ -223,6 +228,7 @@ pub fn search_chat(
         crate::params![query, chat_id, limit],
         search_result_from_row,
     )
+    .await
 }
 
 fn trimmed_content(content: &str) -> Result<&str> {
@@ -321,14 +327,14 @@ mod tests {
         }
     }
 
-    fn migrated_connection() -> TestDb {
+    async fn migrated_connection() -> TestDb {
         let dir = tempfile::tempdir().unwrap();
-        let conn = crate::open_connection(dir.path(), true).unwrap();
+        let conn = crate::open_connection(dir.path(), true).await.unwrap();
         TestDb { _dir: dir, conn }
     }
 
-    fn legacy_conversation_partial_unique_connection() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
+    async fn legacy_conversation_partial_unique_connection() -> Connection {
+        let conn = Connection::open_in_memory().await.unwrap();
         conn.execute_batch(
             "CREATE TABLE conversation_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -350,6 +356,7 @@ mod tests {
             ON conversation_messages (platform, chat_id, message_id, role)
             WHERE message_id IS NOT NULL;",
         )
+        .await
         .unwrap();
         conn
     }
@@ -386,12 +393,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn archive_message_is_idempotent_for_inbound_telegram_message() {
-        let conn = migrated_connection();
+    #[tokio::test]
+    async fn archive_message_is_idempotent_for_inbound_telegram_message() {
+        let conn = migrated_connection().await;
 
-        let first_id = archive_message(&conn, user_message(100, 10, 25, "first draft")).unwrap();
-        let second_id = archive_message(&conn, user_message(100, 10, 25, "revised draft")).unwrap();
+        let first_id = archive_message(&conn, user_message(100, 10, 25, "first draft"))
+            .await
+            .unwrap();
+        let second_id = archive_message(&conn, user_message(100, 10, 25, "revised draft"))
+            .await
+            .unwrap();
 
         assert_eq!(first_id, second_id);
         let (count, content): (i64, String) = conn
@@ -401,17 +412,22 @@ mod tests {
                 (),
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
+            .await
             .unwrap();
         assert_eq!(count, 1);
         assert_eq!(content, "revised draft");
     }
 
-    #[test]
-    fn archive_message_is_compatible_with_legacy_partial_unique_index() {
-        let conn = legacy_conversation_partial_unique_connection();
+    #[tokio::test]
+    async fn archive_message_is_compatible_with_legacy_partial_unique_index() {
+        let conn = legacy_conversation_partial_unique_connection().await;
 
-        let first_id = archive_message(&conn, user_message(100, 10, 25, "first draft")).unwrap();
-        let second_id = archive_message(&conn, user_message(100, 10, 25, "revised draft")).unwrap();
+        let first_id = archive_message(&conn, user_message(100, 10, 25, "first draft"))
+            .await
+            .unwrap();
+        let second_id = archive_message(&conn, user_message(100, 10, 25, "revised draft"))
+            .await
+            .unwrap();
 
         assert_eq!(first_id, second_id);
         let (count, content): (i64, String) = conn
@@ -421,17 +437,22 @@ mod tests {
                 (),
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
+            .await
             .unwrap();
         assert_eq!(count, 1);
         assert_eq!(content, "revised draft");
     }
 
-    #[test]
-    fn mark_routed_is_compatible_with_legacy_partial_unique_index() {
-        let conn = legacy_conversation_partial_unique_connection();
+    #[tokio::test]
+    async fn mark_routed_is_compatible_with_legacy_partial_unique_index() {
+        let conn = legacy_conversation_partial_unique_connection().await;
 
-        let first = mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42).unwrap();
-        let second = mark_routed(&conn, "telegram", 100, 10, 25, "session-def", 43).unwrap();
+        let first = mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42)
+            .await
+            .unwrap();
+        let second = mark_routed(&conn, "telegram", 100, 10, 25, "session-def", 43)
+            .await
+            .unwrap();
 
         assert_eq!(first, 1);
         assert_eq!(second, 1);
@@ -442,16 +463,21 @@ mod tests {
                 (),
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row, (1, "session-def".to_string(), 43));
     }
 
-    #[test]
-    fn mark_routed_sets_session_and_turn() {
-        let conn = migrated_connection();
-        archive_message(&conn, user_message(100, 10, 25, "route me")).unwrap();
+    #[tokio::test]
+    async fn mark_routed_sets_session_and_turn() {
+        let conn = migrated_connection().await;
+        archive_message(&conn, user_message(100, 10, 25, "route me"))
+            .await
+            .unwrap();
 
-        let changed = mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42).unwrap();
+        let changed = mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42)
+            .await
+            .unwrap();
 
         assert_eq!(changed, 1);
         let routed: (i64, Option<String>, Option<i64>) = conn
@@ -462,43 +488,54 @@ mod tests {
                 (),
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
+            .await
             .unwrap();
         assert_eq!(routed, (1, Some("session-abc".to_string()), Some(42)));
     }
 
-    #[test]
-    fn mark_routed_stub_without_archive_does_not_pollute_search() {
+    #[tokio::test]
+    async fn mark_routed_stub_without_archive_does_not_pollute_search() {
         // If archive write is dropped (semaphore saturation, restart), the
         // mark_routed stub row must not appear as a phantom search hit.
-        let conn = migrated_connection();
+        let conn = migrated_connection().await;
 
-        mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42).unwrap();
-        archive_message(&conn, user_message(100, 10, 99, "real content here")).unwrap();
+        mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42)
+            .await
+            .unwrap();
+        archive_message(&conn, user_message(100, 10, 99, "real content here"))
+            .await
+            .unwrap();
 
         // Any FTS query must only return the real-content row, never the stub.
-        let chat_results = search_chat(&conn, "real", 10, 100).unwrap();
+        let chat_results = search_chat(&conn, "real", 10, 100).await.unwrap();
         assert_eq!(chat_results.len(), 1);
         assert_eq!(chat_results[0].message_id, Some(99));
 
         // Querying FTS for an empty term must not surface the stub.
         // (Searching for the all-content sentinel via MATCH 'real OR content'
         // proves the stub doesn't appear under any term.)
-        let results = search_chat(&conn, "anything OR maybe", 50, 100).unwrap();
+        let results = search_chat(&conn, "anything OR maybe", 50, 100)
+            .await
+            .unwrap();
         assert!(
             results.iter().all(|r| r.message_id != Some(25)),
             "stub row (message_id=25) must not appear in search results"
         );
     }
 
-    #[test]
-    fn mark_routed_then_archive_preserves_routing_metadata() {
+    #[tokio::test]
+    async fn mark_routed_then_archive_preserves_routing_metadata() {
         // Race ordering: worker calls mark_routed before async archive write
         // lands. mark_routed creates a stub row; archive_message later
         // overwrites content while preserving routed_to_agent/session/turn.
-        let conn = migrated_connection();
+        let conn = migrated_connection().await;
 
-        mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42).unwrap();
-        archive_message(&conn, user_message(100, 10, 25, "real content")).unwrap();
+        mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42)
+            .await
+            .unwrap();
+        archive_message(&conn, user_message(100, 10, 25, "real content"))
+            .await
+            .unwrap();
 
         let (routed, session, turn, content): (i64, Option<String>, Option<i64>, String) = conn
             .query_one(
@@ -508,6 +545,7 @@ mod tests {
                 (),
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .await
             .unwrap();
         assert_eq!(
             (routed, session, turn, content),
@@ -520,13 +558,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn archive_message_preserves_existing_route_metadata_when_rearchived() {
-        let conn = migrated_connection();
-        archive_message(&conn, user_message(100, 10, 25, "route me")).unwrap();
-        mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42).unwrap();
+    #[tokio::test]
+    async fn archive_message_preserves_existing_route_metadata_when_rearchived() {
+        let conn = migrated_connection().await;
+        archive_message(&conn, user_message(100, 10, 25, "route me"))
+            .await
+            .unwrap();
+        mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42)
+            .await
+            .unwrap();
 
-        archive_message(&conn, user_message(100, 10, 25, "route me edited")).unwrap();
+        archive_message(&conn, user_message(100, 10, 25, "route me edited"))
+            .await
+            .unwrap();
 
         let routed: (i64, Option<String>, Option<i64>, String) = conn
             .query_one(
@@ -536,6 +580,7 @@ mod tests {
                 (),
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .await
             .unwrap();
         assert_eq!(
             routed,
@@ -548,28 +593,40 @@ mod tests {
         );
     }
 
-    #[test]
-    fn thread_search_filters_to_current_thread() {
-        let conn = migrated_connection();
-        archive_message(&conn, user_message(100, 10, 25, "needle in thread ten")).unwrap();
-        archive_message(&conn, user_message(100, 11, 26, "needle in thread eleven")).unwrap();
-        archive_message(&conn, user_message(200, 10, 27, "needle in other chat")).unwrap();
+    #[tokio::test]
+    async fn thread_search_filters_to_current_thread() {
+        let conn = migrated_connection().await;
+        archive_message(&conn, user_message(100, 10, 25, "needle in thread ten"))
+            .await
+            .unwrap();
+        archive_message(&conn, user_message(100, 11, 26, "needle in thread eleven"))
+            .await
+            .unwrap();
+        archive_message(&conn, user_message(200, 10, 27, "needle in other chat"))
+            .await
+            .unwrap();
 
-        let results = search_thread(&conn, "needle", 10, 100, 10).unwrap();
+        let results = search_thread(&conn, "needle", 10, 100, 10).await.unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].thread_id, 10);
         assert_eq!(results[0].message_id, Some(25));
     }
 
-    #[test]
-    fn chat_search_includes_all_threads_in_current_chat() {
-        let conn = migrated_connection();
-        archive_message(&conn, user_message(100, 10, 25, "needle in thread ten")).unwrap();
-        archive_message(&conn, user_message(100, 11, 26, "needle in thread eleven")).unwrap();
-        archive_message(&conn, user_message(200, 10, 27, "needle in other chat")).unwrap();
+    #[tokio::test]
+    async fn chat_search_includes_all_threads_in_current_chat() {
+        let conn = migrated_connection().await;
+        archive_message(&conn, user_message(100, 10, 25, "needle in thread ten"))
+            .await
+            .unwrap();
+        archive_message(&conn, user_message(100, 11, 26, "needle in thread eleven"))
+            .await
+            .unwrap();
+        archive_message(&conn, user_message(200, 10, 27, "needle in other chat"))
+            .await
+            .unwrap();
 
-        let results = search_chat(&conn, "needle", 10, 100).unwrap();
+        let results = search_chat(&conn, "needle", 10, 100).await.unwrap();
         let message_ids: Vec<Option<i32>> = results.iter().map(|r| r.message_id).collect();
 
         assert_eq!(message_ids, vec![Some(26), Some(25)]);
@@ -580,18 +637,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn search_filters_to_telegram_platform() {
-        let conn = migrated_connection();
-        archive_message(&conn, user_message(100, 10, 25, "platform needle telegram")).unwrap();
+    #[tokio::test]
+    async fn search_filters_to_telegram_platform() {
+        let conn = migrated_connection().await;
+        archive_message(&conn, user_message(100, 10, 25, "platform needle telegram"))
+            .await
+            .unwrap();
         archive_message(
             &conn,
             message("discord", 100, 10, 26, "platform needle discord"),
         )
+        .await
         .unwrap();
 
-        let thread_results = search_thread(&conn, "platform needle", 10, 100, 10).unwrap();
-        let chat_results = search_chat(&conn, "platform needle", 10, 100).unwrap();
+        let thread_results = search_thread(&conn, "platform needle", 10, 100, 10)
+            .await
+            .unwrap();
+        let chat_results = search_chat(&conn, "platform needle", 10, 100)
+            .await
+            .unwrap();
 
         assert_eq!(thread_results.len(), 1);
         assert_eq!(thread_results[0].message_id, Some(25));
@@ -599,11 +663,11 @@ mod tests {
         assert_eq!(chat_results[0].message_id, Some(25));
     }
 
-    #[test]
-    fn empty_search_query_is_rejected() {
-        let conn = migrated_connection();
+    #[tokio::test]
+    async fn empty_search_query_is_rejected() {
+        let conn = migrated_connection().await;
 
-        let result = search_chat(&conn, " .!? ", 10, 100);
+        let result = search_chat(&conn, " .!? ", 10, 100).await;
 
         assert!(
             result.is_err(),

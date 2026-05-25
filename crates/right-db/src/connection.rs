@@ -1,43 +1,10 @@
 use std::fmt;
-use std::future::Future;
-use std::panic;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::DbError;
 
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Number of worker threads in the process-wide shared runtime.
-///
-/// Local Turso wraps blocking SQLite, so each DB op is effectively
-/// synchronous. We still want at least two workers so independent
-/// connections (different agents, dashboard, aggregator) do not serialize
-/// behind one another at the scheduler level.
-const SHARED_RUNTIME_WORKER_THREADS: usize = 2;
-
-/// Process-wide tokio runtime shared by every [`Connection`].
-///
-/// Local Turso wraps blocking SQLite, so there is no genuine async work to
-/// overlap inside a single op. However, this runtime is shared across every
-/// agent DB, the dashboard, and the aggregator in the same process; a
-/// `current_thread` runtime would serialise all of them through one
-/// scheduler. Use a small multi-thread runtime so independent connections
-/// can make progress concurrently. The runtime is initialised lazily on the
-/// first connection and lives for the lifetime of the process; we
-/// deliberately never shut it down because that would race with concurrent
-/// `Connection` operations across the workspace.
-fn shared_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(SHARED_RUNTIME_WORKER_THREADS)
-            .enable_all()
-            .build()
-            .expect("right-db Turso runtime should initialize")
-    })
-}
 
 pub struct Connection {
     db_path: PathBuf,
@@ -56,11 +23,11 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
-    pub fn open_in_memory() -> Result<Self, DbError> {
-        Self::build(PathBuf::from(":memory:"), true, false)
+    pub async fn open_in_memory() -> Result<Self, DbError> {
+        Self::build(PathBuf::from(":memory:"), true, false).await
     }
 
-    pub(crate) fn open_local(db_path: PathBuf, create: bool) -> Result<Self, DbError> {
+    pub(crate) async fn open_local(db_path: PathBuf, create: bool) -> Result<Self, DbError> {
         if !create && !db_path.exists() {
             return Err(DbError::Open {
                 path: db_path.clone(),
@@ -70,11 +37,10 @@ impl Connection {
                 )),
             });
         }
-        Self::build(db_path, create, !create)
+        Self::build(db_path, create, !create).await
     }
 
-    fn build(db_path: PathBuf, create: bool, readonly: bool) -> Result<Self, DbError> {
-        let runtime = shared_runtime();
+    async fn build(db_path: PathBuf, create: bool, readonly: bool) -> Result<Self, DbError> {
         let path = db_path.to_str().ok_or_else(|| {
             DbError::InvalidParameter(format!(
                 "database path is not valid UTF-8: {}",
@@ -85,13 +51,11 @@ impl Connection {
             path: db_path.clone(),
             source,
         };
-        let database = block_on_runtime_safe(
-            runtime,
-            turso::Builder::new_local(&path)
-                .experimental_index_method(true)
-                .build(),
-        )
-        .map_err(open_err)?;
+        let database = turso::Builder::new_local(path)
+            .experimental_index_method(true)
+            .build()
+            .await
+            .map_err(open_err)?;
         let inner = database.connect().map_err(open_err)?;
         let conn = Self {
             db_path,
@@ -100,8 +64,7 @@ impl Connection {
             readonly,
         };
         if !create {
-            conn.block_on_turso(conn.inner.pragma_update("query_only", 1))
-                .map(drop)?;
+            conn.inner.pragma_update("query_only", 1).await.map(drop)?;
         }
         Ok(conn)
     }
@@ -110,19 +73,23 @@ impl Connection {
         &self.db_path
     }
 
-    pub fn execute_batch(&self, sql: &str) -> Result<(), DbError> {
+    pub async fn execute_batch(&self, sql: &str) -> Result<(), DbError> {
         self.ensure_writable()?;
-        self.block_on_turso(self.inner.execute_batch(sql)).map(drop)
+        self.inner
+            .execute_batch(sql)
+            .await
+            .map(drop)
+            .map_err(Into::into)
     }
 
-    pub fn execute(
+    pub async fn execute(
         &self,
         sql: &str,
         params: impl crate::params::IntoParams,
     ) -> Result<usize, DbError> {
         self.ensure_writable()?;
         let params = params.into_params()?.into_turso();
-        let changed = self.block_on_turso(self.inner.execute(sql, params))?;
+        let changed = self.inner.execute(sql, params).await?;
         usize::try_from(changed)
             .map_err(|_| DbError::InvalidParameter("changed row count exceeds usize".into()))
     }
@@ -146,7 +113,7 @@ impl Connection {
     ///
     /// Writable connections accept any SQL. The gate is a defense-in-depth
     /// layer on top of Turso's `PRAGMA query_only=1`.
-    pub fn query_one<T>(
+    pub async fn query_one<T>(
         &self,
         sql: &str,
         params: impl crate::params::IntoParams,
@@ -154,26 +121,26 @@ impl Connection {
     ) -> Result<T, DbError> {
         self.ensure_query_allowed(sql)?;
         let params = params.into_params()?.into_turso();
-        let mut rows = self.block_on_turso(self.inner.query(sql, params))?;
-        let Some(row) = self.block_on_turso(rows.next())? else {
+        let mut rows = self.inner.query(sql, params).await?;
+        let Some(row) = rows.next().await? else {
             return Err(DbError::NotFound);
         };
         map(&crate::row::Row::new(&row))
     }
 
-    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> Result<T, DbError>
+    pub async fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> Result<T, DbError>
     where
         P: crate::params::IntoParams,
         F: FnOnce(&crate::row::Row<'_>) -> Result<T, DbError>,
     {
-        self.query_one(sql, params, map)
+        self.query_one(sql, params, map).await
     }
 
     /// Issue a read-only query and decode every row.
     ///
     /// See [`Connection::query_one`] for the readonly SQL grammar accepted by
     /// the Rust-side gate.
-    pub fn query_all<T>(
+    pub async fn query_all<T>(
         &self,
         sql: &str,
         params: impl crate::params::IntoParams,
@@ -181,9 +148,9 @@ impl Connection {
     ) -> Result<Vec<T>, DbError> {
         self.ensure_query_allowed(sql)?;
         let params = params.into_params()?.into_turso();
-        let mut rows = self.block_on_turso(self.inner.query(sql, params))?;
+        let mut rows = self.inner.query(sql, params).await?;
         let mut values = Vec::new();
-        while let Some(row) = self.block_on_turso(rows.next())? {
+        while let Some(row) = rows.next().await? {
             values.push(map(&crate::row::Row::new(&row))?);
         }
         Ok(values)
@@ -217,78 +184,41 @@ impl Connection {
 
     /// Start an immediate transaction.
     ///
-    /// Multi-write operations should prefer [`Connection::with_immediate_transaction`]
-    /// so rollback-on-error is centralized. Use this lower-level API when the
-    /// transaction must be passed through helper boundaries or committed
-    /// manually.
-    pub fn transaction(&self) -> Result<crate::transaction::Transaction<'_>, DbError> {
+    /// Callers are responsible for explicitly committing or rolling back the
+    /// returned transaction.
+    pub async fn transaction(&self) -> Result<crate::transaction::Transaction<'_>, DbError> {
         self.ensure_writable()?;
         self.transaction_with_behavior(turso::transaction::TransactionBehavior::Immediate)
+            .await
     }
 
-    pub fn with_immediate_transaction<T>(
-        &self,
-        f: impl FnOnce(&crate::transaction::Transaction<'_>) -> Result<T, DbError>,
-    ) -> Result<T, DbError> {
-        self.ensure_writable()?;
-        let tx =
-            self.transaction_with_behavior(turso::transaction::TransactionBehavior::Immediate)?;
-        match f(&tx) {
-            Ok(value) => {
-                tx.commit()?;
-                Ok(value)
-            }
-            Err(err) => {
-                if let Err(rollback_err) = tx.rollback() {
-                    tracing::warn!(
-                        path = %self.db_path.display(),
-                        operation_error = format!("{err:#}"),
-                        rollback_error = format!("{rollback_err:#}"),
-                        "transaction rollback failed; returning original operation error",
-                    );
-                }
-                Err(err)
-            }
-        }
-    }
-
-    fn transaction_with_behavior(
+    async fn transaction_with_behavior(
         &self,
         behavior: turso::transaction::TransactionBehavior,
     ) -> Result<crate::transaction::Transaction<'_>, DbError> {
         self.ensure_writable()?;
-        let inner = self.block_on_turso(turso::transaction::Transaction::new_unchecked(
-            &self.inner,
-            behavior,
-        ))?;
+        let inner = turso::transaction::Transaction::new_unchecked(&self.inner, behavior).await?;
         Ok(crate::transaction::Transaction::new(self, inner))
     }
 
-    pub(crate) fn apply_connection_pragmas(&self) -> Result<(), DbError> {
-        self.block_on_turso(self.inner.pragma_update("journal_mode", "WAL"))
+    pub(crate) async fn apply_connection_pragmas(&self) -> Result<(), DbError> {
+        self.inner
+            .pragma_update("journal_mode", "WAL")
+            .await
             .map(drop)?;
-        self.block_on_turso(
-            self.inner
-                .pragma_update("busy_timeout", BUSY_TIMEOUT.as_millis()),
-        )
-        .map(drop)?;
+        self.inner
+            .pragma_update("busy_timeout", BUSY_TIMEOUT.as_millis())
+            .await
+            .map(drop)?;
         Ok(())
     }
 
-    pub(crate) fn apply_readonly_pragmas(&self) -> Result<(), DbError> {
-        self.block_on_turso(
-            self.inner
-                .pragma_update("busy_timeout", BUSY_TIMEOUT.as_millis()),
-        )
-        .map(drop)?;
+    pub(crate) async fn apply_readonly_pragmas(&self) -> Result<(), DbError> {
+        self.inner
+            .pragma_update("busy_timeout", BUSY_TIMEOUT.as_millis())
+            .await
+            .map(drop)?;
         Ok(())
-    }
-
-    pub(crate) fn block_on_turso<T: Send>(
-        &self,
-        future: impl Future<Output = turso::Result<T>> + Send,
-    ) -> Result<T, DbError> {
-        block_on_runtime_safe(shared_runtime(), future).map_err(Into::into)
     }
 
     fn ensure_writable(&self) -> Result<(), DbError> {
@@ -433,7 +363,7 @@ pub struct Statement<'conn> {
 }
 
 impl<'conn> Statement<'conn> {
-    pub fn query_map<T, P, F>(
+    pub async fn query_map<T, P, F>(
         &mut self,
         params: P,
         mut map: F,
@@ -443,43 +373,20 @@ impl<'conn> Statement<'conn> {
         F: FnMut(&crate::row::Row<'_>) -> Result<T, DbError>,
     {
         let params = params.into_params()?.into_turso();
-        let mut query_rows = self
-            .conn
-            .block_on_turso(self.conn.inner.query(&self.sql, params))?;
+        let mut query_rows = self.conn.inner.query(&self.sql, params).await?;
         let mut rows = Vec::new();
-        while let Some(row) = self.conn.block_on_turso(query_rows.next())? {
+        while let Some(row) = query_rows.next().await? {
             rows.push(map(&crate::row::Row::new(&row)));
         }
         Ok(rows.into_iter())
     }
 
-    pub fn query_row<T, P, F>(&mut self, params: P, map: F) -> Result<T, DbError>
+    pub async fn query_row<T, P, F>(&mut self, params: P, map: F) -> Result<T, DbError>
     where
         P: crate::params::IntoParams,
         F: FnOnce(&crate::row::Row<'_>) -> Result<T, DbError>,
     {
-        self.conn.query_one(&self.sql, params, map)
-    }
-}
-
-fn block_on_runtime_safe<F, T>(runtime: &tokio::runtime::Runtime, future: F) -> T
-where
-    F: Future<Output = T> + Send,
-    T: Send,
-{
-    match tokio::runtime::Handle::try_current() {
-        Err(_) => runtime.block_on(future),
-        Ok(_) => std::thread::scope(|scope| {
-            // `block_in_place` panics inside `LocalSet::run_until`, even when
-            // the surrounding runtime is multi-threaded. Keep the sync API
-            // compatible by driving Turso on a plain helper thread whenever
-            // callers are already inside any Tokio runtime.
-            let handle = scope.spawn(move || runtime.block_on(future));
-            match handle.join() {
-                Ok(output) => output,
-                Err(payload) => panic::resume_unwind(payload),
-            }
-        }),
+        self.conn.query_one(&self.sql, params, map).await
     }
 }
 
@@ -487,44 +394,67 @@ where
 mod tests {
     use super::*;
 
-    fn insert_via_connection(conn: &Connection, value: &str) -> Result<(), DbError> {
+    async fn insert_via_connection(conn: &Connection, value: &str) -> Result<(), DbError> {
         conn.execute(
             "INSERT INTO transaction_deref_probe (value) VALUES (?1)",
             crate::params![value],
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
-    #[test]
-    fn transaction_deref_helper_write_is_rolled_back() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE transaction_deref_probe (value TEXT NOT NULL)")
+    #[tokio::test]
+    async fn async_connection_operations_do_not_require_a_sync_bridge() {
+        let conn = Connection::open_in_memory().await.unwrap();
+        conn.execute_batch("CREATE TABLE async_probe (value INTEGER NOT NULL)")
+            .await
             .unwrap();
-        let tx = conn.transaction().unwrap();
+        conn.execute("INSERT INTO async_probe (value) VALUES (?1)", [7_i64])
+            .await
+            .unwrap();
 
-        insert_via_connection(&tx, "inside-tx").unwrap();
-        tx.rollback().unwrap();
+        let value: i64 = conn
+            .query_row("SELECT value FROM async_probe", (), |row| row.get(0))
+            .await
+            .unwrap();
+
+        assert_eq!(value, 7);
+    }
+
+    #[tokio::test]
+    async fn transaction_deref_helper_write_is_rolled_back() {
+        let conn = Connection::open_in_memory().await.unwrap();
+        conn.execute_batch("CREATE TABLE transaction_deref_probe (value TEXT NOT NULL)")
+            .await
+            .unwrap();
+        let tx = conn.transaction().await.unwrap();
+
+        insert_via_connection(&tx, "inside-tx").await.unwrap();
+        tx.rollback().await.unwrap();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM transaction_deref_probe", (), |row| {
                 row.get(0)
             })
+            .await
             .unwrap();
         assert_eq!(count, 0);
     }
 
-    #[test]
-    fn dropped_transaction_is_rolled_back() {
-        let conn = Connection::open_in_memory().unwrap();
+    #[tokio::test]
+    async fn dropped_transaction_is_rolled_back() {
+        let conn = Connection::open_in_memory().await.unwrap();
         conn.execute_batch("CREATE TABLE dropped_tx_probe (value TEXT NOT NULL)")
+            .await
             .unwrap();
 
         {
-            let tx = conn.transaction().unwrap();
+            let tx = conn.transaction().await.unwrap();
             tx.execute(
                 "INSERT INTO dropped_tx_probe (value) VALUES (?1)",
                 crate::params!["inside-tx"],
             )
+            .await
             .unwrap();
         }
 
@@ -532,25 +462,27 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM dropped_tx_probe", (), |row| {
                 row.get(0)
             })
+            .await
             .unwrap();
         assert_eq!(count, 0);
     }
 
-    #[test]
-    fn with_immediate_transaction_returns_operation_error_and_rolls_back() {
-        let conn = Connection::open_in_memory().unwrap();
+    #[tokio::test]
+    async fn explicit_transaction_rollback_after_operation_error_rolls_back() {
+        let conn = Connection::open_in_memory().await.unwrap();
         conn.execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
+            .await
             .unwrap();
 
-        let err = conn
-            .with_immediate_transaction(|tx| {
-                tx.execute(
-                    "INSERT INTO probe (value) VALUES (?1)",
-                    crate::params![1i64],
-                )?;
-                Err::<(), _>(DbError::InvalidParameter("operation failed".into()))
-            })
-            .unwrap_err();
+        let tx = conn.transaction().await.unwrap();
+        tx.execute(
+            "INSERT INTO probe (value) VALUES (?1)",
+            crate::params![1i64],
+        )
+        .await
+        .unwrap();
+        let err = Err::<(), _>(DbError::InvalidParameter("operation failed".into())).unwrap_err();
+        tx.rollback().await.unwrap();
 
         assert!(
             matches!(err, DbError::InvalidParameter(ref msg) if msg == "operation failed"),
@@ -559,48 +491,68 @@ mod tests {
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM probe", (), |row| row.get(0))
+            .await
             .unwrap();
         assert_eq!(count, 0, "operation error must roll back the transaction");
     }
 
-    #[test]
-    fn readonly_connection_cannot_disable_query_only_or_write() {
+    #[tokio::test]
+    async fn readonly_connection_cannot_disable_query_only_or_write() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("data.db");
 
-        let writable = Connection::open_local(db_path.clone(), true).unwrap();
+        let writable = Connection::open_local(db_path.clone(), true).await.unwrap();
         writable
             .execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
+            .await
             .unwrap();
         writable
             .execute("INSERT INTO probe (value) VALUES (?1)", [7_i64])
+            .await
             .unwrap();
         drop(writable);
 
-        let readonly = Connection::open_local(db_path, false).unwrap();
+        let readonly = Connection::open_local(db_path, false).await.unwrap();
 
-        for result in [
-            readonly.execute_batch("PRAGMA query_only = OFF"),
-            readonly.execute_batch("CREATE TABLE forbidden (value INTEGER NOT NULL)"),
+        let mut results = Vec::new();
+        results.push(readonly.execute_batch("PRAGMA query_only = OFF").await);
+        results.push(
+            readonly
+                .execute_batch("CREATE TABLE forbidden (value INTEGER NOT NULL)")
+                .await,
+        );
+        results.push(
             readonly
                 .execute("INSERT INTO probe (value) VALUES (?1)", [8_i64])
+                .await
                 .map(drop),
+        );
+        results.push(
             readonly
                 .query_row(
                     "INSERT INTO probe (value) VALUES (9) RETURNING value",
                     (),
                     |row| row.get::<_, i64>(0),
                 )
+                .await
                 .map(drop),
+        );
+        results.push(
             readonly
                 .query_row("PRAGMA query_only(OFF)", (), |row| row.get::<_, i64>(0))
+                .await
                 .map(drop),
-            readonly
-                .prepare("PRAGMA query_only(OFF)")
-                .and_then(|mut stmt| stmt.query_row((), |row| row.get::<_, i64>(0)))
+        );
+        results.push(match readonly.prepare("PRAGMA query_only(OFF)") {
+            Ok(mut stmt) => stmt
+                .query_row((), |row| row.get::<_, i64>(0))
+                .await
                 .map(drop),
-            readonly.transaction().map(drop),
-        ] {
+            Err(e) => Err(e),
+        });
+        results.push(readonly.transaction().await.map(drop));
+
+        for result in results {
             let err = result.expect_err("readonly connection must reject writes");
             assert!(
                 err.to_string().contains("readonly database"),
@@ -610,30 +562,33 @@ mod tests {
 
         let count: i64 = readonly
             .query_row("SELECT COUNT(*) FROM probe", (), |row| row.get(0))
+            .await
             .unwrap();
         assert_eq!(count, 1);
     }
 
-    #[test]
-    fn readonly_query_gate_accepts_documented_read_forms() {
+    #[tokio::test]
+    async fn readonly_query_gate_accepts_documented_read_forms() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("data.db");
 
-        let writable = Connection::open_local(db_path.clone(), true).unwrap();
+        let writable = Connection::open_local(db_path.clone(), true).await.unwrap();
         writable
             .execute_batch(
                 "CREATE TABLE probe (value INTEGER NOT NULL); \
                  INSERT INTO probe (value) VALUES (1); \
                  INSERT INTO probe (value) VALUES (2);",
             )
+            .await
             .unwrap();
         drop(writable);
 
-        let readonly = Connection::open_local(db_path, false).unwrap();
+        let readonly = Connection::open_local(db_path, false).await.unwrap();
 
         // Plain SELECT.
         let v: i64 = readonly
             .query_row("SELECT COUNT(*) FROM probe", (), |row| row.get(0))
+            .await
             .unwrap();
         assert_eq!(v, 2);
 
@@ -644,6 +599,7 @@ mod tests {
                 (),
                 |row| row.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(v, 2);
 
@@ -652,6 +608,7 @@ mod tests {
             .query_row("/* preamble */ SELECT COUNT(*) FROM probe", (), |row| {
                 row.get(0)
             })
+            .await
             .unwrap();
         assert_eq!(v, 2);
 
@@ -662,6 +619,7 @@ mod tests {
                 (),
                 |row| row.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(v, 2);
 
@@ -673,40 +631,50 @@ mod tests {
                 (),
                 |row| row.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(v, 2);
 
         // EXPLAIN gate-passes (we don't care about the row shape, only that
         // it isn't rejected as a write).
-        let _ = readonly.query_all("EXPLAIN SELECT 1", (), |row| row.get::<_, i64>(0));
-        let _ = readonly.query_all("EXPLAIN QUERY PLAN SELECT 1", (), |row| {
-            row.get::<_, i64>(0)
-        });
+        let _ = readonly
+            .query_all("EXPLAIN SELECT 1", (), |row| row.get::<_, i64>(0))
+            .await;
+        let _ = readonly
+            .query_all("EXPLAIN QUERY PLAN SELECT 1", (), |row| {
+                row.get::<_, i64>(0)
+            })
+            .await;
 
         // Bare PRAGMA read.
         let _: i64 = readonly
             .query_row("PRAGMA query_only", (), |row| row.get(0))
+            .await
             .unwrap();
 
         // prepare() should also accept these forms.
         let mut stmt = readonly
             .prepare("WITH doubled AS (SELECT value * 2 AS v FROM probe) SELECT v FROM doubled")
             .unwrap();
-        let _ = stmt.query_map((), |row| row.get::<_, i64>(0)).unwrap();
+        let _ = stmt
+            .query_map((), |row| row.get::<_, i64>(0))
+            .await
+            .unwrap();
     }
 
-    #[test]
-    fn readonly_query_gate_rejects_write_forms() {
+    #[tokio::test]
+    async fn readonly_query_gate_rejects_write_forms() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("data.db");
 
-        let writable = Connection::open_local(db_path.clone(), true).unwrap();
+        let writable = Connection::open_local(db_path.clone(), true).await.unwrap();
         writable
             .execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
+            .await
             .unwrap();
         drop(writable);
 
-        let readonly = Connection::open_local(db_path, false).unwrap();
+        let readonly = Connection::open_local(db_path, false).await.unwrap();
 
         for sql in [
             // CTE that contains a write keyword is rejected.
@@ -726,6 +694,7 @@ mod tests {
         ] {
             let err = readonly
                 .query_row(sql, (), |row| row.get::<_, i64>(0))
+                .await
                 .expect_err(&format!("expected gate to reject {sql:?}"));
             assert!(
                 err.to_string().contains("readonly database"),
@@ -742,46 +711,55 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn sync_queries_work_inside_current_thread_tokio_runtime() {
-        let conn = Connection::open_in_memory().unwrap();
+    async fn async_queries_work_inside_current_thread_tokio_runtime() {
+        let conn = Connection::open_in_memory().await.unwrap();
         conn.execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
+            .await
             .unwrap();
         conn.execute("INSERT INTO probe (value) VALUES (?1)", [7_i64])
+            .await
             .unwrap();
 
         let value: i64 = conn
             .query_row("SELECT value FROM probe", (), |row| row.get(0))
+            .await
             .unwrap();
         assert_eq!(value, 7);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn sync_queries_work_inside_multi_thread_tokio_runtime() {
-        let conn = Connection::open_in_memory().unwrap();
+    async fn async_queries_work_inside_multi_thread_tokio_runtime() {
+        let conn = Connection::open_in_memory().await.unwrap();
         conn.execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
+            .await
             .unwrap();
         conn.execute("INSERT INTO probe (value) VALUES (?1)", [9_i64])
+            .await
             .unwrap();
 
         let value: i64 = conn
             .query_row("SELECT value FROM probe", (), |row| row.get(0))
+            .await
             .unwrap();
         assert_eq!(value, 9);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn sync_queries_work_inside_local_set_on_multi_thread_runtime() {
+    async fn async_queries_work_inside_local_set_on_multi_thread_runtime() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let conn = Connection::open_in_memory().unwrap();
+                let conn = Connection::open_in_memory().await.unwrap();
                 conn.execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
+                    .await
                     .unwrap();
                 conn.execute("INSERT INTO probe (value) VALUES (?1)", [11_i64])
+                    .await
                     .unwrap();
 
                 let value: i64 = conn
                     .query_row("SELECT value FROM probe", (), |row| row.get(0))
+                    .await
                     .unwrap();
                 assert_eq!(value, 11);
             })

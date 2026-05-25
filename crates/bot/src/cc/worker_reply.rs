@@ -122,38 +122,38 @@ mod tests {
     use super::*;
 
     // parse_reply_output tests (new structured output format per D-03)
-    #[test]
-    fn parse_reply_output_content_string() {
+    #[tokio::test]
+    async fn parse_reply_output_content_string() {
         let json = r#"{"session_id":"abc","result":{"content":"hello","reply_to_message_id":null,"attachments":null}}"#;
         let (output, session_id) = parse_reply_output(json).unwrap();
         assert_eq!(output.content.as_deref(), Some("hello"));
         assert_eq!(session_id.as_deref(), Some("abc"));
     }
 
-    #[test]
-    fn parse_reply_output_content_null() {
+    #[tokio::test]
+    async fn parse_reply_output_content_null() {
         let json = r#"{"result":{"content":null}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
         assert!(output.content.is_none());
     }
 
-    #[test]
-    fn parse_reply_output_missing_result_returns_error() {
+    #[tokio::test]
+    async fn parse_reply_output_missing_result_returns_error() {
         let json = r#"{"session_id":"x"}"#;
         let result = parse_reply_output(json);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("missing both"));
     }
 
-    #[test]
-    fn parse_reply_output_reply_to_message_id() {
+    #[tokio::test]
+    async fn parse_reply_output_reply_to_message_id() {
         let json = r#"{"result":{"content":"hi","reply_to_message_id":42,"attachments":null}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
         assert_eq!(output.reply_to_message_id, Some(42));
     }
 
-    #[test]
-    fn parse_reply_output_plain_string_result_wrapped_as_content() {
+    #[tokio::test]
+    async fn parse_reply_output_plain_string_result_wrapped_as_content() {
         // CC sometimes returns "result": "plain text" after MCP tool use instead of complying
         // with --json-schema. Must deliver the message rather than show an error.
         let json = r#"{"session_id":"abc","result":"hello from plain result"}"#;
@@ -162,23 +162,23 @@ mod tests {
         assert_eq!(session_id.as_deref(), Some("abc"));
     }
 
-    #[test]
-    fn parse_reply_output_empty_string_result_is_silent() {
+    #[tokio::test]
+    async fn parse_reply_output_empty_string_result_is_silent() {
         let json = r#"{"result":""}"#;
         let (output, _) = parse_reply_output(json).unwrap();
         assert!(output.content.is_none());
     }
 
-    #[test]
-    fn parse_reply_output_array_result_returns_error() {
+    #[tokio::test]
+    async fn parse_reply_output_array_result_returns_error() {
         // Array instead of object should fail deserialization
         let json = r#"{"result":[{"type":"text"}]}"#;
         let result = parse_reply_output(json);
         assert!(result.is_err());
     }
 
-    #[test]
-    fn parse_reply_output_structured_output_field() {
+    #[tokio::test]
+    async fn parse_reply_output_structured_output_field() {
         // When structured_output is present, it should be used instead of result
         let json = r#"{"session_id":"abc","result":"","structured_output":{"content":"Hello from structured!","reply_to_message_id":null,"attachments":null}}"#;
         let (output, session_id) = parse_reply_output(json).unwrap();
@@ -186,8 +186,8 @@ mod tests {
         assert_eq!(session_id.as_deref(), Some("abc"));
     }
 
-    #[test]
-    fn parse_reply_output_falls_back_to_result_when_no_structured_output() {
+    #[tokio::test]
+    async fn parse_reply_output_falls_back_to_result_when_no_structured_output() {
         // When structured_output is absent, fall back to result field
         let json = r#"{"session_id":"xyz","result":{"content":"Fallback result","reply_to_message_id":null,"attachments":null}}"#;
         let (output, session_id) = parse_reply_output(json).unwrap();
@@ -195,8 +195,8 @@ mod tests {
         assert_eq!(session_id.as_deref(), Some("xyz"));
     }
 
-    #[test]
-    fn parse_reply_output_missing_result_and_structured_output_returns_error() {
+    #[tokio::test]
+    async fn parse_reply_output_missing_result_and_structured_output_returns_error() {
         let json = r#"{"session_id":"x"}"#;
         let result = parse_reply_output(json);
         assert!(result.is_err());
@@ -207,8 +207,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_reply_output_with_attachments() {
+    #[tokio::test]
+    async fn parse_reply_output_with_attachments() {
         let json = r#"{"session_id":"abc","result":{"content":"Here you go","attachments":[{"type":"document","path":"/sandbox/outbox/data.csv","filename":"results.csv","caption":"Exported data"}]}}"#;
         let (output, session_id) = parse_reply_output(json).unwrap();
         assert_eq!(output.content.as_deref(), Some("Here you go"));
@@ -219,8 +219,8 @@ mod tests {
         assert_eq!(atts[0].filename.as_deref(), Some("results.csv"));
     }
 
-    #[test]
-    fn parse_reply_output_text_only() {
+    #[tokio::test]
+    async fn parse_reply_output_text_only() {
         let json =
             r#"{"result":{"content":"hello","reply_to_message_id":null,"attachments":null}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
@@ -228,16 +228,16 @@ mod tests {
         assert!(output.attachments.is_none());
     }
 
-    #[test]
-    fn parse_reply_output_plain_string_fallback() {
+    #[tokio::test]
+    async fn parse_reply_output_plain_string_fallback() {
         let json = r#"{"result":"plain text fallback"}"#;
         let (output, _) = parse_reply_output(json).unwrap();
         assert_eq!(output.content.as_deref(), Some("plain text fallback"));
         assert!(output.attachments.is_none());
     }
 
-    #[test]
-    fn parse_reply_output_accepts_used_skill_receipts() {
+    #[tokio::test]
+    async fn parse_reply_output_accepts_used_skill_receipts() {
         let json = r#"{"result":{"content":"done","used_skill_receipts":[{"package_name":"rightx-foo","message":"Used my workflow"}]}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
         let receipts = output.used_skill_receipts.unwrap();
@@ -246,22 +246,22 @@ mod tests {
         assert_eq!(receipts[0].message, "Used my workflow");
     }
 
-    #[test]
-    fn parse_reply_output_ignores_legacy_learning_signal_fields() {
+    #[tokio::test]
+    async fn parse_reply_output_ignores_legacy_learning_signal_fields() {
         let json = r#"{"result":{"content":"done","learning_signal":{"kind":"create_candidate","package_name_hint":"right-demo","trigger":"explicit_user_request","reason_not_written":"needs_full_context_review","event_refs":["event-1"],"summary":"Capture this workflow."}}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
         assert_eq!(output.content.as_deref(), Some("done"));
     }
 
-    #[test]
-    fn parse_reply_output_keeps_skill_fields_optional() {
+    #[tokio::test]
+    async fn parse_reply_output_keeps_skill_fields_optional() {
         let json = r#"{"result":{"content":"hello"}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
         assert!(output.used_skill_receipts.is_none());
     }
 
-    #[test]
-    fn append_used_skill_receipts_renders_visual_marker_with_package_name() {
+    #[tokio::test]
+    async fn append_used_skill_receipts_renders_visual_marker_with_package_name() {
         let receipts = vec![UsedSkillReceipt {
             package_name: "rightx-foo".into(),
             message: "Used my workflow".into(),
@@ -274,8 +274,8 @@ mod tests {
         assert!(content.starts_with("Done"));
     }
 
-    #[test]
-    fn append_used_skill_receipts_filters_non_rightx_packages() {
+    #[tokio::test]
+    async fn append_used_skill_receipts_filters_non_rightx_packages() {
         let receipts = vec![
             UsedSkillReceipt {
                 package_name: "rightx-good".into(),
@@ -293,8 +293,8 @@ mod tests {
         assert!(!content.contains("built-in"));
     }
 
-    #[test]
-    fn append_used_skill_receipts_handles_multiple_receipts() {
+    #[tokio::test]
+    async fn append_used_skill_receipts_handles_multiple_receipts() {
         let receipts = vec![
             UsedSkillReceipt {
                 package_name: "rightx-a".into(),
@@ -321,8 +321,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn append_used_skill_receipts_filters_blank_messages() {
+    #[tokio::test]
+    async fn append_used_skill_receipts_filters_blank_messages() {
         let receipts = vec![
             UsedSkillReceipt {
                 package_name: "rightx-a".into(),
@@ -339,8 +339,8 @@ mod tests {
         // Blank-only receipt should be filtered out, no trailing line for it
     }
 
-    #[test]
-    fn append_used_skill_receipts_all_blank_returns_content_unchanged() {
+    #[tokio::test]
+    async fn append_used_skill_receipts_all_blank_returns_content_unchanged() {
         let receipts = vec![UsedSkillReceipt {
             package_name: "rightx-blank".into(),
             message: "  \n  ".into(),
@@ -350,38 +350,38 @@ mod tests {
         assert_eq!(content.as_deref(), Some("Done"));
     }
 
-    #[test]
-    fn append_used_skill_receipts_empty_receipts_leaves_content_unchanged() {
+    #[tokio::test]
+    async fn append_used_skill_receipts_empty_receipts_leaves_content_unchanged() {
         let content = append_used_skill_receipts(Some("Done".to_owned()), Some(&[]));
 
         assert_eq!(content.as_deref(), Some("Done"));
     }
 
     // bootstrap mode tests
-    #[test]
-    fn parse_reply_output_bootstrap_complete_true() {
+    #[tokio::test]
+    async fn parse_reply_output_bootstrap_complete_true() {
         let json = r#"{"type":"result","result":{"content":"Done!","bootstrap_complete":true},"session_id":"abc-123"}"#;
         let (output, _sid) = parse_reply_output(json).unwrap();
         assert_eq!(output.content.as_deref(), Some("Done!"));
         assert_eq!(output.bootstrap_complete, Some(true));
     }
 
-    #[test]
-    fn parse_reply_output_bootstrap_complete_false() {
+    #[tokio::test]
+    async fn parse_reply_output_bootstrap_complete_false() {
         let json = r#"{"type":"result","result":{"content":"What's your name?","bootstrap_complete":false},"session_id":"abc-123"}"#;
         let (output, _sid) = parse_reply_output(json).unwrap();
         assert_eq!(output.bootstrap_complete, Some(false));
     }
 
-    #[test]
-    fn parse_reply_output_no_bootstrap_field() {
+    #[tokio::test]
+    async fn parse_reply_output_no_bootstrap_field() {
         let json = r#"{"type":"result","result":{"content":"Hello!"},"session_id":"abc-123"}"#;
         let (output, _sid) = parse_reply_output(json).unwrap();
         assert_eq!(output.bootstrap_complete, None);
     }
 
-    #[test]
-    fn should_accept_bootstrap_all_files_present() {
+    #[tokio::test]
+    async fn should_accept_bootstrap_all_files_present() {
         let dir = tempfile::tempdir().unwrap();
         for f in right_agent::identity_mirror::IDENTITY_MIRROR_FILES {
             std::fs::write(dir.path().join(f), "# test").unwrap();
@@ -389,23 +389,23 @@ mod tests {
         assert!(should_accept_bootstrap(dir.path()));
     }
 
-    #[test]
-    fn should_accept_bootstrap_missing_files() {
+    #[tokio::test]
+    async fn should_accept_bootstrap_missing_files() {
         let dir = tempfile::tempdir().unwrap();
         // No identity files created
         assert!(!should_accept_bootstrap(dir.path()));
     }
 
-    #[test]
-    fn should_accept_bootstrap_partial_files() {
+    #[tokio::test]
+    async fn should_accept_bootstrap_partial_files() {
         let dir = tempfile::tempdir().unwrap();
         // Only IDENTITY.md exists
         std::fs::write(dir.path().join("IDENTITY.md"), "# test").unwrap();
         assert!(!should_accept_bootstrap(dir.path()));
     }
 
-    #[test]
-    fn used_skill_receipts_filter_only_rightx_names() {
+    #[tokio::test]
+    async fn used_skill_receipts_filter_only_rightx_names() {
         assert!(is_rightx_skill("rightx-foo"));
         assert!(is_rightx_skill("rightx-x"));
         assert!(is_rightx_skill("rightx-some-skill-name"));

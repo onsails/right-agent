@@ -60,11 +60,13 @@ fn make_backend() -> (RightBackend, PathBuf, TempDir) {
 }
 
 /// Create an agent directory with a valid data.db inside it.
-fn create_agent_dir(agents_dir: &std::path::Path, name: &str) -> PathBuf {
+async fn create_agent_dir(agents_dir: &std::path::Path, name: &str) -> PathBuf {
     let agent_dir = agents_dir.join(name);
     std::fs::create_dir_all(&agent_dir).expect("create agent dir");
     // open_connection will create the DB and run migrations
-    let _conn = right_db::open_connection(&agent_dir, true).expect("open memory db");
+    let _conn = right_db::open_connection(&agent_dir, true)
+        .await
+        .expect("open memory db");
     agent_dir
 }
 
@@ -130,7 +132,7 @@ async fn register_learning_kind(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn insert_async_run(
+async fn insert_async_run(
     agent_dir: &std::path::Path,
     id: &str,
     kind: &str,
@@ -140,7 +142,9 @@ fn insert_async_run(
     started_at: &str,
     status: &str,
 ) {
-    let conn = right_db::open_connection(agent_dir, false).expect("open db");
+    let conn = right_db::open_connection(agent_dir, false)
+        .await
+        .expect("open db");
     conn.execute(
         "INSERT INTO async_runs (
             id, kind, producer_ref, source_session_id, run_session_id, target_chat_id,
@@ -164,6 +168,7 @@ fn insert_async_run(
             },
         ],
     )
+    .await
     .expect("insert async run");
 }
 
@@ -246,7 +251,7 @@ fn tools_list_all_have_descriptions() {
 #[tokio::test]
 async fn cron_list_runs_reads_async_cron_rows_and_excludes_background() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     insert_async_run(
         &agent_dir,
         "cron-old",
@@ -256,7 +261,8 @@ async fn cron_list_runs_reads_async_cron_rows_and_excludes_background() {
         "cron-old",
         "2026-04-01T09:00:00Z",
         "success",
-    );
+    )
+    .await;
     insert_async_run(
         &agent_dir,
         "cron-new",
@@ -266,7 +272,8 @@ async fn cron_list_runs_reads_async_cron_rows_and_excludes_background() {
         "cron-new",
         "2026-04-01T10:00:00Z",
         "failed",
-    );
+    )
+    .await;
     insert_async_run(
         &agent_dir,
         "bg-newer",
@@ -276,7 +283,8 @@ async fn cron_list_runs_reads_async_cron_rows_and_excludes_background() {
         "bg-session",
         "2026-04-01T11:00:00Z",
         "success",
-    );
+    )
+    .await;
 
     let result = backend
         .tools_call(
@@ -302,7 +310,7 @@ async fn cron_list_runs_reads_async_cron_rows_and_excludes_background() {
 #[tokio::test]
 async fn cron_show_run_reads_async_cron_rows_and_excludes_background() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     insert_async_run(
         &agent_dir,
         "cron-show",
@@ -312,7 +320,8 @@ async fn cron_show_run_reads_async_cron_rows_and_excludes_background() {
         "cron-show",
         "2026-04-01T10:00:00Z",
         "success",
-    );
+    )
+    .await;
     insert_async_run(
         &agent_dir,
         "bg-show",
@@ -322,7 +331,8 @@ async fn cron_show_run_reads_async_cron_rows_and_excludes_background() {
         "bg-session",
         "2026-04-01T11:00:00Z",
         "success",
-    );
+    )
+    .await;
 
     let result = backend
         .tools_call(
@@ -364,7 +374,7 @@ async fn cron_show_run_reads_async_cron_rows_and_excludes_background() {
 #[tokio::test]
 async fn unknown_tool_returns_error() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
 
     let result = backend
         .tools_call(
@@ -384,7 +394,7 @@ async fn unknown_tool_returns_error() {
 #[tokio::test]
 async fn thread_search_without_invocation_scope_returns_tool_error() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
 
     let result = backend
         .tools_call(
@@ -405,7 +415,7 @@ async fn thread_search_without_invocation_scope_returns_tool_error() {
 #[tokio::test]
 async fn thread_search_rejects_agent_supplied_scope_params() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
 
     let result = backend
         .tools_call(
@@ -426,7 +436,7 @@ async fn thread_search_rejects_agent_supplied_scope_params() {
 #[tokio::test]
 async fn chat_search_rejects_query_without_searchable_terms() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
 
     let result = backend
         .tools_call(
@@ -444,7 +454,7 @@ async fn chat_search_rejects_query_without_searchable_terms() {
     assert_eq!(body["error"]["code"], "invalid_argument");
 }
 
-fn archive_search_fixture(conn: &right_db::Connection) {
+async fn archive_search_fixture(conn: &right_db::Connection) {
     for (chat_id, thread_id, message_id, content) in [
         (100, 7, 1, "needle in current thread"),
         (100, 8, 2, "needle in other thread"),
@@ -467,6 +477,7 @@ fn archive_search_fixture(conn: &right_db::Connection) {
                 content,
             },
         )
+        .await
         .expect("archive message");
     }
 }
@@ -490,10 +501,12 @@ async fn register_foreground_scope(backend: &RightBackend, agent_dir: &std::path
 #[tokio::test]
 async fn thread_search_filters_current_thread() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     {
-        let conn = right_db::open_connection(&agent_dir, false).expect("open db");
-        archive_search_fixture(&conn);
+        let conn = right_db::open_connection(&agent_dir, false)
+            .await
+            .expect("open db");
+        archive_search_fixture(&conn).await;
     }
     register_foreground_scope(&backend, &agent_dir).await;
 
@@ -528,10 +541,12 @@ async fn thread_search_filters_current_thread() {
 #[tokio::test]
 async fn chat_search_includes_other_threads_in_same_chat() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     {
-        let conn = right_db::open_connection(&agent_dir, false).expect("open db");
-        archive_search_fixture(&conn);
+        let conn = right_db::open_connection(&agent_dir, false)
+            .await
+            .expect("open db");
+        archive_search_fixture(&conn).await;
     }
     register_foreground_scope(&backend, &agent_dir).await;
 
@@ -566,7 +581,7 @@ async fn chat_search_includes_other_threads_in_same_chat() {
 #[tokio::test]
 async fn bootstrap_done_missing_files() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
 
     let result = backend
         .tools_call(
@@ -589,7 +604,7 @@ async fn bootstrap_done_missing_files() {
 #[tokio::test]
 async fn bootstrap_done_with_files() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
 
     // Create required files
     for name in ["IDENTITY.md", "SOUL.md", "USER.md"] {
@@ -620,7 +635,7 @@ async fn bootstrap_done_with_files() {
 #[tokio::test]
 async fn skill_learning_start_rejects_create_without_learned_prefix() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
 
     let result = backend
         .tools_call(
@@ -652,7 +667,7 @@ async fn skill_learning_start_rejects_create_without_learned_prefix() {
 #[tokio::test]
 async fn skill_learning_start_rejects_core_skill_update() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
 
     let result = backend
         .tools_call(
@@ -677,7 +692,7 @@ async fn skill_learning_start_rejects_core_skill_update() {
 #[tokio::test]
 async fn skill_learning_start_rejects_non_learned_update() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
         .expect("write agent config");
     let skill_dir = agent_dir.join(".claude/skills/custom-skill");
@@ -715,7 +730,7 @@ async fn skill_learning_start_rejects_non_learned_update() {
 #[tokio::test]
 async fn skill_learning_start_rejects_update_when_package_missing() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
         .expect("write agent config");
 
@@ -742,7 +757,7 @@ async fn skill_learning_start_rejects_update_when_package_missing() {
 #[tokio::test]
 async fn skill_learning_finish_requires_receipt_message_for_success() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
 
     let result = backend
         .tools_call(
@@ -774,7 +789,7 @@ async fn skill_learning_finish_requires_receipt_message_for_success() {
 #[tokio::test]
 async fn skill_learning_finish_rejects_success_when_package_missing() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
         .expect("write agent config");
 
@@ -804,7 +819,7 @@ async fn skill_learning_finish_rejects_success_when_package_missing() {
 #[tokio::test]
 async fn skill_learning_finish_created_updates_lifecycle_with_foreground_provenance() {
     let (backend, agents_dir, tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     let skill_name = "rightx-user-workflow";
     create_host_skill_package(&agent_dir, skill_name);
     let socket_path = start_progress_sink(tmp.path()).await;
@@ -829,8 +844,11 @@ async fn skill_learning_finish_created_updates_lifecycle_with_foreground_provena
         .expect("tool call should complete");
 
     assert_eq!(result.is_error, Some(false));
-    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let conn = right_db::open_connection(&agent_dir, false)
+        .await
+        .expect("open db");
     let row = right_lifecycle::get(&conn, skill_name)
+        .await
         .expect("read lifecycle")
         .expect("lifecycle row");
     assert_eq!(row.state, right_lifecycle::LifecycleState::Active);
@@ -845,6 +863,7 @@ async fn skill_learning_finish_created_updates_lifecycle_with_foreground_provena
             [],
             |row| row.get(0),
         )
+        .await
         .expect("count learning events");
     assert_eq!(audit_count, 1);
 }
@@ -852,20 +871,23 @@ async fn skill_learning_finish_created_updates_lifecycle_with_foreground_provena
 #[tokio::test]
 async fn skill_learning_finish_updated_bumps_patch_and_preserves_created_by() {
     let (backend, agents_dir, tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     let skill_name = "rightx-user-workflow";
     create_host_skill_package(&agent_dir, skill_name);
     let created_at = chrono::DateTime::parse_from_rfc3339("2026-05-24T12:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
     {
-        let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+        let conn = right_db::open_connection(&agent_dir, false)
+            .await
+            .expect("open db");
         right_lifecycle::mark_created(
             &conn,
             skill_name,
             right_lifecycle::CreatedBy::Curator,
             created_at,
         )
+        .await
         .expect("seed lifecycle");
     }
     let socket_path = start_progress_sink(tmp.path()).await;
@@ -890,8 +912,11 @@ async fn skill_learning_finish_updated_bumps_patch_and_preserves_created_by() {
         .expect("tool call should complete");
 
     assert_eq!(result.is_error, Some(false));
-    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let conn = right_db::open_connection(&agent_dir, false)
+        .await
+        .expect("open db");
     let row = right_lifecycle::get(&conn, skill_name)
+        .await
         .expect("read lifecycle")
         .expect("lifecycle row");
     assert_eq!(row.state, right_lifecycle::LifecycleState::Active);
@@ -904,7 +929,7 @@ async fn skill_learning_finish_updated_bumps_patch_and_preserves_created_by() {
 #[tokio::test]
 async fn skill_learning_start_background_kinds_insert_events_without_telegram_delivery() {
     let (backend, agents_dir, tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
         .expect("write agent config");
     let kinds = [
@@ -947,13 +972,16 @@ async fn skill_learning_start_background_kinds_insert_events_without_telegram_de
         assert_eq!(result.is_error, Some(false));
     }
 
-    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let conn = right_db::open_connection(&agent_dir, false)
+        .await
+        .expect("open db");
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM skill_learning_events WHERE invocation_id IN ('inv-probe-start', 'inv-curator-start')",
             [],
             |row| row.get(0),
         )
+        .await
         .expect("count learning events");
     assert_eq!(count, 2);
 }
@@ -961,7 +989,7 @@ async fn skill_learning_start_background_kinds_insert_events_without_telegram_de
 #[tokio::test]
 async fn skill_learning_finish_background_kinds_update_lifecycle_without_telegram_delivery() {
     let (backend, agents_dir, tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     let cases = [
         (
             "inv-probe-finish",
@@ -1006,8 +1034,11 @@ async fn skill_learning_finish_background_kinds_update_lifecycle_without_telegra
             .expect("tool call should complete");
 
         assert_eq!(result.is_error, Some(false));
-        let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+        let conn = right_db::open_connection(&agent_dir, false)
+            .await
+            .expect("open db");
         let row = right_lifecycle::get(&conn, skill_name)
+            .await
             .expect("read lifecycle")
             .expect("lifecycle row");
         assert_eq!(row.created_by, expected_created_by);
@@ -1017,12 +1048,15 @@ async fn skill_learning_finish_background_kinds_update_lifecycle_without_telegra
 #[tokio::test]
 async fn skill_learning_finish_returns_error_when_lifecycle_write_fails() {
     let (backend, agents_dir, tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     let skill_name = "rightx-user-workflow";
     create_host_skill_package(&agent_dir, skill_name);
     {
-        let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+        let conn = right_db::open_connection(&agent_dir, false)
+            .await
+            .expect("open db");
         conn.execute("DROP TABLE skill_lifecycle", [])
+            .await
             .expect("drop lifecycle table");
     }
     let socket_path = start_progress_sink(tmp.path()).await;
@@ -1050,13 +1084,16 @@ async fn skill_learning_finish_returns_error_when_lifecycle_write_fails() {
     let body = extract_error_body(&result);
     assert_eq!(body["error"]["code"], "skill_lifecycle_write_failed");
 
-    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let conn = right_db::open_connection(&agent_dir, false)
+        .await
+        .expect("open db");
     let audit_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM skill_learning_events WHERE invocation_id = 'inv-lifecycle-fails'",
             [],
             |row| row.get(0),
         )
+        .await
         .expect("count learning events");
     assert_eq!(audit_count, 1);
 }
@@ -1064,7 +1101,7 @@ async fn skill_learning_finish_returns_error_when_lifecycle_write_fails() {
 #[tokio::test]
 async fn skill_learning_finish_persists_hint_outcome_for_aborted_finish() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
 
     let result = backend
         .tools_call(
@@ -1086,13 +1123,16 @@ async fn skill_learning_finish_persists_hint_outcome_for_aborted_finish() {
         .expect("tool call should complete");
 
     assert_eq!(result.is_error, Some(false));
-    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let conn = right_db::open_connection(&agent_dir, false)
+        .await
+        .expect("open db");
     let hint_outcome: Option<String> = conn
         .query_row(
             "SELECT hint_outcome FROM skill_learning_events WHERE invocation_id = 'inv-hint-outcome'",
             [],
             |row| row.get(0),
         )
+        .await
         .expect("hint outcome row");
     assert_eq!(hint_outcome.as_deref(), Some("refused"));
 }
@@ -1100,7 +1140,7 @@ async fn skill_learning_finish_persists_hint_outcome_for_aborted_finish() {
 #[tokio::test]
 async fn skill_learning_finish_rejects_invalid_hint_outcome_before_insert() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
 
     let result = backend
         .tools_call(
@@ -1125,13 +1165,16 @@ async fn skill_learning_finish_rejects_invalid_hint_outcome_before_insert() {
     let body = extract_error_body(&result);
     assert_eq!(body["error"]["code"], "invalid_argument");
 
-    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let conn = right_db::open_connection(&agent_dir, false)
+        .await
+        .expect("open db");
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM skill_learning_events WHERE invocation_id = 'inv-invalid-hint'",
             [],
             |row| row.get(0),
         )
+        .await
         .expect("count learning events");
     assert_eq!(count, 0);
 }
@@ -1139,7 +1182,7 @@ async fn skill_learning_finish_rejects_invalid_hint_outcome_before_insert() {
 #[tokio::test]
 async fn skill_learning_finish_rejects_sandboxed_host_fallback_without_mtls() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     std::fs::write(
         agent_dir.join("agent.yaml"),
         "sandbox:\n  mode: openshell\n",
@@ -1175,7 +1218,7 @@ async fn skill_learning_finish_rejects_sandboxed_host_fallback_without_mtls() {
 #[tokio::test]
 async fn skill_learning_start_rejects_malformed_installed_json() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     let skills_dir = agent_dir.join(".claude/skills");
     std::fs::create_dir_all(skills_dir.join("rightx-custom-skill")).expect("create skill dir");
     std::fs::write(
@@ -1213,7 +1256,7 @@ async fn skill_learning_start_rejects_bundled_or_codegen_owned_update() {
         ("codegen-owned-skill", "codegen-owned"),
     ] {
         let (backend, agents_dir, _tmp) = make_backend();
-        let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+        let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
         let skills_dir = agent_dir.join(".claude/skills");
         std::fs::create_dir_all(skills_dir.join(skill_name)).expect("create skill dir");
         std::fs::write(
@@ -1252,7 +1295,7 @@ async fn skill_learning_start_rejects_bundled_or_codegen_owned_update() {
 #[tokio::test]
 async fn skill_learning_start_rejects_empty_message_before_insert() {
     let (backend, agents_dir, _tmp) = make_backend();
-    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
     std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
         .expect("write agent config");
     let skill_dir = agent_dir.join(".claude/skills/rightx-custom-skill");
@@ -1292,13 +1335,16 @@ async fn skill_learning_start_rejects_empty_message_before_insert() {
     let body = extract_error_body(&result);
     assert_eq!(body["error"]["code"], "invalid_argument");
 
-    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let conn = right_db::open_connection(&agent_dir, false)
+        .await
+        .expect("open db");
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM skill_learning_events WHERE invocation_id='inv-empty'",
             [],
             |row| row.get(0),
         )
+        .await
         .expect("count learning events");
     assert_eq!(count, 0, "empty start message must not insert event");
 }
@@ -1416,14 +1462,14 @@ async fn ci_openshell_bootstrap_done_sandbox_files_present() {
         assert_eq!(code, 0, "failed to create {name} in sandbox");
     }
 
-    // Agent name must match: sandbox_name = "rightclaw-{agent_name}" (compat shim)
+    // Agent name must match the sandbox_name derivation: "rightclaw-{agent_name}".
     let agent_name = "test-bootstrap-present";
     let tmp = TempDir::new().unwrap();
     let agents_dir = tmp.path().join("agents");
     let agent_dir = agents_dir.join(agent_name);
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(agent_dir.join("BOOTSTRAP.md"), "bootstrap").unwrap();
-    let _conn = right_db::open_connection(&agent_dir, true).unwrap();
+    let _conn = right_db::open_connection(&agent_dir, true).await.unwrap();
 
     let backend = RightBackend::new(agents_dir, Some(mtls_dir.clone()));
     let result = backend
@@ -1476,7 +1522,7 @@ async fn ci_openshell_bootstrap_done_sandbox_files_missing() {
     let agents_dir = tmp.path().join("agents");
     let agent_dir = agents_dir.join(agent_name);
     std::fs::create_dir_all(&agent_dir).unwrap();
-    let _conn = right_db::open_connection(&agent_dir, true).unwrap();
+    let _conn = right_db::open_connection(&agent_dir, true).await.unwrap();
 
     let backend = RightBackend::new(agents_dir, Some(mtls_dir.clone()));
     let result = backend
@@ -1545,7 +1591,7 @@ async fn cron_create_rejects_target_not_in_allowlist() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     write_allowlist(&agent_dir, &[100], &[]);
     // Initialize the agent's data.db so get_conn succeeds.
-    right_db::open_connection(&agent_dir, true).unwrap();
+    right_db::open_connection(&agent_dir, true).await.unwrap();
 
     let backend = RightBackend::new(agents_dir.clone(), None);
     let args = serde_json::json!({
@@ -1583,7 +1629,7 @@ async fn cron_create_accepts_target_in_allowlist_group() {
     let agent_dir = agents_dir.join("a1");
     std::fs::create_dir_all(&agent_dir).unwrap();
     write_allowlist(&agent_dir, &[], &[-200]);
-    right_db::open_connection(&agent_dir, true).unwrap();
+    right_db::open_connection(&agent_dir, true).await.unwrap();
 
     let backend = RightBackend::new(agents_dir.clone(), None);
     let args = serde_json::json!({
@@ -1619,7 +1665,7 @@ async fn cron_create_rejects_missing_target_chat_id() {
     let agent_dir = agents_dir.join("a1");
     std::fs::create_dir_all(&agent_dir).unwrap();
     write_allowlist(&agent_dir, &[100], &[]);
-    right_db::open_connection(&agent_dir, true).unwrap();
+    right_db::open_connection(&agent_dir, true).await.unwrap();
 
     let backend = RightBackend::new(agents_dir.clone(), None);
     let args = serde_json::json!({
@@ -1650,7 +1696,7 @@ async fn cron_create_rejects_when_allowlist_missing() {
     let agent_dir = agents_dir.join("a1");
     std::fs::create_dir_all(&agent_dir).unwrap();
     // Note: NOT calling write_allowlist — file does not exist.
-    right_db::open_connection(&agent_dir, true).unwrap();
+    right_db::open_connection(&agent_dir, true).await.unwrap();
 
     let backend = RightBackend::new(agents_dir.clone(), None);
     let args = serde_json::json!({
@@ -1692,7 +1738,7 @@ async fn cron_update_changes_target_chat_id_with_validation() {
     let agent_dir = agents_dir.join("a1");
     std::fs::create_dir_all(&agent_dir).unwrap();
     write_allowlist(&agent_dir, &[100], &[-200, -300]);
-    right_db::open_connection(&agent_dir, true).unwrap();
+    right_db::open_connection(&agent_dir, true).await.unwrap();
 
     let backend = RightBackend::new(agents_dir.clone(), None);
     backend
@@ -1765,7 +1811,7 @@ async fn cron_update_clears_target_thread_id_with_explicit_null() {
     let agent_dir = agents_dir.join("a1");
     std::fs::create_dir_all(&agent_dir).unwrap();
     write_allowlist(&agent_dir, &[], &[-200]);
-    right_db::open_connection(&agent_dir, true).unwrap();
+    right_db::open_connection(&agent_dir, true).await.unwrap();
 
     let backend = RightBackend::new(agents_dir.clone(), None);
     backend
@@ -1799,13 +1845,14 @@ async fn cron_update_clears_target_thread_id_with_explicit_null() {
         .await
         .unwrap();
 
-    let conn = right_db::open_connection(&agent_dir, false).unwrap();
+    let conn = right_db::open_connection(&agent_dir, false).await.unwrap();
     let thread: Option<i64> = conn
         .query_row(
             "SELECT target_thread_id FROM cron_specs WHERE job_name='j1'",
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert!(thread.is_none(), "explicit null must clear the column");
 }

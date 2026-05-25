@@ -54,36 +54,36 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    #[test]
-    fn success_voice_includes_transcript_and_kind() {
+    #[tokio::test]
+    async fn success_voice_includes_transcript_and_kind() {
         let s = marker_success(VoiceKind::Voice, "привет");
         assert!(s.contains("надиктовал голосовое сообщение"));
         assert!(s.contains("\"привет\""));
     }
 
-    #[test]
-    fn success_video_note_uses_kruzhok_wording() {
+    #[tokio::test]
+    async fn success_video_note_uses_kruzhok_wording() {
         let s = marker_success(VoiceKind::VideoNote, "hi");
         assert!(s.contains("записал кружок"));
         assert!(s.contains("(видео-сообщение)"));
     }
 
-    #[test]
-    fn ffmpeg_missing_voice_marker() {
+    #[tokio::test]
+    async fn ffmpeg_missing_voice_marker() {
         let m = marker_for_error(VoiceKind::Voice, &SttError::FfmpegNotFound);
         assert!(m.contains("голосовое сообщение"));
         assert!(m.contains("не установлен ffmpeg"));
     }
 
-    #[test]
-    fn ffmpeg_missing_video_note_marker() {
+    #[tokio::test]
+    async fn ffmpeg_missing_video_note_marker() {
         let m = marker_for_error(VoiceKind::VideoNote, &SttError::FfmpegNotFound);
         assert!(m.contains("кружок"));
         assert!(m.contains("не установлен ffmpeg"));
     }
 
-    #[test]
-    fn model_missing_marker() {
+    #[tokio::test]
+    async fn model_missing_marker() {
         let m = marker_for_error(
             VoiceKind::Voice,
             &SttError::ModelMissing(PathBuf::from("/x")),
@@ -91,8 +91,8 @@ mod tests {
         assert!(m.contains("right up"));
     }
 
-    #[test]
-    fn file_too_large_uses_gendered_form() {
+    #[tokio::test]
+    async fn file_too_large_uses_gendered_form() {
         let voice = marker_for_error(
             VoiceKind::Voice,
             &SttError::FileTooLarge {
@@ -113,8 +113,8 @@ mod tests {
         assert!(circle.contains("он слишком большой"));
     }
 
-    #[test]
-    fn generic_failure_includes_short_reason() {
+    #[tokio::test]
+    async fn generic_failure_includes_short_reason() {
         let m = marker_for_error(
             VoiceKind::Voice,
             &SttError::WhisperInferenceFailed("oom".into()),

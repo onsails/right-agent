@@ -133,7 +133,7 @@ pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport
     delete_identity_from_host(&plan.agent_dir)?;
 
     write_bootstrap_md(&plan.agent_dir)?;
-    let sessions_deactivated = deactivate_active_sessions(&plan.agent_dir)?;
+    let sessions_deactivated = deactivate_active_sessions(&plan.agent_dir).await?;
 
     Ok(RebootstrapReport {
         backup_dir: plan.backup_dir.clone(),
@@ -293,15 +293,17 @@ fn write_bootstrap_md(agent_dir: &Path) -> miette::Result<()> {
 /// an opaque "no such table: sessions" error. That state is unreachable in
 /// production, so we accept the opacity rather than migrate defensively
 /// here.
-fn deactivate_active_sessions(agent_dir: &Path) -> miette::Result<usize> {
+async fn deactivate_active_sessions(agent_dir: &Path) -> miette::Result<usize> {
     if !agent_dir.join("data.db").exists() {
         tracing::debug!("rebootstrap: data.db absent, skipping session deactivation");
         return Ok(0);
     }
     let conn = right_db::open_connection(agent_dir, false)
+        .await
         .map_err(|e| miette::miette!("open data.db failed: {e:#}"))?;
     let n = conn
         .execute("UPDATE sessions SET is_active = 0 WHERE is_active = 1", [])
+        .await
         .map_err(|e| miette::miette!("UPDATE sessions failed: {e:#}"))?;
     Ok(n)
 }
@@ -507,10 +509,10 @@ mod tests {
         assert_ne!(content, "stale");
     }
 
-    #[test]
-    fn deactivate_active_sessions_flips_all_active_rows() {
+    #[tokio::test]
+    async fn deactivate_active_sessions_flips_all_active_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
         // Two active sessions for two distinct (chat_id, thread_id),
         // and one already-inactive session that must stay untouched.
         conn.execute(
@@ -518,52 +520,57 @@ mod tests {
              VALUES (1, 0, 'uuid-a', 1)",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
              VALUES (2, 0, 'uuid-b', 1)",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
              VALUES (3, 0, 'uuid-c', 0)",
             [],
         )
+        .await
         .unwrap();
         drop(conn);
 
-        let n = deactivate_active_sessions(dir.path()).unwrap();
+        let n = deactivate_active_sessions(dir.path()).await.unwrap();
         assert_eq!(n, 2);
 
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
         let active_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sessions WHERE is_active = 1",
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(active_count, 0, "no rows should remain active");
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .await
             .unwrap();
         assert_eq!(total, 3, "no rows should be deleted");
     }
 
-    #[test]
-    fn deactivate_active_sessions_skips_when_db_missing() {
+    #[tokio::test]
+    async fn deactivate_active_sessions_skips_when_db_missing() {
         let dir = tempfile::tempdir().unwrap();
         // No data.db
-        let n = deactivate_active_sessions(dir.path()).unwrap();
+        let n = deactivate_active_sessions(dir.path()).await.unwrap();
         assert_eq!(n, 0);
     }
 
-    #[test]
-    fn deactivate_active_sessions_no_active_returns_zero() {
+    #[tokio::test]
+    async fn deactivate_active_sessions_no_active_returns_zero() {
         let dir = tempfile::tempdir().unwrap();
-        let _ = right_db::open_connection(dir.path(), true).unwrap();
-        let n = deactivate_active_sessions(dir.path()).unwrap();
+        let _ = right_db::open_connection(dir.path(), true).await.unwrap();
+        let n = deactivate_active_sessions(dir.path()).await.unwrap();
         assert_eq!(n, 0);
     }
 
@@ -578,12 +585,13 @@ mod tests {
         std::fs::write(agent_dir.join("SOUL.md"), "soul\n").unwrap();
         std::fs::write(agent_dir.join("USER.md"), "user\n").unwrap();
         // Seed an active session so we can verify deactivation.
-        let conn = right_db::open_connection(&agent_dir, true).unwrap();
+        let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
         conn.execute(
             "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
              VALUES (42, 0, 'session-uuid', 1)",
             [],
         )
+        .await
         .unwrap();
         drop(conn);
 
@@ -616,13 +624,14 @@ mod tests {
 
         // Session deactivated.
         assert_eq!(report.sessions_deactivated, 1);
-        let conn = right_db::open_connection(&agent_dir, false).unwrap();
+        let conn = right_db::open_connection(&agent_dir, false).await.unwrap();
         let active: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sessions WHERE is_active = 1",
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(active, 0);
     }

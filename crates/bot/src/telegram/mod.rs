@@ -304,29 +304,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn resolve_token_from_config() {
+    #[tokio::test]
+    async fn resolve_token_from_config() {
         let mut config = minimal_config();
         config.telegram_token = Some("999:inline_token".to_string());
         let token = resolve_token(&config).unwrap();
         assert_eq!(token, "999:inline_token");
     }
 
-    #[test]
-    fn resolve_token_returns_err_when_nothing_configured() {
+    #[tokio::test]
+    async fn resolve_token_returns_err_when_nothing_configured() {
         let config = minimal_config();
         assert!(resolve_token(&config).is_err());
     }
 
-    #[test]
-    fn resolve_token_returns_err_when_empty_string() {
+    #[tokio::test]
+    async fn resolve_token_returns_err_when_empty_string() {
         let mut config = minimal_config();
         config.telegram_token = Some(String::new());
         assert!(resolve_token(&config).is_err());
     }
 
-    #[test]
-    fn initial_thinking_visibility_respects_context() {
+    #[tokio::test]
+    async fn initial_thinking_visibility_respects_context() {
         for (show_thinking, is_group, expected) in [
             (true, false, true),
             (false, false, false),
@@ -372,8 +372,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_thinking_toggle_callback_accepts_valid_data() {
+    #[tokio::test]
+    async fn parse_thinking_toggle_callback_accepts_valid_data() {
         assert_eq!(
             parse_thinking_toggle_callback("think:12345:678:show"),
             Some(((12345, 678), ThinkingToggleAction::Show))
@@ -386,8 +386,8 @@ mod tests {
         assert!(!ThinkingToggleAction::Hide.expanded());
     }
 
-    #[test]
-    fn parse_thinking_toggle_callback_rejects_malformed_data() {
+    #[tokio::test]
+    async fn parse_thinking_toggle_callback_rejects_malformed_data() {
         for bad in [
             "",
             "think",
@@ -402,8 +402,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn set_thinking_visibility_writes_state_for_active_run() {
+    #[tokio::test]
+    async fn set_thinking_visibility_writes_state_for_active_run() {
         let map: ThinkingVisibility = Arc::new(DashMap::new());
         let key = (12345_i64, 0_i64);
         map.insert(key, false);
@@ -422,8 +422,8 @@ mod tests {
 mod shutdown_request_tests {
     use super::*;
 
-    #[test]
-    fn request_shutdown_backgrounding_sets_gate_and_cancels_tokens() {
+    #[tokio::test]
+    async fn request_shutdown_backgrounding_sets_gate_and_cancels_tokens() {
         let stop_tokens: StopTokens = Arc::new(DashMap::new());
         let bg_requests: BgRequests = Arc::new(DashMap::new());
         let gates: BgHandoffGates = Arc::new(DashMap::new());

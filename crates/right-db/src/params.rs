@@ -275,16 +275,13 @@ where
 mod tests {
     use crate::DbError;
 
-    #[test]
-    fn params_macro_defers_large_u64_error_to_execute_result_without_panic() {
-        let conn = crate::Connection::open_in_memory().unwrap();
+    #[tokio::test]
+    async fn params_macro_defers_large_u64_error_to_execute_result_without_panic() {
+        let conn = crate::Connection::open_in_memory().await.unwrap();
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            conn.execute("SELECT ?1", crate::params![u64::MAX])
-        }));
-
-        let err = result
-            .expect("large u64 parameter conversion must not panic")
+        let err = conn
+            .execute("SELECT ?1", crate::params![u64::MAX])
+            .await
             .expect_err("large u64 must be rejected as a database parameter");
         assert!(
             matches!(err, DbError::InvalidParameter(_)),
@@ -292,16 +289,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn params_from_iter_defers_large_u64_error_to_execute_result_without_panic() {
-        let conn = crate::Connection::open_in_memory().unwrap();
+    #[tokio::test]
+    async fn params_from_iter_defers_large_u64_error_to_execute_result_without_panic() {
+        let conn = crate::Connection::open_in_memory().await.unwrap();
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            conn.execute("SELECT ?1", crate::params_from_iter([u64::MAX]))
-        }));
-
-        let err = result
-            .expect("large u64 parameter conversion must not panic")
+        let err = conn
+            .execute("SELECT ?1", crate::params_from_iter([u64::MAX]))
+            .await
             .expect_err("large u64 must be rejected as a database parameter");
         assert!(
             matches!(err, DbError::InvalidParameter(_)),

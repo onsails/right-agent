@@ -650,14 +650,14 @@ mod tests {
     use super::*;
     use PersistedStreamEventKind::*;
 
-    #[test]
-    fn parse_result_event() {
+    #[tokio::test]
+    async fn parse_result_event() {
         let line = r#"{"type":"result","subtype":"success","num_turns":3,"total_cost_usd":0.05,"result":"hello"}"#;
         assert!(matches!(parse_stream_event(line), StreamEvent::Result(_)));
     }
 
-    #[test]
-    fn parse_text_event() {
+    #[tokio::test]
+    async fn parse_text_event() {
         let line =
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello world"}]}}"#;
         match parse_stream_event(line) {
@@ -666,8 +666,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_tool_use_event() {
+    #[tokio::test]
+    async fn parse_tool_use_event() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}"#;
         match parse_stream_event(line) {
             StreamEvent::ToolUse {
@@ -681,46 +681,46 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_thinking_event() {
+    #[tokio::test]
+    async fn parse_thinking_event() {
         let line =
             r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#;
         assert!(matches!(parse_stream_event(line), StreamEvent::Thinking));
     }
 
-    #[test]
-    fn persisted_event_parses_thinking_text() {
+    #[tokio::test]
+    async fn persisted_event_parses_thinking_text() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Need check Notion first"}]}}"#;
         let event = parse_persisted_stream_event(line).unwrap();
         assert_eq!(event.kind, Thinking);
         assert_eq!(event.content_text, "Need check Notion first");
     }
 
-    #[test]
-    fn persisted_event_parses_tool_result_error() {
+    #[tokio::test]
+    async fn persisted_event_parses_tool_result_error() {
         let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":true,"content":"permission denied"}]}}"#;
         let event = parse_persisted_stream_event(line).unwrap();
         assert_eq!(event.kind, ToolError);
     }
 
-    #[test]
-    fn persisted_events_parse_all_assistant_blocks_in_order() {
+    #[tokio::test]
+    async fn persisted_events_parse_all_assistant_blocks_in_order() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"First"},{"type":"thinking","thinking":"Then think"},{"type":"tool_use","name":"Bash","input":{"command":"pwd"}}]}}"#;
         let events = parse_persisted_stream_events(line);
         let kinds = events.iter().map(|event| event.kind).collect::<Vec<_>>();
         assert_eq!(kinds, vec![AssistantText, Thinking, ToolCall]);
     }
 
-    #[test]
-    fn persisted_events_parse_all_user_tool_results_in_order() {
+    #[tokio::test]
+    async fn persisted_events_parse_all_user_tool_results_in_order() {
         let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},{"type":"tool_result","tool_use_id":"toolu_2","is_error":true,"content":"denied"}]}}"#;
         let events = parse_persisted_stream_events(line);
         let kinds = events.iter().map(|event| event.kind).collect::<Vec<_>>();
         assert_eq!(kinds, vec![ToolResult, ToolError]);
     }
 
-    #[test]
-    fn persisted_events_parse_invocation_result() {
+    #[tokio::test]
+    async fn persisted_events_parse_invocation_result() {
         let line = r#"{"type":"result","result":"done"}"#;
         let events = parse_persisted_stream_events(line);
         assert_eq!(events.len(), 1);
@@ -728,27 +728,27 @@ mod tests {
         assert_eq!(events[0].content_text, "done");
     }
 
-    #[test]
-    fn parse_unknown_type() {
+    #[tokio::test]
+    async fn parse_unknown_type() {
         let line = r#"{"type":"system","subtype":"init"}"#;
         assert!(matches!(parse_stream_event(line), StreamEvent::Other));
     }
 
-    #[test]
-    fn parse_invalid_json() {
+    #[tokio::test]
+    async fn parse_invalid_json() {
         assert!(matches!(parse_stream_event("not json"), StreamEvent::Other));
     }
 
-    #[test]
-    fn parse_usage_from_result() {
+    #[tokio::test]
+    async fn parse_usage_from_result() {
         let line = r#"{"type":"result","num_turns":5,"total_cost_usd":0.123}"#;
         let usage = parse_usage(line);
         assert_eq!(usage.num_turns, 5);
         assert!((usage.cost_usd - 0.123).abs() < 0.001);
     }
 
-    #[test]
-    fn ring_buffer_capacity() {
+    #[tokio::test]
+    async fn ring_buffer_capacity() {
         let mut buf = EventRingBuffer::new(3);
         for i in 0..5 {
             buf.push(&StreamEvent::Text(format!("msg {i}")));
@@ -760,8 +760,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ring_buffer_skips_non_displayable() {
+    #[tokio::test]
+    async fn ring_buffer_skips_non_displayable() {
         let mut buf = EventRingBuffer::new(5);
         buf.push(&StreamEvent::Other);
         buf.push(&StreamEvent::Result("{}".into()));
@@ -769,8 +769,8 @@ mod tests {
         assert_eq!(buf.events().len(), 1);
     }
 
-    #[test]
-    fn format_thinking_message_with_events() {
+    #[tokio::test]
+    async fn format_thinking_message_with_events() {
         let mut events = VecDeque::new();
         events.push_back(StreamEvent::ToolUse {
             tool: "Bash".into(),
@@ -788,16 +788,16 @@ mod tests {
         assert!(msg.contains("\"checking files\""));
     }
 
-    #[test]
-    fn format_thinking_message_empty() {
+    #[tokio::test]
+    async fn format_thinking_message_empty() {
         let events = VecDeque::new();
         let usage = StreamUsage::default();
         let msg = format_thinking_message(&events, &usage);
         assert!(msg.contains("starting..."));
     }
 
-    #[test]
-    fn structured_output_excluded_from_thinking() {
+    #[tokio::test]
+    async fn structured_output_excluded_from_thinking() {
         let mut buf = EventRingBuffer::new(5);
         buf.push(&StreamEvent::ToolUse {
             tool: "Bash".into(),
@@ -818,8 +818,8 @@ mod tests {
         assert!(msg.contains("Bash"));
     }
 
-    #[test]
-    fn format_thinking_message_truncates_long_content() {
+    #[tokio::test]
+    async fn format_thinking_message_truncates_long_content() {
         let mut events = VecDeque::new();
         // Add a very long text event
         events.push_back(StreamEvent::Text("x".repeat(5000)));
@@ -828,8 +828,8 @@ mod tests {
         assert!(msg.chars().count() <= 4010); // 4000 + "...\n"
     }
 
-    #[test]
-    fn tool_use_input_summary_truncated() {
+    #[tokio::test]
+    async fn tool_use_input_summary_truncated() {
         let long_cmd = "a".repeat(200);
         let formatted = format_event(&StreamEvent::ToolUse {
             tool: "Bash".into(),
@@ -841,8 +841,8 @@ mod tests {
         assert!(formatted.contains('…'));
     }
 
-    #[test]
-    fn skill_tool_shows_skill_name() {
+    #[tokio::test]
+    async fn skill_tool_shows_skill_name() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"right-cron","args":"big prompt..."}}]}}"#;
         match parse_stream_event(line) {
             StreamEvent::ToolUse {
@@ -856,8 +856,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn agent_tool_shows_description() {
+    #[tokio::test]
+    async fn agent_tool_shows_description() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Agent","input":{"description":"Build workspace","prompt":"long prompt..."}}]}}"#;
         match parse_stream_event(line) {
             StreamEvent::ToolUse {
@@ -871,22 +871,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unknown_tool_input_truncated() {
+    #[tokio::test]
+    async fn unknown_tool_input_truncated() {
         let long_json = serde_json::json!({"data": "x".repeat(200)});
         let summary = summarize_tool_input("UnknownTool", &long_json);
         assert!(summary.chars().count() <= 81); // 80 + "…"
         assert!(summary.contains('…'));
     }
 
-    #[test]
-    fn parse_api_key_source_happy_path() {
+    #[tokio::test]
+    async fn parse_api_key_source_happy_path() {
         let line = r#"{"type":"system","subtype":"init","cwd":"/x","session_id":"s","tools":[],"mcp_servers":[],"model":"claude-sonnet-4-6","permissionMode":"bypassPermissions","slash_commands":[],"apiKeySource":"none"}"#;
         assert_eq!(parse_api_key_source(line).as_deref(), Some("none"));
     }
 
-    #[test]
-    fn parse_api_key_source_api_key_mode() {
+    #[tokio::test]
+    async fn parse_api_key_source_api_key_mode() {
         let line = r#"{"type":"system","subtype":"init","apiKeySource":"ANTHROPIC_API_KEY"}"#;
         assert_eq!(
             parse_api_key_source(line).as_deref(),
@@ -894,32 +894,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_api_key_source_wrong_type_returns_none() {
+    #[tokio::test]
+    async fn parse_api_key_source_wrong_type_returns_none() {
         // Result event has apiKeySource-adjacent fields but different type.
         let line = r#"{"type":"result","apiKeySource":"none"}"#;
         assert!(parse_api_key_source(line).is_none());
     }
 
-    #[test]
-    fn parse_api_key_source_wrong_subtype_returns_none() {
+    #[tokio::test]
+    async fn parse_api_key_source_wrong_subtype_returns_none() {
         let line = r#"{"type":"system","subtype":"other","apiKeySource":"none"}"#;
         assert!(parse_api_key_source(line).is_none());
     }
 
-    #[test]
-    fn parse_api_key_source_missing_field_returns_none() {
+    #[tokio::test]
+    async fn parse_api_key_source_missing_field_returns_none() {
         let line = r#"{"type":"system","subtype":"init"}"#;
         assert!(parse_api_key_source(line).is_none());
     }
 
-    #[test]
-    fn parse_api_key_source_malformed_json_returns_none() {
+    #[tokio::test]
+    async fn parse_api_key_source_malformed_json_returns_none() {
         assert!(parse_api_key_source("not json").is_none());
     }
 
-    #[test]
-    fn parse_right_mcp_init_status_connected() {
+    #[tokio::test]
+    async fn parse_right_mcp_init_status_connected() {
         let line = r#"{
         "type":"system",
         "subtype":"init",
@@ -935,8 +935,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_right_mcp_init_status_needs_auth() {
+    #[tokio::test]
+    async fn parse_right_mcp_init_status_needs_auth() {
         let line = r#"{
         "type":"system",
         "subtype":"init",
@@ -951,8 +951,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_right_mcp_init_status_missing_right_is_unhealthy() {
+    #[tokio::test]
+    async fn parse_right_mcp_init_status_missing_right_is_unhealthy() {
         let line = r#"{
         "type":"system",
         "subtype":"init",
@@ -965,8 +965,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_right_mcp_init_status_missing_servers_is_unhealthy() {
+    #[tokio::test]
+    async fn parse_right_mcp_init_status_missing_servers_is_unhealthy() {
         let line = r#"{"type":"system","subtype":"init"}"#;
 
         assert_eq!(
@@ -975,20 +975,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_right_mcp_init_status_ignores_non_init_lines() {
+    #[tokio::test]
+    async fn parse_right_mcp_init_status_ignores_non_init_lines() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
 
         assert_eq!(parse_right_mcp_init_status(line), None);
     }
 
-    #[test]
-    fn parse_right_mcp_init_status_ignores_malformed_json() {
+    #[tokio::test]
+    async fn parse_right_mcp_init_status_ignores_malformed_json() {
         assert_eq!(parse_right_mcp_init_status("not json"), None);
     }
 
-    #[test]
-    fn parse_usage_full_happy_path() {
+    #[tokio::test]
+    async fn parse_usage_full_happy_path() {
         let line = r#"{
             "type":"result","subtype":"success","is_error":false,
             "session_id":"abc-123",
@@ -1019,26 +1019,26 @@ mod tests {
         assert!(breakdown.model_usage_json.contains("claude-sonnet-4-6"));
     }
 
-    #[test]
-    fn parse_usage_full_missing_cost_returns_none() {
+    #[tokio::test]
+    async fn parse_usage_full_missing_cost_returns_none() {
         let line = r#"{"type":"result","session_id":"x","num_turns":1}"#;
         assert!(parse_usage_full(line).is_none());
     }
 
-    #[test]
-    fn parse_usage_full_missing_turns_returns_none() {
+    #[tokio::test]
+    async fn parse_usage_full_missing_turns_returns_none() {
         let line = r#"{"type":"result","session_id":"x","total_cost_usd":0.1}"#;
         assert!(parse_usage_full(line).is_none());
     }
 
-    #[test]
-    fn parse_usage_full_missing_session_id_returns_none() {
+    #[tokio::test]
+    async fn parse_usage_full_missing_session_id_returns_none() {
         let line = r#"{"type":"result","total_cost_usd":0.1,"num_turns":1}"#;
         assert!(parse_usage_full(line).is_none());
     }
 
-    #[test]
-    fn parse_usage_full_missing_model_usage_uses_empty_object() {
+    #[tokio::test]
+    async fn parse_usage_full_missing_model_usage_uses_empty_object() {
         let line = r#"{
             "type":"result","session_id":"x",
             "total_cost_usd":0.1,"num_turns":1,
@@ -1052,13 +1052,13 @@ mod tests {
         assert_eq!(b.web_search_requests, 0);
     }
 
-    #[test]
-    fn parse_usage_full_invalid_json_returns_none() {
+    #[tokio::test]
+    async fn parse_usage_full_invalid_json_returns_none() {
         assert!(parse_usage_full("not json").is_none());
     }
 
-    #[test]
-    fn parse_result_timing_extracts_optional_fields() {
+    #[tokio::test]
+    async fn parse_result_timing_extracts_optional_fields() {
         let line = r#"{
             "type":"result",
             "duration_ms":1234,
@@ -1092,8 +1092,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_result_timing_ignores_non_result_lines() {
+    #[tokio::test]
+    async fn parse_result_timing_ignores_non_result_lines() {
         let assistant_line =
             r#"{"type":"assistant","duration_ms":1234,"usage":{"input_tokens":10}}"#;
         let malformed_line = "not json";
@@ -1102,8 +1102,8 @@ mod tests {
         assert_eq!(parse_result_timing(malformed_line), None);
     }
 
-    #[test]
-    fn parse_result_timing_ignores_unrelated_cache_miss_reason() {
+    #[tokio::test]
+    async fn parse_result_timing_ignores_unrelated_cache_miss_reason() {
         let line = r#"{
             "type":"result",
             "duration_ms":1234,
@@ -1122,8 +1122,8 @@ mod tests {
         assert_eq!(timing.cache_miss_reason, None);
     }
 
-    #[test]
-    fn parse_cache_miss_reason_extracts_from_assistant_diagnostics() {
+    #[tokio::test]
+    async fn parse_cache_miss_reason_extracts_from_assistant_diagnostics() {
         let line = r#"{
             "type":"assistant",
             "message":{
@@ -1142,8 +1142,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_cache_miss_reason_ignores_unexpected_diagnostic_shapes() {
+    #[tokio::test]
+    async fn parse_cache_miss_reason_ignores_unexpected_diagnostic_shapes() {
         let line = r#"{
             "type":"assistant",
             "diagnostics":{
@@ -1157,8 +1157,8 @@ mod tests {
         assert_eq!(parse_cache_miss_reason(line), None);
     }
 
-    #[test]
-    fn cache_diagnostic_key_prefilter_covers_supported_shapes() {
+    #[tokio::test]
+    async fn cache_diagnostic_key_prefilter_covers_supported_shapes() {
         for key in [
             "cache_miss_reason",
             "cacheMissReason",

@@ -7,7 +7,7 @@ use right_openshell::test_support::TestSandbox;
 
 /// Write a host-side agent dir with `agent.yaml` pointing at `sandbox_name`,
 /// the three identity files, and a stamped active session row in data.db.
-fn seed_agent_dir(agent_dir: &Path, sandbox_name: &str) {
+async fn seed_agent_dir(agent_dir: &Path, sandbox_name: &str) {
     std::fs::create_dir_all(agent_dir).unwrap();
     let yaml = format!(
         "sandbox:\n  mode: openshell\n  name: {sandbox_name}\n  policy_file: policy.yaml\n"
@@ -20,12 +20,13 @@ fn seed_agent_dir(agent_dir: &Path, sandbox_name: &str) {
     std::fs::write(agent_dir.join("SOUL.md"), "host soul\n").unwrap();
     std::fs::write(agent_dir.join("USER.md"), "host user\n").unwrap();
 
-    let conn = right_db::open_connection(agent_dir, true).unwrap();
+    let conn = right_db::open_connection(agent_dir, true).await.unwrap();
     conn.execute(
         "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
          VALUES (1, 0, 'sandbox-session-uuid', 1)",
         [],
     )
+    .await
     .unwrap();
 }
 
@@ -53,7 +54,7 @@ async fn ci_openshell_execute_against_live_sandbox() {
     let home = tempfile::tempdir().unwrap();
     let agent_name = "rb-test";
     let agent_dir = home.path().join("agents").join(agent_name);
-    seed_agent_dir(&agent_dir, sandbox.name());
+    seed_agent_dir(&agent_dir, sandbox.name()).await;
 
     // Build plan manually — the standard `plan()` would resolve a sandbox
     // name from `agent.yaml`, but our agent.yaml doesn't know about

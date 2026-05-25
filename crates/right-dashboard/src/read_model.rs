@@ -36,19 +36,19 @@ pub enum ReadModelError {
 
 pub type OverviewInput = activity::ActivityOverviewInput;
 
-pub fn overview(
+pub async fn overview(
     conn: &Connection,
     input: OverviewInput,
 ) -> Result<OverviewResponse, ReadModelError> {
-    activity::activity_overview(conn, input)
+    activity::activity_overview(conn, input).await
 }
 
-pub fn run_detail(
+pub async fn run_detail(
     conn: &Connection,
     run_id: &str,
     max_lines: usize,
 ) -> Result<Option<RunDetailResponse>, ReadModelError> {
-    activity::activity_run_detail(conn, run_id, max_lines)
+    activity::activity_run_detail(conn, run_id, max_lines).await
 }
 
 pub(crate) fn parse_utc(value: &str) -> Result<DateTime<Utc>, ReadModelError> {

@@ -760,8 +760,8 @@ async fn ci_openshell_policy_validates_against_openshell() {
 
 // --- Task 9: No-sandbox backup and restore integration tests ---
 
-#[test]
-fn test_agent_backup_and_restore_no_sandbox() {
+#[tokio::test]
+async fn test_agent_backup_and_restore_no_sandbox() {
     let home = tempdir().unwrap();
     let home_str = home.path().to_str().unwrap();
 
@@ -797,10 +797,12 @@ groups:
     fs::write(agent_dir.join("test-file.txt"), "hello world\n").unwrap();
 
     // Create a data.db with a test table.
-    let conn = right_db::open_connection(&agent_dir, false).unwrap();
+    let conn = right_db::open_connection(&agent_dir, false).await.unwrap();
     conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)", ())
+        .await
         .unwrap();
     conn.execute("INSERT INTO test (val) VALUES ('backup-test')", ())
+        .await
         .unwrap();
     drop(conn);
 
@@ -894,9 +896,12 @@ groups:
     );
 
     // Verify restored database.
-    let restored_db = right_db::open_database_path_readonly(restored_dir.join("data.db")).unwrap();
+    let restored_db = right_db::open_database_path_readonly(restored_dir.join("data.db"))
+        .await
+        .unwrap();
     let val: String = restored_db
         .query_row("SELECT val FROM test WHERE id = 1", (), |r| r.get(0))
+        .await
         .unwrap();
     assert_eq!(val, "backup-test");
 }

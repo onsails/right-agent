@@ -46,7 +46,7 @@ impl<'conn> Transaction<'conn> {
         }
     }
 
-    pub fn execute(
+    pub async fn execute(
         &self,
         sql: &str,
         params: impl crate::params::IntoParams,
@@ -56,20 +56,20 @@ impl<'conn> Transaction<'conn> {
             .inner
             .as_ref()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        let changed = self.conn.block_on_turso(inner.execute(sql, params))?;
+        let changed = inner.execute(sql, params).await?;
         usize::try_from(changed)
             .map_err(|_| DbError::InvalidParameter("changed row count exceeds usize".into()))
     }
 
-    pub fn execute_batch(&self, sql: &str) -> Result<(), DbError> {
+    pub async fn execute_batch(&self, sql: &str) -> Result<(), DbError> {
         let inner = self
             .inner
             .as_ref()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        self.conn.block_on_turso(inner.execute_batch(sql)).map(drop)
+        inner.execute_batch(sql).await.map(drop).map_err(Into::into)
     }
 
-    pub fn query_one<T>(
+    pub async fn query_one<T>(
         &self,
         sql: &str,
         params: impl crate::params::IntoParams,
@@ -80,22 +80,22 @@ impl<'conn> Transaction<'conn> {
             .inner
             .as_ref()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        let mut rows = self.conn.block_on_turso(inner.query(sql, params))?;
-        let Some(row) = self.conn.block_on_turso(rows.next())? else {
+        let mut rows = inner.query(sql, params).await?;
+        let Some(row) = rows.next().await? else {
             return Err(DbError::NotFound);
         };
         map(&crate::row::Row::new(&row))
     }
 
-    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> Result<T, DbError>
+    pub async fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> Result<T, DbError>
     where
         P: crate::params::IntoParams,
         F: FnOnce(&crate::row::Row<'_>) -> Result<T, DbError>,
     {
-        self.query_one(sql, params, map)
+        self.query_one(sql, params, map).await
     }
 
-    pub fn query_all<T>(
+    pub async fn query_all<T>(
         &self,
         sql: &str,
         params: impl crate::params::IntoParams,
@@ -106,9 +106,9 @@ impl<'conn> Transaction<'conn> {
             .inner
             .as_ref()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        let mut rows = self.conn.block_on_turso(inner.query(sql, params))?;
+        let mut rows = inner.query(sql, params).await?;
         let mut values = Vec::new();
-        while let Some(row) = self.conn.block_on_turso(rows.next())? {
+        while let Some(row) = rows.next().await? {
             values.push(map(&crate::row::Row::new(&row))?);
         }
         Ok(values)
@@ -134,21 +134,21 @@ impl<'conn> Transaction<'conn> {
         self.conn
     }
 
-    pub fn commit(mut self) -> Result<(), DbError> {
+    pub async fn commit(mut self) -> Result<(), DbError> {
         let inner = self
             .inner
             .take()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        self.conn.block_on_turso(inner.commit())?;
+        inner.commit().await?;
         Ok(())
     }
 
-    pub fn rollback(mut self) -> Result<(), DbError> {
+    pub async fn rollback(mut self) -> Result<(), DbError> {
         let inner = self
             .inner
             .take()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        self.conn.block_on_turso(inner.rollback())?;
+        inner.rollback().await?;
         Ok(())
     }
 }
@@ -162,7 +162,7 @@ pub struct TransactionStatement<'tx, 'conn> {
 }
 
 impl<'tx, 'conn> TransactionStatement<'tx, 'conn> {
-    pub fn query_map<T, P, F>(
+    pub async fn query_map<T, P, F>(
         &mut self,
         params: P,
         mut map: F,
@@ -177,44 +177,26 @@ impl<'tx, 'conn> TransactionStatement<'tx, 'conn> {
             .inner
             .as_ref()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        let mut query_rows = self
-            .tx
-            .conn
-            .block_on_turso(inner.query(&self.sql, params))?;
+        let mut query_rows = inner.query(&self.sql, params).await?;
         let mut rows = Vec::new();
-        while let Some(row) = self.tx.conn.block_on_turso(query_rows.next())? {
+        while let Some(row) = query_rows.next().await? {
             rows.push(map(&crate::row::Row::new(&row)));
         }
         Ok(rows.into_iter())
     }
 
-    pub fn query_row<T, P, F>(&mut self, params: P, map: F) -> Result<T, DbError>
+    pub async fn query_row<T, P, F>(&mut self, params: P, map: F) -> Result<T, DbError>
     where
         P: crate::params::IntoParams,
         F: FnOnce(&crate::row::Row<'_>) -> Result<T, DbError>,
     {
-        self.tx.query_one(&self.sql, params, map)
+        self.tx.query_one(&self.sql, params, map).await
     }
 }
 
 impl fmt::Debug for Transaction<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Transaction").finish_non_exhaustive()
-    }
-}
-
-impl Drop for Transaction<'_> {
-    fn drop(&mut self) {
-        let Some(inner) = self.inner.take() else {
-            return;
-        };
-        if let Err(error) = self.conn.block_on_turso(inner.rollback()) {
-            tracing::warn!(
-                path = %self.conn.path().display(),
-                rollback_error = format!("{error:#}"),
-                "transaction rollback on drop failed",
-            );
-        }
     }
 }
 

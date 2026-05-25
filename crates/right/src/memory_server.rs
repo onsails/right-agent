@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use right_agent::async_runs::CronRunJsonRow;
 use right_mcp::tool_error::tool_error;
@@ -155,7 +155,7 @@ where
 #[allow(dead_code)]
 pub struct MemoryServer {
     tool_router: ToolRouter<Self>,
-    conn: Arc<Mutex<right_db::Connection>>,
+    conn: Arc<tokio::sync::Mutex<right_db::Connection>>,
     agent_name: String,
     agent_dir: std::path::PathBuf,
     right_home: std::path::PathBuf,
@@ -171,7 +171,7 @@ impl MemoryServer {
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
-            conn: Arc::new(Mutex::new(conn)),
+            conn: Arc::new(tokio::sync::Mutex::new(conn)),
             agent_name,
             agent_dir,
             right_home,
@@ -185,10 +185,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<CronListRunsParams>,
     ) -> Result<CallToolResult, McpError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        let conn = self.conn.lock().await;
         let limit = params.limit.unwrap_or(20);
         let mut stmt = conn
             .prepare(
@@ -217,6 +214,7 @@ impl MemoryServer {
                     row.get::<_, Option<String>>(10)?.as_deref(),
                 ))
             })
+            .await
             .map_err(|e| McpError::internal_error(format!("query failed: {e:#}"), None))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| McpError::internal_error(format!("row read failed: {e:#}"), None))?;
@@ -232,32 +230,31 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<CronShowRunParams>,
     ) -> Result<CallToolResult, McpError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
-        let result = conn.query_row(
-            "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
+        let conn = self.conn.lock().await;
+        let result = conn
+            .query_row(
+                "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
                     run_note, delivery_json, delivered_at, delivery_status
              FROM async_runs
              WHERE kind = 'cron' AND id = ?1",
-            right_db::params![&params.run_id],
-            |row| {
-                Ok(cron_run_to_json(
-                    &row.get::<_, String>(0)?,
-                    &row.get::<_, String>(1)?,
-                    &row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?.as_deref(),
-                    row.get::<_, Option<i64>>(4)?,
-                    &row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?.as_deref(),
-                    row.get::<_, Option<String>>(7)?.as_deref(),
-                    row.get::<_, Option<String>>(8)?.as_deref(),
-                    row.get::<_, Option<String>>(9)?.as_deref(),
-                    row.get::<_, Option<String>>(10)?.as_deref(),
-                ))
-            },
-        );
+                right_db::params![&params.run_id],
+                |row| {
+                    Ok(cron_run_to_json(
+                        &row.get::<_, String>(0)?,
+                        &row.get::<_, String>(1)?,
+                        &row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?.as_deref(),
+                        row.get::<_, Option<i64>>(4)?,
+                        &row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(6)?.as_deref(),
+                        row.get::<_, Option<String>>(7)?.as_deref(),
+                        row.get::<_, Option<String>>(8)?.as_deref(),
+                        row.get::<_, Option<String>>(9)?.as_deref(),
+                        row.get::<_, Option<String>>(10)?.as_deref(),
+                    ))
+                },
+            )
+            .await;
         match result {
             Ok(val) => {
                 let output = serde_json::to_string_pretty(&val).map_err(|e| {
@@ -279,10 +276,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<CronCreateParams>,
     ) -> Result<CallToolResult, McpError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        let conn = self.conn.lock().await;
         let result = right_agent::cron_spec::create_spec_v2(
             &conn,
             &params.job_name,
@@ -296,6 +290,7 @@ impl MemoryServer {
             params.target_thread_id,
             false,
         )
+        .await
         .map_err(|e| McpError::invalid_params(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(
             right_agent::cron_spec::format_result(&result),
@@ -309,10 +304,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<CronUpdateParams>,
     ) -> Result<CallToolResult, McpError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        let conn = self.conn.lock().await;
         let result = right_agent::cron_spec::update_spec_partial(
             &conn,
             &params.job_name,
@@ -325,6 +317,7 @@ impl MemoryServer {
             params.target_chat_id,
             params.target_thread_id,
         )
+        .await
         .map_err(|e| McpError::invalid_params(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(
             right_agent::cron_spec::format_result(&result),
@@ -336,11 +329,9 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<CronDeleteParams>,
     ) -> Result<CallToolResult, McpError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        let conn = self.conn.lock().await;
         let msg = right_agent::cron_spec::delete_spec(&conn, &params.job_name, &self.agent_dir)
+            .await
             .map_err(|e| McpError::invalid_params(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
@@ -352,11 +343,9 @@ impl MemoryServer {
         &self,
         Parameters(_params): Parameters<CronListParams>,
     ) -> Result<CallToolResult, McpError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        let conn = self.conn.lock().await;
         let output = right_agent::cron_spec::list_specs(&conn)
+            .await
             .map_err(|e| McpError::internal_error(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
@@ -373,11 +362,9 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<CronTriggerParams>,
     ) -> Result<CallToolResult, McpError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        let conn = self.conn.lock().await;
         let msg = right_agent::cron_spec::trigger_spec(&conn, &params.job_name)
+            .await
             .map_err(|e| McpError::invalid_params(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
@@ -389,11 +376,9 @@ impl MemoryServer {
         &self,
         Parameters(_params): Parameters<McpListParams>,
     ) -> Result<CallToolResult, McpError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        let conn = self.conn.lock().await;
         let servers = right_mcp::credentials::db_list_servers(&conn)
+            .await
             .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
         let items: Vec<serde_json::Value> = servers
             .iter()
@@ -595,6 +580,7 @@ pub async fn run_memory_server() -> miette::Result<()> {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let conn = right_db::open_connection(&home, true)
+        .await
         .map_err(|e| miette::miette!("failed to open memory database: {e:#}"))?;
 
     let agent_name = match std::env::var("RC_AGENT_NAME") {

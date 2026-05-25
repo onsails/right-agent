@@ -79,7 +79,7 @@ fn generated_policy_path(agent: &AgentDef) -> miette::Result<PathBuf> {
 /// Called by the bot at startup. Also used by `right init` and `right agent init`.
 ///
 /// Returns the agent secret (existing or newly generated).
-pub fn run_single_agent_codegen(
+pub async fn run_single_agent_codegen(
     home: &Path,
     agent: &AgentDef,
     self_exe: &Path,
@@ -187,7 +187,7 @@ pub fn run_single_agent_codegen(
     write_agent_owned(&claude_dir.join("settings.local.json"), "{}")?;
 
     // Initialize per-agent memory database.
-    right_db::open_db(&agent.path, false).map_err(|e| {
+    right_db::open_db(&agent.path, false).await.map_err(|e| {
         miette::miette!("failed to open memory database for '{}': {e:#}", agent.name)
     })?;
     tracing::debug!(agent = %agent.name, "data.db initialized");
@@ -443,8 +443,8 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn run_single_agent_codegen_generates_all_files() {
+    #[tokio::test]
+    async fn run_single_agent_codegen_generates_all_files() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
         let agent_dir = home.join("agents").join("test");
@@ -459,7 +459,9 @@ pub(crate) mod tests {
         let agent = agent_fixture(&agent_dir);
         let self_exe = std::path::PathBuf::from("/usr/bin/right");
 
-        run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
+        run_single_agent_codegen(home, &agent, &self_exe, false)
+            .await
+            .unwrap();
 
         // Core files must exist
         assert!(agent_dir.join(".claude/settings.json").exists());
@@ -484,8 +486,8 @@ pub(crate) mod tests {
         assert!(policy.contains("port: 80"));
     }
 
-    #[test]
-    fn run_single_agent_codegen_restrictive_policy() {
+    #[tokio::test]
+    async fn run_single_agent_codegen_restrictive_policy() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
         let agent_dir = home.join("agents").join("test");
@@ -500,15 +502,17 @@ pub(crate) mod tests {
         let agent = agent_fixture(&agent_dir);
         let self_exe = std::path::PathBuf::from("/usr/bin/right");
 
-        run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
+        run_single_agent_codegen(home, &agent, &self_exe, false)
+            .await
+            .unwrap();
 
         let policy = std::fs::read_to_string(agent_dir.join("policy.yaml")).unwrap();
         assert!(policy.contains(r#"host: "*.anthropic.com""#));
         assert!(!policy.contains(r#"host: "**.*""#));
     }
 
-    #[test]
-    fn run_single_agent_codegen_writes_bootstrap_policy_without_broad_right_ranges() {
+    #[tokio::test]
+    async fn run_single_agent_codegen_writes_bootstrap_policy_without_broad_right_ranges() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
         let agent_dir = home.join("agents").join("test");
@@ -523,7 +527,9 @@ pub(crate) mod tests {
         let agent = agent_fixture(&agent_dir);
         let self_exe = std::path::PathBuf::from("/usr/bin/right");
 
-        run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
+        run_single_agent_codegen(home, &agent, &self_exe, false)
+            .await
+            .unwrap();
 
         let policy = std::fs::read_to_string(agent_dir.join("policy.yaml")).unwrap();
         let parsed: serde_json::Value =
@@ -537,8 +543,8 @@ pub(crate) mod tests {
         assert!(!policy.contains("192.168.0.0/16"));
     }
 
-    #[test]
-    fn run_single_agent_codegen_writes_custom_policy_file_path() {
+    #[tokio::test]
+    async fn run_single_agent_codegen_writes_custom_policy_file_path() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
         let agent_dir = home.join("agents").join("test");
@@ -553,7 +559,9 @@ pub(crate) mod tests {
         let agent = agent_fixture(&agent_dir);
         let self_exe = std::path::PathBuf::from("/usr/bin/right");
 
-        run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
+        run_single_agent_codegen(home, &agent, &self_exe, false)
+            .await
+            .unwrap();
 
         assert!(agent_dir.join("policies/custom-policy.yaml").exists());
         assert!(
@@ -562,8 +570,8 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn run_agent_codegen_with_empty_agents() {
+    #[tokio::test]
+    async fn run_agent_codegen_with_empty_agents() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
         write_minimal_global_config(home);
@@ -578,8 +586,8 @@ pub(crate) mod tests {
         assert!(home.join("run/state.json").exists());
     }
 
-    #[test]
-    fn run_agent_codegen_reports_new_cloudflared_config_changed() {
+    #[tokio::test]
+    async fn run_agent_codegen_reports_new_cloudflared_config_changed() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
         write_minimal_global_config(home);
@@ -605,8 +613,8 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn run_agent_codegen_reports_unchanged_cloudflared_config() {
+    #[tokio::test]
+    async fn run_agent_codegen_reports_unchanged_cloudflared_config() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
         write_minimal_global_config(home);
@@ -635,8 +643,8 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn tools_md_not_overwritten_if_exists() {
+    #[tokio::test]
+    async fn tools_md_not_overwritten_if_exists() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
         let agent_dir = home.join("agents").join("test");
@@ -653,14 +661,16 @@ pub(crate) mod tests {
 
         let agent = agent_fixture(&agent_dir);
         let self_exe = std::path::PathBuf::from("/usr/bin/right");
-        run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
+        run_single_agent_codegen(home, &agent, &self_exe, false)
+            .await
+            .unwrap();
 
         let after = std::fs::read_to_string(agent_dir.join("TOOLS.md")).unwrap();
         assert_eq!(after, custom_content, "TOOLS.md must not be overwritten");
     }
 
-    #[test]
-    fn tools_md_not_created_by_codegen_if_missing() {
+    #[tokio::test]
+    async fn tools_md_not_created_by_codegen_if_missing() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
         let agent_dir = home.join("agents").join("test");
@@ -676,7 +686,9 @@ pub(crate) mod tests {
 
         let agent = agent_fixture(&agent_dir);
         let self_exe = std::path::PathBuf::from("/usr/bin/right");
-        run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
+        run_single_agent_codegen(home, &agent, &self_exe, false)
+            .await
+            .unwrap();
 
         // Codegen no longer creates TOOLS.md — that's init's responsibility
         assert!(

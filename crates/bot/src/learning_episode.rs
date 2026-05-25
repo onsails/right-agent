@@ -263,7 +263,7 @@ impl LearningEpisodeRuntime {
     }
 }
 
-pub(crate) fn capture_episode_seed(
+pub(crate) async fn capture_episode_seed(
     conn: &right_db::Connection,
     input: EpisodeSeedInput<'_>,
 ) -> Result<i64, right_db::DbError> {
@@ -283,6 +283,7 @@ pub(crate) fn capture_episode_seed(
             ready_after: ready_after.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         },
     )
+    .await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -609,9 +610,11 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
     let now = chrono::Utc::now();
     let now_str = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let conn = right_db::open_connection(&runtime.agent_db_dir, false)
+        .await
         .with_context(|| format!("open {} data.db", runtime.agent_name))?;
     let Some(episode) =
-        right_agent::learning_episodes::claim_ready_episode(&conn, &runtime.agent_name, &now_str)?
+        right_agent::learning_episodes::claim_ready_episode(&conn, &runtime.agent_name, &now_str)
+            .await?
     else {
         return Ok(());
     };
@@ -624,13 +627,16 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
             now_utc: &now_str,
             daily_budget_usd: runtime.learning.max_daily_budget_usd,
         },
-    ) {
+    )
+    .await
+    {
         Ok(gate) => gate,
         Err(e) => {
             let reason = format!("learning episode review gate failed: {e:#}");
             // Gate acquisition failed — we never entered the gate, so do not
             // record a failure against the circuit breaker.
-            mark_claimed_episode_failed(&conn, &runtime, episode.id, &reason, &now_str, false)?;
+            mark_claimed_episode_failed(&conn, &runtime, episode.id, &reason, &now_str, false)
+                .await?;
             return Err(anyhow!(reason));
         }
     };
@@ -642,7 +648,6 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
             | ReviewSkipReason::DailyBudget
             | ReviewSkipReason::CircuitOpen,
         ) => {
-            // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
             requeue_episode_or_fail(
                 &conn,
                 &runtime,
@@ -650,7 +655,8 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
                 now,
                 runtime.learning.episode_settle_seconds.unwrap_or(90),
                 &now_str,
-            )?;
+            )
+            .await?;
             runtime.schedule_drain();
             return Ok(());
         }
@@ -660,17 +666,19 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
                 episode.id,
                 LearningEpisodeStatus::NoEpisode,
                 &serde_json::json!({"status":"no_episode","reason":"review gate below threshold"}),
-            )?;
+            )
+            .await?;
             return Ok(());
         }
     }
 
-    let corpus = match load_selector_corpus(&conn, &episode) {
+    let corpus = match load_selector_corpus(&conn, &episode).await {
         Ok(corpus) => corpus,
         Err(e) => {
             let reason = format!("learning episode corpus load failed: {e:#}");
             let outcome =
-                mark_claimed_episode_failed(&conn, &runtime, episode.id, &reason, &now_str, true)?;
+                mark_claimed_episode_failed(&conn, &runtime, episode.id, &reason, &now_str, true)
+                    .await?;
             if let Some((_, true)) = outcome {
                 spawn_circuit_open_alert(&runtime, &reason);
             }
@@ -681,20 +689,21 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
     let output = selector(runtime.clone(), episode.clone(), corpus.clone()).await;
     match output {
         Ok(output) => {
-            let selected = match record_selector_output(&conn, &runtime, &episode, &corpus, output)
-            {
-                Ok(selected) => selected,
-                Err(e) => {
-                    let reason = format!("{e:#}");
-                    let outcome = mark_claimed_episode_failed(
-                        &conn, &runtime, episode.id, &reason, &now_str, true,
-                    )?;
-                    if let Some((_, true)) = outcome {
-                        spawn_circuit_open_alert(&runtime, &reason);
+            let selected =
+                match record_selector_output(&conn, &runtime, &episode, &corpus, output).await {
+                    Ok(selected) => selected,
+                    Err(e) => {
+                        let reason = format!("{e:#}");
+                        let outcome = mark_claimed_episode_failed(
+                            &conn, &runtime, episode.id, &reason, &now_str, true,
+                        )
+                        .await?;
+                        if let Some((_, true)) = outcome {
+                            spawn_circuit_open_alert(&runtime, &reason);
+                        }
+                        return Err(anyhow!(reason));
                     }
-                    return Err(anyhow!(reason));
-                }
-            };
+                };
             drop(conn);
             if selected && let Err(e) = reviewer(runtime.clone(), episode.id).await {
                 let reason = format!("{e:#}");
@@ -704,7 +713,8 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
         Err(e) => {
             let reason = format!("{e:#}");
             let outcome =
-                mark_claimed_episode_failed(&conn, &runtime, episode.id, &reason, &now_str, true)?;
+                mark_claimed_episode_failed(&conn, &runtime, episode.id, &reason, &now_str, true)
+                    .await?;
             if let Some((_, true)) = outcome {
                 spawn_circuit_open_alert(&runtime, &reason);
             }
@@ -728,7 +738,7 @@ async fn drain_ready_learning_episodes_once_with_selector_and_reviewer(
 /// untouched, which is self-healing: the next failure will still increment the
 /// counter.  Returns `Some((new_count, opened_now))` when `record_failure =
 /// true`, `None` otherwise.
-fn mark_claimed_episode_failed(
+async fn mark_claimed_episode_failed(
     conn: &right_db::Connection,
     runtime: &LearningEpisodeRuntime,
     episode_id: i64,
@@ -738,16 +748,16 @@ fn mark_claimed_episode_failed(
 ) -> anyhow::Result<Option<(i64, bool)>> {
     // First write: mark the episode row failed.
     {
-        let tx = conn.transaction()?;
+        let tx = conn.transaction().await?;
         right_agent::learning_episodes::mark_episode_failed(&tx, episode_id, reason)
+            .await
             .with_context(|| format!("mark learning episode {episode_id} failed"))?;
-        tx.commit()?;
+        tx.commit().await?;
     }
     if !record_failure {
         return Ok(None);
     }
     // Second write: drive the circuit-breaker gate (its own transaction).
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     let (count, opened) = record_review_failure(
         conn,
         &runtime.agent_name,
@@ -755,6 +765,7 @@ fn mark_claimed_episode_failed(
         runtime.learning.circuit_failure_threshold.unwrap_or(5),
         runtime.learning.circuit_cooldown_minutes.unwrap_or(60),
     )
+    .await
     .with_context(|| format!("record review failure for {}", runtime.agent_name))?;
     Ok(Some((count, opened)))
 }
@@ -765,7 +776,6 @@ fn spawn_circuit_open_alert(runtime: &LearningEpisodeRuntime, reason: &str) {
     let Some(bot) = runtime.bot.as_ref().map(Arc::clone) else {
         return;
     };
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     crate::telegram::learning_alerts::spawn_circuit_open_alert(
         bot,
         runtime.agent_db_dir.clone(),
@@ -777,7 +787,7 @@ fn spawn_circuit_open_alert(runtime: &LearningEpisodeRuntime, reason: &str) {
     );
 }
 
-fn record_selector_output(
+async fn record_selector_output(
     conn: &right_db::Connection,
     runtime: &LearningEpisodeRuntime,
     episode: &LearningEpisodeRow,
@@ -790,7 +800,8 @@ fn record_selector_output(
         "selected" => {
             let episode_hash = compute_episode_hash(episode, &output);
             if let Some(status) =
-                find_duplicate_episode_status(conn, &runtime.agent_name, episode.id, &episode_hash)?
+                find_duplicate_episode_status(conn, &runtime.agent_name, episode.id, &episode_hash)
+                    .await?
             {
                 let output_json = serde_json::json!({
                     "status": "no_episode",
@@ -798,15 +809,16 @@ fn record_selector_output(
                     "duplicate_status": status,
                     "episode_hash": episode_hash,
                 });
-                let tx = conn.transaction()?;
+                let tx = conn.transaction().await?;
                 right_agent::learning_episodes::mark_episode_terminal(
                     &tx,
                     episode.id,
                     LearningEpisodeStatus::NoEpisode,
                     &output_json,
-                )?;
-                clear_review_running(&tx, &runtime.agent_name)?;
-                tx.commit()?;
+                )
+                .await?;
+                clear_review_running(&tx, &runtime.agent_name).await?;
+                tx.commit().await?;
                 return Ok(false);
             }
             let selection = SelectedEpisodeUpdate {
@@ -822,42 +834,46 @@ fn record_selector_output(
                 episode_hash: Some(episode_hash),
                 last_evidence_at: selected_last_evidence_at(corpus, &output),
             };
-            right_agent::learning_episodes::mark_episode_selected(conn, episode.id, &selection)?;
+            right_agent::learning_episodes::mark_episode_selected(conn, episode.id, &selection)
+                .await?;
             Ok(true)
         }
         "no_episode" => {
-            let tx = conn.transaction()?;
+            let tx = conn.transaction().await?;
             right_agent::learning_episodes::mark_episode_terminal(
                 &tx,
                 episode.id,
                 LearningEpisodeStatus::NoEpisode,
                 &output.raw,
-            )?;
-            clear_review_running(&tx, &runtime.agent_name)?;
-            tx.commit()?;
+            )
+            .await?;
+            clear_review_running(&tx, &runtime.agent_name).await?;
+            tx.commit().await?;
             Ok(false)
         }
         "insufficient_context" => {
-            let tx = conn.transaction()?;
+            let tx = conn.transaction().await?;
             right_agent::learning_episodes::mark_episode_terminal(
                 &tx,
                 episode.id,
                 LearningEpisodeStatus::InsufficientContext,
                 &output.raw,
-            )?;
-            clear_review_running(&tx, &runtime.agent_name)?;
-            tx.commit()?;
+            )
+            .await?;
+            clear_review_running(&tx, &runtime.agent_name).await?;
+            tx.commit().await?;
             Ok(false)
         }
         "failed" => {
-            let tx = conn.transaction()?;
+            let tx = conn.transaction().await?;
             right_agent::learning_episodes::mark_episode_failed(
                 &tx,
                 episode.id,
                 "selector returned failed status",
-            )?;
-            clear_review_running(&tx, &runtime.agent_name)?;
-            tx.commit()?;
+            )
+            .await?;
+            clear_review_running(&tx, &runtime.agent_name).await?;
+            tx.commit().await?;
             Ok(false)
         }
         status => Err(anyhow!("selector returned invalid status {status:?}")),
@@ -902,7 +918,7 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-fn find_duplicate_episode_status(
+async fn find_duplicate_episode_status(
     conn: &right_db::Connection,
     agent_name: &str,
     current_episode_id: i64,
@@ -919,6 +935,7 @@ fn find_duplicate_episode_status(
         right_db::params![agent_name, episode_hash, current_episode_id],
         |row| row.get(0),
     )
+    .await
     .optional()
 }
 
@@ -938,7 +955,7 @@ async fn run_episode_reviewer_with_invocation(
     let result = run_episode_reviewer_inner(runtime.clone(), episode_id, invoke_review).await;
     if let Err(e) = &result {
         let reason = format!("{e:#}");
-        match mark_episode_review_failed_and_finish(&runtime, episode_id, &reason) {
+        match mark_episode_review_failed_and_finish(&runtime, episode_id, &reason).await {
             Ok(outcome) => {
                 if let Some((_, true)) = outcome {
                     spawn_circuit_open_alert(&runtime, &reason);
@@ -962,14 +979,15 @@ async fn run_episode_reviewer_inner(
     invoke_review: EpisodeReviewInvocation,
 ) -> anyhow::Result<()> {
     let conn = right_db::open_connection(&runtime.agent_db_dir, false)
+        .await
         .with_context(|| format!("open {} data.db", runtime.agent_name))?;
-    let episode = load_selected_episode_for_review(&conn, episode_id)?;
+    let episode = load_selected_episode_for_review(&conn, episode_id).await?;
     let trigger_kind = review_trigger_for_episode(episode.seed_trigger_kind)
         .ok_or_else(|| anyhow!("learning episode {episode_id} has no review trigger"))?;
-    mark_episode_reviewing(&conn, episode_id)?;
-    let selected = load_selected_review_evidence(&conn, &episode)?;
+    mark_episode_reviewing(&conn, episode_id).await?;
+    let selected = load_selected_review_evidence(&conn, &episode).await?;
     let learning_events =
-        load_episode_review_learning_events(&conn, &episode.source_invocation_id)?;
+        load_episode_review_learning_events(&conn, &episode.source_invocation_id).await?;
     drop(conn);
 
     let learned_skills = collect_episode_review_skill_index(&runtime).await?;
@@ -994,6 +1012,7 @@ async fn run_episode_reviewer_inner(
         .map_err(anyhow::Error::msg)?;
 
     let conn = right_db::open_connection(&runtime.agent_db_dir, false)
+        .await
         .with_context(|| format!("reopen {} data.db", runtime.agent_name))?;
     let report = output.to_report(crate::learning_review::ReviewReportContext {
         agent_name: episode.agent_name.clone(),
@@ -1012,19 +1031,20 @@ async fn run_episode_reviewer_inner(
         // report writes first, then record_review_failure in its own tx.
         // Atomicity loss is acceptable (independent tables, self-healing).
         {
-            let tx = conn.transaction()?;
+            let tx = conn.transaction().await?;
             insert_skill_review_report(&tx, &report)
+                .await
                 .with_context(|| format!("insert learning episode {episode_id} review report"))?;
             right_agent::learning_episodes::mark_episode_failed(
                 &tx,
                 episode_id,
                 "reviewer returned failed status",
             )
+            .await
             .with_context(|| format!("mark learning episode {episode_id} failed"))?;
-            tx.commit()?;
+            tx.commit().await?;
         }
         let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
         let (_, opened) = record_review_failure(
             &conn,
             &episode.agent_name,
@@ -1032,6 +1052,7 @@ async fn run_episode_reviewer_inner(
             runtime.learning.circuit_failure_threshold.unwrap_or(5),
             runtime.learning.circuit_cooldown_minutes.unwrap_or(60),
         )
+        .await
         .with_context(|| {
             format!(
                 "record review failure for {} (reviewer returned Failed, episode {episode_id})",
@@ -1043,10 +1064,12 @@ async fn run_episode_reviewer_inner(
         }
         return Ok(());
     }
-    let tx = conn.transaction()?;
+    let tx = conn.transaction().await?;
     insert_skill_review_report(&tx, &report)
+        .await
         .with_context(|| format!("insert learning episode {episode_id} review report"))?;
     mark_episode_reviewed(&tx, episode_id)
+        .await
         .with_context(|| format!("mark learning episode {episode_id} reviewed"))?;
     mark_review_finished_in_tx(
         &tx,
@@ -1055,8 +1078,9 @@ async fn run_episode_reviewer_inner(
         status,
         status != ReviewStatus::Failed,
     )
+    .await
     .with_context(|| format!("finish learning episode {episode_id} review gate"))?;
-    tx.commit()?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1087,7 +1111,8 @@ async fn run_episode_review_invocation(
         &runtime.agent_dir,
         runtime.ssh_config_path.as_deref(),
         runtime.resolved_sandbox.as_deref(),
-    );
+    )
+    .await;
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     let mut child = right_process::ProcessGroupChild::spawn(cmd)
@@ -1114,11 +1139,13 @@ async fn run_episode_review_invocation(
     if let Some(breakdown) = crate::cc::stream::parse_usage_full(&stdout)
         && let Some(episode_id) = bundle.learning_episode_id
     {
-        match right_db::open_connection(&runtime.agent_db_dir, false) {
+        match right_db::open_connection(&runtime.agent_db_dir, false).await {
             Ok(conn) => {
                 if let Err(e) = right_agent::usage::insert::insert_learning_reviewer(
                     &conn, &breakdown, episode_id,
-                ) {
+                )
+                .await
+                {
                     tracing::warn!(
                         agent = %runtime.agent_name,
                         episode_id,
@@ -1157,7 +1184,7 @@ struct SelectedReviewEvidence {
     root_session_id: Option<String>,
 }
 
-fn load_selected_episode_for_review(
+async fn load_selected_episode_for_review(
     conn: &right_db::Connection,
     episode_id: i64,
 ) -> anyhow::Result<SelectedEpisodeForReview> {
@@ -1184,6 +1211,7 @@ fn load_selected_episode_for_review(
                 ))
             },
         )
+        .await
         .optional()?
         .ok_or_else(|| anyhow!("learning episode {episode_id} is not selected"))?;
     Ok(SelectedEpisodeForReview {
@@ -1198,7 +1226,7 @@ fn load_selected_episode_for_review(
     })
 }
 
-fn load_selected_review_evidence(
+async fn load_selected_review_evidence(
     conn: &right_db::Connection,
     episode: &SelectedEpisodeForReview,
 ) -> anyhow::Result<SelectedReviewEvidence> {
@@ -1210,7 +1238,7 @@ fn load_selected_review_evidence(
         .iter()
         .map(|ref_id| parse_prefixed_ref_id(ref_id, "msg:"))
         .collect::<anyhow::Result<_>>()?;
-    let message_rows = load_review_messages_batched(conn, &message_ids)?;
+    let message_rows = load_review_messages_batched(conn, &message_ids).await?;
     let mut messages = Vec::with_capacity(episode.message_refs.len());
     for (ref_id, id) in episode.message_refs.iter().zip(message_ids.iter()) {
         let row = message_rows
@@ -1245,7 +1273,7 @@ fn load_selected_review_evidence(
         .iter()
         .map(|ref_id| parse_prefixed_ref_id(ref_id, "exec:"))
         .collect::<anyhow::Result<_>>()?;
-    let event_rows = load_review_execution_events_batched(conn, &event_ids)?;
+    let event_rows = load_review_execution_events_batched(conn, &event_ids).await?;
     let mut root_session_id = None;
     let mut execution_events = Vec::with_capacity(episode.execution_event_refs.len());
     for (ref_id, id) in episode.execution_event_refs.iter().zip(event_ids.iter()) {
@@ -1305,7 +1333,7 @@ struct BatchedReviewExecutionEventRow {
     root_session_id: Option<String>,
 }
 
-fn load_review_messages_batched(
+async fn load_review_messages_batched(
     conn: &right_db::Connection,
     ids: &[i64],
 ) -> anyhow::Result<HashMap<i64, BatchedReviewMessageRow>> {
@@ -1321,22 +1349,24 @@ fn load_review_messages_batched(
          FROM conversation_messages WHERE id IN ({placeholders})"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mapped = stmt.query_map(right_db::params_from_iter(ids.iter()), |row| {
-        let id: i64 = row.get(0)?;
-        let role: String = row.get(1)?;
-        let content: String = row.get(2)?;
-        let addressed_to_bot: i64 = row.get(3)?;
-        let routed_to_agent: i64 = row.get(4)?;
-        Ok((
-            id,
-            BatchedReviewMessageRow {
-                role,
-                content,
-                addressed_to_bot,
-                routed_to_agent,
-            },
-        ))
-    })?;
+    let mapped = stmt
+        .query_map(right_db::params_from_iter(ids.iter()), |row| {
+            let id: i64 = row.get(0)?;
+            let role: String = row.get(1)?;
+            let content: String = row.get(2)?;
+            let addressed_to_bot: i64 = row.get(3)?;
+            let routed_to_agent: i64 = row.get(4)?;
+            Ok((
+                id,
+                BatchedReviewMessageRow {
+                    role,
+                    content,
+                    addressed_to_bot,
+                    routed_to_agent,
+                },
+            ))
+        })
+        .await?;
     for item in mapped {
         let (id, row) = item?;
         rows.insert(id, row);
@@ -1344,7 +1374,7 @@ fn load_review_messages_batched(
     Ok(rows)
 }
 
-fn load_review_execution_events_batched(
+async fn load_review_execution_events_batched(
     conn: &right_db::Connection,
     ids: &[i64],
 ) -> anyhow::Result<HashMap<i64, BatchedReviewExecutionEventRow>> {
@@ -1360,22 +1390,24 @@ fn load_review_execution_events_batched(
          FROM execution_events WHERE id IN ({placeholders})"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mapped = stmt.query_map(right_db::params_from_iter(ids.iter()), |row| {
-        let id: i64 = row.get(0)?;
-        let event_kind: String = row.get(1)?;
-        let trust_label: String = row.get(2)?;
-        let content: String = row.get(3)?;
-        let root_session_id: Option<String> = row.get(4)?;
-        Ok((
-            id,
-            BatchedReviewExecutionEventRow {
-                event_kind,
-                trust_label,
-                content,
-                root_session_id,
-            },
-        ))
-    })?;
+    let mapped = stmt
+        .query_map(right_db::params_from_iter(ids.iter()), |row| {
+            let id: i64 = row.get(0)?;
+            let event_kind: String = row.get(1)?;
+            let trust_label: String = row.get(2)?;
+            let content: String = row.get(3)?;
+            let root_session_id: Option<String> = row.get(4)?;
+            Ok((
+                id,
+                BatchedReviewExecutionEventRow {
+                    event_kind,
+                    trust_label,
+                    content,
+                    root_session_id,
+                },
+            ))
+        })
+        .await?;
     for item in mapped {
         let (id, row) = item?;
         rows.insert(id, row);
@@ -1383,7 +1415,7 @@ fn load_review_execution_events_batched(
     Ok(rows)
 }
 
-fn load_episode_review_learning_events(
+async fn load_episode_review_learning_events(
     conn: &right_db::Connection,
     source_invocation_id: &str,
 ) -> anyhow::Result<Vec<String>> {
@@ -1394,19 +1426,21 @@ fn load_episode_review_learning_events(
         "SELECT action, skill_name, phase, COALESCE(status, ''), COALESCE(summary, '') \
          FROM skill_learning_events WHERE invocation_id = ?1 ORDER BY id LIMIT ?2",
     )?;
-    let rows = stmt.query_map(
-        right_db::params![source_invocation_id, EPISODE_REVIEW_LEARNING_EVENTS_LIMIT],
-        |row| {
-            let action: String = row.get(0)?;
-            let skill_name: String = row.get(1)?;
-            let phase: String = row.get(2)?;
-            let status: String = row.get(3)?;
-            let summary: String = row.get(4)?;
-            Ok(format!(
-                "{phase} {action} {skill_name} status={status} summary={summary}"
-            ))
-        },
-    )?;
+    let rows = stmt
+        .query_map(
+            right_db::params![source_invocation_id, EPISODE_REVIEW_LEARNING_EVENTS_LIMIT],
+            |row| {
+                let action: String = row.get(0)?;
+                let skill_name: String = row.get(1)?;
+                let phase: String = row.get(2)?;
+                let status: String = row.get(3)?;
+                let summary: String = row.get(4)?;
+                Ok(format!(
+                    "{phase} {action} {skill_name} status={status} summary={summary}"
+                ))
+            },
+        )
+        .await?;
     let mut events = Vec::new();
     for row in rows {
         events.push(row?);
@@ -1428,8 +1462,11 @@ async fn collect_episode_review_skill_index(
     }
 }
 
-fn mark_episode_reviewing(conn: &right_db::Connection, episode_id: i64) -> anyhow::Result<()> {
-    match right_agent::learning_episodes::mark_episode_reviewing(conn, episode_id) {
+async fn mark_episode_reviewing(
+    conn: &right_db::Connection,
+    episode_id: i64,
+) -> anyhow::Result<()> {
+    match right_agent::learning_episodes::mark_episode_reviewing(conn, episode_id).await {
         Ok(()) => Ok(()),
         Err(right_db::DbError::NotFound) => Err(anyhow!(
             "learning episode {episode_id} could not enter reviewing"
@@ -1438,8 +1475,8 @@ fn mark_episode_reviewing(conn: &right_db::Connection, episode_id: i64) -> anyho
     }
 }
 
-fn mark_episode_reviewed(conn: &right_db::Connection, episode_id: i64) -> anyhow::Result<()> {
-    match right_agent::learning_episodes::mark_episode_reviewed(conn, episode_id) {
+async fn mark_episode_reviewed(conn: &right_db::Connection, episode_id: i64) -> anyhow::Result<()> {
+    match right_agent::learning_episodes::mark_episode_reviewed(conn, episode_id).await {
         Ok(()) => Ok(()),
         Err(right_db::DbError::NotFound) => Err(anyhow!(
             "learning episode {episode_id} could not be marked reviewed"
@@ -1448,25 +1485,26 @@ fn mark_episode_reviewed(conn: &right_db::Connection, episode_id: i64) -> anyhow
     }
 }
 
-fn mark_episode_review_failed_and_finish(
+async fn mark_episode_review_failed_and_finish(
     runtime: &LearningEpisodeRuntime,
     episode_id: i64,
     reason: &str,
 ) -> anyhow::Result<Option<(i64, bool)>> {
     let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let conn = right_db::open_connection(&runtime.agent_db_dir, false)
+        .await
         .with_context(|| format!("open {} data.db for review failure", runtime.agent_name))?;
     // First write: mark the episode row failed (its own transaction).
     {
-        let tx = conn.transaction()?;
+        let tx = conn.transaction().await?;
         right_agent::learning_episodes::mark_episode_failed(&tx, episode_id, reason)
+            .await
             .with_context(|| format!("mark learning episode {episode_id} failed"))?;
-        tx.commit()?;
+        tx.commit().await?;
     }
     // Second write: drive the circuit-breaker gate (its own transaction).
     // Atomicity loss between the two writes is acceptable — they touch
     // independent tables and the circuit self-heals on the next failure.
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
     let (count, opened) = record_review_failure(
         &conn,
         &runtime.agent_name,
@@ -1474,6 +1512,7 @@ fn mark_episode_review_failed_and_finish(
         runtime.learning.circuit_failure_threshold.unwrap_or(5),
         runtime.learning.circuit_cooldown_minutes.unwrap_or(60),
     )
+    .await
     .with_context(|| {
         format!(
             "record review failure for {} (episode {episode_id} reviewer crash)",
@@ -1512,13 +1551,13 @@ fn parse_seed_trigger_kind(value: &str) -> anyhow::Result<EpisodeSeedTriggerKind
     }
 }
 
-fn load_selector_corpus(
+async fn load_selector_corpus(
     conn: &right_db::Connection,
     episode: &LearningEpisodeRow,
 ) -> Result<SelectorCorpus, right_db::DbError> {
     let messages = match (episode.target_chat_id, episode.target_thread_id) {
-        (Some(chat_id), Some(thread_id)) => load_corpus_messages(conn, chat_id, thread_id)?,
-        (Some(chat_id), None) => load_corpus_messages(conn, chat_id, 0)?,
+        (Some(chat_id), Some(thread_id)) => load_corpus_messages(conn, chat_id, thread_id).await?,
+        (Some(chat_id), None) => load_corpus_messages(conn, chat_id, 0).await?,
         _ => Vec::new(),
     };
     let (root_session_id, invocation_id, async_run_id, cron_run_id) = corpus_scope_refs(episode);
@@ -1530,7 +1569,8 @@ fn load_selector_corpus(
         async_run_id.as_deref(),
         cron_run_id.as_deref(),
         &messages,
-    )?;
+    )
+    .await?;
     Ok(SelectorCorpus {
         kind: episode.kind,
         messages,
@@ -1538,7 +1578,7 @@ fn load_selector_corpus(
     })
 }
 
-fn load_corpus_messages(
+async fn load_corpus_messages(
     conn: &right_db::Connection,
     chat_id: i64,
     thread_id: i64,
@@ -1563,11 +1603,12 @@ fn load_corpus_messages(
             turn_id: row.get(6)?,
             created_at: row.get(7)?,
         })
-    })?
+    })
+    .await?
     .collect()
 }
 
-fn load_corpus_execution_events(
+async fn load_corpus_execution_events(
     conn: &right_db::Connection,
     agent_name: &str,
     root_session_id: Option<&str>,
@@ -1613,7 +1654,8 @@ fn load_corpus_execution_events(
             trust_label: row.get(2)?,
             content_text: row.get(3)?,
         })
-    })?
+    })
+    .await?
     .collect()
 }
 
@@ -1646,7 +1688,8 @@ async fn run_episode_selector(
         &runtime.agent_dir,
         runtime.ssh_config_path.as_deref(),
         runtime.resolved_sandbox.as_deref(),
-    );
+    )
+    .await;
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     let mut child = right_process::ProcessGroupChild::spawn(cmd)
@@ -1670,12 +1713,14 @@ async fn run_episode_selector(
 
     // Record usage — best-effort, never fail the selector over this.
     if let Some(breakdown) = crate::cc::stream::parse_usage_full(&stdout) {
-        let conn = right_db::open_connection(&runtime.agent_db_dir, false);
+        let conn = right_db::open_connection(&runtime.agent_db_dir, false).await;
         match conn {
             Ok(conn) => {
                 if let Err(e) = right_agent::usage::insert::insert_learning_selector(
                     &conn, &breakdown, episode.id,
-                ) {
+                )
+                .await
+                {
                     tracing::warn!(
                         agent = %runtime.agent_name,
                         episode_id = episode.id,
@@ -1719,7 +1764,7 @@ fn parse_selector_process_stdout(stdout: &str) -> Result<EpisodeSelectorOutput, 
     EpisodeSelectorOutput::parse(raw)
 }
 
-fn requeue_episode(
+async fn requeue_episode(
     conn: &right_db::Connection,
     episode_id: i64,
     now: chrono::DateTime<chrono::Utc>,
@@ -1728,10 +1773,10 @@ fn requeue_episode(
     let ready_after = (now + chrono::Duration::seconds(settle_seconds as i64))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    right_agent::learning_episodes::requeue_episode(conn, episode_id, &ready_after)
+    right_agent::learning_episodes::requeue_episode(conn, episode_id, &ready_after).await
 }
 
-fn requeue_episode_or_fail(
+async fn requeue_episode_or_fail(
     conn: &right_db::Connection,
     runtime: &LearningEpisodeRuntime,
     episode_id: i64,
@@ -1739,7 +1784,7 @@ fn requeue_episode_or_fail(
     settle_seconds: u64,
     now_utc: &str,
 ) -> anyhow::Result<()> {
-    match requeue_episode(conn, episode_id, now, settle_seconds) {
+    match requeue_episode(conn, episode_id, now, settle_seconds).await {
         Ok(()) => Ok(()),
         Err(right_db::DbError::NotFound) => {
             // Row moved out of 'selecting' under us. This helper is used after
@@ -1755,21 +1800,21 @@ fn requeue_episode_or_fail(
             let reason = format!("learning episode requeue failed: {e:#}");
             // Requeue failure after a Skip decision — we do not own the gate and
             // this is not a review-pipeline failure, so do not record a circuit failure.
-            mark_claimed_episode_failed(conn, runtime, episode_id, &reason, now_utc, false)?;
+            mark_claimed_episode_failed(conn, runtime, episode_id, &reason, now_utc, false).await?;
             Err(anyhow!(reason))
         }
     }
 }
 
-pub(crate) fn recover_stale_inflight_episodes(
+pub(crate) async fn recover_stale_inflight_episodes(
     conn: &right_db::Connection,
     agent_name: &str,
     now: &str,
 ) -> Result<usize, right_db::DbError> {
-    right_agent::learning_episodes::recover_stale_inflight_episodes(conn, agent_name, now)
+    right_agent::learning_episodes::recover_stale_inflight_episodes(conn, agent_name, now).await
 }
 
-pub(crate) fn has_ready_pending_episodes(
+pub(crate) async fn has_ready_pending_episodes(
     conn: &right_db::Connection,
     agent_name: &str,
     now: &str,
@@ -1783,6 +1828,7 @@ pub(crate) fn has_ready_pending_episodes(
         right_db::params![agent_name, now],
         |row| row.get::<_, i64>(0),
     )
+    .await
     .map(|value| value != 0)
 }
 
@@ -1926,18 +1972,20 @@ pub(crate) fn deprecation_warn_message(agent_name: &str) -> String {
 }
 
 /// Detect whether the agent has `learning_episodes` rows newer than 24h.
-pub(crate) fn has_recent_legacy_activity(
+pub(crate) async fn has_recent_legacy_activity(
     conn: &right_db::Connection,
 ) -> Result<bool, right_db::DbError> {
     let now = chrono::Utc::now();
     let cutoff = (now - chrono::Duration::hours(24))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM learning_episodes WHERE created_at >= ?1",
-        [cutoff.as_str()],
-        |r| r.get(0),
-    )?;
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM learning_episodes WHERE created_at >= ?1",
+            [cutoff.as_str()],
+            |r| r.get(0),
+        )
+        .await?;
     Ok(count > 0)
 }
 
@@ -1945,8 +1993,8 @@ pub(crate) fn has_recent_legacy_activity(
 mod deprecation_warn_tests {
     use super::*;
 
-    #[test]
-    fn deprecation_warn_message_mentions_agent_name_and_yaml_key() {
+    #[tokio::test]
+    async fn deprecation_warn_message_mentions_agent_name_and_yaml_key() {
         let msg = deprecation_warn_message("him");
         assert!(msg.contains("him"));
         assert!(msg.contains("background_review_enabled"));

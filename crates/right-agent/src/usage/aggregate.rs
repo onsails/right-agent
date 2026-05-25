@@ -6,7 +6,7 @@ use right_db::{Connection, params};
 use std::collections::BTreeMap;
 
 /// Aggregate rows for one (source, window) pair. `since=None` → all-time.
-pub fn aggregate(
+pub async fn aggregate(
     conn: &Connection,
     since: Option<DateTime<Utc>>,
     source: &str,
@@ -42,9 +42,10 @@ pub fn aggregate(
                 r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?,
                 r.get(9)?, r.get(10)?,
             )),
-        )?;
+        )
+        .await?;
 
-    let per_model = aggregate_per_model(conn, &since_str, source)?;
+    let per_model = aggregate_per_model(conn, &since_str, source).await?;
 
     Ok(WindowSummary {
         source: source.to_string(),
@@ -63,17 +64,19 @@ pub fn aggregate(
     })
 }
 
-fn aggregate_per_model(
+async fn aggregate_per_model(
     conn: &Connection,
     since_str: &Option<String>,
     source: &str,
 ) -> Result<BTreeMap<String, ModelTotals>, UsageError> {
-    let rows = conn.query_all(
-        "SELECT model_usage_json FROM usage_events
+    let rows = conn
+        .query_all(
+            "SELECT model_usage_json FROM usage_events
          WHERE source = ?1 AND (?2 IS NULL OR ts >= ?2)",
-        params![source, since_str],
-        |r| r.get::<_, String>(0),
-    )?;
+            params![source, since_str],
+            |r| r.get::<_, String>(0),
+        )
+        .await?;
 
     let mut out: BTreeMap<String, ModelTotals> = BTreeMap::new();
     for json in rows {
@@ -148,51 +151,65 @@ mod tests {
         }
     }
 
-    #[test]
-    fn aggregate_empty_table_returns_zeros() {
+    #[tokio::test]
+    async fn aggregate_empty_table_returns_zeros() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        let s = aggregate(&conn, None, "interactive").unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        let s = aggregate(&conn, None, "interactive").await.unwrap();
         assert_eq!(s.invocations, 0);
         assert_eq!(s.cost_usd, 0.0);
         assert!(s.per_model.is_empty());
     }
 
-    #[test]
-    fn aggregate_sums_across_invocations() {
+    #[tokio::test]
+    async fn aggregate_sums_across_invocations() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        insert_interactive(&conn, &breakdown(0.1, "sonnet"), 1, 0).unwrap();
-        insert_interactive(&conn, &breakdown(0.2, "sonnet"), 1, 0).unwrap();
-        let s = aggregate(&conn, None, "interactive").unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_interactive(&conn, &breakdown(0.1, "sonnet"), 1, 0)
+            .await
+            .unwrap();
+        insert_interactive(&conn, &breakdown(0.2, "sonnet"), 1, 0)
+            .await
+            .unwrap();
+        let s = aggregate(&conn, None, "interactive").await.unwrap();
         assert_eq!(s.invocations, 2);
         assert!((s.cost_usd - 0.3).abs() < 1e-9);
         assert_eq!(s.turns, 2);
         assert_eq!(s.input_tokens, 20);
     }
 
-    #[test]
-    fn aggregate_per_model_reduces_across_rows_and_models() {
+    #[tokio::test]
+    async fn aggregate_per_model_reduces_across_rows_and_models() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        insert_interactive(&conn, &breakdown(0.1, "sonnet"), 1, 0).unwrap();
-        insert_interactive(&conn, &breakdown(0.2, "sonnet"), 1, 0).unwrap();
-        insert_interactive(&conn, &breakdown(0.05, "haiku"), 1, 0).unwrap();
-        let s = aggregate(&conn, None, "interactive").unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_interactive(&conn, &breakdown(0.1, "sonnet"), 1, 0)
+            .await
+            .unwrap();
+        insert_interactive(&conn, &breakdown(0.2, "sonnet"), 1, 0)
+            .await
+            .unwrap();
+        insert_interactive(&conn, &breakdown(0.05, "haiku"), 1, 0)
+            .await
+            .unwrap();
+        let s = aggregate(&conn, None, "interactive").await.unwrap();
         assert_eq!(s.per_model.len(), 2);
         assert!((s.per_model["sonnet"].cost_usd - 0.3).abs() < 1e-9);
         assert!((s.per_model["haiku"].cost_usd - 0.05).abs() < 1e-9);
         assert_eq!(s.per_model["sonnet"].input_tokens, 20);
     }
 
-    #[test]
-    fn aggregate_filters_by_source() {
+    #[tokio::test]
+    async fn aggregate_filters_by_source() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        insert_interactive(&conn, &breakdown(0.1, "sonnet"), 1, 0).unwrap();
-        insert_cron(&conn, &breakdown(0.2, "sonnet"), "job1").unwrap();
-        let i = aggregate(&conn, None, "interactive").unwrap();
-        let c = aggregate(&conn, None, "cron").unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_interactive(&conn, &breakdown(0.1, "sonnet"), 1, 0)
+            .await
+            .unwrap();
+        insert_cron(&conn, &breakdown(0.2, "sonnet"), "job1")
+            .await
+            .unwrap();
+        let i = aggregate(&conn, None, "interactive").await.unwrap();
+        let c = aggregate(&conn, None, "cron").await.unwrap();
         assert_eq!(i.invocations, 1);
         assert!((i.cost_usd - 0.1).abs() < 1e-9);
         assert_eq!(c.invocations, 1);
@@ -205,69 +222,82 @@ mod tests {
         b
     }
 
-    #[test]
-    fn aggregate_splits_subscription_and_api_costs() {
+    #[tokio::test]
+    async fn aggregate_splits_subscription_and_api_costs() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        insert_interactive(&conn, &breakdown_with_src(0.10, "sonnet", "none"), 1, 0).unwrap();
-        insert_interactive(&conn, &breakdown_with_src(0.20, "sonnet", "none"), 1, 0).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_interactive(&conn, &breakdown_with_src(0.10, "sonnet", "none"), 1, 0)
+            .await
+            .unwrap();
+        insert_interactive(&conn, &breakdown_with_src(0.20, "sonnet", "none"), 1, 0)
+            .await
+            .unwrap();
         insert_interactive(
             &conn,
             &breakdown_with_src(0.05, "sonnet", "ANTHROPIC_API_KEY"),
             1,
             0,
         )
+        .await
         .unwrap();
 
-        let s = aggregate(&conn, None, "interactive").unwrap();
+        let s = aggregate(&conn, None, "interactive").await.unwrap();
         assert!((s.cost_usd - 0.35).abs() < 1e-9);
         assert!((s.subscription_cost_usd - 0.30).abs() < 1e-9);
         assert!((s.api_cost_usd - 0.05).abs() < 1e-9);
     }
 
-    #[test]
-    fn aggregate_subscription_only_has_zero_api_cost() {
+    #[tokio::test]
+    async fn aggregate_subscription_only_has_zero_api_cost() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        insert_interactive(&conn, &breakdown_with_src(0.10, "sonnet", "none"), 1, 0).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_interactive(&conn, &breakdown_with_src(0.10, "sonnet", "none"), 1, 0)
+            .await
+            .unwrap();
 
-        let s = aggregate(&conn, None, "interactive").unwrap();
+        let s = aggregate(&conn, None, "interactive").await.unwrap();
         assert!((s.subscription_cost_usd - 0.10).abs() < 1e-9);
         assert_eq!(s.api_cost_usd, 0.0);
     }
 
-    #[test]
-    fn aggregate_api_only_has_zero_subscription_cost() {
+    #[tokio::test]
+    async fn aggregate_api_only_has_zero_subscription_cost() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
         insert_interactive(
             &conn,
             &breakdown_with_src(0.10, "sonnet", "ANTHROPIC_API_KEY"),
             1,
             0,
         )
+        .await
         .unwrap();
 
-        let s = aggregate(&conn, None, "interactive").unwrap();
+        let s = aggregate(&conn, None, "interactive").await.unwrap();
         assert_eq!(s.subscription_cost_usd, 0.0);
         assert!((s.api_cost_usd - 0.10).abs() < 1e-9);
     }
 
-    #[test]
-    fn aggregate_filters_by_since() {
+    #[tokio::test]
+    async fn aggregate_filters_by_since() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        insert_interactive(&conn, &breakdown(0.1, "sonnet"), 1, 0).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_interactive(&conn, &breakdown(0.1, "sonnet"), 1, 0)
+            .await
+            .unwrap();
         // Backdate this row so the filter excludes it.
         conn.execute(
             "UPDATE usage_events SET ts = '2020-01-01T00:00:00Z' WHERE id = 1",
             [],
         )
+        .await
         .unwrap();
-        insert_interactive(&conn, &breakdown(0.2, "sonnet"), 1, 0).unwrap();
+        insert_interactive(&conn, &breakdown(0.2, "sonnet"), 1, 0)
+            .await
+            .unwrap();
 
         let since = Utc::now() - chrono::Duration::hours(1);
-        let s = aggregate(&conn, Some(since), "interactive").unwrap();
+        let s = aggregate(&conn, Some(since), "interactive").await.unwrap();
         assert_eq!(s.invocations, 1);
         assert!((s.cost_usd - 0.2).abs() < 1e-9);
     }

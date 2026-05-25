@@ -279,6 +279,7 @@ pub async fn reconnect_task(
 
     // Persist to SQLite.
     let conn = right_db::open_connection(&agent_dir, false)
+        .await
         .map_err(|e| ReconnectError::PersistFailed(format!("{e:#}")))?;
     let expires_at = new_state.expires_at.to_rfc3339();
     crate::credentials::db_update_oauth_token(
@@ -288,6 +289,7 @@ pub async fn reconnect_task(
         new_state.refresh_token.as_deref(),
         &expires_at,
     )
+    .await
     .map_err(|e| ReconnectError::PersistFailed(format!("{e:#}")))?;
 
     // Notify refresh scheduler so it schedules the next refresh.
@@ -666,11 +668,12 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         // Initialize schema and insert the server row that db_update_oauth_token requires.
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).await.unwrap();
         conn.execute(
             "INSERT INTO mcp_servers (name, url, auth_type) VALUES ('composio', 'https://example.com/mcp', 'oauth')",
             [],
         )
+        .await
         .unwrap();
         drop(conn);
 

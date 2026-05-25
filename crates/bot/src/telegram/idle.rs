@@ -50,8 +50,8 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    #[test]
-    fn touch_is_isolated_by_thread() {
+    #[tokio::test]
+    async fn touch_is_isolated_by_thread() {
         let tracker = IdleTracker::new(1_000);
         let thread_a = IdleKey {
             chat_id: -100,
@@ -68,8 +68,8 @@ mod tests {
         assert_eq!(tracker.idle_for_secs(thread_b, 1_080), 80);
     }
 
-    #[test]
-    fn thread_zero_is_root_chat_key() {
+    #[tokio::test]
+    async fn thread_zero_is_root_chat_key() {
         let tracker = IdleTracker::new(2_000);
         let root = IdleKey {
             chat_id: -200,
@@ -81,8 +81,8 @@ mod tests {
         assert_eq!(tracker.idle_for_secs(root, 2_050), 40);
     }
 
-    #[test]
-    fn unknown_key_uses_tracker_start_time() {
+    #[tokio::test]
+    async fn unknown_key_uses_tracker_start_time() {
         let tracker = IdleTracker::new(3_000);
         let key = IdleKey {
             chat_id: -300,
@@ -92,8 +92,8 @@ mod tests {
         assert_eq!(tracker.idle_for_secs(key, 3_090), 90);
     }
 
-    #[test]
-    fn prune_removes_old_keys_only() {
+    #[tokio::test]
+    async fn prune_removes_old_keys_only() {
         let tracker = IdleTracker::new(4_000);
         let old_key = IdleKey {
             chat_id: -400,
@@ -112,8 +112,8 @@ mod tests {
         assert_eq!(tracker.idle_for_secs(fresh_key, 4_120), 20);
     }
 
-    #[test]
-    fn prune_keeps_keys_at_cutoff() {
+    #[tokio::test]
+    async fn prune_keeps_keys_at_cutoff() {
         let tracker = IdleTracker::new(4_500);
         let key = IdleKey {
             chat_id: -450,
@@ -126,8 +126,8 @@ mod tests {
         assert_eq!(tracker.idle_for_secs(key, 4_560), 10);
     }
 
-    #[test]
-    fn tracker_is_shareable() {
+    #[tokio::test]
+    async fn tracker_is_shareable() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<IdleTracker>();
 

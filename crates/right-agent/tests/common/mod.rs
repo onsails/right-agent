@@ -44,7 +44,7 @@ pub async fn wrap(url: &str, source: &str) -> ResilientHindsight {
     setup_crypto();
     // `into_path()` is deprecated in current tempfile; use `.keep()`.
     let dir = tempfile::tempdir().unwrap().keep();
-    let _ = right_db::open_connection(&dir, true).unwrap();
+    let _ = right_db::open_connection(&dir, true).await.unwrap();
     let client = HindsightClient::new("hs_x", "b", "high", 1024, Some(url));
     ResilientHindsight::new(client, dir, source)
 }

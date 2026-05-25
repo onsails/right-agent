@@ -48,7 +48,7 @@ impl DoctorCheck {
 /// ripgrep PATH check), and validates agent directory structure.
 /// Unlike `verify_dependencies()`, doctor runs ALL checks and collects results
 /// -- never short-circuits.
-pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
+pub async fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     let mut checks = vec![
         check_binary("right", Some("https://github.com/onsails/right-agent")),
         check_binary(
@@ -83,7 +83,7 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     }
 
     // Agent structure checks
-    checks.extend(check_agent_structure(home));
+    checks.extend(check_agent_structure(home).await);
 
     // Telegram webhook checks — Fail when no webhook registered or URL mismatch (Webhooks Phase 1).
     checks.extend(check_webhook_info_for_agents(home));
@@ -124,13 +124,13 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     checks.extend(check_stt(home));
 
     // MCP token status check — Warn when any agent has missing/expired tokens (REFRESH-03)
-    checks.push(check_mcp_tokens(home));
+    checks.push(check_mcp_tokens(home).await);
 
     // OpenShell mTLS certs check
     checks.push(check_openshell_mtls_certs());
 
     // OpenShell gateway health check (gRPC)
-    checks.push(check_openshell_gateway_health());
+    checks.push(check_openshell_gateway_health().await);
 
     checks
 }
@@ -172,7 +172,7 @@ fn check_binary(name: &str, fix_hint: Option<&str>) -> DoctorCheck {
 ///
 /// Returns `None` when OpenShell is not ready (certs missing, not installed) —
 /// the caller skips the check silently in that case.
-fn check_sandbox_for_agent(
+async fn check_sandbox_for_agent(
     agent_name: &str,
     config: Option<&crate::agent::types::AgentConfig>,
 ) -> Option<DoctorCheck> {
@@ -188,18 +188,11 @@ fn check_sandbox_for_agent(
     let sandbox =
         right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
 
-    // Requires a tokio runtime — skip gracefully in sync test contexts.
-    let handle = match tokio::runtime::Handle::try_current() {
-        Ok(h) => h,
-        Err(_) => return None,
-    };
-
-    let result = tokio::task::block_in_place(|| {
-        handle.block_on(async {
-            let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-            right_openshell::openshell::is_sandbox_ready(&mut client, &sandbox).await
-        })
-    });
+    let result = async {
+        let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
+        right_openshell::openshell::is_sandbox_ready(&mut client, &sandbox).await
+    }
+    .await;
 
     match result {
         Ok(true) => Some(DoctorCheck {
@@ -227,7 +220,7 @@ fn check_sandbox_for_agent(
 ///
 /// Checks that agents/ exists and contains at least one valid agent
 /// (directory with IDENTITY.md).
-fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
+async fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let agents_dir = right_config::agents_dir(home);
 
@@ -338,17 +331,19 @@ fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
                 )
             })
             .unwrap_or(true); // default sandbox mode is openshell
-        if is_openshell && let Some(check) = check_sandbox_for_agent(&name, agent_config.as_ref()) {
-            checks.push(check);
+        if is_openshell {
+            if let Some(check) = check_sandbox_for_agent(&name, agent_config.as_ref()).await {
+                checks.push(check);
+            }
         }
 
         // Memory layer health (queue size, oldest-row age, long-standing alerts).
         if path.join("data.db").exists() {
-            for mut chk in check_memory(&path) {
+            for mut chk in check_memory(&path).await {
                 chk.name = format!("{name}/{}", chk.name);
                 checks.push(chk);
             }
-            for mut chk in check_cron_targets(&path) {
+            for mut chk in check_cron_targets(&path).await {
                 chk.name = format!("{name}/{}", chk.name);
                 checks.push(chk);
             }
@@ -825,7 +820,7 @@ fn check_tunnel_health(home: &Path) -> DoctorCheck {
 /// Aggregates missing/expired tokens into a single Warn check.
 /// Tokens with expires_at=0 (non-expiring) count as ok (REFRESH-04).
 /// Only synchronous file I/O — no HTTP calls.
-fn check_mcp_tokens_impl(home: &Path) -> DoctorCheck {
+async fn check_mcp_tokens_impl(home: &Path) -> DoctorCheck {
     let agents_dir = right_config::agents_dir(home);
 
     if !agents_dir.exists() {
@@ -857,12 +852,12 @@ fn check_mcp_tokens_impl(home: &Path) -> DoctorCheck {
             continue;
         }
 
-        let conn = match right_db::open_connection(&path, false) {
+        let conn = match right_db::open_connection(&path, false).await {
             Ok(c) => c,
             Err(_) => continue, // skip agents with unreadable DB
         };
 
-        let servers = match right_mcp::credentials::db_list_servers(&conn) {
+        let servers = match right_mcp::credentials::db_list_servers(&conn).await {
             Ok(s) => s,
             Err(_) => continue,
         };
@@ -883,8 +878,8 @@ fn check_mcp_tokens_impl(home: &Path) -> DoctorCheck {
 ///
 /// Returns `Some(problems)` when any agent has missing/expired MCP tokens, `None` when all ok.
 /// Uses the same logic as the doctor mcp-tokens check.
-pub fn mcp_auth_issues(home: &Path) -> Option<Vec<String>> {
-    let check = check_mcp_tokens(home);
+pub async fn mcp_auth_issues(home: &Path) -> Option<Vec<String>> {
+    let check = check_mcp_tokens(home).await;
     if check.status == CheckStatus::Warn {
         // Extract the problem list from "missing/expired: agent1/notion, agent2/linear"
         let problems: Vec<String> = check
@@ -902,8 +897,8 @@ pub fn mcp_auth_issues(home: &Path) -> Option<Vec<String>> {
 }
 
 /// Check MCP token status across all agents — reads directly from mcp.json headers.
-fn check_mcp_tokens(home: &Path) -> DoctorCheck {
-    check_mcp_tokens_impl(home)
+async fn check_mcp_tokens(home: &Path) -> DoctorCheck {
+    check_mcp_tokens_impl(home).await
 }
 
 /// Generate fix guidance for bubblewrap sandbox failures.
@@ -974,8 +969,7 @@ fn check_openshell_mtls_certs() -> DoctorCheck {
 /// Check OpenShell gateway health via gRPC Health RPC.
 ///
 /// Connects to 127.0.0.1:8080 with mTLS and calls Health RPC.
-/// Uses block_in_place to run async gRPC call from sync context.
-fn check_openshell_gateway_health() -> DoctorCheck {
+async fn check_openshell_gateway_health() -> DoctorCheck {
     let mtls_dir = right_openshell::openshell::default_mtls_dir();
 
     // Skip if certs are missing (the mtls check already flags this)
@@ -988,23 +982,17 @@ fn check_openshell_gateway_health() -> DoctorCheck {
         };
     }
 
-    let result = tokio::task::block_in_place(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("failed to create runtime: {e}"))?;
-        rt.block_on(async {
-            let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
-                .await
-                .map_err(|e| format!("{e:#}"))?;
-            let resp = client
-                .health(right_openshell::openshell_proto::openshell::v1::HealthRequest {})
-                .await
-                .map_err(|e| format!("Health RPC failed: {e:#}"))?;
-            let status = resp.into_inner().status;
-            Ok::<i32, String>(status)
-        })
-    });
+    let result = async {
+        let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+        let resp = client
+            .health(right_openshell::openshell_proto::openshell::v1::HealthRequest {})
+            .await
+            .map_err(|e| format!("Health RPC failed: {e:#}"))?;
+        Ok::<i32, String>(resp.into_inner().status)
+    }
+    .await;
 
     match result {
         Ok(1) => DoctorCheck {
@@ -1036,10 +1024,10 @@ fn check_openshell_gateway_health() -> DoctorCheck {
 ///
 /// Returns one `DoctorCheck` per problem found, plus a single Pass when the agent
 /// has crons and all of them are healthy. Returns an empty Vec if the agent has no crons.
-pub fn check_cron_targets(agent_dir: &Path) -> Vec<DoctorCheck> {
+pub async fn check_cron_targets(agent_dir: &Path) -> Vec<DoctorCheck> {
     let mut out = Vec::new();
 
-    let conn = match right_db::open_connection(agent_dir, false) {
+    let conn = match right_db::open_connection(agent_dir, false).await {
         Ok(c) => c,
         Err(e) => {
             out.push(DoctorCheck {
@@ -1087,9 +1075,12 @@ pub fn check_cron_targets(agent_dir: &Path) -> Vec<DoctorCheck> {
         }
     };
 
-    let rows = match stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
-    }) {
+    let rows = match stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+        })
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             out.push(DoctorCheck {
@@ -1167,12 +1158,12 @@ pub fn check_cron_targets(agent_dir: &Path) -> Vec<DoctorCheck> {
 /// `Fail` check with the error detail rather than silently dropping the check.
 /// This preserves FAIL-FAST semantics while still letting the doctor emit all
 /// other checks (one failing check shouldn't hide the rest).
-pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
+pub async fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     let mut out = Vec::new();
     let db_path = agent_dir.join("data.db");
 
     // 1. data.db opens.
-    let conn = match right_db::open_connection(agent_dir, false) {
+    let conn = match right_db::open_connection(agent_dir, false).await {
         Ok(c) => c,
         Err(e) => {
             out.push(DoctorCheck {
@@ -1186,7 +1177,9 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     };
 
     // 2. journal_mode.
-    let mode: Result<String, _> = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0));
+    let mode: Result<String, _> = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .await;
     match mode {
         Ok(m) if m.eq_ignore_ascii_case("wal") => {
             out.push(DoctorCheck {
@@ -1212,7 +1205,10 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
 
     // 3. user_version matches migration.
     let expected: u32 = right_db::migrations::LATEST_SCHEMA_VERSION;
-    match conn.query_row::<u32, _, _>("PRAGMA user_version", [], |r| r.get(0)) {
+    match conn
+        .query_row::<u32, _, _>("PRAGMA user_version", [], |r| r.get(0))
+        .await
+    {
         Ok(version) if version == expected => out.push(DoctorCheck {
             name: "memory schema".into(),
             status: CheckStatus::Pass,
@@ -1234,7 +1230,7 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     }
 
     // 4. pending_retains row count.
-    match right_memory::retain_queue::count(&conn) {
+    match right_memory::retain_queue::count(&conn).await {
         Ok(n) => {
             let (st, detail) = match n {
                 n if n < 500 => (CheckStatus::Pass, format!("{n} entries")),
@@ -1263,7 +1259,7 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     }
 
     // 5. oldest age.
-    match right_memory::retain_queue::oldest_age(&conn) {
+    match right_memory::retain_queue::oldest_age(&conn).await {
         Ok(Some(age)) => {
             let hours = age.as_secs() / 3600;
             let (st, detail) = if hours < 1 {
@@ -1300,12 +1296,15 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     // 6. memory_alerts rows older than 24h.
     use right_memory::alert_types::{AUTH_FAILED, CLIENT_FLOOD};
     for alert_type in [AUTH_FAILED, CLIENT_FLOOD] {
-        match conn.query_row::<bool, _, _>(
-            "SELECT EXISTS(SELECT 1 FROM memory_alerts WHERE alert_type = ?1 \
+        match conn
+            .query_row::<bool, _, _>(
+                "SELECT EXISTS(SELECT 1 FROM memory_alerts WHERE alert_type = ?1 \
                  AND datetime(first_sent_at) < datetime('now', '-24 hours'))",
-            [alert_type],
-            |r| r.get(0),
-        ) {
+                [alert_type],
+                |r| r.get(0),
+            )
+            .await
+        {
             Ok(true) => {
                 out.push(DoctorCheck {
                     name: format!("memory alert: {alert_type}"),
@@ -1436,31 +1435,31 @@ mod cron_target_tests {
         crate::agent::allowlist::write_file(agent_dir, &file).unwrap();
     }
 
-    fn seed_cron(conn: &right_db::Connection, name: &str, target_chat_id: Option<i64>) {
+    async fn seed_cron(conn: &right_db::Connection, name: &str, target_chat_id: Option<i64>) {
         let now = chrono::Utc::now().to_rfc3339();
         match target_chat_id {
             Some(id) => conn.execute(
                 "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, target_chat_id, created_at, updated_at) \
                  VALUES (?1, '*/5 * * * *', 'p', 1.0, ?2, ?3, ?3)",
                 right_db::params![name, id, &now],
-            ).unwrap(),
+            ).await.unwrap(),
             None => conn.execute(
                 "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
                  VALUES (?1, '*/5 * * * *', 'p', 1.0, ?2, ?2)",
                 right_db::params![name, &now],
-            ).unwrap(),
+            ).await.unwrap(),
         };
     }
 
-    #[test]
-    fn null_target_warns() {
+    #[tokio::test]
+    async fn null_target_warns() {
         let dir = tempfile::tempdir().unwrap();
         write_allowlist(dir.path(), &[100], &[]);
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
-        seed_cron(&conn, "j1", None);
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        seed_cron(&conn, "j1", None).await;
         drop(conn);
 
-        let checks = check_cron_targets(dir.path());
+        let checks = check_cron_targets(dir.path()).await;
         let warns: Vec<_> = checks
             .iter()
             .filter(|c| c.status == CheckStatus::Warn)
@@ -1469,15 +1468,15 @@ mod cron_target_tests {
         assert!(warns[0].detail.contains("j1"));
     }
 
-    #[test]
-    fn target_outside_allowlist_warns() {
+    #[tokio::test]
+    async fn target_outside_allowlist_warns() {
         let dir = tempfile::tempdir().unwrap();
         write_allowlist(dir.path(), &[100], &[]);
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
-        seed_cron(&conn, "j1", Some(-999));
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        seed_cron(&conn, "j1", Some(-999)).await;
         drop(conn);
 
-        let checks = check_cron_targets(dir.path());
+        let checks = check_cron_targets(dir.path()).await;
         let warns: Vec<_> = checks
             .iter()
             .filter(|c| c.status == CheckStatus::Warn)
@@ -1486,15 +1485,15 @@ mod cron_target_tests {
         assert!(warns[0].detail.contains("-999"));
     }
 
-    #[test]
-    fn valid_target_passes() {
+    #[tokio::test]
+    async fn valid_target_passes() {
         let dir = tempfile::tempdir().unwrap();
         write_allowlist(dir.path(), &[], &[-200]);
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
-        seed_cron(&conn, "j1", Some(-200));
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        seed_cron(&conn, "j1", Some(-200)).await;
         drop(conn);
 
-        let checks = check_cron_targets(dir.path());
+        let checks = check_cron_targets(dir.path()).await;
         let warns: Vec<_> = checks
             .iter()
             .filter(|c| c.status == CheckStatus::Warn)
@@ -1539,8 +1538,8 @@ mod stt_doctor_tests {
         agents_dir
     }
 
-    #[test]
-    fn warn_on_missing_model_when_enabled() {
+    #[tokio::test]
+    async fn warn_on_missing_model_when_enabled() {
         let tmp = tempfile::TempDir::new().unwrap();
         make_agent(tmp.path(), "a", true, WhisperModel::Small);
         let reports = check_stt(tmp.path());
@@ -1550,8 +1549,8 @@ mod stt_doctor_tests {
         );
     }
 
-    #[test]
-    fn warn_severity_is_warn_not_fail() {
+    #[tokio::test]
+    async fn warn_severity_is_warn_not_fail() {
         let tmp = tempfile::TempDir::new().unwrap();
         make_agent(tmp.path(), "a", true, WhisperModel::Tiny);
         let reports = check_stt(tmp.path());
@@ -1564,8 +1563,8 @@ mod stt_doctor_tests {
         }
     }
 
-    #[test]
-    fn silent_when_stt_disabled() {
+    #[tokio::test]
+    async fn silent_when_stt_disabled() {
         let tmp = tempfile::TempDir::new().unwrap();
         make_agent(tmp.path(), "a", false, WhisperModel::Small);
         let reports = check_stt(tmp.path());
@@ -1580,8 +1579,8 @@ mod stt_doctor_tests {
         );
     }
 
-    #[test]
-    fn pass_when_model_cached() {
+    #[tokio::test]
+    async fn pass_when_model_cached() {
         let tmp = tempfile::TempDir::new().unwrap();
         make_agent(tmp.path(), "a", true, WhisperModel::Tiny);
         // Create the model cache file.
@@ -1595,8 +1594,8 @@ mod stt_doctor_tests {
         );
     }
 
-    #[test]
-    fn silent_when_no_agents_dir() {
+    #[tokio::test]
+    async fn silent_when_no_agents_dir() {
         let tmp = tempfile::TempDir::new().unwrap();
         // Don't create agents/ at all.
         let reports = check_stt(tmp.path());

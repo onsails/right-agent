@@ -46,7 +46,7 @@ pub(crate) const PREFILTER_SCHEMA_JSON: &str = r#"{
 
 /// Sum today's spend across learning sources from `usage_events`. Used by the
 /// worker to gate the prefilter+probe-writer pipeline against the daily budget.
-pub(crate) fn today_spend_usd(
+pub(crate) async fn today_spend_usd(
     conn: &right_db::Connection,
     now_utc: &str,
 ) -> Result<f64, right_db::DbError> {
@@ -64,7 +64,7 @@ pub(crate) fn today_spend_usd(
     for s in right_agent::usage::LEARNING_SOURCES {
         params.push(s)?;
     }
-    conn.query_row(&sql, params, |r| r.get::<_, f64>(0))
+    conn.query_row(&sql, params, |r| r.get::<_, f64>(0)).await
 }
 
 /// Compose the prompt that goes to Haiku.
@@ -329,7 +329,7 @@ pub(crate) struct PrefilterContext {
 pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> PrefilterDecision {
     use crate::cc::invocation::{ClaudeInvocation, OutputFormat, build_claude_command};
 
-    let conn = match right_db::open_connection(&ctx.agent_db_dir, false) {
+    let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "prefilter open_connection failed: {e:#}");
@@ -342,7 +342,9 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
         &conn,
         ctx.baseline_window_days,
         ctx.baseline_min_sample,
-    ) {
+    )
+    .await
+    {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "prefilter baseline compute failed: {e:#}");
@@ -351,7 +353,6 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
             };
         }
     };
-    drop(conn);
 
     let skills = match crate::learning_review::collect_host_rightx_skill_index(&ctx.agent_dir) {
         Ok(s) => s,
@@ -387,7 +388,8 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
         &ctx.agent_dir,
         ctx.ssh_config_path.as_deref(),
         ctx.resolved_sandbox.as_deref(),
-    );
+    )
+    .await;
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -446,13 +448,13 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
 
     // Record usage event. Zero-signal results still cost money and must be visible.
     if let Some(b) = crate::cc::stream::parse_usage_full(&stdout)
-        && let Ok(conn) = right_db::open_connection(&ctx.agent_db_dir, false)
         && let Err(e) = right_agent::usage::insert::insert_learning_prefilter(
             &conn,
             &b,
             ctx.chat_id,
             ctx.thread_id,
         )
+        .await
     {
         tracing::warn!(agent = %ctx.agent_name, "prefilter usage insert failed: {e:#}");
     }
@@ -533,16 +535,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_prompt_embeds_anchor_texts() {
+    #[tokio::test]
+    async fn build_prompt_embeds_anchor_texts() {
         let bs = baselines_insufficient(0);
         let p = build_prompt(&anchor("hello world", "hi back"), &bs, "");
         assert!(p.contains("hello world"));
         assert!(p.contains("hi back"));
     }
 
-    #[test]
-    fn redacts_schema_and_prompt_from_prefilter_argv() {
+    #[tokio::test]
+    async fn redacts_schema_and_prompt_from_prefilter_argv() {
         let args = vec![
             "claude".to_owned(),
             "-p".to_owned(),
@@ -560,8 +562,8 @@ mod tests {
         assert!(redacted.contains("<prompt chars=13>"));
     }
 
-    #[test]
-    fn prefilter_failure_diagnostics_bound_output_excerpts() {
+    #[tokio::test]
+    async fn prefilter_failure_diagnostics_bound_output_excerpts() {
         let stdout = "s".repeat(PREFILTER_LOG_EXCERPT_MAX_CHARS + 100);
         let stderr = "e".repeat(PREFILTER_LOG_EXCERPT_MAX_CHARS + 200);
 
@@ -579,15 +581,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parses_skip_decision() {
+    #[tokio::test]
+    async fn parses_skip_decision() {
         let stdout = wrap_cc_envelope(r#"{"decision":"skip","reason":"trivial echo"}"#);
         let d = parse_output(&stdout);
         assert!(matches!(d, PrefilterDecision::Skip { reason } if reason == "trivial echo"));
     }
 
-    #[test]
-    fn parses_patch_existing_decision_with_target() {
+    #[tokio::test]
+    async fn parses_patch_existing_decision_with_target() {
         let stdout = wrap_cc_envelope(
             r#"{"decision":"patch_existing","target_skill":"rightx-foo","reason":"missed step"}"#,
         );
@@ -604,8 +606,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parses_create_new_decision_with_topic_hint() {
+    #[tokio::test]
+    async fn parses_create_new_decision_with_topic_hint() {
         let stdout = wrap_cc_envelope(
             r#"{"decision":"create_new","topic_hint":"git rebase recovery","reason":"new procedure"}"#,
         );
@@ -619,22 +621,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn patch_without_target_returns_skip() {
+    #[tokio::test]
+    async fn patch_without_target_returns_skip() {
         let stdout = wrap_cc_envelope(r#"{"decision":"patch_existing","reason":"vague"}"#);
         let d = parse_output(&stdout);
         assert!(matches!(d, PrefilterDecision::Skip { .. }));
     }
 
-    #[test]
-    fn create_without_topic_hint_returns_skip() {
+    #[tokio::test]
+    async fn create_without_topic_hint_returns_skip() {
         let stdout = wrap_cc_envelope(r#"{"decision":"create_new","reason":"vague"}"#);
         let d = parse_output(&stdout);
         assert!(matches!(d, PrefilterDecision::Skip { .. }));
     }
 
-    #[test]
-    fn target_skill_not_rightx_returns_skip() {
+    #[tokio::test]
+    async fn target_skill_not_rightx_returns_skip() {
         let stdout = wrap_cc_envelope(
             r#"{"decision":"patch_existing","target_skill":"foo-bar","reason":"x"}"#,
         );
@@ -642,8 +644,8 @@ mod tests {
         assert!(matches!(d, PrefilterDecision::Skip { .. }));
     }
 
-    #[test]
-    fn malformed_json_returns_skip() {
+    #[tokio::test]
+    async fn malformed_json_returns_skip() {
         let d = parse_output("not json");
         assert!(matches!(d, PrefilterDecision::Skip { .. }));
     }
@@ -659,8 +661,8 @@ mod tests {
         .to_string()
     }
 
-    #[test]
-    fn build_prompt_truncates_long_inputs() {
+    #[tokio::test]
+    async fn build_prompt_truncates_long_inputs() {
         // Use non-ASCII markers absent from the template prose.
         let long_user = "ы".repeat(10_000);
         let long_asst = "ё".repeat(10_000);
@@ -671,8 +673,8 @@ mod tests {
         assert_eq!(p.matches('ё').count(), 4000);
     }
 
-    #[test]
-    fn build_prompt_includes_create_new_framing_when_receipts_empty() {
+    #[tokio::test]
+    async fn build_prompt_includes_create_new_framing_when_receipts_empty() {
         let mut a = anchor("hello", "hi");
         a.used_skill_receipts.clear();
         let bs = baselines_insufficient(8);
@@ -681,8 +683,8 @@ mod tests {
         assert!(p.contains("USED SKILLS: none"), "got: {p}");
     }
 
-    #[test]
-    fn build_prompt_includes_patch_framing_when_receipts_present() {
+    #[tokio::test]
+    async fn build_prompt_includes_patch_framing_when_receipts_present() {
         let mut a = anchor("hello", "hi");
         a.used_skill_receipts = vec!["rightx-foo".into()];
         let bs = baselines_insufficient(8);
@@ -694,8 +696,8 @@ mod tests {
         assert!(p.contains("- rightx-foo"), "got: {p}");
     }
 
-    #[test]
-    fn build_prompt_renders_percentiles_when_baseline_available() {
+    #[tokio::test]
+    async fn build_prompt_renders_percentiles_when_baseline_available() {
         let a = anchor("hello", "hi");
         let bs = baselines_available();
         let p = build_prompt(&a, &bs, "");
@@ -705,8 +707,8 @@ mod tests {
         assert!(p.contains("P99="), "got: {p}");
     }
 
-    #[test]
-    fn build_prompt_renders_insufficient_baseline_message() {
+    #[tokio::test]
+    async fn build_prompt_renders_insufficient_baseline_message() {
         let a = anchor("hello", "hi");
         let bs = baselines_insufficient(8);
         let p = build_prompt(&a, &bs, "");

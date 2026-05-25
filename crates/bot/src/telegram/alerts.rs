@@ -8,19 +8,22 @@ use chrono::Utc;
 
 /// Returns true iff an alert of this type has NOT been sent in the last 24
 /// hours (i.e., it is safe to send).
-pub(crate) fn should_fire(db: &Path, alert_type: &str) -> bool {
-    let conn = match right_db::open_connection(db, false) {
+pub(crate) async fn should_fire(db: &Path, alert_type: &str) -> bool {
+    let conn = match right_db::open_connection(db, false).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("alerts::should_fire open failed: {e:#}");
             return false;
         }
     };
-    let existing: Option<String> = match conn.query_row(
-        "SELECT first_sent_at FROM memory_alerts WHERE alert_type = ?1",
-        [alert_type],
-        |r| r.get(0),
-    ) {
+    let existing: Option<String> = match conn
+        .query_row(
+            "SELECT first_sent_at FROM memory_alerts WHERE alert_type = ?1",
+            [alert_type],
+            |r| r.get(0),
+        )
+        .await
+    {
         Ok(v) => Some(v),
         Err(right_db::DbError::NotFound) => None,
         Err(e) => {
@@ -43,15 +46,18 @@ pub(crate) fn should_fire(db: &Path, alert_type: &str) -> bool {
 
 /// Record that an alert of this type was sent. Idempotent via
 /// `ON CONFLICT DO UPDATE`.
-pub(crate) fn record_fire(db: &Path, alert_type: &str) {
-    match right_db::open_connection(db, false) {
+pub(crate) async fn record_fire(db: &Path, alert_type: &str) {
+    match right_db::open_connection(db, false).await {
         Ok(conn) => {
             let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            if let Err(e) = conn.execute(
-                "INSERT INTO memory_alerts(alert_type, first_sent_at) VALUES (?1, ?2) \
+            if let Err(e) = conn
+                .execute(
+                    "INSERT INTO memory_alerts(alert_type, first_sent_at) VALUES (?1, ?2) \
                  ON CONFLICT(alert_type) DO UPDATE SET first_sent_at = excluded.first_sent_at",
-                [alert_type, &now],
-            ) {
+                    [alert_type, &now],
+                )
+                .await
+            {
                 tracing::warn!("alerts::record_fire failed: {e:#}");
             }
         }
@@ -64,18 +70,18 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn should_fire_true_when_no_row_exists() {
+    #[tokio::test]
+    async fn should_fire_true_when_no_row_exists() {
         let dir = tempdir().unwrap();
-        right_db::open_connection(dir.path(), true).unwrap();
-        assert!(should_fire(dir.path(), "test_type"));
+        right_db::open_connection(dir.path(), true).await.unwrap();
+        assert!(should_fire(dir.path(), "test_type").await);
     }
 
-    #[test]
-    fn record_fire_then_should_fire_is_false() {
+    #[tokio::test]
+    async fn record_fire_then_should_fire_is_false() {
         let dir = tempdir().unwrap();
-        right_db::open_connection(dir.path(), true).unwrap();
-        record_fire(dir.path(), "test_type");
-        assert!(!should_fire(dir.path(), "test_type"));
+        right_db::open_connection(dir.path(), true).await.unwrap();
+        record_fire(dir.path(), "test_type").await;
+        assert!(!should_fire(dir.path(), "test_type").await);
     }
 }

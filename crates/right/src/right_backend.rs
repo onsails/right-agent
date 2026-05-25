@@ -7,7 +7,7 @@
 //! MCP servers.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -45,8 +45,9 @@ pub(crate) struct ConversationSearchParams {
 }
 
 /// Connection cache keyed by agent name.
-type ConnCache = Arc<DashMap<String, Arc<Mutex<right_db::Connection>>>>;
+type ConnCache = Arc<DashMap<String, Arc<tokio::sync::Mutex<right_db::Connection>>>>;
 
+#[derive(Clone)]
 pub struct RightBackend {
     conn_cache: ConnCache,
     agents_dir: PathBuf,
@@ -164,14 +165,14 @@ impl RightBackend {
         context: crate::progress::ToolCallContext,
     ) -> Result<CallToolResult, anyhow::Error> {
         match tool_name {
-            "cron_create" => self.call_cron_create(agent_name, agent_dir, &args),
-            "cron_update" => self.call_cron_update(agent_name, agent_dir, &args),
-            "cron_delete" => self.call_cron_delete(agent_name, agent_dir, &args),
-            "cron_list" => self.call_cron_list(agent_name),
-            "cron_list_runs" => self.call_cron_list_runs(agent_name, &args),
-            "cron_show_run" => self.call_cron_show_run(agent_name, &args),
-            "cron_trigger" => self.call_cron_trigger(agent_name, &args),
-            "mcp_list" => self.call_mcp_list(agent_name),
+            "cron_create" => self.call_cron_create(agent_name, agent_dir, &args).await,
+            "cron_update" => self.call_cron_update(agent_name, agent_dir, &args).await,
+            "cron_delete" => self.call_cron_delete(agent_name, agent_dir, &args).await,
+            "cron_list" => self.call_cron_list(agent_name).await,
+            "cron_list_runs" => self.call_cron_list_runs(agent_name, &args).await,
+            "cron_show_run" => self.call_cron_show_run(agent_name, &args).await,
+            "cron_trigger" => self.call_cron_trigger(agent_name, &args).await,
+            "mcp_list" => self.call_mcp_list(agent_name).await,
             crate::progress::SEND_PROGRESS_TOOL => self.call_send_progress(context, &args).await,
             SKILL_LEARNING_START_TOOL => {
                 self.call_skill_learning_start(agent_name, agent_dir, context, &args)
@@ -208,34 +209,24 @@ impl RightBackend {
     // Connection helpers
     // ------------------------------------------------------------------
 
-    pub(crate) fn get_conn(
+    pub(crate) async fn get_conn(
         &self,
         agent_name: &str,
-    ) -> Result<Arc<Mutex<right_db::Connection>>, anyhow::Error> {
+    ) -> Result<Arc<tokio::sync::Mutex<right_db::Connection>>, anyhow::Error> {
         // Fast path: shared read.
         if let Some(entry) = self.conn_cache.get(agent_name) {
             return Ok(Arc::clone(entry.value()));
         }
-        // Slow path: acquire the shard write-lock atomically via Entry so
-        // concurrent callers cannot both open a Connection and orphan one.
+        let db_dir = self.agents_dir.join(agent_name);
+        let conn = right_db::open_connection(&db_dir, false)
+            .await
+            .with_context(|| format!("failed to open memory DB for {agent_name}"))?;
+        let opened = Arc::new(tokio::sync::Mutex::new(conn));
         let entry = self
             .conn_cache
             .entry(agent_name.to_owned())
-            .or_try_insert_with(|| -> Result<_, anyhow::Error> {
-                let db_dir = self.agents_dir.join(agent_name);
-                let conn = right_db::open_connection(&db_dir, false)
-                    .with_context(|| format!("failed to open memory DB for {agent_name}"))?;
-                Ok(Arc::new(Mutex::new(conn)))
-            })?;
+            .or_insert_with(|| Arc::clone(&opened));
         Ok(Arc::clone(entry.value()))
-    }
-
-    fn lock_conn(
-        conn_arc: &Arc<Mutex<right_db::Connection>>,
-    ) -> Result<std::sync::MutexGuard<'_, right_db::Connection>, anyhow::Error> {
-        conn_arc
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poisoned: {e}"))
     }
 
     fn invocation_kind_to_created_by(
@@ -269,7 +260,7 @@ impl RightBackend {
     // Cron tools
     // ------------------------------------------------------------------
 
-    fn call_cron_create(
+    async fn call_cron_create(
         &self,
         agent_name: &str,
         agent_dir: &Path,
@@ -280,8 +271,8 @@ impl RightBackend {
         if let Err(msg) = validate_target_against_allowlist(agent_dir, params.target_chat_id) {
             return Ok(tool_error("chat_id_not_in_allowlist", msg, None));
         }
-        let conn_arc = self.get_conn(agent_name)?;
-        let conn = Self::lock_conn(&conn_arc)?;
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
         let result = right_agent::cron_spec::create_spec_v2(
             &conn,
             &params.job_name,
@@ -295,13 +286,14 @@ impl RightBackend {
             params.target_thread_id,
             false,
         )
+        .await
         .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
         Ok(CallToolResult::success(vec![Content::text(
             right_agent::cron_spec::format_result(&result),
         )]))
     }
 
-    fn call_cron_update(
+    async fn call_cron_update(
         &self,
         agent_name: &str,
         agent_dir: &Path,
@@ -314,8 +306,8 @@ impl RightBackend {
         {
             return Ok(tool_error("chat_id_not_in_allowlist", msg, None));
         }
-        let conn_arc = self.get_conn(agent_name)?;
-        let conn = Self::lock_conn(&conn_arc)?;
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
         let result = right_agent::cron_spec::update_spec_partial(
             &conn,
             &params.job_name,
@@ -328,13 +320,14 @@ impl RightBackend {
             params.target_chat_id,
             params.target_thread_id,
         )
+        .await
         .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
         Ok(CallToolResult::success(vec![Content::text(
             right_agent::cron_spec::format_result(&result),
         )]))
     }
 
-    fn call_cron_delete(
+    async fn call_cron_delete(
         &self,
         agent_name: &str,
         agent_dir: &Path,
@@ -342,30 +335,32 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronDeleteParams =
             serde_json::from_value(args.clone()).context("invalid cron_delete params")?;
-        let conn_arc = self.get_conn(agent_name)?;
-        let conn = Self::lock_conn(&conn_arc)?;
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
         let msg = right_agent::cron_spec::delete_spec(&conn, &params.job_name, agent_dir)
+            .await
             .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    fn call_cron_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
-        let conn_arc = self.get_conn(agent_name)?;
-        let conn = Self::lock_conn(&conn_arc)?;
-        let output =
-            right_agent::cron_spec::list_specs(&conn).map_err(|e| anyhow::anyhow!("{e}"))?;
+    async fn call_cron_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
+        let output = right_agent::cron_spec::list_specs(&conn)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    fn call_cron_list_runs(
+    async fn call_cron_list_runs(
         &self,
         agent_name: &str,
         args: &serde_json::Value,
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronListRunsParams =
             serde_json::from_value(args.clone()).context("invalid cron_list_runs params")?;
-        let conn_arc = self.get_conn(agent_name)?;
-        let conn = Self::lock_conn(&conn_arc)?;
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
         let limit = params.limit.unwrap_or(20);
         let mut stmt = conn.prepare(
             "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
@@ -391,43 +386,46 @@ impl RightBackend {
                     row.get::<_, Option<String>>(9)?.as_deref(),
                     row.get::<_, Option<String>>(10)?.as_deref(),
                 ))
-            })?
+            })
+            .await?
             .collect::<Result<Vec<_>, _>>()?;
         let output = serde_json::to_string_pretty(&rows)?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    fn call_cron_show_run(
+    async fn call_cron_show_run(
         &self,
         agent_name: &str,
         args: &serde_json::Value,
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronShowRunParams =
             serde_json::from_value(args.clone()).context("invalid cron_show_run params")?;
-        let conn_arc = self.get_conn(agent_name)?;
-        let conn = Self::lock_conn(&conn_arc)?;
-        let result = conn.query_row(
-            "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
+        let result = conn
+            .query_row(
+                "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
                     run_note, delivery_json, delivered_at, delivery_status
              FROM async_runs
              WHERE kind = 'cron' AND id = ?1",
-            right_db::params![&params.run_id],
-            |row| {
-                Ok(cron_run_to_json(
-                    &row.get::<_, String>(0)?,
-                    &row.get::<_, String>(1)?,
-                    &row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?.as_deref(),
-                    row.get::<_, Option<i64>>(4)?,
-                    &row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?.as_deref(),
-                    row.get::<_, Option<String>>(7)?.as_deref(),
-                    row.get::<_, Option<String>>(8)?.as_deref(),
-                    row.get::<_, Option<String>>(9)?.as_deref(),
-                    row.get::<_, Option<String>>(10)?.as_deref(),
-                ))
-            },
-        );
+                right_db::params![&params.run_id],
+                |row| {
+                    Ok(cron_run_to_json(
+                        &row.get::<_, String>(0)?,
+                        &row.get::<_, String>(1)?,
+                        &row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?.as_deref(),
+                        row.get::<_, Option<i64>>(4)?,
+                        &row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(6)?.as_deref(),
+                        row.get::<_, Option<String>>(7)?.as_deref(),
+                        row.get::<_, Option<String>>(8)?.as_deref(),
+                        row.get::<_, Option<String>>(9)?.as_deref(),
+                        row.get::<_, Option<String>>(10)?.as_deref(),
+                    ))
+                },
+            )
+            .await;
         match result {
             Ok(val) => {
                 let output = serde_json::to_string_pretty(&val)?;
@@ -440,16 +438,17 @@ impl RightBackend {
         }
     }
 
-    fn call_cron_trigger(
+    async fn call_cron_trigger(
         &self,
         agent_name: &str,
         args: &serde_json::Value,
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronTriggerParams =
             serde_json::from_value(args.clone()).context("invalid cron_trigger params")?;
-        let conn_arc = self.get_conn(agent_name)?;
-        let conn = Self::lock_conn(&conn_arc)?;
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
         let msg = right_agent::cron_spec::trigger_spec(&conn, &params.job_name)
+            .await
             .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
@@ -458,10 +457,10 @@ impl RightBackend {
     // MCP management tools
     // ------------------------------------------------------------------
 
-    fn call_mcp_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
-        let conn_arc = self.get_conn(agent_name)?;
-        let conn = Self::lock_conn(&conn_arc)?;
-        let servers = right_mcp::credentials::db_list_servers(&conn)?;
+    async fn call_mcp_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
+        let servers = right_mcp::credentials::db_list_servers(&conn).await?;
         let items: Vec<serde_json::Value> = servers
             .iter()
             .map(|s| {
@@ -650,8 +649,8 @@ impl RightBackend {
         }
 
         {
-            let conn_arc = self.get_conn(agent_name)?;
-            let conn = Self::lock_conn(&conn_arc)?;
+            let conn_arc = self.get_conn(agent_name).await?;
+            let conn = conn_arc.lock().await;
             right_agent::learned_skills::insert_learning_event(
                 &conn,
                 &right_agent::learned_skills::LearningEvent {
@@ -667,7 +666,8 @@ impl RightBackend {
                     summary: None,
                     event_refs: params.event_refs.clone().unwrap_or_default(),
                 },
-            )?;
+            )
+            .await?;
         }
 
         if let Err(result) = crate::learning::send_learning_message(
@@ -744,8 +744,8 @@ impl RightBackend {
         }
 
         {
-            let conn_arc = self.get_conn(agent_name)?;
-            let conn = Self::lock_conn(&conn_arc)?;
+            let conn_arc = self.get_conn(agent_name).await?;
+            let conn = conn_arc.lock().await;
             right_agent::learned_skills::insert_learning_event(
                 &conn,
                 &right_agent::learned_skills::LearningEvent {
@@ -763,7 +763,8 @@ impl RightBackend {
                     summary: params.summary.clone(),
                     event_refs: params.event_refs.clone().unwrap_or_default(),
                 },
-            )?;
+            )
+            .await?;
         }
 
         let created_by = if params.status.is_success() {
@@ -815,14 +816,16 @@ impl RightBackend {
 
         if let Some(created_by) = created_by {
             let now_utc = chrono::Utc::now();
-            let conn_arc = self.get_conn(agent_name)?;
-            let conn = Self::lock_conn(&conn_arc)?;
+            let conn_arc = self.get_conn(agent_name).await?;
+            let conn = conn_arc.lock().await;
             let outcome = match params.status.as_str() {
                 "created" => {
                     right_lifecycle::mark_created(&conn, &params.skill_name, created_by, now_utc)
+                        .await
                 }
                 "updated" => {
                     right_lifecycle::bump_patch(&conn, &params.skill_name, created_by, now_utc)
+                        .await
                 }
                 _ => Ok(()),
             };
@@ -890,19 +893,22 @@ impl RightBackend {
             Err(_) => return Ok(conversation_scope_unavailable()),
         };
 
-        let conn_arc = self.get_conn(agent_name)?;
-        let conn = Self::lock_conn(&conn_arc)?;
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
         let limit = params.limit.unwrap_or(CONVERSATION_SEARCH_DEFAULT_LIMIT);
         let results = match mode {
-            ConversationSearchMode::Thread => right_db::conversation::search_thread(
-                &conn,
-                query,
-                limit,
-                scope.chat_id,
-                scope.thread_id,
-            ),
+            ConversationSearchMode::Thread => {
+                right_db::conversation::search_thread(
+                    &conn,
+                    query,
+                    limit,
+                    scope.chat_id,
+                    scope.thread_id,
+                )
+                .await
+            }
             ConversationSearchMode::Chat => {
-                right_db::conversation::search_chat(&conn, query, limit, scope.chat_id)
+                right_db::conversation::search_chat(&conn, query, limit, scope.chat_id).await
             }
         }
         .map_err(|e| anyhow::anyhow!("conversation search failed: {e}"))?;
