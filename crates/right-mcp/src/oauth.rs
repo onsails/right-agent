@@ -10,6 +10,13 @@ use tracing::debug;
 pub enum OAuthError {
     #[error("AS discovery failed for server: {0}")]
     DiscoveryFailed(String),
+    #[error("invalid server URL: {0}")]
+    InvalidServerUrl(String),
+    #[error("no AS metadata found for {server_url} (last probe: {last_probe})")]
+    NoAsMetadata {
+        server_url: String,
+        last_probe: String,
+    },
     #[error("Dynamic Client Registration failed: {0}")]
     DcrFailed(String),
     #[error("Token exchange failed: {0}")]
@@ -22,6 +29,12 @@ pub enum OAuthError {
     MissingClientId,
     #[error("Missing endpoint: {0}")]
     MissingEndpoint(String),
+}
+
+impl OAuthError {
+    pub fn is_no_as_metadata(&self) -> bool {
+        matches!(self, Self::NoAsMetadata { .. })
+    }
 }
 
 /// In-flight OAuth session stored in bot memory until callback arrives.
@@ -66,6 +79,55 @@ enum MetadataProbe<T> {
 enum MetadataKind {
     Resource,
     AuthorizationServer,
+}
+
+#[derive(Debug, Default)]
+struct DiscoveryProbeState {
+    last_probe: Option<String>,
+    last_hard_failure: Option<String>,
+}
+
+impl DiscoveryProbeState {
+    fn record_status(&mut self, status: reqwest::StatusCode, url: &str) {
+        let detail = format!("{status} at {url}");
+        self.last_probe = Some(detail.clone());
+        if is_hard_probe_status(status) {
+            self.last_hard_failure = Some(detail);
+        }
+    }
+
+    fn record_request_error(&mut self, url: &str, error: &reqwest::Error) {
+        let detail = format!("request failed for {url}: {error}");
+        self.last_probe = Some(detail.clone());
+        self.last_hard_failure = Some(detail);
+    }
+
+    fn record_not_metadata(&mut self, reason: String) {
+        self.last_probe = Some(reason);
+    }
+
+    fn no_metadata_error(&self, server_url: &str) -> OAuthError {
+        let last_probe = self
+            .last_probe
+            .clone()
+            .unwrap_or_else(|| "no probes executed".to_string());
+        if let Some(last_hard_failure) = &self.last_hard_failure {
+            OAuthError::DiscoveryFailed(format!(
+                "no AS metadata found for {server_url} (last hard failure: {last_hard_failure})"
+            ))
+        } else {
+            OAuthError::NoAsMetadata {
+                server_url: server_url.to_string(),
+                last_probe,
+            }
+        }
+    }
+}
+
+fn is_hard_probe_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
 
 impl MetadataKind {
@@ -373,18 +435,22 @@ fn parse_www_authenticate_resource_metadata(header: &str) -> Option<String> {
 async fn probe_resource_metadata_via_www_authenticate(
     client: &reqwest::Client,
     server_url: &str,
+    probes: &mut DiscoveryProbeState,
 ) -> Option<String> {
     let resp = match client.get(server_url).send().await {
         Ok(r) => r,
         Err(e) => {
             debug!("WWW-Authenticate probe: request failed for {server_url}: {e}");
+            probes.record_request_error(server_url, &e);
             return None;
         }
     };
-    if resp.status().as_u16() != 401 {
+    let status = resp.status();
+    probes.record_status(status, server_url);
+    if status.as_u16() != 401 {
         debug!(
             "WWW-Authenticate probe: {server_url} returned {} (not 401), skipping",
-            resp.status()
+            status
         );
         return None;
     }
@@ -405,9 +471,10 @@ async fn probe_resource_metadata_via_www_authenticate(
 /// 2. RFC 8414 AS metadata (`/.well-known/oauth-authorization-server`)
 /// 3. OIDC discovery (`/.well-known/openid-configuration`)
 ///
-/// Any non-2xx response (or connection error) on a speculative probe URL
-/// is logged and skipped — the URL simply doesn't host metadata. Only when
-/// every URL in the chain fails does this return `DiscoveryFailed`.
+/// Non-metadata responses on speculative probe URLs are logged and skipped.
+/// When the chain exhausts without hard probe failures, discovery returns a
+/// structured no-metadata error so callers can distinguish it from broken
+/// discovery.
 pub async fn discover_as(
     client: &reqwest::Client,
     server_url: &str,
@@ -435,6 +502,7 @@ pub async fn discover_oauth(
 
     let raw_path = parsed.path();
     let path = raw_path.trim_end_matches('/');
+    let mut probes = DiscoveryProbeState::default();
 
     // --- Step 0: WWW-Authenticate probe (MCP Authorization spec / RFC 9728 §5.1) ---
     // Send unauthenticated request to the MCP URL; the server should respond
@@ -443,7 +511,7 @@ pub async fn discover_oauth(
     // well-known guesses below are best-effort fallbacks for servers that
     // don't follow the spec.
     let www_authenticate_url =
-        probe_resource_metadata_via_www_authenticate(client, server_url).await;
+        probe_resource_metadata_via_www_authenticate(client, server_url, &mut probes).await;
 
     // --- Step 1: RFC 9728 resource metadata ---
     // Use the URL from Step 0 if we have it; otherwise synthesize the
@@ -497,6 +565,7 @@ pub async fn discover_oauth(
                         debug!(
                             "discover_as: RFC 9728 response at {rfc9728_url} was not metadata ({reason}), falling back"
                         );
+                        probes.record_not_metadata(reason);
                         None
                     }
                 }
@@ -504,12 +573,14 @@ pub async fn discover_oauth(
                 // Any non-2xx (404, 401, 5xx, …) → speculative URL didn't
                 // hit metadata. Skip and try the AS metadata fallback chain.
                 debug!("discover_as: RFC 9728 returned {status}, falling back to AS metadata");
+                probes.record_status(status, &rfc9728_url);
                 None
             }
         }
         Err(e) => {
             // Connection error on a speculative URL → skip, try fallback.
             debug!("discover_as: RFC 9728 request failed for {rfc9728_url}: {e}, falling back");
+            probes.record_request_error(&rfc9728_url, &e);
             None
         }
     };
@@ -517,8 +588,12 @@ pub async fn discover_oauth(
     // --- Steps 2 & 3: AS metadata + OIDC ---
     let as_base = as_url.as_deref().unwrap_or(server_url);
     let as_meta_urls = as_metadata_urls(as_base);
+    if as_meta_urls.is_empty() {
+        return Err(OAuthError::DiscoveryFailed(
+            "derived AS metadata URL list is empty".to_string(),
+        ));
+    }
 
-    let mut last_err: Option<String> = None;
     for url in &as_meta_urls {
         debug!("discover_as: trying AS metadata at {url}");
         match client.get(url).send().await {
@@ -546,25 +621,22 @@ pub async fn discover_oauth(
                             debug!(
                                 "discover_as: AS metadata response at {url} was not metadata ({reason}), trying next"
                             );
-                            last_err = Some(reason);
+                            probes.record_not_metadata(reason);
                             continue;
                         }
                     }
                 }
                 debug!("discover_as: {url} returned {status}, trying next");
-                last_err = Some(format!("{status} at {url}"));
+                probes.record_status(status, url);
             }
             Err(e) => {
                 debug!("discover_as: AS metadata request failed for {url}: {e}, trying next");
-                last_err = Some(format!("request failed for {url}: {e}"));
+                probes.record_request_error(url, &e);
             }
         }
     }
 
-    Err(OAuthError::DiscoveryFailed(format!(
-        "no AS metadata found for {server_url} (last probe: {})",
-        last_err.unwrap_or_else(|| "no probes executed".to_string())
-    )))
+    Err(probes.no_metadata_error(server_url))
 }
 
 // ---------------------------------------------------------------------------
@@ -782,6 +854,14 @@ mod tests {
         // install_default returns Err(existing provider Arc) when already
         // installed by another test in the same binary — that's not a failure.
         let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    fn assert_no_as_metadata<T: std::fmt::Debug>(result: Result<T, OAuthError>) {
+        let error = result.expect_err("probe chain should complete without AS metadata");
+        assert!(
+            error.is_no_as_metadata(),
+            "expected structured no-metadata error, got: {error}"
+        );
     }
 
     #[test]
@@ -1082,7 +1162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discover_as_5xx_skips_and_continues() {
+    async fn discover_as_speculative_5xx_does_not_abort_later_success() {
         setup_crypto();
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1119,7 +1199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discover_as_all_non_2xx_returns_discovery_failed() {
+    async fn discover_as_all_non_2xx_returns_no_as_metadata() {
         setup_crypto();
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1136,14 +1216,11 @@ mod tests {
         let server_url = format!("{}/mcp", server.uri());
         let result = discover_as(&client, &server_url).await;
 
-        assert!(
-            matches!(result, Err(OAuthError::DiscoveryFailed(_))),
-            "all-401 chain must end in DiscoveryFailed: {result:?}"
-        );
+        assert_no_as_metadata(result);
     }
 
     #[tokio::test]
-    async fn discover_as_all_404_returns_discovery_failed() {
+    async fn discover_as_all_404_returns_no_as_metadata() {
         setup_crypto();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -1167,9 +1244,77 @@ mod tests {
         let client = reqwest::Client::new();
         let server_url = format!("http://127.0.0.1:{port}");
         let result = discover_as(&client, &server_url).await;
+        assert_no_as_metadata(result);
+    }
+
+    #[tokio::test]
+    async fn discover_as_reports_hard_failure_after_later_benign_misses() {
+        setup_crypto();
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server/mcp"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/mcp/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let server_url = format!("{}/mcp", server.uri());
+        let result = discover_as(&client, &server_url).await;
+
+        let Err(OAuthError::DiscoveryFailed(detail)) = result else {
+            panic!("hard metadata failure should fail discovery, got: {result:?}");
+        };
         assert!(
-            matches!(result, Err(OAuthError::DiscoveryFailed(_))),
-            "all-404 should fail: {result:?}"
+            detail.contains("500 Internal Server Error"),
+            "discovery failure should describe the hard failure, got: {detail}"
+        );
+        assert!(
+            detail.contains("/.well-known/oauth-authorization-server/mcp"),
+            "discovery failure should keep the hard-failure probe URL, got: {detail}"
+        );
+        assert!(
+            !detail.contains("/.well-known/openid-configuration"),
+            "discovery failure should not report the final benign 404, got: {detail}"
         );
     }
 
