@@ -294,7 +294,10 @@ fn is_readonly_query_sql(sql: &str) -> bool {
     }
     if keyword.eq_ignore_ascii_case("PRAGMA") {
         let rest = sql[keyword.len()..].trim_start();
-        return !rest.is_empty() && !rest.contains('=');
+        let Some(pragma_name) = leading_pragma_name(rest) else {
+            return false;
+        };
+        return !pragma_name.is_empty() && rest[pragma_name.len()..].trim().is_empty();
     }
     false
 }
@@ -303,6 +306,16 @@ fn leading_keyword(sql: &str) -> Option<&str> {
     let len = sql
         .char_indices()
         .find_map(|(idx, ch)| (!ch.is_ascii_alphabetic()).then_some(idx))
+        .unwrap_or(sql.len());
+    (len > 0).then_some(&sql[..len])
+}
+
+fn leading_pragma_name(sql: &str) -> Option<&str> {
+    let len = sql
+        .char_indices()
+        .find_map(|(idx, ch)| {
+            (!(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.')).then_some(idx)
+        })
         .unwrap_or(sql.len());
     (len > 0).then_some(&sql[..len])
 }
@@ -450,6 +463,13 @@ mod tests {
                     (),
                     |row| row.get::<_, i64>(0),
                 )
+                .map(drop),
+            readonly
+                .query_row("PRAGMA query_only(OFF)", (), |row| row.get::<_, i64>(0))
+                .map(drop),
+            readonly
+                .prepare("PRAGMA query_only(OFF)")
+                .and_then(|mut stmt| stmt.query_row((), |row| row.get::<_, i64>(0)))
                 .map(drop),
             readonly.transaction().map(drop),
         ] {
