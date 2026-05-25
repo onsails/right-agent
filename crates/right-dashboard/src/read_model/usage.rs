@@ -5,7 +5,7 @@ use crate::api_types::{
     UsageOverviewResponse, UsageSourcePoint, UsageSourceSeries, UsageSourceSummary, UsageWindow,
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use rusqlite::{Connection, params};
+use right_db::{Connection, params};
 
 use super::ReadModelError;
 
@@ -593,7 +593,9 @@ fn aggregate_source_rows(
         .map_err(Into::into)
 }
 
-fn source_aggregate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceAggregateRow> {
+fn source_aggregate_row(
+    row: &right_db::row::Row<'_>,
+) -> Result<SourceAggregateRow, right_db::DbError> {
     Ok(SourceAggregateRow {
         ts: row.get(0)?,
         cost: row.get(1)?,
@@ -673,10 +675,9 @@ fn field_u64(value: &serde_json::Value, key: &str) -> u64 {
 mod tests {
     use super::*;
     use right_db::open_connection;
-    use rusqlite::params;
     use tempfile::tempdir;
 
-    fn insert_usage(conn: &rusqlite::Connection, ts: &str, source: &str, cost: f64, model: &str) {
+    fn insert_usage(conn: &right_db::Connection, ts: &str, source: &str, cost: f64, model: &str) {
         let model_json = format!(
             r#"{{"{model}":{{"costUSD":{cost},"inputTokens":10,"outputTokens":20,"cacheCreationInputTokens":5,"cacheReadInputTokens":40}}}}"#
         );

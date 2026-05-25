@@ -49,15 +49,16 @@ fn validate_lock_ttl_invalid() {
     assert!(validate_lock_ttl("").is_err());
 }
 
-fn setup_db() -> rusqlite::Connection {
-    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-    right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
+fn setup_db() -> right_db::Connection {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = right_db::open_connection(dir.path(), true).unwrap();
+    std::mem::forget(dir);
     conn
 }
 
 #[allow(clippy::too_many_arguments)]
 fn insert_async_cron_run(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     id: &str,
     job_name: &str,
     started_at: &str,
@@ -81,7 +82,7 @@ fn insert_async_cron_run(
             ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?5, ?5
          )",
-        rusqlite::params![
+        right_db::params![
             id,
             job_name,
             target_chat_id,
@@ -321,7 +322,7 @@ fn load_specs_skips_legacy_bg_schedule_rows() {
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
              VALUES ('legacy-bg', ?1, 'old background prompt', 1.0, 0, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
-            rusqlite::params![format!("@bg:{main}")],
+            right_db::params![format!("@bg:{main}")],
         )
         .unwrap();
     conn.execute(

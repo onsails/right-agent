@@ -18,11 +18,47 @@ pub trait IntoValue {
     fn into_value(self) -> Result<libsql::Value, DbError>;
 }
 
+#[derive(Debug, Default)]
+pub struct ParamsBuilder {
+    values: Vec<libsql::Value>,
+}
+
+impl ParamsBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, value: impl IntoValue) -> Result<(), DbError> {
+        self.values.push(value.into_value()?);
+        Ok(())
+    }
+}
+
+pub fn params_from_iter<I, T>(iter: I) -> ParamsBuilder
+where
+    I: IntoIterator<Item = T>,
+    T: IntoValue,
+{
+    let mut params = ParamsBuilder::new();
+    for value in iter {
+        params
+            .push(value)
+            .expect("right-db parameter conversion should be valid");
+    }
+    params
+}
+
 #[macro_export]
 macro_rules! params {
-    ($($value:expr),* $(,)?) => {
-        vec![$($crate::params::IntoValue::into_value($value)?),*]
-    };
+    ($($value:expr),* $(,)?) => {{
+        let mut params = $crate::params::ParamsBuilder::new();
+        $(
+            params
+                .push($value)
+                .expect("right-db parameter conversion should be valid");
+        )*
+        params
+    }};
 }
 
 impl IntoParams for () {
@@ -43,6 +79,12 @@ impl<T: IntoValue> IntoParams for Vec<T> {
             .map(IntoValue::into_value)
             .collect::<Result<Vec<_>, _>>()
             .map(|values| Params(libsql::params::Params::Positional(values)))
+    }
+}
+
+impl IntoParams for ParamsBuilder {
+    fn into_params(self) -> Result<Params, DbError> {
+        Ok(Params(libsql::params::Params::Positional(self.values)))
     }
 }
 
@@ -143,15 +185,45 @@ impl IntoValue for &String {
     }
 }
 
+impl IntoValue for &&str {
+    fn into_value(self) -> Result<libsql::Value, DbError> {
+        Ok(libsql::Value::Text((*self).to_owned()))
+    }
+}
+
 impl IntoValue for i64 {
     fn into_value(self) -> Result<libsql::Value, DbError> {
         Ok(libsql::Value::Integer(self))
     }
 }
 
+impl IntoValue for &i64 {
+    fn into_value(self) -> Result<libsql::Value, DbError> {
+        Ok(libsql::Value::Integer(*self))
+    }
+}
+
 impl IntoValue for i32 {
     fn into_value(self) -> Result<libsql::Value, DbError> {
         Ok(libsql::Value::Integer(i64::from(self)))
+    }
+}
+
+impl IntoValue for &i32 {
+    fn into_value(self) -> Result<libsql::Value, DbError> {
+        Ok(libsql::Value::Integer(i64::from(*self)))
+    }
+}
+
+impl IntoValue for u32 {
+    fn into_value(self) -> Result<libsql::Value, DbError> {
+        Ok(libsql::Value::Integer(i64::from(self)))
+    }
+}
+
+impl IntoValue for &u32 {
+    fn into_value(self) -> Result<libsql::Value, DbError> {
+        Ok(libsql::Value::Integer(i64::from(*self)))
     }
 }
 
@@ -163,9 +235,21 @@ impl IntoValue for u64 {
     }
 }
 
+impl IntoValue for &u64 {
+    fn into_value(self) -> Result<libsql::Value, DbError> {
+        (*self).into_value()
+    }
+}
+
 impl IntoValue for bool {
     fn into_value(self) -> Result<libsql::Value, DbError> {
         Ok(libsql::Value::Integer(i64::from(self)))
+    }
+}
+
+impl IntoValue for &bool {
+    fn into_value(self) -> Result<libsql::Value, DbError> {
+        Ok(libsql::Value::Integer(i64::from(*self)))
     }
 }
 
@@ -175,11 +259,26 @@ impl IntoValue for f64 {
     }
 }
 
+impl IntoValue for &f64 {
+    fn into_value(self) -> Result<libsql::Value, DbError> {
+        Ok(libsql::Value::Real(*self))
+    }
+}
+
 impl<T: IntoValue> IntoValue for Option<T> {
     fn into_value(self) -> Result<libsql::Value, DbError> {
         match self {
             Some(value) => value.into_value(),
             None => Ok(libsql::Value::Null),
         }
+    }
+}
+
+impl<T> IntoValue for &Option<T>
+where
+    T: Clone + IntoValue,
+{
+    fn into_value(self) -> Result<libsql::Value, DbError> {
+        self.clone().into_value()
     }
 }

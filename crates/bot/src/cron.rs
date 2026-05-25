@@ -292,13 +292,13 @@ fn classify_cron_failure(
 /// spec's delivery target onto the row so one-shot delivery survives spec
 /// auto-deletion.
 fn insert_running_run(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     run_id: &str,
     job_name: &str,
     started_at: &str,
     log_path: &str,
     spec: &right_agent::cron_spec::CronSpec,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), right_db::DbError> {
     // `async_runs.target_chat_id` is NOT NULL. Targetless cron runs are kept
     // explicit with sentinel 0; delivery reads convert it back with NULLIF.
     let target_chat_id = spec.target_chat_id.unwrap_or(0);
@@ -320,12 +320,12 @@ fn cron_shutdown_failure_payload(
     run_id: &str,
     job_name: &str,
     reason: &str,
-) -> Result<(String, String, String), rusqlite::Error> {
+) -> Result<(String, String, String), right_db::DbError> {
     let content = format!(
         "Cron job `{job_name}` was interrupted because the bot is shutting down. Run `{run_id}` did not finish."
     );
     let delivery_json = notify_delivery_json(&content, None)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let run_note = format!("Cron job `{job_name}` interrupted by shutdown");
     let error_json = serde_json::json!({
         "kind": "cron_shutdown_interrupted",
@@ -338,11 +338,11 @@ fn cron_shutdown_failure_payload(
 }
 
 fn mark_cron_interrupted_by_shutdown(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     job_name: &str,
     reason: &str,
-) -> Result<usize, rusqlite::Error> {
-    let tx = conn.unchecked_transaction()?;
+) -> Result<usize, right_db::DbError> {
+    let tx = conn.transaction()?;
     let rows = {
         let mut stmt = tx.prepare(
             "SELECT id, target_chat_id
@@ -380,14 +380,14 @@ fn mark_cron_interrupted_by_shutdown(
              WHERE id = ?1
                AND kind = 'cron'
                AND status = 'running'",
-            rusqlite::params![
+            right_db::params![
                 run_id,
                 run_note,
                 delivery_required.then_some(delivery_json),
                 error_json,
                 delivery_required,
                 if delivery_required { "pending" } else { "none" },
-                now,
+                &now,
             ],
         )?;
         updated += changed;
@@ -396,16 +396,16 @@ fn mark_cron_interrupted_by_shutdown(
     Ok(updated)
 }
 
-fn update_failed_run_record(conn: &rusqlite::Connection, run_id: &str, exit_code: Option<i32>) {
+fn update_failed_run_record(conn: &right_db::Connection, run_id: &str, exit_code: Option<i32>) {
     update_run_record(conn, run_id, exit_code, "failed");
 }
 
 fn persist_successful_cron_output(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     run_id: &str,
     cron_output: &CronReplyOutput,
     delivery_json: &str,
-) -> Result<&'static str, rusqlite::Error> {
+) -> Result<&'static str, right_db::DbError> {
     let (delivery_required, delivery_status) = match cron_output.delivery {
         CronDeliveryDecision::Notify { .. } => (true, "pending"),
         CronDeliveryDecision::Silent { .. } => (false, "none"),
@@ -506,7 +506,7 @@ async fn execute_job(
     let log_path_str = format!("{sandbox_log_dir}/{log_filename}");
 
     // DB insert: status='running' (D-04)
-    // Open connection per-job — rusqlite::Connection is !Send
+    // Open connection per-job — right_db::Connection is !Send
     let conn = match right_db::open_connection(agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
@@ -894,8 +894,8 @@ async fn execute_job(
                 // sees the run as broken instead of stuck at 'success' with no
                 // delivery payload.
                 if let Some(delivery_json) = delivery_json {
-                    let tx_result: Result<&'static str, rusqlite::Error> = (|| {
-                        let tx = conn.unchecked_transaction()?;
+                    let tx_result: Result<&'static str, right_db::DbError> = (|| {
+                        let tx = conn.transaction()?;
                         let delivery_status = persist_successful_cron_output(
                             &tx,
                             &run_id,
@@ -905,7 +905,8 @@ async fn execute_job(
                         right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "success")?;
                         tx.commit()?;
                         Ok(delivery_status)
-                    })();
+                    })(
+                    );
 
                     match tx_result {
                         Ok(delivery_status) => {
@@ -940,8 +941,8 @@ async fn execute_job(
                     "reason": reason,
                 })
                 .to_string();
-                let tx_result: Result<(), rusqlite::Error> = (|| {
-                    let tx = conn.unchecked_transaction()?;
+                let tx_result: Result<(), right_db::DbError> = (|| {
+                    let tx = conn.transaction()?;
                     right_agent::async_runs::persist_run_output(
                         &tx,
                         &run_id,
@@ -1130,7 +1131,7 @@ pub(crate) fn parse_cron_output(lines: &[String]) -> Result<CronReplyOutput, Str
 }
 
 fn update_run_record(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     run_id: &str,
     exit_code: Option<i32>,
     status: &str,
@@ -1142,7 +1143,7 @@ fn update_run_record(
 
 #[allow(clippy::too_many_arguments)]
 fn capture_cron_completion_seed(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     agent_dir: &std::path::Path,
     agent_name: &str,
     run_id: &str,
@@ -1480,7 +1481,7 @@ fn fire_one_shot_specs(
 fn reconcile_jobs(
     handles: &mut HashMap<String, (CronSpec, JoinHandle<()>)>,
     triggered_handles: &mut Vec<JoinHandle<()>>,
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     agent_dir: &std::path::Path,
     agent_name: &str,
     model: &Arc<arc_swap::ArcSwap<Option<String>>>,
@@ -2316,7 +2317,7 @@ mod target_snapshot_tests {
     use super::*;
     use right_agent::cron_spec::{CronSpec, ScheduleKind};
 
-    fn migrated_conn() -> (tempfile::TempDir, rusqlite::Connection) {
+    fn migrated_conn() -> (tempfile::TempDir, right_db::Connection) {
         let dir = tempfile::tempdir().unwrap();
         let conn = right_db::open_connection(dir.path(), true).unwrap();
         (dir, conn)

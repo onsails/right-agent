@@ -21,7 +21,7 @@ use right_dashboard::read_model::{
     learning_episodes::{LearningEpisodesInput, learning_episode_detail, learning_episodes},
     usage::{UsageOverviewInput, usage_overview},
 };
-use rusqlite::Connection;
+use right_db::Connection;
 
 mod health;
 mod identity;
@@ -1127,7 +1127,7 @@ mod tests {
     }
 
     fn insert_lifecycle_row(
-        conn: &rusqlite::Connection,
+        conn: &right_db::Connection,
         skill_name: &str,
         created_by: &str,
         pinned: bool,

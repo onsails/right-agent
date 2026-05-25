@@ -1,3 +1,5 @@
+use right_db::params::ParamsBuilder;
+use right_db::{Connection, DbError, Transaction, params};
 use right_mcp::LEARNED_SKILL_PREFIX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -191,28 +193,25 @@ pub enum ReviewGateDecision {
     Skip(ReviewSkipReason),
 }
 
-pub fn insert_learning_event(
-    conn: &rusqlite::Connection,
-    event: &LearningEvent,
-) -> Result<(), rusqlite::Error> {
+pub fn insert_learning_event(conn: &Connection, event: &LearningEvent) -> Result<(), DbError> {
     let event_refs_json = serde_json::to_string(&event.event_refs)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    let tx = conn.unchecked_transaction()?;
+        .map_err(|e| DbError::InvalidParameter(e.to_string()))?;
+    let tx = conn.transaction()?;
     tx.execute(
         "INSERT INTO skill_learning_events \
          (invocation_id, agent_name, action, skill_name, phase, status, hint_outcome, reason, message, summary, event_refs_json) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        rusqlite::params![
-            event.invocation_id,
-            event.agent_name,
+        params![
+            event.invocation_id.as_str(),
+            event.agent_name.as_str(),
             event.action.as_str(),
-            event.skill_name,
+            event.skill_name.as_str(),
             event.phase.as_str(),
             event.status.map(LearningStatus::as_str),
-            event.hint_outcome,
-            event.reason,
-            event.message,
-            event.summary,
+            event.hint_outcome.as_deref(),
+            event.reason.as_deref(),
+            event.message.as_deref(),
+            event.summary.as_deref(),
             event_refs_json,
         ],
     )?;
@@ -224,10 +223,7 @@ pub fn insert_learning_event(
     Ok(())
 }
 
-pub fn successful_finish_exists(
-    conn: &rusqlite::Connection,
-    invocation_id: &str,
-) -> Result<bool, rusqlite::Error> {
+pub fn successful_finish_exists(conn: &Connection, invocation_id: &str) -> Result<bool, DbError> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM skill_learning_events \
          WHERE invocation_id=?1 AND phase='finish' AND status IN ('created','updated')",
@@ -238,11 +234,11 @@ pub fn successful_finish_exists(
 }
 
 pub fn select_reply_signal(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     invocation_id: &str,
     learning_signal: Option<serde_json::Value>,
     skill_issue_signal: Option<serde_json::Value>,
-) -> Result<Option<(NudgeSignalKind, serde_json::Value)>, rusqlite::Error> {
+) -> Result<Option<(NudgeSignalKind, serde_json::Value)>, DbError> {
     if successful_finish_exists(conn, invocation_id)? {
         return Ok(None);
     }
@@ -368,10 +364,7 @@ fn enum_str<'a>(signal: &'a serde_json::Value, field: &str, allowed: &[&str]) ->
     Some(value)
 }
 
-pub fn ensure_nudge_state(
-    conn: &rusqlite::Connection,
-    agent_name: &str,
-) -> Result<(), rusqlite::Error> {
+pub fn ensure_nudge_state(conn: &Connection, agent_name: &str) -> Result<(), DbError> {
     conn.execute(
         "INSERT OR IGNORE INTO skill_nudge_state (agent_name) VALUES (?1)",
         [agent_name],
@@ -379,12 +372,20 @@ pub fn ensure_nudge_state(
     Ok(())
 }
 
+fn ensure_nudge_state_tx(tx: &Transaction<'_>, agent_name: &str) -> Result<(), DbError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO skill_nudge_state (agent_name) VALUES (?1)",
+        [agent_name],
+    )?;
+    Ok(())
+}
+
 pub fn increment_turn_nudge_counters(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     agent_name: &str,
     tool_iters: i64,
-) -> Result<(), rusqlite::Error> {
-    let tx = conn.unchecked_transaction()?;
+) -> Result<(), DbError> {
+    let tx = conn.transaction()?;
     tx.execute(
         "INSERT OR IGNORE INTO skill_nudge_state (agent_name) VALUES (?1)",
         [agent_name],
@@ -394,19 +395,16 @@ pub fn increment_turn_nudge_counters(
          SET turns_since_review = turns_since_review + 1, \
              tool_iters_since_review = tool_iters_since_review + ?2 \
          WHERE agent_name = ?1",
-        rusqlite::params![agent_name, tool_iters.max(0)],
+        params![agent_name, tool_iters.max(0)],
     )?;
     tx.commit()?;
     Ok(())
 }
 
-pub fn record_nudge_signal(
-    conn: &rusqlite::Connection,
-    record: &NudgeSignalRecord,
-) -> Result<(), rusqlite::Error> {
+pub fn record_nudge_signal(conn: &Connection, record: &NudgeSignalRecord) -> Result<(), DbError> {
     let payload = serde_json::to_string(&record.payload_json)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    let tx = conn.unchecked_transaction()?;
+        .map_err(|e| DbError::InvalidParameter(e.to_string()))?;
+    let tx = conn.transaction()?;
     tx.execute(
         "INSERT OR IGNORE INTO skill_nudge_state (agent_name) VALUES (?1)",
         [record.agent_name.as_str()],
@@ -415,10 +413,10 @@ pub fn record_nudge_signal(
         "INSERT INTO skill_nudge_signals \
          (invocation_id, agent_name, root_session_id, chat_id, thread_id, signal_kind, payload_json) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            record.invocation_id,
-            record.agent_name,
-            record.root_session_id,
+        params![
+            record.invocation_id.as_str(),
+            record.agent_name.as_str(),
+            record.root_session_id.as_deref(),
             record.chat_id,
             record.thread_id,
             record.signal_kind.as_str(),
@@ -438,18 +436,18 @@ pub fn record_nudge_signal(
 }
 
 pub fn insert_skill_review_report(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     report: &SkillReviewReport,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), DbError> {
     let evidence_refs_json = serde_json::to_string(&report.evidence_refs)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        .map_err(|e| DbError::InvalidParameter(e.to_string()))?;
     let review_output_json = serde_json::to_string(&report.review_output_json)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        .map_err(|e| DbError::InvalidParameter(e.to_string()))?;
     conn.execute(
         "INSERT INTO skill_review_reports \
          (agent_name, source_invocation_id, learning_episode_id, root_session_id, chat_id, thread_id, trigger_kind, status, confidence, candidate_skill_name, candidate_summary, evidence_refs_json, review_output_json, telegram_notified) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-        rusqlite::params![
+        params![
             report.agent_name.as_str(),
             report.source_invocation_id.as_str(),
             report.learning_episode_id,
@@ -470,22 +468,22 @@ pub fn insert_skill_review_report(
 }
 
 pub fn review_gate_decision(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     agent_name: &str,
     input: ReviewGateInput<'_>,
-) -> Result<ReviewGateDecision, rusqlite::Error> {
-    let tx = conn.unchecked_transaction()?;
-    ensure_nudge_state(&tx, agent_name)?;
+) -> Result<ReviewGateDecision, DbError> {
+    let tx = conn.transaction()?;
+    ensure_nudge_state_tx(&tx, agent_name)?;
     let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
     tx.commit()?;
     Ok(decision)
 }
 
 fn review_gate_decision_in_tx(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Transaction<'_>,
     agent_name: &str,
     input: ReviewGateInput<'_>,
-) -> Result<ReviewGateDecision, rusqlite::Error> {
+) -> Result<ReviewGateDecision, DbError> {
     // Parse now_utc once into a typed DateTime. A malformed string would
     // otherwise silently produce a junk `today_start` (via `split_once('T')`
     // falling back to the whole string) and the daily-budget SUM would
@@ -493,10 +491,7 @@ fn review_gate_decision_in_tx(
     // record_review_failure.
     let parsed_now = chrono::DateTime::parse_from_rfc3339(input.now_utc)
         .map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid now_utc {:?}: {e}", input.now_utc),
-            )))
+            DbError::InvalidParameter(format!("invalid now_utc {:?}: {e}", input.now_utc))
         })?
         .with_timezone(&chrono::Utc);
 
@@ -559,12 +554,16 @@ fn review_gate_decision_in_tx(
         "SELECT COALESCE(SUM(total_cost_usd), 0.0) FROM usage_events \
          WHERE ts >= ?1 AND source IN ({placeholders})"
     );
-    let mut stmt = tx.prepare(&query)?;
-    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&today_start];
+    let mut values = ParamsBuilder::new();
+    values
+        .push(today_start.as_str())
+        .map_err(|e| DbError::InvalidParameter(e.to_string()))?;
     for source in crate::usage::LEARNING_SOURCES {
-        params.push(source);
+        values
+            .push(source)
+            .map_err(|e| DbError::InvalidParameter(e.to_string()))?;
     }
-    let spent: f64 = stmt.query_row(params.as_slice(), |r| r.get(0))?;
+    let spent: f64 = tx.query_row(&query, values, |r| r.get(0))?;
     if spent >= input.daily_budget_usd {
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::DailyBudget));
     }
@@ -573,12 +572,12 @@ fn review_gate_decision_in_tx(
 }
 
 pub fn try_mark_review_started(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     agent_name: &str,
     input: ReviewGateInput<'_>,
-) -> Result<ReviewGateDecision, rusqlite::Error> {
-    let tx = conn.unchecked_transaction()?;
-    ensure_nudge_state(&tx, agent_name)?;
+) -> Result<ReviewGateDecision, DbError> {
+    let tx = conn.transaction()?;
+    ensure_nudge_state_tx(&tx, agent_name)?;
 
     let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
     let ReviewGateDecision::Start(trigger) = decision else {
@@ -606,13 +605,13 @@ pub fn try_mark_review_started(
 }
 
 pub fn mark_review_finished(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     agent_name: &str,
     trigger: ReviewTriggerKind,
     status: ReviewStatus,
     reset_activity_counters: bool,
-) -> Result<(), rusqlite::Error> {
-    let tx = conn.unchecked_transaction()?;
+) -> Result<(), DbError> {
+    let tx = conn.transaction()?;
     mark_review_finished_in_tx(&tx, agent_name, trigger, status, reset_activity_counters)?;
     tx.commit()?;
     Ok(())
@@ -620,7 +619,7 @@ pub fn mark_review_finished(
 
 /// Same as `mark_review_finished` but runs inside an existing transaction.
 /// Used when the caller is already coordinating multiple writes inside
-/// `conn.unchecked_transaction()` and cannot tolerate a nested BEGIN.
+/// `conn.transaction()` and cannot tolerate a nested BEGIN.
 ///
 /// # Transaction contract
 ///
@@ -636,28 +635,23 @@ pub fn mark_review_finished(
 ///
 /// # Implicit invariant on inner helpers
 ///
-/// Every helper this function calls (currently `ensure_nudge_state` and
-/// the direct `tx.execute` UPDATE) accepts `&rusqlite::Connection` but
-/// receives `&rusqlite::Transaction<'_>` via `Transaction: Deref<Target =
-/// Connection>`. That is intentional — the connection-typed helpers reuse
-/// the active transaction without opening a savepoint. Any new helper
-/// introduced here that internally calls `conn.unchecked_transaction()`,
-/// `conn.transaction()`, or opens a SAVEPOINT would silently break the
-/// nested-tx contract and corrupt the caller's atomicity guarantees. If
-/// such a helper is needed, add an `_in_tx` variant that takes
-/// `&Transaction<'_>` directly and call that instead.
+/// Every helper this function calls (currently `ensure_nudge_state_tx` and
+/// the direct `tx.execute` UPDATE) accepts the project-owned transaction
+/// wrapper directly. Any new helper introduced here that internally starts
+/// another transaction or opens a SAVEPOINT would silently break the
+/// nested-tx contract and corrupt the caller's atomicity guarantees.
 ///
 /// There is no runtime way to assert "we are inside a transaction" from a
 /// `&Connection`, so this contract is enforced by documentation and code
 /// review only.
 pub fn mark_review_finished_in_tx(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Transaction<'_>,
     agent_name: &str,
     trigger: ReviewTriggerKind,
     status: ReviewStatus,
     reset_activity_counters: bool,
-) -> Result<(), rusqlite::Error> {
-    ensure_nudge_state(tx, agent_name)?;
+) -> Result<(), DbError> {
+    ensure_nudge_state_tx(tx, agent_name)?;
     let reset_activity_counters =
         reset_activity_counters && !matches!(status, ReviewStatus::Failed);
     let reset_issue_hints = !matches!(status, ReviewStatus::Failed)
@@ -674,7 +668,7 @@ pub fn mark_review_finished_in_tx(
              consecutive_review_failures = 0, \
              review_circuit_open_until = NULL \
          WHERE agent_name = ?1",
-        rusqlite::params![
+        params![
             agent_name,
             status.as_str(),
             if reset_activity_counters { 1_i64 } else { 0_i64 },
@@ -697,7 +691,7 @@ pub fn mark_review_finished_in_tx(
 /// Returns the count of rows reset (for logging).
 ///
 /// Single-statement write — no transaction needed.
-pub fn reset_stale_review_running(conn: &rusqlite::Connection) -> Result<usize, rusqlite::Error> {
+pub fn reset_stale_review_running(conn: &Connection) -> Result<usize, DbError> {
     conn.execute(
         "UPDATE skill_nudge_state SET review_running = 0 WHERE review_running = 1",
         [],
@@ -716,27 +710,22 @@ pub fn reset_stale_review_running(conn: &rusqlite::Connection) -> Result<usize, 
 ///
 /// `now_utc` must be RFC3339 strict (e.g. "2026-05-21T03:14:15Z").
 pub fn record_review_failure(
-    conn: &rusqlite::Connection,
+    conn: &Connection,
     agent_name: &str,
     now_utc: &str,
     threshold: u32,
     cooldown_minutes: u32,
-) -> Result<(i64, bool), rusqlite::Error> {
+) -> Result<(i64, bool), DbError> {
     // Parse now_utc once up front so the open-window comparison and the
     // cooldown computation share a single validation point. Otherwise the
     // open-window branch silently accepts a malformed string while only
     // the should_open branch would have caught it.
     let parsed_now = chrono::DateTime::parse_from_rfc3339(now_utc)
-        .map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid now_utc {now_utc:?}: {e}"),
-            )))
-        })?
+        .map_err(|e| DbError::InvalidParameter(format!("invalid now_utc {now_utc:?}: {e}")))?
         .with_timezone(&chrono::Utc);
 
-    let tx = conn.unchecked_transaction()?;
-    ensure_nudge_state(&tx, agent_name)?;
+    let tx = conn.transaction()?;
+    ensure_nudge_state_tx(&tx, agent_name)?;
 
     let (prev_count, prev_open_until): (i64, Option<String>) = tx.query_row(
         "SELECT consecutive_review_failures, review_circuit_open_until \
@@ -770,7 +759,7 @@ pub fn record_review_failure(
             consecutive_review_failures = ?2, \
             review_circuit_open_until = ?3 \
          WHERE agent_name = ?1",
-        rusqlite::params![agent_name, new_count, new_open_until],
+        params![agent_name, new_count, new_open_until],
     )?;
     tx.commit()?;
     Ok((new_count, opened_now))
@@ -785,10 +774,7 @@ pub fn record_review_failure(
 /// left them.
 ///
 /// Single-statement write — no transaction needed.
-pub fn clear_review_running(
-    conn: &rusqlite::Connection,
-    agent_name: &str,
-) -> Result<(), rusqlite::Error> {
+pub fn clear_review_running(conn: &Connection, agent_name: &str) -> Result<(), DbError> {
     conn.execute(
         "UPDATE skill_nudge_state SET review_running = 0 WHERE agent_name = ?1",
         [agent_name],
@@ -800,9 +786,10 @@ pub fn clear_review_running(
 mod tests {
     use super::*;
 
-    fn conn() -> rusqlite::Connection {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
+    fn conn() -> Connection {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        std::mem::forget(dir);
         conn
     }
 
@@ -814,7 +801,7 @@ mod tests {
         }
     }
 
-    fn insert_usage(conn: &rusqlite::Connection, ts: &str, source: &str, cost: f64) {
+    fn insert_usage(conn: &Connection, ts: &str, source: &str, cost: f64) {
         conn.execute(
             "INSERT INTO usage_events (
                 ts, source, chat_id, thread_id, job_name, session_uuid,
@@ -822,14 +809,14 @@ mod tests {
                 cache_creation_tokens, cache_read_tokens, web_search_requests,
                 web_fetch_requests, model_usage_json, api_key_source
              ) VALUES (?1, ?2, NULL, NULL, NULL, 's', ?3, 1, 0, 0, 0, 0, 0, 0, '{}', 'none')",
-            rusqlite::params![ts, source, cost],
+            params![ts, source, cost],
         )
         .unwrap();
     }
 
-    fn ensure_agent_nudge_state(conn: &rusqlite::Connection, agent: &str) {
-        let tx = conn.unchecked_transaction().unwrap();
-        ensure_nudge_state(&tx, agent).unwrap();
+    fn ensure_agent_nudge_state(conn: &Connection, agent: &str) {
+        let tx = conn.transaction().unwrap();
+        ensure_nudge_state_tx(&tx, agent).unwrap();
         tx.commit().unwrap();
     }
 
@@ -2208,7 +2195,7 @@ mod tests {
         ensure_agent_nudge_state(&conn, "him");
         let result = record_review_failure(&conn, "him", "not-a-timestamp", 5, 60);
         assert!(
-            matches!(result, Err(_)),
+            result.is_err(),
             "expected Err for malformed now_utc, got {result:?}"
         );
     }
@@ -2227,7 +2214,7 @@ mod tests {
             },
         );
         assert!(
-            matches!(result, Err(_)),
+            result.is_err(),
             "expected Err for malformed now_utc, got {result:?}"
         );
     }

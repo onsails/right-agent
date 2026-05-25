@@ -400,8 +400,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Periodically drains pending_retains from SQLite, calling drain_retain_item
     // on each row. Skips when wrapper is non-Healthy (breaker open or auth failed).
     //
-    // `drain_tick` holds `&rusqlite::Connection` across an `.await`, and
-    // `Connection` is `!Sync` -- so the future is `!Send` and cannot be handed
+    // `drain_tick` holds `&right_db::Connection` across an `.await`, and
+    // the local connection wrapper is not shared between threads -- so the
+    // future is `!Send` and cannot be handed
     // to `tokio::spawn`. We drive it via a `LocalSet` from a dedicated
     // `spawn_blocking` thread; async upstream calls (e.g. Hindsight HTTP) still
     // run on the shared runtime through the `Handle` captured inside `LocalSet`.
@@ -1337,7 +1338,7 @@ async fn wait_for_delivery_loop_shutdown(
 /// Memory drain loop. Periodically flushes `pending_retains` to Hindsight,
 /// skipping ticks when the resilient wrapper is in a non-Healthy state.
 ///
-/// Holds `&rusqlite::Connection` across `.await`, so the returned future is
+/// Holds `&right_db::Connection` across `.await`, so the returned future is
 /// `!Send` and must be driven from a `LocalSet`. Honours `shutdown` so the
 /// loop exits cleanly before the runtime starts tearing down its time driver.
 async fn run_drain_loop(

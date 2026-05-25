@@ -7,7 +7,7 @@ use crate::api_types::{
     RunDetailResponse, RunSummary,
 };
 use chrono::{DateTime, TimeZone, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use right_db::{Connection, params};
 
 use super::ReadModelError;
 
@@ -54,7 +54,7 @@ pub fn activity_overview(
                 row.get::<_, f64>(6)?,
             ))
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut crons = Vec::with_capacity(cron_rows.len());
     for (job_name, schedule, recurring, run_at, target_chat_id, target_thread_id, max_budget_usd) in
@@ -117,20 +117,19 @@ pub fn activity_run_detail(
          {RUN_SUMMARY_FROM}
          WHERE ar.id = ?1"
     );
-    let row = conn
-        .query_row(&sql, params![run_id], |row| {
+    let (run, delivery_json, error_json, log_path) =
+        match conn.query_row(&sql, params![run_id], |row| {
             Ok((
                 run_summary_from_row(row)?,
                 row.get::<_, Option<String>>(12)?,
                 row.get::<_, Option<String>>(13)?,
                 row.get::<_, Option<String>>(14)?,
             ))
-        })
-        .optional()?;
-
-    let Some((run, delivery_json, error_json, log_path)) = row else {
-        return Ok(None);
-    };
+        }) {
+            Ok(row) => row,
+            Err(right_db::DbError::NotFound) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
     let run_note = run.run_note.clone();
     let (delivery, delivery_error) = parse_delivery_json(delivery_json);
     let error_message = extract_error_message(error_json);
@@ -156,7 +155,7 @@ fn cron_runs(conn: &Connection, job_name: &str) -> Result<Vec<RunSummary>, ReadM
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(params![job_name], run_summary_from_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
@@ -174,11 +173,11 @@ fn active_background_runs(conn: &Connection) -> Result<Vec<RunSummary>, ReadMode
             params![ACTIVE_BACKGROUND_RUN_LIMIT as i64],
             run_summary_from_row,
         )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
-fn run_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary> {
+fn run_summary_from_row(row: &right_db::row::Row<'_>) -> Result<RunSummary, right_db::DbError> {
     Ok(RunSummary {
         id: row.get(0)?,
         kind: row.get(1)?,

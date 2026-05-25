@@ -6,9 +6,9 @@ use right_agent::learning_episodes::{NewExecutionEvent, SelectedEpisodeUpdate, T
 use right_db::conversation::{ConversationMessage, ConversationRole};
 use std::sync::atomic::AtomicBool;
 
-fn conn() -> rusqlite::Connection {
-    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-    right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
+fn conn() -> right_db::Connection {
+    let conn = right_db::Connection::open_in_memory().unwrap();
+    right_db::MIGRATIONS.to_latest(&conn).unwrap();
     conn
 }
 
@@ -67,7 +67,7 @@ fn completion_seed_capture_is_noop_for_deprecated_stage2() {
 }
 
 fn claimed_episode(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     kind: LearningEpisodeKind,
     seed_trigger_kind: EpisodeSeedTriggerKind,
     seed_ref: &str,
@@ -186,7 +186,7 @@ fn failed_structured_review(
 }
 
 fn prepare_selected_episode(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     seed_ref: &str,
     message_refs: Vec<String>,
     execution_event_refs: Vec<String>,
@@ -230,12 +230,12 @@ fn prepare_selected_episode(
     episode.id
 }
 
-fn insert_review_message(conn: &rusqlite::Connection, content: &str) -> i64 {
+fn insert_review_message(conn: &right_db::Connection, content: &str) -> i64 {
     insert_review_message_with_route(conn, content, true, true, Some("session-review"), Some(1))
 }
 
 fn insert_review_message_with_route(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     content: &str,
     addressed_to_bot: bool,
     routed_to_agent: bool,
@@ -263,7 +263,7 @@ fn insert_review_message_with_route(
 }
 
 fn insert_review_execution_event(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     event_kind: ExecutionEventKind,
     content: &str,
 ) -> i64 {

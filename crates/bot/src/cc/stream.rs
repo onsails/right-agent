@@ -390,10 +390,10 @@ fn cache_miss_reason_from_value(v: &serde_json::Value) -> Option<String> {
                 "cache_diagnostics",
                 "cacheDiagnostics",
             ] {
-                if let Some(cache_info) = map.get(key) {
-                    if let Some(reason) = cache_miss_reason_from_value(cache_info) {
-                        return Some(reason);
-                    }
+                if let Some(cache_info) = map.get(key)
+                    && let Some(reason) = cache_miss_reason_from_value(cache_info)
+                {
+                    return Some(reason);
                 }
             }
 

@@ -23,6 +23,30 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
+    pub fn open_in_memory() -> Result<Self, DbError> {
+        let runtime = LibsqlRuntime::new();
+        let builder = libsql::Builder::new_local(":memory:");
+        // SAFETY: matches `open_local`; right-db drives local libSQL through
+        // synchronous wrappers during the staged migration while rusqlite may
+        // still initialize SQLite first in compatibility tests.
+        let builder = unsafe { builder.skip_safety_assert(true) };
+        let database = runtime
+            .block_on(builder.build())
+            .map_err(|source| DbError::Open {
+                path: PathBuf::from(":memory:"),
+                source,
+            })?;
+        let inner = database.connect().map_err(|source| DbError::Open {
+            path: PathBuf::from(":memory:"),
+            source,
+        })?;
+        Ok(Self {
+            db_path: PathBuf::from(":memory:"),
+            inner,
+            runtime,
+        })
+    }
+
     pub(crate) fn open_local(db_path: PathBuf, create: bool) -> Result<Self, DbError> {
         let runtime = LibsqlRuntime::new();
         let flags = if create {
@@ -92,6 +116,14 @@ impl Connection {
         map(&crate::row::Row::new(&row))
     }
 
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> Result<T, DbError>
+    where
+        P: crate::params::IntoParams,
+        F: FnOnce(&crate::row::Row<'_>) -> Result<T, DbError>,
+    {
+        self.query_one(sql, params, map)
+    }
+
     pub fn query_all<T>(
         &self,
         sql: &str,
@@ -105,6 +137,21 @@ impl Connection {
             values.push(map(&crate::row::Row::new(&row))?);
         }
         Ok(values)
+    }
+
+    pub fn prepare<'conn>(&'conn self, sql: &str) -> Result<Statement<'conn>, DbError> {
+        Ok(Statement {
+            conn: self,
+            sql: sql.to_owned(),
+        })
+    }
+
+    pub fn prepare_cached<'conn>(&'conn self, sql: &str) -> Result<Statement<'conn>, DbError> {
+        self.prepare(sql)
+    }
+
+    pub fn last_insert_rowid(&self) -> i64 {
+        self.inner.last_insert_rowid()
     }
 
     pub fn transaction(&self) -> Result<crate::transaction::Transaction<'_>, DbError> {
@@ -152,6 +199,41 @@ impl Connection {
         future: impl Future<Output = libsql::Result<T>> + Send,
     ) -> Result<T, DbError> {
         self.runtime.block_on(future).map_err(Into::into)
+    }
+}
+
+pub struct Statement<'conn> {
+    conn: &'conn Connection,
+    sql: String,
+}
+
+impl<'conn> Statement<'conn> {
+    pub fn query_map<T, P, F>(
+        &mut self,
+        params: P,
+        mut map: F,
+    ) -> Result<std::vec::IntoIter<Result<T, DbError>>, DbError>
+    where
+        P: crate::params::IntoParams,
+        F: FnMut(&crate::row::Row<'_>) -> Result<T, DbError>,
+    {
+        let params = params.into_params()?.into_libsql();
+        let mut query_rows = self
+            .conn
+            .block_on_libsql(self.conn.inner.query(&self.sql, params))?;
+        let mut rows = Vec::new();
+        while let Some(row) = self.conn.block_on_libsql(query_rows.next())? {
+            rows.push(map(&crate::row::Row::new(&row)));
+        }
+        Ok(rows.into_iter())
+    }
+
+    pub fn query_row<T, P, F>(&mut self, params: P, map: F) -> Result<T, DbError>
+    where
+        P: crate::params::IntoParams,
+        F: FnOnce(&crate::row::Row<'_>) -> Result<T, DbError>,
+    {
+        self.conn.query_one(&self.sql, params, map)
     }
 }
 

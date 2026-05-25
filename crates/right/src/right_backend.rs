@@ -45,7 +45,7 @@ pub(crate) struct ConversationSearchParams {
 }
 
 /// Connection cache keyed by agent name.
-type ConnCache = Arc<DashMap<String, Arc<Mutex<rusqlite::Connection>>>>;
+type ConnCache = Arc<DashMap<String, Arc<Mutex<right_db::Connection>>>>;
 
 pub struct RightBackend {
     conn_cache: ConnCache,
@@ -211,7 +211,7 @@ impl RightBackend {
     pub(crate) fn get_conn(
         &self,
         agent_name: &str,
-    ) -> Result<Arc<Mutex<rusqlite::Connection>>, anyhow::Error> {
+    ) -> Result<Arc<Mutex<right_db::Connection>>, anyhow::Error> {
         if let Some(entry) = self.conn_cache.get(agent_name) {
             return Ok(Arc::clone(entry.value()));
         }
@@ -225,8 +225,8 @@ impl RightBackend {
     }
 
     fn lock_conn(
-        conn_arc: &Arc<Mutex<rusqlite::Connection>>,
-    ) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>, anyhow::Error> {
+        conn_arc: &Arc<Mutex<right_db::Connection>>,
+    ) -> Result<std::sync::MutexGuard<'_, right_db::Connection>, anyhow::Error> {
         conn_arc
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poisoned: {e}"))
@@ -371,7 +371,7 @@ impl RightBackend {
              LIMIT ?2",
         )?;
         let rows: Vec<serde_json::Value> = stmt
-            .query_map(rusqlite::params![params.job_name, limit], |row| {
+            .query_map(right_db::params![params.job_name, limit], |row| {
                 Ok(cron_run_to_json(
                     &row.get::<_, String>(0)?,
                     &row.get::<_, String>(1)?,
@@ -405,7 +405,7 @@ impl RightBackend {
                     run_note, delivery_json, delivered_at, delivery_status
              FROM async_runs
              WHERE kind = 'cron' AND id = ?1",
-            rusqlite::params![params.run_id],
+            right_db::params![&params.run_id],
             |row| {
                 Ok(cron_run_to_json(
                     &row.get::<_, String>(0)?,
@@ -427,12 +427,9 @@ impl RightBackend {
                 let output = serde_json::to_string_pretty(&val)?;
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "cron run '{}' not found",
-                    params.run_id
-                ))]))
-            }
+            Err(right_db::DbError::NotFound) => Ok(CallToolResult::success(vec![Content::text(
+                format!("cron run '{}' not found", params.run_id),
+            )])),
             Err(e) => Err(e.into()),
         }
     }

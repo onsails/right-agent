@@ -1,4 +1,5 @@
 use std::fmt;
+use std::ops::Deref;
 
 use crate::DbError;
 use crate::connection::Connection;
@@ -59,6 +60,40 @@ impl<'conn> Transaction<'conn> {
         map(&crate::row::Row::new(&row))
     }
 
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> Result<T, DbError>
+    where
+        P: crate::params::IntoParams,
+        F: FnOnce(&crate::row::Row<'_>) -> Result<T, DbError>,
+    {
+        self.query_one(sql, params, map)
+    }
+
+    pub fn query_all<T>(
+        &self,
+        sql: &str,
+        params: impl crate::params::IntoParams,
+        mut map: impl FnMut(&crate::row::Row<'_>) -> Result<T, DbError>,
+    ) -> Result<Vec<T>, DbError> {
+        let params = params.into_params()?.into_libsql();
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
+        let mut rows = self.conn.block_on_libsql(inner.query(sql, params))?;
+        let mut values = Vec::new();
+        while let Some(row) = self.conn.block_on_libsql(rows.next())? {
+            values.push(map(&crate::row::Row::new(&row))?);
+        }
+        Ok(values)
+    }
+
+    pub fn prepare<'tx>(&'tx self, sql: &str) -> Result<TransactionStatement<'tx, 'conn>, DbError> {
+        Ok(TransactionStatement {
+            tx: self,
+            sql: sql.to_owned(),
+        })
+    }
+
     pub fn connection(&self) -> &Connection {
         self.conn
     }
@@ -82,8 +117,57 @@ impl<'conn> Transaction<'conn> {
     }
 }
 
+pub struct TransactionStatement<'tx, 'conn> {
+    tx: &'tx Transaction<'conn>,
+    sql: String,
+}
+
+impl<'tx, 'conn> TransactionStatement<'tx, 'conn> {
+    pub fn query_map<T, P, F>(
+        &mut self,
+        params: P,
+        mut map: F,
+    ) -> Result<std::vec::IntoIter<Result<T, DbError>>, DbError>
+    where
+        P: crate::params::IntoParams,
+        F: FnMut(&crate::row::Row<'_>) -> Result<T, DbError>,
+    {
+        let params = params.into_params()?.into_libsql();
+        let inner = self
+            .tx
+            .inner
+            .as_ref()
+            .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
+        let mut query_rows = self
+            .tx
+            .conn
+            .block_on_libsql(inner.query(&self.sql, params))?;
+        let mut rows = Vec::new();
+        while let Some(row) = self.tx.conn.block_on_libsql(query_rows.next())? {
+            rows.push(map(&crate::row::Row::new(&row)));
+        }
+        Ok(rows.into_iter())
+    }
+
+    pub fn query_row<T, P, F>(&mut self, params: P, map: F) -> Result<T, DbError>
+    where
+        P: crate::params::IntoParams,
+        F: FnOnce(&crate::row::Row<'_>) -> Result<T, DbError>,
+    {
+        self.tx.query_one(&self.sql, params, map)
+    }
+}
+
 impl fmt::Debug for Transaction<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Transaction").finish_non_exhaustive()
+    }
+}
+
+impl<'conn> Deref for Transaction<'conn> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.conn
     }
 }

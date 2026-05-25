@@ -37,7 +37,6 @@ const INTERRUPTED_HANDOFF_REASON: &str =
     "background handoff interrupted while queued before startup recovery";
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_background_continuation(
     request: BackgroundRunRequest,
     agent_dir: PathBuf,
@@ -692,7 +691,7 @@ async fn persist_successful_background_output(
     let conn = right_db::open_connection(agent_dir, false)
         .map_err(|e| format!("open DB to persist background output: {e:#}"))?;
     let tx = conn
-        .unchecked_transaction()
+        .transaction()
         .map_err(|e| format!("begin transaction for background output: {e:#}"))?;
     right_agent::async_runs::persist_run_output(
         &tx,
@@ -728,7 +727,7 @@ async fn persist_successful_background_output(
 
 #[allow(clippy::too_many_arguments)]
 fn capture_background_completion_seed(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     agent_dir: &Path,
     agent_name: &str,
     run_id: &str,
@@ -816,10 +815,10 @@ async fn serialize_notify_delivery_for_host(
 }
 
 fn persist_background_failure_notify(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     run_id: &str,
     reason: &str,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), right_db::DbError> {
     let (run_note, delivery_json, error_json) = background_failure_payload(run_id, reason)?;
     right_agent::async_runs::persist_run_output(
         conn,
@@ -836,9 +835,9 @@ fn persist_background_failure_notify(
 fn background_failure_payload(
     run_id: &str,
     reason: &str,
-) -> Result<(String, String, String), rusqlite::Error> {
+) -> Result<(String, String, String), right_db::DbError> {
     let delivery_json = crate::cron::notify_delivery_json(BACKGROUND_FAILURE_NOTIFY_CONTENT, None)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let run_note = format!("Background run `{run_id}` failed before producing a result");
     let error_json = serde_json::json!({
         "kind": "background_result_unavailable",
@@ -850,10 +849,10 @@ fn background_failure_payload(
 }
 
 fn mark_handoff_failed(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     run_id: &str,
     reason: &str,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), right_db::DbError> {
     persist_background_failure_notify(conn, run_id, reason)?;
     let now = chrono::Utc::now().to_rfc3339();
     let rows = conn.execute(
@@ -861,18 +860,18 @@ fn mark_handoff_failed(
          SET handoff_state = 'failed',
              updated_at = ?2
          WHERE id = ?1",
-        rusqlite::params![run_id, now],
+        right_db::params![run_id, now],
     )?;
     if rows == 0 {
-        return Err(rusqlite::Error::QueryReturnedNoRows);
+        return Err(right_db::DbError::NotFound);
     }
     right_agent::async_runs::finish_run(conn, run_id, None, "failed")
 }
 
 pub(crate) fn mark_interrupted_handoffs(
-    conn: &rusqlite::Connection,
-) -> Result<usize, rusqlite::Error> {
-    let tx = conn.unchecked_transaction()?;
+    conn: &right_db::Connection,
+) -> Result<usize, right_db::DbError> {
+    let tx = conn.transaction()?;
     let run_ids = {
         let mut stmt = tx.prepare(
             "SELECT id
@@ -895,9 +894,9 @@ pub(crate) fn mark_interrupted_handoffs(
 }
 
 fn mark_interrupted_handoff_failed_if_still_queued(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     run_id: &str,
-) -> Result<bool, rusqlite::Error> {
+) -> Result<bool, right_db::DbError> {
     let (run_note, delivery_json, error_json) =
         background_failure_payload(run_id, INTERRUPTED_HANDOFF_REASON)?;
     let now = chrono::Utc::now().to_rfc3339();
@@ -917,18 +916,18 @@ fn mark_interrupted_handoff_failed_if_still_queued(
            AND kind = 'background'
            AND status = 'queued'
            AND handoff_state = 'queued'",
-        rusqlite::params![run_id, run_note, delivery_json, error_json, now],
+        right_db::params![run_id, run_note, delivery_json, error_json, now],
     )?;
     Ok(rows > 0)
 }
 
 fn mark_completion_failed(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     run_id: &str,
     exit_code: Option<i32>,
     reason: &str,
-) -> Result<(), rusqlite::Error> {
-    let tx = conn.unchecked_transaction()?;
+) -> Result<(), right_db::DbError> {
+    let tx = conn.transaction()?;
     persist_background_failure_notify(&tx, run_id, reason)?;
     right_agent::async_runs::finish_run(&tx, run_id, exit_code, "failed")?;
     tx.commit()

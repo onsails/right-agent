@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusqlite::{Connection, params};
+use right_db::{Connection, DbError, params};
 
 #[derive(Debug, Clone, Copy)]
 pub struct NewCronRun<'a> {
@@ -45,17 +45,17 @@ pub struct CronRunJsonRow {
     pub delivery_status: Option<String>,
 }
 
-fn require_updated(rows: usize) -> rusqlite::Result<()> {
+fn require_updated(rows: usize) -> Result<(), DbError> {
     if rows == 0 {
-        return Err(rusqlite::Error::QueryReturnedNoRows);
+        return Err(DbError::not_found());
     }
     Ok(())
 }
 
-pub fn insert_running_cron_run(conn: &Connection, run: NewCronRun<'_>) -> rusqlite::Result<()> {
-    let target_chat_id = run.target_chat_id.ok_or_else(|| {
-        rusqlite::Error::InvalidParameterName("target_chat_id is required".into())
-    })?;
+pub fn insert_running_cron_run(conn: &Connection, run: NewCronRun<'_>) -> Result<(), DbError> {
+    let target_chat_id = run
+        .target_chat_id
+        .ok_or_else(|| DbError::InvalidParameter("target_chat_id is required".into()))?;
 
     conn.execute(
         "INSERT INTO async_runs (
@@ -82,7 +82,7 @@ pub fn insert_running_cron_run(conn: &Connection, run: NewCronRun<'_>) -> rusqli
 pub fn insert_queued_background_run(
     conn: &Connection,
     run: NewBackgroundRun<'_>,
-) -> rusqlite::Result<()> {
+) -> Result<(), DbError> {
     conn.execute(
         "INSERT INTO async_runs (
             id, kind, producer_ref, source_session_id, run_session_id, target_chat_id, target_thread_id,
@@ -111,7 +111,7 @@ pub fn mark_background_spawned(
     run_id: &str,
     started_at: &str,
     log_path: &str,
-) -> rusqlite::Result<()> {
+) -> Result<(), DbError> {
     let rows = conn.execute(
         "UPDATE async_runs
          SET status = 'running',
@@ -131,9 +131,9 @@ pub fn persist_run_output(
     conn: &Connection,
     run_id: &str,
     output: RunOutput<'_>,
-) -> rusqlite::Result<()> {
+) -> Result<(), DbError> {
     if output.delivery_required && output.delivery_json.is_none() {
-        return Err(rusqlite::Error::InvalidParameterName(
+        return Err(DbError::InvalidParameter(
             "delivery_json is required when delivery_required is true".into(),
         ));
     }
@@ -172,7 +172,7 @@ pub fn finish_run(
     run_id: &str,
     exit_code: Option<i32>,
     status: &str,
-) -> rusqlite::Result<()> {
+) -> Result<(), DbError> {
     let now = Utc::now().to_rfc3339();
     let exit_code = exit_code.map(i64::from);
 
@@ -218,7 +218,7 @@ pub fn cron_run_to_json(row: &CronRunJsonRow) -> serde_json::Value {
 mod tests {
     use super::*;
 
-    fn setup() -> rusqlite::Connection {
+    fn setup() -> right_db::Connection {
         let dir = tempfile::tempdir().unwrap();
         right_db::open_connection(dir.path(), true).unwrap()
     }
@@ -267,7 +267,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            rusqlite::Error::InvalidParameterName(ref name)
+            right_db::DbError::InvalidParameter(ref name)
                 if name == "target_chat_id is required"
         ));
 
@@ -352,7 +352,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            rusqlite::Error::InvalidParameterName(ref name)
+            right_db::DbError::InvalidParameter(ref name)
                 if name == "delivery_json is required when delivery_required is true"
         ));
 
@@ -395,7 +395,7 @@ mod tests {
         let spawned_err =
             mark_background_spawned(&conn, "missing", "2026-05-18T10:01:00Z", "/log/bg-1.ndjson")
                 .expect_err("missing background run should fail");
-        assert!(matches!(spawned_err, rusqlite::Error::QueryReturnedNoRows));
+        assert!(matches!(spawned_err, right_db::DbError::NotFound));
 
         let output_err = persist_run_output(
             &conn,
@@ -408,11 +408,11 @@ mod tests {
             },
         )
         .expect_err("missing output run should fail");
-        assert!(matches!(output_err, rusqlite::Error::QueryReturnedNoRows));
+        assert!(matches!(output_err, right_db::DbError::NotFound));
 
         let finish_err = finish_run(&conn, "missing", Some(0), "success")
             .expect_err("missing finished run should fail");
-        assert!(matches!(finish_err, rusqlite::Error::QueryReturnedNoRows));
+        assert!(matches!(finish_err, right_db::DbError::NotFound));
     }
 
     #[test]

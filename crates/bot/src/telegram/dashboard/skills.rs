@@ -64,7 +64,7 @@ pub(super) enum PinSkillError {
 #[derive(Debug, thiserror::Error)]
 pub(super) enum SkillLifecycleReadError {
     #[error("database open failed: {0}")]
-    DbOpen(#[from] rusqlite::Error),
+    DbOpen(#[from] right_db::DbError),
     #[error("lifecycle read failed: {0}")]
     Lifecycle(#[from] right_lifecycle::LifecycleError),
     #[error("lifecycle read task panicked: {0}")]

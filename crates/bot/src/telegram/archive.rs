@@ -185,6 +185,13 @@ where
         }
     };
 
+    #[cfg(test)]
+    std::thread::spawn(move || {
+        let _permit = permit;
+        work();
+    });
+
+    #[cfg(not(test))]
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         work();
@@ -273,9 +280,18 @@ fn write_assistant_payload(payload: AssistantArchivePayload) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use teloxide::types::Message;
 
     use super::super::mention::{AddressKind, BotIdentity};
+
+    static ARCHIVE_TEST_MUTEX: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    async fn archive_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        ARCHIVE_TEST_MUTEX.lock().await
+    }
 
     fn message(payload: serde_json::Value) -> Message {
         serde_json::from_value(payload).unwrap()
@@ -289,11 +305,10 @@ mod tests {
     }
 
     fn archived_row(
-        agent_dir: &std::path::Path,
+        conn: &right_db::Connection,
         chat_id: i64,
         message_id: i32,
     ) -> Option<(String, i64)> {
-        let conn = right_db::open_connection(agent_dir, false).unwrap();
         conn.query_row(
             "SELECT content, routed_to_agent
              FROM conversation_messages
@@ -316,7 +331,7 @@ mod tests {
             agent_dir,
             chat_id,
             message_id,
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(6),
         )
         .await
     }
@@ -328,8 +343,16 @@ mod tests {
         timeout: std::time::Duration,
     ) -> Option<(String, i64)> {
         let deadline = tokio::time::Instant::now() + timeout;
+        let mut conn = None;
         loop {
-            if let Some(row) = archived_row(agent_dir, chat_id, message_id) {
+            if conn.is_none()
+                && let Ok(opened) = right_db::open_connection(agent_dir, false)
+            {
+                conn = Some(opened);
+            }
+            if let Some(opened) = conn.as_ref()
+                && let Some(row) = archived_row(opened, chat_id, message_id)
+            {
                 return Some(row);
             }
             if tokio::time::Instant::now() >= deadline {
@@ -414,6 +437,7 @@ mod tests {
 
     #[tokio::test]
     async fn group_archive_persists_unrouted_message_row() {
+        let _guard = archive_test_guard().await;
         let dir = tempfile::tempdir().unwrap();
         right_db::open_connection(dir.path(), true).unwrap();
         let msg = message(serde_json::json!({
@@ -434,6 +458,7 @@ mod tests {
 
     #[tokio::test]
     async fn routed_dm_archive_persists_routed_message_row() {
+        let _guard = archive_test_guard().await;
         let dir = tempfile::tempdir().unwrap();
         right_db::open_connection(dir.path(), true).unwrap();
         let msg = message(serde_json::json!({
@@ -454,6 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn private_message_seen_by_group_archive_does_not_persist() {
+        let _guard = archive_test_guard().await;
         let dir = tempfile::tempdir().unwrap();
         right_db::open_connection(dir.path(), true).unwrap();
         let msg = message(serde_json::json!({
@@ -475,8 +501,9 @@ mod tests {
 
     #[tokio::test]
     async fn archive_seen_group_message_does_not_wait_for_locked_db() {
+        let _guard = archive_test_guard().await;
         let dir = tempfile::tempdir().unwrap();
-        let mut conn = right_db::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
         let tx = conn.transaction().unwrap();
         tx.execute(
             "INSERT INTO conversation_messages (

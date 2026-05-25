@@ -2,7 +2,7 @@ use std::io;
 
 use crate::api_types::{OverviewResponse, RunDetailResponse};
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::Connection;
+use right_db::Connection;
 use thiserror::Error;
 
 #[path = "read_model/activity.rs"]
@@ -21,7 +21,7 @@ pub mod usage;
 #[derive(Debug, Error)]
 pub enum ReadModelError {
     #[error(transparent)]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(#[from] right_db::DbError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -76,7 +76,7 @@ pub(crate) fn coarse_timestamp_bounds(
 }
 
 pub(crate) fn count_parsed_window_rows(
-    rows: impl Iterator<Item = rusqlite::Result<String>>,
+    rows: impl Iterator<Item = Result<String, right_db::DbError>>,
     since: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<i64, ReadModelError> {

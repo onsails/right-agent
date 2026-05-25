@@ -155,7 +155,7 @@ where
 #[allow(dead_code)]
 pub struct MemoryServer {
     tool_router: ToolRouter<Self>,
-    conn: Arc<Mutex<rusqlite::Connection>>,
+    conn: Arc<Mutex<right_db::Connection>>,
     agent_name: String,
     agent_dir: std::path::PathBuf,
     right_home: std::path::PathBuf,
@@ -164,7 +164,7 @@ pub struct MemoryServer {
 #[tool_router]
 impl MemoryServer {
     pub fn new(
-        conn: rusqlite::Connection,
+        conn: right_db::Connection,
         agent_name: String,
         agent_dir: std::path::PathBuf,
         right_home: std::path::PathBuf,
@@ -202,7 +202,7 @@ impl MemoryServer {
             )
             .map_err(|e| McpError::internal_error(format!("prepare failed: {e:#}"), None))?;
         let rows: Vec<serde_json::Value> = stmt
-            .query_map(rusqlite::params![params.job_name, limit], |row| {
+            .query_map(right_db::params![params.job_name, limit], |row| {
                 Ok(cron_run_to_json(
                     &row.get::<_, String>(0)?,
                     &row.get::<_, String>(1)?,
@@ -241,7 +241,7 @@ impl MemoryServer {
                     run_note, delivery_json, delivered_at, delivery_status
              FROM async_runs
              WHERE kind = 'cron' AND id = ?1",
-            rusqlite::params![params.run_id],
+            right_db::params![&params.run_id],
             |row| {
                 Ok(cron_run_to_json(
                     &row.get::<_, String>(0)?,
@@ -265,12 +265,9 @@ impl MemoryServer {
                 })?;
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "cron run '{}' not found",
-                    params.run_id
-                ))]))
-            }
+            Err(right_db::DbError::NotFound) => Ok(CallToolResult::success(vec![Content::text(
+                format!("cron run '{}' not found", params.run_id),
+            )])),
             Err(e) => Err(McpError::internal_error(format!("{e:#}"), None)),
         }
     }

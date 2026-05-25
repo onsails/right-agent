@@ -3790,7 +3790,7 @@ async fn cmd_agent_backup(
         let db_path = agent_dir.join("data.db");
         if db_path.exists() {
             let backup_db = backup_dir.join("data.db");
-            let conn = rusqlite::Connection::open(&db_path)
+            let conn = right_db::open_database_path_readonly(&db_path)
                 .into_diagnostic()
                 .map_err(|e| miette::miette!("failed to open data.db: {e:#}"))?;
             conn.execute(
@@ -5155,7 +5155,7 @@ fn format_size(bytes: u64) -> String {
 /// Resolve agent directory and open its memory database.
 ///
 /// Returns a live `Connection` or a fatal miette error.
-fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<rusqlite::Connection> {
+fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<right_db::Connection> {
     let agent_path = right_config::agents_dir(home).join(agent);
     if !agent_path.exists() {
         return Err(miette::miette!(
@@ -5195,7 +5195,7 @@ fn cmd_memory_list(
     // Local SQLite row projection; extracting a named alias is out of scope.
     #[allow(clippy::type_complexity)]
     let entries: Vec<(i64, String, Option<String>, Option<String>, String)> = stmt
-        .query_map(rusqlite::params![limit, offset], |row| {
+        .query_map(right_db::params![limit, offset], |row| {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
@@ -5330,7 +5330,7 @@ fn cmd_memory_search(
     // Local SQLite row projection; extracting a named alias is out of scope.
     #[allow(clippy::type_complexity)]
     let entries: Vec<(i64, String, Option<String>, Option<String>, String)> = stmt
-        .query_map(rusqlite::params![query, limit, offset], |row| {
+        .query_map(right_db::params![query, limit, offset], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
         })
         .map_err(|e| miette::miette!(
@@ -5392,7 +5392,7 @@ fn cmd_memory_search(
 }
 
 fn cmd_memory_delete(home: &Path, agent: &str, id: i64) -> miette::Result<()> {
-    use rusqlite::OptionalExtension;
+    use right_db::OptionalExtension;
     use std::io::{self, Write};
 
     let conn = resolve_agent_db(home, agent)?;

@@ -1,4 +1,4 @@
-use rusqlite::{OptionalExtension, params};
+use right_db::params;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,11 +245,11 @@ pub struct LearningEpisodeRow {
 }
 
 pub fn insert_execution_event(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     event: &NewExecutionEvent,
-) -> Result<i64, rusqlite::Error> {
+) -> Result<i64, right_db::DbError> {
     let content_json = serde_json::to_string(&event.content_json)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let trust_label = if matches!(event.event_kind, ExecutionEventKind::Thinking) {
         TrustLabel::Secondary
     } else {
@@ -279,10 +279,10 @@ pub fn insert_execution_event(
 }
 
 pub fn insert_pending_episode(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     seed: &NewLearningEpisodeSeed,
-) -> Result<i64, rusqlite::Error> {
-    let tx = conn.unchecked_transaction()?;
+) -> Result<i64, right_db::DbError> {
+    let tx = conn.transaction()?;
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO learning_episodes \
          (agent_name, kind, seed_trigger_kind, seed_ref, status, target_chat_id, target_thread_id, ready_after) \
@@ -324,21 +324,23 @@ pub fn insert_pending_episode(
 }
 
 pub fn claim_ready_episode(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     agent_name: &str,
     now: &str,
-) -> Result<Option<LearningEpisodeRow>, rusqlite::Error> {
-    let tx = conn.unchecked_transaction()?;
-    let id = tx
-        .query_row(
-            "SELECT id FROM learning_episodes \
+) -> Result<Option<LearningEpisodeRow>, right_db::DbError> {
+    let tx = conn.transaction()?;
+    let id = match tx.query_row(
+        "SELECT id FROM learning_episodes \
              WHERE agent_name=?1 AND status='pending' AND ready_after <= ?2 \
              ORDER BY ready_after ASC, id ASC \
              LIMIT 1",
-            params![agent_name, now],
-            |r| r.get::<_, i64>(0),
-        )
-        .optional()?;
+        params![agent_name, now],
+        |r| r.get::<_, i64>(0),
+    ) {
+        Ok(id) => Some(id),
+        Err(right_db::DbError::NotFound) => None,
+        Err(error) => return Err(error),
+    };
     let Some(id) = id else {
         tx.commit()?;
         return Ok(None);
@@ -359,16 +361,16 @@ pub fn claim_ready_episode(
 }
 
 pub fn mark_episode_selected(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     episode_id: i64,
     selection: &SelectedEpisodeUpdate,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), right_db::DbError> {
     let message_refs_json = serde_json::to_string(&selection.message_refs)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let execution_event_refs_json = serde_json::to_string(&selection.execution_event_refs)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let selector_output_json = serde_json::to_string(&selection.selector_output_json)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let updated = conn.execute(
         "UPDATE learning_episodes \
          SET status='selected', \
@@ -408,16 +410,16 @@ pub fn mark_episode_selected(
 }
 
 pub fn mark_episode_terminal(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     episode_id: i64,
     status: LearningEpisodeStatus,
     output_json: &serde_json::Value,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), right_db::DbError> {
     if !status.is_selector_terminal() {
-        return Err(rusqlite::Error::InvalidQuery);
+        return Err(right_db::DbError::InvalidParameter("invalid query".into()));
     }
     let output_json = serde_json::to_string(output_json)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let updated = conn.execute(
         "UPDATE learning_episodes \
          SET status=?2, selector_output_json=?3, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
@@ -428,12 +430,12 @@ pub fn mark_episode_terminal(
 }
 
 pub fn mark_episode_failed(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     episode_id: i64,
     reason: &str,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), right_db::DbError> {
     let output_json = serde_json::to_string(&serde_json::json!({ "error": reason }))
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let updated = conn.execute(
         "UPDATE learning_episodes \
          SET status='failed', selector_output_json=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
@@ -444,9 +446,9 @@ pub fn mark_episode_failed(
 }
 
 pub fn mark_episode_reviewing(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     episode_id: i64,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), right_db::DbError> {
     let updated = conn.execute(
         "UPDATE learning_episodes \
          SET status='reviewing', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
@@ -457,9 +459,9 @@ pub fn mark_episode_reviewing(
 }
 
 pub fn mark_episode_reviewed(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     episode_id: i64,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), right_db::DbError> {
     let updated = conn.execute(
         "UPDATE learning_episodes \
          SET status='reviewed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
@@ -470,10 +472,10 @@ pub fn mark_episode_reviewed(
 }
 
 pub fn requeue_episode(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     episode_id: i64,
     ready_after: &str,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), right_db::DbError> {
     let updated = conn.execute(
         "UPDATE learning_episodes \
          SET status='pending', ready_after=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
@@ -486,10 +488,10 @@ pub fn requeue_episode(
 /// Only clears review_running when the gate is set with no prior review report (stranded case).
 /// Concurrent legitimate reviews are not affected.
 pub fn recover_stale_inflight_episodes(
-    conn: &rusqlite::Connection,
+    conn: &right_db::Connection,
     agent_name: &str,
     now: &str,
-) -> Result<usize, rusqlite::Error> {
+) -> Result<usize, right_db::DbError> {
     let mut stmt = conn.prepare(
         "SELECT id, status FROM learning_episodes \
          WHERE agent_name=?1 AND status IN ('selecting','selected','reviewing') \
@@ -504,7 +506,7 @@ pub fn recover_stale_inflight_episodes(
     }
     drop(stmt);
 
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn.transaction()?;
     let mut recovered = 0;
     for (episode_id, status) in episodes {
         match status.as_str() {
@@ -517,16 +519,18 @@ pub fn recover_stale_inflight_episodes(
                 )?;
             }
             "selected" | "reviewing" => {
-                let report_status: Option<String> = tx
-                    .query_row(
-                        "SELECT status FROM skill_review_reports \
+                let report_status: Option<String> = match tx.query_row(
+                    "SELECT status FROM skill_review_reports \
                          WHERE learning_episode_id=?1 \
                          ORDER BY id DESC \
                          LIMIT 1",
-                        [episode_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
+                    [episode_id],
+                    |row| row.get(0),
+                ) {
+                    Ok(status) => Some(status),
+                    Err(right_db::DbError::NotFound) => None,
+                    Err(error) => return Err(error),
+                };
                 let updated = match report_status.as_deref() {
                     Some("failed") => tx.execute(
                         "UPDATE learning_episodes \
@@ -563,18 +567,18 @@ pub fn recover_stale_inflight_episodes(
     Ok(recovered)
 }
 
-fn require_one_row_updated(updated: usize) -> Result<(), rusqlite::Error> {
+fn require_one_row_updated(updated: usize) -> Result<(), right_db::DbError> {
     if updated == 1 {
         Ok(())
     } else {
-        Err(rusqlite::Error::QueryReturnedNoRows)
+        Err(right_db::DbError::NotFound)
     }
 }
 
 fn select_episode_in_tx(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &right_db::Transaction<'_>,
     episode_id: i64,
-) -> Result<LearningEpisodeRow, rusqlite::Error> {
+) -> Result<LearningEpisodeRow, right_db::DbError> {
     tx.query_row(
         "SELECT id, agent_name, kind, seed_trigger_kind, seed_ref, status, \
                 target_chat_id, target_thread_id, start_ref, end_ref, \
@@ -589,8 +593,8 @@ fn select_episode_in_tx(
 }
 
 fn learning_episode_from_row(
-    row: &rusqlite::Row<'_>,
-) -> Result<LearningEpisodeRow, rusqlite::Error> {
+    row: &right_db::row::Row<'_>,
+) -> Result<LearningEpisodeRow, right_db::DbError> {
     let kind = LearningEpisodeKind::from_db(row.get(2)?).map_err(to_sql_conversion_error)?;
     let seed_trigger_kind =
         EpisodeSeedTriggerKind::from_db(row.get(3)?).map_err(to_sql_conversion_error)?;
@@ -625,18 +629,18 @@ fn learning_episode_from_row(
     })
 }
 
-fn parse_json_column<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, rusqlite::Error> {
-    serde_json::from_str(value).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+fn parse_json_column<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, right_db::DbError> {
+    serde_json::from_str(value).map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))
 }
 
 fn parse_optional_json_column(
     value: Option<String>,
-) -> Result<Option<serde_json::Value>, rusqlite::Error> {
+) -> Result<Option<serde_json::Value>, right_db::DbError> {
     value.map(|value| parse_json_column(&value)).transpose()
 }
 
-fn to_sql_conversion_error(error: InvalidDbValue) -> rusqlite::Error {
-    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+fn to_sql_conversion_error(error: InvalidDbValue) -> right_db::DbError {
+    right_db::DbError::InvalidParameter(error.to_string())
 }
 
 #[derive(Debug)]
@@ -663,9 +667,10 @@ impl std::error::Error for InvalidDbValue {}
 mod tests {
     use super::*;
 
-    fn conn() -> rusqlite::Connection {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
+    fn conn() -> right_db::Connection {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        std::mem::forget(dir);
         conn
     }
 
@@ -697,12 +702,15 @@ mod tests {
         }
     }
 
-    fn assert_query_returned_no_rows(result: Result<(), rusqlite::Error>) {
-        assert!(matches!(result, Err(rusqlite::Error::QueryReturnedNoRows)));
+    fn assert_query_returned_no_rows(result: Result<(), right_db::DbError>) {
+        assert!(matches!(result, Err(right_db::DbError::NotFound)));
     }
 
-    fn assert_invalid_query(result: Result<(), rusqlite::Error>) {
-        assert!(matches!(result, Err(rusqlite::Error::InvalidQuery)));
+    fn assert_invalid_query(result: Result<(), right_db::DbError>) {
+        assert!(matches!(
+            result,
+            Err(right_db::DbError::InvalidParameter(ref message)) if message == "invalid query"
+        ));
     }
 
     #[test]

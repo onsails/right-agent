@@ -277,7 +277,7 @@ pub(crate) fn explicit_state_manifest(
         });
     };
 
-    let conn = rusqlite::Connection::open(db_path)
+    let conn = right_db::open_database_path_readonly(db_path)
         .into_diagnostic()
         .map_err(|e| miette::miette!("open {}: {e:#}", db_path.display()))?;
 
@@ -289,11 +289,11 @@ pub(crate) fn explicit_state_manifest(
     })
 }
 
-fn table_has_rows(conn: &rusqlite::Connection, table: &str) -> miette::Result<bool> {
+fn table_has_rows(conn: &right_db::Connection, table: &str) -> miette::Result<bool> {
     let exists: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-            [table],
+            right_db::params![table],
             |row| row.get(0),
         )
         .into_diagnostic()
@@ -405,15 +405,13 @@ mod tests {
     fn explicit_state_manifest_detects_db_tables_without_reading_secrets() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("data.db");
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
         conn.execute_batch(
             r#"
-            CREATE TABLE mcp_servers (name TEXT PRIMARY KEY, auth_token TEXT);
-            CREATE TABLE auth_tokens (token TEXT NOT NULL);
-            CREATE TABLE cron_specs (job_name TEXT PRIMARY KEY, prompt TEXT NOT NULL);
-            INSERT INTO mcp_servers (name, auth_token) VALUES ('linear', 'mcp_secret');
+            INSERT INTO mcp_servers (name, url) VALUES ('linear', 'https://mcp.example.test');
             INSERT INTO auth_tokens (token) VALUES ('claude_secret');
-            INSERT INTO cron_specs (job_name, prompt) VALUES ('daily', 'secret prompt');
+            INSERT INTO cron_specs (job_name, schedule, prompt, created_at, updated_at)
+            VALUES ('daily', '0 9 * * *', 'secret prompt', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
             "#,
         )
         .unwrap();
@@ -421,6 +419,7 @@ mod tests {
             telegram_token: Some("telegram_secret".to_string()),
             ..AgentConfig::default()
         };
+        drop(conn);
 
         let manifest = build_backup_manifest("right", Some(&config), Some(&db_path)).unwrap();
 

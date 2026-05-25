@@ -9,7 +9,14 @@ impl<'row> Row<'row> {
         Self { inner }
     }
 
-    pub fn get<T: FromValue>(&self, idx: i32) -> Result<T, DbError> {
+    pub fn get<I, T>(&self, idx: I) -> Result<T, DbError>
+    where
+        I: TryInto<i32>,
+        T: FromValue,
+    {
+        let idx = idx
+            .try_into()
+            .map_err(|_| DbError::InvalidParameter("column index does not fit in i32".into()))?;
         T::from_value(self.inner.get_value(idx)?)
     }
 }
@@ -46,6 +53,14 @@ impl FromValue for u64 {
         let value = i64::from_value(value)?;
         u64::try_from(value)
             .map_err(|_| DbError::InvalidParameter("SQLite INTEGER is negative".into()))
+    }
+}
+
+impl FromValue for u32 {
+    fn from_value(value: libsql::Value) -> Result<Self, DbError> {
+        let value = i64::from_value(value)?;
+        u32::try_from(value)
+            .map_err(|_| DbError::InvalidParameter("SQLite INTEGER does not fit in u32".into()))
     }
 }
 

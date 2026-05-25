@@ -127,7 +127,7 @@ fn is_valid_skill_name(name: &str) -> bool {
 }
 
 pub fn classify_skill_group<'a>(name: &str, core_skill_names: &'a [&'a str]) -> &'static str {
-    if core_skill_names.iter().any(|core| *core == name) {
+    if core_skill_names.contains(&name) {
         "core"
     } else if name.starts_with("rightx-") {
         "learned"

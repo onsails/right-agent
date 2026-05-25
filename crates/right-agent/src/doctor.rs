@@ -1436,18 +1436,18 @@ mod cron_target_tests {
         crate::agent::allowlist::write_file(agent_dir, &file).unwrap();
     }
 
-    fn seed_cron(conn: &rusqlite::Connection, name: &str, target_chat_id: Option<i64>) {
+    fn seed_cron(conn: &right_db::Connection, name: &str, target_chat_id: Option<i64>) {
         let now = chrono::Utc::now().to_rfc3339();
         match target_chat_id {
             Some(id) => conn.execute(
                 "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, target_chat_id, created_at, updated_at) \
                  VALUES (?1, '*/5 * * * *', 'p', 1.0, ?2, ?3, ?3)",
-                rusqlite::params![name, id, now],
+                right_db::params![name, id, &now],
             ).unwrap(),
             None => conn.execute(
                 "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
                  VALUES (?1, '*/5 * * * *', 'p', 1.0, ?2, ?2)",
-                rusqlite::params![name, now],
+                right_db::params![name, &now],
             ).unwrap(),
         };
     }
