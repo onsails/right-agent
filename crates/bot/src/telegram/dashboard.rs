@@ -169,7 +169,7 @@ async fn handle_bootstrap(
             readonly: true,
             commands_enabled: false,
             learning_metrics: true,
-            learning_evidence_snippets: true,
+            learning_evidence_snippets: false,
             learning_commands: false,
             activity: true,
             knowledge_learning: true,
@@ -1074,7 +1074,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["features"]["learning_metrics"], true);
-        assert_eq!(body["features"]["learning_evidence_snippets"], true);
+        assert_eq!(body["features"]["learning_evidence_snippets"], false);
         assert_eq!(body["features"]["learning_commands"], false);
         assert_eq!(body["features"]["commands_enabled"], false);
         assert_eq!(body["features"]["activity"], true);
@@ -1295,6 +1295,8 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["capabilities"]["learning_metrics"], true);
+        assert_eq!(body["capabilities"]["learning_evidence_snippets"], false);
+        assert_eq!(body["capabilities"]["learning_commands"], false);
         assert!(
             body.get("flow_nodes").is_some(),
             "learning overview must expose flow_nodes"

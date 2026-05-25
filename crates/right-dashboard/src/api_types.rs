@@ -609,7 +609,7 @@ mod dashboard_v2_tests {
             readonly: true,
             commands_enabled: false,
             learning_metrics: true,
-            learning_evidence_snippets: true,
+            learning_evidence_snippets: false,
             learning_commands: false,
             activity: true,
             knowledge_learning: true,
@@ -627,7 +627,7 @@ mod dashboard_v2_tests {
                 "readonly": true,
                 "commands_enabled": false,
                 "learning_metrics": true,
-                "learning_evidence_snippets": true,
+                "learning_evidence_snippets": false,
                 "learning_commands": false,
                 "activity": true,
                 "knowledge_learning": true,
@@ -872,7 +872,7 @@ mod learning_tests {
             refresh_interval_secs: 5,
             capabilities: LearningCapabilities {
                 learning_metrics: true,
-                learning_evidence_snippets: true,
+                learning_evidence_snippets: false,
                 learning_commands: false,
             },
             lifecycle: LearningLifecycle {
@@ -915,6 +915,7 @@ mod learning_tests {
 
         let value = serde_json::to_value(&response).unwrap();
         assert_eq!(value["capabilities"]["learning_metrics"], true);
+        assert_eq!(value["capabilities"]["learning_evidence_snippets"], false);
         assert_eq!(value["capabilities"]["learning_commands"], false);
         assert!(value.get("funnel").is_none());
         assert!(value.get("quality").is_none());
