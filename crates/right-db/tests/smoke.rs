@@ -224,7 +224,7 @@ fn libsql_migrations_static_runs_with_right_db_connection() {
 }
 
 #[test]
-fn libsql_supports_conversation_fts_triggers() {
+fn turso_supports_conversation_fts_index() {
     let dir = tempdir().unwrap();
     let conn = open_connection(dir.path(), true).unwrap();
 
@@ -237,7 +237,7 @@ fn libsql_supports_conversation_fts_triggers() {
 
     let count: i64 = conn
         .query_one(
-            "SELECT COUNT(*) FROM conversation_messages_fts WHERE conversation_messages_fts MATCH ?",
+            "SELECT COUNT(*) FROM conversation_messages WHERE content MATCH ?",
             ["needle"],
             |row| row.get(0),
         )
@@ -304,6 +304,15 @@ fn query_table_count(conn: &right_db::Connection, table_name: &str) -> i64 {
     .unwrap()
 }
 
+fn query_index_count(conn: &right_db::Connection, index_name: &str) -> i64 {
+    conn.query_one(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?",
+        [index_name],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
 #[test]
 fn schema_has_memories_table() {
     let dir = tempdir().unwrap();
@@ -340,21 +349,21 @@ fn schema_has_conversation_messages_tables() {
         "conversation_messages table should exist"
     );
     assert_eq!(
-        query_table_count(&conn, "conversation_messages_fts"),
+        query_index_count(&conn, "idx_conversation_messages_turso_fts"),
         1,
-        "conversation_messages_fts table should exist"
+        "idx_conversation_messages_turso_fts index should exist"
     );
 }
 
 #[test]
-fn schema_has_memories_fts() {
+fn schema_has_memories_turso_fts_index() {
     let dir = tempdir().unwrap();
     open_db(dir.path(), true).unwrap();
     let conn = open_connection_readonly(dir.path()).unwrap();
     assert_eq!(
-        query_table_count(&conn, "memories_fts"),
+        query_index_count(&conn, "idx_memories_turso_fts"),
         1,
-        "memories_fts virtual table should exist"
+        "idx_memories_turso_fts index should exist"
     );
 }
 
@@ -364,13 +373,16 @@ fn schema_has_conversation_messages_table() {
     open_db(dir.path(), true).unwrap();
     let conn = open_connection_readonly(dir.path()).unwrap();
 
-    for table in ["conversation_messages", "conversation_messages_fts"] {
-        assert_eq!(
-            query_table_count(&conn, table),
-            1,
-            "{table} table should exist"
-        );
-    }
+    assert_eq!(
+        query_table_count(&conn, "conversation_messages"),
+        1,
+        "conversation_messages table should exist"
+    );
+    assert_eq!(
+        query_index_count(&conn, "idx_conversation_messages_turso_fts"),
+        1,
+        "idx_conversation_messages_turso_fts index should exist"
+    );
 }
 
 #[test]

@@ -2386,16 +2386,27 @@ continue background work',
         let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_latest(&mut conn).unwrap();
 
-        for table in ["conversation_messages", "conversation_messages_fts"] {
-            let exists: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                    [table],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(exists, 1, "{table} table must exist");
-        }
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='conversation_messages'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1, "conversation_messages table must exist");
+
+        let index_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='index' AND name='idx_conversation_messages_turso_fts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            index_exists, 1,
+            "idx_conversation_messages_turso_fts index must exist"
+        );
     }
 
     #[test]
@@ -2473,8 +2484,8 @@ continue background work',
 
         let original_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM conversation_messages_fts
-                 WHERE conversation_messages_fts MATCH 'original'",
+                "SELECT COUNT(*) FROM conversation_messages
+                 WHERE content MATCH 'original'",
                 [],
                 |r| r.get(0),
             )
@@ -2489,16 +2500,16 @@ continue background work',
 
         let original_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM conversation_messages_fts
-                 WHERE conversation_messages_fts MATCH 'original'",
+                "SELECT COUNT(*) FROM conversation_messages
+                 WHERE content MATCH 'original'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         let replacement_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM conversation_messages_fts
-                 WHERE conversation_messages_fts MATCH 'replacement'",
+                "SELECT COUNT(*) FROM conversation_messages
+                 WHERE content MATCH 'replacement'",
                 [],
                 |r| r.get(0),
             )

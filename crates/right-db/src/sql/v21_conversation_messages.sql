@@ -16,8 +16,7 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_messages_inbound_unique
-ON conversation_messages (platform, chat_id, message_id, role)
-WHERE message_id IS NOT NULL;
+ON conversation_messages (platform, chat_id, message_id, role);
 
 CREATE INDEX IF NOT EXISTS idx_conversation_messages_thread_created
 ON conversation_messages (platform, chat_id, thread_id, created_at);
@@ -29,32 +28,5 @@ CREATE INDEX IF NOT EXISTS idx_conversation_messages_session_turn
 ON conversation_messages (root_session_id, turn_id)
 WHERE root_session_id IS NOT NULL;
 
-CREATE VIRTUAL TABLE IF NOT EXISTS conversation_messages_fts USING fts5(
-    content,
-    content='conversation_messages',
-    content_rowid='id'
-);
-
--- Stub rows written by mark_routed (content='') must not pollute FTS — they
--- carry routing metadata only. Real content arrives via archive_message's
--- UPSERT, at which point the UPDATE trigger inserts the row into FTS.
-CREATE TRIGGER IF NOT EXISTS conversation_messages_ai AFTER INSERT ON conversation_messages
-WHEN length(new.content) > 0
-BEGIN
-    INSERT INTO conversation_messages_fts(rowid, content)
-    VALUES (new.id, new.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS conversation_messages_ad AFTER DELETE ON conversation_messages
-WHEN length(old.content) > 0
-BEGIN
-    INSERT INTO conversation_messages_fts(conversation_messages_fts, rowid, content)
-    VALUES ('delete', old.id, old.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS conversation_messages_au AFTER UPDATE ON conversation_messages BEGIN
-    INSERT INTO conversation_messages_fts(conversation_messages_fts, rowid, content)
-    SELECT 'delete', old.id, old.content WHERE length(old.content) > 0;
-    INSERT INTO conversation_messages_fts(rowid, content)
-    SELECT new.id, new.content WHERE length(new.content) > 0;
-END;
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_turso_fts
+ON conversation_messages USING fts(content);

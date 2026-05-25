@@ -50,12 +50,14 @@ No MCP memory tools.
 
 The legacy `store_record` / `query_records` / `search_records` / `delete_record`
 tools are removed from the surface; their backing tables (`memories`,
-`memories_fts`, `memory_events`) are retained for migration compat.
+`memory_events`) are retained for migration compat. Fresh local schemas index
+`memories.content` with a Turso FTS index; older databases may still contain
+the legacy `memories_fts` virtual table until the legacy cleanup migration.
 
 ## Transcript Search
 
-Conversation transcript search is SQLite FTS5 over archived Telegram messages
-via `right-db`'s local libSQL driver, not Hindsight. `mcp__right__thread_search` and
+Conversation transcript search uses Turso FTS indexes over archived Telegram
+messages in `right-db`, not Hindsight. `mcp__right__thread_search` and
 `mcp__right__chat_search` return archived transcript snippets scoped by the
 current foreground Telegram invocation. Use these tools, not
 `mcp__right__memory_recall`, when the user asks what was said or asks for past

@@ -412,7 +412,7 @@ agent-managed `MEMORY.md`). MCP tools `memory_retain` / `memory_recall` /
 `memory_reflect` are exposed only in Hindsight mode.
 
 Conversation transcript search is separate from Hindsight. It uses local
-SQLite FTS5 over archived Telegram messages and is scoped by the current
+Turso FTS indexes over archived Telegram messages and is scoped by the current
 foreground invocation.
 
 See: `docs/architecture/memory.md` for auto-retain/recall semantics,
@@ -422,10 +422,10 @@ prefetch cache behavior, cron-skip rules, and backgrounded-turn handling.
 
 See: `docs/architecture/memory.md` (Memory Resilience Layer).
 
-### Memory Schema (SQLite)
+### Memory Schema
 
-Tables in per-agent `data.db`: `memories` / `memory_events` / `memories_fts`
-(legacy, unused but retained for migration compat), `telegram_sessions`,
+Tables in per-agent `data.db`: `memories` / `memory_events` (legacy, unused
+but retained for migration compat), `telegram_sessions`,
 `cron_specs`, `async_runs`, `mcp_servers`, `auth_tokens`, `pending_retains`,
 `memory_alerts`, `curator_state` (singleton; `agent_singleton_id` PRIMARY KEY
 CHECK = 1), `skill_learning_events`, and `skill_lifecycle`. Run
