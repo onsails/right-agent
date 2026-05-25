@@ -4,9 +4,9 @@
 
 **Goal:** Replace runtime `right-db` `libsql` usage with `turso`, enable the `sync` feature for future Turso Cloud work, and migrate local search from SQLite FTS5 virtual tables to Turso FTS indexes without adding cloud behavior.
 
-**Architecture:** `right-db` remains the only database-driver boundary. Every local Turso open enables `experimental_index_method(true)`. Fresh schemas create Turso FTS indexes over base tables; legacy migrations drop old FTS5 sync triggers and create equivalent Turso indexes. No `push()`, `pull()`, credential, config, UI, CLI, bot command, scheduler, or restore behavior is included.
+**Architecture:** `right-db` remains the only database-driver boundary. Every local Turso open enables `experimental_index_method(true)`. Fresh schemas create Turso FTS indexes over base tables. Migrated opens first run a private bundled-`rusqlite` scrubber to remove real legacy SQLite FTS5 virtual tables/triggers, then v34 creates equivalent Turso indexes. No `push()`, `pull()`, credential, config, UI, CLI, bot command, scheduler, or restore behavior is included.
 
-**Tech Stack:** Rust 2024, `right-db`, `turso` crate with `sync` feature, Turso index-method FTS, Tokio runtime bridge, per-agent `data.db`, `devenv shell -- cargo`.
+**Tech Stack:** Rust 2024, `right-db`, `turso` crate with `sync` feature, Turso index-method FTS, bundled `rusqlite` only for legacy FTS5 pre-scrub, Tokio runtime bridge, per-agent `data.db`, `devenv shell -- cargo`.
 
 **Spec:** `docs/superpowers/specs/2026-05-25-turso-local-foundation-design.md`.
 
@@ -16,9 +16,12 @@
 
 - Modify `Cargo.toml`
   - Add `turso = { version = "...", features = ["sync"] }`.
+  - Add `rusqlite = { version = "...", features = ["bundled"] }` for the
+    private legacy FTS5 scrubber only.
   - Remove workspace `libsql` after runtime and temporary gates no longer use it.
 - Modify `crates/right-db/Cargo.toml`
   - Add workspace `turso`.
+  - Add workspace `rusqlite`.
   - Remove workspace `libsql` after the transition gates are removed.
 - Create then remove `crates/right-db/tests/turso_compat.rs`
   - Direct Turso compatibility probes. Direct driver usage is allowed here because this is a temporary boundary test.
@@ -29,6 +32,8 @@
   - Wrap `turso::Transaction`.
 - Modify `crates/right-db/src/error.rs`
   - Normalize `turso::Error` into project `DbError`.
+- Modify `crates/right-db/src/lib.rs`
+  - Run the legacy FTS5 scrubber before migrated Turso opens.
 - Modify `crates/right-db/src/params.rs`
   - Convert project params to `turso::Params` and `turso::Value`.
 - Modify `crates/right-db/src/row.rs`
@@ -38,10 +43,9 @@
 - Modify `crates/right-db/src/sql/v21_conversation_messages.sql`
   - Replace `conversation_messages_fts` SQLite FTS5 virtual table and sync triggers with `idx_conversation_messages_turso_fts`.
 - Create `crates/right-db/src/sql/v34_turso_fts_indexes.sql`
-  - Drop legacy FTS5 sync triggers.
-  - Create Turso FTS indexes for legacy databases.
+  - Drop any remaining legacy FTS5 sync triggers and virtual tables.
 - Modify `crates/right-db/src/migrations.rs`
-  - Add v34 SQL, bump `LATEST_SCHEMA_VERSION`, update FTS tests.
+  - Add v34 SQL and hook, bump `LATEST_SCHEMA_VERSION`, update FTS tests.
 - Modify `crates/right-db/src/conversation.rs`
   - Query `conversation_messages` with `content MATCH ?`.
   - Generate deterministic bounded snippets in Rust.
@@ -656,13 +660,32 @@ devenv shell -- cargo test -p right-db turso_supports_conversation_fts_index sch
 
 Expected: PASS. If Turso FTS index metadata is not represented as `sqlite_master type='index'`, update the helper to the observed metadata shape and keep the test name focused on the user-visible index contract.
 
-## Task 4: Add Legacy v34 FTS Migration
+## Task 4: Add Legacy FTS5 Scrubber And v34 Migration
 
 **Files:**
+- Modify `Cargo.toml`
+- Modify `crates/right-db/Cargo.toml`
+- Modify `crates/right-db/src/lib.rs`
+- Modify `crates/right-db/src/error.rs`
 - Create `crates/right-db/src/sql/v34_turso_fts_indexes.sql`
 - Modify `crates/right-db/src/migrations.rs`
 
-- [ ] **Step 4.1: Add v34 SQL**
+- [ ] **Step 4.1: Add the pre-Turso legacy FTS5 scrubber**
+
+Use bundled `rusqlite` inside `right-db` only. Before `Connection::open_local`
+in `open_connection(path, migrate: true)`, detect existing `data.db` files with
+legacy FTS5 objects and drop:
+
+- `memories_fts`
+- `conversation_messages_fts`
+- `memories_ai`, `memories_ad`, `memories_au`
+- `conversation_messages_ai`, `conversation_messages_ad`,
+  `conversation_messages_au`
+
+This step is outside the Turso migration transaction because Turso cannot
+reliably resolve real legacy FTS5 schemas before the virtual tables are removed.
+
+- [ ] **Step 4.2: Add v34 SQL**
 
 Create `crates/right-db/src/sql/v34_turso_fts_indexes.sql`:
 
@@ -675,14 +698,11 @@ DROP TRIGGER IF EXISTS conversation_messages_ai;
 DROP TRIGGER IF EXISTS conversation_messages_ad;
 DROP TRIGGER IF EXISTS conversation_messages_au;
 
-CREATE INDEX IF NOT EXISTS idx_memories_turso_fts
-ON memories USING fts(content);
-
-CREATE INDEX IF NOT EXISTS idx_conversation_messages_turso_fts
-ON conversation_messages USING fts(content);
+DROP TABLE IF EXISTS memories_fts;
+DROP TABLE IF EXISTS conversation_messages_fts;
 ```
 
-- [ ] **Step 4.2: Register v34**
+- [ ] **Step 4.3: Register v34**
 
 In `crates/right-db/src/migrations.rs`, add:
 
@@ -698,13 +718,14 @@ Add the migration after v33:
 Migration {
     version: 34,
     sql: V34_SCHEMA,
-    hook: None,
+    hook: Some(v34_turso_fts_indexes),
 },
 ```
 
-- [ ] **Step 4.3: Add v34 regression test**
+- [ ] **Step 4.4: Add v34 regression tests**
 
-In `crates/right-db/src/migrations.rs`, add this test near the other migration tests:
+In `crates/right-db/src/migrations.rs`, add regression tests near the other
+migration tests:
 
 ```rust
 #[test]
@@ -766,12 +787,22 @@ fn v34_drops_legacy_fts_triggers_and_creates_turso_indexes() {
 }
 ```
 
-- [ ] **Step 4.4: Run v34 tests**
+Also add a real legacy SQLite FTS5 fixture using `rusqlite` that sets
+`PRAGMA user_version = 33`, opens with `right_db::open_connection(..., true)`,
+and proves:
+
+- legacy FTS5 triggers are gone;
+- `memories_fts` and `conversation_messages_fts` are gone;
+- Turso FTS indexes exist;
+- existing and post-migration rows are both searchable through base-table
+  `MATCH`.
+
+- [ ] **Step 4.5: Run v34 tests**
 
 Run:
 
 ```bash
-devenv shell -- cargo test -p right-db v34_drops_legacy_fts_triggers_and_creates_turso_indexes migration_runner_semantics_libsql_rolls_back_partial_batch_and_reports_context
+devenv shell -- cargo test -p right-db v34_drops_legacy_fts_triggers_and_creates_turso_indexes v34_migrates_real_legacy_fts5_virtual_tables
 ```
 
 Expected: PASS. Rename the migration-runner test from `libsql` to a driver-neutral name in the same edit if it still contains `libsql`.
@@ -950,7 +981,8 @@ devenv shell -- rg -n "libsql|rusqlite|USING fts5|conversation_messages_fts|memo
 
 Expected:
 
-- No runtime `libsql`/`rusqlite` references.
+- No runtime `libsql` references; `rusqlite` appears only in `right-db` legacy
+  FTS5 scrubber code/tests.
 - No active schema/search dependence on SQLite FTS5 virtual tables.
 - No cloud sync calls, remote URLs, auth-token setup, or sync scheduler code.
 

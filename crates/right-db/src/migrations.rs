@@ -620,6 +620,18 @@ fn v30_skill_learning_hint_outcome(conn: &dyn MigrationConnection) -> Result<(),
     Ok(())
 }
 
+fn v34_turso_fts_indexes(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_memories_turso_fts
+         ON memories USING fts(content);",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_conversation_messages_turso_fts
+         ON conversation_messages USING fts(content);",
+    )?;
+    Ok(())
+}
+
 pub static MIGRATIONS: Migrations = Migrations {
     migrations: &[
         Migration {
@@ -790,7 +802,7 @@ pub static MIGRATIONS: Migrations = Migrations {
         Migration {
             version: 34,
             sql: V34_SCHEMA,
-            hook: None,
+            hook: Some(v34_turso_fts_indexes),
         },
     ],
 };
@@ -1058,6 +1070,17 @@ mod tests {
             assert_eq!(trigger_count, 0, "{trigger_name} trigger must be removed");
         }
 
+        for table_name in ["memories_fts", "conversation_messages_fts"] {
+            let table_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_count, 0, "{table_name} table must be removed");
+        }
+
         for index_name in [
             "idx_memories_turso_fts",
             "idx_conversation_messages_turso_fts",
@@ -1089,6 +1112,225 @@ mod tests {
             )
             .unwrap();
         assert_eq!(conversation_match_count, 1);
+    }
+
+    #[test]
+    fn v34_migrates_real_legacy_fts5_virtual_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        create_legacy_v33_fts5_database(&db_path);
+
+        let conn = crate::open_connection(dir.path(), true).unwrap();
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", (), |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, i64::from(LATEST_SCHEMA_VERSION));
+
+        for trigger_name in [
+            "memories_ai",
+            "memories_ad",
+            "memories_au",
+            "conversation_messages_ai",
+            "conversation_messages_ad",
+            "conversation_messages_au",
+        ] {
+            let trigger_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?1",
+                    [trigger_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(trigger_count, 0, "{trigger_name} trigger must be removed");
+        }
+
+        for table_name in ["memories_fts", "conversation_messages_fts"] {
+            let table_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_count, 0, "{table_name} table must be removed");
+        }
+
+        for index_name in [
+            "idx_memories_turso_fts",
+            "idx_conversation_messages_turso_fts",
+        ] {
+            let index_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    [index_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(index_count, 1, "{index_name} index must exist");
+        }
+
+        conn.execute(
+            "INSERT INTO memories (content) VALUES ('post migration memory needle')",
+            (),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_messages (chat_id, thread_id, role, content)
+             VALUES (1, 0, 'user', 'post migration conversation needle')",
+            (),
+        )
+        .unwrap();
+
+        let memory_match_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE content MATCH 'memory'",
+                (),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(memory_match_count, 2);
+
+        let conversation_match_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_messages WHERE content MATCH 'conversation'",
+                (),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(conversation_match_count, 2);
+    }
+
+    fn create_legacy_v33_fts5_database(db_path: &std::path::Path) {
+        let legacy_sql = format!(
+            r#"
+            CREATE TABLE memories (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                content     TEXT    NOT NULL,
+                tags        TEXT,
+                stored_by   TEXT,
+                source_tool TEXT,
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+                deleted_at  TEXT,
+                expires_at  TEXT,
+                importance  REAL    NOT NULL DEFAULT 0.5
+            );
+
+            CREATE TABLE memory_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id   INTEGER,
+                event_type  TEXT    NOT NULL,
+                actor       TEXT,
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TRIGGER memory_events_no_update
+            BEFORE UPDATE ON memory_events
+            BEGIN
+                SELECT RAISE(ABORT, 'memory_events is append-only: UPDATE not permitted');
+            END;
+
+            CREATE TRIGGER memory_events_no_delete
+            BEFORE DELETE ON memory_events
+            BEGIN
+                SELECT RAISE(ABORT, 'memory_events is append-only: DELETE not permitted');
+            END;
+
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                content,
+                content='memories',
+                content_rowid='id'
+            );
+
+            CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, content)
+                VALUES (new.id, new.content);
+            END;
+
+            CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content)
+                VALUES ('delete', old.id, old.content);
+            END;
+
+            CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content)
+                VALUES ('delete', old.id, old.content);
+                INSERT INTO memories_fts(rowid, content)
+                VALUES (new.id, new.content);
+            END;
+
+            CREATE TABLE conversation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL DEFAULT 'telegram',
+                chat_id INTEGER NOT NULL,
+                thread_id INTEGER NOT NULL DEFAULT 0,
+                message_id INTEGER,
+                sender_user_id INTEGER,
+                sender_name TEXT,
+                addressed_to_bot INTEGER NOT NULL DEFAULT 0 CHECK (addressed_to_bot IN (0, 1)),
+                routed_to_agent INTEGER NOT NULL DEFAULT 0 CHECK (routed_to_agent IN (0, 1)),
+                root_session_id TEXT,
+                turn_id INTEGER,
+                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            );
+
+            CREATE UNIQUE INDEX idx_conversation_messages_inbound_unique
+            ON conversation_messages (platform, chat_id, message_id, role)
+            WHERE message_id IS NOT NULL;
+
+            CREATE INDEX idx_conversation_messages_thread_created
+            ON conversation_messages (platform, chat_id, thread_id, created_at);
+
+            CREATE INDEX idx_conversation_messages_chat_created
+            ON conversation_messages (platform, chat_id, created_at);
+
+            CREATE INDEX idx_conversation_messages_session_turn
+            ON conversation_messages (root_session_id, turn_id)
+            WHERE root_session_id IS NOT NULL;
+
+            CREATE VIRTUAL TABLE conversation_messages_fts USING fts5(
+                content,
+                content='conversation_messages',
+                content_rowid='id'
+            );
+
+            CREATE TRIGGER conversation_messages_ai
+            AFTER INSERT ON conversation_messages
+            WHEN length(new.content) > 0
+            BEGIN
+                INSERT INTO conversation_messages_fts(rowid, content)
+                VALUES (new.id, new.content);
+            END;
+
+            CREATE TRIGGER conversation_messages_ad
+            AFTER DELETE ON conversation_messages
+            WHEN length(old.content) > 0
+            BEGIN
+                INSERT INTO conversation_messages_fts(conversation_messages_fts, rowid, content)
+                VALUES ('delete', old.id, old.content);
+            END;
+
+            CREATE TRIGGER conversation_messages_au
+            AFTER UPDATE ON conversation_messages
+            BEGIN
+                INSERT INTO conversation_messages_fts(conversation_messages_fts, rowid, content)
+                SELECT 'delete', old.id, old.content WHERE length(old.content) > 0;
+                INSERT INTO conversation_messages_fts(rowid, content)
+                SELECT new.id, new.content WHERE length(new.content) > 0;
+            END;
+
+            INSERT INTO memories (content) VALUES ('legacy memory needle');
+            INSERT INTO conversation_messages (chat_id, thread_id, role, content)
+            VALUES (1, 0, 'user', 'legacy conversation needle');
+
+            PRAGMA user_version = {};
+            "#,
+            LATEST_SCHEMA_VERSION - 1
+        );
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute_batch(&legacy_sql).unwrap();
     }
 
     #[test]

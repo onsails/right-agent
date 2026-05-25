@@ -22,6 +22,13 @@ pub enum DbError {
         source: turso::Error,
     },
 
+    #[error("legacy SQLite migration on {path}: {source}")]
+    LegacySqlite {
+        path: PathBuf,
+        #[source]
+        source: rusqlite::Error,
+    },
+
     #[error("migration {version} on {path}: {source}")]
     Migration {
         path: PathBuf,
