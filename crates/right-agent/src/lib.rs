@@ -7,7 +7,6 @@ pub mod doctor;
 pub mod identity_mirror;
 pub mod init;
 pub mod learned_skills;
-pub mod learning_episodes;
 pub mod rebootstrap;
 pub mod runtime;
 pub(crate) mod tunnel;
