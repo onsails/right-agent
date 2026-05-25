@@ -87,7 +87,7 @@ pub fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> R
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?
          )
-         ON CONFLICT(platform, chat_id, message_id, role)
+         ON CONFLICT
          DO UPDATE SET
             thread_id = excluded.thread_id,
             sender_user_id = excluded.sender_user_id,
@@ -141,7 +141,7 @@ pub fn mark_routed(
             0, 1, ?, ?,
             'user', ''
          )
-         ON CONFLICT(platform, chat_id, message_id, role)
+         ON CONFLICT
          DO UPDATE SET
             routed_to_agent = 1,
             root_session_id = excluded.root_session_id,
@@ -321,6 +321,33 @@ mod tests {
         TestDb { _dir: dir, conn }
     }
 
+    fn legacy_conversation_partial_unique_connection() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL DEFAULT 'telegram',
+                chat_id INTEGER NOT NULL,
+                thread_id INTEGER NOT NULL DEFAULT 0,
+                message_id INTEGER,
+                sender_user_id INTEGER,
+                sender_name TEXT,
+                addressed_to_bot INTEGER NOT NULL DEFAULT 0 CHECK (addressed_to_bot IN (0, 1)),
+                routed_to_agent INTEGER NOT NULL DEFAULT 0 CHECK (routed_to_agent IN (0, 1)),
+                root_session_id TEXT,
+                turn_id INTEGER,
+                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            );
+            CREATE UNIQUE INDEX idx_conversation_messages_inbound_unique
+            ON conversation_messages (platform, chat_id, message_id, role)
+            WHERE message_id IS NOT NULL;",
+        )
+        .unwrap();
+        conn
+    }
+
     fn user_message<'a>(
         chat_id: i64,
         thread_id: i64,
@@ -356,6 +383,26 @@ mod tests {
     #[test]
     fn archive_message_is_idempotent_for_inbound_telegram_message() {
         let conn = migrated_connection();
+
+        let first_id = archive_message(&conn, user_message(100, 10, 25, "first draft")).unwrap();
+        let second_id = archive_message(&conn, user_message(100, 10, 25, "revised draft")).unwrap();
+
+        assert_eq!(first_id, second_id);
+        let (count, content): (i64, String) = conn
+            .query_one(
+                "SELECT COUNT(*), content FROM conversation_messages
+                 WHERE platform='telegram' AND chat_id=100 AND message_id=25 AND role='user'",
+                (),
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(content, "revised draft");
+    }
+
+    #[test]
+    fn archive_message_is_compatible_with_legacy_partial_unique_index() {
+        let conn = legacy_conversation_partial_unique_connection();
 
         let first_id = archive_message(&conn, user_message(100, 10, 25, "first draft")).unwrap();
         let second_id = archive_message(&conn, user_message(100, 10, 25, "revised draft")).unwrap();
