@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          lfs: true
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
