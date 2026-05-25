@@ -17,6 +17,7 @@ defineProps<{
   tabs: ShellTab[]
   activeTab: string
   displayMode: DashboardDisplayMode
+  preferredDisplayMode: DashboardDisplayMode
 }>()
 
 const emit = defineEmits<{
@@ -36,10 +37,10 @@ const emit = defineEmits<{
         <button
           type="button"
           class="display-mode-button"
-          :aria-label="displayMode === 'fullscreen' ? 'Use normal view' : 'Use fullscreen view'"
+          :aria-label="preferredDisplayMode === 'fullscreen' ? 'Use normal view' : 'Use fullscreen view'"
           @click="emit('toggleDisplayMode')"
         >
-          {{ displayMode === 'fullscreen' ? 'Normal' : 'Fullscreen' }}
+          {{ preferredDisplayMode === 'fullscreen' ? 'Normal' : 'Fullscreen' }}
         </button>
         <StatusPill :status="connectionState" />
       </div>
