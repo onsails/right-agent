@@ -21,6 +21,11 @@ impl<'row> Row<'row> {
     }
 }
 
+/// Internal conversion seam. Public so [`Row::get`] can bound its `T`; not
+/// part of the supported `right-db` surface. Downstream code should rely on
+/// the blanket impls (`i64`, `String`, `Option<T>`, …) via `Row::get::<T>()`
+/// and must not reference [`turso::Value`] directly.
+#[doc(hidden)]
 pub trait FromValue: Sized {
     fn from_value(value: turso::Value) -> Result<Self, DbError>;
 }

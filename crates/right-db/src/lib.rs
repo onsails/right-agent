@@ -25,9 +25,6 @@ pub use row::Row;
 pub use transaction::Transaction;
 
 use std::path::Path;
-use std::time::Duration;
-
-const LEGACY_SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub trait OptionalExtension<T> {
     fn optional(self) -> Result<Option<T>, DbError>;
@@ -66,7 +63,7 @@ impl<T> OptionalExtension<T> for Result<T, DbError> {
 ///   force the second opener to time out.
 pub fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
     let db_path = agent_path.join("data.db");
-    if migrate && legacy_fts5_schema_exists(&db_path)? {
+    if legacy_fts5_schema_exists(&db_path)? {
         scrub_legacy_fts5_schema(&db_path)?;
     }
     let conn = Connection::open_local(db_path, true)?;
@@ -77,6 +74,12 @@ pub fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, D
     Ok(conn)
 }
 
+/// Migration version that replaced the legacy SQLite FTS5 virtual tables with
+/// Turso's `CREATE INDEX ... USING fts`. Any DB at this version or newer is
+/// guaranteed to no longer contain the legacy schema, so the scrubber probe
+/// is permanently a no-op and we skip it.
+const LEGACY_FTS5_SCRUBBED_AT_USER_VERSION: i64 = 34;
+
 fn legacy_fts5_schema_exists(db_path: &Path) -> Result<bool, DbError> {
     if !db_path.exists() {
         return Ok(false);
@@ -84,6 +87,10 @@ fn legacy_fts5_schema_exists(db_path: &Path) -> Result<bool, DbError> {
 
     let conn = Connection::open_local(db_path.to_path_buf(), false)?;
     conn.apply_readonly_pragmas()?;
+    let user_version: i64 = conn.query_row("PRAGMA user_version", (), |row| row.get(0))?;
+    if user_version >= LEGACY_FTS5_SCRUBBED_AT_USER_VERSION {
+        return Ok(false);
+    }
     let legacy_object_count: i64 = conn.query_row(
         "SELECT COUNT(*)
          FROM sqlite_master
@@ -106,7 +113,7 @@ fn scrub_legacy_fts5_schema(db_path: &Path) -> Result<(), DbError> {
                 path: db_path.to_path_buf(),
                 source,
             })?;
-    conn.busy_timeout(LEGACY_SQLITE_BUSY_TIMEOUT)
+    conn.busy_timeout(connection::BUSY_TIMEOUT)
         .map_err(|source| DbError::LegacySqlite {
             path: db_path.to_path_buf(),
             source,

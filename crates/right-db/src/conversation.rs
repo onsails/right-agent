@@ -87,6 +87,9 @@ pub fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> R
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?
          )
+         -- Bare ON CONFLICT relies on exactly one applicable unique constraint
+         -- (the partial idx_conversation_messages_inbound_unique); the WHERE-
+         -- qualified conflict-target form is dropped because Turso's parser does not accept it.
          ON CONFLICT
          DO UPDATE SET
             thread_id = excluded.thread_id,
@@ -141,6 +144,9 @@ pub fn mark_routed(
             0, 1, ?, ?,
             'user', ''
          )
+         -- Bare ON CONFLICT relies on exactly one applicable unique constraint
+         -- (the partial idx_conversation_messages_inbound_unique); the WHERE-
+         -- qualified conflict-target form is dropped because Turso's parser does not accept it.
          ON CONFLICT
          DO UPDATE SET
             routed_to_agent = 1,

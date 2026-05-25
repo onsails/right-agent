@@ -1201,6 +1201,55 @@ mod tests {
         assert_eq!(conversation_match_count, 2);
     }
 
+    #[test]
+    fn open_connection_without_migration_scrubs_legacy_fts5() {
+        // Backup callers (cmd_agent_backup, run_backup on destroy) open with
+        // migrate=false to issue VACUUM INTO, but they still need Turso to be
+        // able to resolve the schema. The legacy FTS5 scrubber must therefore
+        // run regardless of the `migrate` flag.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        create_legacy_v33_fts5_database(&db_path);
+
+        let conn = crate::open_connection(dir.path(), false)
+            .expect("open_connection(.., false) must scrub legacy FTS5 schema");
+
+        for table_name in ["memories_fts", "conversation_messages_fts"] {
+            let table_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                table_count, 0,
+                "{table_name} legacy virtual table must be dropped"
+            );
+        }
+
+        for trigger_name in [
+            "memories_ai",
+            "memories_ad",
+            "memories_au",
+            "conversation_messages_ai",
+            "conversation_messages_ad",
+            "conversation_messages_au",
+        ] {
+            let trigger_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?1",
+                    [trigger_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                trigger_count, 0,
+                "{trigger_name} legacy FTS5 trigger must be dropped"
+            );
+        }
+    }
+
     fn create_legacy_v33_fts5_database(db_path: &std::path::Path) {
         let legacy_sql = format!(
             r#"

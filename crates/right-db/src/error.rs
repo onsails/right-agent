@@ -58,16 +58,52 @@ impl DbError {
             _ => false,
         }
     }
+
+    /// True if the error is a retryable lock contention (SQLite `BUSY` /
+    /// `BUSY_SNAPSHOT`). Callers retrying their own write loop should use
+    /// this predicate instead of stringly classifying the `Display` form.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Database(error) => is_turso_transient(error),
+            Self::Migration { source, .. } => source.is_transient(),
+            _ => false,
+        }
+    }
 }
 
 fn is_turso_constraint(error: &turso::Error) -> bool {
     matches!(error, turso::Error::Constraint(_))
 }
 
+fn is_turso_transient(error: &turso::Error) -> bool {
+    matches!(error, turso::Error::Busy(_) | turso::Error::BusySnapshot(_))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::Connection;
+    use crate::DbError;
     use crate::params;
+
+    #[test]
+    fn is_transient_detects_busy_variants() {
+        assert!(
+            DbError::Database(turso::Error::Busy("locked".into())).is_transient(),
+            "Busy must be transient",
+        );
+        assert!(
+            DbError::Database(turso::Error::BusySnapshot("snapshot".into())).is_transient(),
+            "BusySnapshot must be transient",
+        );
+        assert!(
+            !DbError::Database(turso::Error::Constraint("unique".into())).is_transient(),
+            "Constraint is not transient",
+        );
+        assert!(
+            !DbError::NotFound.is_transient(),
+            "NotFound is not transient",
+        );
+    }
 
     #[test]
     fn is_constraint_violation_detects_unique_violation() {

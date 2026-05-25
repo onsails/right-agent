@@ -94,6 +94,9 @@ async fn run_backup(
         let backup_db = backup_dir.join("data.db");
         let db_display = db_path.display().to_string();
         let backup_path_sql = backup_db.display().to_string().replace('\'', "''");
+        // `open_connection(.., migrate=false)` returns a writable handle.
+        // Turso's `VACUUM INTO` needs writability on the source DB even though
+        // we never mutate user rows here.
         let conn = right_db::open_connection(agent_dir, false)
             .map_err(|e| miette::miette!("failed to open {}: {e:#}", db_display))?;
         conn.execute(&format!("VACUUM INTO '{backup_path_sql}'"), ())
