@@ -480,12 +480,15 @@ message pointing at `right up`". `PC_PORT` may still be referenced by
 
 ## Local Database Rules
 
-Per-agent `data.db` is a SQLite-compatible database. Local Turso is the
-current driver implementation and is hidden behind `right-db`.
+Per-agent `data.db` is a SQLite-compatible database. Runtime local storage uses
+the `turso` crate with `sync` enabled for future Turso Cloud backup work, and
+that driver implementation is hidden behind `right-db`.
 
-`right-db` is the sole owner of local database driver details. Other crates
-must use project-owned `right_db` types and must not expose raw driver
-connection, transaction, row, error, or parameter types in public APIs.
+`right-db` is the only crate that owns local database-driver details. Local
+opens must enable Turso's experimental index-method feature because
+conversation and memory search use `CREATE INDEX ... USING fts`. Other crates
+must use project-owned `right_db` types and must not expose raw `turso`
+connection, transaction, row, error, value, or parameter types in public APIs.
 
 ### Migration Ownership
 
