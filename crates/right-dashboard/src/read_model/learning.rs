@@ -7,7 +7,7 @@ use crate::api_types::{
 use std::collections::{BTreeMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
-use right_db::{Connection, params};
+use right_db::{Connection, OptionalExtension, params};
 
 use super::{
     ReadModelError, coarse_timestamp_bounds, count_parsed_window_rows,
@@ -867,17 +867,16 @@ fn curator_trigger_count_in_window(
     since: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<(i64, Option<DashboardDataWarning>), ReadModelError> {
-    let raw = match conn.query_row(
-        "SELECT last_spike_evidence_json
+    let raw = conn
+        .query_row(
+            "SELECT last_spike_evidence_json
              FROM curator_state
              WHERE agent_singleton_id = 1",
-        [],
-        |row| row.get::<_, Option<String>>(0),
-    ) {
-        Ok(raw) => raw,
-        Err(right_db::DbError::NotFound) => None,
-        Err(error) => return Err(error.into()),
-    };
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
 
     let Some(raw) = raw else {
         return Ok((0, None));
@@ -1351,26 +1350,24 @@ fn load_report_detail_row(
     agent: &str,
     report_id: i64,
 ) -> Result<Option<ReportDetailRow>, ReadModelError> {
-    let row = match conn.query_row(
-        "SELECT id, status, confidence, trigger_kind, candidate_skill_name,
+    let row = conn
+        .query_row(
+            "SELECT id, status, confidence, trigger_kind, candidate_skill_name,
                     candidate_summary, telegram_notified, created_at,
                     learning_episode_id, evidence_refs_json, review_output_json
              FROM skill_review_reports
              WHERE agent_name=?1 AND id=?2",
-        params![agent, report_id],
-        |row| {
-            Ok((
-                report_summary_from_row(row)?,
-                row.get::<_, Option<i64>>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
-            ))
-        },
-    ) {
-        Ok(row) => Some(row),
-        Err(right_db::DbError::NotFound) => None,
-        Err(error) => return Err(error.into()),
-    };
+            params![agent, report_id],
+            |row| {
+                Ok((
+                    report_summary_from_row(row)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                ))
+            },
+        )
+        .optional()?;
     row.map(
         |(report, learning_episode_id, evidence_refs_json, review_output_json)| {
             Ok(ReportDetailRow {
@@ -1389,36 +1386,34 @@ fn load_episode_detail_row(
     agent: &str,
     episode_id: i64,
 ) -> Result<Option<EpisodeDetailRow>, ReadModelError> {
-    let row = match conn.query_row(
-        "SELECT id, kind, seed_trigger_kind, status, start_ref, end_ref,
+    let row = conn
+        .query_row(
+            "SELECT id, kind, seed_trigger_kind, status, start_ref, end_ref,
                     message_refs_json, execution_event_refs_json, selector_model,
                     selector_output_json, boundary_rationale, confidence,
                     context_incomplete
              FROM learning_episodes
              WHERE agent_name=?1 AND id=?2",
-        params![agent, episode_id],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
-                row.get::<_, Option<String>>(11)?,
-                row.get::<_, i64>(12)?,
-            ))
-        },
-    ) {
-        Ok(row) => Some(row),
-        Err(right_db::DbError::NotFound) => None,
-        Err(error) => return Err(error.into()),
-    };
+            params![agent, episode_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, i64>(12)?,
+                ))
+            },
+        )
+        .optional()?;
     row.map(
         |(
             id,
@@ -1518,25 +1513,23 @@ fn load_message_snippet(
     let Some(id) = parse_ref_id(ref_id, "msg:") else {
         return Ok(unavailable_snippet(ref_id.to_owned(), "message"));
     };
-    let row = match conn.query_row(
-        "SELECT role, content, created_at, addressed_to_bot, routed_to_agent
+    let row = conn
+        .query_row(
+            "SELECT role, content, created_at, addressed_to_bot, routed_to_agent
              FROM conversation_messages
              WHERE id=?1 AND role IN ('user','assistant')",
-        params![id],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-            ))
-        },
-    ) {
-        Ok(row) => Some(row),
-        Err(right_db::DbError::NotFound) => None,
-        Err(error) => return Err(error.into()),
-    };
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
     let Some((role, content, created_at, addressed_to_bot, routed_to_agent)) = row else {
         return Ok(unavailable_snippet(ref_id.to_owned(), "message"));
     };
@@ -1564,25 +1557,23 @@ fn load_execution_snippet(
     let Some(id) = parse_ref_id(ref_id, "exec:") else {
         return Ok(unavailable_snippet(ref_id.to_owned(), "execution_event"));
     };
-    let row = match conn.query_row(
-        "SELECT event_kind, tool_name, content_text, trust_label, created_at
+    let row = conn
+        .query_row(
+            "SELECT event_kind, tool_name, content_text, trust_label, created_at
              FROM execution_events
              WHERE agent_name=?1 AND id=?2",
-        params![agent, id],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        },
-    ) {
-        Ok(row) => Some(row),
-        Err(right_db::DbError::NotFound) => None,
-        Err(error) => return Err(error.into()),
-    };
+            params![agent, id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
     let Some((event_kind, tool_name, content_text, trust_label, created_at)) = row else {
         return Ok(unavailable_snippet(ref_id.to_owned(), "execution_event"));
     };

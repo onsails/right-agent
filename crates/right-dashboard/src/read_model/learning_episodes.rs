@@ -2,7 +2,7 @@ use crate::api_types::{
     LearningEpisodeDetailResponse, LearningEpisodeSummary, LearningEpisodesResponse,
     LearningReportSummary, LearningSelectorDetail,
 };
-use right_db::{Connection, params};
+use right_db::{Connection, OptionalExtension, params};
 
 use super::ReadModelError;
 use super::learning::{parse_string_array, report_summary_from_row};
@@ -91,8 +91,9 @@ fn load_episode_detail(
     agent: &str,
     episode_id: i64,
 ) -> Result<Option<EpisodeDetailRow>, ReadModelError> {
-    let row = match conn.query_row(
-        "SELECT id, kind, seed_trigger_kind, seed_ref, status,
+    let row = conn
+        .query_row(
+            "SELECT id, kind, seed_trigger_kind, seed_ref, status,
                     target_chat_id, target_thread_id, start_ref, end_ref,
                     confidence, context_incomplete, last_evidence_at,
                     created_at, updated_at, selector_model,
@@ -100,21 +101,18 @@ fn load_episode_detail(
                     execution_event_refs_json
              FROM learning_episodes
              WHERE agent_name=?1 AND id=?2",
-        params![agent, episode_id],
-        |row| {
-            Ok((
-                episode_summary_from_row(row)?,
-                row.get::<_, Option<String>>(14)?,
-                row.get::<_, Option<String>>(15)?,
-                row.get::<_, String>(16)?,
-                row.get::<_, String>(17)?,
-            ))
-        },
-    ) {
-        Ok(row) => Some(row),
-        Err(right_db::DbError::NotFound) => None,
-        Err(error) => return Err(error.into()),
-    };
+            params![agent, episode_id],
+            |row| {
+                Ok((
+                    episode_summary_from_row(row)?,
+                    row.get::<_, Option<String>>(14)?,
+                    row.get::<_, Option<String>>(15)?,
+                    row.get::<_, String>(16)?,
+                    row.get::<_, String>(17)?,
+                ))
+            },
+        )
+        .optional()?;
 
     row.map(
         |(episode, selector_model, boundary_rationale, message_refs_json, execution_refs_json)| {

@@ -7,7 +7,7 @@ use crate::api_types::{
     RunDetailResponse, RunSummary,
 };
 use chrono::{DateTime, TimeZone, Utc};
-use right_db::{Connection, params};
+use right_db::{Connection, OptionalExtension, params};
 
 use super::ReadModelError;
 
@@ -117,19 +117,19 @@ pub fn activity_run_detail(
          {RUN_SUMMARY_FROM}
          WHERE ar.id = ?1"
     );
-    let (run, delivery_json, error_json, log_path) =
-        match conn.query_row(&sql, params![run_id], |row| {
+    let Some((run, delivery_json, error_json, log_path)) = conn
+        .query_row(&sql, params![run_id], |row| {
             Ok((
                 run_summary_from_row(row)?,
                 row.get::<_, Option<String>>(12)?,
                 row.get::<_, Option<String>>(13)?,
                 row.get::<_, Option<String>>(14)?,
             ))
-        }) {
-            Ok(row) => row,
-            Err(right_db::DbError::NotFound) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
+        })
+        .optional()?
+    else {
+        return Ok(None);
+    };
     let run_note = run.run_note.clone();
     let (delivery, delivery_error) = parse_delivery_json(delivery_json);
     let error_message = extract_error_message(error_json);

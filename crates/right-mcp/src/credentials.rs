@@ -542,15 +542,13 @@ mod auth_token_tests;
 mod db_tests {
     use super::*;
 
-    fn setup_db() -> Connection {
-        let (dir, conn) = right_db::test_support::migrated_connection();
-        let _path = dir.keep();
-        conn
+    fn setup_db() -> (tempfile::TempDir, Connection) {
+        right_db::test_support::migrated_connection()
     }
 
     #[test]
     fn add_and_list_servers() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
         db_add_server(&conn, "linear", "https://mcp.linear.app/mcp").unwrap();
 
@@ -564,7 +562,7 @@ mod db_tests {
 
     #[test]
     fn remove_server() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
         db_remove_server(&conn, "notion").unwrap();
 
@@ -574,14 +572,14 @@ mod db_tests {
 
     #[test]
     fn remove_nonexistent_server() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         let err = db_remove_server(&conn, "ghost").unwrap_err();
         assert!(matches!(err, CredentialError::ServerNotFound(_)));
     }
 
     #[test]
     fn upsert_server() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         db_add_server(&conn, "notion", "https://old.notion.com/mcp").unwrap();
         db_add_server(&conn, "notion", "https://new.notion.com/mcp").unwrap();
 
@@ -666,7 +664,7 @@ mod db_tests {
 
     #[test]
     fn update_and_list_instructions() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
         let servers = db_list_servers(&conn).unwrap();
         assert!(servers[0].instructions.is_none());
@@ -682,7 +680,7 @@ mod db_tests {
 
     #[test]
     fn upsert_preserves_instructions() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         db_add_server(&conn, "notion", "https://old.notion.com/mcp").unwrap();
         db_update_instructions(&conn, "notion", Some("Notion instructions")).unwrap();
 
@@ -697,14 +695,14 @@ mod db_tests {
 
     #[test]
     fn update_instructions_nonexistent_server() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         let err = db_update_instructions(&conn, "ghost", Some("instructions")).unwrap_err();
         assert!(matches!(err, CredentialError::ServerNotFound(_)));
     }
 
     #[test]
     fn db_add_server_with_auth() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         db_add_server(&conn, "test", "https://example.com/mcp").unwrap();
         db_set_auth(&conn, "test", "bearer", None, Some("sk-123")).unwrap();
         let servers = db_list_servers(&conn).unwrap();
@@ -715,14 +713,14 @@ mod db_tests {
 
     #[test]
     fn db_set_auth_nonexistent_server() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         let err = db_set_auth(&conn, "ghost", "bearer", None, Some("tok")).unwrap_err();
         assert!(matches!(err, CredentialError::ServerNotFound(_)));
     }
 
     #[test]
     fn db_set_oauth_state_test() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
         db_set_oauth_state(
             &conn,
@@ -749,7 +747,7 @@ mod db_tests {
 
     #[test]
     fn db_update_oauth_token_test() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
         db_set_oauth_state(
             &conn,
@@ -782,7 +780,7 @@ mod db_tests {
 
     #[test]
     fn db_update_oauth_token_keeps_old_refresh_when_none() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
         db_set_oauth_state(
             &conn,
@@ -804,7 +802,7 @@ mod db_tests {
 
     #[test]
     fn db_list_oauth_servers_test() {
-        let conn = setup_db();
+        let (_dir, conn) = setup_db();
         db_add_server(&conn, "oauth-srv", "https://a.com/mcp").unwrap();
         db_set_oauth_state(
             &conn,

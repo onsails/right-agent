@@ -99,36 +99,6 @@ impl IntoParams for ParamsBuilder {
     }
 }
 
-impl<A: IntoValue, B: IntoValue> IntoParams for (A, B) {
-    fn into_params(self) -> Result<Params, DbError> {
-        Ok(Params(libsql::params::Params::Positional(vec![
-            self.0.into_value()?,
-            self.1.into_value()?,
-        ])))
-    }
-}
-
-impl<A: IntoValue, B: IntoValue, C: IntoValue> IntoParams for (A, B, C) {
-    fn into_params(self) -> Result<Params, DbError> {
-        Ok(Params(libsql::params::Params::Positional(vec![
-            self.0.into_value()?,
-            self.1.into_value()?,
-            self.2.into_value()?,
-        ])))
-    }
-}
-
-impl<A: IntoValue, B: IntoValue, C: IntoValue, D: IntoValue> IntoParams for (A, B, C, D) {
-    fn into_params(self) -> Result<Params, DbError> {
-        Ok(Params(libsql::params::Params::Positional(vec![
-            self.0.into_value()?,
-            self.1.into_value()?,
-            self.2.into_value()?,
-            self.3.into_value()?,
-        ])))
-    }
-}
-
 macro_rules! tuple_into_params {
     ($($name:ident),+ $(,)?) => {
         impl<$($name: IntoValue),+> IntoParams for ($($name,)+) {
@@ -143,6 +113,9 @@ macro_rules! tuple_into_params {
     };
 }
 
+tuple_into_params!(A, B);
+tuple_into_params!(A, B, C);
+tuple_into_params!(A, B, C, D);
 tuple_into_params!(A, B, C, D, E);
 tuple_into_params!(A, B, C, D, E, F);
 tuple_into_params!(A, B, C, D, E, F, G);

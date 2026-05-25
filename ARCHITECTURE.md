@@ -493,7 +493,7 @@ Both the MCP aggregator (`right-mcp-server`) and bot processes run schema migrat
 
 ### Transaction Rule
 
-Any operation that performs 2+ writes (INSERT, UPDATE, DELETE) MUST wrap them in a single `Connection::with_immediate_transaction`. Single-statement writes don't need a transaction. Migrations are the sole exception because the `right-db` migration runner wraps each migration batch.
+Any operation that performs 2+ writes (INSERT, UPDATE, DELETE) MUST use a single immediate transaction. Prefer `Connection::with_immediate_transaction` so rollback-on-error is centralized; use explicit `Connection::transaction()` only when the transaction must be passed through helper boundaries or committed manually. Single-statement writes don't need a transaction. Migrations are the sole exception because the `right-db` migration runner wraps each migration batch.
 
 ### Idempotent Migrations
 

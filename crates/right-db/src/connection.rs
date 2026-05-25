@@ -24,53 +24,33 @@ impl fmt::Debug for Connection {
 
 impl Connection {
     pub fn open_in_memory() -> Result<Self, DbError> {
-        let runtime = LibsqlRuntime::new();
-        let builder = libsql::Builder::new_local(":memory:");
-        // SAFETY: matches `open_local`; right-db drives local libSQL through
-        // synchronous wrappers that own the runtime used for each operation.
-        let builder = unsafe { builder.skip_safety_assert(true) };
-        let database = runtime
-            .block_on(builder.build())
-            .map_err(|source| DbError::Open {
-                path: PathBuf::from(":memory:"),
-                source,
-            })?;
-        let inner = database.connect().map_err(|source| DbError::Open {
-            path: PathBuf::from(":memory:"),
-            source,
-        })?;
-        Ok(Self {
-            db_path: PathBuf::from(":memory:"),
-            inner,
-            runtime,
-        })
+        Self::build(PathBuf::from(":memory:"), libsql::OpenFlags::default())
     }
 
     pub(crate) fn open_local(db_path: PathBuf, create: bool) -> Result<Self, DbError> {
-        let runtime = LibsqlRuntime::new();
         let flags = if create {
             libsql::OpenFlags::default()
         } else {
             libsql::OpenFlags::SQLITE_OPEN_READ_ONLY
         };
+        Self::build(db_path, flags)
+    }
+
+    fn build(db_path: PathBuf, flags: libsql::OpenFlags) -> Result<Self, DbError> {
+        let runtime = LibsqlRuntime::new();
         let builder = libsql::Builder::new_local(&db_path).flags(flags);
-        // SAFETY: right-db is only using local libSQL through synchronous
-        // wrappers that drive each async operation to completion on an owned
-        // runtime. The project still uses local SQLite through libSQL handles
-        // with SQLite mutex protection; this skips only libSQL's process-wide
-        // serialized-mode assertion.
+        // SAFETY: right-db drives local libSQL through synchronous wrappers
+        // that own the runtime used for each operation, so libSQL's
+        // process-wide serialized-mode assertion would be a false positive.
+        // The project still uses local SQLite through libSQL handles with
+        // SQLite mutex protection.
         let builder = unsafe { builder.skip_safety_assert(true) };
-        let database = runtime
-            .block_on(builder.build())
-            .map_err(|source| DbError::Open {
-                path: db_path.clone(),
-                source,
-            })?;
-        let inner = database.connect().map_err(|source| DbError::Open {
+        let open_err = |source| DbError::Open {
             path: db_path.clone(),
             source,
-        })?;
-
+        };
+        let database = runtime.block_on(builder.build()).map_err(open_err)?;
+        let inner = database.connect().map_err(open_err)?;
         Ok(Self {
             db_path,
             inner,
@@ -107,7 +87,7 @@ impl Connection {
         let params = params.into_params()?.into_libsql();
         let mut rows = self.block_on_libsql(self.inner.query(sql, params))?;
         let Some(row) = self.block_on_libsql(rows.next())? else {
-            return Err(DbError::not_found());
+            return Err(DbError::NotFound);
         };
         map(&crate::row::Row::new(&row))
     }
@@ -135,6 +115,17 @@ impl Connection {
         Ok(values)
     }
 
+    /// Capture `sql` for later execution via [`Statement::query_map`] or
+    /// [`Statement::query_row`].
+    ///
+    /// Despite the name, this does NOT prepare or cache a libSQL statement.
+    /// Each subsequent `query_map`/`query_row` re-issues
+    /// [`libsql::Connection::query`] with the same SQL, which re-parses on
+    /// every call. The owned-`String` storage is only there so callers can
+    /// hold the [`Statement`] across `query_map` iterations.
+    ///
+    /// For one-shot queries prefer [`Connection::query_all`] or
+    /// [`Connection::query_row`] directly.
     pub fn prepare<'conn>(&'conn self, sql: &str) -> Result<Statement<'conn>, DbError> {
         Ok(Statement {
             conn: self,
@@ -142,16 +133,18 @@ impl Connection {
         })
     }
 
-    pub fn prepare_cached<'conn>(&'conn self, sql: &str) -> Result<Statement<'conn>, DbError> {
-        self.prepare(sql)
-    }
-
     pub fn last_insert_rowid(&self) -> i64 {
         self.inner.last_insert_rowid()
     }
 
+    /// Start an immediate transaction.
+    ///
+    /// Multi-write operations should prefer [`Connection::with_immediate_transaction`]
+    /// so rollback-on-error is centralized. Use this lower-level API when the
+    /// transaction must be passed through helper boundaries or committed
+    /// manually.
     pub fn transaction(&self) -> Result<crate::transaction::Transaction<'_>, DbError> {
-        self.transaction_with_behavior(libsql::TransactionBehavior::Deferred)
+        self.transaction_with_behavior(libsql::TransactionBehavior::Immediate)
     }
 
     pub fn with_immediate_transaction<T>(
@@ -165,8 +158,15 @@ impl Connection {
                 Ok(value)
             }
             Err(err) => {
-                let rollback = tx.rollback();
-                Err(preserve_transaction_error(err, rollback))
+                if let Err(rollback_err) = tx.rollback() {
+                    tracing::warn!(
+                        path = %self.db_path.display(),
+                        operation_error = format!("{err:#}"),
+                        rollback_error = format!("{rollback_err:#}"),
+                        "transaction rollback failed; returning original operation error",
+                    );
+                }
+                Err(err)
             }
         }
     }
@@ -198,6 +198,9 @@ impl Connection {
     }
 }
 
+/// Owns an SQL string for repeated execution via `query_map`/`query_row`.
+/// No libSQL-level prepared-statement caching is performed; each call
+/// re-issues the query.
 pub struct Statement<'conn> {
     conn: &'conn Connection,
     sql: String,
@@ -233,28 +236,24 @@ impl<'conn> Statement<'conn> {
     }
 }
 
-fn preserve_transaction_error(original: DbError, rollback: Result<(), DbError>) -> DbError {
-    match rollback {
-        Ok(()) | Err(_) => original,
-    }
-}
-
 fn block_on_runtime_safe<F, T>(runtime: &tokio::runtime::Runtime, future: F) -> T
 where
     F: Future<Output = T> + Send,
     T: Send,
 {
-    if tokio::runtime::Handle::try_current().is_err() {
-        return runtime.block_on(future);
-    }
-
-    std::thread::scope(|scope| {
-        let handle = scope.spawn(move || runtime.block_on(future));
-        match handle.join() {
-            Ok(output) => output,
-            Err(payload) => panic::resume_unwind(payload),
+    match tokio::runtime::Handle::try_current() {
+        Err(_) => runtime.block_on(future),
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| runtime.block_on(future))
         }
-    })
+        Ok(_) => std::thread::scope(|scope| {
+            let handle = scope.spawn(move || runtime.block_on(future));
+            match handle.join() {
+                Ok(output) => output,
+                Err(payload) => panic::resume_unwind(payload),
+            }
+        }),
+    }
 }
 
 struct LibsqlRuntime {
@@ -325,15 +324,57 @@ mod tests {
     }
 
     #[test]
-    fn transaction_error_result_prefers_operation_error_when_rollback_fails() {
-        let operation = DbError::InvalidParameter("operation failed".into());
-        let rollback = DbError::InvalidParameter("rollback failed".into());
+    fn with_immediate_transaction_returns_operation_error_and_rolls_back() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
+            .unwrap();
 
-        let err = preserve_transaction_error(operation, Err(rollback));
+        let err = conn
+            .with_immediate_transaction(|tx| {
+                tx.execute(
+                    "INSERT INTO probe (value) VALUES (?1)",
+                    crate::params![1i64],
+                )?;
+                Err::<(), _>(DbError::InvalidParameter("operation failed".into()))
+            })
+            .unwrap_err();
 
-        assert_eq!(
-            err.to_string(),
-            "invalid database parameter: operation failed",
+        assert!(
+            matches!(err, DbError::InvalidParameter(ref msg) if msg == "operation failed"),
+            "expected original operation error, got {err:#}",
         );
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM probe", (), |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "operation error must roll back the transaction");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_queries_work_inside_current_thread_tokio_runtime() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
+            .unwrap();
+        conn.execute("INSERT INTO probe (value) VALUES (?1)", [7_i64])
+            .unwrap();
+
+        let value: i64 = conn
+            .query_row("SELECT value FROM probe", (), |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, 7);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_queries_work_inside_multi_thread_tokio_runtime() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
+            .unwrap();
+        conn.execute("INSERT INTO probe (value) VALUES (?1)", [9_i64])
+            .unwrap();
+
+        let value: i64 = conn
+            .query_row("SELECT value FROM probe", (), |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, 9);
     }
 }

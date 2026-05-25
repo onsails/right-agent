@@ -308,7 +308,8 @@ pub fn apply_automatic_transitions(
              WHERE state IN (?3, ?4)
                AND pinned = 0
                AND created_by IN (?5, ?6)
-               AND {ACTIVITY_BEFORE_CUTOFF_ARCHIVE}"
+               AND {}",
+            activity_before_cutoff("?7"),
         ),
         (
             LifecycleState::Archived.as_db_str(),
@@ -328,7 +329,8 @@ pub fn apply_automatic_transitions(
              WHERE state = ?2
                AND pinned = 0
                AND created_by IN (?3, ?4)
-               AND {ACTIVITY_BEFORE_CUTOFF_STALE}"
+               AND {}",
+            activity_before_cutoff("?5"),
         ),
         (
             LifecycleState::Stale.as_db_str(),
@@ -344,20 +346,19 @@ pub fn apply_automatic_transitions(
 }
 
 /// SQL fragment: true when `MAX(last_used_at, last_patched_at)` (treating
-/// NULLs as missing) is strictly before the cutoff parameter. Compares via `julianday`
-/// to normalize across RFC3339 offsets; rows with both timestamps NULL never
-/// match.
-const ACTIVITY_BEFORE_CUTOFF_ARCHIVE: &str = "julianday(?7) > COALESCE(
-    MAX(julianday(last_used_at), julianday(last_patched_at)),
-    julianday(last_used_at),
-    julianday(last_patched_at)
-)";
-
-const ACTIVITY_BEFORE_CUTOFF_STALE: &str = "julianday(?5) > COALESCE(
-    MAX(julianday(last_used_at), julianday(last_patched_at)),
-    julianday(last_used_at),
-    julianday(last_patched_at)
-)";
+/// NULLs as missing) is strictly before the cutoff parameter. Compares via
+/// `julianday` to normalize across RFC3339 offsets; rows with both timestamps
+/// NULL never match. Pass the cutoff placeholder (e.g. `"?7"`) so the caller
+/// keeps the surrounding positional indexes consistent.
+fn activity_before_cutoff(cutoff_placeholder: &str) -> String {
+    format!(
+        "julianday({cutoff_placeholder}) > COALESCE(
+            MAX(julianday(last_used_at), julianday(last_patched_at)),
+            julianday(last_used_at),
+            julianday(last_patched_at)
+        )"
+    )
+}
 
 /// Count rows whose `created_at` OR `last_patched_at` is strictly after
 /// `since`. Aggregate query — no row materialization. Used by the curator's
@@ -442,10 +443,8 @@ mod tests {
     use super::*;
     use chrono::TimeDelta;
 
-    fn migrated_conn() -> Connection {
-        let (dir, conn) = right_db::test_support::migrated_connection();
-        let _path = dir.keep();
-        conn
+    fn migrated_conn() -> (tempfile::TempDir, Connection) {
+        right_db::test_support::migrated_connection()
     }
 
     fn utc(value: &str) -> DateTime<Utc> {
@@ -545,7 +544,7 @@ mod tests {
 
     #[test]
     fn mark_created_inserts_active_row_with_provenance() {
-        let conn = migrated_conn();
+        let (_dir, conn) = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
 
         mark_created(&conn, "rightx-demo", CreatedBy::ProbeWriter, now).unwrap();
@@ -564,7 +563,7 @@ mod tests {
 
     #[test]
     fn bump_patch_preserves_existing_created_by() {
-        let conn = migrated_conn();
+        let (_dir, conn) = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
         LifecycleRowFixture::new("rightx-demo")
             .state(LifecycleState::Stale)
@@ -583,7 +582,7 @@ mod tests {
 
     #[test]
     fn bump_use_creates_foreground_row_when_missing() {
-        let conn = migrated_conn();
+        let (_dir, conn) = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
 
         bump_use(&conn, "rightx-demo", now).unwrap();
@@ -599,7 +598,7 @@ mod tests {
 
     #[test]
     fn set_pinned_toggles_existing_row() {
-        let conn = migrated_conn();
+        let (_dir, conn) = migrated_conn();
         LifecycleRowFixture::new("rightx-demo")
             .created_by(CreatedBy::Curator)
             .insert(&conn);
@@ -615,7 +614,7 @@ mod tests {
 
     #[test]
     fn automatic_transitions_skip_pinned_foreground_and_bundled_rows() {
-        let conn = migrated_conn();
+        let (_dir, conn) = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
         let old = now - TimeDelta::days(45);
         let stale_old = now - TimeDelta::days(20);
@@ -679,7 +678,7 @@ mod tests {
 
     #[test]
     fn automatic_transitions_leave_rows_without_activity_unchanged() {
-        let conn = migrated_conn();
+        let (_dir, conn) = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
         let config = TransitionConfig {
             stale_after: TimeDelta::days(7),
@@ -700,7 +699,7 @@ mod tests {
 
     #[test]
     fn active_rows_older_than_archive_after_archive_directly() {
-        let conn = migrated_conn();
+        let (_dir, conn) = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
         let old = now - TimeDelta::days(45);
         let config = TransitionConfig {
@@ -722,7 +721,7 @@ mod tests {
 
     #[test]
     fn automatic_transitions_do_not_fire_at_exact_thresholds() {
-        let conn = migrated_conn();
+        let (_dir, conn) = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
         let config = TransitionConfig {
             stale_after: TimeDelta::days(7),
@@ -770,7 +769,7 @@ mod tests {
 
     #[test]
     fn automatic_transitions_skip_rows_pinned_or_used_between_selection_and_update() {
-        let conn = migrated_conn();
+        let (_dir, conn) = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
         let old = now - TimeDelta::days(20);
         let config = TransitionConfig {
@@ -808,7 +807,7 @@ mod tests {
 
     #[test]
     fn stale_transition_predicate_compares_rfc3339_instants_across_offsets() {
-        let conn = migrated_conn();
+        let (_dir, conn) = migrated_conn();
         let now = utc("2026-05-30T12:00:00Z");
         let config = TransitionConfig {
             stale_after: TimeDelta::days(7),
@@ -854,7 +853,7 @@ mod tests {
 
     #[test]
     fn count_changes_since_counts_rows_created_or_patched_after_cutoff() {
-        let conn = migrated_conn();
+        let (_dir, conn) = migrated_conn();
         let since = utc("2026-05-21T00:00:00Z");
 
         LifecycleRowFixture::new("rightx-old")
@@ -880,7 +879,7 @@ mod tests {
 
     #[test]
     fn bump_use_many_increments_in_a_single_transaction() {
-        let conn = migrated_conn();
+        let (_dir, conn) = migrated_conn();
         let now = utc("2026-05-23T12:00:00Z");
 
         bump_use_many(&conn, ["rightx-a", "rightx-b", "rightx-a"], now).unwrap();

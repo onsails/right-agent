@@ -618,8 +618,8 @@ pub fn mark_review_finished(
 }
 
 /// Same as `mark_review_finished` but runs inside an existing transaction.
-/// Used when the caller is already coordinating multiple writes inside
-/// `conn.transaction()` and cannot tolerate a nested BEGIN.
+/// Used when the caller is already coordinating multiple writes inside an
+/// outer `conn.transaction()` and cannot tolerate a nested BEGIN.
 ///
 /// # Transaction contract
 ///

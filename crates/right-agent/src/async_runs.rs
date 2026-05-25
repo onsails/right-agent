@@ -47,7 +47,7 @@ pub struct CronRunJsonRow {
 
 fn require_updated(rows: usize) -> Result<(), DbError> {
     if rows == 0 {
-        return Err(DbError::not_found());
+        return Err(DbError::NotFound);
     }
     Ok(())
 }
