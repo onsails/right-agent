@@ -119,7 +119,7 @@ fn open_connection_readonly_missing_db_returns_error_inside_tokio_runtime() {
 }
 
 #[test]
-fn execute_accepts_rusqlite_style_empty_params_array() {
+fn execute_accepts_empty_params_array() {
     let dir = tempdir().unwrap();
     let conn = open_connection(dir.path(), false).unwrap();
 
@@ -304,58 +304,43 @@ fn query_table_count(conn: &right_db::Connection, table_name: &str) -> i64 {
     .unwrap()
 }
 
-fn query_rusqlite_table_count(conn: &rusqlite::Connection, table_name: &str) -> i64 {
-    conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
-        [table_name],
-        |row| row.get(0),
-    )
-    .unwrap()
-}
-
 #[test]
 fn schema_has_memories_table() {
     let dir = tempdir().unwrap();
     open_db(dir.path(), true).unwrap();
-    let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
-    let count: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memories'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(count, 1, "memories table should exist");
+    let conn = open_connection_readonly(dir.path()).unwrap();
+    assert_eq!(
+        query_table_count(&conn, "memories"),
+        1,
+        "memories table should exist"
+    );
 }
 
 #[test]
 fn schema_has_memory_events_table() {
     let dir = tempdir().unwrap();
     open_db(dir.path(), true).unwrap();
-    let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
-    let count: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memory_events'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(count, 1, "memory_events table should exist");
+    let conn = open_connection_readonly(dir.path()).unwrap();
+    assert_eq!(
+        query_table_count(&conn, "memory_events"),
+        1,
+        "memory_events table should exist"
+    );
 }
 
 #[test]
 fn schema_has_conversation_messages_tables() {
     let dir = tempdir().unwrap();
     open_db(dir.path(), true).unwrap();
-    let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+    let conn = open_connection_readonly(dir.path()).unwrap();
 
     assert_eq!(
-        query_rusqlite_table_count(&conn, "conversation_messages"),
+        query_table_count(&conn, "conversation_messages"),
         1,
         "conversation_messages table should exist"
     );
     assert_eq!(
-        query_rusqlite_table_count(&conn, "conversation_messages_fts"),
+        query_table_count(&conn, "conversation_messages_fts"),
         1,
         "conversation_messages_fts table should exist"
     );
@@ -365,32 +350,26 @@ fn schema_has_conversation_messages_tables() {
 fn schema_has_memories_fts() {
     let dir = tempdir().unwrap();
     open_db(dir.path(), true).unwrap();
-    let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
-    let count: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memories_fts'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(count, 1, "memories_fts virtual table should exist");
+    let conn = open_connection_readonly(dir.path()).unwrap();
+    assert_eq!(
+        query_table_count(&conn, "memories_fts"),
+        1,
+        "memories_fts virtual table should exist"
+    );
 }
 
 #[test]
 fn schema_has_conversation_messages_table() {
     let dir = tempdir().unwrap();
     open_db(dir.path(), true).unwrap();
-    let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+    let conn = open_connection_readonly(dir.path()).unwrap();
 
     for table in ["conversation_messages", "conversation_messages_fts"] {
-        let count: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                [table],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 1, "{table} table should exist");
+        assert_eq!(
+            query_table_count(&conn, table),
+            1,
+            "{table} table should exist"
+        );
     }
 }
 
@@ -458,28 +437,26 @@ fn async_runs_insert_and_update() {
 #[test]
 fn memory_events_blocks_update() {
     let dir = tempdir().unwrap();
-    open_db(dir.path(), true).unwrap();
-    let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+    let conn = open_connection(dir.path(), true).unwrap();
     conn.execute(
         "INSERT INTO memory_events (event_type, actor) VALUES ('store', 'test-agent')",
-        [],
+        (),
     )
     .unwrap();
-    let result = conn.execute("UPDATE memory_events SET actor='x' WHERE id=1", []);
+    let result = conn.execute("UPDATE memory_events SET actor='x' WHERE id=1", ());
     assert!(result.is_err(), "UPDATE on memory_events should be blocked");
 }
 
 #[test]
 fn memory_events_blocks_delete() {
     let dir = tempdir().unwrap();
-    open_db(dir.path(), true).unwrap();
-    let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+    let conn = open_connection(dir.path(), true).unwrap();
     conn.execute(
         "INSERT INTO memory_events (event_type, actor) VALUES ('store', 'test-agent')",
-        [],
+        (),
     )
     .unwrap();
-    let result = conn.execute("DELETE FROM memory_events WHERE id=1", []);
+    let result = conn.execute("DELETE FROM memory_events WHERE id=1", ());
     assert!(result.is_err(), "DELETE on memory_events should be blocked");
 }
 

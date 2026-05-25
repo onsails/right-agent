@@ -27,8 +27,7 @@ impl Connection {
         let runtime = LibsqlRuntime::new();
         let builder = libsql::Builder::new_local(":memory:");
         // SAFETY: matches `open_local`; right-db drives local libSQL through
-        // synchronous wrappers during the staged migration while rusqlite may
-        // still initialize SQLite first in compatibility tests.
+        // synchronous wrappers that own the runtime used for each operation.
         let builder = unsafe { builder.skip_safety_assert(true) };
         let database = runtime
             .block_on(builder.build())
@@ -56,13 +55,10 @@ impl Connection {
         };
         let builder = libsql::Builder::new_local(&db_path).flags(flags);
         // SAFETY: right-db is only using local libSQL through synchronous
-        // wrappers that drive each async operation to completion. During the
-        // staged libSQL migration this crate still links and uses rusqlite in
-        // compatibility tests, so rusqlite can initialize SQLite
-        // before libSQL's one-time serialized-mode assertion runs. The project
-        // still uses serialized, mutex-protected handles; this skips only that
-        // temporary global init assertion until the remaining right-db rusqlite
-        // surfaces are removed.
+        // wrappers that drive each async operation to completion on an owned
+        // runtime. The project still uses local SQLite through libSQL handles
+        // with SQLite mutex protection; this skips only libSQL's process-wide
+        // serialized-mode assertion.
         let builder = unsafe { builder.skip_safety_assert(true) };
         let database = runtime
             .block_on(builder.build())

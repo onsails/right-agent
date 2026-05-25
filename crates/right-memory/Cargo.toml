@@ -14,8 +14,6 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
-rusqlite = { workspace = true }
-rusqlite_migration = { workspace = true }
 fastrand = "2"
 
 [dev-dependencies]

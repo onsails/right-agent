@@ -6,7 +6,6 @@ publish = false
 
 [dependencies]
 libsql = { workspace = true }
-rusqlite = { workspace = true }
 tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
