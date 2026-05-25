@@ -83,8 +83,12 @@ export function initializeTelegramWebApp(
     return actualDisplayMode(webApp, 'normal')
   }
 
+  if (typeof webApp?.requestFullscreen !== 'function') {
+    return actualDisplayMode(webApp, 'normal')
+  }
+
   try {
-    webApp?.requestFullscreen?.()
+    webApp.requestFullscreen()
   } catch {
     return actualDisplayMode(webApp, 'normal')
   }
@@ -101,7 +105,10 @@ export function applyTelegramDisplayMode(
 
   try {
     if (mode === 'fullscreen') {
-      webApp?.requestFullscreen?.()
+      if (typeof webApp?.requestFullscreen !== 'function') {
+        return actualDisplayMode(webApp, 'normal')
+      }
+      webApp.requestFullscreen()
     } else {
       webApp?.exitFullscreen?.()
     }

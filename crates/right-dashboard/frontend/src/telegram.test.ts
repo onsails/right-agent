@@ -147,14 +147,14 @@ describe('Telegram dashboard display mode helpers', () => {
     expect(webApp.expand).toHaveBeenCalledOnce()
   })
 
-  test('returns fullscreen preference as best effort when fullscreen request is unsupported', () => {
+  test('returns actual normal mode when initial fullscreen request is unsupported', () => {
     const webApp: TelegramWebApp = {
       ready: vi.fn(),
       expand: vi.fn(),
     }
 
     expect(() => {
-      expect(initializeTelegramWebApp(webApp, 'fullscreen')).toBe('fullscreen')
+      expect(initializeTelegramWebApp(webApp, 'fullscreen')).toBe('normal')
     }).not.toThrow()
   })
 
@@ -186,6 +186,16 @@ describe('Telegram dashboard display mode helpers', () => {
     vi.mocked(webApp.requestFullscreen!).mockImplementation(() => {
       throw new Error('fullscreen unavailable')
     })
+
+    const actualMode = applyTelegramDisplayMode('fullscreen', webApp, storage)
+
+    expect(actualMode).toBe('normal')
+    expect(storage.setItem).toHaveBeenCalledWith(DASHBOARD_DISPLAY_MODE_STORAGE_KEY, 'fullscreen')
+  })
+
+  test('keeps fullscreen preference but returns actual normal layout when fullscreen request is unsupported', () => {
+    const webApp: TelegramWebApp = {}
+    const storage = storageWithValue(null)
 
     const actualMode = applyTelegramDisplayMode('fullscreen', webApp, storage)
 
