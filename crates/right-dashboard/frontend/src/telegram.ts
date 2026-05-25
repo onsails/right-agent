@@ -1,8 +1,20 @@
+export type DashboardDisplayMode = 'normal' | 'fullscreen'
+
+export const DASHBOARD_DISPLAY_MODE_STORAGE_KEY = 'right-dashboard.display-mode'
+
+type DashboardDisplayModeStorage = Pick<Storage, 'getItem' | 'setItem'>
+type TelegramFullscreenChangedEvent = { is_fullscreen: boolean }
+type TelegramFullscreenChangedHandler = (event: TelegramFullscreenChangedEvent) => void
+
 export interface TelegramWebApp {
   initData?: string
   ready?: () => void
   requestFullscreen?: () => void
+  exitFullscreen?: () => void
   expand?: () => void
+  isFullscreen?: boolean
+  onEvent?: (eventType: 'fullscreen_changed', eventHandler: TelegramFullscreenChangedHandler) => void
+  offEvent?: (eventType: 'fullscreen_changed', eventHandler: TelegramFullscreenChangedHandler) => void
 }
 
 declare global {
@@ -13,12 +25,101 @@ declare global {
   }
 }
 
-export function initializeTelegramWebApp(webApp: TelegramWebApp | undefined = window.Telegram?.WebApp): void {
+function defaultWebApp(): TelegramWebApp | undefined {
+  if (typeof window === 'undefined') {
+    return undefined
+  }
+  return window.Telegram?.WebApp
+}
+
+function defaultStorage(): DashboardDisplayModeStorage | undefined {
+  if (typeof localStorage === 'undefined') {
+    return undefined
+  }
+  return localStorage
+}
+
+function normalizedDisplayMode(value: string | null): DashboardDisplayMode {
+  return value === 'fullscreen' ? 'fullscreen' : 'normal'
+}
+
+function actualDisplayMode(webApp: TelegramWebApp | undefined, fallbackMode: DashboardDisplayMode): DashboardDisplayMode {
+  if (typeof webApp?.isFullscreen === 'boolean') {
+    return webApp.isFullscreen ? 'fullscreen' : 'normal'
+  }
+  return fallbackMode
+}
+
+export function readDashboardDisplayMode(storage: DashboardDisplayModeStorage | undefined = defaultStorage()): DashboardDisplayMode {
+  try {
+    return normalizedDisplayMode(storage?.getItem(DASHBOARD_DISPLAY_MODE_STORAGE_KEY) ?? null)
+  } catch {
+    return 'normal'
+  }
+}
+
+export function saveDashboardDisplayMode(
+  mode: DashboardDisplayMode,
+  storage: DashboardDisplayModeStorage | undefined = defaultStorage(),
+): void {
+  try {
+    storage?.setItem(DASHBOARD_DISPLAY_MODE_STORAGE_KEY, mode)
+  } catch {
+    // Storage may be unavailable or blocked; Telegram display changes should still proceed.
+  }
+}
+
+export function initializeTelegramWebApp(
+  webApp: TelegramWebApp | undefined = defaultWebApp(),
+  preferredMode: DashboardDisplayMode = readDashboardDisplayMode(),
+): DashboardDisplayMode {
   webApp?.ready?.()
+  webApp?.expand?.()
+
+  if (preferredMode !== 'fullscreen') {
+    return actualDisplayMode(webApp, 'normal')
+  }
+
   try {
     webApp?.requestFullscreen?.()
   } catch {
-    // Fullscreen is an optional Telegram client capability; keep the dashboard usable.
+    return actualDisplayMode(webApp, 'normal')
   }
-  webApp?.expand?.()
+
+  return actualDisplayMode(webApp, 'fullscreen')
+}
+
+export function applyTelegramDisplayMode(
+  mode: DashboardDisplayMode,
+  webApp: TelegramWebApp | undefined = defaultWebApp(),
+  storage: DashboardDisplayModeStorage | undefined = defaultStorage(),
+): DashboardDisplayMode {
+  saveDashboardDisplayMode(mode, storage)
+
+  try {
+    if (mode === 'fullscreen') {
+      webApp?.requestFullscreen?.()
+    } else {
+      webApp?.exitFullscreen?.()
+    }
+  } catch {
+    return actualDisplayMode(webApp, 'normal')
+  }
+
+  return actualDisplayMode(webApp, mode)
+}
+
+export function subscribeTelegramFullscreenChanges(
+  webApp: TelegramWebApp | undefined,
+  onChange: (mode: DashboardDisplayMode) => void,
+): () => void {
+  const handler: TelegramFullscreenChangedHandler = (event) => {
+    onChange(event.is_fullscreen ? 'fullscreen' : 'normal')
+  }
+
+  webApp?.onEvent?.('fullscreen_changed', handler)
+
+  return () => {
+    webApp?.offEvent?.('fullscreen_changed', handler)
+  }
 }
