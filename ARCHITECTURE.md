@@ -16,7 +16,7 @@ Nineteen crates in a Cargo workspace:
 | **right-platform-store** | `crates/right-platform-store/` | Content-addressed platform-managed sandbox file deployment |
 | **right-agent-config** | `crates/right-agent-config/` | Agent configuration DTOs, discovery DTOs, sandbox/memory/STT schema types |
 | **right-stt** | `crates/right-stt/` | Host-side STT model cache paths, ffmpeg detection, model download, cache warming |
-| **right-db** | `crates/right-db/` | Per-agent SQLite-compatible `data.db` boundary over local libSQL: project DB types, migrations, `sql/v*.sql` |
+| **right-db** | `crates/right-db/` | Per-agent SQLite-compatible `data.db` boundary over local Turso: project DB types, migrations, `sql/v*.sql` |
 | **right-lifecycle** | `crates/right-lifecycle/` | Learned-skill lifecycle state machine and DB operations over `skill_lifecycle` |
 | **right-mcp** | `crates/right-mcp/` | MCP aggregator backend, proxy, reconnect, credentials, token derivation, auth tokens |
 | **right-codegen** | `crates/right-codegen/` | Per-agent codegen: settings.json, .mcp.json, prompts, process-compose, cloudflared, sandbox policy, bundled skills |
@@ -480,7 +480,7 @@ message pointing at `right up`". `PC_PORT` may still be referenced by
 
 ## Local Database Rules
 
-Per-agent `data.db` is a SQLite-compatible database. Local libSQL is the
+Per-agent `data.db` is a SQLite-compatible database. Local Turso is the
 current driver implementation and is hidden behind `right-db`.
 
 `right-db` is the sole owner of local database driver details. Other crates

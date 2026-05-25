@@ -63,7 +63,7 @@
 
 ### right-db
 
-- `Connection`, `Transaction`, `DbError` — project-owned boundary over the local libSQL driver for per-agent SQLite-compatible `data.db`.
+- `Connection`, `Transaction`, `DbError` — project-owned boundary over the local Turso driver for per-agent SQLite-compatible `data.db`.
 - `migrations.rs` — ordered idempotent migration runner.
 - `conversation.rs` — transcript archive and FTS search storage helpers.
 - `test_support.rs` — migrated temp `data.db` fixtures for crate tests.

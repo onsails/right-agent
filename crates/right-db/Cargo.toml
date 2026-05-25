@@ -5,7 +5,6 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-libsql = { workspace = true }
 tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
