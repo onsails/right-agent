@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
-use right_db::{Connection, DbError};
+use right_db::{Connection, DbError, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -255,11 +255,7 @@ pub fn get(conn: &Connection, skill_name: &str) -> Result<Option<SkillLifecycleR
             [skill_name],
             raw_row_from_sql,
         )
-        .map(Some)
-        .or_else(|err| match err {
-            DbError::NotFound => Ok(None),
-            other => Err(other),
-        })?;
+        .optional()?;
     raw.map(row_from_raw).transpose()
 }
 

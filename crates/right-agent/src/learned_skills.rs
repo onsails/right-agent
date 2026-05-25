@@ -372,14 +372,6 @@ pub fn ensure_nudge_state(conn: &Connection, agent_name: &str) -> Result<(), DbE
     Ok(())
 }
 
-fn ensure_nudge_state_tx(tx: &Transaction<'_>, agent_name: &str) -> Result<(), DbError> {
-    tx.execute(
-        "INSERT OR IGNORE INTO skill_nudge_state (agent_name) VALUES (?1)",
-        [agent_name],
-    )?;
-    Ok(())
-}
-
 pub fn increment_turn_nudge_counters(
     conn: &Connection,
     agent_name: &str,
@@ -473,7 +465,7 @@ pub fn review_gate_decision(
     input: ReviewGateInput<'_>,
 ) -> Result<ReviewGateDecision, DbError> {
     let tx = conn.transaction()?;
-    ensure_nudge_state_tx(&tx, agent_name)?;
+    ensure_nudge_state(&tx, agent_name)?;
     let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
     tx.commit()?;
     Ok(decision)
@@ -577,7 +569,7 @@ pub fn try_mark_review_started(
     input: ReviewGateInput<'_>,
 ) -> Result<ReviewGateDecision, DbError> {
     let tx = conn.transaction()?;
-    ensure_nudge_state_tx(&tx, agent_name)?;
+    ensure_nudge_state(&tx, agent_name)?;
 
     let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
     let ReviewGateDecision::Start(trigger) = decision else {
@@ -635,11 +627,12 @@ pub fn mark_review_finished(
 ///
 /// # Implicit invariant on inner helpers
 ///
-/// Every helper this function calls (currently `ensure_nudge_state_tx` and
+/// Every helper this function calls (currently `ensure_nudge_state` and
 /// the direct `tx.execute` UPDATE) accepts the project-owned transaction
-/// wrapper directly. Any new helper introduced here that internally starts
-/// another transaction or opens a SAVEPOINT would silently break the
-/// nested-tx contract and corrupt the caller's atomicity guarantees.
+/// wrapper directly (via `Transaction: Deref<Target = Connection>`). Any new
+/// helper introduced here that internally starts another transaction or opens
+/// a SAVEPOINT would silently break the nested-tx contract and corrupt the
+/// caller's atomicity guarantees.
 ///
 /// There is no runtime way to assert "we are inside a transaction" from a
 /// `&Connection`, so this contract is enforced by documentation and code
@@ -651,7 +644,7 @@ pub fn mark_review_finished_in_tx(
     status: ReviewStatus,
     reset_activity_counters: bool,
 ) -> Result<(), DbError> {
-    ensure_nudge_state_tx(tx, agent_name)?;
+    ensure_nudge_state(tx, agent_name)?;
     let reset_activity_counters =
         reset_activity_counters && !matches!(status, ReviewStatus::Failed);
     let reset_issue_hints = !matches!(status, ReviewStatus::Failed)
@@ -725,7 +718,7 @@ pub fn record_review_failure(
         .with_timezone(&chrono::Utc);
 
     let tx = conn.transaction()?;
-    ensure_nudge_state_tx(&tx, agent_name)?;
+    ensure_nudge_state(&tx, agent_name)?;
 
     let (prev_count, prev_open_until): (i64, Option<String>) = tx.query_row(
         "SELECT consecutive_review_failures, review_circuit_open_until \
@@ -786,11 +779,8 @@ pub fn clear_review_running(conn: &Connection, agent_name: &str) -> Result<(), D
 mod tests {
     use super::*;
 
-    fn conn() -> Connection {
-        let dir = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
-        std::mem::forget(dir);
-        conn
+    fn conn() -> (tempfile::TempDir, Connection) {
+        right_db::test_support::migrated_connection()
     }
 
     fn review_gate_input(signal_trigger: Option<ReviewTriggerKind>) -> ReviewGateInput<'static> {
@@ -816,13 +806,13 @@ mod tests {
 
     fn ensure_agent_nudge_state(conn: &Connection, agent: &str) {
         let tx = conn.transaction().unwrap();
-        ensure_nudge_state_tx(&tx, agent).unwrap();
+        ensure_nudge_state(&tx, agent).unwrap();
         tx.commit().unwrap();
     }
 
     #[test]
     fn review_report_persistence_round_trips_candidate() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let report = SkillReviewReport {
             agent_name: "right".to_owned(),
             source_invocation_id: "inv-1".to_owned(),
@@ -873,7 +863,7 @@ mod tests {
 
     #[test]
     fn review_gate_accepts_signal_and_effort_threshold() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_nudge_state(&conn, "right").unwrap();
 
         let signal_decision = review_gate_decision(
@@ -929,7 +919,7 @@ mod tests {
 
     #[test]
     fn review_gate_blocks_running() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_nudge_state(&conn, "right").unwrap();
 
         conn.execute(
@@ -976,7 +966,7 @@ mod tests {
 
     #[test]
     fn review_start_and_finish_update_nudge_state() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_nudge_state(&conn, "right").unwrap();
         conn.execute(
             "UPDATE skill_nudge_state SET tool_iters_since_review = 19, turns_since_review = 3 WHERE agent_name='right'",
@@ -1028,7 +1018,7 @@ mod tests {
 
     #[test]
     fn reset_stale_review_running_clears_flag_without_touching_other_fields() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_nudge_state(&conn, "stale").unwrap();
         // Seed a row that looks like a stranded review: running=1, with
         // pre-existing counters and last_review_at/status that
@@ -1113,7 +1103,7 @@ mod tests {
 
     #[test]
     fn clear_review_running_clears_flag_without_touching_other_fields() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_nudge_state(&conn, "agent-x").unwrap();
         // Seed a mid-review row: running=1, with a prior review timestamp,
         // counters, and last_review_status that the shutdown helper MUST
@@ -1173,7 +1163,7 @@ mod tests {
 
     #[test]
     fn review_start_rechecks_running_after_stale_gate() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_nudge_state(&conn, "right").unwrap();
         let stale_decision = review_gate_decision(
             &conn,
@@ -1222,7 +1212,7 @@ mod tests {
 
     #[test]
     fn review_start_ignores_recent_last_review_at_after_stale_gate() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_nudge_state(&conn, "right").unwrap();
         let input = ReviewGateInput {
             signal_trigger: Some(ReviewTriggerKind::LearningSignal),
@@ -1260,7 +1250,7 @@ mod tests {
 
     #[test]
     fn review_gate_disables_non_positive_effort_threshold() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_nudge_state(&conn, "right").unwrap();
 
         for interval in [0, -1] {
@@ -1292,7 +1282,7 @@ mod tests {
 
     #[test]
     fn review_public_helpers_create_missing_nudge_rows() {
-        let conn = conn();
+        let (_dir, conn) = conn();
 
         let gate = review_gate_decision(&conn, "gate-missing", review_gate_input(None)).unwrap();
         assert_eq!(
@@ -1355,7 +1345,7 @@ mod tests {
 
     #[test]
     fn review_failed_finish_preserves_counters_and_sets_last_review_at() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_nudge_state(&conn, "right").unwrap();
         conn.execute(
             "UPDATE skill_nudge_state \
@@ -1401,7 +1391,7 @@ mod tests {
 
     #[test]
     fn review_finish_resets_activity_counters_only_when_requested() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         for agent_name in ["preserve", "reset"] {
             ensure_nudge_state(&conn, agent_name).unwrap();
             conn.execute(
@@ -1453,7 +1443,7 @@ mod tests {
 
     #[test]
     fn review_finish_resets_issue_hints_only_for_issue_or_nothing_to_learn() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         for agent_name in ["learning", "issue", "nothing", "effort-update"] {
             ensure_nudge_state(&conn, agent_name).unwrap();
             conn.execute(
@@ -1538,7 +1528,7 @@ mod tests {
 
     #[test]
     fn successful_finish_exists_only_for_created_or_updated() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         insert_learning_event(
             &conn,
             &LearningEvent {
@@ -1580,7 +1570,7 @@ mod tests {
 
     #[test]
     fn insert_learning_event_persists_hint_outcome() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         insert_learning_event(
             &conn,
             &LearningEvent {
@@ -1611,7 +1601,7 @@ mod tests {
 
     #[test]
     fn record_nudge_signal_persists_payload_and_updates_counter() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         record_nudge_signal(
             &conn,
             &NudgeSignalRecord {
@@ -1678,7 +1668,7 @@ mod tests {
 
     #[test]
     fn nudge_signal_is_dropped_when_successful_finish_exists() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         insert_learning_event(
             &conn,
             &LearningEvent {
@@ -1714,7 +1704,7 @@ mod tests {
 
     #[test]
     fn nudge_signal_is_dropped_when_both_signals_present() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let selected = select_reply_signal(
             &conn,
             "inv-both",
@@ -1735,7 +1725,7 @@ mod tests {
 
     #[test]
     fn nudge_signal_requires_two_event_refs_unless_explicit_user_request() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let dropped = select_reply_signal(
             &conn,
             "inv-short",
@@ -1790,7 +1780,7 @@ mod tests {
 
     #[test]
     fn nudge_signal_rejects_empty_or_whitespace_event_refs() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let explicit_with_blank_ref = select_reply_signal(
             &conn,
             "inv-blank-explicit",
@@ -1820,7 +1810,7 @@ mod tests {
 
     #[test]
     fn nudge_signal_rejects_blank_ref_even_when_enough_nonblank_refs_exist() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let selected = select_reply_signal(
             &conn,
             "inv-mixed-blank",
@@ -1838,7 +1828,7 @@ mod tests {
 
     #[test]
     fn nudge_signal_rejects_non_string_event_ref() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let selected = select_reply_signal(
             &conn,
             "inv-non-string-ref",
@@ -1859,7 +1849,7 @@ mod tests {
 
     #[test]
     fn nudge_signal_accepts_valid_two_event_refs() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let selected = select_reply_signal(
             &conn,
             "inv-two-refs",
@@ -1880,7 +1870,7 @@ mod tests {
 
     #[test]
     fn nudge_signal_requires_learned_skill_prefix() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let create_without_prefix = select_reply_signal(
             &conn,
             "inv-create-prefix",
@@ -1917,7 +1907,7 @@ mod tests {
 
     #[test]
     fn nudge_signal_rejects_invalid_enum_values() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let invalid_trigger = select_reply_signal(
             &conn,
             "inv-invalid-trigger",
@@ -1984,7 +1974,7 @@ mod tests {
 
     #[test]
     fn gate_skips_when_daily_budget_exceeded() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_agent_nudge_state(&conn, "him");
         insert_usage(&conn, "2026-05-21T01:00:00Z", "learning_selector", 2.50);
         insert_usage(&conn, "2026-05-21T02:00:00Z", "learning_reviewer", 3.00);
@@ -2003,7 +1993,7 @@ mod tests {
 
     #[test]
     fn gate_ignores_non_learning_sources_and_yesterdays_spend() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_agent_nudge_state(&conn, "him");
         insert_usage(&conn, "2026-05-20T23:59:00Z", "learning_selector", 10.00);
         insert_usage(&conn, "2026-05-21T01:00:00Z", "interactive", 10.00);
@@ -2020,7 +2010,7 @@ mod tests {
 
     #[test]
     fn gate_skips_when_circuit_open() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_agent_nudge_state(&conn, "him");
         conn.execute(
             "UPDATE skill_nudge_state SET review_circuit_open_until = ?1 WHERE agent_name = 'him'",
@@ -2042,7 +2032,7 @@ mod tests {
 
     #[test]
     fn gate_clears_expired_circuit_and_resets_failure_count() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_agent_nudge_state(&conn, "him");
         conn.execute(
             "UPDATE skill_nudge_state SET \
@@ -2075,7 +2065,7 @@ mod tests {
 
     #[test]
     fn mark_review_finished_resets_circuit_and_failures() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_agent_nudge_state(&conn, "him");
         conn.execute(
             "UPDATE skill_nudge_state SET \
@@ -2111,7 +2101,7 @@ mod tests {
 
     #[test]
     fn record_review_failure_increments_and_returns_opened_false_below_threshold() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_agent_nudge_state(&conn, "him");
         conn.execute(
             "UPDATE skill_nudge_state SET review_running = 1, consecutive_review_failures = 2 WHERE agent_name = 'him'",
@@ -2137,7 +2127,7 @@ mod tests {
 
     #[test]
     fn record_review_failure_opens_circuit_exactly_at_threshold() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_agent_nudge_state(&conn, "him");
         conn.execute(
             "UPDATE skill_nudge_state SET review_running = 1, consecutive_review_failures = 4 WHERE agent_name = 'him'",
@@ -2162,7 +2152,7 @@ mod tests {
 
     #[test]
     fn record_review_failure_does_not_reopen_already_open_circuit() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_agent_nudge_state(&conn, "him");
         conn.execute(
             "UPDATE skill_nudge_state SET \
@@ -2191,7 +2181,7 @@ mod tests {
 
     #[test]
     fn record_review_failure_rejects_invalid_now_utc() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_agent_nudge_state(&conn, "him");
         let result = record_review_failure(&conn, "him", "not-a-timestamp", 5, 60);
         assert!(
@@ -2202,7 +2192,7 @@ mod tests {
 
     #[test]
     fn gate_decision_rejects_invalid_now_utc() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         ensure_nudge_state(&conn, "right").unwrap();
         let result = review_gate_decision(
             &conn,

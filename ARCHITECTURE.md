@@ -491,6 +491,8 @@ connection, transaction, row, error, or parameter types in public APIs.
 
 Both the MCP aggregator (`right-mcp-server`) and bot processes run schema migrations on per-agent `data.db` via `right_db::open_connection(path, migrate: true)`. Migrations are idempotent — concurrent callers are safe (WAL mode + busy_timeout). CLI commands and other processes open with `migrate: false` or read-only helpers. Bot processes still declare `depends_on: right-mcp-server` for MCP readiness, but no longer depend on it for schema migrations. The migration registry (`right_db::migrations::MIGRATIONS`) is the sole place to add new tables.
 
+All pending migrations run inside a single immediate transaction. Rollback is all-or-nothing: a failure at migration N rolls back every prior migration in the same batch and leaves `user_version` unchanged. A concurrent caller that opens the database during a cold-boot batch blocks on that transaction for the full batch duration, not just the next pending version, and may exhaust the 5s `busy_timeout` under WAL. Tests must not assume per-version commit boundaries; see `migration_runner_semantics_rolls_back_all_pending_migrations_on_later_failure`.
+
 ### Transaction Rule
 
 Any operation that performs 2+ writes (INSERT, UPDATE, DELETE) MUST use a single immediate transaction. Prefer `Connection::with_immediate_transaction` so rollback-on-error is centralized; use explicit `Connection::transaction()` only when the transaction must be passed through helper boundaries or committed manually. Single-statement writes don't need a transaction. Migrations are the sole exception because the `right-db` migration runner wraps each migration batch.

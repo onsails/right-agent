@@ -667,11 +667,8 @@ impl std::error::Error for InvalidDbValue {}
 mod tests {
     use super::*;
 
-    fn conn() -> right_db::Connection {
-        let dir = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
-        std::mem::forget(dir);
-        conn
+    fn conn() -> (tempfile::TempDir, right_db::Connection) {
+        right_db::test_support::migrated_connection()
     }
 
     fn seed(seed_ref: &str) -> NewLearningEpisodeSeed {
@@ -715,7 +712,7 @@ mod tests {
 
     #[test]
     fn execution_event_insert_round_trips_thinking_as_secondary() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let id = insert_execution_event(
             &conn,
             &NewExecutionEvent {
@@ -747,7 +744,7 @@ mod tests {
 
     #[test]
     fn claim_ready_episode_moves_pending_to_selecting() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let id = insert_pending_episode(&conn, &seed("inv:inv-1")).unwrap();
         let claimed = claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z").unwrap();
         assert_eq!(claimed.map(|e| e.id), Some(id));
@@ -755,7 +752,7 @@ mod tests {
 
     #[test]
     fn duplicate_pending_seed_extends_ready_after_and_last_evidence_at() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let mut seed = seed("inv:inv-dup");
         seed.ready_after = "2026-05-19T00:01:00Z".to_owned();
         let id = insert_pending_episode(&conn, &seed).unwrap();
@@ -777,7 +774,7 @@ mod tests {
 
     #[test]
     fn mark_episode_selected_moves_selecting_to_selected() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let id = insert_pending_episode(&conn, &seed("inv:inv-2")).unwrap();
         claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
             .unwrap()
@@ -801,7 +798,7 @@ mod tests {
 
     #[test]
     fn mark_episode_selected_rejects_missing_or_non_selecting_episode() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let pending_id = insert_pending_episode(&conn, &seed("inv:inv-3")).unwrap();
 
         assert_query_returned_no_rows(mark_episode_selected(&conn, pending_id, &selected_update()));
@@ -810,7 +807,7 @@ mod tests {
 
     #[test]
     fn mark_episode_terminal_moves_pending_and_selecting_to_terminal_status() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let pending_id = insert_pending_episode(&conn, &seed("inv:inv-4")).unwrap();
         mark_episode_terminal(
             &conn,
@@ -844,7 +841,7 @@ mod tests {
 
     #[test]
     fn mark_episode_terminal_rejects_missing_or_non_pending_selecting_episode() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let id = insert_pending_episode(&conn, &seed("inv:inv-6")).unwrap();
         claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
             .unwrap()
@@ -867,7 +864,7 @@ mod tests {
 
     #[test]
     fn mark_episode_terminal_rejects_non_terminal_destination_status() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let id = insert_pending_episode(&conn, &seed("inv:inv-7")).unwrap();
 
         assert_invalid_query(mark_episode_terminal(
@@ -889,7 +886,7 @@ mod tests {
 
     #[test]
     fn mark_episode_failed_updates_in_flight_episode_and_rejects_missing_episode() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let id = insert_pending_episode(&conn, &seed("inv:inv-8")).unwrap();
         claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
             .unwrap()
@@ -916,7 +913,7 @@ mod tests {
 
     #[test]
     fn mark_episode_failed_does_not_overwrite_final_statuses() {
-        let conn = conn();
+        let (_dir, conn) = conn();
         let reviewed_id = insert_pending_episode(&conn, &seed("inv:inv-9")).unwrap();
         let no_episode_id = insert_pending_episode(&conn, &seed("inv:inv-10")).unwrap();
         conn.execute(

@@ -49,11 +49,8 @@ fn validate_lock_ttl_invalid() {
     assert!(validate_lock_ttl("").is_err());
 }
 
-fn setup_db() -> right_db::Connection {
-    let dir = tempfile::tempdir().unwrap();
-    let conn = right_db::open_connection(dir.path(), true).unwrap();
-    std::mem::forget(dir);
-    conn
+fn setup_db() -> (tempfile::TempDir, right_db::Connection) {
+    right_db::test_support::migrated_connection()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -103,7 +100,7 @@ fn insert_async_cron_run(
 
 #[test]
 fn create_spec_success() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let result = create_spec(&conn, "my-job", "*/5 * * * *", "do stuff", None, None).unwrap();
     assert!(result.message.contains("Created"));
     assert!(result.warning.is_none());
@@ -121,14 +118,14 @@ fn create_spec_success() {
 
 #[test]
 fn create_spec_with_warning() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let result = create_spec(&conn, "my-job", "0 9 * * *", "do stuff", None, None).unwrap();
     assert!(result.warning.is_some());
 }
 
 #[test]
 fn create_spec_duplicate_error() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec(&conn, "dup", "*/5 * * * *", "prompt", None, None).unwrap();
     let err = create_spec(&conn, "dup", "*/5 * * * *", "prompt", None, None).unwrap_err();
     assert!(err.contains("already exists"));
@@ -136,7 +133,7 @@ fn create_spec_duplicate_error() {
 
 #[test]
 fn create_spec_validation_errors() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     // Bad job name
     assert!(create_spec(&conn, "BAD NAME", "*/5 * * * *", "p", None, None).is_err());
     // Empty prompt
@@ -151,7 +148,7 @@ fn create_spec_validation_errors() {
 
 #[test]
 fn update_spec_success() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec(&conn, "upd", "*/5 * * * *", "old", None, None).unwrap();
     let result = update_spec(
         &conn,
@@ -176,14 +173,14 @@ fn update_spec_success() {
 
 #[test]
 fn update_spec_not_found() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let err = update_spec(&conn, "ghost", "*/5 * * * *", "prompt", None, None).unwrap_err();
     assert!(err.contains("not found"));
 }
 
 #[test]
 fn delete_spec_success() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let tmp = tempfile::tempdir().unwrap();
     create_spec(&conn, "del", "*/5 * * * *", "p", None, None).unwrap();
     let msg = delete_spec(&conn, "del", tmp.path()).unwrap();
@@ -201,7 +198,7 @@ fn delete_spec_success() {
 
 #[test]
 fn delete_spec_not_found() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let tmp = tempfile::tempdir().unwrap();
     let err = delete_spec(&conn, "nope", tmp.path()).unwrap_err();
     assert!(err.contains("not found"));
@@ -209,7 +206,7 @@ fn delete_spec_not_found() {
 
 #[test]
 fn list_specs_json() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec(&conn, "a-job", "*/5 * * * *", "prompt a", None, None).unwrap();
     create_spec(
         &conn,
@@ -237,7 +234,7 @@ fn list_specs_json() {
 
 #[test]
 fn list_specs_reads_last_run_from_async_runs() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec(&conn, "a-job", "*/5 * * * *", "prompt a", None, None).unwrap();
     insert_async_cron_run(
         &conn,
@@ -285,14 +282,14 @@ fn list_specs_reads_last_run_from_async_runs() {
 
 #[test]
 fn load_specs_from_db_empty() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let specs = load_specs_from_db(&conn).unwrap();
     assert!(specs.is_empty());
 }
 
 #[test]
 fn load_specs_from_db_returns_all() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
              VALUES ('job1', '*/5 * * * *', 'do stuff', 0.5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
@@ -317,7 +314,7 @@ fn load_specs_from_db_returns_all() {
 
 #[test]
 fn load_specs_skips_legacy_bg_schedule_rows() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let main = Uuid::new_v4();
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
@@ -343,7 +340,7 @@ fn load_specs_skips_legacy_bg_schedule_rows() {
 
 #[test]
 fn load_specs_skips_non_bg_malformed_rows() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
              VALUES ('bad-run-at', '', 'bad run_at prompt', 1.0, 0, 'not-a-date', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
@@ -368,7 +365,7 @@ fn load_specs_skips_non_bg_malformed_rows() {
 
 #[test]
 fn trigger_spec_sets_timestamp() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec(&conn, "trig-job", "*/5 * * * *", "do stuff", None, None).unwrap();
     let msg = trigger_spec(&conn, "trig-job").unwrap();
     assert!(msg.contains("Triggered"));
@@ -384,14 +381,14 @@ fn trigger_spec_sets_timestamp() {
 
 #[test]
 fn trigger_spec_nonexistent_job() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let err = trigger_spec(&conn, "ghost").unwrap_err();
     assert!(err.contains("not found"));
 }
 
 #[test]
 fn trigger_spec_idempotent() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec(&conn, "idem-job", "*/5 * * * *", "do stuff", None, None).unwrap();
     trigger_spec(&conn, "idem-job").unwrap();
     trigger_spec(&conn, "idem-job").unwrap();
@@ -407,7 +404,7 @@ fn trigger_spec_idempotent() {
 
 #[test]
 fn clear_triggered_at_clears() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec(&conn, "clr-job", "*/5 * * * *", "do stuff", None, None).unwrap();
     trigger_spec(&conn, "clr-job").unwrap();
     clear_triggered_at(&conn, "clr-job").unwrap();
@@ -435,7 +432,7 @@ fn describe_schedule_fallback_on_invalid() {
 
 #[test]
 fn get_spec_detail_found() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec(
         &conn,
         "detail-job",
@@ -455,14 +452,14 @@ fn get_spec_detail_found() {
 
 #[test]
 fn get_spec_detail_not_found() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let detail = get_spec_detail(&conn, "ghost").unwrap();
     assert!(detail.is_none());
 }
 
 #[test]
 fn get_recent_runs_returns_ordered() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     insert_async_cron_run(
         &conn,
         "r1",
@@ -496,14 +493,14 @@ fn get_recent_runs_returns_ordered() {
 
 #[test]
 fn get_recent_runs_empty() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let runs = get_recent_runs(&conn, "no-such-job", 5).unwrap();
     assert!(runs.is_empty());
 }
 
 #[test]
 fn get_recent_runs_respects_limit() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     for i in 0..10 {
         insert_async_cron_run(
             &conn,
@@ -582,7 +579,7 @@ fn spec_equality_detects_real_changes() {
 
 #[test]
 fn load_specs_includes_triggered_at() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec(&conn, "tr-load", "*/5 * * * *", "p", None, None).unwrap();
     trigger_spec(&conn, "tr-load").unwrap();
     let specs = load_specs_from_db(&conn).unwrap();
@@ -591,7 +588,7 @@ fn load_specs_includes_triggered_at() {
 
 #[test]
 fn load_specs_from_db_carries_target_fields() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, target_chat_id, target_thread_id, created_at, updated_at) \
@@ -618,7 +615,7 @@ fn load_specs_from_db_carries_target_fields() {
 
 #[test]
 fn create_spec_v2_with_run_at_succeeds() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let result = create_spec_v2(
         &conn,
         "run-at-job",
@@ -638,7 +635,7 @@ fn create_spec_v2_with_run_at_succeeds() {
 
 #[test]
 fn create_spec_v2_with_both_schedule_and_run_at_fails() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let err = create_spec_v2(
         &conn,
         "both-job",
@@ -658,7 +655,7 @@ fn create_spec_v2_with_both_schedule_and_run_at_fails() {
 
 #[test]
 fn create_spec_v2_with_neither_schedule_nor_run_at_fails() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let err = create_spec_v2(
         &conn,
         "neither-job",
@@ -678,7 +675,7 @@ fn create_spec_v2_with_neither_schedule_nor_run_at_fails() {
 
 #[test]
 fn create_spec_v2_with_invalid_run_at_fails() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let err = create_spec_v2(
         &conn,
         "bad-time",
@@ -698,7 +695,7 @@ fn create_spec_v2_with_invalid_run_at_fails() {
 
 #[test]
 fn create_spec_v2_with_past_run_at_succeeds() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let result = create_spec_v2(
         &conn,
         "past-job",
@@ -718,7 +715,7 @@ fn create_spec_v2_with_past_run_at_succeeds() {
 
 #[test]
 fn create_spec_v2_recurring_false_stored_as_one_shot_cron() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "oneshot-cron",
@@ -742,7 +739,7 @@ fn create_spec_v2_recurring_false_stored_as_one_shot_cron() {
 
 #[test]
 fn load_specs_round_trips_all_schedule_kinds() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "recurring",
@@ -803,7 +800,7 @@ fn load_specs_round_trips_all_schedule_kinds() {
 
 #[test]
 fn update_spec_partial_prompt_only() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "partial",
@@ -839,7 +836,7 @@ fn update_spec_partial_prompt_only() {
 
 #[test]
 fn update_spec_partial_schedule_clears_run_at() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "switch",
@@ -876,7 +873,7 @@ fn update_spec_partial_schedule_clears_run_at() {
 
 #[test]
 fn update_spec_partial_run_at_clears_schedule() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "switch2",
@@ -913,7 +910,7 @@ fn update_spec_partial_run_at_clears_schedule() {
 
 #[test]
 fn update_spec_partial_both_schedule_and_run_at_fails() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "both",
@@ -946,7 +943,7 @@ fn update_spec_partial_both_schedule_and_run_at_fails() {
 
 #[test]
 fn update_spec_partial_no_fields_fails() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "empty",
@@ -970,7 +967,7 @@ fn update_spec_partial_no_fields_fails() {
 
 #[test]
 fn update_spec_partial_not_found() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     let err = update_spec_partial(
         &conn,
         "ghost",
@@ -989,7 +986,7 @@ fn update_spec_partial_not_found() {
 
 #[test]
 fn create_spec_v2_persists_target_fields() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "with-target",
@@ -1018,7 +1015,7 @@ fn create_spec_v2_persists_target_fields() {
 
 #[test]
 fn create_spec_v2_persists_null_target_when_omitted() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "no-target",
@@ -1047,7 +1044,7 @@ fn create_spec_v2_persists_null_target_when_omitted() {
 
 #[test]
 fn update_spec_partial_sets_target_chat_id() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "j1",
@@ -1087,7 +1084,7 @@ fn update_spec_partial_sets_target_chat_id() {
 
 #[test]
 fn update_spec_partial_clears_target_thread_id() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "j1",
@@ -1128,7 +1125,7 @@ fn update_spec_partial_clears_target_thread_id() {
 
 #[test]
 fn update_spec_partial_leaves_target_when_omitted() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "j1",
@@ -1170,7 +1167,7 @@ fn update_spec_partial_leaves_target_when_omitted() {
 
 #[test]
 fn load_specs_round_trips_immediate() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
              VALUES ('imm', '@immediate', 'do it now', 5.0, 0, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
@@ -1192,7 +1189,7 @@ fn immediate_is_one_shot() {
 
 #[test]
 fn list_specs_includes_target_fields() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "j1",
@@ -1230,7 +1227,7 @@ fn resolve_schedule_fields_immediate_mutex() {
 
 #[test]
 fn create_spec_v2_immediate_inserts_sentinel() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
     create_spec_v2(
         &conn,
         "bg-test",
@@ -1264,7 +1261,7 @@ fn create_spec_v2_immediate_inserts_sentinel() {
 /// Completed delivery rows keep the target snapshot that was actually sent.
 #[test]
 fn update_spec_target_propagates_to_undelivered_async_runs() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
 
     // Insert spec with original target chat 100.
     conn.execute(
@@ -1404,7 +1401,7 @@ fn update_spec_target_propagates_to_undelivered_async_runs() {
 /// new thread to undelivered runs while preserving the spec's chat.
 #[test]
 fn update_spec_partial_propagates_thread_only_change() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
 
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
@@ -1455,7 +1452,7 @@ fn update_spec_partial_propagates_thread_only_change() {
 /// untouched.
 #[test]
 fn update_spec_partial_non_target_change_leaves_runs_alone() {
-    let conn = setup_db();
+    let (_dir, conn) = setup_db();
 
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \

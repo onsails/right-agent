@@ -42,7 +42,7 @@ test-support = ["right-openshell/test-support"]
 
 [dev-dependencies]
 right-openshell = { path = "../right-openshell", version = "*", features = ["test-support"] }
-right-db = { path = "../right-db", version = "*" }
+right-db = { path = "../right-db", version = "*", features = ["test-support"] }
 rustls = { workspace = true }
 tokio = { version = "1.52", features = ["test-util"] }
 wiremock = "0.6"
