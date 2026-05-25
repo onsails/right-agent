@@ -21,7 +21,7 @@ pub mod usage;
 #[derive(Debug, Error)]
 pub enum ReadModelError {
     #[error(transparent)]
-    Sqlite(#[from] right_db::DbError),
+    Db(#[from] right_db::DbError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]

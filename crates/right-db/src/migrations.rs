@@ -11,14 +11,8 @@ const V8_SCHEMA: &str = include_str!("sql/v8_mcp_servers.sql");
 const V9_SCHEMA: &str = include_str!("sql/v9_mcp_instructions.sql");
 const V10_SCHEMA: &str = include_str!("sql/v10_mcp_auth.sql");
 const V11_SCHEMA: &str = include_str!("sql/v11_auth_tokens.sql");
-#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
-const V13_SCHEMA: &str = include_str!("sql/v13_one_shot_cron.sql");
 const V14_SCHEMA: &str = include_str!("sql/v14_memory_failure_handling.sql");
 const V15_SCHEMA: &str = include_str!("sql/v15_usage_events.sql");
-#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
-const V16_SCHEMA: &str = include_str!("sql/v16_usage_api_key_source.sql");
-#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
-const V17_SCHEMA: &str = include_str!("sql/v17_cron_target.sql");
 const V19_SCHEMA: &str = include_str!("sql/v19_cron_runs_target_index.sql");
 const V20_SCHEMA: &str = include_str!("sql/v20_learned_skills.sql");
 const V21_SCHEMA: &str = include_str!("sql/v21_conversation_messages.sql");
@@ -27,14 +21,7 @@ const V22_SCHEMA: &str = include_str!("sql/v22_skill_review_reports.sql");
 const V23_SCHEMA: &str = include_str!("sql/v23_async_runs.sql");
 const V24_SCHEMA: &str = include_str!("sql/v24_learning_episodes.sql");
 const V25_SCHEMA: &str = include_str!("sql/v25_async_runs_delivery_decision.sql");
-#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
-const V26_SCHEMA: &str = include_str!("sql/v26_skill_nudge_circuit_breaker.sql");
-#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
-const V27_SCHEMA: &str = include_str!("sql/v27_skill_nudge_signals_source.sql");
-#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
-const V28_SCHEMA: &str = include_str!("sql/v28_usage_wall_elapsed.sql");
 const V29_SCHEMA: &str = include_str!("sql/v29_curator_state.sql");
-#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
 const V30_SCHEMA: &str = include_str!("sql/v30_skill_learning_hint_outcome.sql");
 const V31_SCHEMA: &str = include_str!("sql/v31_skill_learning_events_dashboard_index.sql");
 const V32_SCHEMA: &str = include_str!("sql/v32_skill_lifecycle.sql");

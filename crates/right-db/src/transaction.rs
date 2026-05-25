@@ -55,7 +55,7 @@ impl<'conn> Transaction<'conn> {
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
         let mut rows = self.conn.block_on_libsql(inner.query(sql, params))?;
         let Some(row) = self.conn.block_on_libsql(rows.next())? else {
-            return Err(DbError::not_found());
+            return Err(DbError::NotFound);
         };
         map(&crate::row::Row::new(&row))
     }
@@ -87,6 +87,15 @@ impl<'conn> Transaction<'conn> {
         Ok(values)
     }
 
+    /// Capture `sql` for later execution via
+    /// [`TransactionStatement::query_map`] or
+    /// [`TransactionStatement::query_row`].
+    ///
+    /// Despite the name, this does NOT prepare or cache a libSQL statement.
+    /// Each subsequent `query_map`/`query_row` re-issues the query on the
+    /// underlying libSQL transaction with the same SQL, which re-parses on
+    /// every call. The owned-`String` storage is only there so callers can
+    /// hold the [`TransactionStatement`] across `query_map` iterations.
     pub fn prepare<'tx>(&'tx self, sql: &str) -> Result<TransactionStatement<'tx, 'conn>, DbError> {
         Ok(TransactionStatement {
             tx: self,
@@ -117,6 +126,9 @@ impl<'conn> Transaction<'conn> {
     }
 }
 
+/// Owns an SQL string for repeated execution via `query_map`/`query_row`.
+/// No libSQL-level prepared-statement caching is performed; each call
+/// re-issues the query on the underlying transaction.
 pub struct TransactionStatement<'tx, 'conn> {
     tx: &'tx Transaction<'conn>,
     sql: String,

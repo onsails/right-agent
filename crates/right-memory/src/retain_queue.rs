@@ -238,16 +238,15 @@ mod tests {
     use right_db::open_connection;
     use tempfile::tempdir;
 
-    fn fresh_db() -> Connection {
+    fn fresh_db() -> (tempfile::TempDir, Connection) {
         let dir = tempdir().unwrap();
-        // Keep the tempdir alive inside the test scope (leak is fine for test).
-        let path = dir.keep();
-        open_connection(&path, true).unwrap()
+        let conn = open_connection(dir.path(), true).unwrap();
+        (dir, conn)
     }
 
     #[test]
     fn enqueue_inserts_row() {
-        let conn = fresh_db();
+        let (_dir, conn) = fresh_db();
         enqueue(
             &conn,
             "bot",
@@ -263,7 +262,7 @@ mod tests {
 
     #[test]
     fn enqueue_cap_evicts_oldest() {
-        let conn = fresh_db();
+        let (_dir, conn) = fresh_db();
         for i in 0..(QUEUE_CAP + 5) {
             let c = format!("content-{i}");
             enqueue(&conn, "bot", &c, None, None, None, None).unwrap();
@@ -294,13 +293,13 @@ mod tests {
 
     #[test]
     fn oldest_age_returns_none_when_empty() {
-        let conn = fresh_db();
+        let (_dir, conn) = fresh_db();
         assert!(oldest_age(&conn).unwrap().is_none());
     }
 
     #[test]
     fn tags_serialize_as_json_array() {
-        let conn = fresh_db();
+        let (_dir, conn) = fresh_db();
         let tags = vec!["chat:42".to_string(), "user:7".to_string()];
         enqueue(&conn, "bot", "c", None, None, None, Some(&tags)).unwrap();
         let json: String = conn
@@ -335,7 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn drain_success_deletes_entry() {
-        let conn = fresh_db();
+        let (_dir, conn) = fresh_db();
         enqueue(&conn, "bot", "c1", None, None, None, None).unwrap();
         let fake = FakeOutcome::default();
         fake.push(None);
@@ -352,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn drain_client_error_deletes_and_continues() {
-        let conn = fresh_db();
+        let (_dir, conn) = fresh_db();
         enqueue(&conn, "bot", "poison", None, None, None, None).unwrap();
         enqueue(&conn, "bot", "good", None, None, None, None).unwrap();
         let fake = FakeOutcome::default();
@@ -372,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn drain_transient_updates_attempts_and_breaks() {
-        let conn = fresh_db();
+        let (_dir, conn) = fresh_db();
         enqueue(&conn, "bot", "first", None, None, None, None).unwrap();
         enqueue(&conn, "bot", "second", None, None, None, None).unwrap();
         let fake = FakeOutcome::default();
@@ -399,7 +398,7 @@ mod tests {
 
     #[tokio::test]
     async fn drain_age_cap_drops_stale_rows() {
-        let conn = fresh_db();
+        let (_dir, conn) = fresh_db();
         enqueue(&conn, "bot", "old", None, None, None, None).unwrap();
         // Overwrite created_at with a real RFC3339 timestamp 48h in the past so the
         // parser accepts it (SQLite's datetime() format is not RFC3339 and would
@@ -423,7 +422,7 @@ mod tests {
         // Verifies the drain loop does not hold a write lock across the closure await.
         // Without the fix, this test deadlocks (drain holds tx; enqueue waits on busy_timeout).
         let dir = tempdir().unwrap();
-        let path = dir.keep();
+        let path = dir.path().to_path_buf();
         let drain_conn = right_db::open_connection(&path, true).unwrap();
         let enq_conn = right_db::open_connection(&path, false).unwrap();
 

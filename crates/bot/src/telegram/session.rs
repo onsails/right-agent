@@ -40,13 +40,14 @@ pub fn get_active_session(
     chat_id: i64,
     thread_id: i64,
 ) -> Result<Option<SessionRow>, right_db::DbError> {
-    let rows = conn.query_all(
+    use right_db::OptionalExtension as _;
+    conn.query_row(
         "SELECT id, chat_id, thread_id, root_session_id, label, is_active, created_at, last_used_at \
-         FROM sessions WHERE chat_id = ?1 AND thread_id = ?2 AND is_active = 1",
+         FROM sessions WHERE chat_id = ?1 AND thread_id = ?2 AND is_active = 1 LIMIT 1",
         right_db::params![chat_id, thread_id],
         row_to_session,
-    )?;
-    Ok(rows.into_iter().next())
+    )
+    .optional()
 }
 
 /// Create a new active session. Returns the row id.
@@ -123,7 +124,7 @@ pub fn list_sessions(
     chat_id: i64,
     thread_id: i64,
 ) -> Result<Vec<SessionRow>, right_db::DbError> {
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare(
         "SELECT id, chat_id, thread_id, root_session_id, label, is_active, created_at, last_used_at \
          FROM sessions WHERE chat_id = ?1 AND thread_id = ?2 ORDER BY last_used_at DESC",
     )?;
@@ -141,7 +142,7 @@ pub fn find_sessions_by_uuid(
     partial: &str,
 ) -> Result<Vec<SessionRow>, right_db::DbError> {
     let pattern = format!("%{partial}%");
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare(
         "SELECT id, chat_id, thread_id, root_session_id, label, is_active, created_at, last_used_at \
          FROM sessions WHERE chat_id = ?1 AND thread_id = ?2 AND (root_session_id LIKE ?3 OR label LIKE ?3)",
     )?;

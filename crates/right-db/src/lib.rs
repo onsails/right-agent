@@ -21,6 +21,7 @@ pub use connection::Connection;
 pub use error::DbError;
 pub use migrations::MIGRATIONS;
 pub use params::params_from_iter;
+pub use row::Row;
 pub use transaction::Transaction;
 
 use std::path::Path;

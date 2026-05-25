@@ -4,7 +4,7 @@ use crate::api_types::{
     OverviewDoctorStatus, OverviewSandboxStatus, UsageSourcePoint,
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use right_db::{Connection, params};
+use right_db::{Connection, OptionalExtension, params};
 use std::collections::BTreeMap;
 
 use super::{
@@ -526,35 +526,33 @@ fn curator_projection(
     conn: &Connection,
     generated_at: &DateTime<Utc>,
 ) -> Result<CuratorProjection, ReadModelError> {
-    let row = conn.query_row(
-        "SELECT last_run_at, last_run_status, consecutive_failures,
+    let Some(state) = conn
+        .query_row(
+            "SELECT last_run_at, last_run_status, consecutive_failures,
                 circuit_open_until, last_spike_evidence_json
          FROM curator_state WHERE agent_singleton_id = 1",
-        [],
-        |row| {
-            Ok(CuratorStateRow {
-                last_run_at: row.get(0)?,
-                last_run_status: row.get(1)?,
-                consecutive_failures: row.get::<_, i64>(2)?,
-                circuit_open_until: row.get(3)?,
-                last_spike_evidence_json: row.get(4)?,
-            })
-        },
-    );
-    let state = match row {
-        Ok(state) => state,
-        Err(right_db::DbError::NotFound) => {
-            return Ok((
-                Vec::new(),
-                Vec::new(),
-                vec![DashboardDataWarning {
-                    source: "curator_state".to_owned(),
-                    kind: "unavailable".to_owned(),
-                    message: "curator state row is absent".to_owned(),
-                }],
-            ));
-        }
-        Err(error) => return Err(error.into()),
+            [],
+            |row| {
+                Ok(CuratorStateRow {
+                    last_run_at: row.get(0)?,
+                    last_run_status: row.get(1)?,
+                    consecutive_failures: row.get::<_, i64>(2)?,
+                    circuit_open_until: row.get(3)?,
+                    last_spike_evidence_json: row.get(4)?,
+                })
+            },
+        )
+        .optional()?
+    else {
+        return Ok((
+            Vec::new(),
+            Vec::new(),
+            vec![DashboardDataWarning {
+                source: "curator_state".to_owned(),
+                kind: "unavailable".to_owned(),
+                message: "curator state row is absent".to_owned(),
+            }],
+        ));
     };
 
     let mut signals = Vec::new();

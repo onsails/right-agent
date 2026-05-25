@@ -46,13 +46,61 @@ impl DbError {
     pub fn is_constraint_violation(&self) -> bool {
         match self {
             Self::Constraint(_) => true,
-            Self::Database(error) => error.to_string().to_lowercase().contains("constraint"),
+            Self::Database(error) => is_libsql_constraint(error),
             Self::Migration { source, .. } => source.is_constraint_violation(),
             _ => false,
         }
     }
+}
 
-    pub fn not_found() -> Self {
-        Self::NotFound
+/// SQLite primary result code for constraint violations
+/// (`SQLITE_CONSTRAINT = 19`). Extended codes encode subtype in the high
+/// byte (e.g. `SQLITE_CONSTRAINT_UNIQUE = 2067`); the primary code is
+/// always `code & 0xff`.
+const SQLITE_CONSTRAINT: i32 = 19;
+
+fn is_libsql_constraint(error: &libsql::Error) -> bool {
+    match error {
+        libsql::Error::SqliteFailure(code, _) => (*code as i32) & 0xff == SQLITE_CONSTRAINT,
+        libsql::Error::RemoteSqliteFailure(code, extended, _) => {
+            *code == SQLITE_CONSTRAINT || (*extended & 0xff) == SQLITE_CONSTRAINT
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Connection;
+    use crate::params;
+
+    #[test]
+    fn is_constraint_violation_detects_unique_violation() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE constraint_probe (
+                 id INTEGER PRIMARY KEY,
+                 name TEXT NOT NULL UNIQUE
+             )",
+        )
+        .expect("create table");
+
+        conn.execute(
+            "INSERT INTO constraint_probe (name) VALUES (?1)",
+            params!["duplicate-name"],
+        )
+        .expect("first insert succeeds");
+
+        let err = conn
+            .execute(
+                "INSERT INTO constraint_probe (name) VALUES (?1)",
+                params!["duplicate-name"],
+            )
+            .expect_err("duplicate insert must fail");
+
+        assert!(
+            err.is_constraint_violation(),
+            "expected constraint violation, got: {err:#}",
+        );
     }
 }
