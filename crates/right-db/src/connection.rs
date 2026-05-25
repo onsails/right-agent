@@ -2,16 +2,46 @@ use std::fmt;
 use std::future::Future;
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::DbError;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Number of worker threads in the process-wide shared runtime.
+///
+/// Local libSQL wraps blocking SQLite, so each DB op is effectively
+/// synchronous. We still want at least two workers so independent
+/// connections (different agents, dashboard, aggregator) do not serialize
+/// behind one another at the scheduler level.
+const SHARED_RUNTIME_WORKER_THREADS: usize = 2;
+
+/// Process-wide tokio runtime shared by every [`Connection`].
+///
+/// Local libSQL wraps blocking SQLite, so there is no genuine async work to
+/// overlap inside a single op. However, this runtime is shared across every
+/// agent DB, the dashboard, and the aggregator in the same process; a
+/// `current_thread` runtime would serialise all of them through one
+/// scheduler. Use a small multi-thread runtime so independent connections
+/// can make progress concurrently. The runtime is initialised lazily on the
+/// first connection and lives for the lifetime of the process; we
+/// deliberately never shut it down because that would race with concurrent
+/// `Connection` operations across the workspace.
+fn shared_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(SHARED_RUNTIME_WORKER_THREADS)
+            .enable_all()
+            .build()
+            .expect("right-db libsql runtime should initialize")
+    })
+}
+
 pub struct Connection {
     db_path: PathBuf,
     inner: libsql::Connection,
-    runtime: LibsqlRuntime,
 }
 
 impl fmt::Debug for Connection {
@@ -37,10 +67,10 @@ impl Connection {
     }
 
     fn build(db_path: PathBuf, flags: libsql::OpenFlags) -> Result<Self, DbError> {
-        let runtime = LibsqlRuntime::new();
+        let runtime = shared_runtime();
         let builder = libsql::Builder::new_local(&db_path).flags(flags);
         // SAFETY: right-db drives local libSQL through synchronous wrappers
-        // that own the runtime used for each operation, so libSQL's
+        // that share a single process-wide runtime, so libSQL's
         // process-wide serialized-mode assertion would be a false positive.
         // The project still uses local SQLite through libSQL handles with
         // SQLite mutex protection.
@@ -49,13 +79,9 @@ impl Connection {
             path: db_path.clone(),
             source,
         };
-        let database = runtime.block_on(builder.build()).map_err(open_err)?;
+        let database = block_on_runtime_safe(runtime, builder.build()).map_err(open_err)?;
         let inner = database.connect().map_err(open_err)?;
-        Ok(Self {
-            db_path,
-            inner,
-            runtime,
-        })
+        Ok(Self { db_path, inner })
     }
 
     pub fn path(&self) -> &Path {
@@ -194,7 +220,7 @@ impl Connection {
         &self,
         future: impl Future<Output = libsql::Result<T>> + Send,
     ) -> Result<T, DbError> {
-        self.runtime.block_on(future).map_err(Into::into)
+        block_on_runtime_safe(shared_runtime(), future).map_err(Into::into)
     }
 }
 
@@ -253,43 +279,6 @@ where
                 Err(payload) => panic::resume_unwind(payload),
             }
         }),
-    }
-}
-
-struct LibsqlRuntime {
-    runtime: Option<tokio::runtime::Runtime>,
-}
-
-impl LibsqlRuntime {
-    fn new() -> Self {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("right-db libsql runtime should initialize");
-
-        Self {
-            runtime: Some(runtime),
-        }
-    }
-
-    fn block_on<F, T>(&self, future: F) -> T
-    where
-        F: Future<Output = T> + Send,
-        T: Send,
-    {
-        let runtime = self
-            .runtime
-            .as_ref()
-            .expect("right-db libsql runtime should live until guard drop");
-        block_on_runtime_safe(runtime, future)
-    }
-}
-
-impl Drop for LibsqlRuntime {
-    fn drop(&mut self) {
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
-        }
     }
 }
 

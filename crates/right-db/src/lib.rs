@@ -45,6 +45,22 @@ impl<T> OptionalExtension<T> for Result<T, DbError> {
 /// Idempotent. WAL journal mode + 5s busy_timeout. The connection is
 /// returned for callers that need it; use [`open_db`] when you only
 /// want to ensure the file exists.
+///
+/// # Migration semantics
+///
+/// When `migrate = true`, all pending migrations run inside a single
+/// immediate transaction. This has two load-bearing consequences:
+///
+/// - **All-or-nothing rollback.** If migration N fails, every prior
+///   migration in the same batch is rolled back along with it. The
+///   on-disk `user_version` is unchanged on failure. This is intentional
+///   and codified by
+///   `migration_runner_semantics_rolls_back_all_pending_migrations_on_later_failure`.
+/// - **Cold-boot contention.** A concurrent caller that opens the same
+///   database while a batch is in flight blocks on the immediate
+///   transaction for the full batch duration, not just the next pending
+///   version. Under WAL + 5s `busy_timeout`, a slow first-boot batch can
+///   force the second opener to time out.
 pub fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
     let db_path = agent_path.join("data.db");
     let conn = Connection::open_local(db_path, true)?;

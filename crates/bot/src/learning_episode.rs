@@ -19,6 +19,7 @@ use right_agent::learning_episodes::{
     EpisodeSeedTriggerKind, ExecutionEventKind, LearningEpisodeKind, LearningEpisodeRow,
     LearningEpisodeStatus, NewLearningEpisodeSeed, SelectedEpisodeUpdate,
 };
+use right_db::OptionalExtension as _;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -1956,4 +1957,3 @@ mod deprecation_warn_tests {
 #[cfg(test)]
 #[path = "learning_episode_tests.rs"]
 mod tests;
-use right_db::OptionalExtension as _;

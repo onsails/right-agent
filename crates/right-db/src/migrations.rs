@@ -84,15 +84,19 @@ impl Migrations {
         conn: C,
         target_version: u32,
     ) -> Result<(), crate::DbError> {
-        let current = conn
+        // Fast-path hint: cheap pre-tx read avoids taking the immediate lock
+        // when there is genuinely nothing to do. The authoritative read happens
+        // inside the transaction below: two cold-boot callers can both read
+        // user_version = 0 here, and only one wins the BEGIN IMMEDIATE race.
+        let hint_current = conn
             .migration_user_version()
             .map_err(|source| migration_error(&conn, 0, source))?;
         let highest = self.highest_version();
 
-        if current > highest {
+        if hint_current > highest {
             return Err(migration_version_error(
                 &conn,
-                current,
+                hint_current,
                 format!("database schema is newer than known migrations ({highest})"),
             ));
         }
@@ -103,21 +107,36 @@ impl Migrations {
                 format!("unknown migration target above highest known version {highest}"),
             ));
         }
-        if target_version < current {
+        if target_version < hint_current {
             return Err(migration_version_error(
                 &conn,
                 target_version,
-                format!("down migrations are unsupported from current version {current}"),
+                format!("down migrations are unsupported from current version {hint_current}"),
             ));
         }
-        if target_version == current {
+        if target_version == hint_current {
             return Ok(());
         }
 
-        let mut active_version = current + 1;
+        let mut active_version = hint_current + 1;
         conn.with_migration_transaction(|tx| {
+            // Re-read user_version INSIDE the immediate transaction. Two
+            // concurrent migrators on the same DB file can both observe
+            // user_version = 0 outside the lock. Only one wins
+            // BEGIN IMMEDIATE. The loser, once unblocked, must NOT
+            // re-apply migrations the winner already committed (v23 is
+            // non-idempotent: re-running it crashes with "no such table:
+            // cron_runs").
+            let current_in_tx_i64 = tx.query_i64("PRAGMA user_version", MigrationParams::Empty)?;
+            let current_in_tx = u32::try_from(current_in_tx_i64)
+                .map_err(|_| crate::DbError::InvalidParameter("negative user_version".into()))?;
+            if current_in_tx >= target_version {
+                // The winning migrator already advanced to or past our target.
+                // Commit a no-op transaction and return.
+                return Ok(());
+            }
             for migration in self.migrations {
-                if migration.version <= current || migration.version > target_version {
+                if migration.version <= current_in_tx || migration.version > target_version {
                     continue;
                 }
                 active_version = migration.version;
@@ -830,6 +849,75 @@ mod tests {
             )
             .unwrap();
         assert_eq!(table_count, 0);
+    }
+
+    #[test]
+    fn cold_boot_concurrent_migrators_do_not_double_apply_v23() {
+        // Two cold-boot callers (bot + aggregator) racing to migrate the same
+        // per-agent data.db. Before the in-tx user_version recheck, the loser
+        // of the BEGIN IMMEDIATE race would re-run v23, whose hook does
+        // `INSERT INTO async_runs ... FROM cron_runs` then `DROP TABLE
+        // cron_runs`. On the second run cron_runs is already gone; the hook
+        // crashes with "no such table: cron_runs", the tx rolls back, and
+        // open_connection(_, true) returns Err. Process-compose then restarts
+        // both processes and the agent never starts.
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().to_path_buf();
+
+        // Both connections target the same data.db file. open_connection
+        // joins "data.db" onto the path internally.
+        let conn1 = crate::open_connection(&agent_dir, false).unwrap();
+        let conn2 = crate::open_connection(&agent_dir, false).unwrap();
+
+        // Hand each connection to its own thread and run to_latest
+        // concurrently. join() returns ownership so we can keep using the
+        // connections afterward for assertions.
+        let h1 = std::thread::spawn(move || {
+            let result = MIGRATIONS.to_latest(&conn1);
+            (result, conn1)
+        });
+        let h2 = std::thread::spawn(move || {
+            let result = MIGRATIONS.to_latest(&conn2);
+            (result, conn2)
+        });
+        let (r1, conn1) = h1.join().expect("migrator thread 1 panicked");
+        let (r2, conn2) = h2.join().expect("migrator thread 2 panicked");
+
+        r1.expect("first migrator must succeed");
+        r2.expect("second migrator must succeed (no double-apply of v23)");
+
+        // Both connections see the same final user_version, equal to LATEST.
+        let v1: i64 = conn1
+            .query_one("PRAGMA user_version", (), |row| row.get(0))
+            .unwrap();
+        let v2: i64 = conn2
+            .query_one("PRAGMA user_version", (), |row| row.get(0))
+            .unwrap();
+        assert_eq!(v1, v2, "both migrators must converge on the same version");
+        assert_eq!(
+            v1,
+            i64::from(LATEST_SCHEMA_VERSION),
+            "final user_version must equal LATEST_SCHEMA_VERSION",
+        );
+
+        // Schema sanity: async_runs (created by v23) exists; cron_runs
+        // (dropped by v23) does not.
+        let async_runs_exists: i64 = conn1
+            .query_one(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='async_runs'",
+                (),
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(async_runs_exists, 1, "async_runs must exist post-v23");
+        let cron_runs_exists: i64 = conn1
+            .query_one(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cron_runs'",
+                (),
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cron_runs_exists, 0, "cron_runs must be dropped post-v23");
     }
 
     #[test]

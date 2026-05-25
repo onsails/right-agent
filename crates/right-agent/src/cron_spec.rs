@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use right_db::params::ParamsBuilder;
-use right_db::{Connection, DbError, params};
+use right_db::{Connection, DbError, OptionalExtension, params};
 use right_platform_knobs::IDLE_THRESHOLD_MIN;
 
 /// Default budget cap per cron invocation (USD).
@@ -777,7 +777,7 @@ pub fn get_spec_detail(
     conn: &Connection,
     job_name: &str,
 ) -> Result<Option<CronSpecDetail>, String> {
-    let result = conn.query_row(
+    conn.query_row(
         "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, created_at, updated_at, recurring, run_at \
          FROM cron_specs WHERE job_name = ?1",
         params![job_name],
@@ -795,12 +795,9 @@ pub fn get_spec_detail(
                 run_at: row.get(9)?,
             })
         },
-    );
-    match result {
-        Ok(detail) => Ok(Some(detail)),
-        Err(DbError::NotFound) => Ok(None),
-        Err(e) => Err(format!("query failed: {e:#}")),
-    }
+    )
+    .optional()
+    .map_err(|e| format!("query failed: {e:#}"))
 }
 
 /// Summary of a single cron run for display.

@@ -4,6 +4,33 @@ use std::ops::Deref;
 use crate::DbError;
 use crate::connection::Connection;
 
+/// An open database transaction.
+///
+/// # `Deref<Target = Connection>` is intentional
+///
+/// `Transaction` deliberately implements `Deref<Target = Connection>` so that
+/// helpers written against `&Connection` (e.g. `ensure_nudge_state`) can also
+/// be called with `&Transaction` without a separate `_tx` overload. Callers
+/// inside a transaction can pass `&tx` to a `&Connection`-taking helper and
+/// the writes still participate in the open `BEGIN IMMEDIATE`.
+///
+/// This only preserves transactional semantics because the current local
+/// libSQL backend shares the underlying SQLite handle between `Connection`
+/// and `libsql::Transaction` (the transaction `Arc`-clones the parent
+/// connection's SQLite handle). The invariant is covered by
+/// `transaction_deref_helper_write_is_rolled_back` in `connection.rs`, which
+/// verifies that a `&Connection`-taking write reached through `Deref` is
+/// rolled back with the outer transaction.
+///
+/// # WARNING: backend swap
+///
+/// If `right-db` ever swaps to a backend where `libsql::Transaction.conn` is
+/// not the same wire-level handle as the parent `Connection` (e.g. sync
+/// libSQL, hrana, or remote libSQL), this `Deref` silently turns every
+/// `_tx`-less helper call into an autocommit write outside the transaction
+/// with no compile-time signal. Re-audit every `&Connection`-taking helper
+/// and the `transaction_deref_helper_write_is_rolled_back` test before
+/// changing backends.
 pub struct Transaction<'conn> {
     conn: &'conn Connection,
     inner: Option<libsql::Transaction>,
@@ -176,6 +203,9 @@ impl fmt::Debug for Transaction<'_> {
     }
 }
 
+/// Intentional `Deref` so `&Transaction` can be passed to helpers that take
+/// `&Connection`. See the [`Transaction`] struct-level docs for the
+/// transactional-semantics invariant and the backend-swap warning.
 impl<'conn> Deref for Transaction<'conn> {
     type Target = Connection;
 

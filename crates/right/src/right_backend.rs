@@ -212,16 +212,22 @@ impl RightBackend {
         &self,
         agent_name: &str,
     ) -> Result<Arc<Mutex<right_db::Connection>>, anyhow::Error> {
+        // Fast path: shared read.
         if let Some(entry) = self.conn_cache.get(agent_name) {
             return Ok(Arc::clone(entry.value()));
         }
-        let db_dir = self.agents_dir.join(agent_name);
-        let conn = right_db::open_connection(&db_dir, false)
-            .with_context(|| format!("failed to open memory DB for {agent_name}"))?;
-        let conn = Arc::new(Mutex::new(conn));
-        self.conn_cache
-            .insert(agent_name.to_owned(), Arc::clone(&conn));
-        Ok(conn)
+        // Slow path: acquire the shard write-lock atomically via Entry so
+        // concurrent callers cannot both open a Connection and orphan one.
+        let entry = self
+            .conn_cache
+            .entry(agent_name.to_owned())
+            .or_try_insert_with(|| -> Result<_, anyhow::Error> {
+                let db_dir = self.agents_dir.join(agent_name);
+                let conn = right_db::open_connection(&db_dir, false)
+                    .with_context(|| format!("failed to open memory DB for {agent_name}"))?;
+                Ok(Arc::new(Mutex::new(conn)))
+            })?;
+        Ok(Arc::clone(entry.value()))
     }
 
     fn lock_conn(

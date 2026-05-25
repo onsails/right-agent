@@ -2,7 +2,7 @@ use std::io::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
-use right_db::{Connection, DbError, params};
+use right_db::{Connection, DbError, OptionalExtension, params};
 use serde_json::json;
 use tempfile::NamedTempFile;
 use url::Url;
@@ -166,11 +166,6 @@ pub fn set_server_header(
 // SQLite-based server registry
 // ---------------------------------------------------------------------------
 
-/// Map a `right_db::DbError` into `CredentialError::Io`.
-fn map_db_err(e: DbError) -> CredentialError {
-    e.into()
-}
-
 /// Validate an MCP server name.
 ///
 /// Rejects empty names, reserved names (`right`, `rightmeta`), and names
@@ -288,8 +283,7 @@ pub fn db_add_server(conn: &Connection, name: &str, url: &str) -> Result<(), Cre
     conn.execute(
         "INSERT INTO mcp_servers (name, url) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET url = excluded.url",
         (name, url),
-    )
-    .map_err(map_db_err)?;
+    )?;
 
     Ok(())
 }
@@ -298,9 +292,7 @@ pub fn db_add_server(conn: &Connection, name: &str, url: &str) -> Result<(), Cre
 ///
 /// Returns `CredentialError::ServerNotFound` if no matching row exists.
 pub fn db_remove_server(conn: &Connection, name: &str) -> Result<(), CredentialError> {
-    let rows = conn
-        .execute("DELETE FROM mcp_servers WHERE name = ?1", [name])
-        .map_err(map_db_err)?;
+    let rows = conn.execute("DELETE FROM mcp_servers WHERE name = ?1", [name])?;
 
     if rows == 0 {
         return Err(CredentialError::ServerNotFound(name.to_string()));
@@ -316,12 +308,10 @@ pub fn db_update_instructions(
     name: &str,
     instructions: Option<&str>,
 ) -> Result<(), CredentialError> {
-    let changed = conn
-        .execute(
-            "UPDATE mcp_servers SET instructions = ?1 WHERE name = ?2",
-            (instructions, name),
-        )
-        .map_err(map_db_err)?;
+    let changed = conn.execute(
+        "UPDATE mcp_servers SET instructions = ?1 WHERE name = ?2",
+        (instructions, name),
+    )?;
     if changed == 0 {
         return Err(CredentialError::ServerNotFound(name.to_string()));
     }
@@ -354,8 +344,7 @@ fn query_server_entries(
     sql: &str,
     query_params: impl right_db::params::IntoParams,
 ) -> Result<Vec<McpServerEntry>, CredentialError> {
-    conn.query_all(sql, query_params, server_entry_from_row)
-        .map_err(map_db_err)
+    Ok(conn.query_all(sql, query_params, server_entry_from_row)?)
 }
 
 /// List all registered external MCP servers, sorted by name.
@@ -377,12 +366,10 @@ pub fn db_set_auth(
     auth_header: Option<&str>,
     auth_token: Option<&str>,
 ) -> Result<(), CredentialError> {
-    let changed = conn
-        .execute(
-            "UPDATE mcp_servers SET auth_type = ?1, auth_header = ?2, auth_token = ?3 WHERE name = ?4",
-            params![auth_type, auth_header, auth_token, name],
-        )
-        .map_err(map_db_err)?;
+    let changed = conn.execute(
+        "UPDATE mcp_servers SET auth_type = ?1, auth_header = ?2, auth_token = ?3 WHERE name = ?4",
+        params![auth_type, auth_header, auth_token, name],
+    )?;
     if changed == 0 {
         return Err(CredentialError::ServerNotFound(name.to_string()));
     }
@@ -406,23 +393,21 @@ pub fn db_set_oauth_state(
     expires_at: &str,
     oauth_resource: &str,
 ) -> Result<(), CredentialError> {
-    let changed = conn
-        .execute(
-            "UPDATE mcp_servers SET auth_type = 'oauth', auth_token = ?1, refresh_token = ?2, \
-             token_endpoint = ?3, client_id = ?4, client_secret = ?5, expires_at = ?6, \
-             oauth_resource = ?7 WHERE name = ?8",
-            params![
-                access_token,
-                refresh_token,
-                token_endpoint,
-                client_id,
-                client_secret,
-                expires_at,
-                oauth_resource,
-                name
-            ],
-        )
-        .map_err(map_db_err)?;
+    let changed = conn.execute(
+        "UPDATE mcp_servers SET auth_type = 'oauth', auth_token = ?1, refresh_token = ?2, \
+         token_endpoint = ?3, client_id = ?4, client_secret = ?5, expires_at = ?6, \
+         oauth_resource = ?7 WHERE name = ?8",
+        params![
+            access_token,
+            refresh_token,
+            token_endpoint,
+            client_id,
+            client_secret,
+            expires_at,
+            oauth_resource,
+            name
+        ],
+    )?;
     if changed == 0 {
         return Err(CredentialError::ServerNotFound(name.to_string()));
     }
@@ -450,8 +435,7 @@ pub fn db_update_oauth_token(
             "UPDATE mcp_servers SET auth_token = ?1, expires_at = ?2 WHERE name = ?3",
             (access_token, expires_at, name),
         )
-    }
-    .map_err(map_db_err)?;
+    }?;
     if changed == 0 {
         return Err(CredentialError::ServerNotFound(name.to_string()));
     }
@@ -477,26 +461,22 @@ pub fn save_auth_token(conn: &Connection, token: &str) -> Result<(), CredentialE
         tx.execute("DELETE FROM auth_tokens", ())?;
         tx.execute("INSERT INTO auth_tokens (token) VALUES (?1)", [token])?;
         Ok(())
-    })
-    .map_err(map_db_err)?;
+    })?;
     Ok(())
 }
 
 /// Get the stored auth token, if any.
 pub fn get_auth_token(conn: &Connection) -> Result<Option<String>, CredentialError> {
-    match conn.query_one("SELECT token FROM auth_tokens LIMIT 1", (), |row| {
-        row.get(0)
-    }) {
-        Ok(token) => Ok(Some(token)),
-        Err(DbError::NotFound) => Ok(None),
-        Err(err) => Err(map_db_err(err)),
-    }
+    Ok(conn
+        .query_one("SELECT token FROM auth_tokens LIMIT 1", (), |row| {
+            row.get(0)
+        })
+        .optional()?)
 }
 
 /// Delete the stored auth token.
 pub fn delete_auth_token(conn: &Connection) -> Result<(), CredentialError> {
-    conn.execute("DELETE FROM auth_tokens", ())
-        .map_err(map_db_err)?;
+    conn.execute("DELETE FROM auth_tokens", ())?;
     Ok(())
 }
 
