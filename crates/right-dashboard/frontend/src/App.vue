@@ -18,7 +18,13 @@ import {
   skillsOverview,
   usageOverview,
 } from './api'
-import { initializeTelegramWebApp } from './telegram'
+import {
+  applyTelegramDisplayMode,
+  initializeTelegramWebApp,
+  readDashboardDisplayMode,
+  subscribeTelegramFullscreenChanges,
+  type DashboardDisplayMode,
+} from './telegram'
 import AppShell from './components/AppShell.vue'
 import ActivityView from './views/ActivityView.vue'
 import HealthView from './views/HealthView.vue'
@@ -60,6 +66,7 @@ const selectedIdentityFile = ref<IdentityFileSummary | null>(null)
 
 const activeTab = ref<DashboardTab>('overview')
 const activeKnowledgeTab = ref<KnowledgeTab>('episodes')
+const displayMode = ref<DashboardDisplayMode>(readDashboardDisplayMode())
 const connectionState = ref<ConnectionState>('loading')
 const message = ref('Loading dashboard')
 const lastUpdatedAt = ref<string | null>(null)
@@ -81,6 +88,7 @@ const loadingDoctor = ref(false)
 const loadingSandbox = ref(false)
 
 let pollTimer: number | undefined
+let unsubscribeTelegramFullscreen: (() => void) | undefined
 
 const shellTitle = computed(() => bootstrapData.value?.agent ?? dashboardData.value?.agent ?? 'Dashboard')
 const refreshIntervalMs = computed(() => Math.max(bootstrapData.value?.refresh_interval_secs ?? 5, 1) * 1000)
@@ -97,7 +105,11 @@ const tabs = computed(() => {
 })
 
 onMounted(() => {
-  initializeTelegramWebApp()
+  const webApp = window.Telegram?.WebApp
+  displayMode.value = initializeTelegramWebApp(webApp, displayMode.value)
+  unsubscribeTelegramFullscreen = subscribeTelegramFullscreenChanges(webApp, (mode) => {
+    displayMode.value = mode
+  })
   void loadInitial()
 })
 
@@ -105,7 +117,13 @@ onBeforeUnmount(() => {
   if (pollTimer !== undefined) {
     window.clearInterval(pollTimer)
   }
+  unsubscribeTelegramFullscreen?.()
 })
+
+function toggleDisplayMode(): void {
+  const nextMode: DashboardDisplayMode = displayMode.value === 'fullscreen' ? 'normal' : 'fullscreen'
+  displayMode.value = applyTelegramDisplayMode(nextMode)
+}
 
 async function loadInitial(): Promise<void> {
   try {
@@ -418,7 +436,9 @@ async function selectIdentityFile(name: string): Promise<void> {
     :last-updated-at="lastUpdatedAt"
     :tabs="tabs"
     :active-tab="activeTab"
+    :display-mode="displayMode"
     @select="setActiveTab"
+    @toggle-display-mode="toggleDisplayMode"
   >
     <OverviewView v-if="activeTab === 'overview'" :overview="dashboardData" :activity="activityData" />
     <ActivityView
@@ -618,6 +638,7 @@ dt,
   margin-bottom: 10px;
 }
 
+.display-mode-button,
 .tab-button,
 .segment-button,
 .tool-button {
@@ -635,6 +656,21 @@ dt,
   border-color: var(--tg-theme-button_color, #2481cc);
   color: var(--tg-theme-button_color, #2481cc);
   font-weight: 700;
+}
+
+.topbar-actions {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.display-mode-button {
+  font-size: 0.78rem;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .metric-grid {
