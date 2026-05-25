@@ -157,14 +157,14 @@ async fn send_reply(
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_no_arg_is_status() {
+    #[tokio::test]
+    async fn parse_no_arg_is_status() {
         assert_eq!(parse_debug_action("").unwrap(), DebugAction::Status);
         assert_eq!(parse_debug_action("   ").unwrap(), DebugAction::Status);
     }
 
-    #[test]
-    fn parse_on_synonyms() {
+    #[tokio::test]
+    async fn parse_on_synonyms() {
         assert_eq!(parse_debug_action("on").unwrap(), DebugAction::On);
         assert_eq!(parse_debug_action("ON").unwrap(), DebugAction::On);
         assert_eq!(parse_debug_action(" on ").unwrap(), DebugAction::On);
@@ -172,52 +172,52 @@ mod tests {
         assert_eq!(parse_debug_action("1").unwrap(), DebugAction::On);
     }
 
-    #[test]
-    fn parse_off_synonyms() {
+    #[tokio::test]
+    async fn parse_off_synonyms() {
         assert_eq!(parse_debug_action("off").unwrap(), DebugAction::Off);
         assert_eq!(parse_debug_action("OFF").unwrap(), DebugAction::Off);
         assert_eq!(parse_debug_action("false").unwrap(), DebugAction::Off);
         assert_eq!(parse_debug_action("0").unwrap(), DebugAction::Off);
     }
 
-    #[test]
-    fn parse_unknown_is_error() {
+    #[tokio::test]
+    async fn parse_unknown_is_error() {
         let err = parse_debug_action("toggle").unwrap_err();
         assert!(err.contains("Unknown argument"));
         assert!(err.contains("toggle"));
     }
 
-    #[test]
-    fn status_off_explains_what_on_would_do() {
+    #[tokio::test]
+    async fn status_off_explains_what_on_would_do() {
         let s = render_status(false, None);
         assert!(s.contains("OFF"));
         assert!(s.contains("/debug on"));
         assert!(s.contains("/sandbox/.claude/logs/"));
     }
 
-    #[test]
-    fn status_on_with_log_size_reports_bytes() {
+    #[tokio::test]
+    async fn status_on_with_log_size_reports_bytes() {
         let s = render_status(true, Some(2048));
         assert!(s.contains("ON"));
         assert!(s.contains("2048 bytes"));
     }
 
-    #[test]
-    fn status_on_without_log_says_so() {
+    #[tokio::test]
+    async fn status_on_without_log_says_so() {
         let s = render_status(true, None);
         assert!(s.contains("ON"));
         assert!(s.contains("No log written"));
     }
 
-    #[test]
-    fn toggle_on_message_mentions_future_turns() {
+    #[tokio::test]
+    async fn toggle_on_message_mentions_future_turns() {
         let s = render_toggle(true);
         assert!(s.contains("ON"));
         assert!(s.contains("Future turns"));
     }
 
-    #[test]
-    fn toggle_off_message_mentions_existing_logs() {
+    #[tokio::test]
+    async fn toggle_off_message_mentions_existing_logs() {
         let s = render_toggle(false);
         assert!(s.contains("OFF"));
         assert!(s.contains("Existing logs remain"));

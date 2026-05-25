@@ -276,14 +276,19 @@ pub struct McpServerEntry {
 }
 
 /// Register (or update) an external MCP server in the SQLite registry.
-pub fn db_add_server(conn: &Connection, name: &str, url: &str) -> Result<(), CredentialError> {
+pub async fn db_add_server(
+    conn: &Connection,
+    name: &str,
+    url: &str,
+) -> Result<(), CredentialError> {
     validate_server_name(name)?;
     validate_server_url(url)?;
 
     conn.execute(
         "INSERT INTO mcp_servers (name, url) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET url = excluded.url",
         (name, url),
-    )?;
+    )
+    .await?;
 
     Ok(())
 }
@@ -291,8 +296,10 @@ pub fn db_add_server(conn: &Connection, name: &str, url: &str) -> Result<(), Cre
 /// Remove an external MCP server from the SQLite registry.
 ///
 /// Returns `CredentialError::ServerNotFound` if no matching row exists.
-pub fn db_remove_server(conn: &Connection, name: &str) -> Result<(), CredentialError> {
-    let rows = conn.execute("DELETE FROM mcp_servers WHERE name = ?1", [name])?;
+pub async fn db_remove_server(conn: &Connection, name: &str) -> Result<(), CredentialError> {
+    let rows = conn
+        .execute("DELETE FROM mcp_servers WHERE name = ?1", [name])
+        .await?;
 
     if rows == 0 {
         return Err(CredentialError::ServerNotFound(name.to_string()));
@@ -303,15 +310,17 @@ pub fn db_remove_server(conn: &Connection, name: &str) -> Result<(), CredentialE
 /// Update the instructions for an external MCP server in the SQLite registry.
 ///
 /// Returns `CredentialError::ServerNotFound` if no matching row exists.
-pub fn db_update_instructions(
+pub async fn db_update_instructions(
     conn: &Connection,
     name: &str,
     instructions: Option<&str>,
 ) -> Result<(), CredentialError> {
-    let changed = conn.execute(
-        "UPDATE mcp_servers SET instructions = ?1 WHERE name = ?2",
-        (instructions, name),
-    )?;
+    let changed = conn
+        .execute(
+            "UPDATE mcp_servers SET instructions = ?1 WHERE name = ?2",
+            (instructions, name),
+        )
+        .await?;
     if changed == 0 {
         return Err(CredentialError::ServerNotFound(name.to_string()));
     }
@@ -339,27 +348,30 @@ fn server_entry_from_row(row: &right_db::row::Row<'_>) -> Result<McpServerEntry,
     })
 }
 
-fn query_server_entries(
+async fn query_server_entries(
     conn: &Connection,
     sql: &str,
     query_params: impl right_db::params::IntoParams,
 ) -> Result<Vec<McpServerEntry>, CredentialError> {
-    Ok(conn.query_all(sql, query_params, server_entry_from_row)?)
+    Ok(conn
+        .query_all(sql, query_params, server_entry_from_row)
+        .await?)
 }
 
 /// List all registered external MCP servers, sorted by name.
-pub fn db_list_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, CredentialError> {
+pub async fn db_list_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, CredentialError> {
     query_server_entries(
         conn,
         &format!("SELECT {SERVER_COLUMNS} FROM mcp_servers ORDER BY name"),
         (),
     )
+    .await
 }
 
 /// Update auth fields for an MCP server.
 ///
 /// Returns `CredentialError::ServerNotFound` if no matching row exists.
-pub fn db_set_auth(
+pub async fn db_set_auth(
     conn: &Connection,
     name: &str,
     auth_type: &str,
@@ -369,7 +381,8 @@ pub fn db_set_auth(
     let changed = conn.execute(
         "UPDATE mcp_servers SET auth_type = ?1, auth_header = ?2, auth_token = ?3 WHERE name = ?4",
         params![auth_type, auth_header, auth_token, name],
-    )?;
+    )
+    .await?;
     if changed == 0 {
         return Err(CredentialError::ServerNotFound(name.to_string()));
     }
@@ -382,7 +395,7 @@ pub fn db_set_auth(
 /// no matching row exists.
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
-pub fn db_set_oauth_state(
+pub async fn db_set_oauth_state(
     conn: &Connection,
     name: &str,
     access_token: &str,
@@ -393,21 +406,23 @@ pub fn db_set_oauth_state(
     expires_at: &str,
     oauth_resource: &str,
 ) -> Result<(), CredentialError> {
-    let changed = conn.execute(
-        "UPDATE mcp_servers SET auth_type = 'oauth', auth_token = ?1, refresh_token = ?2, \
+    let changed = conn
+        .execute(
+            "UPDATE mcp_servers SET auth_type = 'oauth', auth_token = ?1, refresh_token = ?2, \
          token_endpoint = ?3, client_id = ?4, client_secret = ?5, expires_at = ?6, \
          oauth_resource = ?7 WHERE name = ?8",
-        params![
-            access_token,
-            refresh_token,
-            token_endpoint,
-            client_id,
-            client_secret,
-            expires_at,
-            oauth_resource,
-            name
-        ],
-    )?;
+            params![
+                access_token,
+                refresh_token,
+                token_endpoint,
+                client_id,
+                client_secret,
+                expires_at,
+                oauth_resource,
+                name
+            ],
+        )
+        .await?;
     if changed == 0 {
         return Err(CredentialError::ServerNotFound(name.to_string()));
     }
@@ -418,7 +433,7 @@ pub fn db_set_oauth_state(
 /// the refresh scheduler).
 ///
 /// Returns `CredentialError::ServerNotFound` if no matching row exists.
-pub fn db_update_oauth_token(
+pub async fn db_update_oauth_token(
     conn: &Connection,
     name: &str,
     access_token: &str,
@@ -430,12 +445,14 @@ pub fn db_update_oauth_token(
             "UPDATE mcp_servers SET auth_token = ?1, refresh_token = ?2, expires_at = ?3 WHERE name = ?4",
             (access_token, rt, expires_at, name),
         )
+        .await?
     } else {
         conn.execute(
             "UPDATE mcp_servers SET auth_token = ?1, expires_at = ?2 WHERE name = ?3",
             (access_token, expires_at, name),
         )
-    }?;
+        .await?
+    };
     if changed == 0 {
         return Err(CredentialError::ServerNotFound(name.to_string()));
     }
@@ -443,7 +460,9 @@ pub fn db_update_oauth_token(
 }
 
 /// List OAuth servers that have a refresh token (candidates for token refresh).
-pub fn db_list_oauth_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, CredentialError> {
+pub async fn db_list_oauth_servers(
+    conn: &Connection,
+) -> Result<Vec<McpServerEntry>, CredentialError> {
     query_server_entries(
         conn,
         &format!(
@@ -453,30 +472,32 @@ pub fn db_list_oauth_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, C
         ),
         (),
     )
+    .await
 }
 
 /// Save an auth token, replacing any existing one.
-pub fn save_auth_token(conn: &Connection, token: &str) -> Result<(), CredentialError> {
-    conn.with_immediate_transaction(|tx| {
-        tx.execute("DELETE FROM auth_tokens", ())?;
-        tx.execute("INSERT INTO auth_tokens (token) VALUES (?1)", [token])?;
-        Ok(())
-    })?;
+pub async fn save_auth_token(conn: &Connection, token: &str) -> Result<(), CredentialError> {
+    let tx = conn.transaction().await?;
+    tx.execute("DELETE FROM auth_tokens", ()).await?;
+    tx.execute("INSERT INTO auth_tokens (token) VALUES (?1)", [token])
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 
 /// Get the stored auth token, if any.
-pub fn get_auth_token(conn: &Connection) -> Result<Option<String>, CredentialError> {
+pub async fn get_auth_token(conn: &Connection) -> Result<Option<String>, CredentialError> {
     Ok(conn
         .query_one("SELECT token FROM auth_tokens LIMIT 1", (), |row| {
             row.get(0)
         })
+        .await
         .optional()?)
 }
 
 /// Delete the stored auth token.
-pub fn delete_auth_token(conn: &Connection) -> Result<(), CredentialError> {
-    conn.execute("DELETE FROM auth_tokens", ())?;
+pub async fn delete_auth_token(conn: &Connection) -> Result<(), CredentialError> {
+    conn.execute("DELETE FROM auth_tokens", ()).await?;
     Ok(())
 }
 
@@ -522,17 +543,21 @@ mod auth_token_tests;
 mod db_tests {
     use super::*;
 
-    fn setup_db() -> (tempfile::TempDir, Connection) {
-        right_db::test_support::migrated_connection()
+    async fn setup_db() -> (tempfile::TempDir, Connection) {
+        right_db::test_support::migrated_connection().await
     }
 
-    #[test]
-    fn add_and_list_servers() {
-        let (_dir, conn) = setup_db();
-        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
-        db_add_server(&conn, "linear", "https://mcp.linear.app/mcp").unwrap();
+    #[tokio::test]
+    async fn add_and_list_servers() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+            .await
+            .unwrap();
+        db_add_server(&conn, "linear", "https://mcp.linear.app/mcp")
+            .await
+            .unwrap();
 
-        let servers = db_list_servers(&conn).unwrap();
+        let servers = db_list_servers(&conn).await.unwrap();
         assert_eq!(servers.len(), 2);
         assert_eq!(servers[0].name, "linear");
         assert_eq!(servers[0].url, "https://mcp.linear.app/mcp");
@@ -540,43 +565,49 @@ mod db_tests {
         assert_eq!(servers[1].url, "https://mcp.notion.com/mcp");
     }
 
-    #[test]
-    fn remove_server() {
-        let (_dir, conn) = setup_db();
-        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
-        db_remove_server(&conn, "notion").unwrap();
+    #[tokio::test]
+    async fn remove_server() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+            .await
+            .unwrap();
+        db_remove_server(&conn, "notion").await.unwrap();
 
-        let servers = db_list_servers(&conn).unwrap();
+        let servers = db_list_servers(&conn).await.unwrap();
         assert!(servers.is_empty());
     }
 
-    #[test]
-    fn remove_nonexistent_server() {
-        let (_dir, conn) = setup_db();
-        let err = db_remove_server(&conn, "ghost").unwrap_err();
+    #[tokio::test]
+    async fn remove_nonexistent_server() {
+        let (_dir, conn) = setup_db().await;
+        let err = db_remove_server(&conn, "ghost").await.unwrap_err();
         assert!(matches!(err, CredentialError::ServerNotFound(_)));
     }
 
-    #[test]
-    fn upsert_server() {
-        let (_dir, conn) = setup_db();
-        db_add_server(&conn, "notion", "https://old.notion.com/mcp").unwrap();
-        db_add_server(&conn, "notion", "https://new.notion.com/mcp").unwrap();
+    #[tokio::test]
+    async fn upsert_server() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://old.notion.com/mcp")
+            .await
+            .unwrap();
+        db_add_server(&conn, "notion", "https://new.notion.com/mcp")
+            .await
+            .unwrap();
 
-        let servers = db_list_servers(&conn).unwrap();
+        let servers = db_list_servers(&conn).await.unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].url, "https://new.notion.com/mcp");
     }
 
-    #[test]
-    fn validate_server_name_valid() {
+    #[tokio::test]
+    async fn validate_server_name_valid() {
         validate_server_name("notion").unwrap();
         validate_server_name("my-server").unwrap();
         validate_server_name("server_one").unwrap();
     }
 
-    #[test]
-    fn validate_server_name_reserved() {
+    #[tokio::test]
+    async fn validate_server_name_reserved() {
         assert!(matches!(
             validate_server_name("right"),
             Err(CredentialError::InvalidServerName(_))
@@ -587,42 +618,42 @@ mod db_tests {
         ));
     }
 
-    #[test]
-    fn validate_server_name_double_underscore() {
+    #[tokio::test]
+    async fn validate_server_name_double_underscore() {
         assert!(matches!(
             validate_server_name("my__server"),
             Err(CredentialError::InvalidServerName(_))
         ));
     }
 
-    #[test]
-    fn validate_server_name_empty() {
+    #[tokio::test]
+    async fn validate_server_name_empty() {
         assert!(matches!(
             validate_server_name(""),
             Err(CredentialError::InvalidServerName(_))
         ));
     }
 
-    #[test]
-    fn validate_server_url_https_ok() {
+    #[tokio::test]
+    async fn validate_server_url_https_ok() {
         validate_server_url("https://mcp.notion.com/mcp").unwrap();
     }
 
-    #[test]
-    fn validate_server_url_plain_http_ok() {
+    #[tokio::test]
+    async fn validate_server_url_plain_http_ok() {
         validate_server_url("http://mcp.notion.com/mcp").unwrap();
     }
 
-    #[test]
-    fn validate_server_url_rejects_non_http_schemes() {
+    #[tokio::test]
+    async fn validate_server_url_rejects_non_http_schemes() {
         assert!(matches!(
             validate_server_url("ftp://mcp.notion.com/mcp"),
             Err(CredentialError::InvalidServerUrl(_))
         ));
     }
 
-    #[test]
-    fn validate_server_url_rejects_private_networks_but_allows_loopback() {
+    #[tokio::test]
+    async fn validate_server_url_rejects_private_networks_but_allows_loopback() {
         assert!(validate_server_url("https://192.168.1.1/mcp").is_err());
         assert!(validate_server_url("https://10.0.0.1/mcp").is_err());
         assert!(validate_server_url("https://172.16.0.1/mcp").is_err());
@@ -634,38 +665,48 @@ mod db_tests {
         validate_server_url("https://localhost/mcp").unwrap();
     }
 
-    #[test]
-    fn validate_server_url_rejects_ipv4_mapped_private_ipv6() {
+    #[tokio::test]
+    async fn validate_server_url_rejects_ipv4_mapped_private_ipv6() {
         assert!(validate_server_url("https://[::ffff:192.168.1.1]/mcp").is_err());
         assert!(validate_server_url("https://[::ffff:10.0.0.1]/mcp").is_err());
         assert!(validate_server_url("https://[::ffff:172.16.0.1]/mcp").is_err());
         assert!(validate_server_url("https://[::ffff:169.254.1.1]/mcp").is_err());
     }
 
-    #[test]
-    fn update_and_list_instructions() {
-        let (_dir, conn) = setup_db();
-        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
-        let servers = db_list_servers(&conn).unwrap();
+    #[tokio::test]
+    async fn update_and_list_instructions() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+            .await
+            .unwrap();
+        let servers = db_list_servers(&conn).await.unwrap();
         assert!(servers[0].instructions.is_none());
 
-        db_update_instructions(&conn, "notion", Some("Use Notion tools")).unwrap();
-        let servers = db_list_servers(&conn).unwrap();
+        db_update_instructions(&conn, "notion", Some("Use Notion tools"))
+            .await
+            .unwrap();
+        let servers = db_list_servers(&conn).await.unwrap();
         assert_eq!(servers[0].instructions.as_deref(), Some("Use Notion tools"));
 
-        db_update_instructions(&conn, "notion", None).unwrap();
-        let servers = db_list_servers(&conn).unwrap();
+        db_update_instructions(&conn, "notion", None).await.unwrap();
+        let servers = db_list_servers(&conn).await.unwrap();
         assert!(servers[0].instructions.is_none());
     }
 
-    #[test]
-    fn upsert_preserves_instructions() {
-        let (_dir, conn) = setup_db();
-        db_add_server(&conn, "notion", "https://old.notion.com/mcp").unwrap();
-        db_update_instructions(&conn, "notion", Some("Notion instructions")).unwrap();
+    #[tokio::test]
+    async fn upsert_preserves_instructions() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://old.notion.com/mcp")
+            .await
+            .unwrap();
+        db_update_instructions(&conn, "notion", Some("Notion instructions"))
+            .await
+            .unwrap();
 
-        db_add_server(&conn, "notion", "https://new.notion.com/mcp").unwrap();
-        let servers = db_list_servers(&conn).unwrap();
+        db_add_server(&conn, "notion", "https://new.notion.com/mcp")
+            .await
+            .unwrap();
+        let servers = db_list_servers(&conn).await.unwrap();
         assert_eq!(servers[0].url, "https://new.notion.com/mcp");
         assert_eq!(
             servers[0].instructions.as_deref(),
@@ -673,35 +714,45 @@ mod db_tests {
         );
     }
 
-    #[test]
-    fn update_instructions_nonexistent_server() {
-        let (_dir, conn) = setup_db();
-        let err = db_update_instructions(&conn, "ghost", Some("instructions")).unwrap_err();
+    #[tokio::test]
+    async fn update_instructions_nonexistent_server() {
+        let (_dir, conn) = setup_db().await;
+        let err = db_update_instructions(&conn, "ghost", Some("instructions"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, CredentialError::ServerNotFound(_)));
     }
 
-    #[test]
-    fn db_add_server_with_auth() {
-        let (_dir, conn) = setup_db();
-        db_add_server(&conn, "test", "https://example.com/mcp").unwrap();
-        db_set_auth(&conn, "test", "bearer", None, Some("sk-123")).unwrap();
-        let servers = db_list_servers(&conn).unwrap();
+    #[tokio::test]
+    async fn db_add_server_with_auth() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "test", "https://example.com/mcp")
+            .await
+            .unwrap();
+        db_set_auth(&conn, "test", "bearer", None, Some("sk-123"))
+            .await
+            .unwrap();
+        let servers = db_list_servers(&conn).await.unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].auth_type.as_deref(), Some("bearer"));
         assert_eq!(servers[0].auth_token.as_deref(), Some("sk-123"));
     }
 
-    #[test]
-    fn db_set_auth_nonexistent_server() {
-        let (_dir, conn) = setup_db();
-        let err = db_set_auth(&conn, "ghost", "bearer", None, Some("tok")).unwrap_err();
+    #[tokio::test]
+    async fn db_set_auth_nonexistent_server() {
+        let (_dir, conn) = setup_db().await;
+        let err = db_set_auth(&conn, "ghost", "bearer", None, Some("tok"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, CredentialError::ServerNotFound(_)));
     }
 
-    #[test]
-    fn db_set_oauth_state_test() {
-        let (_dir, conn) = setup_db();
-        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
+    #[tokio::test]
+    async fn db_set_oauth_state_test() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+            .await
+            .unwrap();
         db_set_oauth_state(
             &conn,
             "notion",
@@ -713,8 +764,9 @@ mod db_tests {
             "2026-04-13T12:00:00Z",
             "https://mcp.notion.com/mcp",
         )
+        .await
         .unwrap();
-        let servers = db_list_servers(&conn).unwrap();
+        let servers = db_list_servers(&conn).await.unwrap();
         let s = &servers[0];
         assert_eq!(s.auth_type.as_deref(), Some("oauth"));
         assert_eq!(s.auth_token.as_deref(), Some("access-tok"));
@@ -725,10 +777,12 @@ mod db_tests {
         );
     }
 
-    #[test]
-    fn db_update_oauth_token_test() {
-        let (_dir, conn) = setup_db();
-        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
+    #[tokio::test]
+    async fn db_update_oauth_token_test() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+            .await
+            .unwrap();
         db_set_oauth_state(
             &conn,
             "notion",
@@ -740,6 +794,7 @@ mod db_tests {
             "2026-04-13T12:00:00Z",
             "https://mcp.notion.com/mcp",
         )
+        .await
         .unwrap();
         db_update_oauth_token(
             &conn,
@@ -748,8 +803,9 @@ mod db_tests {
             Some("rt2"),
             "2026-04-13T13:00:00Z",
         )
+        .await
         .unwrap();
-        let servers = db_list_servers(&conn).unwrap();
+        let servers = db_list_servers(&conn).await.unwrap();
         assert_eq!(servers[0].auth_token.as_deref(), Some("new-tok"));
         assert_eq!(servers[0].refresh_token.as_deref(), Some("rt2"));
         assert_eq!(
@@ -758,10 +814,12 @@ mod db_tests {
         );
     }
 
-    #[test]
-    fn db_update_oauth_token_keeps_old_refresh_when_none() {
-        let (_dir, conn) = setup_db();
-        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
+    #[tokio::test]
+    async fn db_update_oauth_token_keeps_old_refresh_when_none() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+            .await
+            .unwrap();
         db_set_oauth_state(
             &conn,
             "notion",
@@ -773,17 +831,22 @@ mod db_tests {
             "2026-04-13T12:00:00Z",
             "https://mcp.notion.com/mcp",
         )
+        .await
         .unwrap();
         // Pass None — should keep "rt-original"
-        db_update_oauth_token(&conn, "notion", "new-tok", None, "2026-04-13T13:00:00Z").unwrap();
-        let servers = db_list_servers(&conn).unwrap();
+        db_update_oauth_token(&conn, "notion", "new-tok", None, "2026-04-13T13:00:00Z")
+            .await
+            .unwrap();
+        let servers = db_list_servers(&conn).await.unwrap();
         assert_eq!(servers[0].refresh_token.as_deref(), Some("rt-original"));
     }
 
-    #[test]
-    fn db_list_oauth_servers_test() {
-        let (_dir, conn) = setup_db();
-        db_add_server(&conn, "oauth-srv", "https://a.com/mcp").unwrap();
+    #[tokio::test]
+    async fn db_list_oauth_servers_test() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "oauth-srv", "https://a.com/mcp")
+            .await
+            .unwrap();
         db_set_oauth_state(
             &conn,
             "oauth-srv",
@@ -795,10 +858,15 @@ mod db_tests {
             "2026-04-13T12:00:00Z",
             "https://a.com/mcp",
         )
+        .await
         .unwrap();
-        db_add_server(&conn, "bearer-srv", "https://b.com/mcp").unwrap();
-        db_set_auth(&conn, "bearer-srv", "bearer", None, Some("key")).unwrap();
-        let oauth = db_list_oauth_servers(&conn).unwrap();
+        db_add_server(&conn, "bearer-srv", "https://b.com/mcp")
+            .await
+            .unwrap();
+        db_set_auth(&conn, "bearer-srv", "bearer", None, Some("key"))
+            .await
+            .unwrap();
+        let oauth = db_list_oauth_servers(&conn).await.unwrap();
         assert_eq!(oauth.len(), 1);
         assert_eq!(oauth[0].name, "oauth-srv");
         assert_eq!(
@@ -807,8 +875,8 @@ mod db_tests {
         );
     }
 
-    #[test]
-    fn redact_url_strips_query() {
+    #[tokio::test]
+    async fn redact_url_strips_query() {
         assert_eq!(
             redact_url("https://example.com/mcp?key=secret&foo=bar"),
             "https://example.com/mcp?<redacted>"
@@ -819,8 +887,8 @@ mod db_tests {
         );
     }
 
-    #[test]
-    fn is_public_url_accepts_network_routable_http_and_https_urls() {
+    #[tokio::test]
+    async fn is_public_url_accepts_network_routable_http_and_https_urls() {
         assert!(is_public_url("https://mcp.notion.com/mcp"));
         assert!(is_public_url("http://mcp.notion.com/mcp"));
         assert!(!is_public_url("http://localhost:3333/mcp"));
@@ -828,16 +896,16 @@ mod db_tests {
         assert!(!is_public_url("https://192.168.1.1/mcp"));
     }
 
-    #[test]
-    fn is_public_url_rejects_ipv4_mapped_private_ipv6() {
+    #[tokio::test]
+    async fn is_public_url_rejects_ipv4_mapped_private_ipv6() {
         assert!(!is_public_url("https://[::ffff:192.168.1.1]/mcp"));
         assert!(!is_public_url("https://[::ffff:10.0.0.1]/mcp"));
         assert!(!is_public_url("https://[::ffff:169.254.1.1]/mcp"));
         assert!(!is_public_url("https://[::ffff:127.0.0.1]/mcp"));
     }
 
-    #[test]
-    fn is_loopback_url_detects_localhost_and_loopback_ips() {
+    #[tokio::test]
+    async fn is_loopback_url_detects_localhost_and_loopback_ips() {
         assert!(is_loopback_url("http://localhost:3333/mcp"));
         assert!(is_loopback_url("https://127.0.0.1/mcp"));
         assert!(is_loopback_url("http://[::1]:3333/mcp"));
@@ -845,8 +913,8 @@ mod db_tests {
         assert!(!is_loopback_url("https://192.168.1.1/mcp"));
     }
 
-    #[test]
-    fn localhost_with_trailing_dot_is_loopback_not_public() {
+    #[tokio::test]
+    async fn localhost_with_trailing_dot_is_loopback_not_public() {
         validate_server_url("http://localhost.:3333/mcp").unwrap();
 
         assert!(is_loopback_url("http://localhost.:3333/mcp"));
@@ -859,8 +927,8 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn add_creates_mcp_json_when_absent() {
+    #[tokio::test]
+    async fn add_creates_mcp_json_when_absent() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp.json");
         add_http_server(&path, "notion", "https://mcp.notion.com/mcp").unwrap();
@@ -873,8 +941,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn add_merges_into_existing() {
+    #[tokio::test]
+    async fn add_merges_into_existing() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp.json");
         std::fs::write(
@@ -898,8 +966,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remove_deletes_named_server() {
+    #[tokio::test]
+    async fn remove_deletes_named_server() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp.json");
         add_http_server(&path, "notion", "https://mcp.notion.com/mcp").unwrap();
@@ -914,8 +982,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remove_returns_not_found() {
+    #[tokio::test]
+    async fn remove_returns_not_found() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp.json");
         add_http_server(&path, "notion", "https://mcp.notion.com/mcp").unwrap();
@@ -923,8 +991,8 @@ mod tests {
         assert!(matches!(err, CredentialError::ServerNotFound(_)));
     }
 
-    #[test]
-    fn list_returns_sorted() {
+    #[tokio::test]
+    async fn list_returns_sorted() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp.json");
         add_http_server(&path, "zebra", "https://zebra.example.com/mcp").unwrap();
@@ -935,16 +1003,16 @@ mod tests {
         assert_eq!(servers[1].0, "zebra");
     }
 
-    #[test]
-    fn list_returns_empty_when_absent() {
+    #[tokio::test]
+    async fn list_returns_empty_when_absent() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("nonexistent-mcp.json");
         let servers = list_http_servers(&path).unwrap();
         assert!(servers.is_empty());
     }
 
-    #[test]
-    fn set_header_adds_authorization() {
+    #[tokio::test]
+    async fn set_header_adds_authorization() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp.json");
         add_http_server(&path, "notion", "https://mcp.notion.com/mcp").unwrap();
@@ -957,8 +1025,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn set_header_returns_not_found() {
+    #[tokio::test]
+    async fn set_header_returns_not_found() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp.json");
         std::fs::write(&path, "{}").unwrap();
@@ -966,8 +1034,8 @@ mod tests {
         assert!(matches!(err, CredentialError::ServerNotFound(_)));
     }
 
-    #[test]
-    fn atomic_write_works() {
+    #[tokio::test]
+    async fn atomic_write_works() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.json");
         let value = serde_json::json!({"key": "value"});

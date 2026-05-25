@@ -32,7 +32,7 @@ const RUN_SUMMARY_FROM: &str = "FROM async_runs ar
     GROUP BY session_uuid
  ) costs ON costs.session_uuid = ar.run_session_id";
 
-pub fn activity_overview(
+pub async fn activity_overview(
     conn: &Connection,
     input: ActivityOverviewInput,
 ) -> Result<OverviewResponse, ReadModelError> {
@@ -53,14 +53,15 @@ pub fn activity_overview(
                 row.get::<_, Option<i64>>(5)?,
                 row.get::<_, f64>(6)?,
             ))
-        })?
+        })
+        .await?
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut crons = Vec::with_capacity(cron_rows.len());
     for (job_name, schedule, recurring, run_at, target_chat_id, target_thread_id, max_budget_usd) in
         cron_rows
     {
-        let recent_runs = cron_runs(conn, &job_name)?;
+        let recent_runs = cron_runs(conn, &job_name).await?;
         crons.push(CronCard {
             job_name,
             schedule,
@@ -74,8 +75,8 @@ pub fn activity_overview(
         });
     }
 
-    let active_background = active_background_runs(conn)?;
-    let today_cost_usd = today_cost_usd(conn, &input.generated_at)?;
+    let active_background = active_background_runs(conn).await?;
+    let today_cost_usd = today_cost_usd(conn, &input.generated_at).await?;
     let active_cron_count = crons
         .iter()
         .filter(|cron| {
@@ -107,7 +108,7 @@ pub fn activity_overview(
     })
 }
 
-pub fn activity_run_detail(
+pub async fn activity_run_detail(
     conn: &Connection,
     run_id: &str,
     max_lines: usize,
@@ -126,6 +127,7 @@ pub fn activity_run_detail(
                 row.get::<_, Option<String>>(14)?,
             ))
         })
+        .await
         .optional()?
     else {
         return Ok(None);
@@ -144,7 +146,7 @@ pub fn activity_run_detail(
     }))
 }
 
-fn cron_runs(conn: &Connection, job_name: &str) -> Result<Vec<RunSummary>, ReadModelError> {
+async fn cron_runs(conn: &Connection, job_name: &str) -> Result<Vec<RunSummary>, ReadModelError> {
     let sql = format!(
         "SELECT {RUN_SUMMARY_COLUMNS}
          {RUN_SUMMARY_FROM}
@@ -154,12 +156,13 @@ fn cron_runs(conn: &Connection, job_name: &str) -> Result<Vec<RunSummary>, ReadM
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(params![job_name], run_summary_from_row)?
+        .query_map(params![job_name], run_summary_from_row)
+        .await?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
-fn active_background_runs(conn: &Connection) -> Result<Vec<RunSummary>, ReadModelError> {
+async fn active_background_runs(conn: &Connection) -> Result<Vec<RunSummary>, ReadModelError> {
     let sql = format!(
         "SELECT {RUN_SUMMARY_COLUMNS}
          {RUN_SUMMARY_FROM}
@@ -172,7 +175,8 @@ fn active_background_runs(conn: &Connection) -> Result<Vec<RunSummary>, ReadMode
         .query_map(
             params![ACTIVE_BACKGROUND_RUN_LIMIT as i64],
             run_summary_from_row,
-        )?
+        )
+        .await?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -199,7 +203,10 @@ fn delivery_kind_from_json(json: Option<&str>) -> Option<String> {
     value.get("kind")?.as_str().map(ToOwned::to_owned)
 }
 
-pub(super) fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f64, ReadModelError> {
+pub(super) async fn today_cost_usd(
+    conn: &Connection,
+    generated_at: &str,
+) -> Result<f64, ReadModelError> {
     // Writers emit `chrono::Utc::now().to_rfc3339()` (e.g.
     // `2026-05-20T08:01:00.123456789+00:00`). SQLite compares timestamps as
     // strings, so the threshold must use the same format. A literal
@@ -211,13 +218,15 @@ pub(super) fn today_cost_usd(conn: &Connection, generated_at: &str) -> Result<f6
         .and_hms_opt(0, 0, 0)
         .ok_or_else(|| ReadModelError::InvalidStartOfDay(generated_at.to_owned()))?;
     let since = Utc.from_utc_datetime(&start_of_day).to_rfc3339();
-    let cost = conn.query_row(
-        "SELECT COALESCE(SUM(total_cost_usd), 0.0)
+    let cost = conn
+        .query_row(
+            "SELECT COALESCE(SUM(total_cost_usd), 0.0)
          FROM usage_events
          WHERE ts >= ?1",
-        params![since],
-        |row| row.get(0),
-    )?;
+            params![since],
+            |row| row.get(0),
+        )
+        .await?;
     Ok(cost)
 }
 
@@ -316,9 +325,11 @@ mod tests {
     use std::fs;
     use tempfile::{TempDir, tempdir};
 
-    fn fixture() -> (TempDir, Connection) {
+    async fn fixture() -> (TempDir, Connection) {
         let dir = tempdir().expect("tempdir");
-        let conn = right_db::open_connection(dir.path(), true).expect("open db");
+        let conn = right_db::open_connection(dir.path(), true)
+            .await
+            .expect("open db");
 
         conn.execute(
             "INSERT INTO cron_specs (
@@ -331,6 +342,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .expect("insert cron spec");
 
         conn.execute(
@@ -345,6 +357,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .expect("insert completed cron run");
 
         conn.execute(
@@ -359,6 +372,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .expect("insert running background run");
 
         conn.execute(
@@ -371,14 +385,15 @@ mod tests {
              )",
             [],
         )
+        .await
         .expect("insert usage event");
 
         (dir, conn)
     }
 
-    #[test]
-    fn activity_overview_builds_cron_cards_and_active_background() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn activity_overview_builds_cron_cards_and_active_background() {
+        let (_dir, conn) = fixture().await;
         let response = activity_overview(
             &conn,
             ActivityOverviewInput {
@@ -392,6 +407,7 @@ mod tests {
                 }],
             },
         )
+        .await
         .unwrap();
 
         assert_eq!(response.summary.cron_count, 1);
@@ -401,15 +417,16 @@ mod tests {
         assert_eq!(response.active.background[0].id, "bg-1");
     }
 
-    #[test]
-    fn activity_overview_includes_cron_run_summary_delivery_and_note_fields() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn activity_overview_includes_cron_run_summary_delivery_and_note_fields() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "UPDATE async_runs
              SET delivery_json = ?1, run_note = ?2
              WHERE id = 'run-1'",
             (r#"{"kind":"notify","content":"done"}"#, "Checked 5 pairs"),
         )
+        .await
         .unwrap();
 
         let response = activity_overview(
@@ -421,6 +438,7 @@ mod tests {
                 foreground: vec![],
             },
         )
+        .await
         .unwrap();
 
         let run = response.crons[0].last_run.as_ref().unwrap();
@@ -429,13 +447,14 @@ mod tests {
         assert_eq!(run.run_note.as_deref(), Some("Checked 5 pairs"));
     }
 
-    #[test]
-    fn activity_overview_ignores_malformed_cron_run_delivery_json_kind() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn activity_overview_ignores_malformed_cron_run_delivery_json_kind() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "UPDATE async_runs SET delivery_json = ?1 WHERE id = 'run-1'",
             [r#"{malformed"#],
         )
+        .await
         .unwrap();
 
         let response = activity_overview(
@@ -447,6 +466,7 @@ mod tests {
                 foreground: vec![],
             },
         )
+        .await
         .unwrap();
 
         let run = response.crons[0].last_run.as_ref().unwrap();
@@ -454,13 +474,13 @@ mod tests {
         assert!(run.delivery_kind.is_none());
     }
 
-    #[test]
-    fn activity_today_cost_includes_events_at_midnight_in_writer_format() {
+    #[tokio::test]
+    async fn activity_today_cost_includes_events_at_midnight_in_writer_format() {
         // Regression: the writer emits `chrono::Utc::now().to_rfc3339()`
         // (e.g. `2026-05-20T00:00:00.123456789+00:00`). A naive
         // `YYYY-MM-DDT00:00:00Z` threshold compares `.` < `Z` at position 19
         // and excludes start-of-day rows.
-        let (_dir, conn) = fixture();
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO usage_events (
                 ts, source, chat_id, thread_id, job_name, session_uuid,
@@ -471,6 +491,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .expect("insert midnight usage event");
 
         let response = activity_overview(
@@ -482,6 +503,7 @@ mod tests {
                 foreground: vec![],
             },
         )
+        .await
         .unwrap();
 
         // 0.25 (fixture) + 0.50 (midnight) = 0.75
@@ -492,13 +514,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn activity_run_detail_handles_missing_runs_and_missing_logs() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn activity_run_detail_handles_missing_runs_and_missing_logs() {
+        let (_dir, conn) = fixture().await;
 
-        assert!(activity_run_detail(&conn, "missing", 20).unwrap().is_none());
+        assert!(
+            activity_run_detail(&conn, "missing", 20)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             !activity_run_detail(&conn, "run-1", 20)
+                .await
                 .unwrap()
                 .unwrap()
                 .log
@@ -506,16 +534,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn activity_run_detail_parses_valid_delivery_json() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn activity_run_detail_parses_valid_delivery_json() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "UPDATE async_runs SET delivery_json = ?1 WHERE id = 'run-1'",
             [r#"{"kind":"notify","content":"done"}"#],
         )
+        .await
         .unwrap();
 
-        let detail = activity_run_detail(&conn, "run-1", 20).unwrap().unwrap();
+        let detail = activity_run_detail(&conn, "run-1", 20)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             detail.delivery,
@@ -524,18 +556,22 @@ mod tests {
         assert!(detail.delivery_error.is_none());
     }
 
-    #[test]
-    fn activity_run_detail_preserves_logs_for_malformed_delivery_json() {
-        let (dir, conn) = fixture();
+    #[tokio::test]
+    async fn activity_run_detail_preserves_logs_for_malformed_delivery_json() {
+        let (dir, conn) = fixture().await;
         let log_path = dir.path().join("run-1.log");
         fs::write(&log_path, "first\nsecond\n").unwrap();
         conn.execute(
             "UPDATE async_runs SET delivery_json = ?1, log_path = ?2 WHERE id = 'run-1'",
             (r#"{malformed"#, log_path.to_string_lossy().as_ref()),
         )
+        .await
         .unwrap();
 
-        let detail = activity_run_detail(&conn, "run-1", 20).unwrap().unwrap();
+        let detail = activity_run_detail(&conn, "run-1", 20)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert!(detail.delivery.is_none());
         assert!(
@@ -553,16 +589,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn activity_run_detail_surfaces_error_message_from_error_json() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn activity_run_detail_surfaces_error_message_from_error_json() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "UPDATE async_runs SET error_json = ?1 WHERE id = 'run-1'",
             [r#"{"kind":"cron_parse_failed","reason":"missing result stream"}"#],
         )
+        .await
         .unwrap();
 
-        let detail = activity_run_detail(&conn, "run-1", 20).unwrap().unwrap();
+        let detail = activity_run_detail(&conn, "run-1", 20)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             detail.error_message.as_deref(),
@@ -572,41 +612,52 @@ mod tests {
         assert!(detail.delivery_error.is_none());
     }
 
-    #[test]
-    fn activity_run_detail_surfaces_raw_error_json_when_no_reason() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn activity_run_detail_surfaces_raw_error_json_when_no_reason() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "UPDATE async_runs SET error_json = ?1 WHERE id = 'run-1'",
             [r#"not-json"#],
         )
+        .await
         .unwrap();
 
-        let detail = activity_run_detail(&conn, "run-1", 20).unwrap().unwrap();
+        let detail = activity_run_detail(&conn, "run-1", 20)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(detail.error_message.as_deref(), Some("not-json"));
     }
 
-    #[test]
-    fn activity_run_detail_omits_error_message_when_error_json_null() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn activity_run_detail_omits_error_message_when_error_json_null() {
+        let (_dir, conn) = fixture().await;
 
-        let detail = activity_run_detail(&conn, "run-1", 20).unwrap().unwrap();
+        let detail = activity_run_detail(&conn, "run-1", 20)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert!(detail.error_message.is_none());
     }
 
-    #[test]
-    fn activity_run_detail_tails_existing_log_file() {
-        let (dir, conn) = fixture();
+    #[tokio::test]
+    async fn activity_run_detail_tails_existing_log_file() {
+        let (dir, conn) = fixture().await;
         let log_path = dir.path().join("run-1.log");
         fs::write(&log_path, "one\ntwo\nthree\nfour\n").unwrap();
         conn.execute(
             "UPDATE async_runs SET log_path = ?1 WHERE id = 'run-1'",
             [log_path.to_string_lossy().as_ref()],
         )
+        .await
         .unwrap();
 
-        let detail = activity_run_detail(&conn, "run-1", 2).unwrap().unwrap();
+        let detail = activity_run_detail(&conn, "run-1", 2)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert!(detail.log.available);
         assert_eq!(

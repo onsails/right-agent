@@ -28,7 +28,7 @@ pub struct UsageOverviewInput {
     pub generated_at: String,
 }
 
-pub fn usage_overview(
+pub async fn usage_overview(
     conn: &Connection,
     input: UsageOverviewInput,
 ) -> Result<UsageOverviewResponse, ReadModelError> {
@@ -40,7 +40,7 @@ pub fn usage_overview(
     );
     let week_start = now - Duration::days(7);
     let month_start = now - Duration::days(30);
-    let unknown_sources = unknown_usage_sources(conn, &now)?;
+    let unknown_sources = unknown_usage_sources(conn, &now).await?;
 
     let windows = vec![
         build_window(
@@ -50,7 +50,8 @@ pub fn usage_overview(
             Some(&today_start),
             &now,
             &unknown_sources,
-        )?,
+        )
+        .await?,
         build_window(
             conn,
             "last_7_days",
@@ -58,7 +59,8 @@ pub fn usage_overview(
             Some(&week_start),
             &now,
             &unknown_sources,
-        )?,
+        )
+        .await?,
         build_window(
             conn,
             "last_30_days",
@@ -66,11 +68,12 @@ pub fn usage_overview(
             Some(&month_start),
             &now,
             &unknown_sources,
-        )?,
-        build_window(conn, "all_time", "All time", None, &now, &unknown_sources)?,
+        )
+        .await?,
+        build_window(conn, "all_time", "All time", None, &now, &unknown_sources).await?,
     ];
 
-    let (daily_series, mut warnings) = build_daily_series(conn, &now)?;
+    let (daily_series, mut warnings) = build_daily_series(conn, &now).await?;
     warnings.extend(unknown_source_warnings(&unknown_sources));
     let source_series = build_source_series(&daily_series, &unknown_sources);
 
@@ -85,7 +88,7 @@ pub fn usage_overview(
     })
 }
 
-fn build_window(
+async fn build_window(
     conn: &Connection,
     key: &str,
     label: &str,
@@ -95,10 +98,10 @@ fn build_window(
 ) -> Result<UsageWindow, ReadModelError> {
     let mut sources = Vec::with_capacity(SOURCES.len() + unknown_sources.len());
     for source in SOURCES {
-        sources.push(aggregate_source(conn, source, since, until)?);
+        sources.push(aggregate_source(conn, source, since, until).await?);
     }
     for source in unknown_sources {
-        let summary = aggregate_source(conn, source, since, until)?;
+        let summary = aggregate_source(conn, source, since, until).await?;
         if summary.invocations > 0 {
             sources.push(summary);
         }
@@ -133,7 +136,7 @@ fn build_window(
     })
 }
 
-fn build_daily_series(
+async fn build_daily_series(
     conn: &Connection,
     now: &DateTime<Utc>,
 ) -> Result<(Vec<UsageDailyPoint>, Vec<DashboardDataWarning>), ReadModelError> {
@@ -182,22 +185,24 @@ fn build_daily_series(
          WHERE ts >= ?1 AND ts <= ?2
          ORDER BY ts ASC",
     )?;
-    let rows = stmt.query_map(params![coarse_since, coarse_until], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, f64>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, i64>(4)?,
-            row.get::<_, i64>(5)?,
-            row.get::<_, i64>(6)?,
-            row.get::<_, i64>(7)?,
-            row.get::<_, i64>(8)?,
-            row.get::<_, i64>(9)?,
-            row.get::<_, String>(10)?,
-            row.get::<_, String>(11)?,
-        ))
-    })?;
+    let rows = stmt
+        .query_map(params![coarse_since, coarse_until], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
+            ))
+        })
+        .await?;
 
     let mut source_totals = BTreeMap::<(String, String), UsageSourcePoint>::new();
     let mut model_totals = BTreeMap::<String, BTreeMap<String, UsageModelSummary>>::new();
@@ -435,7 +440,7 @@ fn source_rank(source: &str) -> Option<usize> {
         .position(|known_source| *known_source == source)
 }
 
-fn unknown_usage_sources(
+async fn unknown_usage_sources(
     conn: &Connection,
     generated_at: &DateTime<Utc>,
 ) -> Result<Vec<String>, ReadModelError> {
@@ -446,9 +451,11 @@ fn unknown_usage_sources(
          WHERE ts <= ?1
          ORDER BY source ASC, ts ASC",
     )?;
-    let rows = stmt.query_map(params![coarse_until], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
+    let rows = stmt
+        .query_map(params![coarse_until], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .await?;
     let mut sources = BTreeSet::new();
     for row in rows {
         let (source, ts) = row?;
@@ -473,7 +480,7 @@ fn unknown_source_warnings(unknown_sources: &[String]) -> Vec<DashboardDataWarni
         .collect()
 }
 
-fn aggregate_source(
+async fn aggregate_source(
     conn: &Connection,
     source: &str,
     since: Option<&DateTime<Utc>>,
@@ -481,7 +488,7 @@ fn aggregate_source(
 ) -> Result<UsageSourceSummary, ReadModelError> {
     let coarse_since = since.map(|since| (*since - Duration::days(1)).to_rfc3339());
     let coarse_until = (*until + Duration::days(1)).to_rfc3339();
-    let rows = aggregate_source_rows(conn, source, coarse_since.as_deref(), &coarse_until)?;
+    let rows = aggregate_source_rows(conn, source, coarse_since.as_deref(), &coarse_until).await?;
 
     let mut summary = UsageSourceSummary {
         source: source.to_owned(),
@@ -556,7 +563,7 @@ struct SourceAggregateRow {
     api_key_source: String,
 }
 
-fn aggregate_source_rows(
+async fn aggregate_source_rows(
     conn: &Connection,
     source: &str,
     coarse_since: Option<&str>,
@@ -575,7 +582,8 @@ fn aggregate_source_rows(
             .query_map(
                 params![source, coarse_since, coarse_until],
                 source_aggregate_row,
-            )?
+            )
+            .await?
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into);
     }
@@ -588,7 +596,8 @@ fn aggregate_source_rows(
          WHERE source = ?1 AND ts <= ?2
          ORDER BY ts ASC",
     )?;
-    stmt.query_map(params![source, coarse_until], source_aggregate_row)?
+    stmt.query_map(params![source, coarse_until], source_aggregate_row)
+        .await?
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
@@ -677,7 +686,13 @@ mod tests {
     use right_db::open_connection;
     use tempfile::tempdir;
 
-    fn insert_usage(conn: &right_db::Connection, ts: &str, source: &str, cost: f64, model: &str) {
+    async fn insert_usage(
+        conn: &right_db::Connection,
+        ts: &str,
+        source: &str,
+        cost: f64,
+        model: &str,
+    ) {
         let model_json = format!(
             r#"{{"{model}":{{"costUSD":{cost},"inputTokens":10,"outputTokens":20,"cacheCreationInputTokens":5,"cacheReadInputTokens":40}}}}"#
         );
@@ -690,34 +705,38 @@ mod tests {
              ) VALUES (?1, ?2, 1, 0, NULL, ?3, ?4, 1, 10, 20, 5, 40, 1, 2, ?5, 'none')",
             params![ts, source, format!("{source}-{model}"), cost, model_json],
         )
+        .await
         .unwrap();
     }
 
-    #[test]
-    fn usage_overview_includes_learning_sources() {
+    #[tokio::test]
+    async fn usage_overview_includes_learning_sources() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
         insert_usage(
             &conn,
             "2026-05-21T01:00:00Z",
             "learning_selector",
             0.10,
             "sonnet",
-        );
+        )
+        .await;
         insert_usage(
             &conn,
             "2026-05-21T02:00:00Z",
             "learning_reviewer",
             0.20,
             "sonnet",
-        );
+        )
+        .await;
         insert_usage(
             &conn,
             "2026-05-21T03:00:00Z",
             "learning_skill_review",
             0.30,
             "sonnet",
-        );
+        )
+        .await;
 
         let response = usage_overview(
             &conn,
@@ -726,6 +745,7 @@ mod tests {
                 generated_at: "2026-05-21T05:00:00Z".to_owned(),
             },
         )
+        .await
         .unwrap();
         let today = response.windows.iter().find(|w| w.key == "today").unwrap();
         let names: Vec<&str> = today.sources.iter().map(|s| s.source.as_str()).collect();
@@ -741,8 +761,8 @@ mod tests {
         assert!((selector.cost_usd - 0.10).abs() < 1e-9);
     }
 
-    #[test]
-    fn usage_overview_sources_match_learning_sources_constant() {
+    #[tokio::test]
+    async fn usage_overview_sources_match_learning_sources_constant() {
         for source in right_agent::usage::LEARNING_SOURCES {
             assert!(
                 SOURCES.contains(source),
@@ -751,12 +771,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn usage_overview_builds_windows_and_sources() {
+    #[tokio::test]
+    async fn usage_overview_builds_windows_and_sources() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        insert_usage(&conn, "2026-05-20T08:00:00Z", "interactive", 0.10, "sonnet");
-        insert_usage(&conn, "2026-05-19T08:00:00Z", "cron", 0.20, "sonnet");
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_usage(&conn, "2026-05-20T08:00:00Z", "interactive", 0.10, "sonnet").await;
+        insert_usage(&conn, "2026-05-19T08:00:00Z", "cron", 0.20, "sonnet").await;
 
         let response = usage_overview(
             &conn,
@@ -765,6 +785,7 @@ mod tests {
                 generated_at: "2026-05-20T12:00:00Z".to_owned(),
             },
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -811,22 +832,23 @@ mod tests {
         assert!((all_time.per_model[0].cost_usd - 0.30).abs() < 1e-9);
     }
 
-    #[test]
-    fn usage_overview_builds_daily_series_for_last_30_days() {
+    #[tokio::test]
+    async fn usage_overview_builds_daily_series_for_last_30_days() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        insert_usage(&conn, "2026-05-01T08:00:00Z", "interactive", 0.10, "sonnet");
-        insert_usage(&conn, "2026-05-01T09:00:00Z", "cron", 0.20, "opus");
-        insert_usage(&conn, "2026-04-01T08:00:00Z", "interactive", 9.99, "old");
-        insert_usage(&conn, "2026-05-01T10:00:00Z", "new_source", 4.44, "unknown");
-        insert_usage(&conn, "2026-05-23T23:00:00Z", "interactive", 7.77, "future");
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_usage(&conn, "2026-05-01T08:00:00Z", "interactive", 0.10, "sonnet").await;
+        insert_usage(&conn, "2026-05-01T09:00:00Z", "cron", 0.20, "opus").await;
+        insert_usage(&conn, "2026-04-01T08:00:00Z", "interactive", 9.99, "old").await;
+        insert_usage(&conn, "2026-05-01T10:00:00Z", "new_source", 4.44, "unknown").await;
+        insert_usage(&conn, "2026-05-23T23:00:00Z", "interactive", 7.77, "future").await;
         insert_usage(
             &conn,
             "2026-05-23T23:00:00Z",
             "future_source",
             8.88,
             "future_unknown",
-        );
+        )
+        .await;
 
         let response = usage_overview(
             &conn,
@@ -835,6 +857,7 @@ mod tests {
                 generated_at: "2026-05-23T12:00:00Z".to_owned(),
             },
         )
+        .await
         .unwrap();
 
         assert_eq!(response.selected_window, "last_30_days");
@@ -955,10 +978,10 @@ mod tests {
         assert!(response.warnings[0].message.contains("new_source"));
     }
 
-    #[test]
-    fn usage_overview_warns_and_skips_malformed_model_json_in_daily_series() {
+    #[tokio::test]
+    async fn usage_overview_warns_and_skips_malformed_model_json_in_daily_series() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
         conn.execute(
             "INSERT INTO usage_events (
                 ts, source, chat_id, thread_id, job_name, session_uuid,
@@ -971,6 +994,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO usage_events (
@@ -984,6 +1008,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
         let response = usage_overview(
@@ -993,6 +1018,7 @@ mod tests {
                 generated_at: "2026-05-23T12:00:00Z".to_owned(),
             },
         )
+        .await
         .unwrap();
 
         let today = response
@@ -1017,32 +1043,35 @@ mod tests {
         );
     }
 
-    #[test]
-    fn usage_overview_filters_and_buckets_daily_series_by_parsed_utc_timestamps() {
+    #[tokio::test]
+    async fn usage_overview_filters_and_buckets_daily_series_by_parsed_utc_timestamps() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
-        insert_usage(&conn, "2026-05-23T12:00:00Z", "interactive", 0.10, "exact");
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_usage(&conn, "2026-05-23T12:00:00Z", "interactive", 0.10, "exact").await;
         insert_usage(
             &conn,
             "2026-05-23T11:59:59.999Z",
             "interactive",
             0.20,
             "fractional",
-        );
+        )
+        .await;
         insert_usage(
             &conn,
             "2026-05-23T13:00:00+02:00",
             "interactive",
             0.30,
             "offset-included",
-        );
+        )
+        .await;
         insert_usage(
             &conn,
             "2026-05-23T15:00:00+02:00",
             "interactive",
             9.99,
             "offset-excluded",
-        );
+        )
+        .await;
 
         let response = usage_overview(
             &conn,
@@ -1051,6 +1080,7 @@ mod tests {
                 generated_at: "2026-05-23T12:00:00Z".to_owned(),
             },
         )
+        .await
         .unwrap();
 
         let today = response

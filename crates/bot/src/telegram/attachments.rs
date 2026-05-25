@@ -1486,8 +1486,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn attachment_kind_as_str_roundtrip() {
+    #[tokio::test]
+    async fn attachment_kind_as_str_roundtrip() {
         assert_eq!(AttachmentKind::Photo.as_str(), "photo");
         assert_eq!(AttachmentKind::Document.as_str(), "document");
         assert_eq!(AttachmentKind::Video.as_str(), "video");
@@ -1498,8 +1498,8 @@ mod tests {
         assert_eq!(AttachmentKind::Animation.as_str(), "animation");
     }
 
-    #[test]
-    fn mime_to_extension_known_types() {
+    #[tokio::test]
+    async fn mime_to_extension_known_types() {
         assert_eq!(mime_to_extension("image/jpeg"), "jpg");
         assert_eq!(mime_to_extension("image/png"), "png");
         assert_eq!(mime_to_extension("audio/ogg"), "ogg");
@@ -1507,38 +1507,38 @@ mod tests {
         assert_eq!(mime_to_extension("video/mp4"), "mp4");
     }
 
-    #[test]
-    fn mime_to_extension_unknown_fallback() {
+    #[tokio::test]
+    async fn mime_to_extension_unknown_fallback() {
         assert_eq!(mime_to_extension("application/x-unknown-thing"), "bin");
         assert_eq!(mime_to_extension(""), "bin");
     }
 
-    #[test]
-    fn webp_magic_header_detects_riff_webp() {
+    #[tokio::test]
+    async fn webp_magic_header_detects_riff_webp() {
         assert!(is_webp_file_header(b"RIFF\x00\x00\x00\x00WEBPVP8 "));
     }
 
-    #[test]
-    fn webp_magic_header_rejects_png_and_short_input() {
+    #[tokio::test]
+    async fn webp_magic_header_rejects_png_and_short_input() {
         assert!(!is_webp_file_header(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d"));
         assert!(!is_webp_file_header(b"RIFF"));
     }
 
-    #[test]
-    fn media_group_validation_error_text_matches_wrong_file_identifier() {
+    #[tokio::test]
+    async fn media_group_validation_error_text_matches_wrong_file_identifier() {
         let err = "Bad Request: failed to send message #1 with the error message \"Wrong file identifier/HTTP URL specified\"";
         assert!(is_media_group_validation_error_text(err));
     }
 
-    #[test]
-    fn media_group_validation_error_text_matches_media_group_invalid() {
+    #[tokio::test]
+    async fn media_group_validation_error_text_matches_media_group_invalid() {
         assert!(is_media_group_validation_error_text(
             "Bad Request: MEDIA_GROUP_INVALID",
         ));
     }
 
-    #[test]
-    fn media_group_validation_error_text_rejects_non_album_errors() {
+    #[tokio::test]
+    async fn media_group_validation_error_text_rejects_non_album_errors() {
         assert!(!is_media_group_validation_error_text(
             "Too Many Requests: retry after 5",
         ));
@@ -1547,15 +1547,15 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn media_group_validation_error_text_rejects_bare_wrong_file_identifier() {
+    #[tokio::test]
+    async fn media_group_validation_error_text_rejects_bare_wrong_file_identifier() {
         assert!(!is_media_group_validation_error_text(
             "Bad Request: Wrong file identifier/HTTP URL specified",
         ));
     }
 
-    #[test]
-    fn format_cc_input_single_text_returns_yaml() {
+    #[tokio::test]
+    async fn format_cc_input_single_text_returns_yaml() {
         let msgs = vec![InputMessage {
             message_id: 1,
             text: Some("hello world".into()),
@@ -1576,13 +1576,13 @@ mod tests {
         assert!(result.contains("    author:\n"));
     }
 
-    #[test]
-    fn format_cc_input_empty_returns_none() {
+    #[tokio::test]
+    async fn format_cc_input_empty_returns_none() {
         assert!(format_cc_input(&[]).is_none());
     }
 
-    #[test]
-    fn format_cc_input_single_no_text_no_attachments_returns_none() {
+    #[tokio::test]
+    async fn format_cc_input_single_no_text_no_attachments_returns_none() {
         let msgs = vec![InputMessage {
             message_id: 1,
             text: None,
@@ -1598,8 +1598,8 @@ mod tests {
         assert!(format_cc_input(&msgs).is_none());
     }
 
-    #[test]
-    fn format_cc_input_multiple_messages_returns_yaml() {
+    #[tokio::test]
+    async fn format_cc_input_multiple_messages_returns_yaml() {
         let ts = DateTime::parse_from_rfc3339("2026-04-08T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -1637,8 +1637,8 @@ mod tests {
         assert!(result.contains("    text: \"second\"\n"));
     }
 
-    #[test]
-    fn format_cc_input_with_attachments_returns_yaml() {
+    #[tokio::test]
+    async fn format_cc_input_with_attachments_returns_yaml() {
         let ts = DateTime::parse_from_rfc3339("2026-04-08T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -1668,8 +1668,8 @@ mod tests {
         assert!(!result.contains("filename:"));
     }
 
-    #[test]
-    fn format_cc_input_document_with_filename() {
+    #[tokio::test]
+    async fn format_cc_input_document_with_filename() {
         let ts = Utc::now();
         let msgs = vec![InputMessage {
             message_id: 10,
@@ -1693,8 +1693,8 @@ mod tests {
         assert!(result.contains("        filename: \"report.pdf\"\n"));
     }
 
-    #[test]
-    fn format_cc_input_text_with_special_chars_escaped() {
+    #[tokio::test]
+    async fn format_cc_input_text_with_special_chars_escaped() {
         let msgs = vec![
             InputMessage {
                 message_id: 1,
@@ -1725,8 +1725,8 @@ mod tests {
         assert!(result.contains(r#"    text: "line1\nline2\ttab \"quoted\""#));
     }
 
-    #[test]
-    fn yaml_escape_handles_all_special_chars() {
+    #[tokio::test]
+    async fn yaml_escape_handles_all_special_chars() {
         assert_eq!(yaml_escape_string(r#"a"b"#), r#"a\"b"#);
         assert_eq!(yaml_escape_string("a\nb"), r"a\nb");
         assert_eq!(yaml_escape_string("a\\b"), r"a\\b");
@@ -1734,8 +1734,8 @@ mod tests {
         assert_eq!(yaml_escape_string("a\tb"), r"a\tb");
     }
 
-    #[test]
-    fn group_kind_from_outbound_kind_covers_all_variants() {
+    #[tokio::test]
+    async fn group_kind_from_outbound_kind_covers_all_variants() {
         use OutboundKind::*;
         assert_eq!(GroupKind::of(&Photo), Some(GroupKind::PhotoVideo));
         assert_eq!(GroupKind::of(&Video), Some(GroupKind::PhotoVideo));
@@ -1778,8 +1778,8 @@ mod tests {
         v.iter().collect()
     }
 
-    #[test]
-    fn classify_two_photos_sends_as_group() {
+    #[tokio::test]
+    async fn classify_two_photos_sends_as_group() {
         let items = atts(&[OutboundKind::Photo, OutboundKind::Photo]);
         assert_eq!(
             classify_media_group(&refs(&items)),
@@ -1787,8 +1787,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn classify_photo_and_video_mix_sends_as_group() {
+    #[tokio::test]
+    async fn classify_photo_and_video_mix_sends_as_group() {
         let items = atts(&[OutboundKind::Photo, OutboundKind::Video]);
         assert_eq!(
             classify_media_group(&refs(&items)),
@@ -1796,8 +1796,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn classify_two_documents_sends_as_group() {
+    #[tokio::test]
+    async fn classify_two_documents_sends_as_group() {
         let items = atts(&[OutboundKind::Document, OutboundKind::Document]);
         assert_eq!(
             classify_media_group(&refs(&items)),
@@ -1805,8 +1805,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn classify_two_audios_sends_as_group() {
+    #[tokio::test]
+    async fn classify_two_audios_sends_as_group() {
         let items = atts(&[OutboundKind::Audio, OutboundKind::Audio]);
         assert_eq!(
             classify_media_group(&refs(&items)),
@@ -1814,8 +1814,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn classify_photo_and_voice_degrades() {
+    #[tokio::test]
+    async fn classify_photo_and_voice_degrades() {
         let items = atts(&[OutboundKind::Photo, OutboundKind::Voice]);
         match classify_media_group(&refs(&items)) {
             GroupPlan::Degrade { reason } => assert!(reason.contains("incompatible")),
@@ -1823,8 +1823,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn classify_photo_and_document_degrades() {
+    #[tokio::test]
+    async fn classify_photo_and_document_degrades() {
         let items = atts(&[OutboundKind::Photo, OutboundKind::Document]);
         match classify_media_group(&refs(&items)) {
             GroupPlan::Degrade { reason } => assert!(reason.contains("incompatible")),
@@ -1832,8 +1832,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn classify_single_item_degrades() {
+    #[tokio::test]
+    async fn classify_single_item_degrades() {
         let items = atts(&[OutboundKind::Photo]);
         match classify_media_group(&refs(&items)) {
             GroupPlan::Degrade { reason } => assert!(reason.contains("group of 1")),
@@ -1841,8 +1841,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn classify_empty_group_degrades() {
+    #[tokio::test]
+    async fn classify_empty_group_degrades() {
         let items: Vec<OutboundAttachment> = vec![];
         match classify_media_group(&refs(&items)) {
             GroupPlan::Degrade { .. } => (),
@@ -1850,8 +1850,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn classify_eleven_photos_splits_into_chunks() {
+    #[tokio::test]
+    async fn classify_eleven_photos_splits_into_chunks() {
         let items = atts(&[OutboundKind::Photo; 11]);
         match classify_media_group(&refs(&items)) {
             GroupPlan::Split { chunks, kind, .. } => {
@@ -1864,8 +1864,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn classify_twenty_five_photos_splits_into_three_chunks() {
+    #[tokio::test]
+    async fn classify_twenty_five_photos_splits_into_three_chunks() {
         let items = atts(&[OutboundKind::Photo; 25]);
         match classify_media_group(&refs(&items)) {
             GroupPlan::Split { chunks, .. } => {
@@ -1878,8 +1878,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn classify_exactly_ten_photos_sends_as_group() {
+    #[tokio::test]
+    async fn classify_exactly_ten_photos_sends_as_group() {
         // Boundary: `len <= MEDIA_GROUP_MAX` — off-by-one guard.
         let items = atts(&[OutboundKind::Photo; 10]);
         assert_eq!(
@@ -1888,15 +1888,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn partition_empty_input_is_safe() {
+    #[tokio::test]
+    async fn partition_empty_input_is_safe() {
         let (sends, warnings) = partition_sends(&[]);
         assert!(sends.is_empty());
         assert!(warnings.is_empty());
     }
 
-    #[test]
-    fn classify_eleven_mixed_with_voice_degrades() {
+    #[tokio::test]
+    async fn classify_eleven_mixed_with_voice_degrades() {
         let mut kinds = vec![OutboundKind::Photo; 10];
         kinds.push(OutboundKind::Voice);
         let items = atts(&kinds);
@@ -1906,36 +1906,36 @@ mod tests {
         }
     }
 
-    #[test]
-    fn merge_captions_first_only_is_preserved() {
+    #[tokio::test]
+    async fn merge_captions_first_only_is_preserved() {
         let mut caps = vec![Some("first".to_owned()), None, None];
         merge_group_captions(&mut caps);
         assert_eq!(caps, vec![Some("first".to_owned()), None, None]);
     }
 
-    #[test]
-    fn merge_captions_all_none_stays_none() {
+    #[tokio::test]
+    async fn merge_captions_all_none_stays_none() {
         let mut caps: Vec<Option<String>> = vec![None, None, None];
         merge_group_captions(&mut caps);
         assert_eq!(caps, vec![None, None, None]);
     }
 
-    #[test]
-    fn merge_captions_later_items_fold_into_first() {
+    #[tokio::test]
+    async fn merge_captions_later_items_fold_into_first() {
         let mut caps = vec![Some("a".to_owned()), None, Some("b".to_owned())];
         merge_group_captions(&mut caps);
         assert_eq!(caps, vec![Some("a\n\nb".to_owned()), None, None]);
     }
 
-    #[test]
-    fn merge_captions_only_later_item_moves_to_first() {
+    #[tokio::test]
+    async fn merge_captions_only_later_item_moves_to_first() {
         let mut caps = vec![None, Some("only".to_owned())];
         merge_group_captions(&mut caps);
         assert_eq!(caps, vec![Some("only".to_owned()), None]);
     }
 
-    #[test]
-    fn merge_captions_all_three_set_joined() {
+    #[tokio::test]
+    async fn merge_captions_all_three_set_joined() {
         let mut caps = vec![
             Some("a".to_owned()),
             Some("b".to_owned()),
@@ -1945,8 +1945,8 @@ mod tests {
         assert_eq!(caps, vec![Some("a\n\nb\n\nc".to_owned()), None, None]);
     }
 
-    #[test]
-    fn merge_captions_truncates_when_over_telegram_limit() {
+    #[tokio::test]
+    async fn merge_captions_truncates_when_over_telegram_limit() {
         // 10 captions × 150 chars each → 1500 chars of content + 9 "\n\n" = 1518
         // Well over the 1024 limit; should be truncated with ellipsis.
         let mut caps: Vec<Option<String>> = (0..10)
@@ -1965,16 +1965,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn merge_captions_under_limit_is_not_truncated() {
+    #[tokio::test]
+    async fn merge_captions_under_limit_is_not_truncated() {
         let mut caps = vec![Some("short".to_owned()), Some("also short".to_owned())];
         merge_group_captions(&mut caps);
         assert_eq!(caps[0].as_deref(), Some("short\n\nalso short"));
         assert!(!caps[0].as_deref().unwrap().ends_with('…'));
     }
 
-    #[test]
-    fn merge_captions_truncation_is_char_safe() {
+    #[tokio::test]
+    async fn merge_captions_truncation_is_char_safe() {
         // Russian / emoji caption, each copy is 500+ chars via chars().count() —
         // byte length is 2-4x that. Byte-slice truncation would panic mid-codepoint.
         let cyrillic: String = "а".repeat(600);
@@ -1989,8 +1989,8 @@ mod tests {
         // No panic = char-boundary-safe truncation.
     }
 
-    #[test]
-    fn format_cc_input_includes_author() {
+    #[tokio::test]
+    async fn format_cc_input_includes_author() {
         let ts = DateTime::parse_from_rfc3339("2026-04-08T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -2021,8 +2021,8 @@ mod tests {
         assert!(result.contains("      user_id: 12345678\n"));
     }
 
-    #[test]
-    fn format_cc_input_includes_forward_info() {
+    #[tokio::test]
+    async fn format_cc_input_includes_forward_info() {
         let ts = DateTime::parse_from_rfc3339("2026-04-08T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -2060,8 +2060,8 @@ mod tests {
         assert!(result.contains("    forward_date: \"2026-04-07T20:00:00Z\"\n"));
     }
 
-    #[test]
-    fn format_cc_input_includes_reply_to_id() {
+    #[tokio::test]
+    async fn format_cc_input_includes_reply_to_id() {
         let ts = Utc::now();
         let msgs = vec![InputMessage {
             message_id: 5,
@@ -2083,8 +2083,8 @@ mod tests {
         assert!(result.contains("    reply_to_id: 3\n"));
     }
 
-    #[test]
-    fn format_cc_input_includes_quoted_text() {
+    #[tokio::test]
+    async fn format_cc_input_includes_quoted_text() {
         let ts = Utc::now();
         let msgs = vec![InputMessage {
             message_id: 5,
@@ -2105,8 +2105,8 @@ mod tests {
         assert!(result.contains("    quoted_text: \"selected fragment\"\n"));
     }
 
-    #[test]
-    fn format_cc_input_can_include_reply_to_body_and_quoted_text() {
+    #[tokio::test]
+    async fn format_cc_input_can_include_reply_to_body_and_quoted_text() {
         let ts = Utc::now();
         let msgs = vec![InputMessage {
             message_id: 5,
@@ -2141,8 +2141,8 @@ mod tests {
         assert!(result.contains("    quoted_text: \"only this sentence\"\n"));
     }
 
-    #[test]
-    fn format_cc_input_escapes_quoted_text() {
+    #[tokio::test]
+    async fn format_cc_input_escapes_quoted_text() {
         let ts = Utc::now();
         let msgs = vec![InputMessage {
             message_id: 5,
@@ -2162,8 +2162,8 @@ mod tests {
         assert!(result.contains(r#"    quoted_text: "line1\nline2\t\"quoted\""#));
     }
 
-    #[test]
-    fn format_cc_input_includes_reply_to_attachments() {
+    #[tokio::test]
+    async fn format_cc_input_includes_reply_to_attachments() {
         let ts = Utc::now();
         let msgs = vec![InputMessage {
             message_id: 5,
@@ -2273,8 +2273,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_group_input_media_document_disables_content_type_detection() {
+    #[tokio::test]
+    async fn build_group_input_media_document_disables_content_type_detection() {
         let att = att_with(OutboundKind::Document, Some("docs"), Some("report"));
         let media = build_group_input_media(&att, std::path::Path::new("/tmp/report.pdf"));
 
@@ -2286,8 +2286,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fallback_to_singles_error_message_contains_reason_if_leaked() {
+    #[tokio::test]
+    async fn fallback_to_singles_error_message_contains_reason_if_leaked() {
         let msg = SendError::FallbackToSingles {
             reason: "preflight rejected WebP document group".to_owned(),
         }
@@ -2299,8 +2299,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn attachment_error_label_names_kind_and_path() {
+    #[tokio::test]
+    async fn attachment_error_label_names_kind_and_path() {
         let att = att_with(OutboundKind::Document, Some("docs"), Some("report"));
 
         assert_eq!(
@@ -2309,8 +2309,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn partition_no_group_ids_produces_all_singles() {
+    #[tokio::test]
+    async fn partition_no_group_ids_produces_all_singles() {
         let atts = vec![
             att_with(OutboundKind::Photo, None, None),
             att_with(OutboundKind::Document, None, None),
@@ -2322,8 +2322,8 @@ mod tests {
         assert!(matches!(sends[1], OutboundSend::Single(_)));
     }
 
-    #[test]
-    fn partition_two_photo_group_produces_one_group_send() {
+    #[tokio::test]
+    async fn partition_two_photo_group_produces_one_group_send() {
         let atts = vec![
             att_with(OutboundKind::Photo, Some("shots"), Some("a")),
             att_with(OutboundKind::Photo, Some("shots"), Some("b")),
@@ -2342,8 +2342,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn partition_group_preserves_original_captions_for_fallback_singles() {
+    #[tokio::test]
+    async fn partition_group_preserves_original_captions_for_fallback_singles() {
         let atts = vec![
             att_with(OutboundKind::Document, Some("docs"), Some("first")),
             att_with(OutboundKind::Document, Some("docs"), Some("second")),
@@ -2368,8 +2368,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn partition_group_preserves_first_occurrence_order() {
+    #[tokio::test]
+    async fn partition_group_preserves_first_occurrence_order() {
         // Reply order: group A item, single, group A item, group B item, group B item
         let atts = vec![
             att_with(OutboundKind::Photo, Some("a"), None),
@@ -2400,8 +2400,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn partition_incompatible_group_degrades_and_warns() {
+    #[tokio::test]
+    async fn partition_incompatible_group_degrades_and_warns() {
         let atts = vec![
             att_with(OutboundKind::Photo, Some("bad"), None),
             att_with(OutboundKind::Voice, Some("bad"), None),
@@ -2417,8 +2417,8 @@ mod tests {
         assert!(sends.iter().all(|s| matches!(s, OutboundSend::Single(_))));
     }
 
-    #[test]
-    fn partition_lone_group_member_degrades_and_warns() {
+    #[tokio::test]
+    async fn partition_lone_group_member_degrades_and_warns() {
         let atts = vec![
             att_with(OutboundKind::Photo, Some("only"), None),
             att_with(OutboundKind::Document, None, None),
@@ -2430,8 +2430,8 @@ mod tests {
         assert!(sends.iter().all(|s| matches!(s, OutboundSend::Single(_))));
     }
 
-    #[test]
-    fn partition_split_oversize_group_yields_multiple_group_sends_plus_trailing_single() {
+    #[tokio::test]
+    async fn partition_split_oversize_group_yields_multiple_group_sends_plus_trailing_single() {
         let atts: Vec<OutboundAttachment> = (0..11)
             .map(|_| att_with(OutboundKind::Photo, Some("big"), None))
             .collect();
@@ -2447,8 +2447,8 @@ mod tests {
         assert!(matches!(sends[1], OutboundSend::Single(_)));
     }
 
-    #[test]
-    fn partition_split_oversize_group_merges_captions_per_chunk() {
+    #[tokio::test]
+    async fn partition_split_oversize_group_merges_captions_per_chunk() {
         // 11 photos in a group — split into a chunk of 10 + 1 trailing single.
         // Give every photo a distinct caption and assert the first item of the
         // 10-chunk carries all 10 captions joined with "\n\n" and the trailing
@@ -2487,8 +2487,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn format_cc_input_hidden_user_forward_omits_missing_fields() {
+    #[tokio::test]
+    async fn format_cc_input_hidden_user_forward_omits_missing_fields() {
         let ts = Utc::now();
         let fwd_date = Utc::now();
         let msgs = vec![InputMessage {
@@ -2535,8 +2535,8 @@ mod group_format_tests {
         chrono::Utc.with_ymd_and_hms(2026, 4, 16, 12, 0, 0).unwrap()
     }
 
-    #[test]
-    fn dm_single_message_emits_yaml_with_chat_block() {
+    #[tokio::test]
+    async fn dm_single_message_emits_yaml_with_chat_block() {
         // In DM, Telegram-side chat_id == user_id.
         let m = InputMessage {
             message_id: 1,
@@ -2570,8 +2570,8 @@ mod group_format_tests {
         );
     }
 
-    #[test]
-    fn group_message_emits_chat_block_and_topic() {
+    #[tokio::test]
+    async fn group_message_emits_chat_block_and_topic() {
         let m = InputMessage {
             message_id: 9,
             text: Some("what does foo do".into()),
@@ -2600,8 +2600,8 @@ mod group_format_tests {
         assert!(yaml.contains("topic_id: 7"));
     }
 
-    #[test]
-    fn group_message_with_reply_to_body_emits_reply_to_block() {
+    #[tokio::test]
+    async fn group_message_with_reply_to_body_emits_reply_to_block() {
         let m = InputMessage {
             message_id: 10,
             text: Some("explain this".into()),
@@ -2635,8 +2635,8 @@ mod group_format_tests {
         assert!(yaml.contains("here is the function: foo()"));
     }
 
-    #[test]
-    fn send_error_skip_into_user_msg_prefixes_label_and_reason() {
+    #[tokio::test]
+    async fn send_error_skip_into_user_msg_prefixes_label_and_reason() {
         let e = SendError::Skip("path outside outbox — skipping".into());
         let msg = e.into_user_msg("Photo attachment /bad/path.jpg");
         assert_eq!(
@@ -2645,8 +2645,8 @@ mod group_format_tests {
         );
     }
 
-    #[test]
-    fn display_error_chain_includes_sources() {
+    #[tokio::test]
+    async fn display_error_chain_includes_sources() {
         use std::error::Error;
         use std::fmt;
 
@@ -2680,8 +2680,8 @@ mod group_format_tests {
         assert_eq!(display_error_chain(&err), "top-level failure: root cause");
     }
 
-    #[test]
-    fn display_error_chain_handles_no_source() {
+    #[tokio::test]
+    async fn display_error_chain_handles_no_source() {
         use std::error::Error;
         use std::fmt;
 

@@ -155,8 +155,8 @@ mod tests {
     /// ssh_host(agent_name). New agents have explicit sandbox.name = right-{agent}
     /// in agent.yaml; their SSH config carries Host openshell-right-{agent} and
     /// targeting openshell-rightclaw-{agent} would fail.
-    #[test]
-    fn upgrade_uses_resolved_sandbox_not_agent_name() {
+    #[tokio::test]
+    async fn upgrade_uses_resolved_sandbox_not_agent_name() {
         let src = include_str!("upgrade.rs");
         // The bare ssh_host(agent_name) call would be the bug.
         // Split the pattern so this test's own source text doesn't match.
@@ -212,14 +212,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn claude_upgrade_accepts_current_version_exit_one() {
+    #[tokio::test]
+    async fn claude_upgrade_accepts_current_version_exit_one() {
         let stdout = "Current version: 2.1.143\n\nClaude Code is up to date\n";
         assert!(super::claude_upgrade_success(1, stdout));
     }
 
-    #[test]
-    fn claude_upgrade_accepts_current_version_config_repair_exit_one() {
+    #[tokio::test]
+    async fn claude_upgrade_accepts_current_version_config_repair_exit_one() {
         let stdout = "Current version: 2.1.143\n\
             Checking for updates to latest version...\n\
             Warning: Running native installation but config install method is 'not set'\n\
@@ -228,8 +228,8 @@ mod tests {
         assert!(super::claude_upgrade_success(1, stdout));
     }
 
-    #[test]
-    fn claude_upgrade_rejects_unrelated_exit_one() {
+    #[tokio::test]
+    async fn claude_upgrade_rejects_unrelated_exit_one() {
         assert!(!super::claude_upgrade_success(1, "network failed"));
     }
 }

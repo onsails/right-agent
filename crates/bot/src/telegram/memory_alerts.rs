@@ -35,18 +35,26 @@ pub fn spawn_watcher(
     // re-notify. Scoped to memory alert types so longer-dedup alerts on the
     // shared `memory_alerts` table (e.g. `learning_circuit_open`, 24h) keep
     // their dedup window across bot restarts.
-    match right_db::open_connection(&agent_dir, false) {
-        Ok(conn) => {
-            if let Err(e) = conn.execute(
-                "DELETE FROM memory_alerts \
-                 WHERE alert_type IN (?1, ?2) \
-                   AND datetime(first_sent_at) < datetime('now', '-1 hour')",
-                [AUTH_FAILED, CLIENT_FLOOD],
-            ) {
-                tracing::warn!("memory_alerts startup cleanup failed: {e:#}");
+    {
+        let db = agent_dir.clone();
+        tokio::spawn(async move {
+            match right_db::open_connection(&db, false).await {
+                Ok(conn) => {
+                    if let Err(e) = conn
+                        .execute(
+                            "DELETE FROM memory_alerts \
+                             WHERE alert_type IN (?1, ?2) \
+                               AND datetime(first_sent_at) < datetime('now', '-1 hour')",
+                            [AUTH_FAILED, CLIENT_FLOOD],
+                        )
+                        .await
+                    {
+                        tracing::warn!("memory_alerts startup cleanup failed: {e:#}");
+                    }
+                }
+                Err(e) => tracing::warn!("memory_alerts startup open_connection failed: {e:#}"),
             }
-        }
-        Err(e) => tracing::warn!("memory_alerts startup open_connection failed: {e:#}"),
+        });
     }
 
     // Task A: status watcher.
@@ -85,7 +93,7 @@ pub fn spawn_watcher(
                 t.tick().await;
                 let drops_1h = wrapper.client_drops_1h().await;
                 if drops_1h > right_memory::resilient::CLIENT_FLOOD_THRESHOLD
-                    && super::alerts::should_fire(&db, CLIENT_FLOOD)
+                    && super::alerts::should_fire(&db, CLIENT_FLOOD).await
                 {
                     let msg = format!(
                         "\u{26a0} Memory retains persistently rejected (HTTP 4xx) — \
@@ -96,7 +104,7 @@ pub fn spawn_watcher(
                     // changes after startup are honored.
                     let chats = current_chats(&allowlist);
                     broadcast_to_chats(&bot, &chats, &msg).await;
-                    super::alerts::record_fire(&db, CLIENT_FLOOD);
+                    super::alerts::record_fire(&db, CLIENT_FLOOD).await;
                 }
             }
         });
@@ -110,7 +118,7 @@ async fn handle_status_change(
     db: &std::path::Path,
 ) {
     if matches!(status, MemoryStatus::AuthFailed { .. }) {
-        if super::alerts::should_fire(db, AUTH_FAILED) {
+        if super::alerts::should_fire(db, AUTH_FAILED).await {
             let msg = "\u{26a0} Memory provider authentication failed.\n\
                        Rotate the Hindsight API key — set `memory.api_key` in \
                        agent.yaml or the HINDSIGHT_API_KEY env var — and restart \
@@ -119,16 +127,19 @@ async fn handle_status_change(
             // changes after startup are honored.
             let chats = current_chats(allowlist);
             broadcast_to_chats(bot, &chats, msg).await;
-            super::alerts::record_fire(db, AUTH_FAILED);
+            super::alerts::record_fire(db, AUTH_FAILED).await;
         }
     } else if matches!(status, MemoryStatus::Healthy) {
         // Clear dedup on recovery.
-        match right_db::open_connection(db, false) {
+        match right_db::open_connection(db, false).await {
             Ok(conn) => {
-                if let Err(e) = conn.execute(
-                    "DELETE FROM memory_alerts WHERE alert_type = ?1",
-                    [AUTH_FAILED],
-                ) {
+                if let Err(e) = conn
+                    .execute(
+                        "DELETE FROM memory_alerts WHERE alert_type = ?1",
+                        [AUTH_FAILED],
+                    )
+                    .await
+                {
                     tracing::warn!("memory_alerts dedup clear failed: {e:#}");
                 }
             }

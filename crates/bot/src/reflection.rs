@@ -253,7 +253,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
             None, // no MCP instructions refresh
             None, // no memory section
         );
-        if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir) {
+        if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
             assembly_script =
                 format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
@@ -286,7 +286,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         c.arg(&assembly_script);
         c.env("HOME", &ctx.agent_dir);
         c.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir) {
+        if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir).await {
             c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
         }
         c.current_dir(&ctx.agent_dir);
@@ -357,14 +357,14 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
 
     // Account usage (best-effort — log but don't fail reflection on usage insert error).
     if let Some(breakdown) = crate::cc::stream::parse_usage_full(&result_line) {
-        match right_db::open_connection(&ctx.agent_dir, false) {
+        match right_db::open_connection(&ctx.agent_dir, false).await {
             Ok(conn) => {
                 let res = match &ctx.parent_source {
                     ParentSource::Worker { chat_id, thread_id } => {
-                        insert_reflection_worker(&conn, &breakdown, *chat_id, *thread_id)
+                        insert_reflection_worker(&conn, &breakdown, *chat_id, *thread_id).await
                     }
                     ParentSource::Cron { job_name } => {
-                        insert_reflection_cron(&conn, &breakdown, job_name)
+                        insert_reflection_cron(&conn, &breakdown, job_name).await
                     }
                 };
                 if let Err(e) = res {
@@ -398,8 +398,8 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
 mod tests {
     use super::*;
 
-    #[test]
-    fn reason_text_per_kind() {
+    #[tokio::test]
+    async fn reason_text_per_kind() {
         assert!(
             failure_reason_text(&FailureKind::BudgetExceeded { limit_usd: 2.0 }).contains("$2.00")
         );
@@ -408,16 +408,16 @@ mod tests {
         assert!(failure_reason_text(&FailureKind::NonZeroExit { code: -1 }).contains("-1"));
     }
 
-    #[test]
-    fn format_ring_event_truncates_text() {
+    #[tokio::test]
+    async fn format_ring_event_truncates_text() {
         let ev = StreamEvent::Text("x".repeat(200));
         let out = format_ring_event(&ev).unwrap();
         assert!(out.starts_with("- said: "));
         assert!(out.len() < 120);
     }
 
-    #[test]
-    fn format_ring_event_tool_use() {
+    #[tokio::test]
+    async fn format_ring_event_tool_use() {
         let ev = StreamEvent::ToolUse {
             tool: "Read".into(),
             input_summary: r#"{"path":"/x"}"#.into(),
@@ -427,8 +427,8 @@ mod tests {
         assert!(out.contains("/x"));
     }
 
-    #[test]
-    fn format_ring_event_tool_use_truncates_long_input_summary() {
+    #[tokio::test]
+    async fn format_ring_event_tool_use_truncates_long_input_summary() {
         let ev = StreamEvent::ToolUse {
             tool: "Bash".into(),
             input_summary: "a".repeat(200),
@@ -440,15 +440,15 @@ mod tests {
         assert!(out.starts_with("- called Bash("));
     }
 
-    #[test]
-    fn format_ring_event_skips_empty_text_and_other() {
+    #[tokio::test]
+    async fn format_ring_event_skips_empty_text_and_other() {
         assert!(format_ring_event(&StreamEvent::Text("   ".into())).is_none());
         assert!(format_ring_event(&StreamEvent::Other).is_none());
         assert!(format_ring_event(&StreamEvent::Result("{}".into())).is_none());
     }
 
-    #[test]
-    fn prompt_contains_markers_and_reason() {
+    #[tokio::test]
+    async fn prompt_contains_markers_and_reason() {
         let tail = VecDeque::from([
             StreamEvent::ToolUse {
                 tool: "Read".into(),
@@ -465,8 +465,8 @@ mod tests {
         assert!(p.contains("stay within 3 turns"));
     }
 
-    #[test]
-    fn prompt_handles_empty_ring_buffer() {
+    #[tokio::test]
+    async fn prompt_handles_empty_ring_buffer() {
         let tail: VecDeque<StreamEvent> = VecDeque::new();
         let p = build_reflection_prompt(&FailureKind::NonZeroExit { code: 1 }, &tail, 3);
         assert!(p.contains("(no tool activity recorded)"));

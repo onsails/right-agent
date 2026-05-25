@@ -63,8 +63,8 @@ pub(crate) fn snapshot_skills(
 mod tests {
     use super::*;
 
-    #[test]
-    fn snapshot_includes_skill_files_and_excludes_archive() {
+    #[tokio::test]
+    async fn snapshot_includes_skill_files_and_excludes_archive() {
         let dir = tempfile::TempDir::new().unwrap();
         let skills = dir.path().join(".claude/skills");
         std::fs::create_dir_all(skills.join("rightx-foo")).unwrap();

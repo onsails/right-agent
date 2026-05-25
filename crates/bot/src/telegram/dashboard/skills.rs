@@ -159,20 +159,18 @@ pub(super) async fn pin_skill_response(
 
     let agent_dir = state.agent_dir.clone();
     let skill_name = skill_name.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let conn = right_db::open_connection(&agent_dir, false)?;
-        let row =
-            right_lifecycle::get(&conn, &skill_name)?.ok_or(PinSkillError::LifecycleMissing)?;
-        if !matches!(
-            row.created_by,
-            right_lifecycle::CreatedBy::ProbeWriter | right_lifecycle::CreatedBy::Curator
-        ) {
-            return Err(PinSkillError::NotCuratorManaged);
-        }
-        right_lifecycle::set_pinned(&conn, &skill_name, pinned)?;
-        Ok(PinSkillResponse { skill_name, pinned })
-    })
-    .await?
+    let conn = right_db::open_connection(&agent_dir, false).await?;
+    let row = right_lifecycle::get(&conn, &skill_name)
+        .await?
+        .ok_or(PinSkillError::LifecycleMissing)?;
+    if !matches!(
+        row.created_by,
+        right_lifecycle::CreatedBy::ProbeWriter | right_lifecycle::CreatedBy::Curator
+    ) {
+        return Err(PinSkillError::NotCuratorManaged);
+    }
+    right_lifecycle::set_pinned(&conn, &skill_name, pinned).await?;
+    Ok(PinSkillResponse { skill_name, pinned })
 }
 
 /// Cheap existence probe for a learned-skill package inside a sandbox.
@@ -406,13 +404,10 @@ fn enrich_group(
 async fn lifecycle_rows_by_name(
     agent_dir: PathBuf,
 ) -> Result<BTreeMap<String, right_lifecycle::SkillLifecycleRow>, SkillLifecycleReadError> {
-    tokio::task::spawn_blocking(move || {
-        let conn = right_db::open_connection_readonly(agent_dir)?;
-        let rows = right_lifecycle::list(&conn)?;
-        Ok(rows
-            .into_iter()
-            .map(|row| (row.skill_name.clone(), row))
-            .collect())
-    })
-    .await?
+    let conn = right_db::open_connection_readonly(agent_dir).await?;
+    let rows = right_lifecycle::list(&conn).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.skill_name.clone(), row))
+        .collect())
 }

@@ -98,8 +98,10 @@ async fn run_backup(
         // Turso's `VACUUM INTO` needs writability on the source DB even though
         // we never mutate user rows here.
         let conn = right_db::open_connection(agent_dir, false)
+            .await
             .map_err(|e| miette::miette!("failed to open {}: {e:#}", db_display))?;
         conn.execute(&format!("VACUUM INTO '{backup_path_sql}'"), ())
+            .await
             .map_err(|e| miette::miette!("VACUUM INTO failed: {e:#}"))?;
     }
 
@@ -436,11 +438,12 @@ mod tests {
         let agents_dir = home.join("agents").join("backup-db");
         std::fs::create_dir_all(&agents_dir).unwrap();
         std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
-        let conn = right_db::open_connection(&agents_dir, true).unwrap();
+        let conn = right_db::open_connection(&agents_dir, true).await.unwrap();
         conn.execute(
             "INSERT INTO auth_tokens (token) VALUES (?1)",
             right_db::params!["token-for-backup"],
         )
+        .await
         .unwrap();
         drop(conn);
 
@@ -452,9 +455,11 @@ mod tests {
         let result = destroy_agent(home, &options).await.unwrap();
         let backup_path = result.backup_path.expect("backup path must be recorded");
         let backup_conn = right_db::open_database_path_readonly(backup_path.join("data.db"))
+            .await
             .expect("backup database must be readable");
         let count: i64 = backup_conn
             .query_row("SELECT COUNT(*) FROM auth_tokens", (), |row| row.get(0))
+            .await
             .unwrap();
 
         assert_eq!(count, 1);

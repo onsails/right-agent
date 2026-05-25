@@ -33,9 +33,12 @@ async fn outage_queues_retain_and_degrades_status() {
 
     assert!(matches!(wrapper.status(), MemoryStatus::Degraded { .. }));
 
-    let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
+    let conn = right_db::open_connection(wrapper.agent_db_path(), false)
+        .await
+        .unwrap();
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
+        .await
         .unwrap();
     assert!(n >= 1, "expected queue non-empty, got {n}");
 }
@@ -63,9 +66,12 @@ async fn client_error_drops_record_bumps_counter_no_enqueue() {
         .await;
 
     assert_eq!(wrapper.client_drops_24h().await, 1);
-    let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
+    let conn = right_db::open_connection(wrapper.agent_db_path(), false)
+        .await
+        .unwrap();
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
+        .await
         .unwrap();
     assert_eq!(n, 0);
 }
@@ -91,9 +97,12 @@ async fn recovery_drains_queue_after_breaker_closes() {
             .await;
     }
 
-    let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
+    let conn = right_db::open_connection(wrapper.agent_db_path(), false)
+        .await
+        .unwrap();
     let queued: i64 = conn
         .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
+        .await
         .unwrap();
     assert!(queued > 0, "expected non-empty queue");
 
@@ -130,10 +139,16 @@ async fn recovery_drains_queue_after_breaker_closes() {
 async fn drain_poison_pill_deleted_good_records_still_processed() {
     let (_h, url) = common::mock::always(200, r#"{"success":true}"#).await;
     let wrapper = common::wrap(&url, "bot").await;
-    let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
+    let conn = right_db::open_connection(wrapper.agent_db_path(), false)
+        .await
+        .unwrap();
 
-    right_memory::retain_queue::enqueue(&conn, "bot", "POISON", None, None, None, None).unwrap();
-    right_memory::retain_queue::enqueue(&conn, "bot", "GOOD", None, None, None, None).unwrap();
+    right_memory::retain_queue::enqueue(&conn, "bot", "POISON", None, None, None, None)
+        .await
+        .unwrap();
+    right_memory::retain_queue::enqueue(&conn, "bot", "GOOD", None, None, None, None)
+        .await
+        .unwrap();
 
     let report = right_memory::retain_queue::drain_tick(&conn, |items| async move {
         if items[0].content == "POISON" {
@@ -148,6 +163,7 @@ async fn drain_poison_pill_deleted_good_records_still_processed() {
     assert_eq!(report.deleted, 1);
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
+        .await
         .unwrap();
     assert_eq!(n, 0);
 }
@@ -156,15 +172,20 @@ async fn drain_poison_pill_deleted_good_records_still_processed() {
 async fn queue_eviction_at_cap() {
     let (_h, url) = common::mock::always(200, r#"{"success":true}"#).await;
     let wrapper = common::wrap(&url, "bot").await;
-    let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
+    let conn = right_db::open_connection(wrapper.agent_db_path(), false)
+        .await
+        .unwrap();
 
     for i in 0..(right_memory::retain_queue::QUEUE_CAP + 5) {
         let c = format!("row-{i}");
-        right_memory::retain_queue::enqueue(&conn, "bot", &c, None, None, None, None).unwrap();
+        right_memory::retain_queue::enqueue(&conn, "bot", &c, None, None, None, None)
+            .await
+            .unwrap();
     }
 
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
+        .await
         .unwrap();
     assert_eq!(n as usize, right_memory::retain_queue::QUEUE_CAP);
     let first_gone: i64 = conn
@@ -173,6 +194,7 @@ async fn queue_eviction_at_cap() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(first_gone, 0, "row-0 should have been evicted");
 }

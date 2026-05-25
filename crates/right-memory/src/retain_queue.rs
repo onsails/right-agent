@@ -25,7 +25,7 @@ pub struct PendingRetain {
 /// Enqueue a retain attempt for later drain. Evicts oldest rows if cap exceeded.
 /// Cap enforcement and insert happen atomically in one transaction so concurrent
 /// enqueuers can never blow past the cap.
-pub fn enqueue(
+pub async fn enqueue(
     conn: &Connection,
     source: &str,
     content: &str,
@@ -40,48 +40,52 @@ pub fn enqueue(
         .map_err(|e| MemoryError::HindsightOther(format!("tags_json: {e:#}")))?;
     let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-    conn.with_immediate_transaction(|tx| {
-        // Delete (count - (cap - 1)) oldest rows if over-cap, so we're at cap-1 before insert.
-        tx.execute(
-            "DELETE FROM pending_retains WHERE id IN (
-                SELECT id FROM pending_retains ORDER BY created_at ASC
-                    LIMIT MAX(0, (SELECT COUNT(*) FROM pending_retains) - ?1)
-             )",
-            [(QUEUE_CAP as i64) - 1],
-        )?;
+    let tx = conn.transaction().await?;
+    // Delete (count - (cap - 1)) oldest rows if over-cap, so we're at cap-1 before insert.
+    tx.execute(
+        "DELETE FROM pending_retains WHERE id IN (
+            SELECT id FROM pending_retains ORDER BY created_at ASC
+                LIMIT MAX(0, (SELECT COUNT(*) FROM pending_retains) - ?1)
+         )",
+        [(QUEUE_CAP as i64) - 1],
+    )
+    .await?;
 
-        tx.execute(
-            "INSERT INTO pending_retains
-                (content, context, document_id, update_mode, tags_json, created_at, attempts, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
-            params![
-                content,
-                context,
-                document_id,
-                update_mode,
-                tags_json,
-                created_at,
-                source,
-            ],
-        )?;
+    tx.execute(
+        "INSERT INTO pending_retains
+            (content, context, document_id, update_mode, tags_json, created_at, attempts, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+        params![
+            content,
+            context,
+            document_id,
+            update_mode,
+            tags_json,
+            created_at,
+            source,
+        ],
+    )
+    .await?;
 
-        Ok(())
-    })?;
+    tx.commit().await?;
     Ok(())
 }
 
 /// Current row count.
-pub fn count(conn: &Connection) -> Result<usize, MemoryError> {
-    let n: i64 = conn.query_one("SELECT COUNT(*) FROM pending_retains", (), |r| r.get(0))?;
+pub async fn count(conn: &Connection) -> Result<usize, MemoryError> {
+    let n: i64 = conn
+        .query_one("SELECT COUNT(*) FROM pending_retains", (), |r| r.get(0))
+        .await?;
     Ok(n as usize)
 }
 
 /// Age of the oldest row (None if queue empty).
-pub fn oldest_age(conn: &Connection) -> Result<Option<Duration>, MemoryError> {
-    let iso: Option<String> =
-        conn.query_one("SELECT MIN(created_at) FROM pending_retains", (), |r| {
+pub async fn oldest_age(conn: &Connection) -> Result<Option<Duration>, MemoryError> {
+    let iso: Option<String> = conn
+        .query_one("SELECT MIN(created_at) FROM pending_retains", (), |r| {
             r.get(0)
-        })?;
+        })
+        .await?;
     let Some(iso) = iso else { return Ok(None) };
     let parsed = chrono::DateTime::parse_from_rfc3339(&iso)
         .map_err(|e| MemoryError::HindsightOther(format!("oldest_age parse: {e:#}")))?;
@@ -112,7 +116,7 @@ where
 {
     let mut report = DrainReport::default();
 
-    let batch = match load_batch(conn, DRAIN_BATCH) {
+    let batch = match load_batch(conn, DRAIN_BATCH).await {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("drain: load_batch failed: {e:#}");
@@ -138,7 +142,10 @@ where
         if let Some(c) = created
             && now.signed_duration_since(c) > MAX_AGE
         {
-            match conn.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
+            match conn
+                .execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id])
+                .await
+            {
                 Ok(_) => {
                     tracing::warn!(id = entry.id, "retain dropped: >24h");
                     report.dropped_age += 1;
@@ -151,14 +158,20 @@ where
         }
 
         match call(vec![entry.clone()]).await {
-            Ok(()) => match conn.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
+            Ok(()) => match conn
+                .execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id])
+                .await
+            {
                 Ok(_) => report.deleted += 1,
                 Err(e) => {
                     tracing::error!(id = entry.id, error = %e, "drain: success DELETE failed");
                 }
             },
             Err(ErrorKind::Client) => {
-                match conn.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
+                match conn
+                    .execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id])
+                    .await
+                {
                     Ok(_) => {
                         tracing::error!(id = entry.id, "retain dropped on 4xx: {entry:?}");
                         report.dropped_client += 1;
@@ -184,11 +197,14 @@ where
                 break;
             }
             Err(_) => {
-                if let Err(e) = conn.execute(
-                    "UPDATE pending_retains SET attempts = attempts + 1, \
+                if let Err(e) = conn
+                    .execute(
+                        "UPDATE pending_retains SET attempts = attempts + 1, \
                        last_attempt_at = ?1, last_error = ?2 WHERE id = ?3",
-                    (now.to_rfc3339(), "classified_transient", entry.id),
-                ) {
+                        (now.to_rfc3339(), "classified_transient", entry.id),
+                    )
+                    .await
+                {
                     tracing::error!(id = entry.id, error = %e, "drain: attempts UPDATE failed");
                 }
                 report.bumped_attempts += 1;
@@ -200,7 +216,7 @@ where
     report
 }
 
-fn load_batch(conn: &Connection, limit: usize) -> Result<Vec<PendingRetain>, MemoryError> {
+async fn load_batch(conn: &Connection, limit: usize) -> Result<Vec<PendingRetain>, MemoryError> {
     conn.query_all(
         "SELECT id, content, context, document_id, update_mode, tags_json, created_at, attempts
            FROM pending_retains ORDER BY created_at ASC LIMIT ?1",
@@ -229,6 +245,7 @@ fn load_batch(conn: &Connection, limit: usize) -> Result<Vec<PendingRetain>, Mem
             })
         },
     )
+    .await
     .map_err(Into::into)
 }
 
@@ -238,15 +255,15 @@ mod tests {
     use right_db::open_connection;
     use tempfile::tempdir;
 
-    fn fresh_db() -> (tempfile::TempDir, Connection) {
+    async fn fresh_db() -> (tempfile::TempDir, Connection) {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path(), true).unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
         (dir, conn)
     }
 
-    #[test]
-    fn enqueue_inserts_row() {
-        let (_dir, conn) = fresh_db();
+    #[tokio::test]
+    async fn enqueue_inserts_row() {
+        let (_dir, conn) = fresh_db().await;
         enqueue(
             &conn,
             "bot",
@@ -256,18 +273,21 @@ mod tests {
             Some("append"),
             None,
         )
+        .await
         .unwrap();
-        assert_eq!(count(&conn).unwrap(), 1);
+        assert_eq!(count(&conn).await.unwrap(), 1);
     }
 
-    #[test]
-    fn enqueue_cap_evicts_oldest() {
-        let (_dir, conn) = fresh_db();
+    #[tokio::test]
+    async fn enqueue_cap_evicts_oldest() {
+        let (_dir, conn) = fresh_db().await;
         for i in 0..(QUEUE_CAP + 5) {
             let c = format!("content-{i}");
-            enqueue(&conn, "bot", &c, None, None, None, None).unwrap();
+            enqueue(&conn, "bot", &c, None, None, None, None)
+                .await
+                .unwrap();
         }
-        assert_eq!(count(&conn).unwrap(), QUEUE_CAP);
+        assert_eq!(count(&conn).await.unwrap(), QUEUE_CAP);
         // Oldest remaining rows should not include the first 5.
         let oldest_content: String = conn
             .query_one(
@@ -275,6 +295,7 @@ mod tests {
                 (),
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert!(
             oldest_content.starts_with("content-"),
@@ -287,25 +308,29 @@ mod tests {
                 (),
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(first_gone, 0);
     }
 
-    #[test]
-    fn oldest_age_returns_none_when_empty() {
-        let (_dir, conn) = fresh_db();
-        assert!(oldest_age(&conn).unwrap().is_none());
+    #[tokio::test]
+    async fn oldest_age_returns_none_when_empty() {
+        let (_dir, conn) = fresh_db().await;
+        assert!(oldest_age(&conn).await.unwrap().is_none());
     }
 
-    #[test]
-    fn tags_serialize_as_json_array() {
-        let (_dir, conn) = fresh_db();
+    #[tokio::test]
+    async fn tags_serialize_as_json_array() {
+        let (_dir, conn) = fresh_db().await;
         let tags = vec!["chat:42".to_string(), "user:7".to_string()];
-        enqueue(&conn, "bot", "c", None, None, None, Some(&tags)).unwrap();
+        enqueue(&conn, "bot", "c", None, None, None, Some(&tags))
+            .await
+            .unwrap();
         let json: String = conn
             .query_one("SELECT tags_json FROM pending_retains LIMIT 1", (), |r| {
                 r.get(0)
             })
+            .await
             .unwrap();
         let parsed: Vec<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, tags);
@@ -334,8 +359,10 @@ mod tests {
 
     #[tokio::test]
     async fn drain_success_deletes_entry() {
-        let (_dir, conn) = fresh_db();
-        enqueue(&conn, "bot", "c1", None, None, None, None).unwrap();
+        let (_dir, conn) = fresh_db().await;
+        enqueue(&conn, "bot", "c1", None, None, None, None)
+            .await
+            .unwrap();
         let fake = FakeOutcome::default();
         fake.push(None);
 
@@ -346,14 +373,18 @@ mod tests {
         .await;
 
         assert_eq!(report.deleted, 1);
-        assert_eq!(count(&conn).unwrap(), 0);
+        assert_eq!(count(&conn).await.unwrap(), 0);
     }
 
     #[tokio::test]
     async fn drain_client_error_deletes_and_continues() {
-        let (_dir, conn) = fresh_db();
-        enqueue(&conn, "bot", "poison", None, None, None, None).unwrap();
-        enqueue(&conn, "bot", "good", None, None, None, None).unwrap();
+        let (_dir, conn) = fresh_db().await;
+        enqueue(&conn, "bot", "poison", None, None, None, None)
+            .await
+            .unwrap();
+        enqueue(&conn, "bot", "good", None, None, None, None)
+            .await
+            .unwrap();
         let fake = FakeOutcome::default();
         fake.push(Some(ErrorKind::Client));
         fake.push(None);
@@ -366,14 +397,18 @@ mod tests {
 
         assert_eq!(report.dropped_client, 1);
         assert_eq!(report.deleted, 1);
-        assert_eq!(count(&conn).unwrap(), 0);
+        assert_eq!(count(&conn).await.unwrap(), 0);
     }
 
     #[tokio::test]
     async fn drain_transient_updates_attempts_and_breaks() {
-        let (_dir, conn) = fresh_db();
-        enqueue(&conn, "bot", "first", None, None, None, None).unwrap();
-        enqueue(&conn, "bot", "second", None, None, None, None).unwrap();
+        let (_dir, conn) = fresh_db().await;
+        enqueue(&conn, "bot", "first", None, None, None, None)
+            .await
+            .unwrap();
+        enqueue(&conn, "bot", "second", None, None, None, None)
+            .await
+            .unwrap();
         let fake = FakeOutcome::default();
         fake.push(Some(ErrorKind::Transient));
 
@@ -391,21 +426,25 @@ mod tests {
                 (),
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(attempts, 1);
-        assert_eq!(count(&conn).unwrap(), 2);
+        assert_eq!(count(&conn).await.unwrap(), 2);
     }
 
     #[tokio::test]
     async fn drain_age_cap_drops_stale_rows() {
-        let (_dir, conn) = fresh_db();
-        enqueue(&conn, "bot", "old", None, None, None, None).unwrap();
+        let (_dir, conn) = fresh_db().await;
+        enqueue(&conn, "bot", "old", None, None, None, None)
+            .await
+            .unwrap();
         // Overwrite created_at with a real RFC3339 timestamp 48h in the past so the
         // parser accepts it (SQLite's datetime() format is not RFC3339 and would
         // fail to parse, which would fall through to the call path).
         let t = (chrono::Utc::now() - chrono::Duration::hours(48))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         conn.execute("UPDATE pending_retains SET created_at = ?1", [t])
+            .await
             .unwrap();
 
         let report = drain_tick(&conn, |_items| async move {
@@ -414,7 +453,7 @@ mod tests {
         .await;
 
         assert_eq!(report.dropped_age, 1);
-        assert_eq!(count(&conn).unwrap(), 0);
+        assert_eq!(count(&conn).await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -423,11 +462,13 @@ mod tests {
         // Without the fix, this test deadlocks (drain holds tx; enqueue waits on busy_timeout).
         let dir = tempdir().unwrap();
         let path = dir.path().to_path_buf();
-        let drain_conn = right_db::open_connection(&path, true).unwrap();
-        let enq_conn = right_db::open_connection(&path, false).unwrap();
+        let drain_conn = right_db::open_connection(&path, true).await.unwrap();
+        let enq_conn = right_db::open_connection(&path, false).await.unwrap();
 
         // Seed with one row to drain.
-        enqueue(&drain_conn, "bot", "first", None, None, None, None).unwrap();
+        enqueue(&drain_conn, "bot", "first", None, None, None, None)
+            .await
+            .unwrap();
 
         // Trigger drain where the closure blocks on a oneshot until the concurrent
         // enqueue succeeds; if a tx was held, the enqueue would starve.
@@ -455,7 +496,9 @@ mod tests {
             // Wait until drain is mid-await.
             rx_entered.await.unwrap();
             // This must succeed even though drain_tick is suspended in its closure.
-            enqueue(&enq_conn, "bot", "concurrent", None, None, None, None).unwrap();
+            enqueue(&enq_conn, "bot", "concurrent", None, None, None, None)
+                .await
+                .unwrap();
             let _ = tx_unblock.send(());
         };
 
@@ -463,6 +506,6 @@ mod tests {
 
         assert_eq!(report.deleted, 1);
         // After drain: "first" gone, "concurrent" still enqueued
-        assert_eq!(count(&drain_conn).unwrap(), 1);
+        assert_eq!(count(&drain_conn).await.unwrap(), 1);
     }
 }

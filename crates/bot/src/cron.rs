@@ -291,7 +291,7 @@ fn classify_cron_failure(
 /// Insert a freshly-started cron run with `status='running'`, snapshotting the
 /// spec's delivery target onto the row so one-shot delivery survives spec
 /// auto-deletion.
-fn insert_running_run(
+async fn insert_running_run(
     conn: &right_db::Connection,
     run_id: &str,
     job_name: &str,
@@ -314,6 +314,7 @@ fn insert_running_run(
             target_thread_id: spec.target_thread_id,
         },
     )
+    .await
 }
 
 fn cron_shutdown_failure_payload(
@@ -337,12 +338,12 @@ fn cron_shutdown_failure_payload(
     Ok((run_note, delivery_json, error_json))
 }
 
-fn mark_cron_interrupted_by_shutdown(
+async fn mark_cron_interrupted_by_shutdown(
     conn: &right_db::Connection,
     job_name: &str,
     reason: &str,
 ) -> Result<usize, right_db::DbError> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction().await?;
     let rows = {
         let mut stmt = tx.prepare(
             "SELECT id, target_chat_id
@@ -353,7 +354,8 @@ fn mark_cron_interrupted_by_shutdown(
         )?;
         stmt.query_map([job_name], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })?
+        })
+        .await?
         .collect::<Result<Vec<_>, _>>()?
     };
     let mut updated = 0usize;
@@ -367,8 +369,9 @@ fn mark_cron_interrupted_by_shutdown(
         // `exit_code` is intentionally not in the SET list: a row at
         // `status='running'` has no exit code yet, and skipping the column
         // means a future race that wrote one would not be silently erased.
-        let changed = tx.execute(
-            "UPDATE async_runs
+        let changed = tx
+            .execute(
+                "UPDATE async_runs
              SET run_note = ?2,
                  delivery_json = ?3,
                  error_json = ?4,
@@ -380,27 +383,32 @@ fn mark_cron_interrupted_by_shutdown(
              WHERE id = ?1
                AND kind = 'cron'
                AND status = 'running'",
-            right_db::params![
-                run_id,
-                run_note,
-                delivery_required.then_some(delivery_json),
-                error_json,
-                delivery_required,
-                if delivery_required { "pending" } else { "none" },
-                &now,
-            ],
-        )?;
+                right_db::params![
+                    run_id,
+                    run_note,
+                    delivery_required.then_some(delivery_json),
+                    error_json,
+                    delivery_required,
+                    if delivery_required { "pending" } else { "none" },
+                    &now,
+                ],
+            )
+            .await?;
         updated += changed;
     }
-    tx.commit()?;
+    tx.commit().await?;
     Ok(updated)
 }
 
-fn update_failed_run_record(conn: &right_db::Connection, run_id: &str, exit_code: Option<i32>) {
-    update_run_record(conn, run_id, exit_code, "failed");
+async fn update_failed_run_record(
+    conn: &right_db::Connection,
+    run_id: &str,
+    exit_code: Option<i32>,
+) {
+    update_run_record(conn, run_id, exit_code, "failed").await;
 }
 
-fn persist_successful_cron_output(
+async fn persist_successful_cron_output(
     conn: &right_db::Connection,
     run_id: &str,
     cron_output: &CronReplyOutput,
@@ -419,7 +427,8 @@ fn persist_successful_cron_output(
             error_json: None,
             delivery_required,
         },
-    )?;
+    )
+    .await?;
     Ok(delivery_status)
 }
 
@@ -506,8 +515,8 @@ async fn execute_job(
     let log_path_str = format!("{sandbox_log_dir}/{log_filename}");
 
     // DB insert: status='running' (D-04)
-    // Open connection per-job — right_db::Connection is !Send
-    let conn = match right_db::open_connection(agent_dir, false) {
+    // Open per job so DB resource lifetime is bounded to the job run.
+    let conn = match right_db::open_connection(agent_dir, false).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(job = %job_name, "DB open failed: {e:#}");
@@ -515,7 +524,9 @@ async fn execute_job(
             return;
         }
     };
-    if let Err(e) = insert_running_run(&conn, &run_id, job_name, &started_at, &log_path_str, spec) {
+    if let Err(e) =
+        insert_running_run(&conn, &run_id, job_name, &started_at, &log_path_str, spec).await
+    {
         tracing::error!(job = %job_name, "DB insert failed: {e:#}");
         std::fs::remove_file(&lock_path).ok();
         return;
@@ -599,7 +610,7 @@ async fn execute_job(
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
         );
-        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
             assembly_script =
                 format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
@@ -637,14 +648,14 @@ async fn execute_job(
         );
         if which::which("claude").is_err() && which::which("claude-bun").is_err() {
             tracing::error!(job = %job_name, "claude binary not found in PATH");
-            update_failed_run_record(&conn, &run_id, None);
+            update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
         }
         let host_log_dir = agent_dir.join("crons").join("logs");
         if let Err(e) = std::fs::create_dir_all(&host_log_dir) {
             tracing::error!(job = %job_name, "failed to create log dir: {e:#}");
-            update_failed_run_record(&conn, &run_id, None);
+            update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
         }
@@ -660,7 +671,7 @@ async fn execute_job(
         // UNDOCUMENTED: re-verify after CC version bumps.
         // See: https://github.com/anthropics/claude-code/issues/6415
         c.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
         }
         c.current_dir(agent_dir);
@@ -675,7 +686,7 @@ async fn execute_job(
     let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
-            update_failed_run_record(&conn, &run_id, None);
+            update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
         }
@@ -703,7 +714,9 @@ async fn execute_job(
             &execution_event_scope,
             execution_event_seq,
             &line,
-        ) {
+        )
+        .await
+        {
             tracing::warn!(
                 job = %job_name,
                 run_id = %run_id,
@@ -744,7 +757,7 @@ async fn execute_job(
         }
     };
     if exit_status.is_none() {
-        update_failed_run_record(&conn, &run_id, None);
+        update_failed_run_record(&conn, &run_id, None).await;
         std::fs::remove_file(&lock_path).ok();
         return;
     }
@@ -894,19 +907,21 @@ async fn execute_job(
                 // sees the run as broken instead of stuck at 'success' with no
                 // delivery payload.
                 if let Some(delivery_json) = delivery_json {
-                    let tx_result: Result<&'static str, right_db::DbError> = (|| {
-                        let tx = conn.transaction()?;
+                    let tx_result: Result<&'static str, right_db::DbError> = async {
+                        let tx = conn.transaction().await?;
                         let delivery_status = persist_successful_cron_output(
                             &tx,
                             &run_id,
                             &cron_output,
                             &delivery_json,
-                        )?;
-                        right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "success")?;
-                        tx.commit()?;
+                        )
+                        .await?;
+                        right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "success")
+                            .await?;
+                        tx.commit().await?;
                         Ok(delivery_status)
-                    })(
-                    );
+                    }
+                    .await;
 
                     match tx_result {
                         Ok(delivery_status) => {
@@ -923,7 +938,7 @@ async fn execute_job(
                                 job = %job_name,
                                 "failed to persist cron output atomically; marking run failed: {e:#}"
                             );
-                            update_failed_run_record(&conn, &run_id, exit_code);
+                            update_failed_run_record(&conn, &run_id, exit_code).await;
                         }
                     }
                 } else {
@@ -931,7 +946,7 @@ async fn execute_job(
                         job = %job_name,
                         "failed to produce delivery_json; marking run failed"
                     );
-                    update_failed_run_record(&conn, &run_id, exit_code);
+                    update_failed_run_record(&conn, &run_id, exit_code).await;
                 }
             }
             Err(reason) => {
@@ -941,8 +956,8 @@ async fn execute_job(
                     "reason": reason,
                 })
                 .to_string();
-                let tx_result: Result<(), right_db::DbError> = (|| {
-                    let tx = conn.transaction()?;
+                let tx_result: Result<(), right_db::DbError> = async {
+                    let tx = conn.transaction().await?;
                     right_agent::async_runs::persist_run_output(
                         &tx,
                         &run_id,
@@ -952,18 +967,20 @@ async fn execute_job(
                             error_json: Some(&error_json_str),
                             delivery_required: false,
                         },
-                    )?;
-                    right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "failed")?;
-                    tx.commit()?;
+                    )
+                    .await?;
+                    right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "failed").await?;
+                    tx.commit().await?;
                     Ok(())
-                })();
+                }
+                .await;
 
                 if let Err(e) = tx_result {
                     tracing::error!(
                         job = %job_name,
                         "failed to persist cron parse error atomically: {e:#}"
                     );
-                    update_failed_run_record(&conn, &run_id, exit_code);
+                    update_failed_run_record(&conn, &run_id, exit_code).await;
                 }
             }
         }
@@ -971,7 +988,7 @@ async fn execute_job(
         // Failure path: commit terminal status='failed' before reflection runs.
         // Reflection then writes its own failure notify via persist_run_output,
         // which is consistent with status='failed'.
-        update_run_record(&conn, &run_id, exit_code, "failed");
+        update_run_record(&conn, &run_id, exit_code, "failed").await;
         let exit_str = exit_code.map_or("unknown".to_string(), |c| c.to_string());
         let raw_detail = find_last_result_line(&collected_lines)
             .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -1041,7 +1058,9 @@ async fn execute_job(
                         error_json: None,
                         delivery_required: true,
                     },
-                ) {
+                )
+                .await
+                {
                     tracing::error!(job = %job_name, "failed to persist failure notify to DB: {e:#}");
                 }
             }
@@ -1073,7 +1092,8 @@ async fn execute_job(
                     .iter()
                     .find_map(|l| crate::cc::stream::parse_api_key_source(l))
                     .unwrap_or_else(|| "none".into());
-                if let Err(e) = right_agent::usage::insert::insert_cron(&conn, &breakdown, job_name)
+                if let Err(e) =
+                    right_agent::usage::insert::insert_cron(&conn, &breakdown, job_name).await
                 {
                     tracing::warn!(job = %job_name, "usage insert failed: {e:#}");
                 }
@@ -1130,13 +1150,13 @@ pub(crate) fn parse_cron_output(lines: &[String]) -> Result<CronReplyOutput, Str
     Ok(output)
 }
 
-fn update_run_record(
+async fn update_run_record(
     conn: &right_db::Connection,
     run_id: &str,
     exit_code: Option<i32>,
     status: &str,
 ) {
-    if let Err(e) = right_agent::async_runs::finish_run(conn, run_id, exit_code, status) {
+    if let Err(e) = right_agent::async_runs::finish_run(conn, run_id, exit_code, status).await {
         tracing::error!("DB update for run {run_id} failed: {e:#}");
     }
 }
@@ -1251,7 +1271,7 @@ pub(crate) async fn run_cron_task(
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
-    let conn = match right_db::open_connection(&agent_dir, false) {
+    let conn = match right_db::open_connection(&agent_dir, false).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(agent = %agent_name, "cron task: DB open failed: {e:#}");
@@ -1281,12 +1301,13 @@ pub(crate) async fn run_cron_task(
         &debug,
         &learning,
         &learning_drain_scheduler,
-    );
+    )
+    .await;
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock, &debug, &learning, &learning_drain_scheduler);
+                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock, &debug, &learning, &learning_drain_scheduler).await;
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
@@ -1349,10 +1370,11 @@ pub(crate) async fn run_cron_task(
                         "cron shutdown: job timed out, aborting and marking interrupted"
                     );
                     pending_handle.handle.abort();
-                    match right_db::open_connection(&agent_dir, false) {
+                    match right_db::open_connection(&agent_dir, false).await {
                         Ok(conn) => {
                             if let Err(e) =
                                 mark_cron_interrupted_by_shutdown(&conn, &name, "shutdown timeout")
+                                    .await
                             {
                                 tracing::error!(
                                     job = %name,
@@ -1385,21 +1407,30 @@ struct OneShotSpecDeleter {
 
 impl Drop for OneShotSpecDeleter {
     fn drop(&mut self) {
-        delete_one_shot_spec(&self.agent_dir, &self.job_name);
+        // `tokio::spawn` panics if no runtime is current — guard so a drop
+        // after the runtime has shut down (e.g. test teardown) doesn't abort.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let agent_dir = self.agent_dir.clone();
+        let job_name = self.job_name.clone();
+        handle.spawn(async move {
+            delete_one_shot_spec(&agent_dir, &job_name).await;
+        });
     }
 }
 
 /// Delete a one-shot spec after it has fired. Opens a fresh DB connection
 /// (callers are inside `tokio::spawn` and cannot share the reconciler's connection).
-fn delete_one_shot_spec(agent_dir: &std::path::Path, job_name: &str) {
-    let conn = match right_db::open_connection(agent_dir, false) {
+async fn delete_one_shot_spec(agent_dir: &std::path::Path, job_name: &str) {
+    let conn = match right_db::open_connection(agent_dir, false).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(job = %job_name, "failed to open DB for post-fire delete: {e:#}");
             return;
         }
     };
-    if let Err(e) = right_agent::cron_spec::delete_spec(&conn, job_name, agent_dir) {
+    if let Err(e) = right_agent::cron_spec::delete_spec(&conn, job_name, agent_dir).await {
         tracing::error!(job = %job_name, "failed to delete one-shot spec after fire: {e}");
     } else {
         tracing::info!(job = %job_name, "one-shot spec auto-deleted after fire");
@@ -1478,7 +1509,7 @@ fn fire_one_shot_specs(
 
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
-fn reconcile_jobs(
+async fn reconcile_jobs(
     handles: &mut HashMap<String, (CronSpec, JoinHandle<()>)>,
     triggered_handles: &mut Vec<JoinHandle<()>>,
     conn: &right_db::Connection,
@@ -1496,7 +1527,7 @@ fn reconcile_jobs(
 ) {
     // Clean up finished triggered handles
     triggered_handles.retain(|h| !h.is_finished());
-    let new_specs = match right_agent::cron_spec::load_specs_from_db(conn) {
+    let new_specs = match right_agent::cron_spec::load_specs_from_db(conn).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("failed to load cron specs from DB: {e}");
@@ -1616,7 +1647,7 @@ fn reconcile_jobs(
     for (name, spec) in &new_specs {
         if spec.triggered_at.is_some() {
             // Clear trigger immediately to prevent re-firing on next tick
-            if let Err(e) = right_agent::cron_spec::clear_triggered_at(conn, name) {
+            if let Err(e) = right_agent::cron_spec::clear_triggered_at(conn, name).await {
                 tracing::error!(job = %name, "failed to clear triggered_at: {e}");
                 continue;
             }
@@ -2057,10 +2088,10 @@ mod tests {
         assert!(err.contains("empty silent reason"));
     }
 
-    #[test]
-    fn persist_successful_cron_output_notify_sets_pending_delivery() {
+    #[tokio::test]
+    async fn persist_successful_cron_output_notify_sets_pending_delivery() {
         let dir = tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
         let spec = right_agent::cron_spec::CronSpec {
             schedule_kind: right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".into()),
             prompt: "p".into(),
@@ -2078,6 +2109,7 @@ mod tests {
             "/log",
             &spec,
         )
+        .await
         .unwrap();
         let output = CronReplyOutput {
             delivery: CronDeliveryDecision::Notify {
@@ -2088,7 +2120,9 @@ mod tests {
         };
         let json = serde_json::to_string(&output.delivery).unwrap();
 
-        let status = persist_successful_cron_output(&conn, "run-notify", &output, &json).unwrap();
+        let status = persist_successful_cron_output(&conn, "run-notify", &output, &json)
+            .await
+            .unwrap();
 
         assert_eq!(status, "pending");
         let row: (String, String, i64, String) = conn
@@ -2097,6 +2131,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row.0, "checked");
         assert_eq!(
@@ -2107,10 +2142,10 @@ mod tests {
         assert_eq!(row.3, "pending");
     }
 
-    #[test]
-    fn persist_successful_cron_output_silent_sets_none_delivery() {
+    #[tokio::test]
+    async fn persist_successful_cron_output_silent_sets_none_delivery() {
         let dir = tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
         let spec = right_agent::cron_spec::CronSpec {
             schedule_kind: right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".into()),
             prompt: "p".into(),
@@ -2128,6 +2163,7 @@ mod tests {
             "/log",
             &spec,
         )
+        .await
         .unwrap();
         let output = CronReplyOutput {
             delivery: CronDeliveryDecision::Silent {
@@ -2137,7 +2173,9 @@ mod tests {
         };
         let json = serde_json::to_string(&output.delivery).unwrap();
 
-        let status = persist_successful_cron_output(&conn, "run-silent", &output, &json).unwrap();
+        let status = persist_successful_cron_output(&conn, "run-silent", &output, &json)
+            .await
+            .unwrap();
 
         assert_eq!(status, "none");
         let row: (String, String, i64, String) = conn
@@ -2146,6 +2184,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row.0, "checked");
         assert_eq!(row.1, r#"{"kind":"silent","reason":"no changes"}"#);
@@ -2153,10 +2192,10 @@ mod tests {
         assert_eq!(row.3, "none");
     }
 
-    #[test]
-    fn test_triggered_at_loaded_from_db() {
+    #[tokio::test]
+    async fn test_triggered_at_loaded_from_db() {
         let dir = tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
 
         right_agent::cron_spec::create_spec(
             &conn,
@@ -2166,27 +2205,39 @@ mod tests {
             None,
             None,
         )
+        .await
         .unwrap();
-        right_agent::cron_spec::trigger_spec(&conn, "trig-test").unwrap();
+        right_agent::cron_spec::trigger_spec(&conn, "trig-test")
+            .await
+            .unwrap();
 
-        let specs = right_agent::cron_spec::load_specs_from_db(&conn).unwrap();
+        let specs = right_agent::cron_spec::load_specs_from_db(&conn)
+            .await
+            .unwrap();
         assert!(
             specs["trig-test"].triggered_at.is_some(),
             "triggered_at should be loaded"
         );
     }
 
-    #[test]
-    fn test_clear_triggered_at_works() {
+    #[tokio::test]
+    async fn test_clear_triggered_at_works() {
         let dir = tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
 
         right_agent::cron_spec::create_spec(&conn, "clr-test", "*/5 * * * *", "test", None, None)
+            .await
             .unwrap();
-        right_agent::cron_spec::trigger_spec(&conn, "clr-test").unwrap();
-        right_agent::cron_spec::clear_triggered_at(&conn, "clr-test").unwrap();
+        right_agent::cron_spec::trigger_spec(&conn, "clr-test")
+            .await
+            .unwrap();
+        right_agent::cron_spec::clear_triggered_at(&conn, "clr-test")
+            .await
+            .unwrap();
 
-        let specs = right_agent::cron_spec::load_specs_from_db(&conn).unwrap();
+        let specs = right_agent::cron_spec::load_specs_from_db(&conn)
+            .await
+            .unwrap();
         assert!(
             specs["clr-test"].triggered_at.is_none(),
             "triggered_at should be cleared"
@@ -2204,7 +2255,7 @@ mod tests {
         let agent_dir = dir.path().to_path_buf();
 
         // Create DB and register a job with a far-future schedule (once per year)
-        let conn = right_db::open_connection(&agent_dir, true).unwrap();
+        let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
         right_agent::cron_spec::create_spec(
             &conn,
             "slow-job",
@@ -2213,6 +2264,7 @@ mod tests {
             None,
             None,
         )
+        .await
         .unwrap();
         drop(conn);
 
@@ -2317,15 +2369,15 @@ mod target_snapshot_tests {
     use super::*;
     use right_agent::cron_spec::{CronSpec, ScheduleKind};
 
-    fn migrated_conn() -> (tempfile::TempDir, right_db::Connection) {
+    async fn migrated_conn() -> (tempfile::TempDir, right_db::Connection) {
         let dir = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
         (dir, conn)
     }
 
-    #[test]
-    fn insert_running_run_writes_async_runs() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn insert_running_run_writes_async_runs() {
+        let (_dir, conn) = migrated_conn().await;
         let spec = CronSpec {
             schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
             prompt: "p".into(),
@@ -2343,6 +2395,7 @@ mod target_snapshot_tests {
             "/log/path",
             &spec,
         )
+        .await
         .unwrap();
 
         let row: (String, String, Option<i64>, Option<i64>) = conn
@@ -2351,13 +2404,14 @@ mod target_snapshot_tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row, ("cron".into(), "job-x".into(), Some(-777), Some(13)));
     }
 
-    #[test]
-    fn insert_running_run_writes_zero_for_targetless_cron() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn insert_running_run_writes_zero_for_targetless_cron() {
+        let (_dir, conn) = migrated_conn().await;
         let spec = CronSpec {
             schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
             prompt: "p".into(),
@@ -2375,6 +2429,7 @@ mod target_snapshot_tests {
             "/log/path",
             &spec,
         )
+        .await
         .unwrap();
 
         let target_chat_id: i64 = conn
@@ -2383,13 +2438,14 @@ mod target_snapshot_tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(target_chat_id, 0);
     }
 
-    #[test]
-    fn mark_cron_interrupted_by_shutdown_sets_failed_pending_delivery_for_target() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn mark_cron_interrupted_by_shutdown_sets_failed_pending_delivery_for_target() {
+        let (_dir, conn) = migrated_conn().await;
         let spec = right_agent::cron_spec::CronSpec {
             schedule_kind: right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".into()),
             prompt: "p".into(),
@@ -2407,10 +2463,12 @@ mod target_snapshot_tests {
             "/sandbox/crons/logs/job-x-run-1.ndjson",
             &spec,
         )
+        .await
         .unwrap();
 
-        let updated =
-            mark_cron_interrupted_by_shutdown(&conn, "job-x", "shutdown timeout").unwrap();
+        let updated = mark_cron_interrupted_by_shutdown(&conn, "job-x", "shutdown timeout")
+            .await
+            .unwrap();
 
         assert_eq!(updated, 1);
         let row: (String, String, String, String) = conn
@@ -2420,6 +2478,7 @@ mod target_snapshot_tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row.0, "failed");
         assert_eq!(row.1, "pending");
@@ -2427,9 +2486,9 @@ mod target_snapshot_tests {
         assert!(row.3.contains("shutdown timeout"));
     }
 
-    #[test]
-    fn mark_cron_interrupted_by_shutdown_uses_none_delivery_for_targetless() {
-        let (_dir, conn) = migrated_conn();
+    #[tokio::test]
+    async fn mark_cron_interrupted_by_shutdown_uses_none_delivery_for_targetless() {
+        let (_dir, conn) = migrated_conn().await;
         let spec = right_agent::cron_spec::CronSpec {
             schedule_kind: right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".into()),
             prompt: "p".into(),
@@ -2447,10 +2506,12 @@ mod target_snapshot_tests {
             "/log/path",
             &spec,
         )
+        .await
         .unwrap();
 
-        let updated =
-            mark_cron_interrupted_by_shutdown(&conn, "job-y", "shutdown timeout").unwrap();
+        let updated = mark_cron_interrupted_by_shutdown(&conn, "job-y", "shutdown timeout")
+            .await
+            .unwrap();
 
         assert_eq!(updated, 1);
         let row: (String, i64, String) = conn
@@ -2459,6 +2520,7 @@ mod target_snapshot_tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row, ("failed".to_string(), 0, "none".to_string()));
     }

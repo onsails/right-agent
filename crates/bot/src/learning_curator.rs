@@ -140,24 +140,26 @@ use crate::telegram::SessionLocks;
 const CURATOR_TIMEOUT: StdDuration = StdDuration::from_secs(900);
 const CURATOR_MAX_TURNS: u32 = 9999;
 
-pub(crate) fn load_state_db(
+pub(crate) async fn load_state_db(
     conn: &right_db::Connection,
 ) -> Result<CuratorState, right_db::DbError> {
-    let row = conn.query_row(
-        "SELECT last_run_at, last_run_status, consecutive_failures, \
+    let row = conn
+        .query_row(
+            "SELECT last_run_at, last_run_status, consecutive_failures, \
                 circuit_open_until, last_spike_evidence_json \
          FROM curator_state WHERE agent_singleton_id = 1",
-        [],
-        |r| {
-            Ok(CuratorState {
-                last_run_at: r.get(0)?,
-                last_run_status: r.get(1)?,
-                consecutive_failures: r.get::<_, i64>(2)? as u32,
-                circuit_open_until: r.get(3)?,
-                last_spike_evidence_json: r.get(4)?,
-            })
-        },
-    );
+            [],
+            |r| {
+                Ok(CuratorState {
+                    last_run_at: r.get(0)?,
+                    last_run_status: r.get(1)?,
+                    consecutive_failures: r.get::<_, i64>(2)? as u32,
+                    circuit_open_until: r.get(3)?,
+                    last_spike_evidence_json: r.get(4)?,
+                })
+            },
+        )
+        .await;
     match row {
         Ok(s) => Ok(s),
         Err(right_db::DbError::NotFound) => Ok(CuratorState::default()),
@@ -165,7 +167,7 @@ pub(crate) fn load_state_db(
     }
 }
 
-pub(crate) fn save_state_db(
+pub(crate) async fn save_state_db(
     conn: &right_db::Connection,
     state: &CuratorState,
 ) -> Result<(), right_db::DbError> {
@@ -181,7 +183,8 @@ pub(crate) fn save_state_db(
             state.circuit_open_until.as_deref(),
             state.last_spike_evidence_json.as_deref(),
         ],
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -206,14 +209,14 @@ pub(crate) async fn run_if_due(
     ctx: CuratorContext,
     latest_user_activity_at: Option<DateTime<Utc>>,
 ) {
-    let conn = match right_db::open_connection(&ctx.agent_db_dir, false) {
+    let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "curator open_connection failed: {e:#}");
             return;
         }
     };
-    let mut state = match load_state_db(&conn) {
+    let mut state = match load_state_db(&conn).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "curator load_state_db failed: {e:#}");
@@ -226,7 +229,7 @@ pub(crate) async fn run_if_due(
     // Seed first-run timestamp (Hermes defer).
     if state.last_run_at.is_none() {
         state.last_run_at = Some(now.to_rfc3339());
-        if let Err(e) = save_state_db(&conn, &state) {
+        if let Err(e) = save_state_db(&conn, &state).await {
             tracing::warn!(agent = %ctx.agent_name, "curator seed state failed: {e:#}");
         }
         return;
@@ -241,19 +244,22 @@ pub(crate) async fn run_if_due(
     }
 
     // Compute trigger signals.
-    let cost_spike_evidence = match right_agent::usage::turn_baseline::check_probe_writer_cost_spike(
-        &conn,
-        now,
-        ctx.config.cost_spike_baseline_days,
-        ctx.config.cost_spike_k,
-        ctx.config.cost_spike_min_floor_usd,
-    ) {
-        Ok(ev) => ev,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "curator cost spike check failed: {e:#}");
-            None
-        }
-    };
+    let cost_spike_evidence =
+        match right_agent::usage::turn_baseline::check_probe_writer_cost_spike(
+            &conn,
+            now,
+            ctx.config.cost_spike_baseline_days,
+            ctx.config.cost_spike_k,
+            ctx.config.cost_spike_min_floor_usd,
+        )
+        .await
+        {
+            Ok(ev) => ev,
+            Err(e) => {
+                tracing::warn!(agent = %ctx.agent_name, "curator cost spike check failed: {e:#}");
+                None
+            }
+        };
 
     // last_run_at is always Some(_) here — the first-run defer above writes
     // it before any gate runs, so unwrap is structural, not assumed.
@@ -271,7 +277,7 @@ pub(crate) async fn run_if_due(
             return;
         }
     };
-    let change_count = match right_lifecycle::count_changes_since(&conn, since) {
+    let change_count = match right_lifecycle::count_changes_since(&conn, since).await {
         Ok(n) => n,
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "curator change-count read failed: {e:#}");
@@ -314,14 +320,16 @@ pub(crate) async fn run_if_due(
             stale_after: Duration::days(ctx.config.stale_after_days as i64),
             archive_after: Duration::days(ctx.config.archive_after_days as i64),
         },
-    ) {
+    )
+    .await
+    {
         Ok(changes) => changes,
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "curator auto-transition failed: {e:#}");
             return;
         }
     };
-    let lifecycle_rows = match right_lifecycle::list_curator_candidates(&conn) {
+    let lifecycle_rows = match right_lifecycle::list_curator_candidates(&conn).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "curator lifecycle candidate read failed: {e:#}");
@@ -357,7 +365,7 @@ pub(crate) async fn run_if_due(
             state.last_run_at = Some(now.to_rfc3339());
             state.last_run_status = Some(run_status);
             state.consecutive_failures += 1;
-            if let Err(e) = save_state_db(&conn, &state) {
+            if let Err(e) = save_state_db(&conn, &state).await {
                 tracing::warn!(agent = %ctx.agent_name, "curator save state failed: {e:#}");
             }
             return;
@@ -375,46 +383,48 @@ pub(crate) async fn run_if_due(
         &ctx.agent_dir,
         ctx.ssh_config_path.as_deref(),
         ctx.resolved_sandbox.as_deref(),
-    );
+    )
+    .await;
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
     let run_status = match right_process::ProcessGroupChild::spawn(cmd) {
-        Ok(child) => match crate::cc::invocation::wait_with_output_or_kill(child, CURATOR_TIMEOUT)
-            .await
-        {
-            Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                if let Some(b) = crate::cc::stream::parse_usage_full(&stdout)
-                    && let Err(e) = right_agent::usage::insert::insert_learning_curator(&conn, &b)
-                {
-                    tracing::warn!(agent = %ctx.agent_name, "curator usage insert failed: {e:#}");
+        Ok(child) => {
+            match crate::cc::invocation::wait_with_output_or_kill(child, CURATOR_TIMEOUT).await {
+                Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                    if let Some(b) = crate::cc::stream::parse_usage_full(&stdout)
+                        && let Err(e) =
+                            right_agent::usage::insert::insert_learning_curator(&conn, &b).await
+                    {
+                        tracing::warn!(agent = %ctx.agent_name, "curator usage insert failed: {e:#}");
+                    }
+                    if output.status.success() {
+                        "success".to_owned()
+                    } else {
+                        tracing::warn!(
+                            agent = %ctx.agent_name,
+                            status = ?output.status,
+                            "curator exited non-zero"
+                        );
+                        "failed".to_owned()
+                    }
                 }
-                if output.status.success() {
-                    "success".to_owned()
-                } else {
+                Ok(crate::cc::invocation::ChildOutput::TimedOut) => {
                     tracing::warn!(
                         agent = %ctx.agent_name,
-                        status = ?output.status,
-                        "curator exited non-zero"
+                        "curator timed out after {}s",
+                        CURATOR_TIMEOUT.as_secs()
                     );
                     "failed".to_owned()
                 }
+                Err(e) => {
+                    tracing::warn!(agent = %ctx.agent_name, "curator wait failed: {e:#}");
+                    "failed".to_owned()
+                }
             }
-            Ok(crate::cc::invocation::ChildOutput::TimedOut) => {
-                tracing::warn!(
-                    agent = %ctx.agent_name,
-                    "curator timed out after {}s",
-                    CURATOR_TIMEOUT.as_secs()
-                );
-                "failed".to_owned()
-            }
-            Err(e) => {
-                tracing::warn!(agent = %ctx.agent_name, "curator wait failed: {e:#}");
-                "failed".to_owned()
-            }
-        },
+        }
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "curator spawn failed: {e:#}");
             "failed".to_owned()
@@ -433,8 +443,27 @@ pub(crate) async fn run_if_due(
         // opens the circuit — it's only set by direct DB writes (tests).
         state.consecutive_failures += 1;
     }
-    if let Err(e) = save_state_db(&conn, &state) {
-        tracing::warn!(agent = %ctx.agent_name, "curator save state failed: {e:#}");
+    // Retry once on transient DbError (BUSY/BUSY_SNAPSHOT). The save is a
+    // cheap UPSERT on a singleton row and idempotent, so re-running it is
+    // safe. Silently dropping this write would lose circuit-breaker
+    // accounting, which ARCHITECTURE.md documents as a load-bearing gate.
+    if let Err(e) = save_state_db(&conn, &state).await {
+        if e.is_transient() {
+            tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+            if let Err(e2) = save_state_db(&conn, &state).await {
+                tracing::warn!(
+                    agent = %ctx.agent_name,
+                    attempts = 2,
+                    "curator save state failed: {e2:#}",
+                );
+            }
+        } else {
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                attempts = 1,
+                "curator save state failed: {e:#}",
+            );
+        }
     }
 }
 
@@ -534,23 +563,23 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn open_test_conn() -> right_db::Connection {
-        let conn = right_db::Connection::open_in_memory().unwrap();
-        right_db::MIGRATIONS.to_latest(&conn).unwrap();
+    async fn open_test_conn() -> right_db::Connection {
+        let conn = right_db::Connection::open_in_memory().await.unwrap();
+        right_db::MIGRATIONS.to_latest(&conn).await.unwrap();
         conn
     }
 
-    #[test]
-    fn db_load_state_returns_default_when_empty() {
-        let conn = open_test_conn();
-        let s = load_state_db(&conn).unwrap();
+    #[tokio::test]
+    async fn db_load_state_returns_default_when_empty() {
+        let conn = open_test_conn().await;
+        let s = load_state_db(&conn).await.unwrap();
         assert!(s.last_run_at.is_none());
         assert_eq!(s.consecutive_failures, 0);
     }
 
-    #[test]
-    fn db_save_then_load_round_trip() {
-        let conn = open_test_conn();
+    #[tokio::test]
+    async fn db_save_then_load_round_trip() {
+        let conn = open_test_conn().await;
         let s = CuratorState {
             last_run_at: Some("2026-05-22T00:00:00Z".to_owned()),
             last_run_status: Some("success".to_owned()),
@@ -558,14 +587,14 @@ mod tests {
             circuit_open_until: None,
             last_spike_evidence_json: Some(r#"{"trigger":"cost_spike"}"#.to_owned()),
         };
-        save_state_db(&conn, &s).unwrap();
-        let loaded = load_state_db(&conn).unwrap();
+        save_state_db(&conn, &s).await.unwrap();
+        let loaded = load_state_db(&conn).await.unwrap();
         assert_eq!(loaded, s);
     }
 
-    #[test]
-    fn db_save_replaces_existing_row() {
-        let conn = open_test_conn();
+    #[tokio::test]
+    async fn db_save_replaces_existing_row() {
+        let conn = open_test_conn().await;
         save_state_db(
             &conn,
             &CuratorState {
@@ -573,6 +602,7 @@ mod tests {
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
         save_state_db(
             &conn,
@@ -581,12 +611,14 @@ mod tests {
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM curator_state", [], |r| r.get(0))
+            .await
             .unwrap();
         assert_eq!(count, 1);
-        let loaded = load_state_db(&conn).unwrap();
+        let loaded = load_state_db(&conn).await.unwrap();
         assert_eq!(loaded.last_run_at.as_deref(), Some("b"));
     }
 
@@ -627,8 +659,8 @@ mod tests {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
-    #[test]
-    fn background_invocation_curator_uses_invocation_scoped_mcp_config() {
+    #[tokio::test]
+    async fn background_invocation_curator_uses_invocation_scoped_mcp_config() {
         let dir = tempdir().unwrap();
         let ctx = context(dir.path().to_path_buf());
         let mcp_path = dir
@@ -653,8 +685,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn disabled_skips() {
+    #[tokio::test]
+    async fn disabled_skips() {
         let mut c = cfg();
         c.enabled = false;
         assert_eq!(
@@ -670,8 +702,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn paused_skips() {
+    #[tokio::test]
+    async fn paused_skips() {
         let mut c = cfg();
         c.paused = true;
         assert_eq!(
@@ -687,8 +719,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn circuit_open_in_future_skips() {
+    #[tokio::test]
+    async fn circuit_open_in_future_skips() {
         let s = CuratorState {
             circuit_open_until: Some("2027-01-01T00:00:00Z".into()),
             ..Default::default()
@@ -699,8 +731,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cooldown_blocks_all_triggers() {
+    #[tokio::test]
+    async fn cooldown_blocks_all_triggers() {
         let s = CuratorState {
             last_run_at: Some("2026-05-21T18:00:00Z".into()),
             ..Default::default()
@@ -717,8 +749,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cost_spike_fires_after_cooldown() {
+    #[tokio::test]
+    async fn cost_spike_fires_after_cooldown() {
         let s = CuratorState {
             last_run_at: Some("2026-05-21T00:00:00Z".into()),
             ..Default::default()
@@ -745,8 +777,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn skill_change_count_fires_when_no_cost_spike() {
+    #[tokio::test]
+    async fn skill_change_count_fires_when_no_cost_spike() {
         let s = CuratorState {
             last_run_at: Some("2026-05-21T00:00:00Z".into()),
             ..Default::default()
@@ -763,8 +795,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn time_fallback_fires_when_no_other_trigger() {
+    #[tokio::test]
+    async fn time_fallback_fires_when_no_other_trigger() {
         let s = CuratorState {
             last_run_at: Some("2026-05-01T00:00:00Z".into()),
             ..Default::default()
@@ -780,8 +812,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn no_trigger_no_run() {
+    #[tokio::test]
+    async fn no_trigger_no_run() {
         let s = CuratorState {
             last_run_at: Some("2026-05-21T00:00:00Z".into()),
             ..Default::default()
@@ -791,8 +823,8 @@ mod tests {
         assert_eq!(d, CuratorGateDecision::SkipNoTrigger);
     }
 
-    #[test]
-    fn first_ever_run_defers() {
+    #[tokio::test]
+    async fn first_ever_run_defers() {
         let s = CuratorState {
             last_run_at: None,
             ..Default::default()
@@ -801,8 +833,8 @@ mod tests {
         assert_eq!(d, CuratorGateDecision::SkipNoTrigger);
     }
 
-    #[test]
-    fn chat_active_within_min_idle_skips() {
+    #[tokio::test]
+    async fn chat_active_within_min_idle_skips() {
         let s = CuratorState {
             last_run_at: Some("2026-05-01T00:00:00Z".into()),
             ..Default::default()

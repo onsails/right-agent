@@ -672,19 +672,22 @@ async fn main() -> miette::Result<()> {
             network_policy,
             sandbox_mode,
             force,
-        } => cmd_init(
-            &home,
-            telegram_token.as_deref(),
-            &telegram_allowed_chat_ids,
-            &tunnel_name,
-            tunnel_hostname.as_deref(),
-            yes,
-            network_policy,
-            sandbox_mode,
-            force,
-        ),
+        } => {
+            cmd_init(
+                &home,
+                telegram_token.as_deref(),
+                &telegram_allowed_chat_ids,
+                &tunnel_name,
+                tunnel_hostname.as_deref(),
+                yes,
+                network_policy,
+                sandbox_mode,
+                force,
+            )
+            .await
+        }
         Commands::List => cmd_list(&home),
-        Commands::Doctor => cmd_doctor(&home),
+        Commands::Doctor => cmd_doctor(&home).await,
         Commands::Up {
             agents,
             detach,
@@ -748,6 +751,7 @@ async fn main() -> miette::Result<()> {
                         network_policy,
                         sandbox_mode,
                     )
+                    .await
                 }
             }
             AgentCommands::List => cmd_list(&home),
@@ -936,7 +940,7 @@ async fn main() -> miette::Result<()> {
                 }
                 Ok(())
             }
-            AgentCommands::Skill { command } => cmd_agent_skill(&home, command),
+            AgentCommands::Skill { command } => cmd_agent_skill(&home, command).await,
         },
         Commands::Memory { command } => match command {
             MemoryCommands::List {
@@ -944,19 +948,19 @@ async fn main() -> miette::Result<()> {
                 limit,
                 offset,
                 json,
-            } => cmd_memory_list(&home, &agent, limit, offset, json),
+            } => cmd_memory_list(&home, &agent, limit, offset, json).await,
             MemoryCommands::Search {
                 agent,
                 query,
                 limit,
                 offset,
                 json,
-            } => cmd_memory_search(&home, &agent, &query, limit, offset, json),
-            MemoryCommands::Delete { agent, id } => cmd_memory_delete(&home, &agent, id),
-            MemoryCommands::Stats { agent, json } => cmd_memory_stats(&home, &agent, json),
+            } => cmd_memory_search(&home, &agent, &query, limit, offset, json).await,
+            MemoryCommands::Delete { agent, id } => cmd_memory_delete(&home, &agent, id).await,
+            MemoryCommands::Stats { agent, json } => cmd_memory_stats(&home, &agent, json).await,
         },
         Commands::Mcp { command } => match command {
-            McpCommands::Status { agent } => cmd_mcp_status(&home, agent.as_deref()),
+            McpCommands::Status { agent } => cmd_mcp_status(&home, agent.as_deref()).await,
         },
         // Unreachable: MemoryServer is dispatched before reaching here.
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
@@ -1037,8 +1041,8 @@ async fn main() -> miette::Result<()> {
                 )> = Vec::new();
                 let mut oauth_server_names = std::collections::HashSet::<String>::new();
 
-                match right_db::open_connection(&agent_dir, true) {
-                    Ok(conn) => match right_mcp::credentials::db_list_servers(&conn) {
+                match right_db::open_connection(&agent_dir, true).await {
+                    Ok(conn) => match right_mcp::credentials::db_list_servers(&conn).await {
                         Ok(servers) => {
                             for s in servers {
                                 let auth_method = right_mcp::proxy::AuthMethod::from_db(
@@ -1363,7 +1367,7 @@ fn filter_agents(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn cmd_init(
+async fn cmd_init(
     home: &Path,
     telegram_token: Option<&str>,
     telegram_allowed_chat_ids: &[i64],
@@ -1689,7 +1693,7 @@ fn cmd_init(
             heartbeat_path: None,
         };
         right_codegen::run_agent_codegen(home, std::slice::from_ref(&agent_def), &self_exe, false)?;
-        right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
+        right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false).await?;
 
         // Create sandbox if openshell mode.
         if matches!(sandbox, right_agent::agent::types::SandboxMode::Openshell) {
@@ -1778,7 +1782,7 @@ fn cmd_init(
     Ok(())
 }
 
-fn cmd_agent_init(
+async fn cmd_agent_init(
     home: &Path,
     name: &str,
     yes: bool,
@@ -2150,7 +2154,7 @@ fn cmd_agent_init(
             heartbeat_path: None,
         };
         right_codegen::run_agent_codegen(home, std::slice::from_ref(&agent_def), &self_exe, false)?;
-        right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
+        right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false).await?;
     }
 
     // Create sandbox for openshell agents.
@@ -2399,9 +2403,9 @@ fn prompt_sandbox_recreate_if_exists(
     }
 }
 
-fn cmd_doctor(home: &Path) -> miette::Result<()> {
+async fn cmd_doctor(home: &Path) -> miette::Result<()> {
     let theme = right_ui::detect();
-    let checks = right_agent::doctor::run_doctor(home);
+    let checks = right_agent::doctor::run_doctor(home).await;
 
     println!("{}", right_ui::section(theme, "diagnostics"));
     println!("{}", right_ui::Rail::blank(theme));
@@ -3097,7 +3101,8 @@ async fn cmd_agent_restore(
         backup_path,
         &backup_config,
         effective_restore_binding_mode,
-    )?;
+    )
+    .await?;
 
     let theme = right_ui::detect();
     println!(
@@ -3164,7 +3169,7 @@ async fn cmd_agent_restore(
                 .into_diagnostic()
                 .map_err(|e| miette::miette!("failed to resolve self exe: {e:#}"))?;
 
-            right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
+            right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false).await?;
 
             // Prepare staging dir.
             let staging = agent_dir.join("staging");
@@ -3793,6 +3798,7 @@ async fn cmd_agent_backup(
             // `open_connection(.., migrate=false)` returns a writable handle.
             // Turso's `VACUUM INTO` needs writability on the source DB.
             let conn = right_db::open_connection(&agent_dir, false)
+                .await
                 .into_diagnostic()
                 .map_err(|e| miette::miette!("failed to open data.db: {e:#}"))?;
             conn.execute(
@@ -3802,6 +3808,7 @@ async fn cmd_agent_backup(
                 ),
                 [],
             )
+            .await
             .into_diagnostic()
             .map_err(|e| miette::miette!("VACUUM INTO failed: {e:#}"))?;
             println!(
@@ -3814,7 +3821,8 @@ async fn cmd_agent_backup(
             agent_name,
             config.as_ref(),
             Some(&backup_dir.join("data.db")),
-        )?;
+        )
+        .await?;
         restore::write_backup_manifest(&backup_dir, &manifest)?;
         println!("backup.json written");
     }
@@ -3943,13 +3951,13 @@ async fn cmd_agent_destroy(
 }
 
 /// Read-only skill lifecycle helper.
-fn cmd_agent_skill(home: &Path, command: AgentSkillCommands) -> miette::Result<()> {
+async fn cmd_agent_skill(home: &Path, command: AgentSkillCommands) -> miette::Result<()> {
     match command {
-        AgentSkillCommands::List => cmd_agent_skill_list(home),
+        AgentSkillCommands::List => cmd_agent_skill_list(home).await,
     }
 }
 
-fn cmd_agent_skill_list(home: &Path) -> miette::Result<()> {
+async fn cmd_agent_skill_list(home: &Path) -> miette::Result<()> {
     let agents_dir = right_config::agents_dir(home);
     if !agents_dir.is_dir() {
         println!("No learned skills.");
@@ -3980,8 +3988,10 @@ fn cmd_agent_skill_list(home: &Path) -> miette::Result<()> {
             .and_then(|name| name.to_str())
             .ok_or_else(|| miette::miette!("invalid agent dir name: {}", agent_dir.display()))?;
         let conn = right_db::open_connection_readonly(&agent_dir)
+            .await
             .map_err(|e| miette::miette!("open lifecycle db for {agent_name}: {e:#}"))?;
         let rows = right_lifecycle::list(&conn)
+            .await
             .map_err(|e| miette::miette!("list lifecycle rows for {agent_name}: {e:#}"))?;
         for row in rows {
             println!(
@@ -4433,11 +4443,11 @@ mod tests {
 
     // ---- resolve_agent_db error paths ----
 
-    #[test]
-    fn resolve_agent_db_errors_on_missing_agent_dir() {
+    #[tokio::test]
+    async fn resolve_agent_db_errors_on_missing_agent_dir() {
         let tmp = TempDir::new().unwrap();
         // home exists but agents/nonexistent does not
-        let result = resolve_agent_db(tmp.path(), "nonexistent");
+        let result = resolve_agent_db(tmp.path(), "nonexistent").await;
         let err = result.expect_err("should fail when agent dir missing");
         let msg = format!("{err:?}");
         assert!(
@@ -4446,13 +4456,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolve_agent_db_errors_on_missing_memory_db() {
+    #[tokio::test]
+    async fn resolve_agent_db_errors_on_missing_memory_db() {
         let tmp = TempDir::new().unwrap();
         // create agent dir but no data.db
         let agent_dir = tmp.path().join("agents").join("testagent");
         fs::create_dir_all(&agent_dir).unwrap();
-        let result = resolve_agent_db(tmp.path(), "testagent");
+        let result = resolve_agent_db(tmp.path(), "testagent").await;
         let err = result.expect_err("should fail when data.db missing");
         let msg = format!("{err:?}");
         assert!(
@@ -5075,14 +5085,14 @@ groups:
 
     // ---- cmd_mcp_status error paths ----
 
-    #[test]
-    fn cmd_mcp_status_errors_on_nonexistent_agent() {
+    #[tokio::test]
+    async fn cmd_mcp_status_errors_on_nonexistent_agent() {
         use super::cmd_mcp_status;
         let tmp = TempDir::new().unwrap();
         let agents_dir = tmp.path().join("agents");
         fs::create_dir_all(&agents_dir).unwrap();
 
-        let result = cmd_mcp_status(tmp.path(), Some("nonexistent"));
+        let result = cmd_mcp_status(tmp.path(), Some("nonexistent")).await;
         let err = result.expect_err("should fail when agent not found");
         let msg = format!("{err:?}");
         assert!(
@@ -5091,16 +5101,16 @@ groups:
         );
     }
 
-    #[test]
-    fn cmd_mcp_status_returns_ok_with_no_mcp_json() {
+    #[tokio::test]
+    async fn cmd_mcp_status_returns_ok_with_no_mcp_json() {
         use super::cmd_mcp_status;
         let tmp = TempDir::new().unwrap();
         let agent_dir = tmp.path().join("agents").join("myagent");
         fs::create_dir_all(&agent_dir).unwrap();
         // CLI commands expect a pre-migrated DB (aggregator migrates at startup).
-        right_db::open_db(&agent_dir, true).unwrap();
+        right_db::open_db(&agent_dir, true).await.unwrap();
 
-        let result = cmd_mcp_status(tmp.path(), Some("myagent"));
+        let result = cmd_mcp_status(tmp.path(), Some("myagent")).await;
         assert!(result.is_ok(), "should succeed when mcp.json absent");
     }
 }
@@ -5157,7 +5167,7 @@ fn format_size(bytes: u64) -> String {
 /// Resolve agent directory and open its memory database.
 ///
 /// Returns a live `Connection` or a fatal miette error.
-fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<right_db::Connection> {
+async fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<right_db::Connection> {
     let agent_path = right_config::agents_dir(home).join(agent);
     if !agent_path.exists() {
         return Err(miette::miette!(
@@ -5174,17 +5184,18 @@ fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<right_db::Connec
         ));
     }
     right_db::open_connection(&agent_path, false)
+        .await
         .map_err(|e| miette::miette!("failed to open data.db for '{}': {e:#}", agent))
 }
 
-fn cmd_memory_list(
+async fn cmd_memory_list(
     home: &Path,
     agent: &str,
     limit: i64,
     offset: i64,
     json: bool,
 ) -> miette::Result<()> {
-    let conn = resolve_agent_db(home, agent)?;
+    let conn = resolve_agent_db(home, agent).await?;
     let mut stmt = conn
         .prepare(
             "SELECT id, content, tags, stored_by, created_at \
@@ -5206,6 +5217,7 @@ fn cmd_memory_list(
                 row.get(4)?,
             ))
         })
+        .await
         .map_err(|e| miette::miette!("failed to list memories: {e:#}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| miette::miette!("failed to list memories: {e:#}"))?;
@@ -5254,6 +5266,7 @@ fn cmd_memory_list(
                 [],
                 |r| r.get(0),
             )
+            .await
             .map_err(|e| miette::miette!("failed to count memories: {e:#}"))?;
         println!(
             "\n{} of {} entries shown  (--offset {} for next page)",
@@ -5266,9 +5279,9 @@ fn cmd_memory_list(
     Ok(())
 }
 
-fn cmd_memory_stats(home: &Path, agent: &str, json: bool) -> miette::Result<()> {
+async fn cmd_memory_stats(home: &Path, agent: &str, json: bool) -> miette::Result<()> {
     // resolve_agent_db validates agent dir and data.db existence before opening.
-    let conn = resolve_agent_db(home, agent)?;
+    let conn = resolve_agent_db(home, agent).await?;
 
     // db_path needed only for fs metadata (file size) — derive from home, not conn.
     let db_path = right_config::agents_dir(home).join(agent).join("data.db");
@@ -5283,6 +5296,7 @@ fn cmd_memory_stats(home: &Path, agent: &str, json: bool) -> miette::Result<()> 
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
+        .await
         .map_err(|e| miette::miette!("failed to query stats: {e:#}"))?;
 
     if json {
@@ -5306,7 +5320,7 @@ fn cmd_memory_stats(home: &Path, agent: &str, json: bool) -> miette::Result<()> 
     Ok(())
 }
 
-fn cmd_memory_search(
+async fn cmd_memory_search(
     home: &Path,
     agent: &str,
     query: &str,
@@ -5314,7 +5328,7 @@ fn cmd_memory_search(
     offset: i64,
     json: bool,
 ) -> miette::Result<()> {
-    let conn = resolve_agent_db(home, agent)?;
+    let conn = resolve_agent_db(home, agent).await?;
     let search_err = |e: right_db::DbError| {
         miette::miette!(
             help = "Full-text search uses Turso MATCH syntax: use simple words or phrases.",
@@ -5343,6 +5357,7 @@ fn cmd_memory_search(
                 row.get(4)?,
             ))
         })
+        .await
         .map_err(search_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(search_err)?;
@@ -5395,11 +5410,11 @@ fn cmd_memory_search(
     Ok(())
 }
 
-fn cmd_memory_delete(home: &Path, agent: &str, id: i64) -> miette::Result<()> {
+async fn cmd_memory_delete(home: &Path, agent: &str, id: i64) -> miette::Result<()> {
     use right_db::OptionalExtension;
     use std::io::{self, Write};
 
-    let conn = resolve_agent_db(home, agent)?;
+    let conn = resolve_agent_db(home, agent).await?;
 
     // Check soft-deleted rows too (hard-delete works on any existing row).
     let any_row: Option<(String, Option<String>)> = conn
@@ -5408,6 +5423,7 @@ fn cmd_memory_delete(home: &Path, agent: &str, id: i64) -> miette::Result<()> {
             [id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
+        .await
         .optional()
         .map_err(|e| miette::miette!("DB query failed: {e:#}"))?;
 
@@ -5443,6 +5459,7 @@ fn cmd_memory_delete(home: &Path, agent: &str, id: i64) -> miette::Result<()> {
 
     let deleted = conn
         .execute("DELETE FROM memories WHERE id = ?1", [id])
+        .await
         .map_err(|e| miette::miette!("failed to delete memory: {e:#}"))?;
     if deleted == 0 {
         return Err(miette::miette!(
@@ -5544,7 +5561,7 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
     Err(miette::miette!("failed to launch claude: {err}"))
 }
 
-fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()> {
+async fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()> {
     let agents_dir = right_config::agents_dir(home);
     // Collect agent dirs -- either all or filtered to one
     let entries: Vec<std::path::PathBuf> = if let Some(name) = agent_filter {
@@ -5572,8 +5589,10 @@ fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()>
             .and_then(|n| n.to_str())
             .unwrap_or("?");
         let conn = right_db::open_connection(agent_dir, false)
+            .await
             .map_err(|e| miette::miette!("open data.db for {agent_name}: {e:#}"))?;
         let servers = right_mcp::credentials::db_list_servers(&conn)
+            .await
             .map_err(|e| miette::miette!("db_list_servers for {agent_name}: {e:#}"))?;
         for s in &servers {
             println!("{agent_name}  {} [{}]", s.name, s.url);
@@ -5752,7 +5771,7 @@ async fn perform_migration(
     let self_exe = std::env::current_exe()
         .into_diagnostic()
         .map_err(|e| miette::miette!("failed to resolve self exe: {e:#}"))?;
-    right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
+    right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false).await?;
 
     let staging = agent_dir.join("staging");
     right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;

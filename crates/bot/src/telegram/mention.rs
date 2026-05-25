@@ -129,8 +129,8 @@ pub fn strip_bot_mentions(text: &str, username: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn strip_removes_bot_mention() {
+    #[tokio::test]
+    async fn strip_removes_bot_mention() {
         assert_eq!(strip_bot_mentions("@right_bot hello", "right_bot"), "hello");
         assert_eq!(
             strip_bot_mentions("hey @right_bot how are you", "right_bot"),
@@ -138,21 +138,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn strip_leaves_other_mentions() {
+    #[tokio::test]
+    async fn strip_leaves_other_mentions() {
         assert_eq!(
             strip_bot_mentions("@alice says hi to @right_bot", "right_bot"),
             "@alice says hi to"
         );
     }
 
-    #[test]
-    fn strip_is_case_insensitive() {
+    #[tokio::test]
+    async fn strip_is_case_insensitive() {
         assert_eq!(strip_bot_mentions("@Right_Bot hi", "right_bot"), "hi");
     }
 
-    #[test]
-    fn strip_preserves_newlines() {
+    #[tokio::test]
+    async fn strip_preserves_newlines() {
         let input = "@right_bot hello\nline two\nline three";
         assert_eq!(
             strip_bot_mentions(input, "right_bot"),
@@ -160,8 +160,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dm_returns_direct_message() {
+    #[tokio::test]
+    async fn dm_returns_direct_message() {
         let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,
@@ -180,8 +180,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn group_non_mention_returns_none() {
+    #[tokio::test]
+    async fn group_non_mention_returns_none() {
         let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,

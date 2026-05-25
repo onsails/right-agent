@@ -56,7 +56,7 @@ pub(crate) async fn maybe_alert_circuit_open(
     cooldown_minutes: u32,
     failure_threshold: u32,
 ) -> Result<()> {
-    if !alerts::should_fire(db, ALERT_TYPE) {
+    if !alerts::should_fire(db, ALERT_TYPE).await {
         return Ok(());
     }
     let Some(chat_id) = first_allowlist_chat(agent_dir)? else {
@@ -80,7 +80,7 @@ pub(crate) async fn maybe_alert_circuit_open(
         .parse_mode(teloxide::types::ParseMode::Html)
         .await
         .context("send learning_circuit_open alert")?;
-    alerts::record_fire(db, ALERT_TYPE);
+    alerts::record_fire(db, ALERT_TYPE).await;
     Ok(())
 }
 
@@ -119,8 +119,8 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
 
-    #[test]
-    fn first_allowlist_chat_returns_user_before_group() {
+    #[tokio::test]
+    async fn first_allowlist_chat_returns_user_before_group() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("allowlist.yaml");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -134,8 +134,8 @@ mod tests {
         assert_eq!(id, Some(100));
     }
 
-    #[test]
-    fn first_allowlist_chat_group_when_no_users() {
+    #[tokio::test]
+    async fn first_allowlist_chat_group_when_no_users() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("allowlist.yaml");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -148,8 +148,8 @@ mod tests {
         assert_eq!(id, Some(-200));
     }
 
-    #[test]
-    fn first_allowlist_chat_none_when_both_empty() {
+    #[tokio::test]
+    async fn first_allowlist_chat_none_when_both_empty() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("allowlist.yaml");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -158,15 +158,15 @@ mod tests {
         assert_eq!(id, None);
     }
 
-    #[test]
-    fn first_allowlist_chat_none_when_file_missing() {
+    #[tokio::test]
+    async fn first_allowlist_chat_none_when_file_missing() {
         let dir = tempdir().unwrap();
         let id = first_allowlist_chat(dir.path()).unwrap();
         assert_eq!(id, None);
     }
 
-    #[test]
-    fn truncate_with_ellipsis_does_not_panic_on_cyrillic() {
+    #[tokio::test]
+    async fn truncate_with_ellipsis_does_not_panic_on_cyrillic() {
         // 300 Cyrillic chars (2 bytes each in UTF-8). Byte 200 lies inside a
         // codepoint, so byte-slicing at 200 would panic. The char-safe path
         // must return a 200-char prefix plus the ellipsis.
@@ -177,15 +177,15 @@ mod tests {
         assert_eq!(out.chars().take(200).collect::<String>(), "я".repeat(200));
     }
 
-    #[test]
-    fn truncate_with_ellipsis_no_ellipsis_when_within_limit() {
+    #[tokio::test]
+    async fn truncate_with_ellipsis_no_ellipsis_when_within_limit() {
         let input = "hello";
         let out = truncate_with_ellipsis(input, 200);
         assert_eq!(out, "hello");
     }
 
-    #[test]
-    fn truncate_with_ellipsis_handles_emoji_boundary() {
+    #[tokio::test]
+    async fn truncate_with_ellipsis_handles_emoji_boundary() {
         // Each 😀 is 4 bytes; 60 of them = 240 bytes, 60 chars.
         let input: String = "😀".repeat(60);
         let out = truncate_with_ellipsis(&input, 50);

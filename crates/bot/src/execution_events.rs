@@ -12,7 +12,7 @@ pub(crate) struct ExecutionEventScope<'a> {
     pub(crate) cron_run_id: Option<&'a str>,
 }
 
-pub(crate) fn persist_stream_line(
+pub(crate) async fn persist_stream_line(
     conn: &right_db::Connection,
     scope: &ExecutionEventScope<'_>,
     seq: i64,
@@ -22,17 +22,17 @@ pub(crate) fn persist_stream_line(
     if events.is_empty() {
         return Ok(None);
     };
-    let tx = conn.transaction()?;
+    let tx = conn.transaction().await?;
     let mut first_id = None;
     for (block_index, event) in events.into_iter().enumerate() {
-        let id = insert_stream_event(&tx, scope, seq, block_index, event)?;
+        let id = insert_stream_event(&tx, scope, seq, block_index, event).await?;
         first_id.get_or_insert(id);
     }
-    tx.commit()?;
+    tx.commit().await?;
     Ok(first_id)
 }
 
-fn insert_stream_event(
+async fn insert_stream_event(
     conn: &right_db::Connection,
     scope: &ExecutionEventScope<'_>,
     seq: i64,
@@ -87,6 +87,7 @@ fn insert_stream_event(
             trust_label,
         },
     )
+    .await
 }
 
 fn content_text_from_redacted_event(
@@ -324,8 +325,8 @@ fn truncate_to_chars(value: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn sensitive_json_keys_are_redacted() {
+    #[tokio::test]
+    async fn sensitive_json_keys_are_redacted() {
         let input = serde_json::json!({
             "api_key": "abc",
             "nested": {
@@ -355,9 +356,9 @@ mod tests {
         assert_eq!(redacted["safe"], "visible");
     }
 
-    fn conn() -> right_db::Connection {
-        let conn = right_db::Connection::open_in_memory().unwrap();
-        right_db::MIGRATIONS.to_latest(&conn).unwrap();
+    async fn conn() -> right_db::Connection {
+        let conn = right_db::Connection::open_in_memory().await.unwrap();
+        right_db::MIGRATIONS.to_latest(&conn).await.unwrap();
         conn
     }
 
@@ -373,12 +374,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn persist_stream_line_stores_scope_and_thinking_secondary() {
-        let conn = conn();
+    #[tokio::test]
+    async fn persist_stream_line_stores_scope_and_thinking_secondary() {
+        let conn = conn().await;
         let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Need check first"}]}}"#;
 
         let id = persist_stream_line(&conn, &scope(), 7, line)
+            .await
             .unwrap()
             .unwrap();
 
@@ -417,6 +419,7 @@ mod tests {
                     ))
                 },
             )
+            .await
             .unwrap();
 
         assert_eq!(row.0, "right");
@@ -432,12 +435,13 @@ mod tests {
         assert_eq!(row.10, "Need check first");
     }
 
-    #[test]
-    fn persist_stream_line_redacts_content_json_and_text() {
-        let conn = conn();
+    #[tokio::test]
+    async fn persist_stream_line_redacts_content_json_and_text() {
+        let conn = conn().await;
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ANTHROPIC_API_KEY=sk-text-secret curl https://example.com","api_key":"sk-json-secret"}}]}}"#;
 
         let id = persist_stream_line(&conn, &scope(), 3, line)
+            .await
             .unwrap()
             .unwrap();
 
@@ -447,6 +451,7 @@ mod tests {
                 [id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
+            .await
             .unwrap();
         assert!(!content_json.contains("sk-json-secret"), "{content_json}");
         assert!(!content_json.contains("sk-text-secret"), "{content_json}");
@@ -456,12 +461,13 @@ mod tests {
         assert!(content_text.contains("[redacted]"), "{content_text}");
     }
 
-    #[test]
-    fn persist_stream_line_redacts_header_style_secrets() {
-        let conn = conn();
+    #[tokio::test]
+    async fn persist_stream_line_redacts_header_style_secrets() {
+        let conn = conn().await;
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"curl -H Cookie: session=abc -H X-Api-Key: sk-live -H Authorization:Bearer sk-auth https://example.com"}}]}}"#;
 
         let id = persist_stream_line(&conn, &scope(), 4, line)
+            .await
             .unwrap()
             .unwrap();
 
@@ -471,6 +477,7 @@ mod tests {
                 [id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
+            .await
             .unwrap();
         for secret in ["session=abc", "sk-live", "sk-auth"] {
             assert!(!content_json.contains(secret), "{content_json}");
@@ -480,9 +487,9 @@ mod tests {
         assert!(content_text.contains("[redacted]"), "{content_text}");
     }
 
-    #[test]
-    fn persist_stream_line_caps_content_text_and_json() {
-        let conn = conn();
+    #[tokio::test]
+    async fn persist_stream_line_caps_content_text_and_json() {
+        let conn = conn().await;
         let mut input = serde_json::Map::new();
         for i in 0..6 {
             input.insert(
@@ -503,6 +510,7 @@ mod tests {
         .to_string();
 
         let id = persist_stream_line(&conn, &scope(), 5, &line)
+            .await
             .unwrap()
             .unwrap();
 
@@ -512,14 +520,15 @@ mod tests {
                 [id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
+            .await
             .unwrap();
         assert!(content_json.chars().count() <= 8_000, "{content_json}");
         assert_eq!(content_text.chars().count(), 2_000);
     }
 
-    #[test]
-    fn persist_stream_line_rolls_back_on_partial_failure() {
-        let conn = conn();
+    #[tokio::test]
+    async fn persist_stream_line_rolls_back_on_partial_failure() {
+        let conn = conn().await;
         // Force the second block (block_index=1, seq=9_001) to fail by creating
         // a UNIQUE index on seq and pre-inserting a row at that seq. The first
         // block (seq=9_000) would succeed if not transactional; with the fix it
@@ -528,6 +537,7 @@ mod tests {
             "CREATE UNIQUE INDEX test_unique_seq ON execution_events(seq)",
             [],
         )
+        .await
         .unwrap();
         right_agent::learning_episodes::insert_execution_event(
             &conn,
@@ -547,11 +557,14 @@ mod tests {
                 trust_label: right_agent::learning_episodes::TrustLabel::Primary,
             },
         )
+        .await
         .unwrap();
 
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"First"},{"type":"thinking","thinking":"Second"},{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/file"}}]}}"#;
 
-        let err = persist_stream_line(&conn, &scope(), 9, line).unwrap_err();
+        let err = persist_stream_line(&conn, &scope(), 9, line)
+            .await
+            .unwrap_err();
         assert!(
             err.is_constraint_violation(),
             "expected sqlite constraint failure, got {err:?}"
@@ -565,6 +578,7 @@ mod tests {
                 [],
                 |row| row.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(count, 0, "first block must roll back on partial failure");
         let sentinel_count: i64 = conn
@@ -573,16 +587,18 @@ mod tests {
                 [],
                 |row| row.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(sentinel_count, 1, "sentinel row must remain");
     }
 
-    #[test]
-    fn persist_stream_line_inserts_all_blocks_in_order() {
-        let conn = conn();
+    #[tokio::test]
+    async fn persist_stream_line_inserts_all_blocks_in_order() {
+        let conn = conn().await;
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"First"},{"type":"thinking","thinking":"Second"},{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/file"}}]}}"#;
 
         let first_id = persist_stream_line(&conn, &scope(), 9, line)
+            .await
             .unwrap()
             .unwrap();
 
@@ -594,6 +610,7 @@ mod tests {
                 )
                 .unwrap();
             stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .await
                 .unwrap()
                 .collect::<Result<_, _>>()
                 .unwrap()
@@ -612,6 +629,7 @@ mod tests {
                 [first_id],
                 |row| row.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(first_seq, 9_000);
     }

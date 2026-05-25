@@ -52,7 +52,10 @@ fn require_updated(rows: usize) -> Result<(), DbError> {
     Ok(())
 }
 
-pub fn insert_running_cron_run(conn: &Connection, run: NewCronRun<'_>) -> Result<(), DbError> {
+pub async fn insert_running_cron_run(
+    conn: &Connection,
+    run: NewCronRun<'_>,
+) -> Result<(), DbError> {
     let target_chat_id = run
         .target_chat_id
         .ok_or_else(|| DbError::InvalidParameter("target_chat_id is required".into()))?;
@@ -75,11 +78,12 @@ pub fn insert_running_cron_run(conn: &Connection, run: NewCronRun<'_>) -> Result
             run.started_at,
             run.log_path,
         ],
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-pub fn insert_queued_background_run(
+pub async fn insert_queued_background_run(
     conn: &Connection,
     run: NewBackgroundRun<'_>,
 ) -> Result<(), DbError> {
@@ -102,18 +106,20 @@ pub fn insert_queued_background_run(
             run.target_thread_id,
             run.created_at,
         ],
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-pub fn mark_background_spawned(
+pub async fn mark_background_spawned(
     conn: &Connection,
     run_id: &str,
     started_at: &str,
     log_path: &str,
 ) -> Result<(), DbError> {
-    let rows = conn.execute(
-        "UPDATE async_runs
+    let rows = conn
+        .execute(
+            "UPDATE async_runs
          SET status = 'running',
              handoff_state = 'spawned',
              started_at = ?2,
@@ -122,12 +128,13 @@ pub fn mark_background_spawned(
              delivery_status = 'pending',
              updated_at = ?2
          WHERE id = ?1",
-        params![run_id, started_at, log_path],
-    )?;
+            params![run_id, started_at, log_path],
+        )
+        .await?;
     require_updated(rows)
 }
 
-pub fn persist_run_output(
+pub async fn persist_run_output(
     conn: &Connection,
     run_id: &str,
     output: RunOutput<'_>,
@@ -145,8 +152,9 @@ pub fn persist_run_output(
         "none"
     };
 
-    let rows = conn.execute(
-        "UPDATE async_runs
+    let rows = conn
+        .execute(
+            "UPDATE async_runs
          SET run_note = ?2,
              delivery_json = ?3,
              error_json = ?4,
@@ -154,20 +162,21 @@ pub fn persist_run_output(
              delivery_status = ?6,
              updated_at = ?7
          WHERE id = ?1",
-        params![
-            run_id,
-            output.run_note,
-            output.delivery_json,
-            output.error_json,
-            output.delivery_required,
-            delivery_status,
-            now,
-        ],
-    )?;
+            params![
+                run_id,
+                output.run_note,
+                output.delivery_json,
+                output.error_json,
+                output.delivery_required,
+                delivery_status,
+                now,
+            ],
+        )
+        .await?;
     require_updated(rows)
 }
 
-pub fn finish_run(
+pub async fn finish_run(
     conn: &Connection,
     run_id: &str,
     exit_code: Option<i32>,
@@ -176,15 +185,17 @@ pub fn finish_run(
     let now = Utc::now().to_rfc3339();
     let exit_code = exit_code.map(i64::from);
 
-    let rows = conn.execute(
-        "UPDATE async_runs
+    let rows = conn
+        .execute(
+            "UPDATE async_runs
          SET finished_at = ?2,
              exit_code = ?3,
              status = ?4,
              updated_at = ?2
          WHERE id = ?1",
-        params![run_id, now, exit_code, status],
-    )?;
+            params![run_id, now, exit_code, status],
+        )
+        .await?;
     require_updated(rows)
 }
 
@@ -218,14 +229,14 @@ pub fn cron_run_to_json(row: &CronRunJsonRow) -> serde_json::Value {
 mod tests {
     use super::*;
 
-    fn setup() -> right_db::Connection {
+    async fn setup() -> right_db::Connection {
         let dir = tempfile::tempdir().unwrap();
-        right_db::open_connection(dir.path(), true).unwrap()
+        right_db::open_connection(dir.path(), true).await.unwrap()
     }
 
-    #[test]
-    fn insert_running_cron_run_sets_none_delivery() {
-        let conn = setup();
+    #[tokio::test]
+    async fn insert_running_cron_run_sets_none_delivery() {
+        let conn = setup().await;
         insert_running_cron_run(
             &conn,
             NewCronRun {
@@ -237,6 +248,7 @@ mod tests {
                 target_thread_id: Some(7),
             },
         )
+        .await
         .unwrap();
 
         let row: (String, String, i64, String) = conn
@@ -245,13 +257,14 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row, ("cron".into(), "job-a".into(), 0, "none".into()));
     }
 
-    #[test]
-    fn insert_running_cron_run_requires_target_chat_id() {
-        let conn = setup();
+    #[tokio::test]
+    async fn insert_running_cron_run_requires_target_chat_id() {
+        let conn = setup().await;
         let err = insert_running_cron_run(
             &conn,
             NewCronRun {
@@ -263,6 +276,7 @@ mod tests {
                 target_thread_id: None,
             },
         )
+        .await
         .expect_err("missing target_chat_id should fail");
 
         assert!(matches!(
@@ -273,13 +287,14 @@ mod tests {
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM async_runs", [], |r| r.get(0))
+            .await
             .unwrap();
         assert_eq!(count, 0);
     }
 
-    #[test]
-    fn mark_run_output_with_delivery_makes_delivery_pending() {
-        let conn = setup();
+    #[tokio::test]
+    async fn mark_run_output_with_delivery_makes_delivery_pending() {
+        let conn = setup().await;
         insert_running_cron_run(
             &conn,
             NewCronRun {
@@ -291,6 +306,7 @@ mod tests {
                 target_thread_id: None,
             },
         )
+        .await
         .unwrap();
 
         persist_run_output(
@@ -303,6 +319,7 @@ mod tests {
                 delivery_required: true,
             },
         )
+        .await
         .unwrap();
 
         let row: (i64, String, String) = conn
@@ -311,6 +328,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
+            .await
             .unwrap();
         assert_eq!(
             row,
@@ -322,9 +340,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn persist_run_output_requires_delivery_json_when_delivery_required() {
-        let conn = setup();
+    #[tokio::test]
+    async fn persist_run_output_requires_delivery_json_when_delivery_required() {
+        let conn = setup().await;
         insert_running_cron_run(
             &conn,
             NewCronRun {
@@ -336,6 +354,7 @@ mod tests {
                 target_thread_id: None,
             },
         )
+        .await
         .unwrap();
 
         let err = persist_run_output(
@@ -348,6 +367,7 @@ mod tests {
                 delivery_required: true,
             },
         )
+        .await
         .expect_err("delivery_required without delivery_json should fail");
 
         assert!(matches!(
@@ -362,12 +382,13 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row, (0, "none".into(), None));
     }
 
-    #[test]
-    fn cron_run_to_json_parses_delivery() {
+    #[tokio::test]
+    async fn cron_run_to_json_parses_delivery() {
         let row = CronRunJsonRow {
             id: "run-1".into(),
             job_name: "job-a".into(),
@@ -389,11 +410,12 @@ mod tests {
         assert!(json.get("notify").is_none());
     }
 
-    #[test]
-    fn update_helpers_return_err_for_missing_run_id() {
-        let conn = setup();
+    #[tokio::test]
+    async fn update_helpers_return_err_for_missing_run_id() {
+        let conn = setup().await;
         let spawned_err =
             mark_background_spawned(&conn, "missing", "2026-05-18T10:01:00Z", "/log/bg-1.ndjson")
+                .await
                 .expect_err("missing background run should fail");
         assert!(matches!(spawned_err, right_db::DbError::NotFound));
 
@@ -407,17 +429,19 @@ mod tests {
                 delivery_required: true,
             },
         )
+        .await
         .expect_err("missing output run should fail");
         assert!(matches!(output_err, right_db::DbError::NotFound));
 
         let finish_err = finish_run(&conn, "missing", Some(0), "success")
+            .await
             .expect_err("missing finished run should fail");
         assert!(matches!(finish_err, right_db::DbError::NotFound));
     }
 
-    #[test]
-    fn insert_queued_background_run_then_mark_spawned_sets_pending_delivery() {
-        let conn = setup();
+    #[tokio::test]
+    async fn insert_queued_background_run_then_mark_spawned_sets_pending_delivery() {
+        let conn = setup().await;
         insert_queued_background_run(
             &conn,
             NewBackgroundRun {
@@ -430,6 +454,7 @@ mod tests {
                 created_at: "2026-05-18T10:00:00Z",
             },
         )
+        .await
         .unwrap();
 
         let queued: (String, Option<String>, String, String, i64, String) = conn
@@ -447,6 +472,7 @@ mod tests {
                     ))
                 },
             )
+            .await
             .unwrap();
         assert_eq!(
             queued,
@@ -460,7 +486,9 @@ mod tests {
             )
         );
 
-        mark_background_spawned(&conn, "bg-1", "2026-05-18T10:01:00Z", "/log/bg-1.ndjson").unwrap();
+        mark_background_spawned(&conn, "bg-1", "2026-05-18T10:01:00Z", "/log/bg-1.ndjson")
+            .await
+            .unwrap();
 
         let spawned: (String, String, String, i64, String) = conn
             .query_row(
@@ -468,6 +496,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
+            .await
             .unwrap();
         assert_eq!(
             spawned,
@@ -481,9 +510,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn finish_run_sets_terminal_fields() {
-        let conn = setup();
+    #[tokio::test]
+    async fn finish_run_sets_terminal_fields() {
+        let conn = setup().await;
         insert_running_cron_run(
             &conn,
             NewCronRun {
@@ -495,9 +524,12 @@ mod tests {
                 target_thread_id: None,
             },
         )
+        .await
         .unwrap();
 
-        finish_run(&conn, "run-1", Some(0), "success").unwrap();
+        finish_run(&conn, "run-1", Some(0), "success")
+            .await
+            .unwrap();
 
         let row: (Option<String>, Option<i64>, String, String) = conn
             .query_row(
@@ -505,6 +537,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row.1, Some(0));
         assert_eq!(row.2, "success");

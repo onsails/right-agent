@@ -193,10 +193,13 @@ pub enum ReviewGateDecision {
     Skip(ReviewSkipReason),
 }
 
-pub fn insert_learning_event(conn: &Connection, event: &LearningEvent) -> Result<(), DbError> {
+pub async fn insert_learning_event(
+    conn: &Connection,
+    event: &LearningEvent,
+) -> Result<(), DbError> {
     let event_refs_json = serde_json::to_string(&event.event_refs)
         .map_err(|e| DbError::InvalidParameter(e.to_string()))?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction().await?;
     tx.execute(
         "INSERT INTO skill_learning_events \
          (invocation_id, agent_name, action, skill_name, phase, status, hint_outcome, reason, message, summary, event_refs_json) \
@@ -214,32 +217,39 @@ pub fn insert_learning_event(conn: &Connection, event: &LearningEvent) -> Result
             event.summary.as_deref(),
             event_refs_json,
         ],
-    )?;
+    )
+    .await?;
     tx.execute(
         "INSERT OR IGNORE INTO skill_nudge_state (agent_name) VALUES (?1)",
         [event.agent_name.as_str()],
-    )?;
-    tx.commit()?;
+    )
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
-pub fn successful_finish_exists(conn: &Connection, invocation_id: &str) -> Result<bool, DbError> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM skill_learning_events \
+pub async fn successful_finish_exists(
+    conn: &Connection,
+    invocation_id: &str,
+) -> Result<bool, DbError> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM skill_learning_events \
          WHERE invocation_id=?1 AND phase='finish' AND status IN ('created','updated')",
-        [invocation_id],
-        |r| r.get(0),
-    )?;
+            [invocation_id],
+            |r| r.get(0),
+        )
+        .await?;
     Ok(count > 0)
 }
 
-pub fn select_reply_signal(
+pub async fn select_reply_signal(
     conn: &Connection,
     invocation_id: &str,
     learning_signal: Option<serde_json::Value>,
     skill_issue_signal: Option<serde_json::Value>,
 ) -> Result<Option<(NudgeSignalKind, serde_json::Value)>, DbError> {
-    if successful_finish_exists(conn, invocation_id)? {
+    if successful_finish_exists(conn, invocation_id).await? {
         return Ok(None);
     }
 
@@ -364,43 +374,50 @@ fn enum_str<'a>(signal: &'a serde_json::Value, field: &str, allowed: &[&str]) ->
     Some(value)
 }
 
-pub fn ensure_nudge_state(conn: &Connection, agent_name: &str) -> Result<(), DbError> {
+pub async fn ensure_nudge_state(conn: &Connection, agent_name: &str) -> Result<(), DbError> {
     conn.execute(
         "INSERT OR IGNORE INTO skill_nudge_state (agent_name) VALUES (?1)",
         [agent_name],
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-pub fn increment_turn_nudge_counters(
+pub async fn increment_turn_nudge_counters(
     conn: &Connection,
     agent_name: &str,
     tool_iters: i64,
 ) -> Result<(), DbError> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction().await?;
     tx.execute(
         "INSERT OR IGNORE INTO skill_nudge_state (agent_name) VALUES (?1)",
         [agent_name],
-    )?;
+    )
+    .await?;
     tx.execute(
         "UPDATE skill_nudge_state \
          SET turns_since_review = turns_since_review + 1, \
              tool_iters_since_review = tool_iters_since_review + ?2 \
          WHERE agent_name = ?1",
         params![agent_name, tool_iters.max(0)],
-    )?;
-    tx.commit()?;
+    )
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 
-pub fn record_nudge_signal(conn: &Connection, record: &NudgeSignalRecord) -> Result<(), DbError> {
+pub async fn record_nudge_signal(
+    conn: &Connection,
+    record: &NudgeSignalRecord,
+) -> Result<(), DbError> {
     let payload = serde_json::to_string(&record.payload_json)
         .map_err(|e| DbError::InvalidParameter(e.to_string()))?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction().await?;
     tx.execute(
         "INSERT OR IGNORE INTO skill_nudge_state (agent_name) VALUES (?1)",
         [record.agent_name.as_str()],
-    )?;
+    )
+    .await?;
     tx.execute(
         "INSERT INTO skill_nudge_signals \
          (invocation_id, agent_name, root_session_id, chat_id, thread_id, signal_kind, payload_json) \
@@ -414,20 +431,22 @@ pub fn record_nudge_signal(conn: &Connection, record: &NudgeSignalRecord) -> Res
             record.signal_kind.as_str(),
             payload,
         ],
-    )?;
+    )
+    .await?;
     if matches!(record.signal_kind, NudgeSignalKind::SkillIssue) {
         tx.execute(
             "UPDATE skill_nudge_state \
              SET skill_issue_hints_since_review = skill_issue_hints_since_review + 1 \
              WHERE agent_name = ?1",
             [record.agent_name.as_str()],
-        )?;
+        )
+        .await?;
     }
-    tx.commit()?;
+    tx.commit().await?;
     Ok(())
 }
 
-pub fn insert_skill_review_report(
+pub async fn insert_skill_review_report(
     conn: &Connection,
     report: &SkillReviewReport,
 ) -> Result<(), DbError> {
@@ -455,23 +474,24 @@ pub fn insert_skill_review_report(
             review_output_json,
             if report.telegram_notified { 1_i64 } else { 0_i64 },
         ],
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-pub fn review_gate_decision(
+pub async fn review_gate_decision(
     conn: &Connection,
     agent_name: &str,
     input: ReviewGateInput<'_>,
 ) -> Result<ReviewGateDecision, DbError> {
-    let tx = conn.transaction()?;
-    ensure_nudge_state(&tx, agent_name)?;
-    let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
-    tx.commit()?;
+    let tx = conn.transaction().await?;
+    ensure_nudge_state(&tx, agent_name).await?;
+    let decision = review_gate_decision_in_tx(&tx, agent_name, input).await?;
+    tx.commit().await?;
     Ok(decision)
 }
 
-fn review_gate_decision_in_tx(
+async fn review_gate_decision_in_tx(
     tx: &Transaction<'_>,
     agent_name: &str,
     input: ReviewGateInput<'_>,
@@ -492,13 +512,15 @@ fn review_gate_decision_in_tx(
         Option<String>,
         i64,
         i64,
-    ) = tx.query_row(
-        "SELECT review_running, review_circuit_open_until, \
+    ) = tx
+        .query_row(
+            "SELECT review_running, review_circuit_open_until, \
                     tool_iters_since_review, creation_review_interval \
              FROM skill_nudge_state WHERE agent_name = ?1",
-        [agent_name],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-    )?;
+            [agent_name],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .await?;
 
     if review_running != 0 {
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::AlreadyRunning));
@@ -519,7 +541,8 @@ fn review_gate_decision_in_tx(
                 consecutive_review_failures = 0 \
              WHERE agent_name = ?1",
             [agent_name],
-        )?;
+        )
+        .await?;
     }
 
     let prospective = if let Some(trigger) = input.signal_trigger {
@@ -555,7 +578,7 @@ fn review_gate_decision_in_tx(
             .push(source)
             .map_err(|e| DbError::InvalidParameter(e.to_string()))?;
     }
-    let spent: f64 = tx.query_row(&query, values, |r| r.get(0))?;
+    let spent: f64 = tx.query_row(&query, values, |r| r.get(0)).await?;
     if spent >= input.daily_budget_usd {
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::DailyBudget));
     }
@@ -563,49 +586,51 @@ fn review_gate_decision_in_tx(
     Ok(ReviewGateDecision::Start(prospective))
 }
 
-pub fn try_mark_review_started(
+pub async fn try_mark_review_started(
     conn: &Connection,
     agent_name: &str,
     input: ReviewGateInput<'_>,
 ) -> Result<ReviewGateDecision, DbError> {
-    let tx = conn.transaction()?;
-    ensure_nudge_state(&tx, agent_name)?;
+    let tx = conn.transaction().await?;
+    ensure_nudge_state(&tx, agent_name).await?;
 
-    let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
+    let decision = review_gate_decision_in_tx(&tx, agent_name, input).await?;
     let ReviewGateDecision::Start(trigger) = decision else {
-        tx.commit()?;
+        tx.commit().await?;
         return Ok(decision);
     };
 
     // Only flip `review_running`. The daily-budget guard is enforced by the
     // SUM query above — no counter to increment.
-    let updated = tx.execute(
-        "UPDATE skill_nudge_state \
+    let updated = tx
+        .execute(
+            "UPDATE skill_nudge_state \
          SET review_running = 1 \
          WHERE agent_name = ?1 AND review_running = 0",
-        [agent_name],
-    )?;
+            [agent_name],
+        )
+        .await?;
     if updated == 1 {
-        tx.commit()?;
+        tx.commit().await?;
         return Ok(ReviewGateDecision::Start(trigger));
     }
 
     // Lost the race — another caller marked it running. Re-read.
-    let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
-    tx.commit()?;
+    let decision = review_gate_decision_in_tx(&tx, agent_name, input).await?;
+    tx.commit().await?;
     Ok(decision)
 }
 
-pub fn mark_review_finished(
+pub async fn mark_review_finished(
     conn: &Connection,
     agent_name: &str,
     trigger: ReviewTriggerKind,
     status: ReviewStatus,
     reset_activity_counters: bool,
 ) -> Result<(), DbError> {
-    let tx = conn.transaction()?;
-    mark_review_finished_in_tx(&tx, agent_name, trigger, status, reset_activity_counters)?;
-    tx.commit()?;
+    let tx = conn.transaction().await?;
+    mark_review_finished_in_tx(&tx, agent_name, trigger, status, reset_activity_counters).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -637,14 +662,14 @@ pub fn mark_review_finished(
 /// There is no runtime way to assert "we are inside a transaction" from a
 /// `&Connection`, so this contract is enforced by documentation and code
 /// review only.
-pub fn mark_review_finished_in_tx(
+pub async fn mark_review_finished_in_tx(
     tx: &Transaction<'_>,
     agent_name: &str,
     trigger: ReviewTriggerKind,
     status: ReviewStatus,
     reset_activity_counters: bool,
 ) -> Result<(), DbError> {
-    ensure_nudge_state(tx, agent_name)?;
+    ensure_nudge_state(tx, agent_name).await?;
     let reset_activity_counters =
         reset_activity_counters && !matches!(status, ReviewStatus::Failed);
     let reset_issue_hints = !matches!(status, ReviewStatus::Failed)
@@ -667,7 +692,8 @@ pub fn mark_review_finished_in_tx(
             if reset_activity_counters { 1_i64 } else { 0_i64 },
             if reset_issue_hints { 1_i64 } else { 0_i64 },
         ],
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -684,11 +710,12 @@ pub fn mark_review_finished_in_tx(
 /// Returns the count of rows reset (for logging).
 ///
 /// Single-statement write — no transaction needed.
-pub fn reset_stale_review_running(conn: &Connection) -> Result<usize, DbError> {
+pub async fn reset_stale_review_running(conn: &Connection) -> Result<usize, DbError> {
     conn.execute(
         "UPDATE skill_nudge_state SET review_running = 0 WHERE review_running = 1",
         [],
     )
+    .await
 }
 
 /// Record a learning review failure: increment `consecutive_review_failures`,
@@ -702,7 +729,7 @@ pub fn reset_stale_review_running(conn: &Connection) -> Result<usize, DbError> {
 ///   the circuit stays open.
 ///
 /// `now_utc` must be RFC3339 strict (e.g. "2026-05-21T03:14:15Z").
-pub fn record_review_failure(
+pub async fn record_review_failure(
     conn: &Connection,
     agent_name: &str,
     now_utc: &str,
@@ -717,15 +744,17 @@ pub fn record_review_failure(
         .map_err(|e| DbError::InvalidParameter(format!("invalid now_utc {now_utc:?}: {e}")))?
         .with_timezone(&chrono::Utc);
 
-    let tx = conn.transaction()?;
-    ensure_nudge_state(&tx, agent_name)?;
+    let tx = conn.transaction().await?;
+    ensure_nudge_state(&tx, agent_name).await?;
 
-    let (prev_count, prev_open_until): (i64, Option<String>) = tx.query_row(
-        "SELECT consecutive_review_failures, review_circuit_open_until \
+    let (prev_count, prev_open_until): (i64, Option<String>) = tx
+        .query_row(
+            "SELECT consecutive_review_failures, review_circuit_open_until \
          FROM skill_nudge_state WHERE agent_name = ?1",
-        [agent_name],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
+            [agent_name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .await?;
 
     let new_count = prev_count + 1;
     // RFC3339-Z strings are lexicographically orderable; both sides are
@@ -751,10 +780,11 @@ pub fn record_review_failure(
             review_running = 0, \
             consecutive_review_failures = ?2, \
             review_circuit_open_until = ?3 \
-         WHERE agent_name = ?1",
+        WHERE agent_name = ?1",
         params![agent_name, new_count, new_open_until],
-    )?;
-    tx.commit()?;
+    )
+    .await?;
+    tx.commit().await?;
     Ok((new_count, opened_now))
 }
 
@@ -767,11 +797,12 @@ pub fn record_review_failure(
 /// left them.
 ///
 /// Single-statement write — no transaction needed.
-pub fn clear_review_running(conn: &Connection, agent_name: &str) -> Result<(), DbError> {
+pub async fn clear_review_running(conn: &Connection, agent_name: &str) -> Result<(), DbError> {
     conn.execute(
         "UPDATE skill_nudge_state SET review_running = 0 WHERE agent_name = ?1",
         [agent_name],
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -779,8 +810,8 @@ pub fn clear_review_running(conn: &Connection, agent_name: &str) -> Result<(), D
 mod tests {
     use super::*;
 
-    fn conn() -> (tempfile::TempDir, Connection) {
-        right_db::test_support::migrated_connection()
+    async fn conn() -> (tempfile::TempDir, Connection) {
+        right_db::test_support::migrated_connection().await
     }
 
     fn review_gate_input(signal_trigger: Option<ReviewTriggerKind>) -> ReviewGateInput<'static> {
@@ -791,7 +822,7 @@ mod tests {
         }
     }
 
-    fn insert_usage(conn: &Connection, ts: &str, source: &str, cost: f64) {
+    async fn insert_usage(conn: &Connection, ts: &str, source: &str, cost: f64) {
         conn.execute(
             "INSERT INTO usage_events (
                 ts, source, chat_id, thread_id, job_name, session_uuid,
@@ -801,18 +832,19 @@ mod tests {
              ) VALUES (?1, ?2, NULL, NULL, NULL, 's', ?3, 1, 0, 0, 0, 0, 0, 0, '{}', 'none')",
             params![ts, source, cost],
         )
+        .await
         .unwrap();
     }
 
-    fn ensure_agent_nudge_state(conn: &Connection, agent: &str) {
-        let tx = conn.transaction().unwrap();
-        ensure_nudge_state(&tx, agent).unwrap();
-        tx.commit().unwrap();
+    async fn ensure_agent_nudge_state(conn: &Connection, agent: &str) {
+        let tx = conn.transaction().await.unwrap();
+        ensure_nudge_state(&tx, agent).await.unwrap();
+        tx.commit().await.unwrap();
     }
 
-    #[test]
-    fn review_report_persistence_round_trips_candidate() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn review_report_persistence_round_trips_candidate() {
+        let (_dir, conn) = conn().await;
         let report = SkillReviewReport {
             agent_name: "right".to_owned(),
             source_invocation_id: "inv-1".to_owned(),
@@ -834,7 +866,7 @@ mod tests {
             telegram_notified: true,
         };
 
-        insert_skill_review_report(&conn, &report).unwrap();
+        insert_skill_review_report(&conn, &report).await.unwrap();
 
         let row: (String, String, String, String, String, i64) = conn
             .query_row(
@@ -852,6 +884,7 @@ mod tests {
                     ))
                 },
             )
+            .await
             .unwrap();
         assert_eq!(row.0, "learning_signal");
         assert_eq!(row.1, "create_candidate");
@@ -861,10 +894,10 @@ mod tests {
         assert_eq!(row.5, 1);
     }
 
-    #[test]
-    fn review_gate_accepts_signal_and_effort_threshold() {
-        let (_dir, conn) = conn();
-        ensure_nudge_state(&conn, "right").unwrap();
+    #[tokio::test]
+    async fn review_gate_accepts_signal_and_effort_threshold() {
+        let (_dir, conn) = conn().await;
+        ensure_nudge_state(&conn, "right").await.unwrap();
 
         let signal_decision = review_gate_decision(
             &conn,
@@ -875,6 +908,7 @@ mod tests {
                 daily_budget_usd: 5.00,
             },
         )
+        .await
         .unwrap();
         assert_eq!(
             signal_decision,
@@ -890,6 +924,7 @@ mod tests {
                 daily_budget_usd: 5.00,
             },
         )
+        .await
         .unwrap();
         assert_eq!(
             issue_decision,
@@ -900,6 +935,7 @@ mod tests {
             "UPDATE skill_nudge_state SET tool_iters_since_review = 15 WHERE agent_name='right'",
             [],
         )
+        .await
         .unwrap();
         let effort_decision = review_gate_decision(
             &conn,
@@ -910,6 +946,7 @@ mod tests {
                 daily_budget_usd: 5.00,
             },
         )
+        .await
         .unwrap();
         assert_eq!(
             effort_decision,
@@ -917,15 +954,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn review_gate_blocks_running() {
-        let (_dir, conn) = conn();
-        ensure_nudge_state(&conn, "right").unwrap();
+    #[tokio::test]
+    async fn review_gate_blocks_running() {
+        let (_dir, conn) = conn().await;
+        ensure_nudge_state(&conn, "right").await.unwrap();
 
         conn.execute(
             "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name='right'",
             [],
         )
+        .await
         .unwrap();
         let running = review_gate_decision(
             &conn,
@@ -936,6 +974,7 @@ mod tests {
                 daily_budget_usd: 5.00,
             },
         )
+        .await
         .unwrap();
         assert_eq!(
             running,
@@ -947,6 +986,7 @@ mod tests {
             "UPDATE skill_nudge_state SET review_running = 0 WHERE agent_name='right'",
             [],
         )
+        .await
         .unwrap();
         let started = review_gate_decision(
             &conn,
@@ -957,6 +997,7 @@ mod tests {
                 daily_budget_usd: 5.00,
             },
         )
+        .await
         .unwrap();
         assert_eq!(
             started,
@@ -964,14 +1005,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn review_start_and_finish_update_nudge_state() {
-        let (_dir, conn) = conn();
-        ensure_nudge_state(&conn, "right").unwrap();
+    #[tokio::test]
+    async fn review_start_and_finish_update_nudge_state() {
+        let (_dir, conn) = conn().await;
+        ensure_nudge_state(&conn, "right").await.unwrap();
         conn.execute(
             "UPDATE skill_nudge_state SET tool_iters_since_review = 19, turns_since_review = 3 WHERE agent_name='right'",
             [],
         )
+        .await
         .unwrap();
 
         let started = try_mark_review_started(
@@ -983,6 +1025,7 @@ mod tests {
                 daily_budget_usd: 5.00,
             },
         )
+        .await
         .unwrap();
         assert_eq!(
             started,
@@ -994,6 +1037,7 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(running, 1);
 
@@ -1004,6 +1048,7 @@ mod tests {
             ReviewStatus::NothingToLearn,
             true,
         )
+        .await
         .unwrap();
         let row: (i64, i64, i64, String) = conn
             .query_row(
@@ -1012,14 +1057,15 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row, (0, 0, 0, "nothing_to_learn".to_owned()));
     }
 
-    #[test]
-    fn reset_stale_review_running_clears_flag_without_touching_other_fields() {
-        let (_dir, conn) = conn();
-        ensure_nudge_state(&conn, "stale").unwrap();
+    #[tokio::test]
+    async fn reset_stale_review_running_clears_flag_without_touching_other_fields() {
+        let (_dir, conn) = conn().await;
+        ensure_nudge_state(&conn, "stale").await.unwrap();
         // Seed a row that looks like a stranded review: running=1, with
         // pre-existing counters and last_review_at/status that
         // the reaper MUST leave alone.
@@ -1036,19 +1082,21 @@ mod tests {
              WHERE agent_name='stale'",
             [],
         )
+        .await
         .unwrap();
 
         // Also seed a non-stale row to confirm the WHERE clause is selective.
-        ensure_nudge_state(&conn, "idle").unwrap();
+        ensure_nudge_state(&conn, "idle").await.unwrap();
         conn.execute(
             "UPDATE skill_nudge_state \
              SET review_running = 0, last_review_at = '2026-05-18T10:00:00Z' \
              WHERE agent_name='idle'",
             [],
         )
+        .await
         .unwrap();
 
-        let reset = reset_stale_review_running(&conn).unwrap();
+        let reset = reset_stale_review_running(&conn).await.unwrap();
         assert_eq!(reset, 1);
 
         let stale_row: (i64, i64, i64, i64, i64, String, String, String) = conn
@@ -1071,6 +1119,7 @@ mod tests {
                     ))
                 },
             )
+            .await
             .unwrap();
         assert_eq!(
             stale_row,
@@ -1093,18 +1142,19 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(idle_running, 0);
 
         // Re-running the reaper on a clean DB is a no-op.
-        let reset_again = reset_stale_review_running(&conn).unwrap();
+        let reset_again = reset_stale_review_running(&conn).await.unwrap();
         assert_eq!(reset_again, 0);
     }
 
-    #[test]
-    fn clear_review_running_clears_flag_without_touching_other_fields() {
-        let (_dir, conn) = conn();
-        ensure_nudge_state(&conn, "agent-x").unwrap();
+    #[tokio::test]
+    async fn clear_review_running_clears_flag_without_touching_other_fields() {
+        let (_dir, conn) = conn().await;
+        ensure_nudge_state(&conn, "agent-x").await.unwrap();
         // Seed a mid-review row: running=1, with a prior review timestamp,
         // counters, and last_review_status that the shutdown helper MUST
         // leave alone.
@@ -1121,9 +1171,10 @@ mod tests {
              WHERE agent_name='agent-x'",
             [],
         )
+        .await
         .unwrap();
 
-        clear_review_running(&conn, "agent-x").unwrap();
+        clear_review_running(&conn, "agent-x").await.unwrap();
 
         let row: (i64, i64, i64, i64, i64, String, String, String) = conn
             .query_row(
@@ -1145,6 +1196,7 @@ mod tests {
                     ))
                 },
             )
+            .await
             .unwrap();
         assert_eq!(
             row,
@@ -1161,15 +1213,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn review_start_rechecks_running_after_stale_gate() {
-        let (_dir, conn) = conn();
-        ensure_nudge_state(&conn, "right").unwrap();
+    #[tokio::test]
+    async fn review_start_rechecks_running_after_stale_gate() {
+        let (_dir, conn) = conn().await;
+        ensure_nudge_state(&conn, "right").await.unwrap();
         let stale_decision = review_gate_decision(
             &conn,
             "right",
             review_gate_input(Some(ReviewTriggerKind::LearningSignal)),
         )
+        .await
         .unwrap();
         assert_eq!(
             stale_decision,
@@ -1180,12 +1233,14 @@ mod tests {
             "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name='right'",
             [],
         )
+        .await
         .unwrap();
         let running = try_mark_review_started(
             &conn,
             "right",
             review_gate_input(Some(ReviewTriggerKind::LearningSignal)),
         )
+        .await
         .unwrap();
         assert_eq!(
             running,
@@ -1197,12 +1252,14 @@ mod tests {
             "UPDATE skill_nudge_state SET review_running = 0 WHERE agent_name='right'",
             [],
         )
+        .await
         .unwrap();
         let started = try_mark_review_started(
             &conn,
             "right",
             review_gate_input(Some(ReviewTriggerKind::LearningSignal)),
         )
+        .await
         .unwrap();
         assert_eq!(
             started,
@@ -1210,17 +1267,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn review_start_ignores_recent_last_review_at_after_stale_gate() {
-        let (_dir, conn) = conn();
-        ensure_nudge_state(&conn, "right").unwrap();
+    #[tokio::test]
+    async fn review_start_ignores_recent_last_review_at_after_stale_gate() {
+        let (_dir, conn) = conn().await;
+        ensure_nudge_state(&conn, "right").await.unwrap();
         let input = ReviewGateInput {
             signal_trigger: Some(ReviewTriggerKind::LearningSignal),
             now_utc: "2026-05-18T12:00:00Z",
             daily_budget_usd: 5.00,
         };
 
-        let stale_decision = review_gate_decision(&conn, "right", input).unwrap();
+        let stale_decision = review_gate_decision(&conn, "right", input).await.unwrap();
         assert_eq!(
             stale_decision,
             ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
@@ -1230,9 +1287,12 @@ mod tests {
             "UPDATE skill_nudge_state SET last_review_at = '2026-05-18T12:05:00Z' WHERE agent_name='right'",
             [],
         )
+        .await
         .unwrap();
 
-        let started = try_mark_review_started(&conn, "right", input).unwrap();
+        let started = try_mark_review_started(&conn, "right", input)
+            .await
+            .unwrap();
         assert_eq!(
             started,
             ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
@@ -1244,14 +1304,15 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(running, 1);
     }
 
-    #[test]
-    fn review_gate_disables_non_positive_effort_threshold() {
-        let (_dir, conn) = conn();
-        ensure_nudge_state(&conn, "right").unwrap();
+    #[tokio::test]
+    async fn review_gate_disables_non_positive_effort_threshold() {
+        let (_dir, conn) = conn().await;
+        ensure_nudge_state(&conn, "right").await.unwrap();
 
         for interval in [0, -1] {
             conn.execute(
@@ -1259,9 +1320,12 @@ mod tests {
                  WHERE agent_name='right'",
                 [interval],
             )
+            .await
             .unwrap();
 
-            let effort = review_gate_decision(&conn, "right", review_gate_input(None)).unwrap();
+            let effort = review_gate_decision(&conn, "right", review_gate_input(None))
+                .await
+                .unwrap();
             assert_eq!(
                 effort,
                 ReviewGateDecision::Skip(ReviewSkipReason::BelowThreshold)
@@ -1272,6 +1336,7 @@ mod tests {
                 "right",
                 review_gate_input(Some(ReviewTriggerKind::SkillIssueSignal)),
             )
+            .await
             .unwrap();
             assert_eq!(
                 signal,
@@ -1280,11 +1345,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn review_public_helpers_create_missing_nudge_rows() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn review_public_helpers_create_missing_nudge_rows() {
+        let (_dir, conn) = conn().await;
 
-        let gate = review_gate_decision(&conn, "gate-missing", review_gate_input(None)).unwrap();
+        let gate = review_gate_decision(&conn, "gate-missing", review_gate_input(None))
+            .await
+            .unwrap();
         assert_eq!(
             gate,
             ReviewGateDecision::Skip(ReviewSkipReason::BelowThreshold)
@@ -1295,6 +1362,7 @@ mod tests {
             "start-missing",
             review_gate_input(Some(ReviewTriggerKind::SkillIssueSignal)),
         )
+        .await
         .unwrap();
         assert_eq!(
             start,
@@ -1308,6 +1376,7 @@ mod tests {
             ReviewStatus::Failed,
             false,
         )
+        .await
         .unwrap();
 
         for agent_name in ["gate-missing", "start-missing", "finish-missing"] {
@@ -1317,6 +1386,7 @@ mod tests {
                     [agent_name],
                     |r| r.get(0),
                 )
+                .await
                 .unwrap();
             assert_eq!(count, 1, "{agent_name} row should exist");
         }
@@ -1327,6 +1397,7 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(started, 1);
 
@@ -1337,22 +1408,24 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
+            .await
             .unwrap();
         assert_eq!(finished.0, 0);
         assert_eq!(finished.1, "failed");
         assert!(finished.2.is_some());
     }
 
-    #[test]
-    fn review_failed_finish_preserves_counters_and_sets_last_review_at() {
-        let (_dir, conn) = conn();
-        ensure_nudge_state(&conn, "right").unwrap();
+    #[tokio::test]
+    async fn review_failed_finish_preserves_counters_and_sets_last_review_at() {
+        let (_dir, conn) = conn().await;
+        ensure_nudge_state(&conn, "right").await.unwrap();
         conn.execute(
             "UPDATE skill_nudge_state \
              SET review_running = 1, tool_iters_since_review = 11, turns_since_review = 4, skill_issue_hints_since_review = 3 \
              WHERE agent_name='right'",
             [],
         )
+        .await
         .unwrap();
 
         mark_review_finished(
@@ -1362,6 +1435,7 @@ mod tests {
             ReviewStatus::Failed,
             true,
         )
+        .await
         .unwrap();
 
         let row: (i64, i64, i64, i64, String, Option<String>) = conn
@@ -1380,6 +1454,7 @@ mod tests {
                     ))
                 },
             )
+            .await
             .unwrap();
         assert_eq!(row.0, 0);
         assert_eq!(row.1, 11);
@@ -1389,17 +1464,18 @@ mod tests {
         assert!(row.5.is_some());
     }
 
-    #[test]
-    fn review_finish_resets_activity_counters_only_when_requested() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn review_finish_resets_activity_counters_only_when_requested() {
+        let (_dir, conn) = conn().await;
         for agent_name in ["preserve", "reset"] {
-            ensure_nudge_state(&conn, agent_name).unwrap();
+            ensure_nudge_state(&conn, agent_name).await.unwrap();
             conn.execute(
                 "UPDATE skill_nudge_state \
                  SET review_running = 1, tool_iters_since_review = 9, turns_since_review = 2, skill_issue_hints_since_review = 5 \
                  WHERE agent_name = ?1",
                 [agent_name],
             )
+            .await
             .unwrap();
         }
 
@@ -1410,6 +1486,7 @@ mod tests {
             ReviewStatus::CreateCandidate,
             false,
         )
+        .await
         .unwrap();
         mark_review_finished(
             &conn,
@@ -1418,6 +1495,7 @@ mod tests {
             ReviewStatus::CreateCandidate,
             true,
         )
+        .await
         .unwrap();
 
         let preserve: (i64, i64, i64, i64) = conn
@@ -1427,6 +1505,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .await
             .unwrap();
         assert_eq!(preserve, (0, 9, 2, 5));
 
@@ -1437,21 +1516,23 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .await
             .unwrap();
         assert_eq!(reset, (0, 0, 0, 5));
     }
 
-    #[test]
-    fn review_finish_resets_issue_hints_only_for_issue_or_nothing_to_learn() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn review_finish_resets_issue_hints_only_for_issue_or_nothing_to_learn() {
+        let (_dir, conn) = conn().await;
         for agent_name in ["learning", "issue", "nothing", "effort-update"] {
-            ensure_nudge_state(&conn, agent_name).unwrap();
+            ensure_nudge_state(&conn, agent_name).await.unwrap();
             conn.execute(
                 "UPDATE skill_nudge_state \
                  SET review_running = 1, tool_iters_since_review = 9, turns_since_review = 2, skill_issue_hints_since_review = 5 \
                  WHERE agent_name = ?1",
                 [agent_name],
             )
+            .await
             .unwrap();
         }
 
@@ -1462,6 +1543,7 @@ mod tests {
             ReviewStatus::CreateCandidate,
             true,
         )
+        .await
         .unwrap();
         mark_review_finished(
             &conn,
@@ -1470,6 +1552,7 @@ mod tests {
             ReviewStatus::UpdateCandidate,
             true,
         )
+        .await
         .unwrap();
         mark_review_finished(
             &conn,
@@ -1478,6 +1561,7 @@ mod tests {
             ReviewStatus::NothingToLearn,
             true,
         )
+        .await
         .unwrap();
         mark_review_finished(
             &conn,
@@ -1486,6 +1570,7 @@ mod tests {
             ReviewStatus::UpdateCandidate,
             true,
         )
+        .await
         .unwrap();
 
         let learning: (i64, i64, i64, i64, String) = conn
@@ -1495,6 +1580,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
+            .await
             .unwrap();
         assert_eq!(learning, (0, 0, 0, 5, "create_candidate".to_owned()));
 
@@ -1504,6 +1590,7 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(issue_hints, 0);
 
@@ -1513,6 +1600,7 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(nothing_hints, 0);
 
@@ -1522,13 +1610,14 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(effort_update_hints, 5);
     }
 
-    #[test]
-    fn successful_finish_exists_only_for_created_or_updated() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn successful_finish_exists_only_for_created_or_updated() {
+        let (_dir, conn) = conn().await;
         insert_learning_event(
             &conn,
             &LearningEvent {
@@ -1545,8 +1634,9 @@ mod tests {
                 event_refs: vec![],
             },
         )
+        .await
         .unwrap();
-        assert!(!successful_finish_exists(&conn, "inv-1").unwrap());
+        assert!(!successful_finish_exists(&conn, "inv-1").await.unwrap());
 
         insert_learning_event(
             &conn,
@@ -1564,13 +1654,14 @@ mod tests {
                 event_refs: vec!["e1".to_owned(), "e2".to_owned()],
             },
         )
+        .await
         .unwrap();
-        assert!(successful_finish_exists(&conn, "inv-1").unwrap());
+        assert!(successful_finish_exists(&conn, "inv-1").await.unwrap());
     }
 
-    #[test]
-    fn insert_learning_event_persists_hint_outcome() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn insert_learning_event_persists_hint_outcome() {
+        let (_dir, conn) = conn().await;
         insert_learning_event(
             &conn,
             &LearningEvent {
@@ -1587,6 +1678,7 @@ mod tests {
                 event_refs: vec![],
             },
         )
+        .await
         .unwrap();
 
         let hint_outcome: Option<String> = conn
@@ -1595,13 +1687,14 @@ mod tests {
                 [],
                 |row| row.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(hint_outcome.as_deref(), Some("refused"));
     }
 
-    #[test]
-    fn record_nudge_signal_persists_payload_and_updates_counter() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn record_nudge_signal_persists_payload_and_updates_counter() {
+        let (_dir, conn) = conn().await;
         record_nudge_signal(
             &conn,
             &NudgeSignalRecord {
@@ -1614,10 +1707,12 @@ mod tests {
                 payload_json: serde_json::json!({"kind":"update_candidate"}),
             },
         )
+        .await
         .unwrap();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM skill_nudge_signals", [], |r| r.get(0))
+            .await
             .unwrap();
         assert_eq!(count, 1);
 
@@ -1625,6 +1720,7 @@ mod tests {
             .query_row("SELECT payload_json FROM skill_nudge_signals", [], |r| {
                 r.get(0)
             })
+            .await
             .unwrap();
         let payload: serde_json::Value = serde_json::from_str(&payload_json).unwrap();
         assert_eq!(
@@ -1639,6 +1735,7 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(hints, 1);
     }
@@ -1666,9 +1763,9 @@ mod tests {
         })
     }
 
-    #[test]
-    fn nudge_signal_is_dropped_when_successful_finish_exists() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn nudge_signal_is_dropped_when_successful_finish_exists() {
+        let (_dir, conn) = conn().await;
         insert_learning_event(
             &conn,
             &LearningEvent {
@@ -1685,6 +1782,7 @@ mod tests {
                 event_refs: vec!["event-1".to_owned()],
             },
         )
+        .await
         .unwrap();
 
         let selected = select_reply_signal(
@@ -1697,14 +1795,15 @@ mod tests {
             )),
             None,
         )
+        .await
         .unwrap();
 
         assert!(selected.is_none());
     }
 
-    #[test]
-    fn nudge_signal_is_dropped_when_both_signals_present() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn nudge_signal_is_dropped_when_both_signals_present() {
+        let (_dir, conn) = conn().await;
         let selected = select_reply_signal(
             &conn,
             "inv-both",
@@ -1718,14 +1817,15 @@ mod tests {
                 "Patch the stale command.",
             )),
         )
+        .await
         .unwrap();
 
         assert!(selected.is_none());
     }
 
-    #[test]
-    fn nudge_signal_requires_two_event_refs_unless_explicit_user_request() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn nudge_signal_requires_two_event_refs_unless_explicit_user_request() {
+        let (_dir, conn) = conn().await;
         let dropped = select_reply_signal(
             &conn,
             "inv-short",
@@ -1736,6 +1836,7 @@ mod tests {
             )),
             None,
         )
+        .await
         .unwrap();
         assert!(dropped.is_none());
 
@@ -1749,6 +1850,7 @@ mod tests {
             )),
             None,
         )
+        .await
         .unwrap();
         assert_eq!(
             accepted.map(|(kind, _)| kind),
@@ -1765,6 +1867,7 @@ mod tests {
             )),
             None,
         )
+        .await
         .unwrap();
         assert!(empty_summary.is_none());
 
@@ -1774,13 +1877,14 @@ mod tests {
             None,
             Some(skill_issue_signal(vec!["event-1", "event-2"], "")),
         )
+        .await
         .unwrap();
         assert!(empty_patch_hint.is_none());
     }
 
-    #[test]
-    fn nudge_signal_rejects_empty_or_whitespace_event_refs() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn nudge_signal_rejects_empty_or_whitespace_event_refs() {
+        let (_dir, conn) = conn().await;
         let explicit_with_blank_ref = select_reply_signal(
             &conn,
             "inv-blank-explicit",
@@ -1791,6 +1895,7 @@ mod tests {
             )),
             None,
         )
+        .await
         .unwrap();
         assert!(explicit_with_blank_ref.is_none());
 
@@ -1804,13 +1909,14 @@ mod tests {
             )),
             None,
         )
+        .await
         .unwrap();
         assert!(non_explicit_with_one_nonblank_ref.is_none());
     }
 
-    #[test]
-    fn nudge_signal_rejects_blank_ref_even_when_enough_nonblank_refs_exist() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn nudge_signal_rejects_blank_ref_even_when_enough_nonblank_refs_exist() {
+        let (_dir, conn) = conn().await;
         let selected = select_reply_signal(
             &conn,
             "inv-mixed-blank",
@@ -1821,14 +1927,15 @@ mod tests {
             )),
             None,
         )
+        .await
         .unwrap();
 
         assert!(selected.is_none());
     }
 
-    #[test]
-    fn nudge_signal_rejects_non_string_event_ref() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn nudge_signal_rejects_non_string_event_ref() {
+        let (_dir, conn) = conn().await;
         let selected = select_reply_signal(
             &conn,
             "inv-non-string-ref",
@@ -1842,14 +1949,15 @@ mod tests {
             })),
             None,
         )
+        .await
         .unwrap();
 
         assert!(selected.is_none());
     }
 
-    #[test]
-    fn nudge_signal_accepts_valid_two_event_refs() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn nudge_signal_accepts_valid_two_event_refs() {
+        let (_dir, conn) = conn().await;
         let selected = select_reply_signal(
             &conn,
             "inv-two-refs",
@@ -1860,6 +1968,7 @@ mod tests {
             )),
             None,
         )
+        .await
         .unwrap();
 
         assert_eq!(
@@ -1868,9 +1977,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn nudge_signal_requires_learned_skill_prefix() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn nudge_signal_requires_learned_skill_prefix() {
+        let (_dir, conn) = conn().await;
         let create_without_prefix = select_reply_signal(
             &conn,
             "inv-create-prefix",
@@ -1884,6 +1993,7 @@ mod tests {
             })),
             None,
         )
+        .await
         .unwrap();
         assert!(create_without_prefix.is_none());
 
@@ -1901,13 +2011,14 @@ mod tests {
                 "patch_hint": "Patch the stale command.",
             })),
         )
+        .await
         .unwrap();
         assert!(update_without_prefix.is_none());
     }
 
-    #[test]
-    fn nudge_signal_rejects_invalid_enum_values() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn nudge_signal_rejects_invalid_enum_values() {
+        let (_dir, conn) = conn().await;
         let invalid_trigger = select_reply_signal(
             &conn,
             "inv-invalid-trigger",
@@ -1918,6 +2029,7 @@ mod tests {
             )),
             None,
         )
+        .await
         .unwrap();
         assert!(invalid_trigger.is_none());
 
@@ -1934,6 +2046,7 @@ mod tests {
             })),
             None,
         )
+        .await
         .unwrap();
         assert!(invalid_learning_reason.is_none());
 
@@ -1951,6 +2064,7 @@ mod tests {
                 "patch_hint": "Patch the stale command.",
             })),
         )
+        .await
         .unwrap();
         assert!(invalid_issue.is_none());
 
@@ -1968,54 +2082,56 @@ mod tests {
                 "patch_hint": "Patch the stale command.",
             })),
         )
+        .await
         .unwrap();
         assert!(invalid_observed_effect.is_none());
     }
 
-    #[test]
-    fn gate_skips_when_daily_budget_exceeded() {
-        let (_dir, conn) = conn();
-        ensure_agent_nudge_state(&conn, "agent-b");
-        insert_usage(&conn, "2026-05-21T01:00:00Z", "learning_selector", 2.50);
-        insert_usage(&conn, "2026-05-21T02:00:00Z", "learning_reviewer", 3.00);
+    #[tokio::test]
+    async fn gate_skips_when_daily_budget_exceeded() {
+        let (_dir, conn) = conn().await;
+        ensure_agent_nudge_state(&conn, "agent-b").await;
+        insert_usage(&conn, "2026-05-21T01:00:00Z", "learning_selector", 2.50).await;
+        insert_usage(&conn, "2026-05-21T02:00:00Z", "learning_reviewer", 3.00).await;
 
         let input = ReviewGateInput {
             signal_trigger: Some(ReviewTriggerKind::EffortThreshold),
             now_utc: "2026-05-21T03:00:00Z",
             daily_budget_usd: 5.00,
         };
-        let decision = try_mark_review_started(&conn, "agent-b", input).unwrap();
+        let decision = try_mark_review_started(&conn, "agent-b", input).await.unwrap();
         assert_eq!(
             decision,
             ReviewGateDecision::Skip(ReviewSkipReason::DailyBudget)
         );
     }
 
-    #[test]
-    fn gate_ignores_non_learning_sources_and_yesterdays_spend() {
-        let (_dir, conn) = conn();
-        ensure_agent_nudge_state(&conn, "agent-b");
-        insert_usage(&conn, "2026-05-20T23:59:00Z", "learning_selector", 10.00);
-        insert_usage(&conn, "2026-05-21T01:00:00Z", "interactive", 10.00);
-        insert_usage(&conn, "2026-05-21T02:00:00Z", "learning_selector", 1.00);
+    #[tokio::test]
+    async fn gate_ignores_non_learning_sources_and_yesterdays_spend() {
+        let (_dir, conn) = conn().await;
+        ensure_agent_nudge_state(&conn, "agent-b").await;
+        insert_usage(&conn, "2026-05-20T23:59:00Z", "learning_selector", 10.00).await;
+        insert_usage(&conn, "2026-05-21T01:00:00Z", "interactive", 10.00).await;
+        insert_usage(&conn, "2026-05-21T02:00:00Z", "learning_selector", 1.00).await;
 
         let input = ReviewGateInput {
             signal_trigger: Some(ReviewTriggerKind::EffortThreshold),
             now_utc: "2026-05-21T03:00:00Z",
             daily_budget_usd: 5.00,
         };
-        let decision = try_mark_review_started(&conn, "agent-b", input).unwrap();
+        let decision = try_mark_review_started(&conn, "agent-b", input).await.unwrap();
         assert!(matches!(decision, ReviewGateDecision::Start(_)));
     }
 
-    #[test]
-    fn gate_skips_when_circuit_open() {
-        let (_dir, conn) = conn();
-        ensure_agent_nudge_state(&conn, "agent-b");
+    #[tokio::test]
+    async fn gate_skips_when_circuit_open() {
+        let (_dir, conn) = conn().await;
+        ensure_agent_nudge_state(&conn, "agent-b").await;
         conn.execute(
             "UPDATE skill_nudge_state SET review_circuit_open_until = ?1 WHERE agent_name = 'agent-b'",
             ["2026-05-21T04:00:00Z"],
         )
+        .await
         .unwrap();
 
         let input = ReviewGateInput {
@@ -2023,17 +2139,17 @@ mod tests {
             now_utc: "2026-05-21T03:00:00Z",
             daily_budget_usd: 5.00,
         };
-        let decision = try_mark_review_started(&conn, "agent-b", input).unwrap();
+        let decision = try_mark_review_started(&conn, "agent-b", input).await.unwrap();
         assert_eq!(
             decision,
             ReviewGateDecision::Skip(ReviewSkipReason::CircuitOpen)
         );
     }
 
-    #[test]
-    fn gate_clears_expired_circuit_and_resets_failure_count() {
-        let (_dir, conn) = conn();
-        ensure_agent_nudge_state(&conn, "agent-b");
+    #[tokio::test]
+    async fn gate_clears_expired_circuit_and_resets_failure_count() {
+        let (_dir, conn) = conn().await;
+        ensure_agent_nudge_state(&conn, "agent-b").await;
         conn.execute(
             "UPDATE skill_nudge_state SET \
                 review_circuit_open_until = '2026-05-21T02:30:00Z', \
@@ -2041,6 +2157,7 @@ mod tests {
              WHERE agent_name = 'agent-b'",
             [],
         )
+        .await
         .unwrap();
 
         let input = ReviewGateInput {
@@ -2048,7 +2165,7 @@ mod tests {
             now_utc: "2026-05-21T03:00:00Z",
             daily_budget_usd: 5.00,
         };
-        let decision = try_mark_review_started(&conn, "agent-b", input).unwrap();
+        let decision = try_mark_review_started(&conn, "agent-b", input).await.unwrap();
         assert!(matches!(decision, ReviewGateDecision::Start(_)));
 
         let (open_until, count): (Option<String>, i64) = conn
@@ -2058,15 +2175,16 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
+            .await
             .unwrap();
         assert_eq!(open_until, None);
         assert_eq!(count, 0);
     }
 
-    #[test]
-    fn mark_review_finished_resets_circuit_and_failures() {
-        let (_dir, conn) = conn();
-        ensure_agent_nudge_state(&conn, "agent-b");
+    #[tokio::test]
+    async fn mark_review_finished_resets_circuit_and_failures() {
+        let (_dir, conn) = conn().await;
+        ensure_agent_nudge_state(&conn, "agent-b").await;
         conn.execute(
             "UPDATE skill_nudge_state SET \
                 review_running = 1, \
@@ -2075,6 +2193,7 @@ mod tests {
              WHERE agent_name = 'agent-b'",
             [],
         )
+        .await
         .unwrap();
 
         mark_review_finished(
@@ -2084,6 +2203,7 @@ mod tests {
             ReviewStatus::NothingToLearn,
             false,
         )
+        .await
         .unwrap();
 
         let (running, failures, open_until): (i64, i64, Option<String>) = conn
@@ -2093,24 +2213,27 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
+            .await
             .unwrap();
         assert_eq!(running, 0);
         assert_eq!(failures, 0);
         assert_eq!(open_until, None);
     }
 
-    #[test]
-    fn record_review_failure_increments_and_returns_opened_false_below_threshold() {
-        let (_dir, conn) = conn();
-        ensure_agent_nudge_state(&conn, "agent-b");
+    #[tokio::test]
+    async fn record_review_failure_increments_and_returns_opened_false_below_threshold() {
+        let (_dir, conn) = conn().await;
+        ensure_agent_nudge_state(&conn, "agent-b").await;
         conn.execute(
             "UPDATE skill_nudge_state SET review_running = 1, consecutive_review_failures = 2 WHERE agent_name = 'agent-b'",
             [],
         )
+        .await
         .unwrap();
 
-        let (count, opened) =
-            record_review_failure(&conn, "agent-b", "2026-05-21T03:00:00Z", 5, 60).unwrap();
+        let (count, opened) = record_review_failure(&conn, "agent-b", "2026-05-21T03:00:00Z", 5, 60)
+            .await
+            .unwrap();
         assert_eq!(count, 3);
         assert!(!opened);
 
@@ -2120,23 +2243,26 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
+            .await
             .unwrap();
         assert_eq!(running, 0);
         assert_eq!(open_until, None);
     }
 
-    #[test]
-    fn record_review_failure_opens_circuit_exactly_at_threshold() {
-        let (_dir, conn) = conn();
-        ensure_agent_nudge_state(&conn, "agent-b");
+    #[tokio::test]
+    async fn record_review_failure_opens_circuit_exactly_at_threshold() {
+        let (_dir, conn) = conn().await;
+        ensure_agent_nudge_state(&conn, "agent-b").await;
         conn.execute(
             "UPDATE skill_nudge_state SET review_running = 1, consecutive_review_failures = 4 WHERE agent_name = 'agent-b'",
             [],
         )
+        .await
         .unwrap();
 
-        let (count, opened) =
-            record_review_failure(&conn, "agent-b", "2026-05-21T03:00:00Z", 5, 60).unwrap();
+        let (count, opened) = record_review_failure(&conn, "agent-b", "2026-05-21T03:00:00Z", 5, 60)
+            .await
+            .unwrap();
         assert_eq!(count, 5);
         assert!(opened);
 
@@ -2146,14 +2272,15 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(open_until.as_deref(), Some("2026-05-21T04:00:00Z"));
     }
 
-    #[test]
-    fn record_review_failure_does_not_reopen_already_open_circuit() {
-        let (_dir, conn) = conn();
-        ensure_agent_nudge_state(&conn, "agent-b");
+    #[tokio::test]
+    async fn record_review_failure_does_not_reopen_already_open_circuit() {
+        let (_dir, conn) = conn().await;
+        ensure_agent_nudge_state(&conn, "agent-b").await;
         conn.execute(
             "UPDATE skill_nudge_state SET \
                 review_running = 1, \
@@ -2162,10 +2289,12 @@ mod tests {
              WHERE agent_name = 'agent-b'",
             [],
         )
+        .await
         .unwrap();
 
-        let (count, opened) =
-            record_review_failure(&conn, "agent-b", "2026-05-21T03:00:00Z", 5, 60).unwrap();
+        let (count, opened) = record_review_failure(&conn, "agent-b", "2026-05-21T03:00:00Z", 5, 60)
+            .await
+            .unwrap();
         assert_eq!(count, 8);
         assert!(!opened);
 
@@ -2175,25 +2304,26 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(open_until.as_deref(), Some("2026-05-21T05:00:00Z"));
     }
 
-    #[test]
-    fn record_review_failure_rejects_invalid_now_utc() {
-        let (_dir, conn) = conn();
-        ensure_agent_nudge_state(&conn, "agent-b");
-        let result = record_review_failure(&conn, "agent-b", "not-a-timestamp", 5, 60);
+    #[tokio::test]
+    async fn record_review_failure_rejects_invalid_now_utc() {
+        let (_dir, conn) = conn().await;
+        ensure_agent_nudge_state(&conn, "agent-b").await;
+        let result = record_review_failure(&conn, "agent-b", "not-a-timestamp", 5, 60).await;
         assert!(
             result.is_err(),
             "expected Err for malformed now_utc, got {result:?}"
         );
     }
 
-    #[test]
-    fn gate_decision_rejects_invalid_now_utc() {
-        let (_dir, conn) = conn();
-        ensure_nudge_state(&conn, "right").unwrap();
+    #[tokio::test]
+    async fn gate_decision_rejects_invalid_now_utc() {
+        let (_dir, conn) = conn().await;
+        ensure_nudge_state(&conn, "right").await.unwrap();
         let result = review_gate_decision(
             &conn,
             "right",
@@ -2202,7 +2332,8 @@ mod tests {
                 now_utc: "not-a-timestamp",
                 daily_budget_usd: 5.00,
             },
-        );
+        )
+        .await;
         assert!(
             result.is_err(),
             "expected Err for malformed now_utc, got {result:?}"

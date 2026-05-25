@@ -2,9 +2,11 @@ use super::*;
 use rmcp::handler::server::ServerHandler;
 use tempfile::tempdir;
 
-fn setup_server() -> (MemoryServer, tempfile::TempDir) {
+async fn setup_server() -> (MemoryServer, tempfile::TempDir) {
     let dir = tempdir().expect("tempdir");
-    let conn = right_db::open_connection(dir.path(), true).expect("open_connection");
+    let conn = right_db::open_connection(dir.path(), true)
+        .await
+        .expect("open_connection");
     let server = MemoryServer::new(
         conn,
         "test-agent".to_string(),
@@ -14,18 +16,18 @@ fn setup_server() -> (MemoryServer, tempfile::TempDir) {
     (server, dir)
 }
 
-fn setup_server_with_dir() -> (MemoryServer, tempfile::TempDir) {
-    setup_server()
+async fn setup_server_with_dir() -> (MemoryServer, tempfile::TempDir) {
+    setup_server().await
 }
 
-fn insert_cron_run(
+async fn insert_cron_run(
     server: &MemoryServer,
     id: &str,
     job_name: &str,
     started_at: &str,
     status: &str,
 ) {
-    let conn = server.conn.lock().unwrap();
+    let conn = server.conn.lock().await;
     conn.execute(
         "INSERT INTO async_runs (
             id, kind, producer_ref, run_session_id, target_chat_id,
@@ -34,6 +36,7 @@ fn insert_cron_run(
          ) VALUES (?1, 'cron', ?2, ?1, -100, ?3, ?4, ?5, 0, 'none', ?3, ?3)",
         right_db::params![id, job_name, started_at, status, format!("/tmp/{id}.log")],
     )
+    .await
     .expect("insert async cron run");
 }
 
@@ -52,16 +55,16 @@ fn call_result_text(result: CallToolResult) -> String {
         .join("")
 }
 
-#[test]
-fn test_get_info_server_name() {
-    let (server, _dir) = setup_server();
+#[tokio::test]
+async fn test_get_info_server_name() {
+    let (server, _dir) = setup_server().await;
     let info = server.get_info();
     assert_eq!(info.server_info.name, "right");
 }
 
 #[tokio::test]
 async fn test_cron_list_runs_empty() {
-    let (server, _dir) = setup_server();
+    let (server, _dir) = setup_server().await;
     let result = server
         .cron_list_runs(Parameters(CronListRunsParams {
             job_name: None,
@@ -76,21 +79,23 @@ async fn test_cron_list_runs_empty() {
 
 #[tokio::test]
 async fn test_cron_list_runs_two_rows() {
-    let (server, _dir) = setup_server();
+    let (server, _dir) = setup_server().await;
     insert_cron_run(
         &server,
         "run-001",
         "deploy-check",
         "2026-04-01T10:00:00Z",
         "success",
-    );
+    )
+    .await;
     insert_cron_run(
         &server,
         "run-002",
         "health-ping",
         "2026-04-01T11:00:00Z",
         "success",
-    );
+    )
+    .await;
 
     let result = server
         .cron_list_runs(Parameters(CronListRunsParams {
@@ -109,21 +114,23 @@ async fn test_cron_list_runs_two_rows() {
 
 #[tokio::test]
 async fn test_cron_list_runs_filter_job_name() {
-    let (server, _dir) = setup_server();
+    let (server, _dir) = setup_server().await;
     insert_cron_run(
         &server,
         "run-a1",
         "job-a",
         "2026-04-01T10:00:00Z",
         "success",
-    );
+    )
+    .await;
     insert_cron_run(
         &server,
         "run-b1",
         "job-b",
         "2026-04-01T10:01:00Z",
         "success",
-    );
+    )
+    .await;
 
     let result = server
         .cron_list_runs(Parameters(CronListRunsParams {
@@ -141,16 +148,17 @@ async fn test_cron_list_runs_filter_job_name() {
 
 #[tokio::test]
 async fn test_cron_list_runs_excludes_background_rows() {
-    let (server, _dir) = setup_server();
+    let (server, _dir) = setup_server().await;
     insert_cron_run(
         &server,
         "cron-001",
         "job-a",
         "2026-04-01T10:00:00Z",
         "success",
-    );
+    )
+    .await;
     {
-        let conn = server.conn.lock().unwrap();
+        let conn = server.conn.lock().await;
         conn.execute(
             "INSERT INTO async_runs (
                 id, kind, source_session_id, run_session_id, target_chat_id,
@@ -162,6 +170,7 @@ async fn test_cron_list_runs_excludes_background_rows() {
              )",
             [],
         )
+        .await
         .unwrap();
     }
 
@@ -180,9 +189,9 @@ async fn test_cron_list_runs_excludes_background_rows() {
 
 #[tokio::test]
 async fn test_cron_list_runs_propagates_malformed_row_error() {
-    let (server, _dir) = setup_server();
+    let (server, _dir) = setup_server().await;
     {
-        let conn = server.conn.lock().unwrap();
+        let conn = server.conn.lock().await;
         conn.execute(
             "INSERT INTO async_runs (
                 id, kind, producer_ref, run_session_id, target_chat_id,
@@ -194,6 +203,7 @@ async fn test_cron_list_runs_propagates_malformed_row_error() {
              )",
             [],
         )
+        .await
         .unwrap();
     }
 
@@ -213,7 +223,7 @@ async fn test_cron_list_runs_propagates_malformed_row_error() {
 
 #[tokio::test]
 async fn test_cron_list_runs_limit() {
-    let (server, _dir) = setup_server();
+    let (server, _dir) = setup_server().await;
     for i in 0..5 {
         insert_cron_run(
             &server,
@@ -221,7 +231,8 @@ async fn test_cron_list_runs_limit() {
             "batch-job",
             &format!("2026-04-01T{i:02}:00:00Z"),
             "success",
-        );
+        )
+        .await;
     }
     let result = server
         .cron_list_runs(Parameters(CronListRunsParams {
@@ -237,14 +248,15 @@ async fn test_cron_list_runs_limit() {
 
 #[tokio::test]
 async fn test_cron_show_run_found() {
-    let (server, _dir) = setup_server();
+    let (server, _dir) = setup_server().await;
     insert_cron_run(
         &server,
         "run-xyz",
         "nightly-report",
         "2026-04-01T02:00:00Z",
         "success",
-    );
+    )
+    .await;
 
     let result = server
         .cron_show_run(Parameters(CronShowRunParams {
@@ -261,7 +273,7 @@ async fn test_cron_show_run_found() {
 
 #[tokio::test]
 async fn test_cron_show_run_not_found() {
-    let (server, _dir) = setup_server();
+    let (server, _dir) = setup_server().await;
 
     let result = server
         .cron_show_run(Parameters(CronShowRunParams {
@@ -281,8 +293,8 @@ async fn test_cron_show_run_not_found() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn test_cron_list_runs_includes_diagnostics_fields() {
-    let (server, _dir) = setup_server();
-    let conn = server.conn.lock().unwrap();
+    let (server, _dir) = setup_server().await;
+    let conn = server.conn.lock().await;
     conn.execute(
         "INSERT INTO async_runs (
             id, kind, producer_ref, run_session_id, target_chat_id,
@@ -296,6 +308,7 @@ async fn test_cron_list_runs_includes_diagnostics_fields() {
          )",
         [],
     )
+    .await
     .expect("insert");
     conn.execute(
         "INSERT INTO async_runs (
@@ -310,6 +323,7 @@ async fn test_cron_list_runs_includes_diagnostics_fields() {
          )",
         [],
     )
+    .await
     .expect("insert");
     drop(conn);
 
@@ -343,7 +357,7 @@ async fn test_cron_list_runs_includes_diagnostics_fields() {
 
 #[tokio::test]
 async fn test_mcp_list_empty() {
-    let (server, _dir) = setup_server_with_dir();
+    let (server, _dir) = setup_server_with_dir().await;
     let result = server
         .mcp_list(Parameters(McpListParams {}))
         .await
@@ -355,7 +369,7 @@ async fn test_mcp_list_empty() {
 
 #[tokio::test]
 async fn stdio_send_progress_returns_progress_unavailable() {
-    let (server, _dir) = setup_server();
+    let (server, _dir) = setup_server().await;
     let result = server
         .send_progress(Parameters(crate::progress::SendProgressParams {
             message: "hello".to_string(),
@@ -371,7 +385,7 @@ async fn stdio_send_progress_returns_progress_unavailable() {
 
 #[tokio::test]
 async fn stdio_conversation_search_returns_scope_unavailable() {
-    let (server, _dir) = setup_server();
+    let (server, _dir) = setup_server().await;
 
     let thread_result = server
         .thread_search(Parameters(crate::right_backend::ConversationSearchParams {
@@ -403,9 +417,9 @@ async fn stdio_conversation_search_returns_scope_unavailable() {
     assert_eq!(chat_body["error"]["code"], "conversation_scope_unavailable");
 }
 
-#[test]
-fn test_get_info_mentions_cron_and_mcp_tools() {
-    let (server, _dir) = setup_server_with_dir();
+#[tokio::test]
+async fn test_get_info_mentions_cron_and_mcp_tools() {
+    let (server, _dir) = setup_server_with_dir().await;
     let info = server.get_info();
     let instructions = info.instructions.unwrap_or_default();
     assert!(
@@ -422,9 +436,9 @@ fn test_get_info_mentions_cron_and_mcp_tools() {
     );
 }
 
-#[test]
-fn test_get_info_delegates_memory_routing_to_right_memory() {
-    let (server, _dir) = setup_server_with_dir();
+#[tokio::test]
+async fn test_get_info_delegates_memory_routing_to_right_memory() {
+    let (server, _dir) = setup_server_with_dir().await;
     let info = server.get_info();
     let instructions = info.instructions.unwrap_or_default();
     for needle in [

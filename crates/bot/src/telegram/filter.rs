@@ -170,8 +170,8 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn routing_decision_constructs() {
+    #[tokio::test]
+    async fn routing_decision_constructs() {
         let d = RoutingDecision {
             address: Some(AddressKind::DirectMessage),
             sender_trusted: true,
@@ -181,8 +181,8 @@ mod tests {
         assert!(!d.group_open);
     }
 
-    #[test]
-    fn untrusted_private_text_message_is_dropped() {
+    #[tokio::test]
+    async fn untrusted_private_text_message_is_dropped() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
             user_id: 999,
@@ -196,8 +196,8 @@ mod tests {
         assert!(f(msg).is_none());
     }
 
-    #[test]
-    fn untrusted_private_media_caption_message_is_dropped() {
+    #[tokio::test]
+    async fn untrusted_private_media_caption_message_is_dropped() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
             user_id: 999,
@@ -211,8 +211,8 @@ mod tests {
         assert!(f(msg).is_none());
     }
 
-    #[test]
-    fn trusted_private_text_routes_as_direct_message() {
+    #[tokio::test]
+    async fn trusted_private_text_routes_as_direct_message() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
             user_id: 999,
@@ -229,8 +229,8 @@ mod tests {
         assert!(!decision.group_open);
     }
 
-    #[test]
-    fn trusted_private_media_caption_routes_as_direct_message() {
+    #[tokio::test]
+    async fn trusted_private_media_caption_routes_as_direct_message() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
             user_id: 999,
@@ -247,8 +247,8 @@ mod tests {
         assert!(!decision.group_open);
     }
 
-    #[test]
-    fn media_group_sibling_without_mention_passes_for_open_group() {
+    #[tokio::test]
+    async fn media_group_sibling_without_mention_passes_for_open_group() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
             user_id: 999,
@@ -271,8 +271,8 @@ mod tests {
         assert!(d.group_open);
     }
 
-    #[test]
-    fn ordinary_group_message_without_mention_still_dropped() {
+    #[tokio::test]
+    async fn ordinary_group_message_without_mention_still_dropped() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
             user_id: 999,
@@ -295,8 +295,8 @@ mod tests {
         assert!(f(msg).is_none());
     }
 
-    #[test]
-    fn unaddressed_group_message_still_dropped_by_routing_filter() {
+    #[tokio::test]
+    async fn unaddressed_group_message_still_dropped_by_routing_filter() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
             user_id: 999,
@@ -318,8 +318,8 @@ mod tests {
         assert!(f(msg).is_none());
     }
 
-    #[test]
-    fn media_group_sibling_without_mention_dropped_for_untrusted_sender() {
+    #[tokio::test]
+    async fn media_group_sibling_without_mention_dropped_for_untrusted_sender() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
             user_id: 999,
@@ -341,8 +341,8 @@ mod tests {
         assert!(f(msg).is_none());
     }
 
-    #[test]
-    fn media_group_sibling_with_mention_passes_with_some_address() {
+    #[tokio::test]
+    async fn media_group_sibling_with_mention_passes_with_some_address() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
             user_id: 999,
@@ -364,8 +364,8 @@ mod tests {
         assert!(matches!(d.address, Some(AddressKind::GroupMentionText)));
     }
 
-    #[test]
-    fn vonder_repro_three_album_siblings_all_routed() {
+    #[tokio::test]
+    async fn vonder_repro_three_album_siblings_all_routed() {
         // Reproduces the bug from ~/.right/logs/agent-b.log.2026-04-27 lines 137-152:
         // three messages sharing media_group_id, only the third carries the @mention.
         let identity = BotIdentity {
@@ -406,8 +406,8 @@ mod tests {
         assert!(d3.address.is_some());
     }
 
-    #[test]
-    fn forward_origin_passes_in_open_group() {
+    #[tokio::test]
+    async fn forward_origin_passes_in_open_group() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
             user_id: 999,
@@ -443,8 +443,8 @@ mod tests {
         assert!(d.group_open);
     }
 
-    #[test]
-    fn forward_origin_dropped_for_untrusted_sender_and_closed_group() {
+    #[tokio::test]
+    async fn forward_origin_dropped_for_untrusted_sender_and_closed_group() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
             user_id: 999,
@@ -478,8 +478,8 @@ mod tests {
         assert!(f(msg).is_none());
     }
 
-    #[test]
-    fn forward_with_caption_mention_routes_as_addressed() {
+    #[tokio::test]
+    async fn forward_with_caption_mention_routes_as_addressed() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
             user_id: 999,

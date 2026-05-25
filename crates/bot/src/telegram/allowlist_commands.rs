@@ -415,20 +415,20 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn resolve_numeric_id() {
+    #[tokio::test]
+    async fn resolve_numeric_id() {
         let m = dm_msg(1, "42");
         assert_eq!(resolve_user_target(&m, "42"), UserTarget::NumericId(42));
     }
 
-    #[test]
-    fn resolve_empty_args() {
+    #[tokio::test]
+    async fn resolve_empty_args() {
         let m = dm_msg(1, "");
         assert_eq!(resolve_user_target(&m, ""), UserTarget::None);
     }
 
-    #[test]
-    fn resolve_unresolvable_username() {
+    #[tokio::test]
+    async fn resolve_unresolvable_username() {
         let m = dm_msg(1, "@someone");
         match resolve_user_target(&m, "@someone") {
             UserTarget::UnresolvableUsername(u) => assert_eq!(u, "someone"),

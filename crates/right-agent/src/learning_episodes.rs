@@ -244,7 +244,7 @@ pub struct LearningEpisodeRow {
     pub updated_at: String,
 }
 
-pub fn insert_execution_event(
+pub async fn insert_execution_event(
     conn: &right_db::Connection,
     event: &NewExecutionEvent,
 ) -> Result<i64, right_db::DbError> {
@@ -274,15 +274,16 @@ pub fn insert_execution_event(
             event.content_text.as_str(),
             trust_label.as_str(),
         ],
-    )?;
+    )
+    .await?;
     Ok(conn.last_insert_rowid())
 }
 
-pub fn insert_pending_episode(
+pub async fn insert_pending_episode(
     conn: &right_db::Connection,
     seed: &NewLearningEpisodeSeed,
 ) -> Result<i64, right_db::DbError> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction().await?;
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO learning_episodes \
          (agent_name, kind, seed_trigger_kind, seed_ref, status, target_chat_id, target_thread_id, ready_after) \
@@ -296,71 +297,80 @@ pub fn insert_pending_episode(
             seed.target_thread_id,
             seed.ready_after.as_str(),
         ],
-    )?;
+    )
+    .await?;
     let id = if inserted == 1 {
         tx.last_insert_rowid()
     } else {
-        let id = tx.query_row(
-            "SELECT id FROM learning_episodes \
+        let id = tx
+            .query_row(
+                "SELECT id FROM learning_episodes \
              WHERE agent_name=?1 AND kind=?2 AND seed_trigger_kind=?3 AND seed_ref=?4",
-            params![
-                seed.agent_name.as_str(),
-                seed.kind.as_str(),
-                seed.seed_trigger_kind.as_str(),
-                seed.seed_ref.as_str(),
-            ],
-            |r| r.get(0),
-        )?;
+                params![
+                    seed.agent_name.as_str(),
+                    seed.kind.as_str(),
+                    seed.seed_trigger_kind.as_str(),
+                    seed.seed_ref.as_str(),
+                ],
+                |r| r.get(0),
+            )
+            .await?;
         tx.execute(
             "UPDATE learning_episodes \
              SET ready_after=?2, last_evidence_at=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
              WHERE id=?1 AND status='pending'",
             params![id, seed.ready_after.as_str()],
-        )?;
+        )
+        .await?;
         id
     };
-    tx.commit()?;
+    tx.commit().await?;
     Ok(id)
 }
 
-pub fn claim_ready_episode(
+pub async fn claim_ready_episode(
     conn: &right_db::Connection,
     agent_name: &str,
     now: &str,
 ) -> Result<Option<LearningEpisodeRow>, right_db::DbError> {
-    let tx = conn.transaction()?;
-    let id = match tx.query_row(
-        "SELECT id FROM learning_episodes \
+    let tx = conn.transaction().await?;
+    let id = match tx
+        .query_row(
+            "SELECT id FROM learning_episodes \
              WHERE agent_name=?1 AND status='pending' AND ready_after <= ?2 \
              ORDER BY ready_after ASC, id ASC \
              LIMIT 1",
-        params![agent_name, now],
-        |r| r.get::<_, i64>(0),
-    ) {
+            params![agent_name, now],
+            |r| r.get::<_, i64>(0),
+        )
+        .await
+    {
         Ok(id) => Some(id),
         Err(right_db::DbError::NotFound) => None,
         Err(error) => return Err(error),
     };
     let Some(id) = id else {
-        tx.commit()?;
+        tx.commit().await?;
         return Ok(None);
     };
-    let updated = tx.execute(
-        "UPDATE learning_episodes \
+    let updated = tx
+        .execute(
+            "UPDATE learning_episodes \
          SET status='selecting', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
          WHERE id=?1 AND status='pending'",
-        [id],
-    )?;
+            [id],
+        )
+        .await?;
     if updated != 1 {
-        tx.commit()?;
+        tx.commit().await?;
         return Ok(None);
     }
-    let episode = select_episode_in_tx(&tx, id)?;
-    tx.commit()?;
+    let episode = select_episode_in_tx(&tx, id).await?;
+    tx.commit().await?;
     Ok(Some(episode))
 }
 
-pub fn mark_episode_selected(
+pub async fn mark_episode_selected(
     conn: &right_db::Connection,
     episode_id: i64,
     selection: &SelectedEpisodeUpdate,
@@ -371,8 +381,9 @@ pub fn mark_episode_selected(
         .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let selector_output_json = serde_json::to_string(&selection.selector_output_json)
         .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
-    let updated = conn.execute(
-        "UPDATE learning_episodes \
+    let updated = conn
+        .execute(
+            "UPDATE learning_episodes \
          SET status='selected', \
              start_ref=?2, \
              end_ref=?3, \
@@ -387,29 +398,30 @@ pub fn mark_episode_selected(
              last_evidence_at=COALESCE(?12, last_evidence_at), \
              updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
          WHERE id=?1 AND status='selecting'",
-        params![
-            episode_id,
-            selection.start_ref.as_deref(),
-            selection.end_ref.as_deref(),
-            message_refs_json,
-            execution_event_refs_json,
-            selection.selector_model.as_deref(),
-            selector_output_json,
-            selection.boundary_rationale.as_deref(),
-            selection.confidence.as_deref(),
-            if selection.context_incomplete {
-                1_i64
-            } else {
-                0_i64
-            },
-            selection.episode_hash.as_deref(),
-            selection.last_evidence_at.as_deref(),
-        ],
-    )?;
+            params![
+                episode_id,
+                selection.start_ref.as_deref(),
+                selection.end_ref.as_deref(),
+                message_refs_json,
+                execution_event_refs_json,
+                selection.selector_model.as_deref(),
+                selector_output_json,
+                selection.boundary_rationale.as_deref(),
+                selection.confidence.as_deref(),
+                if selection.context_incomplete {
+                    1_i64
+                } else {
+                    0_i64
+                },
+                selection.episode_hash.as_deref(),
+                selection.last_evidence_at.as_deref(),
+            ],
+        )
+        .await?;
     require_one_row_updated(updated)
 }
 
-pub fn mark_episode_terminal(
+pub async fn mark_episode_terminal(
     conn: &right_db::Connection,
     episode_id: i64,
     status: LearningEpisodeStatus,
@@ -420,16 +432,18 @@ pub fn mark_episode_terminal(
     }
     let output_json = serde_json::to_string(output_json)
         .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
-    let updated = conn.execute(
-        "UPDATE learning_episodes \
+    let updated = conn
+        .execute(
+            "UPDATE learning_episodes \
          SET status=?2, selector_output_json=?3, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
          WHERE id=?1 AND status IN ('pending','selecting')",
-        params![episode_id, status.as_str(), output_json],
-    )?;
+            params![episode_id, status.as_str(), output_json],
+        )
+        .await?;
     require_one_row_updated(updated)
 }
 
-pub fn mark_episode_failed(
+pub async fn mark_episode_failed(
     conn: &right_db::Connection,
     episode_id: i64,
     reason: &str,
@@ -441,53 +455,60 @@ pub fn mark_episode_failed(
          SET status='failed', selector_output_json=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
          WHERE id=?1 AND status IN ('pending','selecting','selected','reviewing')",
         params![episode_id, output_json],
-    )?;
+    )
+    .await?;
     require_one_row_updated(updated)
 }
 
-pub fn mark_episode_reviewing(
+pub async fn mark_episode_reviewing(
     conn: &right_db::Connection,
     episode_id: i64,
 ) -> Result<(), right_db::DbError> {
-    let updated = conn.execute(
-        "UPDATE learning_episodes \
+    let updated = conn
+        .execute(
+            "UPDATE learning_episodes \
          SET status='reviewing', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
          WHERE id=?1 AND status='selected'",
-        [episode_id],
-    )?;
+            [episode_id],
+        )
+        .await?;
     require_one_row_updated(updated)
 }
 
-pub fn mark_episode_reviewed(
+pub async fn mark_episode_reviewed(
     conn: &right_db::Connection,
     episode_id: i64,
 ) -> Result<(), right_db::DbError> {
-    let updated = conn.execute(
-        "UPDATE learning_episodes \
+    let updated = conn
+        .execute(
+            "UPDATE learning_episodes \
          SET status='reviewed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
          WHERE id=?1 AND status='reviewing'",
-        [episode_id],
-    )?;
+            [episode_id],
+        )
+        .await?;
     require_one_row_updated(updated)
 }
 
-pub fn requeue_episode(
+pub async fn requeue_episode(
     conn: &right_db::Connection,
     episode_id: i64,
     ready_after: &str,
 ) -> Result<(), right_db::DbError> {
-    let updated = conn.execute(
-        "UPDATE learning_episodes \
+    let updated = conn
+        .execute(
+            "UPDATE learning_episodes \
          SET status='pending', ready_after=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
          WHERE id=?1 AND status='selecting'",
-        params![episode_id, ready_after],
-    )?;
+            params![episode_id, ready_after],
+        )
+        .await?;
     require_one_row_updated(updated)
 }
 
 /// Only clears review_running when the gate is set with no prior review report (stranded case).
 /// Concurrent legitimate reviews are not affected.
-pub fn recover_stale_inflight_episodes(
+pub async fn recover_stale_inflight_episodes(
     conn: &right_db::Connection,
     agent_name: &str,
     now: &str,
@@ -497,16 +518,18 @@ pub fn recover_stale_inflight_episodes(
          WHERE agent_name=?1 AND status IN ('selecting','selected','reviewing') \
          ORDER BY id ASC",
     )?;
-    let rows = stmt.query_map([agent_name], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-    })?;
+    let rows = stmt
+        .query_map([agent_name], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .await?;
     let mut episodes = Vec::new();
     for row in rows {
         episodes.push(row?);
     }
     drop(stmt);
 
-    let tx = conn.transaction()?;
+    let tx = conn.transaction().await?;
     let mut recovered = 0;
     for (episode_id, status) in episodes {
         match status.as_str() {
@@ -516,17 +539,21 @@ pub fn recover_stale_inflight_episodes(
                      SET status='pending', ready_after=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
                      WHERE id=?1 AND status='selecting'",
                     params![episode_id, now],
-                )?;
+                )
+                .await?;
             }
             "selected" | "reviewing" => {
-                let report_status: Option<String> = match tx.query_row(
-                    "SELECT status FROM skill_review_reports \
+                let report_status: Option<String> = match tx
+                    .query_row(
+                        "SELECT status FROM skill_review_reports \
                          WHERE learning_episode_id=?1 \
                          ORDER BY id DESC \
                          LIMIT 1",
-                    [episode_id],
-                    |row| row.get(0),
-                ) {
+                        [episode_id],
+                        |row| row.get(0),
+                    )
+                    .await
+                {
                     Ok(status) => Some(status),
                     Err(right_db::DbError::NotFound) => None,
                     Err(error) => return Err(error),
@@ -537,19 +564,22 @@ pub fn recover_stale_inflight_episodes(
                          SET status='failed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
                          WHERE id=?1 AND status IN ('selected','reviewing')",
                         [episode_id],
-                    )?,
+                    )
+                    .await?,
                     Some(_) => tx.execute(
                         "UPDATE learning_episodes \
                          SET status='reviewed', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
                          WHERE id=?1 AND status IN ('selected','reviewing')",
                         [episode_id],
-                    )?,
+                    )
+                    .await?,
                     None => tx.execute(
                         "UPDATE learning_episodes \
                          SET status='pending', ready_after=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') \
                          WHERE id=?1 AND status IN ('selected','reviewing')",
                         params![episode_id, now],
-                    )?,
+                    )
+                    .await?,
                 };
                 recovered += updated;
             }
@@ -561,9 +591,10 @@ pub fn recover_stale_inflight_episodes(
             "UPDATE skill_nudge_state SET review_running = 0 \
              WHERE agent_name = ?1 AND review_running = 1 AND last_review_status IS NULL",
             [agent_name],
-        )?;
+        )
+        .await?;
     }
-    tx.commit()?;
+    tx.commit().await?;
     Ok(recovered)
 }
 
@@ -575,7 +606,7 @@ fn require_one_row_updated(updated: usize) -> Result<(), right_db::DbError> {
     }
 }
 
-fn select_episode_in_tx(
+async fn select_episode_in_tx(
     tx: &right_db::Transaction<'_>,
     episode_id: i64,
 ) -> Result<LearningEpisodeRow, right_db::DbError> {
@@ -590,6 +621,7 @@ fn select_episode_in_tx(
         [episode_id],
         learning_episode_from_row,
     )
+    .await
 }
 
 fn learning_episode_from_row(
@@ -667,8 +699,8 @@ impl std::error::Error for InvalidDbValue {}
 mod tests {
     use super::*;
 
-    fn conn() -> (tempfile::TempDir, right_db::Connection) {
-        right_db::test_support::migrated_connection()
+    async fn conn() -> (tempfile::TempDir, right_db::Connection) {
+        right_db::test_support::migrated_connection().await
     }
 
     fn seed(seed_ref: &str) -> NewLearningEpisodeSeed {
@@ -710,9 +742,9 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn execution_event_insert_round_trips_thinking_as_secondary() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn execution_event_insert_round_trips_thinking_as_secondary() {
+        let (_dir, conn) = conn().await;
         let id = insert_execution_event(
             &conn,
             &NewExecutionEvent {
@@ -731,6 +763,7 @@ mod tests {
                 trust_label: TrustLabel::Secondary,
             },
         )
+        .await
         .unwrap();
         let row: (String, String) = conn
             .query_row(
@@ -738,27 +771,32 @@ mod tests {
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row, ("thinking".to_owned(), "secondary".to_owned()));
     }
 
-    #[test]
-    fn claim_ready_episode_moves_pending_to_selecting() {
-        let (_dir, conn) = conn();
-        let id = insert_pending_episode(&conn, &seed("inv:inv-1")).unwrap();
-        let claimed = claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z").unwrap();
+    #[tokio::test]
+    async fn claim_ready_episode_moves_pending_to_selecting() {
+        let (_dir, conn) = conn().await;
+        let id = insert_pending_episode(&conn, &seed("inv:inv-1"))
+            .await
+            .unwrap();
+        let claimed = claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
+            .await
+            .unwrap();
         assert_eq!(claimed.map(|e| e.id), Some(id));
     }
 
-    #[test]
-    fn duplicate_pending_seed_extends_ready_after_and_last_evidence_at() {
-        let (_dir, conn) = conn();
+    #[tokio::test]
+    async fn duplicate_pending_seed_extends_ready_after_and_last_evidence_at() {
+        let (_dir, conn) = conn().await;
         let mut seed = seed("inv:inv-dup");
         seed.ready_after = "2026-05-19T00:01:00Z".to_owned();
-        let id = insert_pending_episode(&conn, &seed).unwrap();
+        let id = insert_pending_episode(&conn, &seed).await.unwrap();
 
         seed.ready_after = "2026-05-19T00:05:00Z".to_owned();
-        let duplicate_id = insert_pending_episode(&conn, &seed).unwrap();
+        let duplicate_id = insert_pending_episode(&conn, &seed).await.unwrap();
 
         let row: (String, String) = conn
             .query_row(
@@ -766,21 +804,27 @@ mod tests {
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
+            .await
             .unwrap();
         assert_eq!(duplicate_id, id);
         assert_eq!(row.0, "2026-05-19T00:05:00Z");
         assert_eq!(row.1, "2026-05-19T00:05:00Z");
     }
 
-    #[test]
-    fn mark_episode_selected_moves_selecting_to_selected() {
-        let (_dir, conn) = conn();
-        let id = insert_pending_episode(&conn, &seed("inv:inv-2")).unwrap();
+    #[tokio::test]
+    async fn mark_episode_selected_moves_selecting_to_selected() {
+        let (_dir, conn) = conn().await;
+        let id = insert_pending_episode(&conn, &seed("inv:inv-2"))
+            .await
+            .unwrap();
         claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
+            .await
             .unwrap()
             .unwrap();
 
-        mark_episode_selected(&conn, id, &selected_update()).unwrap();
+        mark_episode_selected(&conn, id, &selected_update())
+            .await
+            .unwrap();
 
         let row: (String, String, String, String) = conn
             .query_row(
@@ -789,6 +833,7 @@ mod tests {
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row.0, "selected");
         assert_eq!(row.1, "msg:1");
@@ -796,29 +841,39 @@ mod tests {
         assert_eq!(row.3, r#"["event:7"]"#);
     }
 
-    #[test]
-    fn mark_episode_selected_rejects_missing_or_non_selecting_episode() {
-        let (_dir, conn) = conn();
-        let pending_id = insert_pending_episode(&conn, &seed("inv:inv-3")).unwrap();
+    #[tokio::test]
+    async fn mark_episode_selected_rejects_missing_or_non_selecting_episode() {
+        let (_dir, conn) = conn().await;
+        let pending_id = insert_pending_episode(&conn, &seed("inv:inv-3"))
+            .await
+            .unwrap();
 
-        assert_query_returned_no_rows(mark_episode_selected(&conn, pending_id, &selected_update()));
-        assert_query_returned_no_rows(mark_episode_selected(&conn, 999, &selected_update()));
+        assert_query_returned_no_rows(
+            mark_episode_selected(&conn, pending_id, &selected_update()).await,
+        );
+        assert_query_returned_no_rows(mark_episode_selected(&conn, 999, &selected_update()).await);
     }
 
-    #[test]
-    fn mark_episode_terminal_moves_pending_and_selecting_to_terminal_status() {
-        let (_dir, conn) = conn();
-        let pending_id = insert_pending_episode(&conn, &seed("inv:inv-4")).unwrap();
+    #[tokio::test]
+    async fn mark_episode_terminal_moves_pending_and_selecting_to_terminal_status() {
+        let (_dir, conn) = conn().await;
+        let pending_id = insert_pending_episode(&conn, &seed("inv:inv-4"))
+            .await
+            .unwrap();
         mark_episode_terminal(
             &conn,
             pending_id,
             LearningEpisodeStatus::NoEpisode,
             &serde_json::json!({"reason": "no bounded episode"}),
         )
+        .await
         .unwrap();
 
-        let selecting_id = insert_pending_episode(&conn, &seed("inv:inv-5")).unwrap();
+        let selecting_id = insert_pending_episode(&conn, &seed("inv:inv-5"))
+            .await
+            .unwrap();
         claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
+            .await
             .unwrap()
             .unwrap();
         mark_episode_terminal(
@@ -827,52 +882,70 @@ mod tests {
             LearningEpisodeStatus::InsufficientContext,
             &serde_json::json!({"reason": "missing events"}),
         )
+        .await
         .unwrap();
 
         let statuses: Vec<String> = conn
             .prepare("SELECT status FROM learning_episodes ORDER BY id")
             .unwrap()
             .query_map([], |r| r.get(0))
+            .await
             .unwrap()
             .map(Result::unwrap)
             .collect();
         assert_eq!(statuses, vec!["no_episode", "insufficient_context"]);
     }
 
-    #[test]
-    fn mark_episode_terminal_rejects_missing_or_non_pending_selecting_episode() {
-        let (_dir, conn) = conn();
-        let id = insert_pending_episode(&conn, &seed("inv:inv-6")).unwrap();
+    #[tokio::test]
+    async fn mark_episode_terminal_rejects_missing_or_non_pending_selecting_episode() {
+        let (_dir, conn) = conn().await;
+        let id = insert_pending_episode(&conn, &seed("inv:inv-6"))
+            .await
+            .unwrap();
         claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
+            .await
             .unwrap()
             .unwrap();
-        mark_episode_selected(&conn, id, &selected_update()).unwrap();
+        mark_episode_selected(&conn, id, &selected_update())
+            .await
+            .unwrap();
 
-        assert_query_returned_no_rows(mark_episode_terminal(
-            &conn,
-            id,
-            LearningEpisodeStatus::NoEpisode,
-            &serde_json::json!({"reason": "too late"}),
-        ));
-        assert_query_returned_no_rows(mark_episode_terminal(
-            &conn,
-            999,
-            LearningEpisodeStatus::NoEpisode,
-            &serde_json::json!({}),
-        ));
+        assert_query_returned_no_rows(
+            mark_episode_terminal(
+                &conn,
+                id,
+                LearningEpisodeStatus::NoEpisode,
+                &serde_json::json!({"reason": "too late"}),
+            )
+            .await,
+        );
+        assert_query_returned_no_rows(
+            mark_episode_terminal(
+                &conn,
+                999,
+                LearningEpisodeStatus::NoEpisode,
+                &serde_json::json!({}),
+            )
+            .await,
+        );
     }
 
-    #[test]
-    fn mark_episode_terminal_rejects_non_terminal_destination_status() {
-        let (_dir, conn) = conn();
-        let id = insert_pending_episode(&conn, &seed("inv:inv-7")).unwrap();
+    #[tokio::test]
+    async fn mark_episode_terminal_rejects_non_terminal_destination_status() {
+        let (_dir, conn) = conn().await;
+        let id = insert_pending_episode(&conn, &seed("inv:inv-7"))
+            .await
+            .unwrap();
 
-        assert_invalid_query(mark_episode_terminal(
-            &conn,
-            id,
-            LearningEpisodeStatus::Selected,
-            &serde_json::json!({"invalid": true}),
-        ));
+        assert_invalid_query(
+            mark_episode_terminal(
+                &conn,
+                id,
+                LearningEpisodeStatus::Selected,
+                &serde_json::json!({"invalid": true}),
+            )
+            .await,
+        );
 
         let status: String = conn
             .query_row(
@@ -880,25 +953,32 @@ mod tests {
                 [id],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(status, "pending");
     }
 
-    #[test]
-    fn mark_episode_failed_updates_in_flight_episode_and_rejects_missing_episode() {
-        let (_dir, conn) = conn();
-        let id = insert_pending_episode(&conn, &seed("inv:inv-8")).unwrap();
+    #[tokio::test]
+    async fn mark_episode_failed_updates_in_flight_episode_and_rejects_missing_episode() {
+        let (_dir, conn) = conn().await;
+        let id = insert_pending_episode(&conn, &seed("inv:inv-8"))
+            .await
+            .unwrap();
         claim_ready_episode(&conn, "right", "2026-05-19T00:00:01Z")
+            .await
             .unwrap()
             .unwrap();
         conn.execute(
             "UPDATE learning_episodes SET status='reviewing' WHERE id=?1",
             [id],
         )
+        .await
         .unwrap();
 
-        mark_episode_failed(&conn, id, "selector crashed").unwrap();
-        assert_query_returned_no_rows(mark_episode_failed(&conn, 999, "missing"));
+        mark_episode_failed(&conn, id, "selector crashed")
+            .await
+            .unwrap();
+        assert_query_returned_no_rows(mark_episode_failed(&conn, 999, "missing").await);
 
         let row: (String, String) = conn
             .query_row(
@@ -906,34 +986,46 @@ mod tests {
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row.0, "failed");
         assert_eq!(row.1, r#"{"error":"selector crashed"}"#);
     }
 
-    #[test]
-    fn mark_episode_failed_does_not_overwrite_final_statuses() {
-        let (_dir, conn) = conn();
-        let reviewed_id = insert_pending_episode(&conn, &seed("inv:inv-9")).unwrap();
-        let no_episode_id = insert_pending_episode(&conn, &seed("inv:inv-10")).unwrap();
+    #[tokio::test]
+    async fn mark_episode_failed_does_not_overwrite_final_statuses() {
+        let (_dir, conn) = conn().await;
+        let reviewed_id = insert_pending_episode(&conn, &seed("inv:inv-9"))
+            .await
+            .unwrap();
+        let no_episode_id = insert_pending_episode(&conn, &seed("inv:inv-10"))
+            .await
+            .unwrap();
         conn.execute(
             "UPDATE learning_episodes SET status='reviewed' WHERE id=?1",
             [reviewed_id],
         )
+        .await
         .unwrap();
         conn.execute(
             "UPDATE learning_episodes SET status='no_episode' WHERE id=?1",
             [no_episode_id],
         )
+        .await
         .unwrap();
 
-        assert_query_returned_no_rows(mark_episode_failed(&conn, reviewed_id, "late failure"));
-        assert_query_returned_no_rows(mark_episode_failed(&conn, no_episode_id, "late failure"));
+        assert_query_returned_no_rows(
+            mark_episode_failed(&conn, reviewed_id, "late failure").await,
+        );
+        assert_query_returned_no_rows(
+            mark_episode_failed(&conn, no_episode_id, "late failure").await,
+        );
 
         let statuses: Vec<String> = conn
             .prepare("SELECT status FROM learning_episodes ORDER BY id")
             .unwrap()
             .query_map([], |r| r.get(0))
+            .await
             .unwrap()
             .map(Result::unwrap)
             .collect();

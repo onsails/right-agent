@@ -224,8 +224,8 @@ fn host_mirror_or_unavailable(
 mod tests {
     use super::*;
 
-    #[test]
-    fn truncate_to_char_boundary_handles_split_multibyte_suffix() {
+    #[tokio::test]
+    async fn truncate_to_char_boundary_handles_split_multibyte_suffix() {
         let mut value = format!("{}é", "a".repeat(IDENTITY_PREVIEW_LIMIT_BYTES - 1));
 
         right_dashboard::fs_safety::truncate_to_char_boundary(
@@ -237,8 +237,8 @@ mod tests {
         assert!(value.ends_with('a'));
     }
 
-    #[test]
-    fn host_mirror_or_unavailable_labels_missing_files() {
+    #[tokio::test]
+    async fn host_mirror_or_unavailable_labels_missing_files() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("IDENTITY.md"), "# Identity\n").unwrap();
 

@@ -763,8 +763,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn chat_scope_cleanup_ids_include_legacy_and_current_allowlist() {
+    #[tokio::test]
+    async fn chat_scope_cleanup_ids_include_legacy_and_current_allowlist() {
         let now: chrono::DateTime<chrono::Utc> = "2026-05-19T12:00:00Z".parse().unwrap();
         let allowlist = AllowlistHandle::new(AllowlistState::from_file(AllowlistFile {
             version: 1,
@@ -788,8 +788,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn visible_commands_hide_usage_but_keep_dashboard() {
+    #[tokio::test]
+    async fn visible_commands_hide_usage_but_keep_dashboard() {
         let commands = visible_bot_commands();
         let names = commands
             .iter()
@@ -804,8 +804,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn pre_filter_log_meta_omits_private_text_and_caption_content() {
+    #[tokio::test]
+    async fn pre_filter_log_meta_omits_private_text_and_caption_content() {
         let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 10,
             "date": 0,

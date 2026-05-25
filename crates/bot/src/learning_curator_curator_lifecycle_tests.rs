@@ -1,8 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
 
-fn open_test_conn() -> right_db::Connection {
-    let conn = right_db::Connection::open_in_memory().unwrap();
-    right_db::MIGRATIONS.to_latest(&conn).unwrap();
+async fn open_test_conn() -> right_db::Connection {
+    let conn = right_db::Connection::open_in_memory().await.unwrap();
+    right_db::MIGRATIONS.to_latest(&conn).await.unwrap();
     conn
 }
 
@@ -11,7 +11,7 @@ fn dt(s: &str) -> DateTime<Utc> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn insert_skill_lifecycle_row(
+async fn insert_skill_lifecycle_row(
     conn: &right_db::Connection,
     skill_name: &str,
     state: right_lifecycle::LifecycleState,
@@ -38,12 +38,13 @@ fn insert_skill_lifecycle_row(
             last_patched_at,
         ],
     )
+    .await
     .unwrap();
 }
 
-#[test]
-fn curator_lifecycle_pinned_skills_are_skipped_by_automatic_transitions() {
-    let conn = open_test_conn();
+#[tokio::test]
+async fn curator_lifecycle_pinned_skills_are_skipped_by_automatic_transitions() {
+    let conn = open_test_conn().await;
     let now = dt("2026-05-24T00:00:00Z");
     insert_skill_lifecycle_row(
         &conn,
@@ -55,7 +56,8 @@ fn curator_lifecycle_pinned_skills_are_skipped_by_automatic_transitions() {
         0,
         Some("2026-01-01T00:00:00Z"),
         None,
-    );
+    )
+    .await;
 
     let changed = crate::lifecycle::transitions::apply_automatic_transitions(
         &conn,
@@ -65,18 +67,20 @@ fn curator_lifecycle_pinned_skills_are_skipped_by_automatic_transitions() {
             archive_after: Duration::days(90),
         },
     )
+    .await
     .unwrap();
 
     assert_eq!(changed, 0);
     let row = right_lifecycle::get(&conn, "rightx-pinned-old")
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(row.state, right_lifecycle::LifecycleState::Active);
 }
 
-#[test]
-fn curator_lifecycle_foreground_bundled_pinned_and_archived_rows_are_not_candidates() {
-    let conn = open_test_conn();
+#[tokio::test]
+async fn curator_lifecycle_foreground_bundled_pinned_and_archived_rows_are_not_candidates() {
+    let conn = open_test_conn().await;
     for (skill_name, state, pinned, created_by) in [
         (
             "rightx-probe",
@@ -125,10 +129,12 @@ fn curator_lifecycle_foreground_bundled_pinned_and_archived_rows_are_not_candida
             0,
             Some("2026-05-01T00:00:00Z"),
             None,
-        );
+        )
+        .await;
     }
 
     let names: Vec<_> = right_lifecycle::list_curator_candidates(&conn)
+        .await
         .unwrap()
         .into_iter()
         .map(|row| row.skill_name)
@@ -137,9 +143,9 @@ fn curator_lifecycle_foreground_bundled_pinned_and_archived_rows_are_not_candida
     assert_eq!(names, vec!["rightx-curator", "rightx-probe"]);
 }
 
-#[test]
-fn curator_lifecycle_probe_writer_and_curator_rows_can_transition() {
-    let conn = open_test_conn();
+#[tokio::test]
+async fn curator_lifecycle_probe_writer_and_curator_rows_can_transition() {
+    let conn = open_test_conn().await;
     let now = dt("2026-05-24T00:00:00Z");
     for (skill_name, state, created_by, last_used_at) in [
         (
@@ -177,7 +183,8 @@ fn curator_lifecycle_probe_writer_and_curator_rows_can_transition() {
             0,
             Some(last_used_at),
             None,
-        );
+        )
+        .await;
     }
 
     let changed = crate::lifecycle::transitions::apply_automatic_transitions(
@@ -188,12 +195,14 @@ fn curator_lifecycle_probe_writer_and_curator_rows_can_transition() {
             archive_after: Duration::days(90),
         },
     )
+    .await
     .unwrap();
 
     assert_eq!(changed, 4);
     for skill_name in ["rightx-active-probe", "rightx-active-curator"] {
         assert_eq!(
             right_lifecycle::get(&conn, skill_name)
+                .await
                 .unwrap()
                 .unwrap()
                 .state,
@@ -203,6 +212,7 @@ fn curator_lifecycle_probe_writer_and_curator_rows_can_transition() {
     for skill_name in ["rightx-stale-probe", "rightx-stale-curator"] {
         assert_eq!(
             right_lifecycle::get(&conn, skill_name)
+                .await
                 .unwrap()
                 .unwrap()
                 .state,
@@ -211,9 +221,9 @@ fn curator_lifecycle_probe_writer_and_curator_rows_can_transition() {
     }
 }
 
-#[test]
-fn curator_lifecycle_candidate_rendering_includes_db_status_fields() {
-    let conn = open_test_conn();
+#[tokio::test]
+async fn curator_lifecycle_candidate_rendering_includes_db_status_fields() {
+    let conn = open_test_conn().await;
     insert_skill_lifecycle_row(
         &conn,
         "rightx-rendered",
@@ -224,8 +234,11 @@ fn curator_lifecycle_candidate_rendering_includes_db_status_fields() {
         3,
         Some("2026-05-01T00:00:00Z"),
         Some("2026-05-03T00:00:00Z"),
-    );
-    let candidates = right_lifecycle::list_curator_candidates(&conn).unwrap();
+    )
+    .await;
+    let candidates = right_lifecycle::list_curator_candidates(&conn)
+        .await
+        .unwrap();
 
     let rendered = super::render_candidate_list(&candidates);
 

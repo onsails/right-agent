@@ -30,8 +30,8 @@ pub enum OutboundKind {
 mod tests {
     use super::*;
 
-    #[test]
-    fn outbound_kind_deserialize() {
+    #[tokio::test]
+    async fn outbound_kind_deserialize() {
         let json = r#"{"type":"photo","path":"/sandbox/outbox/img.png"}"#;
         let att: OutboundAttachment = serde_json::from_str(json).unwrap();
         assert_eq!(att.kind, OutboundKind::Photo);
@@ -40,8 +40,8 @@ mod tests {
         assert!(att.caption.is_none());
     }
 
-    #[test]
-    fn outbound_kind_deserialize_with_all_fields() {
+    #[tokio::test]
+    async fn outbound_kind_deserialize_with_all_fields() {
         let json = r#"{"type":"document","path":"/sandbox/outbox/data.csv","filename":"results.csv","caption":"Here's the data"}"#;
         let att: OutboundAttachment = serde_json::from_str(json).unwrap();
         assert_eq!(att.kind, OutboundKind::Document);
@@ -49,22 +49,22 @@ mod tests {
         assert_eq!(att.caption.as_deref(), Some("Here's the data"));
     }
 
-    #[test]
-    fn outbound_kind_deserialize_snake_case() {
+    #[tokio::test]
+    async fn outbound_kind_deserialize_snake_case() {
         let json = r#"{"type":"video_note","path":"/sandbox/outbox/note.mp4"}"#;
         let att: OutboundAttachment = serde_json::from_str(json).unwrap();
         assert_eq!(att.kind, OutboundKind::VideoNote);
     }
 
-    #[test]
-    fn outbound_attachment_deserialize_without_media_group_id_defaults_none() {
+    #[tokio::test]
+    async fn outbound_attachment_deserialize_without_media_group_id_defaults_none() {
         let json = r#"{"type":"photo","path":"/sandbox/outbox/a.jpg"}"#;
         let att: OutboundAttachment = serde_json::from_str(json).unwrap();
         assert!(att.media_group_id.is_none());
     }
 
-    #[test]
-    fn outbound_attachment_deserialize_with_media_group_id() {
+    #[tokio::test]
+    async fn outbound_attachment_deserialize_with_media_group_id() {
         let json = r#"{"type":"photo","path":"/sandbox/outbox/a.jpg","media_group_id":"shots"}"#;
         let att: OutboundAttachment = serde_json::from_str(json).unwrap();
         assert_eq!(att.media_group_id.as_deref(), Some("shots"));

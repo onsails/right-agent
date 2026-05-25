@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{collections::BTreeSet, future::Future, path::PathBuf};
 
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
@@ -219,10 +219,13 @@ async fn handle_activity_overview(
     };
 
     let agent_name = state.agent_name.clone();
-    match with_dashboard_conn(&state, move |conn| activity_overview(conn, input)).await {
+    match with_dashboard_conn(&state, move |conn| async move {
+        activity_overview(&conn, input).await
+    })
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(DashboardConnError::Open(error)) => error.into_response(),
-        Err(DashboardConnError::Join(error)) => error.into_response(),
         Err(DashboardConnError::Work(error)) => {
             tracing::error!(agent = %agent_name, "dashboard activity overview query failed: {error:#}");
             json_error(
@@ -251,10 +254,13 @@ async fn handle_overview(
     };
 
     let agent_name = state.agent_name.clone();
-    match with_dashboard_conn(&state, move |conn| dashboard_overview(conn, input)).await {
+    match with_dashboard_conn(&state, move |conn| async move {
+        dashboard_overview(&conn, input).await
+    })
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(DashboardConnError::Open(error)) => error.into_response(),
-        Err(DashboardConnError::Join(error)) => error.into_response(),
         Err(DashboardConnError::Work(error)) => {
             tracing::error!(agent = %agent_name, "dashboard overview query failed: {error:#}");
             json_error(
@@ -277,15 +283,14 @@ async fn handle_activity_run_detail(
 
     let agent_name = state.agent_name.clone();
     let run_id_for_query = run_id.clone();
-    match with_dashboard_conn(&state, move |conn| {
-        activity_run_detail(conn, &run_id_for_query, MAX_LOG_LINES)
+    match with_dashboard_conn(&state, move |conn| async move {
+        activity_run_detail(&conn, &run_id_for_query, MAX_LOG_LINES).await
     })
     .await
     {
         Ok(Some(response)) => Json(response).into_response(),
         Ok(None) => json_error(StatusCode::NOT_FOUND, "not_found", Some("run not found")),
         Err(DashboardConnError::Open(error)) => error.into_response(),
-        Err(DashboardConnError::Join(error)) => error.into_response(),
         Err(DashboardConnError::Work(error)) => {
             tracing::error!(agent = %agent_name, run_id = %run_id, "dashboard run detail query failed: {error:#}");
             json_error(
@@ -312,10 +317,13 @@ async fn handle_usage_overview(
     };
 
     let agent_name = state.agent_name.clone();
-    match with_dashboard_conn(&state, move |conn| usage_overview(conn, input)).await {
+    match with_dashboard_conn(&state, move |conn| async move {
+        usage_overview(&conn, input).await
+    })
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(DashboardConnError::Open(error)) => error.into_response(),
-        Err(DashboardConnError::Join(error)) => error.into_response(),
         Err(DashboardConnError::Work(error)) => {
             tracing::error!(agent = %agent_name, "dashboard usage query failed: {error:#}");
             json_error(
@@ -343,10 +351,13 @@ async fn handle_learning_overview(
     };
 
     let agent_name = state.agent_name.clone();
-    match with_dashboard_conn(&state, move |conn| learning_overview(conn, input)).await {
+    match with_dashboard_conn(&state, move |conn| async move {
+        learning_overview(&conn, input).await
+    })
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(DashboardConnError::Open(error)) => error.into_response(),
-        Err(DashboardConnError::Join(error)) => error.into_response(),
         Err(DashboardConnError::Work(error)) => {
             tracing::error!(agent = %agent_name, "dashboard learning overview query failed: {error:#}");
             json_error(
@@ -373,10 +384,13 @@ async fn handle_learning_episodes(
     };
 
     let agent_name = state.agent_name.clone();
-    match with_dashboard_conn(&state, move |conn| learning_episodes(conn, input)).await {
+    match with_dashboard_conn(&state, move |conn| async move {
+        learning_episodes(&conn, input).await
+    })
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(DashboardConnError::Open(error)) => error.into_response(),
-        Err(DashboardConnError::Join(error)) => error.into_response(),
         Err(DashboardConnError::Work(error)) => {
             tracing::error!(agent = %agent_name, "dashboard learning episodes query failed: {error:#}");
             json_error(
@@ -410,8 +424,8 @@ async fn handle_learning_episode_detail(
 
     let agent_name = state.agent_name.clone();
     let agent_name_for_query = state.agent_name.clone();
-    match with_dashboard_conn(&state, move |conn| {
-        learning_episode_detail(conn, &agent_name_for_query, episode_id)
+    match with_dashboard_conn(&state, move |conn| async move {
+        learning_episode_detail(&conn, &agent_name_for_query, episode_id).await
     })
     .await
     {
@@ -422,7 +436,6 @@ async fn handle_learning_episode_detail(
             Some("learning episode not found"),
         ),
         Err(DashboardConnError::Open(error)) => error.into_response(),
-        Err(DashboardConnError::Join(error)) => error.into_response(),
         Err(DashboardConnError::Work(error)) => {
             tracing::error!(agent = %agent_name, episode_id, "dashboard learning episode query failed: {error:#}");
             json_error(
@@ -456,8 +469,8 @@ async fn handle_learning_report_detail(
 
     let agent_name = state.agent_name.clone();
     let agent_name_for_query = state.agent_name.clone();
-    match with_dashboard_conn(&state, move |conn| {
-        learning_report_detail(conn, &agent_name_for_query, report_id)
+    match with_dashboard_conn(&state, move |conn| async move {
+        learning_report_detail(&conn, &agent_name_for_query, report_id).await
     })
     .await
     {
@@ -468,7 +481,6 @@ async fn handle_learning_report_detail(
             Some("learning report not found"),
         ),
         Err(DashboardConnError::Open(error)) => error.into_response(),
-        Err(DashboardConnError::Join(error)) => error.into_response(),
         Err(DashboardConnError::Work(error)) => {
             tracing::error!(agent = %agent_name, report_id, "dashboard learning report query failed: {error:#}");
             json_error(
@@ -491,14 +503,13 @@ async fn handle_learning_skill_lifecycle(
 
     let agent_name = state.agent_name.clone();
     let agent_name_for_query = state.agent_name.clone();
-    match with_dashboard_conn(&state, move |conn| {
-        skill_lifecycle_overview(conn, &agent_name_for_query)
+    match with_dashboard_conn(&state, move |conn| async move {
+        skill_lifecycle_overview(&conn, &agent_name_for_query).await
     })
     .await
     {
         Ok(response) => Json(response).into_response(),
         Err(DashboardConnError::Open(error)) => error.into_response(),
-        Err(DashboardConnError::Join(error)) => error.into_response(),
         Err(DashboardConnError::Work(error)) => {
             tracing::error!(agent = %agent_name, "dashboard skill_lifecycle query failed: {error:#}");
             json_error(
@@ -685,7 +696,7 @@ async fn handle_health_doctor(
         .into_response();
     }
 
-    let checks = tokio::task::block_in_place(|| right_agent::doctor::run_doctor(&state.home));
+    let checks = right_agent::doctor::run_doctor(&state.home).await;
     Json(health::doctor_response_from_checks(
         &state.agent_name,
         checks,
@@ -772,34 +783,28 @@ fn authenticate_api(
     Ok(user)
 }
 
-/// Failure mode from `with_dashboard_conn`. Connection-open and JoinError
-/// failures already have HTTP responses associated with them; the `Work`
-/// variant carries the read-model error so each route can produce its own
-/// status code, error code, and log message.
+/// Failure mode from `with_dashboard_conn`. Connection-open failures already
+/// have HTTP responses associated with them; the `Work` variant carries the
+/// read-model error so each route can produce its own status code, error code,
+/// and log message.
 enum DashboardConnError {
     Open(DashboardRouteError),
-    Join(DashboardRouteError),
     Work(ReadModelError),
 }
 
-/// Run a synchronous read-model query against the per-agent SQLite database on
-/// the tokio blocking pool. Both the connection open and the closure execution
-/// happen inside `spawn_blocking` so the async reactor is never stalled by
-/// SQLite I/O.
-///
-/// The closure receives a borrowed `Connection` (not consumed) and returns a
-/// `ReadModelError` on query failure. JoinError (panic in blocking task)
-/// returns a 500 with `db_panic` error code.
-async fn with_dashboard_conn<F, T>(state: &DashboardState, work: F) -> Result<T, DashboardConnError>
+async fn with_dashboard_conn<F, Fut, T>(
+    state: &DashboardState,
+    work: F,
+) -> Result<T, DashboardConnError>
 where
-    F: FnOnce(&Connection) -> Result<T, ReadModelError> + Send + 'static,
-    T: Send + 'static,
+    F: FnOnce(Connection) -> Fut,
+    Fut: Future<Output = Result<T, ReadModelError>>,
 {
     let agent_dir = state.agent_dir.clone();
     let agent_name = state.agent_name.clone();
-    let agent_name_for_join = state.agent_name.clone();
-    let join_result = tokio::task::spawn_blocking(move || {
-        let conn = right_db::open_connection_readonly(&agent_dir).map_err(|error| {
+    let conn = right_db::open_connection_readonly(&agent_dir)
+        .await
+        .map_err(|error| {
             tracing::error!(agent = %agent_name, "dashboard db open failed: {error:#}");
             DashboardConnError::Open(DashboardRouteError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -807,24 +812,7 @@ where
                 Some("failed to open dashboard database"),
             ))
         })?;
-        work(&conn).map_err(DashboardConnError::Work)
-    })
-    .await;
-
-    match join_result {
-        Ok(result) => result,
-        Err(join_error) => {
-            tracing::error!(
-                agent = %agent_name_for_join,
-                "dashboard db blocking task panicked: {join_error}",
-            );
-            Err(DashboardConnError::Join(DashboardRouteError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_panic",
-                Some("dashboard database task panicked"),
-            )))
-        }
-    }
+    work(conn).await.map_err(DashboardConnError::Work)
 }
 
 #[derive(Clone, Copy)]
@@ -1126,7 +1114,7 @@ mod tests {
         .unwrap();
     }
 
-    fn insert_lifecycle_row(
+    async fn insert_lifecycle_row(
         conn: &right_db::Connection,
         skill_name: &str,
         created_by: &str,
@@ -1138,65 +1126,66 @@ mod tests {
              ) VALUES (?1, 'active', ?2, ?3, '2026-04-01T00:00:00Z')",
             (skill_name, i64::from(pinned), created_by),
         )
+        .await
         .unwrap();
     }
 
-    #[test]
-    fn dashboard_url_strips_scheme_and_trailing_slash() {
+    #[tokio::test]
+    async fn dashboard_url_strips_scheme_and_trailing_slash() {
         let url = super::dashboard_url("https://right.example.com/", "alpha").unwrap();
 
         assert_eq!(url.as_str(), "https://right.example.com/dashboard/alpha/");
     }
 
-    #[test]
-    fn dashboard_url_uses_agent_path() {
+    #[tokio::test]
+    async fn dashboard_url_uses_agent_path() {
         let url = super::dashboard_url("right.example.com", "bot-one").unwrap();
 
         assert_eq!(url.path(), "/dashboard/bot-one/");
     }
 
-    #[test]
-    fn dashboard_url_rejects_hostname_with_path() {
+    #[tokio::test]
+    async fn dashboard_url_rejects_hostname_with_path() {
         let err = super::dashboard_url("right.example.com/some-path", "alpha")
             .expect_err("hostname with path must be rejected");
 
         assert!(matches!(err, super::DashboardUrlError::HostnameNotBare(_)));
     }
 
-    #[test]
-    fn dashboard_url_rejects_hostname_with_path_after_scheme() {
+    #[tokio::test]
+    async fn dashboard_url_rejects_hostname_with_path_after_scheme() {
         let err = super::dashboard_url("https://right.example.com/extra", "alpha")
             .expect_err("hostname with path must be rejected");
 
         assert!(matches!(err, super::DashboardUrlError::HostnameNotBare(_)));
     }
 
-    #[test]
-    fn dashboard_url_rejects_hostname_with_query() {
+    #[tokio::test]
+    async fn dashboard_url_rejects_hostname_with_query() {
         let err = super::dashboard_url("right.example.com/?token=abc", "alpha")
             .expect_err("hostname with query must be rejected");
 
         assert!(matches!(err, super::DashboardUrlError::HostnameNotBare(_)));
     }
 
-    #[test]
-    fn dashboard_url_rejects_hostname_with_fragment() {
+    #[tokio::test]
+    async fn dashboard_url_rejects_hostname_with_fragment() {
         let err = super::dashboard_url("right.example.com/#frag", "alpha")
             .expect_err("hostname with fragment must be rejected");
 
         assert!(matches!(err, super::DashboardUrlError::HostnameNotBare(_)));
     }
 
-    #[test]
-    fn dashboard_url_rejects_hostname_with_userinfo() {
+    #[tokio::test]
+    async fn dashboard_url_rejects_hostname_with_userinfo() {
         let err = super::dashboard_url("user@right.example.com", "alpha")
             .expect_err("hostname with userinfo must be rejected");
 
         assert!(matches!(err, super::DashboardUrlError::HostnameNotBare(_)));
     }
 
-    #[test]
-    fn dashboard_url_accepts_scheme_prefix() {
+    #[tokio::test]
+    async fn dashboard_url_accepts_scheme_prefix() {
         let url = super::dashboard_url("https://right.example.com", "alpha").unwrap();
 
         assert_eq!(url.as_str(), "https://right.example.com/dashboard/alpha/");
@@ -1214,7 +1203,9 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_exposes_learning_capabilities() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let _conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
 
         let (status, body) = get_json(
             "/dashboard/alpha/api/v1/bootstrap",
@@ -1296,7 +1287,9 @@ mod tests {
     #[tokio::test]
     async fn overview_returns_data_for_authorized_user() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let _conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
 
         let (status, body) = get_json(
             "/dashboard/alpha/api/v1/overview",
@@ -1329,7 +1322,9 @@ mod tests {
     #[tokio::test]
     async fn activity_overview_returns_current_cron_payload() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
         let run_note = "Checked 5 pairs";
         conn.execute(
             "INSERT INTO cron_specs (
@@ -1342,6 +1337,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .expect("insert cron spec");
         conn.execute(
             "INSERT INTO async_runs (
@@ -1357,6 +1353,7 @@ mod tests {
              )",
             [run_note],
         )
+        .await
         .expect("insert completed cron run");
 
         let (status, body) = get_json(
@@ -1383,7 +1380,9 @@ mod tests {
     #[tokio::test]
     async fn usage_returns_structured_windows_for_authorized_user() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
         conn.execute(
             "INSERT INTO usage_events (
                 ts, source, chat_id, thread_id, job_name, session_uuid,
@@ -1397,6 +1396,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
         let (status, body) = get_json(
@@ -1424,7 +1424,9 @@ mod tests {
     #[tokio::test]
     async fn learning_overview_returns_data_for_authorized_user() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let _conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
 
         let (status, body) = get_json(
             "/dashboard/alpha/api/v1/knowledge/learning/overview",
@@ -1452,7 +1454,9 @@ mod tests {
     #[tokio::test]
     async fn learning_episodes_returns_data_for_authorized_user() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
         conn.execute(
             "INSERT INTO learning_episodes (
                 id, agent_name, kind, seed_trigger_kind, seed_ref, status,
@@ -1466,6 +1470,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
         let (status, body) = get_json(
@@ -1484,7 +1489,9 @@ mod tests {
     #[tokio::test]
     async fn learning_episode_detail_returns_data_for_authorized_user() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
         conn.execute(
             "INSERT INTO learning_episodes (
                 id, agent_name, kind, seed_trigger_kind, seed_ref, status,
@@ -1499,6 +1506,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
         let (status, body) = get_json(
@@ -1536,8 +1544,10 @@ mod tests {
             "---\nname: hub-browser\ndescription: Browser automation.\n---\n# Browser\n",
         )
         .unwrap();
-        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
-        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "curator", true);
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "curator", true).await;
 
         let (status, body) = get_json(
             "/dashboard/alpha/api/v1/knowledge/skills",
@@ -1605,8 +1615,10 @@ mod tests {
             "---\nname: rightx-oauth-debugging\ndescription: Learned OAuth flow.\n---\n# OAuth\n",
         )
         .unwrap();
-        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
-        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "probe_writer", true);
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "probe_writer", true).await;
 
         let (status, body) = get_json(
             "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging",
@@ -1633,7 +1645,9 @@ mod tests {
     async fn skill_detail_uses_neutral_lifecycle_when_table_missing() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_skill(temp.path(), "rightx-oauth-debugging");
-        let _conn = right_db::open_connection(temp.path(), false).expect("open unmigrated db");
+        let _conn = right_db::open_connection(temp.path(), false)
+            .await
+            .expect("open unmigrated db");
 
         let (status, body) = get_json(
             "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging",
@@ -1702,8 +1716,10 @@ mod tests {
     async fn dashboard_skill_pin_sets_db_pinned_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_skill(temp.path(), "rightx-oauth-debugging");
-        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
-        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "curator", false);
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "curator", false).await;
 
         let (status, body) = patch_json(
             "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging/pin",
@@ -1717,6 +1733,7 @@ mod tests {
         assert_eq!(body["skill_name"], "rightx-oauth-debugging");
         assert_eq!(body["pinned"], true);
         let row = right_lifecycle::get(&conn, "rightx-oauth-debugging")
+            .await
             .unwrap()
             .unwrap();
         assert!(row.pinned);
@@ -1726,8 +1743,10 @@ mod tests {
     async fn dashboard_skill_pin_clears_db_pinned_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_skill(temp.path(), "rightx-oauth-debugging");
-        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
-        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "probe_writer", true);
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "probe_writer", true).await;
 
         let (status, body) = patch_json(
             "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging/pin",
@@ -1741,6 +1760,7 @@ mod tests {
         assert_eq!(body["skill_name"], "rightx-oauth-debugging");
         assert_eq!(body["pinned"], false);
         let row = right_lifecycle::get(&conn, "rightx-oauth-debugging")
+            .await
             .unwrap()
             .unwrap();
         assert!(!row.pinned);
@@ -1749,8 +1769,10 @@ mod tests {
     #[tokio::test]
     async fn dashboard_skill_pin_returns_404_for_unknown_skill_package() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
-        insert_lifecycle_row(&conn, "rightx-missing", "curator", false);
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        insert_lifecycle_row(&conn, "rightx-missing", "curator", false).await;
 
         let (status, body) = patch_json(
             "/dashboard/alpha/api/v1/knowledge/skills/rightx-missing/pin",
@@ -1772,8 +1794,10 @@ mod tests {
         // of returning 404 from a host SKILL.md check that can never see
         // the sandbox file.
         let temp = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
-        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "curator", false);
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        insert_lifecycle_row(&conn, "rightx-oauth-debugging", "curator", false).await;
         // Deliberately do NOT call `write_skill`: the SKILL.md is absent
         // on the host. The old code path returned 404 here; the fix must
         // bypass that host check and go to the sandbox.
@@ -1822,6 +1846,7 @@ mod tests {
         // Lifecycle row must remain unpinned — sandbox probe failed, no
         // pin should have been written.
         let row = right_lifecycle::get(&conn, "rightx-oauth-debugging")
+            .await
             .unwrap()
             .unwrap();
         assert!(!row.pinned);
@@ -1831,7 +1856,9 @@ mod tests {
     async fn dashboard_skill_pin_returns_404_for_missing_lifecycle_row() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_skill(temp.path(), "rightx-oauth-debugging");
-        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let _conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
 
         let (status, body) = patch_json(
             "/dashboard/alpha/api/v1/knowledge/skills/rightx-oauth-debugging/pin",
@@ -1849,7 +1876,9 @@ mod tests {
     async fn dashboard_skill_pin_rejects_non_rightx_skill() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_skill(temp.path(), "right-cron");
-        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let _conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
 
         let (status, body) = patch_json(
             "/dashboard/alpha/api/v1/knowledge/skills/right-cron/pin",
@@ -1866,13 +1895,15 @@ mod tests {
     #[tokio::test]
     async fn dashboard_skill_pin_returns_409_for_non_curator_managed_rows() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
         for (skill_name, created_by) in [
             ("rightx-foreground-owned", "foreground"),
             ("rightx-bundled-owned", "bundled"),
         ] {
             write_skill(temp.path(), skill_name);
-            insert_lifecycle_row(&conn, skill_name, created_by, false);
+            insert_lifecycle_row(&conn, skill_name, created_by, false).await;
 
             let (status, body) = patch_json(
                 &format!("/dashboard/alpha/api/v1/knowledge/skills/{skill_name}/pin"),
@@ -2016,7 +2047,9 @@ mod tests {
     #[tokio::test]
     async fn run_detail_returns_not_found_for_unknown_run() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let _conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
 
         let status = get(
             "/dashboard/alpha/api/v1/runs/missing-run",
@@ -2031,7 +2064,9 @@ mod tests {
     #[tokio::test]
     async fn activity_run_detail_returns_not_found_for_unknown_run() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let _conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
 
         let (status, body) = get_json(
             "/dashboard/alpha/api/v1/activity/runs/missing-run",
@@ -2048,7 +2083,9 @@ mod tests {
     #[tokio::test]
     async fn learning_report_detail_returns_not_found_for_unknown_report() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let _conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
 
         let status = get(
             "/dashboard/alpha/api/v1/learning/reports/999",
@@ -2063,7 +2100,9 @@ mod tests {
     #[tokio::test]
     async fn learning_report_detail_rejects_malformed_id_after_auth() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let _conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
 
         let (status, body) = get_json(
             "/dashboard/alpha/api/v1/learning/reports/not-a-number",
@@ -2094,7 +2133,9 @@ mod tests {
     #[tokio::test]
     async fn learning_report_detail_returns_data_for_authorized_user() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
         conn.execute(
             "INSERT INTO skill_review_reports (
                 id, agent_name, source_invocation_id, trigger_kind, status,
@@ -2107,6 +2148,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
         let (status, body) = get_json(
@@ -2119,48 +2161,5 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["report"]["id"], 1);
         assert_eq!(body["report"]["status"], "nothing_to_learn");
-    }
-
-    #[tokio::test]
-    async fn with_dashboard_conn_returns_db_panic_on_closure_panic() {
-        // Initialise a real per-agent SQLite so `open_connection_readonly`
-        // inside `with_dashboard_conn` succeeds. We want to exercise the
-        // panic-recovery path after the connection is opened, not the
-        // `Open` error path.
-        let temp = tempfile::tempdir().expect("tempdir");
-        let _conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
-
-        let state = test_state(temp.path().to_path_buf());
-
-        // Suppress the default panic hook for the duration of the
-        // intentional panic so test output stays clean. `take_hook` /
-        // `set_hook` are global; restore on the way out.
-        let previous_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let result =
-            super::with_dashboard_conn(&state, |_conn| -> Result<(), _> { panic!("boom") }).await;
-        std::panic::set_hook(previous_hook);
-
-        let join_error = match result {
-            Err(super::DashboardConnError::Join(error)) => error,
-            Err(super::DashboardConnError::Open(_)) => {
-                panic!("expected Join variant, got Open: connection should have opened first")
-            }
-            Err(super::DashboardConnError::Work(_)) => {
-                panic!(
-                    "expected Join variant, got Work: closure should have panicked, not returned an error"
-                )
-            }
-            Ok(()) => panic!("expected Join variant, got Ok: closure was supposed to panic"),
-        };
-
-        let response = join_error.into_response();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
-            .await
-            .expect("body bytes");
-        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json response");
-        assert_eq!(body["error"], "db_panic");
-        assert_eq!(body["detail"], "dashboard database task panicked");
     }
 }

@@ -289,28 +289,25 @@ async fn handle_mcp_add(
     let auth_method = AuthMethod::from_db(req.auth_type.as_deref(), req.auth_header.as_deref());
     let http_warning = plain_http_warning(&req.url);
 
-    // Get DB connection, agent_dir, and proxies from DashMap (single lookup, scope guard before await)
-    let (conn_arc, agent_dir, proxies_lock) = {
+    // Get backend, agent_dir, and proxies from DashMap, then drop the guard before DB await.
+    let (right, agent_dir, proxies_lock) = {
         let Some(registry) = dispatcher.agents.get(&req.agent) else {
             return not_found(format!("agent '{}' not found", req.agent)).into_response();
         };
-        let conn = match registry.right.get_conn(&req.agent) {
-            Ok(c) => c,
-            Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
-        };
         (
-            conn,
+            registry.right.clone(),
             registry.agent_dir.clone(),
             Arc::clone(&registry.proxies),
         )
     };
+    let conn_arc = match right.get_conn(&req.agent).await {
+        Ok(c) => c,
+        Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
+    };
 
     {
-        let conn = match conn_arc.lock() {
-            Ok(c) => c,
-            Err(e) => return internal_error(format!("mutex poisoned: {e}")).into_response(),
-        };
-        if let Err(e) = credentials::db_add_server(&conn, &req.name, &req.url) {
+        let conn = conn_arc.lock().await;
+        if let Err(e) = credentials::db_add_server(&conn, &req.name, &req.url).await {
             return internal_error(format!("db_add_server: {e:#}")).into_response();
         }
         // Persist auth fields if provided
@@ -322,6 +319,7 @@ async fn handle_mcp_add(
                 req.auth_header.as_deref(),
                 req.auth_token.as_deref(),
             )
+            .await
         {
             return internal_error(format!("db_set_auth: {e:#}")).into_response();
         }
@@ -389,14 +387,9 @@ async fn handle_mcp_add(
         Err(e) => {
             // Remove from SQLite on connection failure (reuse conn_arc from initial lookup)
             {
-                let conn = match conn_arc.lock() {
-                    Ok(c) => c,
-                    Err(poison) => {
-                        return internal_error(format!("mutex poisoned: {poison}")).into_response();
-                    }
-                };
+                let conn = conn_arc.lock().await;
                 // Best-effort rollback — ignore ServerNotFound
-                match credentials::db_remove_server(&conn, &req.name) {
+                match credentials::db_remove_server(&conn, &req.name).await {
                     Ok(()) | Err(CredentialError::ServerNotFound(_)) => {}
                     Err(db_err) => {
                         tracing::warn!("rollback db_remove_server failed: {db_err:#}");
@@ -429,16 +422,16 @@ async fn handle_mcp_remove(
         .into_response();
     }
 
-    // Clone proxies Arc and conn (scope DashMap guard before await)
-    let (proxies_lock, conn_arc) = {
+    // Clone proxies Arc and backend, then drop the DashMap guard before DB await.
+    let (proxies_lock, right) = {
         let Some(registry) = dispatcher.agents.get(&req.agent) else {
             return not_found(format!("agent '{}' not found", req.agent)).into_response();
         };
-        let conn = match registry.right.get_conn(&req.agent) {
-            Ok(c) => c,
-            Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
-        };
-        (Arc::clone(&registry.proxies), conn)
+        (Arc::clone(&registry.proxies), registry.right.clone())
+    };
+    let conn_arc = match right.get_conn(&req.agent).await {
+        Ok(c) => c,
+        Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
     };
 
     // Remove from proxies
@@ -457,12 +450,9 @@ async fn handle_mcp_remove(
 
     // Remove from SQLite
     {
-        let conn = match conn_arc.lock() {
-            Ok(c) => c,
-            Err(e) => return internal_error(format!("mutex poisoned: {e}")).into_response(),
-        };
+        let conn = conn_arc.lock().await;
         // Ignore ServerNotFound — we already removed from the in-memory map.
-        match credentials::db_remove_server(&conn, &req.name) {
+        match credentials::db_remove_server(&conn, &req.name).await {
             Ok(()) => {}
             Err(CredentialError::ServerNotFound(_)) => {}
             Err(e) => return internal_error(format!("db_remove_server: {e:#}")).into_response(),
@@ -580,19 +570,17 @@ async fn handle_set_token(
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(req.expires_in as i64);
     let expires_at_str = expires_at.to_rfc3339();
     {
-        let conn_arc = {
+        let right = {
             let Some(registry) = dispatcher.agents.get(&req.agent) else {
                 return not_found("agent_not_found").into_response();
             };
-            match registry.right.get_conn(&req.agent) {
-                Ok(c) => c,
-                Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
-            }
+            registry.right.clone()
         };
-        let conn = match conn_arc.lock() {
+        let conn_arc = match right.get_conn(&req.agent).await {
             Ok(c) => c,
-            Err(e) => return internal_error(format!("mutex poisoned: {e}")).into_response(),
+            Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
         };
+        let conn = conn_arc.lock().await;
         if let Err(e) = right_mcp::credentials::db_set_oauth_state(
             &conn,
             &req.server,
@@ -603,7 +591,9 @@ async fn handle_set_token(
             req.client_secret.as_deref(),
             &expires_at_str,
             &oauth_resource,
-        ) {
+        )
+        .await
+        {
             return internal_error(format!("db_set_oauth_state: {e:#}")).into_response();
         }
     }
@@ -680,8 +670,15 @@ async fn handle_mcp_list(
     Json(req): Json<McpListRequest>,
 ) -> axum::response::Response {
     let dispatcher = &state.dispatcher;
-    let Some(registry) = dispatcher.agents.get(&req.agent) else {
-        return not_found(format!("agent '{}' not found", req.agent)).into_response();
+    let (right, proxies_lock, right_tool_count) = {
+        let Some(registry) = dispatcher.agents.get(&req.agent) else {
+            return not_found(format!("agent '{}' not found", req.agent)).into_response();
+        };
+        (
+            registry.right.clone(),
+            Arc::clone(&registry.proxies),
+            registry.right.tools_list().len(),
+        )
     };
 
     let mut servers = Vec::new();
@@ -691,16 +688,17 @@ async fn handle_mcp_list(
         name: "right".into(),
         url: None,
         status: "connected".into(),
-        tool_count: registry.right.tools_list().len(),
+        tool_count: right_tool_count,
         auth_type: None,
     });
 
     // Read auth_type from SQLite (preserves "oauth" — AuthMethod enum has no OAuth variant)
     let db_auth_types: std::collections::HashMap<String, Option<String>> = {
-        match registry.right.get_conn(&req.agent) {
+        match right.get_conn(&req.agent).await {
             Ok(conn_arc) => {
-                let conn = conn_arc.lock().unwrap_or_else(|e| e.into_inner());
+                let conn = conn_arc.lock().await;
                 credentials::db_list_servers(&conn)
+                    .await
                     .unwrap_or_default()
                     .into_iter()
                     .map(|s| (s.name, s.auth_type))
@@ -711,7 +709,7 @@ async fn handle_mcp_list(
     };
 
     // External proxy backends
-    let proxies = registry.proxies.read().await;
+    let proxies = proxies_lock.read().await;
     for (name, proxy) in proxies.iter() {
         let status = proxy.status().await;
         let tool_count = proxy.try_tools().map(|t| t.len()).unwrap_or(0);
@@ -737,22 +735,20 @@ async fn handle_mcp_instructions(
     Json(req): Json<McpInstructionsRequest>,
 ) -> axum::response::Response {
     let dispatcher = &state.dispatcher;
-    let conn_arc = {
+    let right = {
         let Some(registry) = dispatcher.agents.get(&req.agent) else {
             return not_found(format!("agent '{}' not found", req.agent)).into_response();
         };
-        match registry.right.get_conn(&req.agent) {
-            Ok(c) => c,
-            Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
-        }
+        registry.right.clone()
+    };
+    let conn_arc = match right.get_conn(&req.agent).await {
+        Ok(c) => c,
+        Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
     };
 
     let servers = {
-        let conn = match conn_arc.lock() {
-            Ok(c) => c,
-            Err(e) => return internal_error(format!("mutex poisoned: {e}")).into_response(),
-        };
-        match credentials::db_list_servers(&conn) {
+        let conn = conn_arc.lock().await;
+        match credentials::db_list_servers(&conn).await {
             Ok(s) => s,
             Err(e) => return internal_error(format!("db_list_servers: {e:#}")).into_response(),
         }
@@ -883,7 +879,7 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
 
-    fn make_test_dispatcher(tmp: &std::path::Path) -> Arc<ToolDispatcher> {
+    async fn make_test_dispatcher(tmp: &std::path::Path) -> Arc<ToolDispatcher> {
         use crate::aggregator::BackendRegistry;
         use crate::right_backend::RightBackend;
         use dashmap::DashMap;
@@ -892,7 +888,7 @@ mod tests {
         let agents_dir = tmp.join("agents");
         let agent_dir = agents_dir.join("test-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        right_db::open_db(&agent_dir, true).unwrap();
+        right_db::open_db(&agent_dir, true).await.unwrap();
 
         let right = RightBackend::new(agents_dir, None);
         let registry = BackendRegistry {
@@ -907,8 +903,10 @@ mod tests {
         Arc::new(ToolDispatcher { agents })
     }
 
-    fn make_test_router_and_dispatcher(tmp: &std::path::Path) -> (Router, Arc<ToolDispatcher>) {
-        let dispatcher = make_test_dispatcher(tmp);
+    async fn make_test_router_and_dispatcher(
+        tmp: &std::path::Path,
+    ) -> (Router, Arc<ToolDispatcher>) {
+        let dispatcher = make_test_dispatcher(tmp).await;
         let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
         let reconnect_managers: ReconnectManagers = Arc::new(std::collections::HashMap::new());
 
@@ -943,8 +941,8 @@ mod tests {
         (router, dispatcher)
     }
 
-    fn make_test_router(tmp: &std::path::Path) -> Router {
-        make_test_router_and_dispatcher(tmp).0
+    async fn make_test_router(tmp: &std::path::Path) -> Router {
+        make_test_router_and_dispatcher(tmp).await.0
     }
 
     async fn send_json(
@@ -990,7 +988,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_add_validates_name_reserved() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, body) = send_json(
             app,
@@ -1013,7 +1011,7 @@ mod tests {
     #[tokio::test]
     async fn progress_register_adds_foreground_invocation() {
         let tmp = tempfile::tempdir().unwrap();
-        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path());
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
 
         let (status, body) = send_json(
             app,
@@ -1059,7 +1057,7 @@ mod tests {
     #[tokio::test]
     async fn progress_invocation_kind_register_maps_probe_writer_and_curator() {
         let tmp = tempfile::tempdir().unwrap();
-        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path());
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
         let cases = [
             (
                 "probe-writer-inv",
@@ -1107,7 +1105,7 @@ mod tests {
     #[tokio::test]
     async fn progress_unregister_removes_invocation() {
         let tmp = tempfile::tempdir().unwrap();
-        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path());
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
 
         let (status, _) = send_json(
             app.clone(),
@@ -1147,7 +1145,7 @@ mod tests {
     #[tokio::test]
     async fn progress_register_rejects_unknown_agent() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, _) = send_json(
             app,
@@ -1167,7 +1165,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_add_validates_name_double_underscore() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, _body) = send_json(
             app,
@@ -1186,7 +1184,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_add_warns_for_plain_http_oauth_registration() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, body) = send_json(
             app,
@@ -1211,7 +1209,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_add_validates_url_private_ip() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, _body) = send_json(
             app,
@@ -1230,7 +1228,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_add_allows_loopback_oauth_registration() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, body) = send_json(
             app,
@@ -1251,7 +1249,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_remove_protected_name_right() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, body) = send_json(
             app,
@@ -1273,7 +1271,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_remove_protected_name_rightmeta() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, _body) = send_json(
             app,
@@ -1291,7 +1289,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_remove_agent_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, _body) = send_json(
             app,
@@ -1309,7 +1307,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_remove_server_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, _body) = send_json(
             app,
@@ -1327,7 +1325,7 @@ mod tests {
     #[tokio::test]
     async fn set_token_agent_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, _body) = send_json(
             app,
@@ -1350,7 +1348,7 @@ mod tests {
     #[tokio::test]
     async fn set_token_server_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, _body) = send_json(
             app,
@@ -1374,7 +1372,7 @@ mod tests {
     async fn set_token_retries_500_and_reports_failure_without_success() {
         setup_crypto();
         let tmp = tempfile::tempdir().unwrap();
-        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path());
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
         let attempts = Arc::new(AtomicUsize::new(0));
         let mcp_url = start_failing_mcp_server(Arc::clone(&attempts)).await;
 
@@ -1389,15 +1387,17 @@ mod tests {
                 registry
                     .right
                     .get_conn("test-agent")
+                    .await
                     .expect("test db connection"),
             )
         };
         {
-            let conn = conn_arc.lock().unwrap();
+            let conn = conn_arc.lock().await;
             conn.execute(
                 "INSERT INTO mcp_servers (name, url, auth_type) VALUES ('composio', ?1, 'oauth')",
                 [&mcp_url],
             )
+            .await
             .unwrap();
         }
 
@@ -1449,12 +1449,13 @@ mod tests {
             "fresh token should still be stored for the refresh scheduler after readiness failure",
         );
         let persisted_resource: Option<String> = {
-            let conn = conn_arc.lock().unwrap();
+            let conn = conn_arc.lock().await;
             conn.query_row(
                 "SELECT oauth_resource FROM mcp_servers WHERE name = 'composio'",
                 [],
                 |row| row.get(0),
             )
+            .await
             .unwrap()
         };
         assert_eq!(persisted_resource.as_deref(), Some(mcp_url.as_str()));
@@ -1463,7 +1464,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_add_agent_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, _body) = send_json(
             app,
@@ -1482,7 +1483,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_list_returns_right_backend() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, body) = send_json(
             app,
@@ -1511,7 +1512,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_list_unknown_agent_returns_404() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, _body) = send_json(
             app,
@@ -1526,7 +1527,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_instructions_returns_header_for_no_servers() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, body) = send_json(
             app,
@@ -1543,7 +1544,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_instructions_unknown_agent_returns_404() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = make_test_router(tmp.path());
+        let app = make_test_router(tmp.path()).await;
 
         let (status, _body) = send_json(
             app,
@@ -1566,7 +1567,7 @@ mod tests {
         )
         .unwrap();
 
-        let dispatcher = make_test_dispatcher(tmp.path());
+        let dispatcher = make_test_dispatcher(tmp.path()).await;
         let token_map: crate::aggregator::AgentTokenMap = {
             let mut map = std::collections::HashMap::new();
             map.insert(
@@ -1603,11 +1604,11 @@ mod tests {
 
         let agent1_dir = agents_dir.join("test-agent");
         std::fs::create_dir_all(&agent1_dir).unwrap();
-        right_db::open_db(&agent1_dir, true).unwrap();
+        right_db::open_db(&agent1_dir, true).await.unwrap();
 
         let agent2_dir = agents_dir.join("new-agent");
         std::fs::create_dir_all(&agent2_dir).unwrap();
-        right_db::open_db(&agent2_dir, true).unwrap();
+        right_db::open_db(&agent2_dir, true).await.unwrap();
 
         let token_map_path = tmp.path().join("agent-tokens.json");
         std::fs::write(
@@ -1616,7 +1617,7 @@ mod tests {
         )
         .unwrap();
 
-        let dispatcher = make_test_dispatcher(tmp.path());
+        let dispatcher = make_test_dispatcher(tmp.path()).await;
 
         let token_map: crate::aggregator::AgentTokenMap = {
             let mut map = std::collections::HashMap::new();

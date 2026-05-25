@@ -198,8 +198,8 @@ mod tests {
         diff_classify(old, new)
     }
 
-    #[test]
-    fn diff_model_only_is_hot_reloadable() {
+    #[tokio::test]
+    async fn diff_model_only_is_hot_reloadable() {
         let old = "restart: never\nmax_restarts: 5\nmodel: \"claude-sonnet-4-6\"\n";
         let new = "restart: never\nmax_restarts: 5\nmodel: \"claude-haiku-4-5\"\n";
         match classify(old, new) {
@@ -213,8 +213,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn diff_model_added_is_hot_reloadable() {
+    #[tokio::test]
+    async fn diff_model_added_is_hot_reloadable() {
         let old = "restart: never\nmax_restarts: 5\n";
         let new = "restart: never\nmax_restarts: 5\nmodel: \"claude-haiku-4-5\"\n";
         match classify(old, new) {
@@ -228,8 +228,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn diff_model_removed_is_hot_reloadable() {
+    #[tokio::test]
+    async fn diff_model_removed_is_hot_reloadable() {
         let old = "restart: never\nmax_restarts: 5\nmodel: \"claude-haiku-4-5\"\n";
         let new = "restart: never\nmax_restarts: 5\n";
         match classify(old, new) {
@@ -243,49 +243,49 @@ mod tests {
         }
     }
 
-    #[test]
-    fn diff_other_field_changed_is_restart_required() {
+    #[tokio::test]
+    async fn diff_other_field_changed_is_restart_required() {
         let old = "restart: never\nmax_restarts: 5\nmodel: \"claude-sonnet-4-6\"\n";
         let new = "restart: always\nmax_restarts: 5\nmodel: \"claude-sonnet-4-6\"\n";
         assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
     }
 
-    #[test]
-    fn diff_learning_change_requires_restart() {
+    #[tokio::test]
+    async fn diff_learning_change_requires_restart() {
         let old = "restart: never\nlearning:\n  episode_settle_seconds: 90\n";
         let new = "restart: never\nlearning:\n  episode_settle_seconds: 180\n";
         assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
     }
 
-    #[test]
-    fn diff_model_and_other_field_is_restart_required() {
+    #[tokio::test]
+    async fn diff_model_and_other_field_is_restart_required() {
         let old = "restart: never\nmodel: \"claude-sonnet-4-6\"\n";
         let new = "restart: always\nmodel: \"claude-haiku-4-5\"\n";
         assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
     }
 
-    #[test]
-    fn diff_parse_failure_is_restart_required() {
+    #[tokio::test]
+    async fn diff_parse_failure_is_restart_required() {
         let old = "restart: never\n";
         let new = "{ this is not yaml";
         assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
     }
 
-    #[test]
-    fn diff_identical_yaml_is_no_change() {
+    #[tokio::test]
+    async fn diff_identical_yaml_is_no_change() {
         let yaml = "restart: never\nmodel: \"claude-haiku-4-5\"\n";
         assert!(matches!(classify(yaml, yaml), ChangeKind::NoChange));
     }
 
-    #[test]
-    fn agent_config_partial_eq_smoke_test() {
+    #[tokio::test]
+    async fn agent_config_partial_eq_smoke_test() {
         let a: AgentConfig = serde_saphyr::from_str("restart: never\n").unwrap();
         let b: AgentConfig = serde_saphyr::from_str("restart: never\n").unwrap();
         assert_eq!(a, b);
     }
 
-    #[test]
-    fn diff_debug_only_is_hot_reloadable() {
+    #[tokio::test]
+    async fn diff_debug_only_is_hot_reloadable() {
         let old = "restart: never\nmax_restarts: 5\ndebug: false\n";
         let new = "restart: never\nmax_restarts: 5\ndebug: true\n";
         match classify(old, new) {
@@ -300,8 +300,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn diff_debug_added_is_hot_reloadable() {
+    #[tokio::test]
+    async fn diff_debug_added_is_hot_reloadable() {
         let old = "restart: never\nmax_restarts: 5\n";
         let new = "restart: never\nmax_restarts: 5\ndebug: true\n";
         match classify(old, new) {
@@ -316,8 +316,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn diff_debug_removed_is_hot_reloadable() {
+    #[tokio::test]
+    async fn diff_debug_removed_is_hot_reloadable() {
         let old = "restart: never\nmax_restarts: 5\ndebug: true\n";
         let new = "restart: never\nmax_restarts: 5\n";
         match classify(old, new) {
@@ -332,8 +332,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn diff_debug_and_model_combined_is_hot_reloadable() {
+    #[tokio::test]
+    async fn diff_debug_and_model_combined_is_hot_reloadable() {
         let old = "restart: never\nmodel: \"claude-sonnet-4-6\"\ndebug: false\n";
         let new = "restart: never\nmodel: \"claude-haiku-4-5\"\ndebug: true\n";
         match classify(old, new) {
@@ -348,8 +348,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn diff_debug_plus_other_field_is_restart_required() {
+    #[tokio::test]
+    async fn diff_debug_plus_other_field_is_restart_required() {
         let old = "restart: never\nmax_restarts: 5\ndebug: false\n";
         let new = "restart: always\nmax_restarts: 5\ndebug: true\n";
         assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
@@ -357,8 +357,8 @@ mod tests {
 
     // diff_classify itself returns None on removal — the watcher handles the fallback to initial_debug.
     // The diff-level test below documents this contract.
-    #[test]
-    fn diff_debug_removed_returns_none_for_watcher_to_handle() {
+    #[tokio::test]
+    async fn diff_debug_removed_returns_none_for_watcher_to_handle() {
         let old = "restart: never\ndebug: true\n";
         let new = "restart: never\n";
         match classify(old, new) {

@@ -248,8 +248,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn parse_process_lines_bounds_process_count() {
+    #[tokio::test]
+    async fn parse_process_lines_bounds_process_count() {
         let long_command = format!("{}{}", "x".repeat(180), " tail");
         let stdout = format!(
             "1 0 0.0 0.1 123 /sbin/init\n2 1 5.5 1.2 256 /bin/sh -c echo hello\nbad line\n3 1 0.1 0.2 512 {long_command}\n"
@@ -270,8 +270,8 @@ mod tests {
         assert_eq!(capped.command.chars().count(), 160);
     }
 
-    #[test]
-    fn doctor_response_groups_statuses() {
+    #[tokio::test]
+    async fn doctor_response_groups_statuses() {
         let checks = vec![
             DoctorCheck {
                 name: "right".to_string(),
@@ -305,8 +305,8 @@ mod tests {
         assert_eq!(response.fail[0].name, "agents/");
     }
 
-    #[test]
-    fn parse_sandbox_stats_output_uses_df_mountpoint() {
+    #[tokio::test]
+    async fn parse_sandbox_stats_output_uses_df_mountpoint() {
         let stdout = "__DISK__\n1000 250 750 25% /sandbox\n__MEM__\n100 40\n__LOAD__\n1.00 0.50 0.25\n__PS__\n1 0 0.0 0.1 10 /init\n";
 
         let response = parse_sandbox_stats_output("alpha", stdout);

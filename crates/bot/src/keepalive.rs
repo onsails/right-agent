@@ -328,7 +328,8 @@ async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, S
         &health.agent_dir,
         health.ssh_config_path.as_deref(),
         health.resolved_sandbox.as_deref(),
-    );
+    )
+    .await;
 
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
@@ -387,13 +388,13 @@ async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, S
 mod tests {
     use super::*;
 
-    #[test]
-    fn default_interval_is_one_hour() {
+    #[tokio::test]
+    async fn default_interval_is_one_hour() {
         assert_eq!(DEFAULT_INTERVAL, Duration::from_secs(3600));
     }
 
-    #[test]
-    fn health_probe_invocation_uses_haiku_stream_json_and_strict_mcp() {
+    #[tokio::test]
+    async fn health_probe_invocation_uses_haiku_stream_json_and_strict_mcp() {
         let args = health_probe_invocation("/sandbox/mcp.json").into_args();
 
         assert!(args.contains(&"--model".to_string()));
@@ -410,8 +411,8 @@ mod tests {
         assert!(!args.contains(&"--session-id".to_string()));
     }
 
-    #[test]
-    fn init_status_decision_maps_only_connected_to_health_probe_outcome() {
+    #[tokio::test]
+    async fn init_status_decision_maps_only_connected_to_health_probe_outcome() {
         assert_eq!(
             classify_init_status(crate::cc::stream::RightMcpInitStatus::Connected),
             HealthProbeOutcome::Healthy
@@ -446,8 +447,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn repair_notice_is_one_shot() {
+    #[tokio::test]
+    async fn repair_notice_is_one_shot() {
         let health = ClaudeHealth::new(
             "agent-b".to_owned(),
             PathBuf::from("/tmp/agent"),
@@ -462,8 +463,8 @@ mod tests {
         assert_eq!(health.consume_repair_notice(), None);
     }
 
-    #[test]
-    fn repair_lock_rejects_concurrent_second_holder() {
+    #[tokio::test]
+    async fn repair_lock_rejects_concurrent_second_holder() {
         let health = ClaudeHealth::new(
             "agent-b".to_owned(),
             PathBuf::from("/tmp/agent"),

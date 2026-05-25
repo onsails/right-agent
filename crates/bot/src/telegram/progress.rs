@@ -174,8 +174,8 @@ async fn handle_progress_send(
 mod tests {
     use super::*;
 
-    #[test]
-    fn progress_state_register_get_unregister_roundtrip() {
+    #[tokio::test]
+    async fn progress_state_register_get_unregister_roundtrip() {
         let state = ProgressState::default();
         let target = ProgressTarget {
             invocation_id: "inv-1".to_owned(),
@@ -195,8 +195,8 @@ mod tests {
         assert!(state.get("inv-1").is_none());
     }
 
-    #[test]
-    fn progress_target_debug_redacts_token() {
+    #[tokio::test]
+    async fn progress_target_debug_redacts_token() {
         let target = ProgressTarget {
             invocation_id: "inv-1".to_owned(),
             token: "supersecret".to_owned(),
@@ -208,8 +208,8 @@ mod tests {
         assert!(s.contains("<redacted>"), "Debug must mark redaction: {s}");
     }
 
-    #[test]
-    fn progress_target_token_matches() {
+    #[tokio::test]
+    async fn progress_target_token_matches() {
         let target = ProgressTarget {
             invocation_id: "inv-1".to_owned(),
             token: "secret-token".to_owned(),

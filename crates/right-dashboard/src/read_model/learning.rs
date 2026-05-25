@@ -45,7 +45,7 @@ fn learning_capabilities() -> LearningCapabilities {
     }
 }
 
-pub fn learning_overview(
+pub async fn learning_overview(
     conn: &Connection,
     input: LearningOverviewInput,
 ) -> Result<LearningOverviewResponse, ReadModelError> {
@@ -57,25 +57,39 @@ pub fn learning_overview(
     let agent = agent_name.as_str();
 
     let signals_accepted_24h =
-        signal_count_in_window(conn, agent, &since_24h_utc, &generated_at_utc)?;
-
-    let episode_count = |status: &str| -> Result<i64, ReadModelError> {
-        episode_count_in_window(conn, agent, status, &since_24h_utc, &generated_at_utc)
-    };
-
-    let report_count = |status: &str| -> Result<i64, ReadModelError> {
-        report_count_in_window(conn, agent, status, &since_24h_utc, &generated_at_utc)
-    };
+        signal_count_in_window(conn, agent, &since_24h_utc, &generated_at_utc).await?;
 
     let reports_total_24h =
-        report_total_count_in_window(conn, agent, &since_24h_utc, &generated_at_utc)?;
-    let create_candidates_24h = report_count("create_candidate")?;
-    let update_candidates_24h = report_count("update_candidate")?;
-    let nothing_to_learn_24h = report_count("nothing_to_learn")?;
-    let failed_reviews_24h = report_count("failed")?;
+        report_total_count_in_window(conn, agent, &since_24h_utc, &generated_at_utc).await?;
+    let create_candidates_24h = report_count_in_window(
+        conn,
+        agent,
+        "create_candidate",
+        &since_24h_utc,
+        &generated_at_utc,
+    )
+    .await?;
+    let update_candidates_24h = report_count_in_window(
+        conn,
+        agent,
+        "update_candidate",
+        &since_24h_utc,
+        &generated_at_utc,
+    )
+    .await?;
+    let nothing_to_learn_24h = report_count_in_window(
+        conn,
+        agent,
+        "nothing_to_learn",
+        &since_24h_utc,
+        &generated_at_utc,
+    )
+    .await?;
+    let failed_reviews_24h =
+        report_count_in_window(conn, agent, "failed", &since_24h_utc, &generated_at_utc).await?;
     let non_failed_reports = create_candidates_24h + update_candidates_24h + nothing_to_learn_24h;
     let foreground_created_or_updated_7d =
-        successful_writer_count_in_window(conn, agent, &since_7d_utc, &generated_at_utc)?;
+        successful_writer_count_in_window(conn, agent, &since_7d_utc, &generated_at_utc).await?;
 
     let quality = LearningQuality {
         candidate_rate: rate(
@@ -91,33 +105,36 @@ pub fn learning_overview(
             &since_24h_utc,
             &generated_at_utc,
             "high",
-        )?,
+        )
+        .await?,
         medium_confidence_count_24h: confidence_count(
             conn,
             agent,
             &since_24h_utc,
             &generated_at_utc,
             "medium",
-        )?,
+        )
+        .await?,
         low_confidence_count_24h: confidence_count(
             conn,
             agent,
             &since_24h_utc,
             &generated_at_utc,
             "low",
-        )?,
+        )
+        .await?,
         failed_count_24h: failed_reviews_24h,
     };
 
-    let health = learning_health(conn, agent, &generated_at)?;
-    let lifecycle = learning_lifecycle(conn, agent, &since_7d_utc, &generated_at_utc)?;
-    let recent_reports = recent_reports(conn, agent)?;
+    let health = learning_health(conn, agent, &generated_at).await?;
+    let lifecycle = learning_lifecycle(conn, agent, &since_7d_utc, &generated_at_utc).await?;
+    let recent_reports = recent_reports(conn, agent).await?;
     let (flow_counts, mut warnings) =
-        learning_flow_counts(conn, agent, &since_7d_utc, &generated_at_utc)?;
+        learning_flow_counts(conn, agent, &since_7d_utc, &generated_at_utc).await?;
     let flow_nodes = learning_flow_nodes(&flow_counts);
     let (flow_edges, partial_flow) = learning_flow_edges(&flow_nodes, &flow_counts);
     let recent_learning_signals =
-        recent_learning_signals(conn, agent, &since_7d_utc, &generated_at_utc)?;
+        recent_learning_signals(conn, agent, &since_7d_utc, &generated_at_utc).await?;
     if partial_flow {
         warnings.push(DashboardDataWarning {
             source: "learning_flow".to_owned(),
@@ -125,14 +142,31 @@ pub fn learning_overview(
             message: "writer transitions are aggregate-only and partially inferred".to_owned(),
         });
     }
-    let episodes_pending_24h = episode_count("pending")?;
-    let episodes_selecting_24h = episode_count("selecting")?;
-    let episodes_selected_24h = episode_count("selected")?;
-    let episodes_reviewing_24h = episode_count("reviewing")?;
-    let episodes_reviewed_24h = episode_count("reviewed")?;
-    let episodes_no_episode_24h = episode_count("no_episode")?;
-    let episodes_insufficient_context_24h = episode_count("insufficient_context")?;
-    let episodes_failed_24h = episode_count("failed")?;
+    let episodes_pending_24h =
+        episode_count_in_window(conn, agent, "pending", &since_24h_utc, &generated_at_utc).await?;
+    let episodes_selecting_24h =
+        episode_count_in_window(conn, agent, "selecting", &since_24h_utc, &generated_at_utc)
+            .await?;
+    let episodes_selected_24h =
+        episode_count_in_window(conn, agent, "selected", &since_24h_utc, &generated_at_utc).await?;
+    let episodes_reviewing_24h =
+        episode_count_in_window(conn, agent, "reviewing", &since_24h_utc, &generated_at_utc)
+            .await?;
+    let episodes_reviewed_24h =
+        episode_count_in_window(conn, agent, "reviewed", &since_24h_utc, &generated_at_utc).await?;
+    let episodes_no_episode_24h =
+        episode_count_in_window(conn, agent, "no_episode", &since_24h_utc, &generated_at_utc)
+            .await?;
+    let episodes_insufficient_context_24h = episode_count_in_window(
+        conn,
+        agent,
+        "insufficient_context",
+        &since_24h_utc,
+        &generated_at_utc,
+    )
+    .await?;
+    let episodes_failed_24h =
+        episode_count_in_window(conn, agent, "failed", &since_24h_utc, &generated_at_utc).await?;
 
     Ok(LearningOverviewResponse {
         agent: agent_name,
@@ -186,13 +220,14 @@ struct LearningFlowCounts {
     applied_differently_updated: i64,
 }
 
-fn learning_flow_counts(
+async fn learning_flow_counts(
     conn: &Connection,
     agent: &str,
     since: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<(LearningFlowCounts, Vec<DashboardDataWarning>), ReadModelError> {
-    let (curator_triggered, curator_warning) = curator_trigger_count_in_window(conn, since, now)?;
+    let (curator_triggered, curator_warning) =
+        curator_trigger_count_in_window(conn, since, now).await?;
     let mut warnings = Vec::new();
     if let Some(warning) = curator_warning {
         warnings.push(warning);
@@ -200,11 +235,14 @@ fn learning_flow_counts(
 
     Ok((
         LearningFlowCounts {
-            signals: signal_count_in_window(conn, agent, since, now)?,
-            create_candidates: report_count_in_window(conn, agent, "create_candidate", since, now)?,
-            update_candidates: report_count_in_window(conn, agent, "update_candidate", since, now)?,
-            nothing_to_learn: report_count_in_window(conn, agent, "nothing_to_learn", since, now)?,
-            failed_reviews: report_count_in_window(conn, agent, "failed", since, now)?,
+            signals: signal_count_in_window(conn, agent, since, now).await?,
+            create_candidates: report_count_in_window(conn, agent, "create_candidate", since, now)
+                .await?,
+            update_candidates: report_count_in_window(conn, agent, "update_candidate", since, now)
+                .await?,
+            nothing_to_learn: report_count_in_window(conn, agent, "nothing_to_learn", since, now)
+                .await?,
+            failed_reviews: report_count_in_window(conn, agent, "failed", since, now).await?,
             curator_triggered,
             writer_applied_as_hinted: writer_hint_outcome_count_in_window(
                 conn,
@@ -212,20 +250,23 @@ fn learning_flow_counts(
                 "applied_as_hinted",
                 since,
                 now,
-            )?,
+            )
+            .await?,
             writer_applied_differently: writer_hint_outcome_count_in_window(
                 conn,
                 agent,
                 "applied_differently",
                 since,
                 now,
-            )?,
-            writer_refused: writer_hint_outcome_count_in_window(
-                conn, agent, "refused", since, now,
-            )?,
-            writer_failed: failed_writer_flow_count_in_window(conn, agent, since, now)?,
-            skill_created: writer_status_count_in_window(conn, agent, "created", since, now)?,
-            skill_updated: writer_status_count_in_window(conn, agent, "updated", since, now)?,
+            )
+            .await?,
+            writer_refused: writer_hint_outcome_count_in_window(conn, agent, "refused", since, now)
+                .await?,
+            writer_failed: failed_writer_flow_count_in_window(conn, agent, since, now).await?,
+            skill_created: writer_status_count_in_window(conn, agent, "created", since, now)
+                .await?,
+            skill_updated: writer_status_count_in_window(conn, agent, "updated", since, now)
+                .await?,
             applied_as_hinted_created: writer_hint_status_count_in_window(
                 conn,
                 agent,
@@ -233,7 +274,8 @@ fn learning_flow_counts(
                 "created",
                 since,
                 now,
-            )?,
+            )
+            .await?,
             applied_as_hinted_updated: writer_hint_status_count_in_window(
                 conn,
                 agent,
@@ -241,7 +283,8 @@ fn learning_flow_counts(
                 "updated",
                 since,
                 now,
-            )?,
+            )
+            .await?,
             applied_differently_created: writer_hint_status_count_in_window(
                 conn,
                 agent,
@@ -249,7 +292,8 @@ fn learning_flow_counts(
                 "created",
                 since,
                 now,
-            )?,
+            )
+            .await?,
             applied_differently_updated: writer_hint_status_count_in_window(
                 conn,
                 agent,
@@ -257,7 +301,8 @@ fn learning_flow_counts(
                 "updated",
                 since,
                 now,
-            )?,
+            )
+            .await?,
         },
         warnings,
     ))
@@ -615,7 +660,7 @@ fn attach_flow_edge_with_cap(
     *represented += value;
 }
 
-fn signal_count_in_window(
+async fn signal_count_in_window(
     conn: &Connection,
     agent: &str,
     since: &DateTime<Utc>,
@@ -629,13 +674,15 @@ fn signal_count_in_window(
            AND accepted_at >= ?2
            AND accepted_at <= ?3",
     )?;
-    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
-        row.get::<_, String>(0)
-    })?;
+    let rows = stmt
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            row.get::<_, String>(0)
+        })
+        .await?;
     count_parsed_window_rows(rows, since, now)
 }
 
-fn episode_count_in_window(
+async fn episode_count_in_window(
     conn: &Connection,
     agent: &str,
     status: &str,
@@ -651,13 +698,15 @@ fn episode_count_in_window(
            AND created_at >= ?3
            AND created_at <= ?4",
     )?;
-    let rows = stmt.query_map(params![agent, status, coarse_since, coarse_until], |row| {
-        row.get::<_, String>(0)
-    })?;
+    let rows = stmt
+        .query_map(params![agent, status, coarse_since, coarse_until], |row| {
+            row.get::<_, String>(0)
+        })
+        .await?;
     count_parsed_window_rows(rows, since, now)
 }
 
-fn report_total_count_in_window(
+async fn report_total_count_in_window(
     conn: &Connection,
     agent: &str,
     since: &DateTime<Utc>,
@@ -671,13 +720,15 @@ fn report_total_count_in_window(
            AND created_at >= ?2
            AND created_at <= ?3",
     )?;
-    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
-        row.get::<_, String>(0)
-    })?;
+    let rows = stmt
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            row.get::<_, String>(0)
+        })
+        .await?;
     count_parsed_window_rows(rows, since, now)
 }
 
-fn report_count_in_window(
+async fn report_count_in_window(
     conn: &Connection,
     agent: &str,
     status: &str,
@@ -693,13 +744,15 @@ fn report_count_in_window(
            AND created_at >= ?3
            AND created_at <= ?4",
     )?;
-    let rows = stmt.query_map(params![agent, status, coarse_since, coarse_until], |row| {
-        row.get::<_, String>(0)
-    })?;
+    let rows = stmt
+        .query_map(params![agent, status, coarse_since, coarse_until], |row| {
+            row.get::<_, String>(0)
+        })
+        .await?;
     count_parsed_window_rows(rows, since, now)
 }
 
-fn confidence_count(
+async fn confidence_count(
     conn: &Connection,
     agent: &str,
     since: &DateTime<Utc>,
@@ -715,14 +768,16 @@ fn confidence_count(
            AND created_at >= ?3
            AND created_at <= ?4",
     )?;
-    let rows = stmt.query_map(
-        params![agent, confidence, coarse_since, coarse_until],
-        |row| row.get::<_, String>(0),
-    )?;
+    let rows = stmt
+        .query_map(
+            params![agent, confidence, coarse_since, coarse_until],
+            |row| row.get::<_, String>(0),
+        )
+        .await?;
     count_parsed_window_rows(rows, since, now)
 }
 
-fn writer_status_count_in_window(
+async fn writer_status_count_in_window(
     conn: &Connection,
     agent: &str,
     status: &str,
@@ -739,13 +794,15 @@ fn writer_status_count_in_window(
            AND created_at >= ?3
            AND created_at <= ?4",
     )?;
-    let rows = stmt.query_map(params![agent, status, coarse_since, coarse_until], |row| {
-        row.get::<_, String>(0)
-    })?;
+    let rows = stmt
+        .query_map(params![agent, status, coarse_since, coarse_until], |row| {
+            row.get::<_, String>(0)
+        })
+        .await?;
     count_parsed_window_rows(rows, since, now)
 }
 
-fn writer_hint_outcome_count_in_window(
+async fn writer_hint_outcome_count_in_window(
     conn: &Connection,
     agent: &str,
     hint_outcome: &str,
@@ -762,14 +819,16 @@ fn writer_hint_outcome_count_in_window(
            AND created_at >= ?3
            AND created_at <= ?4",
     )?;
-    let rows = stmt.query_map(
-        params![agent, hint_outcome, coarse_since, coarse_until],
-        |row| row.get::<_, String>(0),
-    )?;
+    let rows = stmt
+        .query_map(
+            params![agent, hint_outcome, coarse_since, coarse_until],
+            |row| row.get::<_, String>(0),
+        )
+        .await?;
     count_parsed_window_rows(rows, since, now)
 }
 
-fn writer_hint_status_count_in_window(
+async fn writer_hint_status_count_in_window(
     conn: &Connection,
     agent: &str,
     hint_outcome: &str,
@@ -788,14 +847,16 @@ fn writer_hint_status_count_in_window(
            AND created_at >= ?4
            AND created_at <= ?5",
     )?;
-    let rows = stmt.query_map(
-        params![agent, hint_outcome, status, coarse_since, coarse_until],
-        |row| row.get::<_, String>(0),
-    )?;
+    let rows = stmt
+        .query_map(
+            params![agent, hint_outcome, status, coarse_since, coarse_until],
+            |row| row.get::<_, String>(0),
+        )
+        .await?;
     count_parsed_window_rows(rows, since, now)
 }
 
-fn successful_writer_count_in_window(
+async fn successful_writer_count_in_window(
     conn: &Connection,
     agent: &str,
     since: &DateTime<Utc>,
@@ -811,13 +872,15 @@ fn successful_writer_count_in_window(
            AND created_at >= ?2
            AND created_at <= ?3",
     )?;
-    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
-        row.get::<_, String>(0)
-    })?;
+    let rows = stmt
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            row.get::<_, String>(0)
+        })
+        .await?;
     count_parsed_window_rows(rows, since, now)
 }
 
-fn failed_writer_flow_count_in_window(
+async fn failed_writer_flow_count_in_window(
     conn: &Connection,
     agent: &str,
     since: &DateTime<Utc>,
@@ -834,13 +897,15 @@ fn failed_writer_flow_count_in_window(
            AND created_at >= ?2
            AND created_at <= ?3",
     )?;
-    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
-        row.get::<_, String>(0)
-    })?;
+    let rows = stmt
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            row.get::<_, String>(0)
+        })
+        .await?;
     count_parsed_window_rows(rows, since, now)
 }
 
-fn failed_writer_count_in_window(
+async fn failed_writer_count_in_window(
     conn: &Connection,
     agent: &str,
     since: &DateTime<Utc>,
@@ -856,13 +921,15 @@ fn failed_writer_count_in_window(
            AND created_at >= ?2
            AND created_at <= ?3",
     )?;
-    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
-        row.get::<_, String>(0)
-    })?;
+    let rows = stmt
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            row.get::<_, String>(0)
+        })
+        .await?;
     count_parsed_window_rows(rows, since, now)
 }
 
-fn curator_trigger_count_in_window(
+async fn curator_trigger_count_in_window(
     conn: &Connection,
     since: &DateTime<Utc>,
     now: &DateTime<Utc>,
@@ -875,6 +942,7 @@ fn curator_trigger_count_in_window(
             [],
             |row| row.get::<_, Option<String>>(0),
         )
+        .await
         .optional()?
         .flatten();
 
@@ -918,7 +986,7 @@ fn curator_trigger_evidence_timestamp(raw: &str) -> Result<Option<DateTime<Utc>>
         .map_err(|_| ())
 }
 
-fn recent_learning_signals(
+async fn recent_learning_signals(
     conn: &Connection,
     agent: &str,
     since: &DateTime<Utc>,
@@ -934,16 +1002,18 @@ fn recent_learning_signals(
            AND created_at <= ?3
          ORDER BY created_at DESC, id DESC",
     )?;
-    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, String>(5)?,
-        ))
-    })?;
+    let rows = stmt
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .await?;
     let mut signals = Vec::<(DateTime<Utc>, i64, LearningSignalPoint)>::new();
     for row in rows {
         let (id, action, skill_name, status, hint_outcome, occurred_at) = row?;
@@ -972,7 +1042,7 @@ fn recent_learning_signals(
     Ok(signals.into_iter().map(|(_, _, signal)| signal).collect())
 }
 
-pub fn skill_lifecycle_overview(
+pub async fn skill_lifecycle_overview(
     conn: &Connection,
     agent: &str,
 ) -> Result<crate::api_types::SkillLifecycleOverviewResponse, ReadModelError> {
@@ -988,21 +1058,23 @@ pub fn skill_lifecycle_overview(
     let mut bundled_active = 0;
     let mut recently_used: Vec<crate::api_types::RecentSkill> = Vec::new();
 
-    let rows = conn.query_all(
-        "SELECT skill_name, state, pinned, created_by, use_count, last_used_at
+    let rows = conn
+        .query_all(
+            "SELECT skill_name, state, pinned, created_by, use_count, last_used_at
          FROM skill_lifecycle",
-        (),
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ))
-        },
-    )?;
+            (),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
+        .await?;
     for (skill_name, state_raw, pinned, created_by_raw, use_count, last_used_at) in rows {
         let state = LifecycleState::from_db_str(&state_raw).map_err(|_| {
             ReadModelError::InvalidLifecycle(format!(
@@ -1063,30 +1135,32 @@ pub fn skill_lifecycle_overview(
     })
 }
 
-fn learning_health(
+async fn learning_health(
     conn: &Connection,
     agent: &str,
     generated_at: &str,
 ) -> Result<LearningHealth, ReadModelError> {
-    let row = conn.query_row(
-        "SELECT review_running, daily_review_count, creation_review_interval,
+    let row = conn
+        .query_row(
+            "SELECT review_running, daily_review_count, creation_review_interval,
                     tool_iters_since_review, turns_since_review,
                     skill_issue_hints_since_review, last_review_status, last_review_at
              FROM skill_nudge_state WHERE agent_name=?1",
-        params![agent],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-            ))
-        },
-    );
+            params![agent],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            },
+        )
+        .await;
     let (
         review_running,
         daily_review_count,
@@ -1108,45 +1182,47 @@ fn learning_health(
         skill_issue_hints_since_review,
         last_review_status,
         last_review_at,
-        possibly_stuck: possibly_stuck(conn, agent, generated_at)?,
+        possibly_stuck: possibly_stuck(conn, agent, generated_at).await?,
     })
 }
 
-fn possibly_stuck(
+async fn possibly_stuck(
     conn: &Connection,
     agent: &str,
     generated_at: &str,
 ) -> Result<bool, ReadModelError> {
     let cutoff = (parse_utc(generated_at)? - Duration::minutes(10)).to_rfc3339();
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM learning_episodes
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM learning_episodes
          WHERE agent_name=?1 AND status='reviewing' AND updated_at < ?2
            AND COALESCE(
                  (SELECT review_running FROM skill_nudge_state WHERE agent_name=?1),
                  0
                ) = 0",
-        params![agent, cutoff],
-        |row| row.get(0),
-    )?;
+            params![agent, cutoff],
+            |row| row.get(0),
+        )
+        .await?;
     Ok(count > 0)
 }
 
-fn learning_lifecycle(
+async fn learning_lifecycle(
     conn: &Connection,
     agent: &str,
     since_7d: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<LearningLifecycle, ReadModelError> {
     Ok(LearningLifecycle {
-        created_7d: writer_status_count_in_window(conn, agent, "created", since_7d, now)?,
-        updated_7d: writer_status_count_in_window(conn, agent, "updated", since_7d, now)?,
-        failed_or_aborted_7d: failed_writer_count_in_window(conn, agent, since_7d, now)?,
-        recent_successful_events: recent_successful_events(conn, agent, since_7d, now)?,
-        candidate_skill_names_7d: candidate_skill_names(conn, agent, since_7d, now)?,
+        created_7d: writer_status_count_in_window(conn, agent, "created", since_7d, now).await?,
+        updated_7d: writer_status_count_in_window(conn, agent, "updated", since_7d, now).await?,
+        failed_or_aborted_7d: failed_writer_count_in_window(conn, agent, since_7d, now).await?,
+        recent_successful_events: recent_successful_events(conn, agent, since_7d, now).await?,
+        candidate_skill_names_7d: candidate_skill_names(conn, agent, since_7d, now).await?,
     })
 }
 
-fn recent_successful_events(
+async fn recent_successful_events(
     conn: &Connection,
     agent: &str,
     since_7d: &DateTime<Utc>,
@@ -1163,17 +1239,19 @@ fn recent_successful_events(
            AND created_at <= ?3
          ORDER BY created_at DESC, id DESC",
     )?;
-    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, Option<String>>(4)?,
-            row.get::<_, Option<String>>(5)?,
-            row.get::<_, String>(6)?,
-        ))
-    })?;
+    let rows = stmt
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .await?;
     let mut events = Vec::<(DateTime<Utc>, i64, LearningEventSummary)>::new();
     for row in rows {
         let (id, skill_name, action, status, message, summary, created_at) = row?;
@@ -1199,7 +1277,7 @@ fn recent_successful_events(
     Ok(events.into_iter().map(|(_, _, event)| event).collect())
 }
 
-fn candidate_skill_names(
+async fn candidate_skill_names(
     conn: &Connection,
     agent: &str,
     since_7d: &DateTime<Utc>,
@@ -1215,9 +1293,11 @@ fn candidate_skill_names(
            AND created_at >= ?2
            AND created_at <= ?3",
     )?;
-    let rows = stmt.query_map(params![agent, coarse_since, coarse_until], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
+    let rows = stmt
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .await?;
     let mut newest_by_name = BTreeMap::<String, DateTime<Utc>>::new();
     for row in rows {
         let (name, created_at) = row?;
@@ -1240,7 +1320,7 @@ fn candidate_skill_names(
     Ok(rows.into_iter().map(|(name, _)| name).collect())
 }
 
-fn recent_reports(
+async fn recent_reports(
     conn: &Connection,
     agent: &str,
 ) -> Result<Vec<LearningReportSummary>, ReadModelError> {
@@ -1253,7 +1333,8 @@ fn recent_reports(
          LIMIT ?2",
     )?;
     let rows = stmt
-        .query_map(params![agent, RECENT_REPORT_LIMIT], report_summary_from_row)?
+        .query_map(params![agent, RECENT_REPORT_LIMIT], report_summary_from_row)
+        .await?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -1287,16 +1368,16 @@ struct EpisodeDetailRow {
     execution_event_refs: Vec<String>,
 }
 
-pub fn learning_report_detail(
+pub async fn learning_report_detail(
     conn: &Connection,
     agent: &str,
     report_id: i64,
 ) -> Result<Option<LearningReportDetailResponse>, ReadModelError> {
-    let Some(report_row) = load_report_detail_row(conn, agent, report_id)? else {
+    let Some(report_row) = load_report_detail_row(conn, agent, report_id).await? else {
         return Ok(None);
     };
     let episode_row = match report_row.learning_episode_id {
-        Some(episode_id) => load_episode_detail_row(conn, agent, episode_id)?,
+        Some(episode_id) => load_episode_detail_row(conn, agent, episode_id).await?,
         None => None,
     };
     let allowed_message_refs = episode_row
@@ -1333,7 +1414,8 @@ pub fn learning_report_detail(
         &evidence_refs,
         allowed_message_refs,
         allowed_execution_refs,
-    )?;
+    )
+    .await?;
     let reviewer = reviewer_detail(&report_row);
 
     Ok(Some(LearningReportDetailResponse {
@@ -1345,7 +1427,7 @@ pub fn learning_report_detail(
     }))
 }
 
-fn load_report_detail_row(
+async fn load_report_detail_row(
     conn: &Connection,
     agent: &str,
     report_id: i64,
@@ -1367,6 +1449,7 @@ fn load_report_detail_row(
                 ))
             },
         )
+        .await
         .optional()?;
     row.map(
         |(report, learning_episode_id, evidence_refs_json, review_output_json)| {
@@ -1381,7 +1464,7 @@ fn load_report_detail_row(
     .transpose()
 }
 
-fn load_episode_detail_row(
+async fn load_episode_detail_row(
     conn: &Connection,
     agent: &str,
     episode_id: i64,
@@ -1413,6 +1496,7 @@ fn load_episode_detail_row(
                 ))
             },
         )
+        .await
         .optional()?;
     row.map(
         |(
@@ -1475,7 +1559,7 @@ fn reviewer_detail(row: &ReportDetailRow) -> LearningReviewerDetail {
     }
 }
 
-fn load_evidence_snippets(
+async fn load_evidence_snippets(
     conn: &Connection,
     agent: &str,
     refs: &[String],
@@ -1492,13 +1576,13 @@ fn load_evidence_snippets(
                 snippets.push(unavailable_snippet(ref_id.clone(), "message"));
                 continue;
             }
-            snippets.push(load_message_snippet(conn, ref_id)?);
+            snippets.push(load_message_snippet(conn, ref_id).await?);
         } else if ref_id.starts_with("exec:") {
             if !allowed_executions.contains(ref_id.as_str()) {
                 snippets.push(unavailable_snippet(ref_id.clone(), "execution_event"));
                 continue;
             }
-            snippets.push(load_execution_snippet(conn, agent, ref_id)?);
+            snippets.push(load_execution_snippet(conn, agent, ref_id).await?);
         } else {
             snippets.push(unavailable_snippet(ref_id.clone(), "unknown"));
         }
@@ -1506,7 +1590,7 @@ fn load_evidence_snippets(
     Ok(snippets)
 }
 
-fn load_message_snippet(
+async fn load_message_snippet(
     conn: &Connection,
     ref_id: &str,
 ) -> Result<LearningEvidenceSnippet, ReadModelError> {
@@ -1529,6 +1613,7 @@ fn load_message_snippet(
                 ))
             },
         )
+        .await
         .optional()?;
     let Some((role, content, created_at, addressed_to_bot, routed_to_agent)) = row else {
         return Ok(unavailable_snippet(ref_id.to_owned(), "message"));
@@ -1549,7 +1634,7 @@ fn load_message_snippet(
     })
 }
 
-fn load_execution_snippet(
+async fn load_execution_snippet(
     conn: &Connection,
     agent: &str,
     ref_id: &str,
@@ -1573,6 +1658,7 @@ fn load_execution_snippet(
                 ))
             },
         )
+        .await
         .optional()?;
     let Some((event_kind, tool_name, content_text, trust_label, created_at)) = row else {
         return Ok(unavailable_snippet(ref_id.to_owned(), "execution_event"));
@@ -1631,9 +1717,11 @@ fn unavailable_snippet(ref_id: String, source: &str) -> LearningEvidenceSnippet 
 mod tests {
     use super::*;
 
-    fn fixture() -> (tempfile::TempDir, Connection) {
+    async fn fixture() -> (tempfile::TempDir, Connection) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(dir.path(), true).expect("open db");
+        let conn = right_db::open_connection(dir.path(), true)
+            .await
+            .expect("open db");
         (dir, conn)
     }
 
@@ -1663,9 +1751,9 @@ mod tests {
             .unwrap_or(0)
     }
 
-    #[test]
-    fn learning_overview_builds_funnel_quality_health_and_lifecycle() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_builds_funnel_quality_health_and_lifecycle() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_nudge_state (
                 agent_name, tool_iters_since_review, turns_since_review,
@@ -1678,6 +1766,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_nudge_signals (
@@ -1689,6 +1778,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO learning_episodes (
@@ -1704,6 +1794,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -1722,6 +1813,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_learning_events (
@@ -1735,9 +1827,10 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert_eq!(response.funnel.signals_accepted_24h, 1);
         assert_eq!(response.funnel.episodes_reviewed_24h, 1);
@@ -1755,9 +1848,9 @@ mod tests {
         assert_eq!(response.recent_reports[0].id, 7);
     }
 
-    #[test]
-    fn learning_overview_builds_flow_nodes_edges_and_recent_signals() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_builds_flow_nodes_edges_and_recent_signals() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_nudge_signals (
                 invocation_id, agent_name, root_session_id, chat_id, thread_id,
@@ -1768,6 +1861,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_learning_events (
@@ -1781,9 +1875,10 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert!(
             response
@@ -1815,9 +1910,9 @@ mod tests {
         assert_eq!(response.recent_learning_signals[0].kind, "skill_created");
     }
 
-    #[test]
-    fn learning_overview_flow_projects_hint_outcomes_skills_and_curator_trigger() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_flow_projects_hint_outcomes_skills_and_curator_trigger() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT OR REPLACE INTO curator_state (
                 agent_singleton_id, last_run_at, last_run_status,
@@ -1828,6 +1923,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -1844,6 +1940,7 @@ mod tests {
                  'medium', '[]', '{}', '2026-05-20T10:03:00Z')",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_learning_events (
@@ -1864,9 +1961,10 @@ mod tests {
                  '2026-05-20T10:13:00Z')",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert_eq!(flow_node_count(&response, "curator_triggered"), 1);
         assert_eq!(flow_node_count(&response, "writer_applied_as_hinted"), 1);
@@ -1901,8 +1999,9 @@ mod tests {
              SET last_spike_evidence_json = '{not json'",
             [],
         )
+        .await
         .unwrap();
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
         assert_eq!(flow_node_count(&response, "curator_triggered"), 0);
         assert!(response.warnings.iter().any(|warning| {
             warning.source == "curator_state.last_spike_evidence_json"
@@ -1910,9 +2009,9 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn learning_overview_flow_prefers_prefilter_pipeline_when_reports_exist() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_flow_prefers_prefilter_pipeline_when_reports_exist() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_nudge_signals (
                 invocation_id, agent_name, root_session_id, chat_id, thread_id,
@@ -1923,6 +2022,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -1934,6 +2034,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_learning_events (
@@ -1947,9 +2048,10 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert_eq!(flow_edge_count(&response, "signals", "prefilter_create"), 1);
         assert_eq!(
@@ -1967,9 +2069,9 @@ mod tests {
         assert!(response.warnings.is_empty());
     }
 
-    #[test]
-    fn learning_overview_warns_when_writer_flow_is_partially_inferred() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_warns_when_writer_flow_is_partially_inferred() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_nudge_signals (
                 invocation_id, agent_name, root_session_id, chat_id, thread_id,
@@ -1980,6 +2082,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -1991,6 +2094,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_learning_events (
@@ -2007,9 +2111,10 @@ mod tests {
                  '2026-05-20T11:20:00Z')",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert_eq!(
             flow_edge_count(&response, "prefilter_create", "writer_applied_as_hinted"),
@@ -2020,9 +2125,9 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn learning_overview_flow_uses_bounded_7d_window() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_flow_uses_bounded_7d_window() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_nudge_signals (
                 invocation_id, agent_name, root_session_id, chat_id, thread_id,
@@ -2033,6 +2138,7 @@ mod tests {
                 ('future-signal', 'right', 'session-1', 10, 20, 'learning', '{}', '2026-05-21T10:00:00Z')",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -2045,6 +2151,7 @@ mod tests {
                 ('right', 'future-create', 'learning_signal', 'create_candidate', 'high', '[]', '{}', '2026-05-21T10:10:00Z')",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_learning_events (
@@ -2055,9 +2162,10 @@ mod tests {
                 ('future-created', 'right', 'create', 'rightx-future', 'finish', 'created', 'future', 'future', '[]', NULL, '2026-05-21T11:00:00Z')",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert_eq!(flow_node_count(&response, "signals"), 2);
         assert_eq!(flow_node_count(&response, "prefilter_create"), 1);
@@ -2075,9 +2183,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn learning_overview_flow_keeps_failed_reviews_out_of_writer_failed() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_flow_keeps_failed_reviews_out_of_writer_failed() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_nudge_signals (
                 invocation_id, agent_name, root_session_id, chat_id, thread_id,
@@ -2088,6 +2196,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -2099,17 +2208,18 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert_eq!(flow_node_count(&response, "prefilter_failed"), 1);
         assert_eq!(flow_node_count(&response, "writer_failed"), 0);
     }
 
-    #[test]
-    fn learning_overview_recent_signals_parse_utc_bounds_and_sort() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_recent_signals_parse_utc_bounds_and_sort() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_learning_events (
                 invocation_id, agent_name, action, skill_name, phase, status,
@@ -2121,9 +2231,10 @@ mod tests {
                 ('old-created', 'right', 'create', 'rightx-old', 'finish', 'created', 'old', 'old', '[]', NULL, '2026-05-13T11:59:59Z')",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
         let labels = response
             .recent_learning_signals
             .iter()
@@ -2135,9 +2246,9 @@ mod tests {
         assert_eq!(response.recent_learning_signals[0].severity, "info");
     }
 
-    #[test]
-    fn learning_overview_counts_parse_utc_bounds() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_counts_parse_utc_bounds() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_nudge_signals (
                 invocation_id, agent_name, root_session_id, chat_id, thread_id,
@@ -2147,6 +2258,7 @@ mod tests {
                 ('future-signal', 'right', 'session-1', 10, 20, 'learning', '{}', '2026-05-20T11:30:00.000-02:00')",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO learning_episodes (
@@ -2162,6 +2274,7 @@ mod tests {
                  '2026-05-20T11:30:00.000-02:00', '2026-05-20T11:31:00.000-02:00')",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -2177,6 +2290,7 @@ mod tests {
                  '2026-05-20T11:30:00.000-02:00')",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_learning_events (
@@ -2191,9 +2305,10 @@ mod tests {
                  '2026-05-20T11:30:00.000-02:00')",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert_eq!(response.funnel.signals_accepted_24h, 1);
         assert_eq!(response.funnel.episodes_selected_24h, 1);
@@ -2215,9 +2330,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn learning_overview_rates_are_null_without_non_failed_reports() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_rates_are_null_without_non_failed_reports() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_review_reports (
                 agent_name, source_invocation_id, trigger_kind, status,
@@ -2228,18 +2343,19 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert_eq!(response.quality.candidate_rate, None);
         assert_eq!(response.quality.nothing_to_learn_rate, None);
         assert_eq!(response.quality.failed_count_24h, 1);
     }
 
-    #[test]
-    fn learning_overview_detects_old_reviewing_episode_as_possibly_stuck() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_detects_old_reviewing_episode_as_possibly_stuck() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_nudge_state (
                 agent_name, review_running, creation_review_interval,
@@ -2247,6 +2363,7 @@ mod tests {
              ) VALUES ('right', 0, 15, 1)",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO learning_episodes (
@@ -2260,17 +2377,18 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert!(!response.health.review_running);
         assert!(response.health.possibly_stuck);
     }
 
-    #[test]
-    fn learning_overview_does_not_flag_stuck_while_reviewer_running() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_does_not_flag_stuck_while_reviewer_running() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_nudge_state (
                 agent_name, review_running, creation_review_interval,
@@ -2278,6 +2396,7 @@ mod tests {
              ) VALUES ('right', 1, 15, 1)",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO learning_episodes (
@@ -2291,17 +2410,18 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert!(response.health.review_running);
         assert!(!response.health.possibly_stuck);
     }
 
-    #[test]
-    fn learning_overview_candidate_names_include_only_candidate_reports() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_candidate_names_include_only_candidate_reports() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_review_reports (
                 agent_name, source_invocation_id, trigger_kind, status,
@@ -2314,6 +2434,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -2327,9 +2448,10 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert_eq!(
             response.lifecycle.candidate_skill_names_7d,
@@ -2337,9 +2459,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn learning_overview_counts_insufficient_context_episodes() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_overview_counts_insufficient_context_episodes() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO learning_episodes (
                 agent_name, kind, seed_trigger_kind, seed_ref, status,
@@ -2352,16 +2474,17 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_overview(&conn, input()).unwrap();
+        let response = learning_overview(&conn, input()).await.unwrap();
 
         assert_eq!(response.funnel.episodes_insufficient_context_24h, 1);
     }
 
-    #[test]
-    fn learning_report_detail_returns_message_and_execution_snippets() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_report_detail_returns_message_and_execution_snippets() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO conversation_messages (
                 id, platform, chat_id, thread_id, message_id, role, content,
@@ -2373,6 +2496,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO execution_events (
@@ -2386,6 +2510,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO learning_episodes (
@@ -2404,6 +2529,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -2422,9 +2548,13 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let detail = learning_report_detail(&conn, "right", 9).unwrap().unwrap();
+        let detail = learning_report_detail(&conn, "right", 9)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(detail.report.id, 9);
         assert_eq!(detail.episode.as_ref().unwrap().id, 4);
@@ -2446,9 +2576,9 @@ mod tests {
         assert!(detail.reviewer.user_notice_present);
     }
 
-    #[test]
-    fn learning_report_detail_marks_missing_refs_unavailable_and_hides_thinking() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_report_detail_marks_missing_refs_unavailable_and_hides_thinking() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO execution_events (
                 id, agent_name, root_session_id, invocation_id, turn_id, seq,
@@ -2460,6 +2590,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO learning_episodes (
@@ -2474,6 +2605,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -2488,9 +2620,13 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let detail = learning_report_detail(&conn, "right", 10).unwrap().unwrap();
+        let detail = learning_report_detail(&conn, "right", 10)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(detail.evidence.len(), 2);
         assert!(!detail.evidence[0].available);
@@ -2500,9 +2636,9 @@ mod tests {
         assert_eq!(detail.evidence[1].text, None);
     }
 
-    #[test]
-    fn learning_report_detail_hides_low_trust_messages() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_report_detail_hides_low_trust_messages() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO conversation_messages (
                 id, platform, chat_id, thread_id, message_id, role, content,
@@ -2514,6 +2650,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO learning_episodes (
@@ -2528,6 +2665,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -2542,9 +2680,13 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let detail = learning_report_detail(&conn, "right", 12).unwrap().unwrap();
+        let detail = learning_report_detail(&conn, "right", 12)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(detail.evidence.len(), 1);
         assert_eq!(detail.evidence[0].ref_id, "msg:102");
@@ -2553,9 +2695,9 @@ mod tests {
         assert_eq!(detail.evidence[0].text, None);
     }
 
-    #[test]
-    fn learning_report_detail_errors_on_malformed_report_json() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_report_detail_errors_on_malformed_report_json() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO skill_review_reports (
                 id, agent_name, source_invocation_id, trigger_kind, status,
@@ -2566,14 +2708,15 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        assert!(learning_report_detail(&conn, "right", 11).is_err());
+        assert!(learning_report_detail(&conn, "right", 11).await.is_err());
     }
 
-    #[test]
-    fn skill_lifecycle_overview_reads_db_counts_and_provenance() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn skill_lifecycle_overview_reads_db_counts_and_provenance() {
+        let (_dir, conn) = fixture().await;
         insert_skill_lifecycle_row(
             &conn,
             "rightx-foo",
@@ -2584,7 +2727,8 @@ mod tests {
             0,
             Some("2026-05-22T10:00:00Z"),
             None,
-        );
+        )
+        .await;
         insert_skill_lifecycle_row(
             &conn,
             "rightx-curated",
@@ -2595,7 +2739,8 @@ mod tests {
             2,
             Some("2026-05-23T10:00:00Z"),
             Some("2026-05-23T11:00:00Z"),
-        );
+        )
+        .await;
         insert_skill_lifecycle_row(
             &conn,
             "rightx-bar",
@@ -2606,7 +2751,8 @@ mod tests {
             0,
             None,
             None,
-        );
+        )
+        .await;
         insert_skill_lifecycle_row(
             &conn,
             "rightx-baz",
@@ -2617,7 +2763,8 @@ mod tests {
             0,
             Some("2026-05-15T10:00:00Z"),
             None,
-        );
+        )
+        .await;
         insert_skill_lifecycle_row(
             &conn,
             "rightx-explicit",
@@ -2628,7 +2775,8 @@ mod tests {
             0,
             None,
             None,
-        );
+        )
+        .await;
         insert_skill_lifecycle_row(
             &conn,
             "rightx-bundled",
@@ -2639,9 +2787,10 @@ mod tests {
             0,
             None,
             None,
-        );
+        )
+        .await;
 
-        let resp = skill_lifecycle_overview(&conn, "right").unwrap();
+        let resp = skill_lifecycle_overview(&conn, "right").await.unwrap();
 
         assert_eq!(resp.total_active, 4);
         assert_eq!(resp.total_stale, 1);
@@ -2657,10 +2806,10 @@ mod tests {
         assert_eq!(resp.recently_used[0].use_count, 1);
     }
 
-    #[test]
-    fn skill_lifecycle_overview_empty_when_table_has_no_rows() {
-        let (_dir, conn) = fixture();
-        let resp = skill_lifecycle_overview(&conn, "right").unwrap();
+    #[tokio::test]
+    async fn skill_lifecycle_overview_empty_when_table_has_no_rows() {
+        let (_dir, conn) = fixture().await;
+        let resp = skill_lifecycle_overview(&conn, "right").await.unwrap();
         assert_eq!(resp.total_active, 0);
         assert_eq!(resp.total_stale, 0);
         assert_eq!(resp.total_archived, 0);
@@ -2669,7 +2818,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn insert_skill_lifecycle_row(
+    async fn insert_skill_lifecycle_row(
         conn: &Connection,
         skill_name: &str,
         state: &str,
@@ -2696,6 +2845,7 @@ mod tests {
                 last_patched_at,
             ),
         )
+        .await
         .unwrap();
     }
 }

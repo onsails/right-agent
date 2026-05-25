@@ -56,7 +56,7 @@ pub(crate) async fn spawn_background_continuation(
         && let Err(e) = std::fs::create_dir_all(parent)
     {
         let reason = format!("failed to create background log dir: {e:#}");
-        persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason);
+        persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason).await;
         return HandoffStatus::Failed(reason);
     }
 
@@ -96,10 +96,12 @@ pub(crate) async fn spawn_background_continuation(
         resolved_sandbox.as_deref(),
         &claude_args,
         mcp_instructions.as_deref(),
-    ) {
+    )
+    .await
+    {
         Ok(cmd) => cmd,
         Err(reason) => {
-            persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason);
+            persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason).await;
             return HandoffStatus::Failed(reason);
         }
     };
@@ -118,7 +120,7 @@ pub(crate) async fn spawn_background_continuation(
         Ok(child) => child,
         Err(e) => {
             let reason = format!("spawn failed: {e:#}");
-            persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason);
+            persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason).await;
             return HandoffStatus::Failed(reason);
         }
     };
@@ -132,7 +134,7 @@ pub(crate) async fn spawn_background_continuation(
             let reason = "spawned background child without stdout".to_string();
             let stderr = kill_child_and_collect_stderr(child, stderr_handle).await;
             let reason = append_stderr_to_reason(&reason, &stderr);
-            persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason);
+            persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason).await;
             return HandoffStatus::Failed(reason);
         }
     };
@@ -158,20 +160,21 @@ pub(crate) async fn spawn_background_continuation(
     if let Err(reason) = confirmed {
         let stderr = kill_unconfirmed_child(child, reader_handle, stderr_handle).await;
         let reason = append_stderr_to_reason(&reason, &stderr);
-        persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason);
+        persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason).await;
         return HandoffStatus::Failed(reason);
     }
 
     let started_at = chrono::Utc::now().to_rfc3339();
     let log_path_str = log_path.to_string_lossy().into_owned();
     let mark_spawned = {
-        match right_db::open_connection(&agent_dir, false) {
+        match right_db::open_connection(&agent_dir, false).await {
             Ok(conn) => right_agent::async_runs::mark_background_spawned(
                 &conn,
                 &request.run_id,
                 &started_at,
                 &log_path_str,
             )
+            .await
             .map_err(|e| format!("mark background spawned: {e:#}")),
             Err(e) => Err(format!("open DB to mark background spawned: {e:#}")),
         }
@@ -179,7 +182,7 @@ pub(crate) async fn spawn_background_continuation(
     if let Err(reason) = mark_spawned {
         let stderr = kill_unconfirmed_child(child, reader_handle, stderr_handle).await;
         let reason = append_stderr_to_reason(&reason, &stderr);
-        persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason);
+        persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason).await;
         return HandoffStatus::Failed(reason);
     }
 
@@ -236,7 +239,7 @@ async fn fetch_mcp_instructions(
     }
 }
 
-fn build_background_command(
+async fn build_background_command(
     agent_dir: &Path,
     agent_name: &str,
     ssh_config_path: Option<&Path>,
@@ -272,7 +275,7 @@ fn build_background_command(
             mcp_instructions,
             memory_mode.as_ref(),
         );
-        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
             assembly_script =
                 format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
@@ -311,7 +314,7 @@ fn build_background_command(
         cmd.arg(&assembly_script);
         cmd.env("HOME", agent_dir);
         cmd.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             cmd.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
         }
         cmd.current_dir(agent_dir);
@@ -344,7 +347,7 @@ async fn read_background_stdout(
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut collected = Vec::new();
     let mut saw_init = false;
-    let conn = match right_db::open_connection(&agent_dir, false) {
+    let conn = match right_db::open_connection(&agent_dir, false).await {
         Ok(conn) => Some(conn),
         Err(e) => {
             tracing::warn!(
@@ -386,6 +389,7 @@ async fn read_background_stdout(
                 execution_event_seq,
                 &line,
             )
+            .await
         {
             tracing::warn!(
                 run_id = %run_id,
@@ -550,7 +554,7 @@ async fn complete_background_run(
             drop(child);
             let stderr = await_stderr_reader(stderr_handle).await;
             let reason = append_stderr_to_reason(&reason, &stderr);
-            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason);
+            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason).await;
             return;
         }
         Err(e) => {
@@ -561,7 +565,7 @@ async fn complete_background_run(
                 &format!("background stdout reader task failed: {e:#}"),
                 &stderr,
             );
-            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason);
+            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason).await;
             return;
         }
     };
@@ -572,7 +576,7 @@ async fn complete_background_run(
             let stderr = await_stderr_reader(stderr_handle).await;
             let reason =
                 append_stderr_to_reason(&format!("background child wait failed: {e:#}"), &stderr);
-            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason);
+            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason).await;
             return;
         }
         Err(_) => {
@@ -583,7 +587,7 @@ async fn complete_background_run(
                 "background child wait timed out after stdout closed",
                 &stderr,
             );
-            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason);
+            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason).await;
             return;
         }
     };
@@ -603,7 +607,7 @@ async fn complete_background_run(
         } else {
             format!("background subprocess failed with exit code {exit_code:?}: {stderr}")
         };
-        persist_completion_failed_at_agent(&agent_dir, &request.run_id, exit_code, &reason);
+        persist_completion_failed_at_agent(&agent_dir, &request.run_id, exit_code, &reason).await;
         return;
     }
 
@@ -626,11 +630,13 @@ async fn complete_background_run(
             )
             .await
             {
-                persist_completion_failed_at_agent(&agent_dir, &request.run_id, exit_code, &reason);
+                persist_completion_failed_at_agent(&agent_dir, &request.run_id, exit_code, &reason)
+                    .await;
             }
         }
         Err(reason) => {
-            persist_completion_failed_at_agent(&agent_dir, &request.run_id, exit_code, &reason);
+            persist_completion_failed_at_agent(&agent_dir, &request.run_id, exit_code, &reason)
+                .await;
         }
     }
 }
@@ -689,9 +695,11 @@ async fn persist_successful_background_output(
         serialize_notify_delivery_for_host(agent_dir, run_id, &notify, resolved_sandbox).await?;
 
     let conn = right_db::open_connection(agent_dir, false)
+        .await
         .map_err(|e| format!("open DB to persist background output: {e:#}"))?;
     let tx = conn
         .transaction()
+        .await
         .map_err(|e| format!("begin transaction for background output: {e:#}"))?;
     right_agent::async_runs::persist_run_output(
         &tx,
@@ -703,10 +711,13 @@ async fn persist_successful_background_output(
             delivery_required: true,
         },
     )
+    .await
     .map_err(|e| format!("persist background output: {e:#}"))?;
     right_agent::async_runs::finish_run(&tx, run_id, exit_code, "success")
+        .await
         .map_err(|e| format!("finish background run: {e:#}"))?;
     tx.commit()
+        .await
         .map_err(|e| format!("commit background output: {e:#}"))?;
     capture_background_completion_seed(
         &conn,
@@ -814,7 +825,7 @@ async fn serialize_notify_delivery_for_host(
         .map_err(|e| format!("serialize background host delivery_json: {e:#}"))
 }
 
-fn persist_background_failure_notify(
+async fn persist_background_failure_notify(
     conn: &right_db::Connection,
     run_id: &str,
     reason: &str,
@@ -830,6 +841,7 @@ fn persist_background_failure_notify(
             delivery_required: true,
         },
     )
+    .await
 }
 
 fn background_failure_payload(
@@ -848,30 +860,32 @@ fn background_failure_payload(
     Ok((run_note, delivery_json, error_json))
 }
 
-fn mark_handoff_failed(
+async fn mark_handoff_failed(
     conn: &right_db::Connection,
     run_id: &str,
     reason: &str,
 ) -> Result<(), right_db::DbError> {
-    persist_background_failure_notify(conn, run_id, reason)?;
+    persist_background_failure_notify(conn, run_id, reason).await?;
     let now = chrono::Utc::now().to_rfc3339();
-    let rows = conn.execute(
-        "UPDATE async_runs
+    let rows = conn
+        .execute(
+            "UPDATE async_runs
          SET handoff_state = 'failed',
              updated_at = ?2
-         WHERE id = ?1",
-        right_db::params![run_id, now],
-    )?;
+        WHERE id = ?1",
+            right_db::params![run_id, now],
+        )
+        .await?;
     if rows == 0 {
         return Err(right_db::DbError::NotFound);
     }
-    right_agent::async_runs::finish_run(conn, run_id, None, "failed")
+    right_agent::async_runs::finish_run(conn, run_id, None, "failed").await
 }
 
-pub(crate) fn mark_interrupted_handoffs(
+pub(crate) async fn mark_interrupted_handoffs(
     conn: &right_db::Connection,
 ) -> Result<usize, right_db::DbError> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction().await?;
     let run_ids = {
         let mut stmt = tx.prepare(
             "SELECT id
@@ -880,28 +894,30 @@ pub(crate) fn mark_interrupted_handoffs(
                AND status = 'queued'
                AND handoff_state = 'queued'",
         )?;
-        stmt.query_map([], |r| r.get::<_, String>(0))?
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .await?
             .collect::<Result<Vec<_>, _>>()?
     };
     let mut converted = 0usize;
     for run_id in run_ids {
-        if mark_interrupted_handoff_failed_if_still_queued(&tx, &run_id)? {
+        if mark_interrupted_handoff_failed_if_still_queued(&tx, &run_id).await? {
             converted += 1;
         }
     }
-    tx.commit()?;
+    tx.commit().await?;
     Ok(converted)
 }
 
-fn mark_interrupted_handoff_failed_if_still_queued(
+async fn mark_interrupted_handoff_failed_if_still_queued(
     conn: &right_db::Connection,
     run_id: &str,
 ) -> Result<bool, right_db::DbError> {
     let (run_note, delivery_json, error_json) =
         background_failure_payload(run_id, INTERRUPTED_HANDOFF_REASON)?;
     let now = chrono::Utc::now().to_rfc3339();
-    let rows = conn.execute(
-        "UPDATE async_runs
+    let rows = conn
+        .execute(
+            "UPDATE async_runs
          SET run_note = ?2,
              delivery_json = ?3,
              error_json = ?4,
@@ -912,31 +928,32 @@ fn mark_interrupted_handoff_failed_if_still_queued(
              exit_code = NULL,
              status = 'failed',
              updated_at = ?5
-         WHERE id = ?1
+        WHERE id = ?1
            AND kind = 'background'
            AND status = 'queued'
            AND handoff_state = 'queued'",
-        right_db::params![run_id, run_note, delivery_json, error_json, now],
-    )?;
+            right_db::params![run_id, run_note, delivery_json, error_json, now],
+        )
+        .await?;
     Ok(rows > 0)
 }
 
-fn mark_completion_failed(
+async fn mark_completion_failed(
     conn: &right_db::Connection,
     run_id: &str,
     exit_code: Option<i32>,
     reason: &str,
 ) -> Result<(), right_db::DbError> {
-    let tx = conn.transaction()?;
-    persist_background_failure_notify(&tx, run_id, reason)?;
-    right_agent::async_runs::finish_run(&tx, run_id, exit_code, "failed")?;
-    tx.commit()
+    let tx = conn.transaction().await?;
+    persist_background_failure_notify(&tx, run_id, reason).await?;
+    right_agent::async_runs::finish_run(&tx, run_id, exit_code, "failed").await?;
+    tx.commit().await
 }
 
-fn persist_handoff_failed_at_agent(agent_dir: &Path, run_id: &str, reason: &str) {
-    match right_db::open_connection(agent_dir, false) {
+async fn persist_handoff_failed_at_agent(agent_dir: &Path, run_id: &str, reason: &str) {
+    match right_db::open_connection(agent_dir, false).await {
         Ok(conn) => {
-            if let Err(e) = mark_handoff_failed(&conn, run_id, reason) {
+            if let Err(e) = mark_handoff_failed(&conn, run_id, reason).await {
                 tracing::error!(
                     run_id,
                     "failed to persist background handoff failure: {e:#}"
@@ -950,15 +967,15 @@ fn persist_handoff_failed_at_agent(agent_dir: &Path, run_id: &str, reason: &str)
     }
 }
 
-fn persist_completion_failed_at_agent(
+async fn persist_completion_failed_at_agent(
     agent_dir: &Path,
     run_id: &str,
     exit_code: Option<i32>,
     reason: &str,
 ) {
-    match right_db::open_connection(agent_dir, false) {
+    match right_db::open_connection(agent_dir, false).await {
         Ok(conn) => {
-            if let Err(e) = mark_completion_failed(&conn, run_id, exit_code, reason) {
+            if let Err(e) = mark_completion_failed(&conn, run_id, exit_code, reason).await {
                 tracing::error!(
                     run_id,
                     "failed to persist background completion failure: {e:#}"
@@ -978,16 +995,16 @@ fn persist_completion_failed_at_agent(
 mod tests {
     use super::*;
 
-    #[test]
-    fn bg_log_path_uses_background_logs_dir() {
+    #[tokio::test]
+    async fn bg_log_path_uses_background_logs_dir() {
         assert_eq!(
             bg_log_path(Path::new("/agent"), "run-1"),
             PathBuf::from("/agent/background/logs/run-1.ndjson")
         );
     }
 
-    #[test]
-    fn handoff_init_parser_requires_matching_system_init_session_id() {
+    #[tokio::test]
+    async fn handoff_init_parser_requires_matching_system_init_session_id() {
         let line = r#"{"type":"system","subtype":"init","session_id":"run-1"}"#;
         assert!(is_handoff_init_for_run(line, "run-1"));
         assert!(!is_handoff_init_for_run(line, "run-2"));
@@ -998,8 +1015,8 @@ mod tests {
         assert!(!is_handoff_init_for_run("not json", "run-1"));
     }
 
-    #[test]
-    fn format_stderr_log_line_marks_stderr_stream() {
+    #[tokio::test]
+    async fn format_stderr_log_line_marks_stderr_stream() {
         let line = format_stderr_log_line("run-1", "warning: bad \"thing\"");
         let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(parsed["type"], "stream");
@@ -1034,10 +1051,10 @@ mod tests {
         assert_eq!(second["content"], "second");
     }
 
-    #[test]
-    fn mark_handoff_failed_sets_failed_pending_delivery() {
+    #[tokio::test]
+    async fn mark_handoff_failed_sets_failed_pending_delivery() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).await.unwrap();
         right_agent::async_runs::insert_queued_background_run(
             &conn,
             right_agent::async_runs::NewBackgroundRun {
@@ -1050,9 +1067,12 @@ mod tests {
                 created_at: "2026-05-18T10:00:00Z",
             },
         )
+        .await
         .unwrap();
 
-        mark_handoff_failed(&conn, "run-1", "init timeout").unwrap();
+        mark_handoff_failed(&conn, "run-1", "init timeout")
+            .await
+            .unwrap();
 
         let row: (String, String, i64, String, String, String) = conn
             .query_row(
@@ -1061,6 +1081,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row.0, "failed");
         assert_eq!(row.1, "failed");
@@ -1070,10 +1091,10 @@ mod tests {
         assert!(row.5.contains("init timeout"));
     }
 
-    #[test]
-    fn mark_interrupted_handoffs_converts_queued_background_to_failed_pending_delivery() {
+    #[tokio::test]
+    async fn mark_interrupted_handoffs_converts_queued_background_to_failed_pending_delivery() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).await.unwrap();
         right_agent::async_runs::insert_queued_background_run(
             &conn,
             right_agent::async_runs::NewBackgroundRun {
@@ -1086,6 +1107,7 @@ mod tests {
                 created_at: "2026-05-18T10:00:00Z",
             },
         )
+        .await
         .unwrap();
         right_agent::async_runs::insert_queued_background_run(
             &conn,
@@ -1099,6 +1121,7 @@ mod tests {
                 created_at: "2026-05-18T10:00:00Z",
             },
         )
+        .await
         .unwrap();
         right_agent::async_runs::mark_background_spawned(
             &conn,
@@ -1106,6 +1129,7 @@ mod tests {
             "2026-05-18T10:01:00Z",
             "/log/bg-spawned.ndjson",
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO async_runs (
@@ -1119,9 +1143,10 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let converted = mark_interrupted_handoffs(&conn).unwrap();
+        let converted = mark_interrupted_handoffs(&conn).await.unwrap();
 
         assert_eq!(converted, 1);
         let bg: (String, String, i64, String, String, String) = conn
@@ -1131,6 +1156,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
+            .await
             .unwrap();
         assert_eq!(bg.0, "failed");
         assert_eq!(bg.1, "failed");
@@ -1145,6 +1171,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
+            .await
             .unwrap();
         assert_eq!(spawned.0, "running");
         assert_eq!(spawned.1, "spawned");
@@ -1155,16 +1182,17 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
+            .await
             .unwrap();
         assert_eq!(cron.0, "cron");
         assert_eq!(cron.1, "queued");
         assert_eq!(cron.2, "queued");
     }
 
-    #[test]
-    fn mark_interrupted_handoffs_skip_rows_no_longer_queued_at_write_time() {
+    #[tokio::test]
+    async fn mark_interrupted_handoffs_skip_rows_no_longer_queued_at_write_time() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).await.unwrap();
         right_agent::async_runs::insert_queued_background_run(
             &conn,
             right_agent::async_runs::NewBackgroundRun {
@@ -1177,6 +1205,7 @@ mod tests {
                 created_at: "2026-05-18T10:00:00Z",
             },
         )
+        .await
         .unwrap();
         right_agent::async_runs::mark_background_spawned(
             &conn,
@@ -1184,9 +1213,12 @@ mod tests {
             "2026-05-18T10:01:00Z",
             "/log/bg-raced.ndjson",
         )
+        .await
         .unwrap();
 
-        let converted = mark_interrupted_handoff_failed_if_still_queued(&conn, "bg-raced").unwrap();
+        let converted = mark_interrupted_handoff_failed_if_still_queued(&conn, "bg-raced")
+            .await
+            .unwrap();
 
         assert!(!converted);
         let row: (String, String, i64, String, Option<String>, Option<String>) = conn
@@ -1196,6 +1228,7 @@ mod tests {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row.0, "running");
         assert_eq!(row.1, "spawned");

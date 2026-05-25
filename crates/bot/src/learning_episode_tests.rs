@@ -6,9 +6,9 @@ use right_agent::learning_episodes::{NewExecutionEvent, SelectedEpisodeUpdate, T
 use right_db::conversation::{ConversationMessage, ConversationRole};
 use std::sync::atomic::AtomicBool;
 
-fn conn() -> right_db::Connection {
-    let conn = right_db::Connection::open_in_memory().unwrap();
-    right_db::MIGRATIONS.to_latest(&conn).unwrap();
+async fn conn() -> right_db::Connection {
+    let conn = right_db::Connection::open_in_memory().await.unwrap();
+    right_db::MIGRATIONS.to_latest(&conn).await.unwrap();
     conn
 }
 
@@ -42,9 +42,9 @@ fn runtime_for_dir(path: &std::path::Path) -> LearningEpisodeRuntime {
     }
 }
 
-#[test]
-fn completion_seed_capture_is_noop_for_deprecated_stage2() {
-    let conn = conn();
+#[tokio::test]
+async fn completion_seed_capture_is_noop_for_deprecated_stage2() {
+    let conn = conn().await;
     let mut runtime = runtime();
     runtime.learning.background_review_enabled = Some(true);
 
@@ -61,12 +61,13 @@ fn completion_seed_capture_is_noop_for_deprecated_stage2() {
 
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM learning_episodes", [], |r| r.get(0))
+        .await
         .unwrap();
     assert_eq!(episode_id, 0);
     assert_eq!(count, 0);
 }
 
-fn claimed_episode(
+async fn claimed_episode(
     conn: &right_db::Connection,
     kind: LearningEpisodeKind,
     seed_trigger_kind: EpisodeSeedTriggerKind,
@@ -85,8 +86,10 @@ fn claimed_episode(
             now: "2026-05-19T10:00:00Z",
         },
     )
+    .await
     .unwrap();
     right_agent::learning_episodes::claim_ready_episode(conn, "right", "2026-05-19T10:01:30Z")
+        .await
         .unwrap()
         .unwrap()
 }
@@ -185,7 +188,7 @@ fn failed_structured_review(
     })
 }
 
-fn prepare_selected_episode(
+async fn prepare_selected_episode(
     conn: &right_db::Connection,
     seed_ref: &str,
     message_refs: Vec<String>,
@@ -196,7 +199,8 @@ fn prepare_selected_episode(
         LearningEpisodeKind::ForegroundThread,
         EpisodeSeedTriggerKind::LearningSignal,
         seed_ref,
-    );
+    )
+    .await;
     right_agent::learning_episodes::mark_episode_selected(
         conn,
         episode.id,
@@ -220,21 +224,26 @@ fn prepare_selected_episode(
             last_evidence_at: None,
         },
     )
+    .await
     .unwrap();
-    right_agent::learned_skills::ensure_nudge_state(conn, "right").unwrap();
+    right_agent::learned_skills::ensure_nudge_state(conn, "right")
+        .await
+        .unwrap();
     conn.execute(
         "UPDATE skill_nudge_state SET review_running=1 WHERE agent_name='right'",
         [],
     )
+    .await
     .unwrap();
     episode.id
 }
 
-fn insert_review_message(conn: &right_db::Connection, content: &str) -> i64 {
+async fn insert_review_message(conn: &right_db::Connection, content: &str) -> i64 {
     insert_review_message_with_route(conn, content, true, true, Some("session-review"), Some(1))
+        .await
 }
 
-fn insert_review_message_with_route(
+async fn insert_review_message_with_route(
     conn: &right_db::Connection,
     content: &str,
     addressed_to_bot: bool,
@@ -259,10 +268,11 @@ fn insert_review_message_with_route(
             content,
         },
     )
+    .await
     .unwrap()
 }
 
-fn insert_review_execution_event(
+async fn insert_review_execution_event(
     conn: &right_db::Connection,
     event_kind: ExecutionEventKind,
     content: &str,
@@ -285,12 +295,13 @@ fn insert_review_execution_event(
             trust_label: TrustLabel::Primary,
         },
     )
+    .await
     .unwrap()
 }
 
-#[test]
-fn accepted_signal_creates_pending_seed_without_cooldown() {
-    let conn = conn();
+#[tokio::test]
+async fn accepted_signal_creates_pending_seed_without_cooldown() {
+    let conn = conn().await;
     capture_episode_seed(
         &conn,
         EpisodeSeedInput {
@@ -304,6 +315,7 @@ fn accepted_signal_creates_pending_seed_without_cooldown() {
             now: "2026-05-19T10:00:00Z",
         },
     )
+    .await
     .unwrap();
     let row: (String, String) = conn
         .query_row(
@@ -311,6 +323,7 @@ fn accepted_signal_creates_pending_seed_without_cooldown() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .await
         .unwrap();
     assert_eq!(
         row,
@@ -318,22 +331,22 @@ fn accepted_signal_creates_pending_seed_without_cooldown() {
     );
 }
 
-#[test]
-fn selector_rejects_refs_outside_corpus() {
+#[tokio::test]
+async fn selector_rejects_refs_outside_corpus() {
     let corpus = SelectorCorpus::for_test(vec!["msg:1"], vec![]);
     let output = EpisodeSelectorOutput::for_test_selected(vec!["msg:2"], vec![]);
     assert!(validate_selector_output(&corpus, &output).is_err());
 }
 
-#[test]
-fn selector_rejects_thinking_only_episode() {
+#[tokio::test]
+async fn selector_rejects_thinking_only_episode() {
     let corpus = SelectorCorpus::for_test(vec![], vec![("exec:10", ExecutionEventKind::Thinking)]);
     let output = EpisodeSelectorOutput::for_test_selected(vec![], vec!["exec:10"]);
     assert!(validate_selector_output(&corpus, &output).is_err());
 }
 
-#[test]
-fn cron_and_async_seed_triggers_start_review_gate_without_effort_threshold() {
+#[tokio::test]
+async fn cron_and_async_seed_triggers_start_review_gate_without_effort_threshold() {
     assert_eq!(
         review_trigger_for_episode(EpisodeSeedTriggerKind::Cron),
         Some(ReviewTriggerKind::EffortThreshold)
@@ -344,15 +357,16 @@ fn cron_and_async_seed_triggers_start_review_gate_without_effort_threshold() {
     );
 }
 
-#[test]
-fn terminal_selector_output_rejects_refs_outside_corpus_before_marking_terminal() {
-    let conn = conn();
+#[tokio::test]
+async fn terminal_selector_output_rejects_refs_outside_corpus_before_marking_terminal() {
+    let conn = conn().await;
     let episode = claimed_episode(
         &conn,
         LearningEpisodeKind::ForegroundThread,
         EpisodeSeedTriggerKind::LearningSignal,
         "inv:inv-terminal-invalid",
-    );
+    )
+    .await;
     let corpus = SelectorCorpus::for_test(vec!["msg:1"], vec![]);
     let output = EpisodeSelectorOutput {
         status: "no_episode".to_owned(),
@@ -377,7 +391,9 @@ fn terminal_selector_output_rejects_refs_outside_corpus_before_marking_terminal(
         }),
     };
 
-    let err = record_selector_output(&conn, &runtime(), &episode, &corpus, output).unwrap_err();
+    let err = record_selector_output(&conn, &runtime(), &episode, &corpus, output)
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("outside corpus"));
     let status: String = conn
         .query_row(
@@ -385,12 +401,13 @@ fn terminal_selector_output_rejects_refs_outside_corpus_before_marking_terminal(
             [episode.id],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(status, "selecting");
 }
 
-#[test]
-fn effective_selector_model_prefers_learning_override_then_inherited_model() {
+#[tokio::test]
+async fn effective_selector_model_prefers_learning_override_then_inherited_model() {
     let mut runtime = runtime();
     runtime.inherited_model = Some("claude-sonnet-inherited".to_owned());
     assert_eq!(
@@ -405,21 +422,24 @@ fn effective_selector_model_prefers_learning_override_then_inherited_model() {
     );
 }
 
-#[test]
-fn selected_episode_persists_effective_selector_model() {
-    let conn = conn();
+#[tokio::test]
+async fn selected_episode_persists_effective_selector_model() {
+    let conn = conn().await;
     let episode = claimed_episode(
         &conn,
         LearningEpisodeKind::ForegroundThread,
         EpisodeSeedTriggerKind::LearningSignal,
         "inv:inv-selected-model",
-    );
+    )
+    .await;
     let corpus = SelectorCorpus::for_test(vec!["msg:1"], vec![]);
     let mut runtime = runtime();
     runtime.inherited_model = Some("claude-sonnet-inherited".to_owned());
     let output = EpisodeSelectorOutput::for_test_selected(vec!["msg:1"], vec![]);
 
-    record_selector_output(&conn, &runtime, &episode, &corpus, output).unwrap();
+    record_selector_output(&conn, &runtime, &episode, &corpus, output)
+        .await
+        .unwrap();
 
     let selector_model: Option<String> = conn
         .query_row(
@@ -427,12 +447,13 @@ fn selected_episode_persists_effective_selector_model() {
             [episode.id],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(selector_model, Some("claude-sonnet-inherited".to_owned()));
 }
 
-#[test]
-fn selected_selector_output_requires_non_null_boundaries_in_corpus() {
+#[tokio::test]
+async fn selected_selector_output_requires_non_null_boundaries_in_corpus() {
     let corpus = SelectorCorpus::for_test(vec!["msg:1"], vec![]);
     let mut output = EpisodeSelectorOutput::for_test_selected(vec!["msg:1"], vec![]);
     output.start_ref = None;
@@ -442,22 +463,25 @@ fn selected_selector_output_requires_non_null_boundaries_in_corpus() {
     assert!(err.contains("selected output requires start_ref and end_ref"));
 }
 
-#[test]
-fn selected_episode_persists_episode_hash() {
-    let conn = conn();
+#[tokio::test]
+async fn selected_episode_persists_episode_hash() {
+    let conn = conn().await;
     let episode = claimed_episode(
         &conn,
         LearningEpisodeKind::ForegroundThread,
         EpisodeSeedTriggerKind::LearningSignal,
         "inv:inv-selected-hash",
-    );
+    )
+    .await;
     let corpus = SelectorCorpus::for_test(
         vec!["msg:1", "msg:2"],
         vec![("exec:3", ExecutionEventKind::ToolResult)],
     );
     let output = EpisodeSelectorOutput::for_test_selected(vec!["msg:1", "msg:2"], vec!["exec:3"]);
 
-    record_selector_output(&conn, &runtime(), &episode, &corpus, output).unwrap();
+    record_selector_output(&conn, &runtime(), &episode, &corpus, output)
+        .await
+        .unwrap();
 
     let episode_hash: Option<String> = conn
         .query_row(
@@ -465,32 +489,38 @@ fn selected_episode_persists_episode_hash() {
             [episode.id],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert!(episode_hash.as_deref().is_some_and(|hash| !hash.is_empty()));
 }
 
-#[test]
-fn duplicate_selected_episode_is_suppressed_before_review() {
-    let conn = conn();
+#[tokio::test]
+async fn duplicate_selected_episode_is_suppressed_before_review() {
+    let conn = conn().await;
     let existing = claimed_episode(
         &conn,
         LearningEpisodeKind::ForegroundThread,
         EpisodeSeedTriggerKind::LearningSignal,
         "inv:inv-duplicate-existing",
-    );
+    )
+    .await;
     let corpus = SelectorCorpus::for_test(vec!["msg:1"], vec![]);
     let output = EpisodeSelectorOutput::for_test_selected(vec!["msg:1"], vec![]);
-    record_selector_output(&conn, &runtime(), &existing, &corpus, output).unwrap();
+    record_selector_output(&conn, &runtime(), &existing, &corpus, output)
+        .await
+        .unwrap();
 
     let duplicate = claimed_episode(
         &conn,
         LearningEpisodeKind::ForegroundThread,
         EpisodeSeedTriggerKind::LearningSignal,
         "inv:inv-duplicate-current",
-    );
+    )
+    .await;
     let output = EpisodeSelectorOutput::for_test_selected(vec!["msg:1"], vec![]);
 
     let should_review = record_selector_output(&conn, &runtime(), &duplicate, &corpus, output)
+        .await
         .expect("duplicate should be terminal, not an error");
 
     let row: (String, String) = conn
@@ -499,21 +529,23 @@ fn duplicate_selected_episode_is_suppressed_before_review() {
             [duplicate.id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .await
         .unwrap();
     assert!(!should_review);
     assert_eq!(row.0, "no_episode");
     assert!(row.1.contains("duplicate_episode"));
 }
 
-#[test]
-fn selector_corpus_includes_execution_events_for_message_turns() {
-    let conn = conn();
+#[tokio::test]
+async fn selector_corpus_includes_execution_events_for_message_turns() {
+    let conn = conn().await;
     let episode = claimed_episode(
         &conn,
         LearningEpisodeKind::ForegroundThread,
         EpisodeSeedTriggerKind::LearningSignal,
         "inv:seed-invocation",
-    );
+    )
+    .await;
     insert_review_message_with_route(
         &conn,
         "nearby correction",
@@ -521,7 +553,8 @@ fn selector_corpus_includes_execution_events_for_message_turns() {
         true,
         Some("session-nearby"),
         Some(9),
-    );
+    )
+    .await;
     let event_id = right_agent::learning_episodes::insert_execution_event(
         &conn,
         &NewExecutionEvent {
@@ -540,9 +573,10 @@ fn selector_corpus_includes_execution_events_for_message_turns() {
             trust_label: TrustLabel::Primary,
         },
     )
+    .await
     .unwrap();
 
-    let corpus = load_selector_corpus(&conn, &episode).unwrap();
+    let corpus = load_selector_corpus(&conn, &episode).await.unwrap();
 
     assert!(
         corpus
@@ -556,14 +590,15 @@ fn selector_corpus_includes_execution_events_for_message_turns() {
 #[tokio::test]
 async fn episode_reviewer_inserts_report_and_marks_reviewed() {
     let temp = tempfile::tempdir().unwrap();
-    let conn = right_db::open_connection(temp.path(), true).unwrap();
-    let message_id = insert_review_message(&conn, "remember this workflow");
+    let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+    let message_id = insert_review_message(&conn, "remember this workflow").await;
     let episode_id = prepare_selected_episode(
         &conn,
         "inv:inv-review-success",
         vec![format!("msg:{message_id}")],
         Vec::new(),
-    );
+    )
+    .await;
     drop(conn);
 
     run_episode_reviewer_with_invocation(
@@ -574,7 +609,7 @@ async fn episode_reviewer_inserts_report_and_marks_reviewed() {
     .await
     .unwrap();
 
-    let conn = right_db::open_connection(temp.path(), false).unwrap();
+    let conn = right_db::open_connection(temp.path(), false).await.unwrap();
     let row: (String, i64, String, String, i64) = conn
         .query_row(
             "SELECT e.status, r.learning_episode_id, r.source_invocation_id, r.evidence_refs_json, s.review_running
@@ -585,6 +620,7 @@ async fn episode_reviewer_inserts_report_and_marks_reviewed() {
             [episode_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
+        .await
         .unwrap();
     assert_eq!(row.0, "reviewed");
     assert_eq!(row.1, episode_id);
@@ -599,14 +635,15 @@ async fn episode_reviewer_inserts_report_and_marks_reviewed() {
 #[tokio::test]
 async fn episode_reviewer_failed_output_marks_episode_failed_and_clears_gate() {
     let temp = tempfile::tempdir().unwrap();
-    let conn = right_db::open_connection(temp.path(), true).unwrap();
-    let message_id = insert_review_message(&conn, "reviewer cannot decide");
+    let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+    let message_id = insert_review_message(&conn, "reviewer cannot decide").await;
     let episode_id = prepare_selected_episode(
         &conn,
         "inv:inv-review-failed-output",
         vec![format!("msg:{message_id}")],
         Vec::new(),
-    );
+    )
+    .await;
     drop(conn);
 
     run_episode_reviewer_with_invocation(
@@ -617,7 +654,7 @@ async fn episode_reviewer_failed_output_marks_episode_failed_and_clears_gate() {
     .await
     .unwrap();
 
-    let conn = right_db::open_connection(temp.path(), false).unwrap();
+    let conn = right_db::open_connection(temp.path(), false).await.unwrap();
     let row: (String, String, i64, i64) = conn
         .query_row(
             "SELECT e.status, r.status, r.learning_episode_id, s.review_running
@@ -628,6 +665,7 @@ async fn episode_reviewer_failed_output_marks_episode_failed_and_clears_gate() {
             [episode_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
+        .await
         .unwrap();
     assert_eq!(
         row,
@@ -638,18 +676,20 @@ async fn episode_reviewer_failed_output_marks_episode_failed_and_clears_gate() {
 #[tokio::test]
 async fn episode_reviewer_rejects_thinking_only_candidate_and_clears_gate() {
     let temp = tempfile::tempdir().unwrap();
-    let conn = right_db::open_connection(temp.path(), true).unwrap();
+    let conn = right_db::open_connection(temp.path(), true).await.unwrap();
     let event_id = insert_review_execution_event(
         &conn,
         ExecutionEventKind::Thinking,
         "private reasoning only",
-    );
+    )
+    .await;
     let episode_id = prepare_selected_episode(
         &conn,
         "async:async-review-thinking",
         Vec::new(),
         vec![format!("exec:{event_id}")],
-    );
+    )
+    .await;
     drop(conn);
 
     let err = run_episode_reviewer_with_invocation(
@@ -664,7 +704,7 @@ async fn episode_reviewer_rejects_thinking_only_candidate_and_clears_gate() {
         "{err:#}"
     );
 
-    let conn = right_db::open_connection(temp.path(), false).unwrap();
+    let conn = right_db::open_connection(temp.path(), false).await.unwrap();
     let row: (String, i64, i64) = conn
         .query_row(
             "SELECT e.status, s.review_running, COUNT(r.id)
@@ -675,6 +715,7 @@ async fn episode_reviewer_rejects_thinking_only_candidate_and_clears_gate() {
             [episode_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
+        .await
         .unwrap();
     assert_eq!(row, ("failed".to_owned(), 0, 0));
 }
@@ -682,7 +723,7 @@ async fn episode_reviewer_rejects_thinking_only_candidate_and_clears_gate() {
 #[tokio::test]
 async fn episode_reviewer_preserves_low_trust_message_label_in_bundle() {
     let temp = tempfile::tempdir().unwrap();
-    let conn = right_db::open_connection(temp.path(), true).unwrap();
+    let conn = right_db::open_connection(temp.path(), true).await.unwrap();
     let message_id = insert_review_message_with_route(
         &conn,
         "nearby unaddressed correction",
@@ -690,13 +731,15 @@ async fn episode_reviewer_preserves_low_trust_message_label_in_bundle() {
         false,
         Some("session-review"),
         Some(1),
-    );
+    )
+    .await;
     let episode_id = prepare_selected_episode(
         &conn,
         "inv:inv-review-low-trust",
         vec![format!("msg:{message_id}")],
         Vec::new(),
-    );
+    )
+    .await;
     drop(conn);
 
     run_episode_reviewer_with_invocation(
@@ -711,7 +754,7 @@ async fn episode_reviewer_preserves_low_trust_message_label_in_bundle() {
 #[tokio::test]
 async fn drain_marks_failed_and_clears_gate_when_corpus_load_fails_after_gate_start() {
     let temp = tempfile::tempdir().unwrap();
-    let conn = right_db::open_connection(temp.path(), true).unwrap();
+    let conn = right_db::open_connection(temp.path(), true).await.unwrap();
     capture_episode_seed(
         &conn,
         EpisodeSeedInput {
@@ -725,8 +768,10 @@ async fn drain_marks_failed_and_clears_gate_when_corpus_load_fails_after_gate_st
             now: "2020-01-01T00:00:00Z",
         },
     )
+    .await
     .unwrap();
     conn.execute("DROP TABLE conversation_messages", [])
+        .await
         .unwrap();
     drop(conn);
 
@@ -737,13 +782,14 @@ async fn drain_marks_failed_and_clears_gate_when_corpus_load_fails_after_gate_st
     .await;
 
     assert!(result.is_err());
-    let conn = right_db::open_connection(temp.path(), false).unwrap();
+    let conn = right_db::open_connection(temp.path(), false).await.unwrap();
     let status: String = conn
         .query_row(
             "SELECT status FROM learning_episodes WHERE seed_ref='inv:inv-corpus-fails'",
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     let review_running: i64 = conn
         .query_row(
@@ -751,6 +797,7 @@ async fn drain_marks_failed_and_clears_gate_when_corpus_load_fails_after_gate_st
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(status, "failed");
     assert_eq!(review_running, 0);
@@ -759,12 +806,15 @@ async fn drain_marks_failed_and_clears_gate_when_corpus_load_fails_after_gate_st
 #[tokio::test]
 async fn drain_requeues_when_review_already_running() {
     let temp = tempfile::tempdir().unwrap();
-    let conn = right_db::open_connection(temp.path(), true).unwrap();
-    right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+    let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+    right_agent::learned_skills::ensure_nudge_state(&conn, "right")
+        .await
+        .unwrap();
     conn.execute(
         "UPDATE skill_nudge_state SET review_running=1 WHERE agent_name='right'",
         [],
     )
+    .await
     .unwrap();
     capture_episode_seed(
         &conn,
@@ -779,6 +829,7 @@ async fn drain_requeues_when_review_already_running() {
             now: "2020-01-01T00:00:00Z",
         },
     )
+    .await
     .unwrap();
     drop(conn);
 
@@ -786,7 +837,7 @@ async fn drain_requeues_when_review_already_running() {
         .await
         .unwrap();
 
-    let conn = right_db::open_connection(temp.path(), false).unwrap();
+    let conn = right_db::open_connection(temp.path(), false).await.unwrap();
     let row: (String, i64) = conn
         .query_row(
             "SELECT e.status, s.review_running
@@ -796,19 +847,21 @@ async fn drain_requeues_when_review_already_running() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .await
         .unwrap();
     assert_eq!(row, ("pending".to_owned(), 1));
 }
 
-#[test]
-fn requeue_episode_or_fail_requests_follow_up_drain() {
-    let conn = conn();
+#[tokio::test]
+async fn requeue_episode_or_fail_requests_follow_up_drain() {
+    let conn = conn().await;
     let episode = claimed_episode(
         &conn,
         LearningEpisodeKind::ForegroundThread,
         EpisodeSeedTriggerKind::LearningSignal,
         "inv:inv-requeue-follow-up",
-    );
+    )
+    .await;
 
     requeue_episode_or_fail(
         &conn,
@@ -820,6 +873,7 @@ fn requeue_episode_or_fail_requests_follow_up_drain() {
         90,
         "2026-05-19T10:00:00Z",
     )
+    .await
     .unwrap();
 
     let status: String = conn
@@ -828,32 +882,38 @@ fn requeue_episode_or_fail_requests_follow_up_drain() {
             [episode.id],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(status, "pending");
 }
 
-#[test]
-fn requeue_episode_or_fail_preserves_gate_when_no_row_matched() {
-    let conn = conn();
+#[tokio::test]
+async fn requeue_episode_or_fail_preserves_gate_when_no_row_matched() {
+    let conn = conn().await;
     let episode = claimed_episode(
         &conn,
         LearningEpisodeKind::ForegroundThread,
         EpisodeSeedTriggerKind::LearningSignal,
         "inv:inv-requeue-no-row",
-    );
+    )
+    .await;
     // Simulate a concurrent writer moving the row out of 'selecting' while a
     // separate review owns the review_running gate. The requeue helper is used
     // after Skip(AlreadyRunning), so it must not clear a gate it did not acquire.
-    right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+    right_agent::learned_skills::ensure_nudge_state(&conn, "right")
+        .await
+        .unwrap();
     conn.execute(
         "UPDATE skill_nudge_state SET review_running=1 WHERE agent_name='right'",
         [],
     )
+    .await
     .unwrap();
     conn.execute(
         "UPDATE learning_episodes SET status='pending' WHERE id=?1",
         [episode.id],
     )
+    .await
     .unwrap();
 
     requeue_episode_or_fail(
@@ -866,6 +926,7 @@ fn requeue_episode_or_fail_preserves_gate_when_no_row_matched() {
         90,
         "2026-05-19T10:00:00Z",
     )
+    .await
     .unwrap();
 
     let review_running: i64 = conn
@@ -874,28 +935,34 @@ fn requeue_episode_or_fail_preserves_gate_when_no_row_matched() {
             [],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(review_running, 1);
 }
 
-#[test]
-fn startup_recovery_requeues_selecting_episode_and_clears_gate() {
-    let conn = conn();
+#[tokio::test]
+async fn startup_recovery_requeues_selecting_episode_and_clears_gate() {
+    let conn = conn().await;
     let episode = claimed_episode(
         &conn,
         LearningEpisodeKind::ForegroundThread,
         EpisodeSeedTriggerKind::LearningSignal,
         "inv:inv-recover-selecting",
-    );
-    right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+    )
+    .await;
+    right_agent::learned_skills::ensure_nudge_state(&conn, "right")
+        .await
+        .unwrap();
     conn.execute(
         "UPDATE skill_nudge_state SET review_running=1 WHERE agent_name='right'",
         [],
     )
+    .await
     .unwrap();
 
-    let recovered =
-        recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z").unwrap();
+    let recovered = recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z")
+        .await
+        .unwrap();
 
     let row: (String, String, i64) = conn
         .query_row(
@@ -906,6 +973,7 @@ fn startup_recovery_requeues_selecting_episode_and_clears_gate() {
             [episode.id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
+        .await
         .unwrap();
     assert_eq!(recovered, 1);
     assert_eq!(
@@ -914,20 +982,22 @@ fn startup_recovery_requeues_selecting_episode_and_clears_gate() {
     );
 }
 
-#[test]
-fn startup_recovery_marks_reviewing_episode_failed_from_latest_failed_report() {
-    let conn = conn();
-    let message_id = insert_review_message(&conn, "failed review evidence");
+#[tokio::test]
+async fn startup_recovery_marks_reviewing_episode_failed_from_latest_failed_report() {
+    let conn = conn().await;
+    let message_id = insert_review_message(&conn, "failed review evidence").await;
     let episode_id = prepare_selected_episode(
         &conn,
         "inv:inv-recover-failed-report",
         vec![format!("msg:{message_id}")],
         Vec::new(),
-    );
+    )
+    .await;
     conn.execute(
         "UPDATE learning_episodes SET status='reviewing' WHERE id=?1",
         [episode_id],
     )
+    .await
     .unwrap();
     right_agent::learned_skills::insert_skill_review_report(
         &conn,
@@ -948,9 +1018,12 @@ fn startup_recovery_marks_reviewing_episode_failed_from_latest_failed_report() {
             telegram_notified: false,
         },
     )
+    .await
     .unwrap();
 
-    recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z").unwrap();
+    recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z")
+        .await
+        .unwrap();
 
     let status: String = conn
         .query_row(
@@ -958,24 +1031,27 @@ fn startup_recovery_marks_reviewing_episode_failed_from_latest_failed_report() {
             [episode_id],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(status, "failed");
 }
 
-#[test]
-fn startup_recovery_marks_reviewing_episode_reviewed_from_successful_report() {
-    let conn = conn();
-    let message_id = insert_review_message(&conn, "successful review evidence");
+#[tokio::test]
+async fn startup_recovery_marks_reviewing_episode_reviewed_from_successful_report() {
+    let conn = conn().await;
+    let message_id = insert_review_message(&conn, "successful review evidence").await;
     let episode_id = prepare_selected_episode(
         &conn,
         "inv:inv-recover-success-report",
         vec![format!("msg:{message_id}")],
         Vec::new(),
-    );
+    )
+    .await;
     conn.execute(
         "UPDATE learning_episodes SET status='reviewing' WHERE id=?1",
         [episode_id],
     )
+    .await
     .unwrap();
     right_agent::learned_skills::insert_skill_review_report(
         &conn,
@@ -996,9 +1072,12 @@ fn startup_recovery_marks_reviewing_episode_reviewed_from_successful_report() {
             telegram_notified: false,
         },
     )
+    .await
     .unwrap();
 
-    recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z").unwrap();
+    recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z")
+        .await
+        .unwrap();
 
     let status: String = conn
         .query_row(
@@ -1006,39 +1085,46 @@ fn startup_recovery_marks_reviewing_episode_reviewed_from_successful_report() {
             [episode_id],
             |r| r.get(0),
         )
+        .await
         .unwrap();
     assert_eq!(status, "reviewed");
 }
 
-#[test]
-fn startup_recovery_preserves_review_running_when_prior_review_reported_status() {
+#[tokio::test]
+async fn startup_recovery_preserves_review_running_when_prior_review_reported_status() {
     // Regression: `recover_stale_inflight_episodes` must NOT clear
     // `review_running` if a legitimate review has already reported a
     // status (i.e. `last_review_status IS NOT NULL`). Only the stranded
     // case — gate set with no prior status — should be cleared.
-    let conn = conn();
+    let conn = conn().await;
     let episode = claimed_episode(
         &conn,
         LearningEpisodeKind::ForegroundThread,
         EpisodeSeedTriggerKind::LearningSignal,
         "inv:inv-recover-preserves-gate",
-    );
+    )
+    .await;
     conn.execute(
         "UPDATE learning_episodes SET status='reviewing' WHERE id=?1",
         [episode.id],
     )
+    .await
     .unwrap();
-    right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+    right_agent::learned_skills::ensure_nudge_state(&conn, "right")
+        .await
+        .unwrap();
     conn.execute(
         "UPDATE skill_nudge_state \
          SET review_running=1, last_review_status='succeeded' \
          WHERE agent_name='right'",
         [],
     )
+    .await
     .unwrap();
 
-    let recovered =
-        recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z").unwrap();
+    let recovered = recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z")
+        .await
+        .unwrap();
 
     let (episode_status, ready_after, review_running): (String, String, i64) = conn
         .query_row(
@@ -1049,6 +1135,7 @@ fn startup_recovery_preserves_review_running_when_prior_review_reported_status()
             [episode.id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
+        .await
         .unwrap();
     assert_eq!(recovered, 1);
     assert_eq!(episode_status, "pending");
@@ -1059,25 +1146,27 @@ fn startup_recovery_preserves_review_running_when_prior_review_reported_status()
     );
 }
 
-#[test]
-fn recovery_requeues_selected_episode_with_no_review_report_to_pending() {
+#[tokio::test]
+async fn recovery_requeues_selected_episode_with_no_review_report_to_pending() {
     // Regression: there is a narrow window between `mark_episode_selected`
     // (which transitions `selecting` -> `selected` and is followed by the
     // reviewer being invoked) where the bot can die. End state on disk is
     // status='selected', review_running=1, and no skill_review_reports row.
     // Startup recovery must requeue the episode to 'pending' and clear the
     // stranded gate.
-    let conn = conn();
-    let message_id = insert_review_message(&conn, "selector-to-reviewer crash evidence");
+    let conn = conn().await;
+    let message_id = insert_review_message(&conn, "selector-to-reviewer crash evidence").await;
     let episode_id = prepare_selected_episode(
         &conn,
         "inv:inv-recover-selected-no-report",
         vec![format!("msg:{message_id}")],
         Vec::new(),
-    );
+    )
+    .await;
 
-    let recovered =
-        recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z").unwrap();
+    let recovered = recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z")
+        .await
+        .unwrap();
 
     let (episode_status, ready_after, review_running): (String, String, i64) = conn
         .query_row(
@@ -1088,6 +1177,7 @@ fn recovery_requeues_selected_episode_with_no_review_report_to_pending() {
             [episode_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
+        .await
         .unwrap();
     assert_eq!(recovered, 1);
     assert_eq!(episode_status, "pending");
@@ -1098,22 +1188,23 @@ fn recovery_requeues_selected_episode_with_no_review_report_to_pending() {
     );
 }
 
-#[test]
-fn recovery_marks_selected_episode_with_review_report_as_reviewed() {
+#[tokio::test]
+async fn recovery_marks_selected_episode_with_review_report_as_reviewed() {
     // Regression: if the reviewer actually inserted a `skill_review_reports`
     // row but the bot died before finalizing the episode status, startup
     // recovery must finalize the episode (status='reviewed') rather than
     // requeue it. The gate-clear in `recover_stale_inflight_episodes` is
     // scoped to `last_review_status IS NULL`, so a populated
     // `last_review_status` here keeps `review_running=1`.
-    let conn = conn();
-    let message_id = insert_review_message(&conn, "selected-with-report evidence");
+    let conn = conn().await;
+    let message_id = insert_review_message(&conn, "selected-with-report evidence").await;
     let episode_id = prepare_selected_episode(
         &conn,
         "inv:inv-recover-selected-with-report",
         vec![format!("msg:{message_id}")],
         Vec::new(),
-    );
+    )
+    .await;
     right_agent::learned_skills::insert_skill_review_report(
         &conn,
         &right_agent::learned_skills::SkillReviewReport {
@@ -1133,6 +1224,7 @@ fn recovery_marks_selected_episode_with_review_report_as_reviewed() {
             telegram_notified: false,
         },
     )
+    .await
     .unwrap();
     // Simulate the reviewer's `mark_review_finished_in_tx` having stamped
     // `last_review_status` before the crash. Without this, the recovery
@@ -1143,10 +1235,12 @@ fn recovery_marks_selected_episode_with_review_report_as_reviewed() {
          WHERE agent_name='right'",
         [],
     )
+    .await
     .unwrap();
 
-    let recovered =
-        recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z").unwrap();
+    let recovered = recover_stale_inflight_episodes(&conn, "right", "2026-05-19T11:00:00Z")
+        .await
+        .unwrap();
 
     let (episode_status, review_running): (String, i64) = conn
         .query_row(
@@ -1157,6 +1251,7 @@ fn recovery_marks_selected_episode_with_review_report_as_reviewed() {
             [episode_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .await
         .unwrap();
     assert_eq!(recovered, 1);
     assert_eq!(episode_status, "reviewed");
@@ -1175,7 +1270,7 @@ async fn drain_scheduler_joins_within_timeout_after_shutdown() {
     let temp = tempfile::tempdir().unwrap();
     // Migrate the DB so a stray drain pass on shutdown finds an empty,
     // schema-current corpus (it should not be reached given the cancel race).
-    let _ = right_db::open_connection(temp.path(), true).unwrap();
+    let _ = right_db::open_connection(temp.path(), true).await.unwrap();
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let (scheduler, handle) = DrainScheduler::spawn(

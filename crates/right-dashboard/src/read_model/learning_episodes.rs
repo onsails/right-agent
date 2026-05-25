@@ -23,7 +23,7 @@ struct EpisodeDetailRow {
     execution_event_refs: Vec<String>,
 }
 
-pub fn learning_episodes(
+pub async fn learning_episodes(
     conn: &Connection,
     input: LearningEpisodesInput,
 ) -> Result<LearningEpisodesResponse, ReadModelError> {
@@ -41,11 +41,12 @@ pub fn learning_episodes(
         .query_map(
             params![input.agent.as_str(), RECENT_EPISODE_LIMIT],
             episode_summary_from_row,
-        )?
+        )
+        .await?
         .collect::<Result<Vec<_>, _>>()?;
     let mut episodes = Vec::with_capacity(rows.len());
     for mut episode in rows {
-        episode.reports = reports_for_episode(conn, &input.agent, episode.id)?;
+        episode.reports = reports_for_episode(conn, &input.agent, episode.id).await?;
         episodes.push(episode);
     }
 
@@ -56,15 +57,15 @@ pub fn learning_episodes(
     })
 }
 
-pub fn learning_episode_detail(
+pub async fn learning_episode_detail(
     conn: &Connection,
     agent: &str,
     episode_id: i64,
 ) -> Result<Option<LearningEpisodeDetailResponse>, ReadModelError> {
-    let Some(mut row) = load_episode_detail(conn, agent, episode_id)? else {
+    let Some(mut row) = load_episode_detail(conn, agent, episode_id).await? else {
         return Ok(None);
     };
-    row.episode.reports = reports_for_episode(conn, agent, episode_id)?;
+    row.episode.reports = reports_for_episode(conn, agent, episode_id).await?;
     let selector = if row.selector_model.is_some()
         || row.boundary_rationale.is_some()
         || !row.message_refs.is_empty()
@@ -86,7 +87,7 @@ pub fn learning_episode_detail(
     }))
 }
 
-fn load_episode_detail(
+async fn load_episode_detail(
     conn: &Connection,
     agent: &str,
     episode_id: i64,
@@ -112,6 +113,7 @@ fn load_episode_detail(
                 ))
             },
         )
+        .await
         .optional()?;
 
     row.map(
@@ -150,7 +152,7 @@ fn episode_summary_from_row(
     })
 }
 
-fn reports_for_episode(
+async fn reports_for_episode(
     conn: &Connection,
     agent: &str,
     episode_id: i64,
@@ -167,7 +169,8 @@ fn reports_for_episode(
         .query_map(
             params![agent, episode_id, REPORTS_PER_EPISODE_LIMIT],
             report_summary_from_row,
-        )?
+        )
+        .await?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -176,9 +179,11 @@ fn reports_for_episode(
 mod tests {
     use super::*;
 
-    fn fixture() -> (tempfile::TempDir, Connection) {
+    async fn fixture() -> (tempfile::TempDir, Connection) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(dir.path(), true).expect("open db");
+        let conn = right_db::open_connection(dir.path(), true)
+            .await
+            .expect("open db");
         (dir, conn)
     }
 
@@ -189,9 +194,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn learning_episodes_list_links_reports() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_episodes_list_links_reports() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO learning_episodes (
                 id, agent_name, kind, seed_trigger_kind, seed_ref, status,
@@ -211,6 +216,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         conn.execute(
             "INSERT INTO skill_review_reports (
@@ -229,9 +235,10 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_episodes(&conn, input()).unwrap();
+        let response = learning_episodes(&conn, input()).await.unwrap();
 
         assert_eq!(response.agent, "right");
         assert_eq!(response.generated_at, "2026-05-20T12:00:00Z");
@@ -243,9 +250,9 @@ mod tests {
         assert_eq!(response.episodes[0].reports[0].status, "create_candidate");
     }
 
-    #[test]
-    fn learning_episodes_caps_linked_reports() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_episodes_caps_linked_reports() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO learning_episodes (
                 id, agent_name, kind, seed_trigger_kind, seed_ref, status,
@@ -259,6 +266,7 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
         for id in 1..=12 {
             conn.execute(
@@ -276,19 +284,20 @@ mod tests {
                     format!("2026-05-20T11:{id:02}:00Z")
                 ],
             )
+            .await
             .unwrap();
         }
 
-        let response = learning_episodes(&conn, input()).unwrap();
+        let response = learning_episodes(&conn, input()).await.unwrap();
 
         assert_eq!(response.episodes[0].reports.len(), 10);
         assert_eq!(response.episodes[0].reports[0].id, 12);
         assert_eq!(response.episodes[0].reports[9].id, 3);
     }
 
-    #[test]
-    fn learning_episode_detail_parses_selector_refs() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_episode_detail_parses_selector_refs() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO learning_episodes (
                 id, agent_name, kind, seed_trigger_kind, seed_ref, status,
@@ -306,9 +315,13 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        let response = learning_episode_detail(&conn, "right", 8).unwrap().unwrap();
+        let response = learning_episode_detail(&conn, "right", 8)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(response.episode.id, 8);
         assert_eq!(response.episode.kind, "cron_run");
@@ -326,9 +339,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn learning_episode_detail_errors_on_malformed_ref_json() {
-        let (_dir, conn) = fixture();
+    #[tokio::test]
+    async fn learning_episode_detail_errors_on_malformed_ref_json() {
+        let (_dir, conn) = fixture().await;
         conn.execute(
             "INSERT INTO learning_episodes (
                 id, agent_name, kind, seed_trigger_kind, seed_ref, status,
@@ -342,8 +355,9 @@ mod tests {
              )",
             [],
         )
+        .await
         .unwrap();
 
-        assert!(learning_episode_detail(&conn, "right", 9).is_err());
+        assert!(learning_episode_detail(&conn, "right", 9).await.is_err());
     }
 }

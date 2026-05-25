@@ -23,13 +23,13 @@ pub(crate) struct PendingAsyncResult {
 
 /// Query the oldest undelivered async result with a non-null delivery_json.
 #[cfg(test)]
-pub(crate) fn fetch_pending(
+pub(crate) async fn fetch_pending(
     conn: &right_db::Connection,
 ) -> Result<Option<PendingAsyncResult>, right_db::DbError> {
-    Ok(fetch_pending_batch(conn, 1)?.into_iter().next())
+    Ok(fetch_pending_batch(conn, 1).await?.into_iter().next())
 }
 
-fn fetch_pending_batch(
+async fn fetch_pending_batch(
     conn: &right_db::Connection,
     limit: usize,
 ) -> Result<Vec<PendingAsyncResult>, right_db::DbError> {
@@ -44,7 +44,8 @@ fn fetch_pending_batch(
          ORDER BY finished_at ASC \
          LIMIT ?1",
     )?;
-    stmt.query_map(right_db::params![limit.max(1) as i64], pending_from_row)?
+    stmt.query_map(right_db::params![limit.max(1) as i64], pending_from_row)
+        .await?
         .collect()
 }
 
@@ -61,12 +62,12 @@ fn pending_from_row(row: &right_db::row::Row<'_>) -> Result<PendingAsyncResult, 
     })
 }
 
-pub(crate) fn fetch_next_pending(
+pub(crate) async fn fetch_next_pending(
     conn: &right_db::Connection,
     delivered_in_memory: &HashSet<String>,
 ) -> Result<Option<PendingAsyncResult>, right_db::DbError> {
     let limit = PENDING_FETCH_BATCH_SIZE.max(delivered_in_memory.len().saturating_add(1));
-    let batch = fetch_pending_batch(conn, limit)?;
+    let batch = fetch_pending_batch(conn, limit).await?;
     let mut in_memory_ids = Vec::new();
     for pending in batch {
         if delivered_in_memory.contains(&pending.id) {
@@ -78,7 +79,7 @@ pub(crate) fn fetch_next_pending(
 
     let mut mark_error = None;
     for id in in_memory_ids {
-        if let Err(e) = mark_delivery_outcome(conn, &id, "delivered") {
+        if let Err(e) = mark_delivery_outcome(conn, &id, "delivered").await {
             tracing::warn!(run_id = %id, "async delivery: retry mark delivered failed: {e:#}");
             if mark_error.is_none() {
                 mark_error = Some(e);
@@ -94,18 +95,20 @@ pub(crate) fn fetch_next_pending(
 /// Mark an async run delivery as complete with a given status.
 ///
 /// Single UPDATE sets both `delivery_status` and `delivered_at` atomically.
-fn mark_delivery_outcome(
+async fn mark_delivery_outcome(
     conn: &right_db::Connection,
     run_id: &str,
     status: &str,
 ) -> Result<(), right_db::DbError> {
     let now = chrono::Utc::now().to_rfc3339();
-    let rows = conn.execute(
-        "UPDATE async_runs \
+    let rows = conn
+        .execute(
+            "UPDATE async_runs \
          SET delivery_status = ?1, delivered_at = ?2, updated_at = ?2 \
-         WHERE id = ?3",
-        right_db::params![status, now, run_id],
-    )?;
+        WHERE id = ?3",
+            right_db::params![status, now, run_id],
+        )
+        .await?;
     if rows == 0 {
         return Err(right_db::DbError::NotFound);
     }
@@ -114,7 +117,7 @@ fn mark_delivery_outcome(
 
 /// Deduplicate: for a given job, find the latest undelivered result and mark all
 /// older undelivered results as delivered. Returns (latest_result, skipped_count).
-pub(crate) fn deduplicate_job(
+pub(crate) async fn deduplicate_job(
     conn: &right_db::Connection,
     producer_ref: &str,
 ) -> Result<Option<(PendingAsyncResult, u32)>, right_db::DbError> {
@@ -134,6 +137,7 @@ pub(crate) fn deduplicate_job(
             right_db::params![producer_ref],
             pending_from_row,
         )
+        .await
         .optional()?;
 
     let Some(latest) = latest else {
@@ -141,8 +145,9 @@ pub(crate) fn deduplicate_job(
     };
 
     let now = chrono::Utc::now().to_rfc3339();
-    let count = conn.execute(
-        "UPDATE async_runs \
+    let count = conn
+        .execute(
+            "UPDATE async_runs \
          SET delivered_at = ?1, delivery_status = 'superseded', updated_at = ?1 \
          WHERE kind = 'cron' \
            AND producer_ref = ?2 \
@@ -150,20 +155,21 @@ pub(crate) fn deduplicate_job(
            AND delivery_required = 1 \
            AND delivery_status IN ('pending', 'retryable') \
            AND status IN ('success', 'failed')",
-        right_db::params![now, producer_ref, &latest.id],
-    )?;
+            right_db::params![now, producer_ref, &latest.id],
+        )
+        .await?;
 
     Ok(Some((latest, count as u32)))
 }
 
-pub(crate) fn select_delivery_candidate(
+pub(crate) async fn select_delivery_candidate(
     conn: &right_db::Connection,
     pending: PendingAsyncResult,
 ) -> Result<Option<(PendingAsyncResult, u32)>, right_db::DbError> {
     if pending.kind == "cron"
         && let Some(producer_ref) = pending.producer_ref.as_deref()
     {
-        return deduplicate_job(conn, producer_ref);
+        return deduplicate_job(conn, producer_ref).await;
     }
 
     Ok(Some((pending, 0)))
@@ -392,7 +398,7 @@ async fn run_delivery_once(
     learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
     shutdown: DeliveryShutdownControl<'_>,
 ) -> bool {
-    let pending = match fetch_next_pending(conn, &state.delivered_in_memory) {
+    let pending = match fetch_next_pending(conn, &state.delivered_in_memory).await {
         Ok(Some(p)) => p,
         Ok(None) => return false,
         Err(e) => {
@@ -417,7 +423,7 @@ async fn run_delivery_once(
         return false;
     }
 
-    let (to_deliver, skipped) = match select_delivery_candidate(conn, pending) {
+    let (to_deliver, skipped) = match select_delivery_candidate(conn, pending).await {
         Ok(Some((result, s))) => (result, s),
         Ok(None) => return false,
         Err(e) => {
@@ -427,7 +433,10 @@ async fn run_delivery_once(
     };
 
     if state.delivered_in_memory.contains(&to_deliver.id) {
-        if mark_delivery_outcome(conn, &to_deliver.id, "delivered").is_ok() {
+        if mark_delivery_outcome(conn, &to_deliver.id, "delivered")
+            .await
+            .is_ok()
+        {
             state.delivered_in_memory.remove(&to_deliver.id);
         }
         tracing::debug!(run_id = %to_deliver.id, "skipping already-delivered run (in-memory dedup)");
@@ -448,7 +457,7 @@ async fn run_delivery_once(
                     run_id = %to_deliver.id,
                     "async run has no target_chat_id; marking delivery no_target"
                 );
-                if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "no_target") {
+                if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "no_target").await {
                     tracing::error!(run_id = %to_deliver.id, "mark no_target failed: {e:#}");
                     state.delivered_in_memory.insert(to_deliver.id.clone());
                 }
@@ -462,7 +471,7 @@ async fn run_delivery_once(
                     target_chat_id = ?to_deliver.target_chat_id,
                     "async delivery target chat is not in allowlist; skipping delivery"
                 );
-                if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "denied") {
+                if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "denied").await {
                     tracing::error!(run_id = %to_deliver.id, "mark denied failed: {e:#}");
                     state.delivered_in_memory.insert(to_deliver.id.clone());
                 }
@@ -475,7 +484,9 @@ async fn run_delivery_once(
         conn,
         target_chat_id,
         target_thread_id.unwrap_or(0),
-    ) {
+    )
+    .await
+    {
         Ok(s) => s.map(|s| s.root_session_id),
         Err(e) => {
             tracing::error!("async delivery: session lookup failed: {e:#}");
@@ -492,7 +503,7 @@ async fn run_delivery_once(
                 run_id = %to_deliver.id,
                 "async delivery: delivery_json deserialization failed, marking delivery failed: {e:#}"
             );
-            if let Err(db_err) = mark_delivery_outcome(conn, &to_deliver.id, "failed") {
+            if let Err(db_err) = mark_delivery_outcome(conn, &to_deliver.id, "failed").await {
                 tracing::error!(run_id = %to_deliver.id, "mark failed for malformed delivery_json failed: {db_err:#}");
                 state.delivered_in_memory.insert(to_deliver.id.clone());
             }
@@ -538,7 +549,7 @@ async fn run_delivery_once(
             // NDJSON), so there is no "result" event line to feed parse_usage_full. Usage
             // tracking for delivery sessions requires either switching to stream-json output
             // or extracting cost from the non-streaming JSON response format.
-            if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "delivered") {
+            if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "delivered").await {
                 tracing::error!(run_id = %to_deliver.id, "delivery DB update failed: {e:#}");
                 state.delivered_in_memory.insert(to_deliver.id.clone());
             }
@@ -589,7 +600,7 @@ async fn run_delivery_once(
                     run_id = %to_deliver.id,
                     "async delivery send outcome is unknown after shutdown deadline; marking terminal failed to avoid duplicate delivery"
                 );
-                if let Err(mark_err) = mark_delivery_outcome(conn, &to_deliver.id, "failed") {
+                if let Err(mark_err) = mark_delivery_outcome(conn, &to_deliver.id, "failed").await {
                     tracing::error!(run_id = %to_deliver.id, "terminal delivery-failure DB update failed: {mark_err:#}");
                     state.delivered_in_memory.insert(to_deliver.id.clone());
                 }
@@ -616,7 +627,7 @@ async fn run_delivery_once(
                     run_id = %to_deliver.id,
                     "giving up after {MAX_DELIVERY_ATTEMPTS} attempts, marking as delivered"
                 );
-                if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "failed") {
+                if let Err(e) = mark_delivery_outcome(conn, &to_deliver.id, "failed").await {
                     tracing::error!(run_id = %to_deliver.id, "delivery-failure DB update failed: {e:#}");
                     state.delivered_in_memory.insert(to_deliver.id.clone());
                 }
@@ -649,7 +660,7 @@ pub(crate) async fn run_delivery_loop(
 ) {
     tracing::info!(agent = %agent_name, "async delivery loop started");
 
-    let mut conn = match right_db::open_connection(&agent_dir, false) {
+    let mut conn = match right_db::open_connection(&agent_dir, false).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("async delivery: DB open failed: {e:#}");
@@ -811,7 +822,7 @@ pub(crate) async fn flush_ready_deliveries_for_shutdown(
     learning: right_agent::agent::types::LearningConfig,
     learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
 ) {
-    let mut conn = match right_db::open_connection(&agent_dir, false) {
+    let mut conn = match right_db::open_connection(&agent_dir, false).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("async delivery shutdown flush: DB open failed: {e:#}");
@@ -1053,7 +1064,7 @@ async fn deliver_through_session(
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
         );
-        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
             assembly_script =
                 format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
@@ -1088,7 +1099,7 @@ async fn deliver_through_session(
         c.arg(&assembly_script);
         c.env("HOME", agent_dir);
         c.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
         }
         c.current_dir(agent_dir);
@@ -1236,8 +1247,8 @@ async fn deliver_through_session(
 mod tests {
     use super::*;
 
-    #[test]
-    fn delivery_mode_shutdown_flush_skips_idle_gate() {
+    #[tokio::test]
+    async fn delivery_mode_shutdown_flush_skips_idle_gate() {
         assert!(should_wait_for_idle(DeliveryMode::Normal, 10));
         assert!(!should_wait_for_idle(DeliveryMode::ShutdownFlush, 10));
     }
@@ -1297,8 +1308,8 @@ mod tests {
         assert_eq!(result, Ok(true));
     }
 
-    #[test]
-    fn delivery_shutdown_interruption_is_not_retry_failure() {
+    #[tokio::test]
+    async fn delivery_shutdown_interruption_is_not_retry_failure() {
         assert!(is_delivery_shutdown_interruption(
             DELIVERY_INTERRUPTED_BY_SHUTDOWN
         ));
@@ -1380,9 +1391,9 @@ mod tests {
         assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    fn setup_db() -> (tempfile::TempDir, right_db::Connection) {
+    async fn setup_db() -> (tempfile::TempDir, right_db::Connection) {
         let dir = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
         (dir, conn)
     }
 
@@ -1423,7 +1434,7 @@ mod tests {
         }
     }
 
-    fn insert_async_cron_run(conn: &right_db::Connection, run: TestCronRun) {
+    async fn insert_async_cron_run(conn: &right_db::Connection, run: TestCronRun) {
         let delivery_required = run.delivery_required.unwrap_or(run.delivery_json.is_some());
         let delivery_status =
             run.delivery_status
@@ -1456,10 +1467,11 @@ mod tests {
                 updated_at,
             ],
         )
+        .await
         .unwrap();
     }
 
-    fn insert_async_background_run(
+    async fn insert_async_background_run(
         conn: &right_db::Connection,
         id: &str,
         started_at: &str,
@@ -1487,18 +1499,19 @@ mod tests {
                 delivery_json,
             ],
         )
+        .await
         .unwrap();
     }
 
-    #[test]
-    fn fetch_pending_empty_db() {
-        let (_dir, conn) = setup_db();
-        assert!(fetch_pending(&conn).unwrap().is_none());
+    #[tokio::test]
+    async fn fetch_pending_empty_db() {
+        let (_dir, conn) = setup_db().await;
+        assert!(fetch_pending(&conn).await.unwrap().is_none());
     }
 
-    #[test]
-    fn fetch_pending_returns_oldest() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn fetch_pending_returns_oldest() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1507,7 +1520,8 @@ mod tests {
                 delivery_json: Some("{\"kind\":\"notify\",\"content\":\"first\"}"),
                 ..Default::default()
             },
-        );
+        )
+        .await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1518,14 +1532,15 @@ mod tests {
                 delivery_json: Some("{\"kind\":\"notify\",\"content\":\"second\"}"),
                 ..Default::default()
             },
-        );
-        let pending = fetch_pending(&conn).unwrap().unwrap();
+        )
+        .await;
+        let pending = fetch_pending(&conn).await.unwrap().unwrap();
         assert_eq!(pending.id, "a", "should return oldest first");
     }
 
-    #[test]
-    fn fetch_next_pending_skips_in_memory_delivered_oldest() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn fetch_next_pending_skips_in_memory_delivered_oldest() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1534,7 +1549,8 @@ mod tests {
                 delivery_json: Some("{\"kind\":\"notify\",\"content\":\"first\"}"),
                 ..Default::default()
             },
-        );
+        )
+        .await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1545,18 +1561,20 @@ mod tests {
                 delivery_json: Some("{\"kind\":\"notify\",\"content\":\"second\"}"),
                 ..Default::default()
             },
-        );
+        )
+        .await;
         let delivered_in_memory = HashSet::from(["a".to_string()]);
 
         let pending = fetch_next_pending(&conn, &delivered_in_memory)
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(pending.id, "b");
     }
 
-    #[test]
-    fn fetch_pending_skips_null_delivery() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn fetch_pending_skips_null_delivery() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1564,13 +1582,14 @@ mod tests {
                 run_note: Some("silent"),
                 ..Default::default()
             },
-        );
-        assert!(fetch_pending(&conn).unwrap().is_none());
+        )
+        .await;
+        assert!(fetch_pending(&conn).await.unwrap().is_none());
     }
 
-    #[test]
-    fn fetch_pending_ignores_silent_delivery_decision() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn fetch_pending_ignores_silent_delivery_decision() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1581,13 +1600,14 @@ mod tests {
                 delivery_status: Some("none"),
                 ..Default::default()
             },
-        );
-        assert!(fetch_pending(&conn).unwrap().is_none());
+        )
+        .await;
+        assert!(fetch_pending(&conn).await.unwrap().is_none());
     }
 
-    #[test]
-    fn fetch_pending_skips_delivered() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn fetch_pending_skips_delivered() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1597,13 +1617,14 @@ mod tests {
                 delivery_status: Some("delivered"),
                 ..Default::default()
             },
-        );
-        assert!(fetch_pending(&conn).unwrap().is_none());
+        )
+        .await;
+        assert!(fetch_pending(&conn).await.unwrap().is_none());
     }
 
-    #[test]
-    fn fetch_pending_reads_async_runs_and_skips_none_delivery() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn fetch_pending_reads_async_runs_and_skips_none_delivery() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1613,7 +1634,8 @@ mod tests {
                 delivery_status: Some("none"),
                 ..Default::default()
             },
-        );
+        )
+        .await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1623,17 +1645,18 @@ mod tests {
                 delivery_json: Some("{\"kind\":\"notify\",\"content\":\"deliver\"}"),
                 ..Default::default()
             },
-        );
+        )
+        .await;
 
-        let pending = fetch_pending(&conn).unwrap().unwrap();
+        let pending = fetch_pending(&conn).await.unwrap().unwrap();
         assert_eq!(pending.id, "pending");
         assert_eq!(pending.kind, "cron");
         assert_eq!(pending.producer_ref.as_deref(), Some("job1"));
     }
 
-    #[test]
-    fn deduplicate_keeps_latest_marks_older() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn deduplicate_keeps_latest_marks_older() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1642,7 +1665,8 @@ mod tests {
                 delivery_json: Some("{\"kind\":\"notify\",\"content\":\"old\"}"),
                 ..Default::default()
             },
-        );
+        )
+        .await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1653,8 +1677,9 @@ mod tests {
                 delivery_json: Some("{\"kind\":\"notify\",\"content\":\"new\"}"),
                 ..Default::default()
             },
-        );
-        let (latest, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
+        )
+        .await;
+        let (latest, skipped) = deduplicate_job(&conn, "job1").await.unwrap().unwrap();
         assert_eq!(latest.id, "b");
         assert_eq!(skipped, 1);
         let delivered: Option<String> = conn
@@ -1663,6 +1688,7 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert!(delivered.is_some());
         let not_delivered: Option<String> = conn
@@ -1671,13 +1697,14 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert!(not_delivered.is_none());
     }
 
-    #[test]
-    fn deduplicate_does_not_touch_other_jobs() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn deduplicate_does_not_touch_other_jobs() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1685,7 +1712,8 @@ mod tests {
                 delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
                 ..Default::default()
             },
-        );
+        )
+        .await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1694,15 +1722,16 @@ mod tests {
                 delivery_json: Some("{\"kind\":\"notify\",\"content\":\"y\"}"),
                 ..Default::default()
             },
-        );
-        let (latest, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
+        )
+        .await;
+        let (latest, skipped) = deduplicate_job(&conn, "job1").await.unwrap().unwrap();
         assert_eq!(latest.id, "a");
         assert_eq!(skipped, 0);
     }
 
-    #[test]
-    fn deduplicate_sets_superseded_status() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn deduplicate_sets_superseded_status() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1712,7 +1741,8 @@ mod tests {
                 delivery_status: Some("pending"),
                 ..Default::default()
             },
-        );
+        )
+        .await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1724,8 +1754,9 @@ mod tests {
                 delivery_status: Some("pending"),
                 ..Default::default()
             },
-        );
-        let (latest, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
+        )
+        .await;
+        let (latest, skipped) = deduplicate_job(&conn, "job1").await.unwrap().unwrap();
         assert_eq!(latest.id, "b");
         assert_eq!(skipped, 1);
 
@@ -1735,12 +1766,13 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
+            .await
             .unwrap();
         assert_eq!(status.as_deref(), Some("superseded"));
     }
 
-    #[test]
-    fn format_async_yaml_basic_cron() {
+    #[tokio::test]
+    async fn format_async_yaml_basic_cron() {
         let pending = PendingAsyncResult {
             id: "abc".into(),
             kind: "cron".into(),
@@ -1765,8 +1797,8 @@ mod tests {
         assert!(output.contains("Checked 5 pairs"));
     }
 
-    #[test]
-    fn format_async_yaml_no_skipped() {
+    #[tokio::test]
+    async fn format_async_yaml_no_skipped() {
         let pending = PendingAsyncResult {
             id: "abc".into(),
             kind: "cron".into(),
@@ -1783,8 +1815,8 @@ mod tests {
         assert!(!output.contains("skipped_runs"));
     }
 
-    #[test]
-    fn format_async_yaml_uses_cron_failure_instruction_when_status_failed() {
+    #[tokio::test]
+    async fn format_async_yaml_uses_cron_failure_instruction_when_status_failed() {
         let pending = PendingAsyncResult {
             id: "r1".into(),
             kind: "cron".into(),
@@ -1801,8 +1833,8 @@ mod tests {
         assert!(!out.contains("send it VERBATIM"));
     }
 
-    #[test]
-    fn format_async_yaml_uses_cron_success_instruction_when_status_success() {
+    #[tokio::test]
+    async fn format_async_yaml_uses_cron_success_instruction_when_status_success() {
         let pending = PendingAsyncResult {
             id: "r2".into(),
             kind: "cron".into(),
@@ -1817,8 +1849,8 @@ mod tests {
         assert!(out.contains("VERBATIM"));
     }
 
-    #[test]
-    fn format_async_yaml_rejects_silent_delivery_json() {
+    #[tokio::test]
+    async fn format_async_yaml_rejects_silent_delivery_json() {
         let pending = PendingAsyncResult {
             id: "r-silent".into(),
             kind: "cron".into(),
@@ -1836,8 +1868,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn format_async_yaml_background_includes_background_instruction_and_content() {
+    #[tokio::test]
+    async fn format_async_yaml_background_includes_background_instruction_and_content() {
         let pending = PendingAsyncResult {
             id: "bg-1".into(),
             kind: "background".into(),
@@ -1858,8 +1890,8 @@ mod tests {
         assert!(!out.contains("cron_result:"));
     }
 
-    #[test]
-    fn format_async_yaml_background_uses_failure_instruction_when_status_failed() {
+    #[tokio::test]
+    async fn format_async_yaml_background_uses_failure_instruction_when_status_failed() {
         let pending = PendingAsyncResult {
             id: "bg-2".into(),
             kind: "background".into(),
@@ -1877,8 +1909,8 @@ mod tests {
         assert!(out.contains("Background work failed"));
     }
 
-    #[test]
-    fn delivery_invocation_uses_configured_agent_model() {
+    #[tokio::test]
+    async fn delivery_invocation_uses_configured_agent_model() {
         let args = build_delivery_invocation_args(
             "/sandbox/mcp.json".into(),
             r#"{"type":"object"}"#.into(),
@@ -1898,11 +1930,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fetch_pending_resolves_target_after_spec_deletion() {
+    #[tokio::test]
+    async fn fetch_pending_resolves_target_after_spec_deletion() {
         // Reproduces the production bug: a one-shot spec auto-deletes after
         // firing, but the run row still needs to know where to deliver.
-        let (_dir, conn) = setup_db();
+        let (_dir, conn) = setup_db().await;
         let now = chrono::Utc::now().to_rfc3339();
 
         // 1. Spec is created (recurring=0, one-shot).
@@ -1910,7 +1942,7 @@ mod tests {
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, target_chat_id, target_thread_id, created_at, updated_at) \
              VALUES ('one-shot', '*/5 * * * *', 'p', 1.0, 0, -4996137249, NULL, ?1, ?1)",
             [&now],
-        ).unwrap();
+        ).await.unwrap();
 
         // 2. Run row inserted with snapshot of target (what new execute_job does).
         insert_async_cron_run(
@@ -1924,25 +1956,27 @@ mod tests {
                 target_chat_id: Some(-4996137249),
                 ..Default::default()
             },
-        );
+        )
+        .await;
 
         // 3. Spec is auto-deleted (one-shot completion).
         conn.execute("DELETE FROM cron_specs WHERE job_name = 'one-shot'", [])
+            .await
             .unwrap();
 
         // 4. Delivery loop fetches — must still find the target.
-        let pending = fetch_pending(&conn).unwrap().unwrap();
+        let pending = fetch_pending(&conn).await.unwrap().unwrap();
         assert_eq!(pending.target_chat_id, Some(-4996137249));
         assert_eq!(pending.target_thread_id, None);
 
         // And dedup must agree.
-        let (latest, _skipped) = deduplicate_job(&conn, "one-shot").unwrap().unwrap();
+        let (latest, _skipped) = deduplicate_job(&conn, "one-shot").await.unwrap().unwrap();
         assert_eq!(latest.target_chat_id, Some(-4996137249));
     }
 
-    #[test]
-    fn fetch_pending_carries_target_fields() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn fetch_pending_carries_target_fields() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1952,15 +1986,16 @@ mod tests {
                 target_thread_id: Some(9),
                 ..Default::default()
             },
-        );
-        let pending = fetch_pending(&conn).unwrap().unwrap();
+        )
+        .await;
+        let pending = fetch_pending(&conn).await.unwrap().unwrap();
         assert_eq!(pending.target_chat_id, Some(-555));
         assert_eq!(pending.target_thread_id, Some(9));
     }
 
-    #[test]
-    fn fetch_pending_returns_none_target_when_run_has_none() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn fetch_pending_returns_none_target_when_run_has_none() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1969,15 +2004,16 @@ mod tests {
                 delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
                 ..Default::default()
             },
-        );
-        let pending = fetch_pending(&conn).unwrap().unwrap();
+        )
+        .await;
+        let pending = fetch_pending(&conn).await.unwrap().unwrap();
         assert!(pending.target_chat_id.is_none());
         assert!(pending.target_thread_id.is_none());
     }
 
-    #[test]
-    fn null_target_classifies_as_no_target() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn null_target_classifies_as_no_target() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -1986,8 +2022,9 @@ mod tests {
                 delivery_json: Some("{\"kind\":\"notify\",\"content\":\"x\"}"),
                 ..Default::default()
             },
-        );
-        let pending = fetch_pending(&conn).unwrap().unwrap();
+        )
+        .await;
+        let pending = fetch_pending(&conn).await.unwrap().unwrap();
         let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[]));
         assert!(
             matches!(outcome, TargetClassification::NoTarget),
@@ -1995,9 +2032,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn target_chat_id_zero_fetches_as_no_target() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn target_chat_id_zero_fetches_as_no_target() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -2007,8 +2044,9 @@ mod tests {
                 target_chat_id: Some(0),
                 ..Default::default()
             },
-        );
-        let pending = fetch_pending(&conn).unwrap().unwrap();
+        )
+        .await;
+        let pending = fetch_pending(&conn).await.unwrap().unwrap();
         assert_eq!(pending.target_chat_id, None);
 
         let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[0]));
@@ -2018,9 +2056,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn target_not_in_allowlist_classifies_as_denied() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn target_not_in_allowlist_classifies_as_denied() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -2030,8 +2068,9 @@ mod tests {
                 target_chat_id: Some(-777),
                 ..Default::default()
             },
-        );
-        let pending = fetch_pending(&conn).unwrap().unwrap();
+        )
+        .await;
+        let pending = fetch_pending(&conn).await.unwrap().unwrap();
         let outcome = classify_pending_target(&pending, &fake_allowlist(&[100], &[-200]));
         assert!(
             matches!(outcome, TargetClassification::Denied),
@@ -2039,9 +2078,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn target_in_allowlist_classifies_as_ready() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn target_in_allowlist_classifies_as_ready() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -2052,8 +2091,9 @@ mod tests {
                 target_thread_id: Some(5),
                 ..Default::default()
             },
-        );
-        let pending = fetch_pending(&conn).unwrap().unwrap();
+        )
+        .await;
+        let pending = fetch_pending(&conn).await.unwrap().unwrap();
         let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[-200]));
         assert!(
             matches!(
@@ -2093,9 +2133,9 @@ mod tests {
         state
     }
 
-    #[test]
-    fn deduplicate_job_carries_target_fields() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn deduplicate_job_carries_target_fields() {
+        let (_dir, conn) = setup_db().await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -2105,7 +2145,8 @@ mod tests {
                 target_chat_id: Some(-100),
                 ..Default::default()
             },
-        );
+        )
+        .await;
         insert_async_cron_run(
             &conn,
             TestCronRun {
@@ -2117,16 +2158,17 @@ mod tests {
                 target_chat_id: Some(-100),
                 ..Default::default()
             },
-        );
-        let (latest, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
+        )
+        .await;
+        let (latest, skipped) = deduplicate_job(&conn, "job1").await.unwrap().unwrap();
         assert_eq!(latest.id, "b");
         assert_eq!(skipped, 1);
         assert_eq!(latest.target_chat_id, Some(-100));
     }
 
-    #[test]
-    fn select_delivery_candidate_does_not_deduplicate_background_rows() {
-        let (_dir, conn) = setup_db();
+    #[tokio::test]
+    async fn select_delivery_candidate_does_not_deduplicate_background_rows() {
+        let (_dir, conn) = setup_db().await;
         insert_async_background_run(
             &conn,
             "bg-old",
@@ -2134,7 +2176,8 @@ mod tests {
             "success",
             "{\"kind\":\"notify\",\"content\":\"old\"}",
             -100,
-        );
+        )
+        .await;
         insert_async_background_run(
             &conn,
             "bg-new",
@@ -2142,11 +2185,15 @@ mod tests {
             "success",
             "{\"kind\":\"notify\",\"content\":\"new\"}",
             -100,
-        );
+        )
+        .await;
 
-        let pending = fetch_pending(&conn).unwrap().unwrap();
+        let pending = fetch_pending(&conn).await.unwrap().unwrap();
         assert_eq!(pending.id, "bg-old");
-        let (selected, skipped) = select_delivery_candidate(&conn, pending).unwrap().unwrap();
+        let (selected, skipped) = select_delivery_candidate(&conn, pending)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(selected.id, "bg-old");
         assert_eq!(skipped, 0);
 
@@ -2154,6 +2201,7 @@ mod tests {
             .prepare("SELECT id, delivery_status FROM async_runs ORDER BY id")
             .unwrap()
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .await
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -2166,8 +2214,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn empty_delivery_send_report_is_rejected() {
+    #[tokio::test]
+    async fn empty_delivery_send_report_is_rejected() {
         let report = DeliverySendReport {
             text_messages_sent: 0,
             attachment_batches_sent: 0,

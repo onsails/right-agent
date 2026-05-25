@@ -1,56 +1,56 @@
 use super::md_to_telegram_html;
 use super::split_html_message;
 
-#[test]
-fn plain_text_passes_through() {
+#[tokio::test]
+async fn plain_text_passes_through() {
     assert_eq!(md_to_telegram_html("hello world"), "hello world");
 }
 
-#[test]
-fn html_entities_escaped() {
+#[tokio::test]
+async fn html_entities_escaped() {
     assert_eq!(
         md_to_telegram_html("a < b & c > d"),
         "a &lt; b &amp; c &gt; d"
     );
 }
 
-#[test]
-fn bold_text() {
+#[tokio::test]
+async fn bold_text() {
     assert_eq!(md_to_telegram_html("**bold**"), "<b>bold</b>");
 }
 
-#[test]
-fn italic_text() {
+#[tokio::test]
+async fn italic_text() {
     assert_eq!(md_to_telegram_html("*italic*"), "<i>italic</i>");
 }
 
-#[test]
-fn bold_italic() {
+#[tokio::test]
+async fn bold_italic() {
     // pulldown-cmark parses *** as Emphasis(Strong(text))
     assert_eq!(md_to_telegram_html("***both***"), "<i><b>both</b></i>");
 }
 
-#[test]
-fn inline_code() {
+#[tokio::test]
+async fn inline_code() {
     assert_eq!(md_to_telegram_html("`code`"), "<code>code</code>");
 }
 
-#[test]
-fn inline_code_with_html_entities() {
+#[tokio::test]
+async fn inline_code_with_html_entities() {
     assert_eq!(
         md_to_telegram_html("`<div>&</div>`"),
         "<code>&lt;div&gt;&amp;&lt;/div&gt;</code>"
     );
 }
 
-#[test]
-fn fenced_code_block_no_lang() {
+#[tokio::test]
+async fn fenced_code_block_no_lang() {
     let input = "```\nfn main() {}\n```";
     assert_eq!(md_to_telegram_html(input), "<pre>fn main() {}</pre>");
 }
 
-#[test]
-fn fenced_code_block_with_lang() {
+#[tokio::test]
+async fn fenced_code_block_with_lang() {
     let input = "```rust\nfn main() {}\n```";
     assert_eq!(
         md_to_telegram_html(input),
@@ -58,8 +58,8 @@ fn fenced_code_block_with_lang() {
     );
 }
 
-#[test]
-fn code_block_escapes_html() {
+#[tokio::test]
+async fn code_block_escapes_html() {
     let input = "```\n<b>not bold</b>\n```";
     assert_eq!(
         md_to_telegram_html(input),
@@ -67,35 +67,35 @@ fn code_block_escapes_html() {
     );
 }
 
-#[test]
-fn link() {
+#[tokio::test]
+async fn link() {
     assert_eq!(
         md_to_telegram_html("[click](https://example.com)"),
         "<a href=\"https://example.com\">click</a>"
     );
 }
 
-#[test]
-fn heading_becomes_bold() {
+#[tokio::test]
+async fn heading_becomes_bold() {
     let html = md_to_telegram_html("# Heading");
     assert!(html.contains("<b>Heading</b>"), "got: {html}");
 }
 
-#[test]
-fn strikethrough() {
+#[tokio::test]
+async fn strikethrough() {
     assert_eq!(md_to_telegram_html("~~deleted~~"), "<s>deleted</s>");
 }
 
-#[test]
-fn blockquote() {
+#[tokio::test]
+async fn blockquote() {
     let html = md_to_telegram_html("> quoted");
     assert!(html.contains("<blockquote>"), "got: {html}");
     assert!(html.contains("quoted"), "got: {html}");
     assert!(html.contains("</blockquote>"), "got: {html}");
 }
 
-#[test]
-fn unordered_list() {
+#[tokio::test]
+async fn unordered_list() {
     let input = "- one\n- two\n- three";
     let html = md_to_telegram_html(input);
     assert!(html.contains("• one"), "got: {html}");
@@ -103,8 +103,8 @@ fn unordered_list() {
     assert!(html.contains("• three"), "got: {html}");
 }
 
-#[test]
-fn list_followed_by_paragraph_separates_with_blank_line() {
+#[tokio::test]
+async fn list_followed_by_paragraph_separates_with_blank_line() {
     // Regression: pulldown-cmark's tight-list mode emits item content without
     // a wrapping Paragraph and emits no Text/Break between End(Item) and the
     // following Start(Paragraph). Without explicit separation in our handler
@@ -119,16 +119,16 @@ fn list_followed_by_paragraph_separates_with_blank_line() {
     );
 }
 
-#[test]
-fn ordered_list() {
+#[tokio::test]
+async fn ordered_list() {
     let input = "1. first\n2. second";
     let html = md_to_telegram_html(input);
     assert!(html.contains("1. first"), "got: {html}");
     assert!(html.contains("2. second"), "got: {html}");
 }
 
-#[test]
-fn image_becomes_link() {
+#[tokio::test]
+async fn image_becomes_link() {
     let html = md_to_telegram_html("![photo](https://img.com/x.png)");
     assert!(
         html.contains("<a href=\"https://img.com/x.png\">"),
@@ -137,8 +137,8 @@ fn image_becomes_link() {
     assert!(html.contains("photo"), "got: {html}");
 }
 
-#[test]
-fn horizontal_rule_dropped() {
+#[tokio::test]
+async fn horizontal_rule_dropped() {
     let input = "before\n\n---\n\nafter";
     let html = md_to_telegram_html(input);
     assert!(!html.contains("---"), "got: {html}");
@@ -146,8 +146,8 @@ fn horizontal_rule_dropped() {
     assert!(html.contains("after"), "got: {html}");
 }
 
-#[test]
-fn mixed_formatting() {
+#[tokio::test]
+async fn mixed_formatting() {
     let input = "Use **bold** and `code` in *italic* text";
     let html = md_to_telegram_html(input);
     assert!(html.contains("<b>bold</b>"), "got: {html}");
@@ -155,8 +155,8 @@ fn mixed_formatting() {
     assert!(html.contains("<i>italic</i>"), "got: {html}");
 }
 
-#[test]
-fn softbreak_becomes_newline() {
+#[tokio::test]
+async fn softbreak_becomes_newline() {
     let input = "line one\nline two";
     let html = md_to_telegram_html(input);
     assert!(html.contains("line one\nline two"), "got: {html}");
@@ -164,8 +164,8 @@ fn softbreak_becomes_newline() {
 
 // --- table tests ---
 
-#[test]
-fn simple_table() {
+#[tokio::test]
+async fn simple_table() {
     let input = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |";
     let html = md_to_telegram_html(input);
     assert!(html.contains("<pre>"), "got: {html}");
@@ -178,16 +178,16 @@ fn simple_table() {
     assert!(html.contains("--"), "got: {html}");
 }
 
-#[test]
-fn table_escapes_html_in_cells() {
+#[tokio::test]
+async fn table_escapes_html_in_cells() {
     // Use &amp; which pulldown-cmark passes as literal text, then we HTML-escape it.
     let input = "| X |\n|---|\n| a & b |";
     let html = md_to_telegram_html(input);
     assert!(html.contains("a &amp; b"), "got: {html}");
 }
 
-#[test]
-fn table_with_formatting_in_cells() {
+#[tokio::test]
+async fn table_with_formatting_in_cells() {
     let input = "| Name | Value |\n|---|---|\n| `key` | **val** |";
     let html = md_to_telegram_html(input);
     // Inside <pre> block, cell content should be plain text (backticks preserved, bold stripped)
@@ -197,14 +197,14 @@ fn table_with_formatting_in_cells() {
 
 // --- split_html_message tests ---
 
-#[test]
-fn short_message_no_split() {
+#[tokio::test]
+async fn short_message_no_split() {
     let parts = split_html_message("hello");
     assert_eq!(parts, vec!["hello"]);
 }
 
-#[test]
-fn long_message_splits_at_newline() {
+#[tokio::test]
+async fn long_message_splits_at_newline() {
     let line = "a".repeat(100);
     let msg: String = (0..50)
         .map(|_| line.as_str())
@@ -218,8 +218,8 @@ fn long_message_splits_at_newline() {
     }
 }
 
-#[test]
-fn split_closes_open_bold_tag() {
+#[tokio::test]
+async fn split_closes_open_bold_tag() {
     let inner = "a".repeat(4090);
     let msg = format!("<b>{inner}</b>");
     let parts = split_html_message(&msg);
@@ -236,8 +236,8 @@ fn split_closes_open_bold_tag() {
     );
 }
 
-#[test]
-fn split_preserves_pre_block_under_limit() {
+#[tokio::test]
+async fn split_preserves_pre_block_under_limit() {
     let code = "x\n".repeat(100);
     let msg = format!("text before\n<pre>{code}</pre>\ntext after");
     assert!(msg.len() < 4096);
@@ -245,8 +245,8 @@ fn split_preserves_pre_block_under_limit() {
     assert_eq!(parts.len(), 1);
 }
 
-#[test]
-fn split_handles_pre_block_over_limit() {
+#[tokio::test]
+async fn split_handles_pre_block_over_limit() {
     let code = "x".repeat(5000);
     let msg = format!("<pre>{code}</pre>");
     let parts = split_html_message(&msg);
@@ -260,8 +260,8 @@ fn split_handles_pre_block_over_limit() {
     assert!(parts[1].starts_with("<pre>"), "second part must reopen pre");
 }
 
-#[test]
-fn split_pre_block_parts_stay_within_telegram_limit() {
+#[tokio::test]
+async fn split_pre_block_parts_stay_within_telegram_limit() {
     let code = "x".repeat(5000);
     let msg = format!("<pre>{code}</pre>");
     let parts = split_html_message(&msg);
@@ -272,8 +272,8 @@ fn split_pre_block_parts_stay_within_telegram_limit() {
     }
 }
 
-#[test]
-fn split_does_not_exceed_limit_with_closing_tags() {
+#[tokio::test]
+async fn split_does_not_exceed_limit_with_closing_tags() {
     // Even after appending closing tags, each part must stay under Telegram's limit.
     let inner = "a".repeat(4080);
     let msg = format!("<b><i><code>{inner}</code></i></b>");
@@ -284,8 +284,8 @@ fn split_does_not_exceed_limit_with_closing_tags() {
     }
 }
 
-#[test]
-fn split_html_message_multibyte_no_panic() {
+#[tokio::test]
+async fn split_html_message_multibyte_no_panic() {
     // Reproduce the production crash: byte index 3696 (= TELEGRAM_LIMIT - 400)
     // landed inside an em-dash '—' (3-byte UTF-8: E2 80 94).
     // We construct a string where byte 3696 falls inside a multi-byte char.
@@ -311,8 +311,8 @@ fn split_html_message_multibyte_no_panic() {
     assert_eq!(joined, msg);
 }
 
-#[test]
-fn snap_to_char_boundary_basic() {
+#[tokio::test]
+async fn snap_to_char_boundary_basic() {
     let s = "abc—def"; // '—' occupies bytes 3..6
     assert_eq!(super::snap_to_char_boundary(s, 3), 3); // exact boundary
     assert_eq!(super::snap_to_char_boundary(s, 4), 3); // inside '—'

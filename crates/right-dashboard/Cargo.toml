@@ -21,3 +21,4 @@ url = { workspace = true }
 [dev-dependencies]
 right-agent = { path = "../right-agent", version = "*" }
 tempfile = { workspace = true }
+tokio = { workspace = true }
