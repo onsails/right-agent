@@ -421,6 +421,26 @@ mod tests {
     }
 
     #[test]
+    fn mark_routed_is_compatible_with_legacy_partial_unique_index() {
+        let conn = legacy_conversation_partial_unique_connection();
+
+        let first = mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42).unwrap();
+        let second = mark_routed(&conn, "telegram", 100, 10, 25, "session-def", 43).unwrap();
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 1);
+        let row: (i64, String, i64) = conn
+            .query_one(
+                "SELECT COUNT(*), root_session_id, turn_id FROM conversation_messages
+                 WHERE platform='telegram' AND chat_id=100 AND message_id=25 AND role='user'",
+                (),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (1, "session-def".to_string(), 43));
+    }
+
+    #[test]
     fn mark_routed_sets_session_and_turn() {
         let conn = migrated_connection();
         archive_message(&conn, user_message(100, 10, 25, "route me")).unwrap();
