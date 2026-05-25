@@ -4,6 +4,7 @@
 //! live infrastructure and are covered by code review pattern only.
 
 use std::collections::VecDeque;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -25,11 +26,6 @@ use crate::cc::worker_reply::{
     UsedSkillReceipt, append_used_skill_receipts, is_rightx_skill, should_accept_bootstrap,
 };
 use crate::reflection::FailureKind;
-use right_agent::learned_skills::{
-    NudgeSignalKind, ReviewGateDecision, ReviewGateInput, ReviewStatus, ReviewTriggerKind,
-    SkillReviewReport, clear_review_running, insert_skill_review_report, mark_review_finished,
-    try_mark_review_started,
-};
 
 use super::session::{
     SessionRow, create_session, deactivate_current, get_active_session, touch_session,
@@ -53,14 +49,6 @@ const MEDIA_GROUP_HARD_CAP_MS: u64 = 2500;
 
 /// Maximum time to wait for a CC subprocess to complete.
 const CC_TIMEOUT_SECS: u64 = 600;
-
-const BACKGROUND_REVIEW_MAX_BUDGET_USD: f64 = 0.50;
-const BACKGROUND_REVIEW_MAX_TURNS: u32 = 8;
-const BACKGROUND_REVIEW_TIMEOUT_SECS: u64 = 180;
-const BACKGROUND_REVIEW_TIMELINE_MAX_EVENTS: usize = 80;
-const BACKGROUND_REVIEW_LEARNING_EVENTS_LIMIT: i64 = 20;
-const BACKGROUND_REVIEW_FAILURE_ERROR_MAX_CHARS: usize = 1_024;
-const BACKGROUND_REVIEW_FAILURE_EXCERPT_MAX_CHARS: usize = 4_096;
 
 /// Bound on `child.wait()` after we've already broken from the streaming
 /// loop. The slave should be either gone (deadline/stop SIGKILL) or about
@@ -332,9 +320,6 @@ pub struct WorkerContext {
     pub stt: Option<std::sync::Arc<crate::stt::SttContext>>,
     /// Learning-review configuration captured at bot startup. Changes require restart.
     pub learning: right_agent::agent::types::LearningConfig,
-    /// Per-agent debounced learning-episode drain scheduler. Capturing a seed
-    /// notifies the scheduler instead of spawning a per-seed timer task.
-    pub(crate) learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
     /// Shared Claude health state for MCP self-heal and one-shot repair notices.
     pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
     /// Process shutdown token used to cancel detached user-turn repair work.
@@ -997,6 +982,98 @@ fn summary_first_line(excerpt: &str) -> String {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HostLearnedSkillSummary {
+    name: String,
+    excerpt: String,
+}
+
+const HOST_SKILL_EXCERPT_MAX_BYTES: usize = 4_096;
+const HOST_SKILL_EXCERPT_MAX_CHARS: usize = 4_096;
+const HOST_SKILL_EXCERPT_MAX_LINES: usize = 120;
+
+fn collect_host_rightx_skill_index(
+    agent_dir: &Path,
+) -> std::io::Result<Vec<HostLearnedSkillSummary>> {
+    let skills_dir = agent_dir.join(".claude/skills");
+    let entries = match std::fs::read_dir(&skills_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    let mut skills = Vec::new();
+
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_rightx_skill(&name) {
+            continue;
+        }
+
+        let skill_path = entry.path().join("SKILL.md");
+        let excerpt = match read_bounded_skill_excerpt(&skill_path) {
+            Ok(Some(excerpt)) => excerpt,
+            Ok(None) => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        skills.push(HostLearnedSkillSummary { name, excerpt });
+    }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(skills)
+}
+
+fn read_bounded_skill_excerpt(path: &Path) -> std::io::Result<Option<String>> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Ok(None);
+    }
+
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file).take(HOST_SKILL_EXCERPT_MAX_BYTES as u64);
+    let mut bytes = Vec::with_capacity(HOST_SKILL_EXCERPT_MAX_BYTES);
+    reader.read_to_end(&mut bytes)?;
+    let content = String::from_utf8_lossy(&bytes);
+    Ok(Some(bounded_skill_excerpt(&content)))
+}
+
+fn bounded_skill_excerpt(content: &str) -> String {
+    let mut out = String::new();
+    let mut chars = 0;
+    let mut first = true;
+
+    for line in content.lines().take(HOST_SKILL_EXCERPT_MAX_LINES) {
+        if !first && !push_bounded_skill_char(&mut out, '\n', &mut chars) {
+            break;
+        }
+        first = false;
+
+        for ch in line.chars() {
+            if !push_bounded_skill_char(&mut out, ch, &mut chars) {
+                return out.trim().to_owned();
+            }
+        }
+    }
+
+    out.trim().to_owned()
+}
+
+fn push_bounded_skill_char(out: &mut String, ch: char, chars: &mut usize) -> bool {
+    if *chars >= HOST_SKILL_EXCERPT_MAX_CHARS
+        || out.len() + ch.len_utf8() > HOST_SKILL_EXCERPT_MAX_BYTES
+    {
+        return false;
+    }
+    out.push(ch);
+    *chars += 1;
+    true
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InvocationLogContext {
@@ -1360,7 +1437,6 @@ pub fn spawn_worker(
                 session_uuid,
                 turn_id,
                 is_first_call,
-                _reply_has_accepted_signal,
                 cc_prompt_mode,
                 cc_usage,
                 cc_wall_elapsed_ms,
@@ -1380,7 +1456,6 @@ pub fn spawn_worker(
                     session_uuid,
                     turn_id,
                     is_first_call,
-                    reply_has_accepted_signal,
                     prompt_mode,
                     usage,
                     wall_elapsed_ms,
@@ -1389,7 +1464,6 @@ pub fn spawn_worker(
                     session_uuid,
                     Some(turn_id),
                     is_first_call,
-                    reply_has_accepted_signal,
                     Some(prompt_mode),
                     usage,
                     wall_elapsed_ms,
@@ -1410,7 +1484,6 @@ pub fn spawn_worker(
                         Err(failure),
                         uuid,
                         None,
-                        false,
                         false,
                         None,
                         crate::cc::stream::StreamUsage::default(),
@@ -1907,8 +1980,6 @@ pub fn spawn_worker(
                         Arc::clone(&ctx.upgrade_lock),
                         session_guard,
                         Arc::clone(&ctx.debug),
-                        ctx.learning.clone(),
-                        Arc::clone(&ctx.learning_drain_scheduler),
                     )
                     .await;
                     gate_release.release();
@@ -2057,23 +2128,20 @@ pub fn spawn_worker(
                         }
                     };
 
-                    let skill_index =
-                        match crate::learning_review::collect_host_rightx_skill_index(&agent_dir) {
-                            Ok(entries) => entries
-                                .into_iter()
-                                .map(|s| {
-                                    format!("- {}: {}", s.name, summary_first_line(&s.excerpt))
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                            Err(e) => {
-                                tracing::warn!(
-                                    agent = %agent_name,
-                                    "collect_host_rightx_skill_index failed: {e:#}"
-                                );
-                                String::new()
-                            }
-                        };
+                    let skill_index = match collect_host_rightx_skill_index(&agent_dir) {
+                        Ok(entries) => entries
+                            .into_iter()
+                            .map(|s| format!("- {}: {}", s.name, summary_first_line(&s.excerpt)))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        Err(e) => {
+                            tracing::warn!(
+                                agent = %agent_name,
+                                "collect_host_rightx_skill_index failed: {e:#}"
+                            );
+                            String::new()
+                        }
+                    };
 
                     let writer_ctx = crate::learning_probe_writer::ProbeWriterContext {
                         agent_dir,
@@ -2171,32 +2239,6 @@ pub(crate) async fn send_tg(
     text: &str,
 ) -> Result<(), teloxide::RequestError> {
     let mut send = bot.send_message(chat_id, text);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-    }
-    send.await?;
-    Ok(())
-}
-
-/// Send a learned-skill review `user_notice` to Telegram.
-///
-/// The notice is produced by the reviewer LLM after consuming
-/// potentially attacker-controlled session content, so it MUST NOT be
-/// rendered as raw bot copy. We HTML-escape the notice, wrap it in a
-/// labelled `<blockquote>`, and send with `ParseMode::Html` so any
-/// injected markup is shown as text and the framing makes it visually
-/// clear the line came from the background reviewer, not the bot.
-async fn send_review_user_notice(
-    bot: &super::BotType,
-    chat_id: teloxide::types::ChatId,
-    eff_thread_id: i64,
-    notice: &str,
-) -> Result<(), teloxide::RequestError> {
-    let escaped = html_escape(notice);
-    let body = format!("<b>Learned-skill reviewer notice</b>\n<blockquote>{escaped}</blockquote>");
-    let mut send = bot
-        .send_message(chat_id, body)
-        .parse_mode(teloxide::types::ParseMode::Html);
     if eff_thread_id != 0 {
         send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
     }
@@ -2359,9 +2401,6 @@ pub(crate) struct CcReply {
     /// `true` if this invocation created a brand-new CC session
     /// (i.e. the worker's first turn in this chat/thread).
     pub(crate) is_first_call: bool,
-    /// Legacy reply-signal marker. Always false; retained until callers stop
-    /// carrying this field through the worker tuple.
-    pub(crate) reply_has_accepted_signal: bool,
     /// Prompt mode used for this invocation. Probe-writer runs only for `Normal`.
     pub(crate) prompt_mode: crate::cc::prompt::PromptMode,
     /// Usage stats extracted from the CC `result` event.
@@ -2620,860 +2659,6 @@ async fn remove_sandbox_progress_config_file(
             );
         }
     }
-}
-
-async fn load_skill_review_gate_snapshot(
-    conn: &right_db::Connection,
-    agent_name: &str,
-) -> Result<(i64, i64, i64), right_db::DbError> {
-    right_agent::learned_skills::ensure_nudge_state(conn, agent_name).await?;
-    conn.query_row(
-        "SELECT tool_iters_since_review, turns_since_review, skill_issue_hints_since_review \
-         FROM skill_nudge_state WHERE agent_name = ?1",
-        [agent_name],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )
-    .await
-}
-
-#[allow(dead_code)]
-async fn load_learning_episode_effort_snapshot(
-    conn: &right_db::Connection,
-    agent_name: &str,
-) -> Result<(i64, i64), right_db::DbError> {
-    right_agent::learned_skills::ensure_nudge_state(conn, agent_name).await?;
-    conn.query_row(
-        "SELECT tool_iters_since_review, creation_review_interval \
-         FROM skill_nudge_state WHERE agent_name = ?1",
-        [agent_name],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-    .await
-}
-
-#[derive(Debug)]
-struct BackgroundReviewFailure {
-    error: String,
-    stdout: Option<String>,
-    stderr: Option<String>,
-}
-
-impl BackgroundReviewFailure {
-    fn new(error: impl Into<String>) -> Self {
-        Self {
-            error: error.into(),
-            stdout: None,
-            stderr: None,
-        }
-    }
-
-    fn with_output(
-        error: impl Into<String>,
-        stdout: Option<String>,
-        stderr: Option<String>,
-    ) -> Self {
-        Self {
-            error: error.into(),
-            stdout,
-            stderr,
-        }
-    }
-}
-
-fn review_failure_output_json(
-    error: &str,
-    stdout: Option<&str>,
-    stderr: Option<&str>,
-) -> serde_json::Value {
-    let mut output = serde_json::json!({ "error": bounded_review_failure_error(error) });
-    if let Some(stdout_excerpt) = bounded_review_failure_excerpt(stdout) {
-        output["stdout_excerpt"] = serde_json::Value::String(stdout_excerpt);
-    }
-    if let Some(stderr_excerpt) = bounded_review_failure_excerpt(stderr) {
-        output["stderr_excerpt"] = serde_json::Value::String(stderr_excerpt);
-    }
-    output
-}
-
-fn bounded_review_failure_error(error: &str) -> String {
-    let error = error.trim();
-    let error = if error.is_empty() {
-        "background review failed"
-    } else {
-        error
-    };
-    crate::learning_review::bounded_text(
-        error,
-        BACKGROUND_REVIEW_FAILURE_ERROR_MAX_CHARS,
-        crate::learning_review::TRUNCATED_SUFFIX,
-    )
-}
-
-fn bounded_review_failure_excerpt(value: Option<&str>) -> Option<String> {
-    let value = value?.trim();
-    if value.is_empty() {
-        return None;
-    }
-    Some(crate::learning_review::bounded_text(
-        value,
-        BACKGROUND_REVIEW_FAILURE_EXCERPT_MAX_CHARS,
-        crate::learning_review::TRUNCATED_SUFFIX,
-    ))
-}
-
-async fn maybe_spawn_learned_skill_review(
-    conn: &right_db::Connection,
-    ctx: &WorkerContext,
-    chat_id: i64,
-    eff_thread_id: i64,
-    root_session_id: &str,
-    source_invocation_id: Option<&str>,
-    accepted_signal: Option<(NudgeSignalKind, serde_json::Value)>,
-) {
-    let Some(source_invocation_id) = source_invocation_id else {
-        return;
-    };
-
-    let (tool_iters_since_review, turns_since_review, skill_issue_hints_since_review) =
-        match load_skill_review_gate_snapshot(conn, &ctx.agent_name).await {
-            Ok(snapshot) => snapshot,
-            Err(e) => {
-                tracing::warn!(
-                    agent = %ctx.agent_name,
-                    "learned-skill review gate snapshot load failed: {e:#}"
-                );
-                return;
-            }
-        };
-
-    let has_learning_accepted = matches!(
-        accepted_signal.as_ref(),
-        Some((NudgeSignalKind::Learning, _))
-    );
-    let has_skill_issue_accepted = matches!(
-        accepted_signal.as_ref(),
-        Some((NudgeSignalKind::SkillIssue, _))
-    );
-    let signal_trigger = crate::learning_review::select_review_trigger(
-        has_learning_accepted,
-        has_skill_issue_accepted,
-    );
-    let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let gate = match try_mark_review_started(
-        conn,
-        &ctx.agent_name,
-        ReviewGateInput {
-            signal_trigger,
-            now_utc: &now_utc,
-            daily_budget_usd: ctx.learning.max_daily_budget_usd,
-        },
-    )
-    .await
-    {
-        Ok(gate) => gate,
-        Err(e) => {
-            tracing::warn!(
-                agent = %ctx.agent_name,
-                "learned-skill review gate/start failed: {e:#}"
-            );
-            return;
-        }
-    };
-    let ReviewGateDecision::Start(trigger_kind) = gate else {
-        return;
-    };
-
-    let accepted_signal_json = accepted_signal.map(|(_, payload)| payload.to_string());
-    let agent_name = ctx.agent_name.clone();
-    let agent_dir = ctx.agent_dir.clone();
-    let agent_db_dir = ctx.agent_db_dir.clone();
-    let bot = ctx.bot.clone();
-    let alert_bot = Arc::new(ctx.bot.clone());
-    let model = crate::snapshot_model(&ctx.model);
-    let ssh_config_path = ctx.ssh_config_path.clone();
-    let resolved_sandbox = ctx.resolved_sandbox.clone();
-    let debug = Arc::clone(&ctx.debug);
-    let shutdown = ctx.shutdown.clone();
-    let source_invocation_id = source_invocation_id.to_owned();
-    let root_session_id = root_session_id.to_owned();
-    let tg_chat_id = teloxide::types::ChatId(chat_id);
-    let failure_threshold = ctx.learning.circuit_failure_threshold.unwrap_or(5);
-    let cooldown_minutes = ctx.learning.circuit_cooldown_minutes.unwrap_or(60);
-
-    std::mem::drop(tokio::spawn(async move {
-        let review_future = run_background_learned_skill_review(
-            &agent_name,
-            &agent_dir,
-            &agent_db_dir,
-            source_invocation_id.clone(),
-            root_session_id.clone(),
-            chat_id,
-            eff_thread_id,
-            trigger_kind,
-            model,
-            ssh_config_path,
-            resolved_sandbox,
-            debug,
-            accepted_signal_json,
-            tool_iters_since_review,
-            turns_since_review,
-            skill_issue_hints_since_review,
-        );
-
-        let review_result = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => {
-                // Dropping `review_future` here drops any in-flight
-                // `ProcessGroupChild`, which SIGKILLs the entire claude-p
-                // process group. No `skill_review_reports` row is written
-                // for a cancelled review — just clear the running gate so
-                // the next eligible turn can spawn another review.
-                clear_background_review_gate_on_shutdown(&agent_db_dir, &agent_name).await;
-                return;
-            }
-            result = review_future => result,
-        };
-
-        match review_result {
-            Ok((report, notice)) => {
-                record_successful_background_review(
-                    &agent_db_dir,
-                    &agent_dir,
-                    &agent_name,
-                    report,
-                    notice,
-                    failure_threshold,
-                    cooldown_minutes,
-                    Arc::clone(&alert_bot),
-                    move |notice| {
-                        let bot = bot.clone();
-                        async move {
-                            send_review_user_notice(&bot, tg_chat_id, eff_thread_id, &notice).await
-                        }
-                    },
-                )
-                .await;
-            }
-            Err(e) => {
-                let BackgroundReviewFailure {
-                    error,
-                    stdout,
-                    stderr,
-                } = e;
-                tracing::warn!(
-                    agent = %agent_name,
-                    "learned-skill background review failed: {error}"
-                );
-                record_failed_background_review(
-                    &agent_db_dir,
-                    &agent_dir,
-                    agent_name,
-                    source_invocation_id,
-                    Some(root_session_id),
-                    Some(chat_id),
-                    Some(eff_thread_id),
-                    trigger_kind,
-                    failure_threshold,
-                    cooldown_minutes,
-                    alert_bot,
-                    error,
-                    stdout,
-                    stderr,
-                )
-                .await;
-            }
-        }
-    }));
-}
-
-#[allow(dead_code)]
-fn foreground_episode_seed_trigger_kind(
-    accepted_signal: Option<&(NudgeSignalKind, serde_json::Value)>,
-    tool_iters_since_review: i64,
-    creation_review_interval: i64,
-) -> Option<right_agent::learning_episodes::EpisodeSeedTriggerKind> {
-    let has_learning_accepted = matches!(accepted_signal, Some((NudgeSignalKind::Learning, _)));
-    let has_skill_issue_accepted =
-        matches!(accepted_signal, Some((NudgeSignalKind::SkillIssue, _)));
-
-    match crate::learning_review::select_review_trigger(
-        has_learning_accepted,
-        has_skill_issue_accepted,
-    ) {
-        Some(ReviewTriggerKind::LearningSignal) => {
-            Some(right_agent::learning_episodes::EpisodeSeedTriggerKind::LearningSignal)
-        }
-        Some(ReviewTriggerKind::SkillIssueSignal) => {
-            Some(right_agent::learning_episodes::EpisodeSeedTriggerKind::SkillIssueSignal)
-        }
-        Some(ReviewTriggerKind::EffortThreshold) => {
-            Some(right_agent::learning_episodes::EpisodeSeedTriggerKind::EffortThreshold)
-        }
-        None if creation_review_interval > 0
-            && tool_iters_since_review >= creation_review_interval =>
-        {
-            Some(right_agent::learning_episodes::EpisodeSeedTriggerKind::EffortThreshold)
-        }
-        None => None,
-    }
-}
-
-#[allow(dead_code)]
-async fn maybe_capture_learning_episode_seed(
-    conn: &right_db::Connection,
-    ctx: &WorkerContext,
-    chat_id: i64,
-    eff_thread_id: i64,
-    source_invocation_id: Option<&str>,
-    accepted_signal: Option<&(NudgeSignalKind, serde_json::Value)>,
-) {
-    let Some(source_invocation_id) = source_invocation_id else {
-        return;
-    };
-
-    let (tool_iters_since_review, creation_review_interval) =
-        match load_learning_episode_effort_snapshot(conn, &ctx.agent_name).await {
-            Ok(snapshot) => snapshot,
-            Err(e) => {
-                tracing::warn!(
-                    agent = %ctx.agent_name,
-                    invocation_id = %source_invocation_id,
-                    "learning episode effort snapshot load failed: {e:#}"
-                );
-                return;
-            }
-        };
-
-    let Some(seed_trigger_kind) = foreground_episode_seed_trigger_kind(
-        accepted_signal,
-        tool_iters_since_review,
-        creation_review_interval,
-    ) else {
-        return;
-    };
-
-    let seed_ref = format!("inv:{source_invocation_id}");
-    let runtime = crate::learning_episode::LearningEpisodeRuntime::new(
-        ctx.agent_dir.clone(),
-        ctx.agent_db_dir.clone(),
-        ctx.agent_name.clone(),
-        crate::snapshot_model(&ctx.model),
-        ctx.ssh_config_path.clone(),
-        ctx.resolved_sandbox.clone(),
-        Arc::clone(&ctx.debug),
-        ctx.learning.clone(),
-        Some(Arc::clone(&ctx.learning_drain_scheduler)),
-        None,
-    );
-    if let Err(e) = runtime.capture_completion_seed(
-        conn,
-        right_agent::learning_episodes::LearningEpisodeKind::ForegroundThread,
-        seed_trigger_kind,
-        &seed_ref,
-        Some(chat_id),
-        Some(eff_thread_id),
-    ) {
-        tracing::warn!(
-            agent = %ctx.agent_name,
-            invocation_id = %source_invocation_id,
-            "learning episode seed capture failed: {e:#}"
-        );
-    }
-}
-
-/// Clears the `skill_nudge_state.review_running` flag without inserting a
-/// `skill_review_reports` row. Called when a background review is aborted by
-/// bot shutdown — recording a "failed" report for a deliberate cancellation
-/// would be misleading, but the running gate must still be released or the
-/// next review path would refuse to start.
-///
-/// Uses `clear_review_running` (not `mark_review_finished`) so the timestamp
-/// and status from any prior real review remain intact: no review
-/// actually finished here, only got interrupted.
-async fn clear_background_review_gate_on_shutdown(agent_db_dir: &Path, agent_name: &str) {
-    let conn = match right_db::open_connection(agent_db_dir, false).await {
-        Ok(conn) => conn,
-        Err(e) => {
-            tracing::warn!(
-                agent = %agent_name,
-                "learned-skill shutdown gate-clear db reopen failed: {:#}",
-                e
-            );
-            return;
-        }
-    };
-    if let Err(e) = clear_review_running(&conn, agent_name).await {
-        tracing::warn!(
-            agent = %agent_name,
-            "learned-skill shutdown gate-clear failed: {:#}",
-            e
-        );
-    }
-}
-
-// `agent_dir` is the host-side agent root: `load_auth_token` opens its
-// `data.db` to fetch the OAuth token, matching `cc::invocation::build_claude_command`.
-async fn build_background_review_claude_command(
-    args: &[String],
-    agent_dir: &Path,
-    ssh_config_path: Option<&Path>,
-    resolved_sandbox: Option<&str>,
-) -> Result<tokio::process::Command, BackgroundReviewFailure> {
-    if let Some(ssh_config) = ssh_config_path {
-        let sandbox_name = resolved_sandbox.ok_or_else(|| {
-            BackgroundReviewFailure::new("sandbox name required for SSH-based background review")
-        })?;
-        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sandbox_name);
-        let mut script = String::new();
-        if let Some(token) = crate::login::load_auth_token(agent_dir).await {
-            let escaped = token.replace('\'', "'\\''");
-            script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
-        }
-        script.push_str(crate::cc::sandbox_env::INLINE_FALLBACK_SCRIPT);
-        let quoted =
-            right_openshell::openshell::quote_ssh_remote_args(args.iter().map(String::as_str))
-                .map_err(|e| BackgroundReviewFailure::new(format!("quote claude args: {e:#}")))?;
-        script.push_str(&quoted);
-
-        let mut cmd = tokio::process::Command::new("ssh");
-        cmd.arg("-F").arg(ssh_config);
-        cmd.arg("-o").arg("ControlMaster=no");
-        cmd.arg("-o").arg("ControlPath=none");
-        cmd.arg(&ssh_host);
-        cmd.arg("--");
-        cmd.arg(script);
-        Ok(cmd)
-    } else {
-        Ok(crate::cc::invocation::build_claude_command(args, agent_dir, None, None).await)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_background_learned_skill_review(
-    agent_name: &str,
-    agent_dir: &Path,
-    agent_db_dir: &Path,
-    source_invocation_id: String,
-    root_session_id: String,
-    chat_id: i64,
-    thread_id: i64,
-    trigger_kind: right_agent::learned_skills::ReviewTriggerKind,
-    model: Option<String>,
-    ssh_config_path: Option<PathBuf>,
-    resolved_sandbox: Option<String>,
-    debug: Arc<AtomicBool>,
-    accepted_signal_json: Option<String>,
-    tool_iters_since_review: i64,
-    turns_since_review: i64,
-    skill_issue_hints_since_review: i64,
-) -> Result<(SkillReviewReport, Option<String>), BackgroundReviewFailure> {
-    let learned_skills = if ssh_config_path.is_some() {
-        collect_sandbox_review_skill_index(resolved_sandbox.as_deref())
-            .await
-            .map_err(|e| {
-                BackgroundReviewFailure::new(format!("collect sandbox learned skills: {e:#}"))
-            })?
-    } else {
-        crate::learning_review::collect_host_rightx_skill_index(agent_dir).map_err(|e| {
-            BackgroundReviewFailure::new(format!("collect host learned skills: {e:#}"))
-        })?
-    };
-    let mut event_timeline = crate::learning_review::collect_stream_event_timeline(
-        agent_dir,
-        &root_session_id,
-        BACKGROUND_REVIEW_TIMELINE_MAX_EVENTS,
-    )
-    .map_err(|e| BackgroundReviewFailure::new(format!("collect review event timeline: {e:#}")))?;
-    if event_timeline.is_empty() {
-        event_timeline.push(format!(
-            "event-1 foreground invocation {source_invocation_id} completed; stream log unavailable or empty"
-        ));
-    }
-    let learning_events = load_review_learning_events(agent_db_dir, &source_invocation_id)
-        .await
-        .map_err(|e| BackgroundReviewFailure::new(format!("load review learning events: {e:#}")))?;
-    let episode_execution_events = event_timeline
-        .into_iter()
-        .enumerate()
-        .map(
-            |(idx, event)| crate::learning_review::ReviewExecutionEvent {
-                ref_id: format!("event-{}", idx + 1),
-                event_kind: right_agent::learning_episodes::ExecutionEventKind::StreamEvent,
-                trust_label: right_agent::learning_episodes::TrustLabel::Primary,
-                content: event,
-            },
-        )
-        .collect();
-    let bundle = crate::learning_review::ReviewBundle {
-        agent_name: agent_name.to_owned(),
-        source_invocation_id: source_invocation_id.clone(),
-        learning_episode_id: None,
-        root_session_id: Some(root_session_id.clone()),
-        trigger_kind: trigger_kind.as_str().to_owned(),
-        accepted_signal_json,
-        tool_iters_since_review,
-        turns_since_review,
-        skill_issue_hints_since_review,
-        episode_messages: Vec::new(),
-        episode_execution_events,
-        learning_events,
-        learned_skills,
-    };
-    let prompt = crate::learning_review::build_review_prompt(&bundle);
-    let invocation = crate::cc::invocation::ClaudeInvocation {
-        mcp_config_path: None,
-        json_schema: Some(crate::learning_review::REVIEW_SCHEMA_JSON.to_owned()),
-        output_format: crate::cc::invocation::OutputFormat::Json,
-        model,
-        max_budget_usd: Some(BACKGROUND_REVIEW_MAX_BUDGET_USD),
-        max_turns: Some(BACKGROUND_REVIEW_MAX_TURNS),
-        resume_session_id: None,
-        new_session_id: None,
-        fork_session: false,
-        allowed_tools: Vec::new(),
-        disallowed_tools: Vec::new(),
-        extra_args: crate::cc::invocation::disable_all_tools_args(),
-        prompt: Some(prompt),
-        debug_flag: Some(debug),
-    };
-    let args = invocation.into_args();
-    let mut cmd = build_background_review_claude_command(
-        &args,
-        agent_dir,
-        ssh_config_path.as_deref(),
-        resolved_sandbox.as_deref(),
-    )
-    .await?;
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    let mut child = right_process::ProcessGroupChild::spawn(cmd).map_err(|e| {
-        BackgroundReviewFailure::new(format!("spawn background review claude: {e:#}"))
-    })?;
-    let output = tokio::time::timeout(
-        Duration::from_secs(BACKGROUND_REVIEW_TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| BackgroundReviewFailure::new("background review claude timed out"))?
-    .map_err(|e| {
-        BackgroundReviewFailure::new(format!("wait for background review claude: {e:#}"))
-    })?;
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let error = format!("background review claude exited {:?}", output.status.code());
-        return Err(BackgroundReviewFailure::with_output(
-            error,
-            Some(stdout),
-            Some(stderr),
-        ));
-    }
-    let stdout = match String::from_utf8(output.stdout) {
-        Ok(stdout) => stdout,
-        Err(e) => {
-            let stdout = String::from_utf8_lossy(e.as_bytes()).into_owned();
-            return Err(BackgroundReviewFailure::with_output(
-                format!("background review stdout utf8: {e:#}"),
-                Some(stdout),
-                None,
-            ));
-        }
-    };
-    let review_output = match crate::learning_review::parse_review_process_stdout(&stdout) {
-        Ok(output) => output,
-        Err(e) => {
-            return Err(BackgroundReviewFailure::with_output(e, Some(stdout), None));
-        }
-    };
-    let notice = review_output.should_notify_user().then(|| {
-        review_output.user_notice.clone().unwrap_or_else(|| {
-            "I found a reusable workflow candidate and recorded it for review.".to_owned()
-        })
-    });
-    if let Some(breakdown) = crate::cc::stream::parse_usage_full(&stdout) {
-        match right_db::open_connection(agent_db_dir, false).await {
-            Ok(conn) => {
-                if let Err(e) = right_agent::usage::insert::insert_learning_skill_review(
-                    &conn, &breakdown, chat_id, thread_id,
-                )
-                .await
-                {
-                    tracing::warn!(
-                        agent = %agent_name,
-                        "insert_learning_skill_review failed: {e:#}"
-                    );
-                }
-            }
-            Err(e) => tracing::warn!(
-                agent = %agent_name,
-                "insert_learning_skill_review: open db failed: {e:#}"
-            ),
-        }
-    }
-    let report = review_output.to_report(crate::learning_review::ReviewReportContext {
-        agent_name: agent_name.to_owned(),
-        source_invocation_id,
-        learning_episode_id: None,
-        root_session_id: Some(root_session_id),
-        chat_id: Some(chat_id),
-        thread_id: Some(thread_id),
-        trigger_kind,
-        telegram_notified: false,
-    });
-    Ok((report, notice))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn record_successful_background_review<F, Fut, E>(
-    agent_db_dir: &Path,
-    agent_dir: &Path,
-    agent_name: &str,
-    mut report: SkillReviewReport,
-    notice: Option<String>,
-    failure_threshold: u32,
-    cooldown_minutes: u32,
-    alert_bot: Arc<super::BotType>,
-    send_notice: F,
-) where
-    F: FnOnce(String) -> Fut,
-    Fut: std::future::Future<Output = Result<(), E>>,
-    E: std::fmt::Display,
-{
-    let conn = match right_db::open_connection(agent_db_dir, false).await {
-        Ok(conn) => conn,
-        Err(e) => {
-            tracing::warn!(
-                agent = %agent_name,
-                "learned-skill review db reopen failed: {e:#}"
-            );
-            return;
-        }
-    };
-    report.telegram_notified = if let Some(notice) = notice {
-        match send_notice(notice).await {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!(
-                    agent = %agent_name,
-                    "learned-skill review Telegram notice failed: {e}"
-                );
-                false
-            }
-        }
-    } else {
-        false
-    };
-
-    let trigger_kind = report.trigger_kind;
-    let status = report.status;
-    if let Err(e) = insert_skill_review_report(&conn, &report).await {
-        tracing::warn!(
-            agent = %agent_name,
-            source_invocation_id = %report.source_invocation_id,
-            "learned-skill review report insert failed: {e:#}"
-        );
-    }
-    if status == ReviewStatus::Failed {
-        let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        match right_agent::learned_skills::record_review_failure(
-            &conn,
-            agent_name,
-            &now_utc,
-            failure_threshold,
-            cooldown_minutes,
-        )
-        .await
-        {
-            Ok((_count, opened)) => {
-                if opened {
-                    crate::telegram::learning_alerts::spawn_circuit_open_alert(
-                        Arc::clone(&alert_bot),
-                        agent_db_dir.to_owned(),
-                        agent_name.to_owned(),
-                        agent_dir.to_owned(),
-                        "reviewer returned status=failed".to_owned(),
-                        failure_threshold,
-                        cooldown_minutes,
-                    );
-                }
-            }
-            Err(e) => tracing::warn!(
-                agent = %agent_name,
-                "learned-skill review record_review_failure failed: {e:#}"
-            ),
-        }
-    } else if let Err(e) = mark_review_finished(&conn, agent_name, trigger_kind, status, true).await
-    {
-        tracing::warn!(
-            agent = %agent_name,
-            "learned-skill review finish mark failed: {e:#}"
-        );
-    }
-    tracing::info!(
-        agent = %agent_name,
-        source_invocation_id = %report.source_invocation_id,
-        trigger_kind = %report.trigger_kind.as_str(),
-        status = %report.status.as_str(),
-        confidence = %report.confidence.as_str(),
-        candidate_skill_name = report.candidate_skill_name.as_deref().unwrap_or(""),
-        telegram_notified = report.telegram_notified,
-        "learned-skill background review completed"
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn record_failed_background_review(
-    agent_db_dir: &Path,
-    agent_dir: &Path,
-    agent_name: String,
-    source_invocation_id: String,
-    root_session_id: Option<String>,
-    chat_id: Option<i64>,
-    thread_id: Option<i64>,
-    trigger_kind: right_agent::learned_skills::ReviewTriggerKind,
-    failure_threshold: u32,
-    cooldown_minutes: u32,
-    alert_bot: Arc<super::BotType>,
-    error: String,
-    stdout: Option<String>,
-    stderr: Option<String>,
-) {
-    let conn = match right_db::open_connection(agent_db_dir, false).await {
-        Ok(conn) => conn,
-        Err(e) => {
-            tracing::warn!(
-                agent = %agent_name,
-                "learned-skill failed-review db reopen failed: {e:#}"
-            );
-            return;
-        }
-    };
-    let report = SkillReviewReport {
-        agent_name: agent_name.clone(),
-        source_invocation_id,
-        learning_episode_id: None,
-        root_session_id,
-        chat_id,
-        thread_id,
-        trigger_kind,
-        status: ReviewStatus::Failed,
-        confidence: right_agent::learned_skills::ReviewConfidence::Low,
-        candidate_skill_name: None,
-        candidate_summary: None,
-        evidence_refs: Vec::new(),
-        review_output_json: review_failure_output_json(
-            &error,
-            stdout.as_deref(),
-            stderr.as_deref(),
-        ),
-        telegram_notified: false,
-    };
-    if let Err(e) = insert_skill_review_report(&conn, &report).await {
-        tracing::warn!(
-            agent = %agent_name,
-            source_invocation_id = %report.source_invocation_id,
-            "learned-skill failed review report insert failed: {e:#}"
-        );
-    }
-    let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    match right_agent::learned_skills::record_review_failure(
-        &conn,
-        &agent_name,
-        &now_utc,
-        failure_threshold,
-        cooldown_minutes,
-    )
-    .await
-    {
-        Ok((_count, opened)) => {
-            if opened {
-                crate::telegram::learning_alerts::spawn_circuit_open_alert(
-                    Arc::clone(&alert_bot),
-                    agent_db_dir.to_owned(),
-                    agent_name.clone(),
-                    agent_dir.to_owned(),
-                    error.clone(),
-                    failure_threshold,
-                    cooldown_minutes,
-                );
-            }
-        }
-        Err(e) => tracing::warn!(
-            agent = %agent_name,
-            "learned-skill failed review record_review_failure failed: {e:#}"
-        ),
-    }
-}
-
-async fn load_review_learning_events(
-    agent_db_dir: &Path,
-    source_invocation_id: &str,
-) -> anyhow::Result<Vec<String>> {
-    let conn = right_db::open_connection(agent_db_dir, false).await?;
-    let mut stmt = conn.prepare(
-        "SELECT action, skill_name, phase, COALESCE(status, ''), COALESCE(summary, '') \
-         FROM skill_learning_events WHERE invocation_id = ?1 ORDER BY id LIMIT ?2",
-    )?;
-    let rows = stmt
-        .query_map(
-            right_db::params![
-                source_invocation_id,
-                BACKGROUND_REVIEW_LEARNING_EVENTS_LIMIT
-            ],
-            |row| {
-                let action: String = row.get(0)?;
-                let skill_name: String = row.get(1)?;
-                let phase: String = row.get(2)?;
-                let status: String = row.get(3)?;
-                let summary: String = row.get(4)?;
-                Ok(format!(
-                    "{phase} {action} {skill_name} status={status} summary={summary}"
-                ))
-            },
-        )
-        .await?;
-    let mut events = Vec::new();
-    for row in rows {
-        events.push(row?);
-    }
-    Ok(events)
-}
-
-pub(crate) async fn collect_sandbox_review_skill_index(
-    sandbox_name: Option<&str>,
-) -> anyhow::Result<Vec<crate::learning_review::LearnedSkillSummary>> {
-    let sandbox_name = sandbox_name.ok_or_else(|| anyhow::anyhow!("sandbox name unresolved"))?;
-    let mtls_dir = match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-        status => {
-            return Err(anyhow::anyhow!(
-                "OpenShell not ready for review skill index: {status:?}"
-            ));
-        }
-    };
-    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox_name)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-    let command = crate::learning_review::sandbox_skill_index_command();
-    let (stdout, exit_code) = right_openshell::openshell::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
-        &command,
-        right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-    if exit_code != 0 {
-        return Err(anyhow::anyhow!(
-            "sandbox skill index command exited {exit_code}: {stdout}"
-        ));
-    }
-    Ok(crate::learning_review::parse_sandbox_skill_index_stdout(
-        &stdout,
-    ))
 }
 
 /// Invoke `claude -p` and parse the reply tool call from its JSON output.
@@ -3883,7 +3068,6 @@ async fn invoke_cc(
             session_uuid,
             turn_id,
             is_first_call,
-            reply_has_accepted_signal: false,
             prompt_mode,
             usage: crate::cc::stream::StreamUsage::default(),
             wall_elapsed_ms: 0,
@@ -4087,20 +3271,6 @@ async fn invoke_cc(
     ui_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut total_assistant_events: u32 = 0;
     let tg_chat_id = ctx.chat_id;
-    let learning_invocation_id = active_progress
-        .as_ref()
-        .map(|active| active.invocation_id.clone());
-    let execution_event_scope = crate::execution_events::ExecutionEventScope {
-        agent_name: &ctx.agent_name,
-        root_session_id: Some(&session_uuid),
-        invocation_id: learning_invocation_id.as_deref(),
-        turn_id: Some(i64::try_from(turn_id).unwrap_or(i64::MAX)),
-        async_run_id: None,
-        cron_job_name: None,
-        cron_run_id: None,
-    };
-    let mut execution_event_seq = 0_i64;
-
     let initial_expanded = read_expanded();
     if let Some(msg_id) = send_thinking_anchor(
         ctx,
@@ -4131,25 +3301,6 @@ async fn invoke_cc(
                             use std::io::Write;
                             let _ = writeln!(log, "{line}");
                         }
-                        if let Err(e) = crate::execution_events::persist_stream_line(
-                            &conn,
-                            &execution_event_scope,
-                            execution_event_seq,
-                            &line,
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                chat_id = log_ctx.chat_id,
-                                eff_thread_id = log_ctx.eff_thread_id,
-                                key = ?log_ctx.key(),
-                                session_uuid = %log_ctx.session_uuid,
-                                turn_id = log_ctx.turn_id,
-                                seq = execution_event_seq,
-                                "execution event persist failed: {e:#}"
-                            );
-                        }
-                        execution_event_seq += 1;
 
                         if api_key_source.is_none()
                             && let Some(src) = crate::cc::stream::parse_api_key_source(&line)
@@ -4589,7 +3740,6 @@ async fn invoke_cc(
             session_uuid,
             turn_id,
             is_first_call,
-            reply_has_accepted_signal: false,
             prompt_mode,
             usage: usage.clone(),
             wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
@@ -4676,7 +3826,6 @@ async fn invoke_cc(
                         session_uuid,
                         turn_id,
                         is_first_call,
-                        reply_has_accepted_signal: false,
                         prompt_mode,
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
@@ -4688,7 +3837,6 @@ async fn invoke_cc(
                         session_uuid,
                         turn_id,
                         is_first_call,
-                        reply_has_accepted_signal: false,
                         prompt_mode,
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
@@ -4721,7 +3869,6 @@ async fn invoke_cc(
                         session_uuid,
                         turn_id,
                         is_first_call,
-                        reply_has_accepted_signal: false,
                         prompt_mode,
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
@@ -4732,7 +3879,6 @@ async fn invoke_cc(
                         session_uuid,
                         turn_id,
                         is_first_call,
-                        reply_has_accepted_signal: false,
                         prompt_mode,
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
@@ -4812,7 +3958,6 @@ async fn invoke_cc(
                 session_uuid,
                 turn_id,
                 is_first_call,
-                reply_has_accepted_signal: false,
                 prompt_mode,
                 usage,
                 wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
@@ -5038,333 +4183,6 @@ mod tests {
         assert!(stop_tokens.get(&key).is_none());
         assert_eq!(consume_bg_request(&bg_requests, key, 7), None);
         assert!(bg_handoff_gates.get(&key).is_none());
-    }
-
-    #[tokio::test]
-    async fn record_failed_background_review_persists_failure_and_finishes_gate() {
-        let temp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
-        right_agent::learned_skills::ensure_nudge_state(&conn, "right")
-            .await
-            .unwrap();
-        conn.execute(
-            "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name = 'right'",
-            [],
-        )
-        .await
-        .unwrap();
-        drop(conn);
-
-        record_failed_background_review(
-            temp.path(),
-            temp.path(),
-            "right".to_owned(),
-            "inv-1".to_owned(),
-            Some("session-1".to_owned()),
-            Some(10),
-            Some(20),
-            right_agent::learned_skills::ReviewTriggerKind::SkillIssueSignal,
-            3,
-            60,
-            Arc::new(crate::telegram::bot::build_bot("test".to_owned())),
-            format!(
-                "background review claude exited Some(1): stderr-head{}STDERR-TAIL",
-                "z".repeat(9000)
-            ),
-            Some(format!("stdout-head{}STDOUT-TAIL", "x".repeat(9000))),
-            Some(format!("stderr-head{}STDERR-TAIL", "y".repeat(9000))),
-        )
-        .await;
-
-        let conn = right_db::open_connection(temp.path(), false).await.unwrap();
-        let report: (String, String, String, String, String) = conn
-            .query_row(
-                "SELECT trigger_kind, status, confidence, source_invocation_id, review_output_json \
-                 FROM skill_review_reports WHERE agent_name = 'right'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .await
-            .unwrap();
-        assert_eq!(report.0, "skill_issue_signal");
-        assert_eq!(report.1, "failed");
-        assert_eq!(report.2, "low");
-        assert_eq!(report.3, "inv-1");
-        let output_json: serde_json::Value = serde_json::from_str(&report.4).unwrap();
-        assert!(
-            output_json["error"]
-                .as_str()
-                .unwrap()
-                .starts_with("background review claude exited Some(1): stderr-head")
-        );
-        assert!(
-            !output_json["error"]
-                .as_str()
-                .unwrap()
-                .contains("STDERR-TAIL")
-        );
-        assert!(
-            output_json["stdout_excerpt"]
-                .as_str()
-                .unwrap()
-                .starts_with("stdout-head")
-        );
-        assert!(
-            !output_json["stdout_excerpt"]
-                .as_str()
-                .unwrap()
-                .contains("STDOUT-TAIL")
-        );
-        assert!(
-            output_json["stderr_excerpt"]
-                .as_str()
-                .unwrap()
-                .starts_with("stderr-head")
-        );
-        assert!(
-            !output_json["stderr_excerpt"]
-                .as_str()
-                .unwrap()
-                .contains("STDERR-TAIL")
-        );
-
-        let state: (i64, i64) = conn
-            .query_row(
-                "SELECT review_running, consecutive_review_failures \
-                 FROM skill_nudge_state WHERE agent_name = 'right'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .await
-            .unwrap();
-        // record_review_failure clears the running gate and increments the
-        // failure counter; it intentionally does NOT update last_review_status.
-        assert_eq!(state, (0, 1));
-    }
-
-    #[tokio::test]
-    async fn record_successful_background_review_persists_notified_false_when_send_fails() {
-        let temp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
-        right_agent::learned_skills::ensure_nudge_state(&conn, "right")
-            .await
-            .unwrap();
-        conn.execute(
-            "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name = 'right'",
-            [],
-        )
-        .await
-        .unwrap();
-        drop(conn);
-
-        let report = SkillReviewReport {
-            agent_name: "right".to_owned(),
-            source_invocation_id: "inv-1".to_owned(),
-            learning_episode_id: None,
-            root_session_id: Some("session-1".to_owned()),
-            chat_id: Some(10),
-            thread_id: Some(20),
-            trigger_kind: right_agent::learned_skills::ReviewTriggerKind::LearningSignal,
-            status: ReviewStatus::CreateCandidate,
-            confidence: right_agent::learned_skills::ReviewConfidence::High,
-            candidate_skill_name: Some("rightx-demo".to_owned()),
-            candidate_summary: Some("Demo candidate".to_owned()),
-            evidence_refs: vec!["event-1".to_owned()],
-            review_output_json: serde_json::json!({
-                "status": "create_candidate",
-                "confidence": "high",
-                "candidate_skill_name": "rightx-demo",
-                "candidate_summary": "Demo candidate",
-                "evidence_refs": ["event-1"],
-                "user_notice": "notice"
-            }),
-            telegram_notified: true,
-        };
-
-        record_successful_background_review(
-            temp.path(),
-            temp.path(),
-            "right",
-            report,
-            Some("notice".to_owned()),
-            3,
-            60,
-            Arc::new(crate::telegram::bot::build_bot("test".to_owned())),
-            |_notice| async { Err("send failed") },
-        )
-        .await;
-
-        let conn = right_db::open_connection(temp.path(), false).await.unwrap();
-        let row: (i64, i64, String) = conn
-            .query_row(
-                "SELECT r.telegram_notified, s.review_running, s.last_review_status \
-                 FROM skill_review_reports r \
-                 JOIN skill_nudge_state s ON s.agent_name = r.agent_name \
-                 WHERE r.agent_name = 'right'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .await
-            .unwrap();
-        assert_eq!(row, (0, 0, "create_candidate".to_owned()));
-    }
-
-    #[tokio::test]
-    async fn record_successful_background_review_sends_notice_and_persists_notified_true() {
-        let temp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
-        right_agent::learned_skills::ensure_nudge_state(&conn, "right")
-            .await
-            .unwrap();
-        conn.execute(
-            "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name = 'right'",
-            [],
-        )
-        .await
-        .unwrap();
-        drop(conn);
-
-        let report = SkillReviewReport {
-            agent_name: "right".to_owned(),
-            source_invocation_id: "inv-1".to_owned(),
-            learning_episode_id: None,
-            root_session_id: Some("session-1".to_owned()),
-            chat_id: Some(10),
-            thread_id: Some(20),
-            trigger_kind: right_agent::learned_skills::ReviewTriggerKind::LearningSignal,
-            status: ReviewStatus::CreateCandidate,
-            confidence: right_agent::learned_skills::ReviewConfidence::High,
-            candidate_skill_name: Some("rightx-demo".to_owned()),
-            candidate_summary: Some("Demo candidate".to_owned()),
-            evidence_refs: vec!["event-1".to_owned()],
-            review_output_json: serde_json::json!({
-                "status": "create_candidate",
-                "confidence": "high",
-                "candidate_skill_name": "rightx-demo",
-                "candidate_summary": "Demo candidate",
-                "evidence_refs": ["event-1"],
-                "user_notice": "notice"
-            }),
-            telegram_notified: false,
-        };
-
-        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let sent_for_closure = std::sync::Arc::clone(&sent);
-
-        record_successful_background_review(
-            temp.path(),
-            temp.path(),
-            "right",
-            report,
-            Some("notice".to_owned()),
-            3,
-            60,
-            Arc::new(crate::telegram::bot::build_bot("test".to_owned())),
-            move |notice| {
-                let sent_for_future = std::sync::Arc::clone(&sent_for_closure);
-                async move {
-                    sent_for_future.lock().unwrap().push(notice);
-                    Ok::<(), &'static str>(())
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(sent.lock().unwrap().as_slice(), ["notice"]);
-
-        let conn = right_db::open_connection(temp.path(), false).await.unwrap();
-        let row: (i64, i64, String) = conn
-            .query_row(
-                "SELECT r.telegram_notified, s.review_running, s.last_review_status \
-                 FROM skill_review_reports r \
-                 JOIN skill_nudge_state s ON s.agent_name = r.agent_name \
-                 WHERE r.agent_name = 'right'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(row, (1, 0, "create_candidate".to_owned()));
-    }
-
-    #[tokio::test]
-    async fn background_review_sandbox_command_disables_ssh_controlmaster() {
-        let temp = tempfile::tempdir().unwrap();
-        let args = vec![
-            "claude".to_owned(),
-            "-p".to_owned(),
-            "--".to_owned(),
-            "review prompt".to_owned(),
-        ];
-
-        let cmd = build_background_review_claude_command(
-            &args,
-            temp.path(),
-            Some(Path::new("ssh.config")),
-            Some("right-demo"),
-        )
-        .await
-        .expect("sandbox name provided");
-        let std_cmd = cmd.as_std();
-        let ssh_args: Vec<String> = std_cmd
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-
-        assert_eq!(std_cmd.get_program(), "ssh");
-        assert_eq!(ssh_args[0], "-F");
-        assert_eq!(ssh_args[1], "ssh.config");
-        assert_eq!(ssh_args[2], "-o");
-        assert_eq!(ssh_args[3], "ControlMaster=no");
-        assert_eq!(ssh_args[4], "-o");
-        assert_eq!(ssh_args[5], "ControlPath=none");
-        assert_eq!(ssh_args[6], "openshell-right-demo");
-        assert_eq!(ssh_args[7], "--");
-        assert_eq!(ssh_args[8..].len(), 1);
-        assert!(ssh_args[8].contains("claude"));
-        assert!(!ssh_args[8].contains("--resume"));
-        assert!(!ssh_args[8].contains("--fork-session"));
-    }
-
-    #[tokio::test]
-    async fn background_review_sandbox_command_sources_user_local_env() {
-        let temp = tempfile::tempdir().unwrap();
-        let args = vec![
-            "claude".to_owned(),
-            "-p".to_owned(),
-            "--".to_owned(),
-            "review prompt".to_owned(),
-        ];
-
-        let cmd = build_background_review_claude_command(
-            &args,
-            temp.path(),
-            Some(Path::new("ssh.config")),
-            Some("right-demo"),
-        )
-        .await
-        .expect("sandbox name provided");
-        let std_cmd = cmd.as_std();
-        let ssh_args: Vec<String> = std_cmd
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-
-        let script = &ssh_args[8];
-        let env_pos = script
-            .find("/sandbox/.right/env.sh")
-            .expect("background review script must reference managed env");
-        let claude_pos = script
-            .find("claude")
-            .expect("background review script must invoke claude");
-        assert!(
-            env_pos < claude_pos,
-            "env setup must precede claude invocation"
-        );
-        assert!(script.contains("NPM_CONFIG_PREFIX=/sandbox/.local"));
-        assert!(script.contains("NPM_CONFIG_CACHE=/sandbox/.npm"));
-        assert!(script.contains("/sandbox/.local/bin"));
     }
 
     #[tokio::test]
@@ -5917,24 +4735,6 @@ esac
         assert!(should_trigger_mcp_repair_from_init(bad));
         assert!(!should_trigger_mcp_repair_from_init(good));
         assert!(!should_trigger_mcp_repair_from_init(other));
-    }
-
-    #[tokio::test]
-    async fn foreground_seed_trigger_derives_without_review_gate() {
-        let accepted_learning = (
-            NudgeSignalKind::Learning,
-            serde_json::json!({"kind": "create_candidate"}),
-        );
-
-        assert_eq!(
-            foreground_episode_seed_trigger_kind(Some(&accepted_learning), 0, 0),
-            Some(right_agent::learning_episodes::EpisodeSeedTriggerKind::LearningSignal)
-        );
-        assert_eq!(
-            foreground_episode_seed_trigger_kind(None, 15, 10),
-            Some(right_agent::learning_episodes::EpisodeSeedTriggerKind::EffortThreshold)
-        );
-        assert_eq!(foreground_episode_seed_trigger_kind(None, 9, 10), None);
     }
 
     #[tokio::test]

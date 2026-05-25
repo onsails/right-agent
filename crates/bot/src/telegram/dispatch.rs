@@ -163,7 +163,6 @@ pub(crate) async fn run_telegram<L>(
     bg_requests: super::BgRequests,
     stop_tokens: super::StopTokens,
     progress_state: super::progress::ProgressState,
-    learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
     update_listener: L,
 ) -> miette::Result<()>
 where
@@ -221,7 +220,6 @@ where
         debug,
         stt,
         learning,
-        learning_drain_scheduler,
         claude_health,
         shutdown: worker_shutdown.clone(),
     });
@@ -691,24 +689,6 @@ mod tests {
         let internal_api = Arc::new(InternalApi(Arc::new(InternalClient::new(
             "/tmp/smoke.sock",
         ))));
-        let smoke_drain_runtime = crate::learning_episode::LearningEpisodeRuntime::new(
-            PathBuf::from("/tmp/smoke"),
-            PathBuf::from("/tmp/smoke"),
-            "smoke".to_owned(),
-            None,
-            None,
-            None,
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            right_agent::agent::types::LearningConfig::default(),
-            None,
-            None,
-        );
-        let (smoke_drain_scheduler, _smoke_drain_handle) =
-            crate::learning_episode::DrainScheduler::spawn(
-                smoke_drain_runtime,
-                std::time::Duration::from_secs(1),
-                CancellationToken::new(),
-            );
         let settings = Arc::new(AgentSettings {
             show_thinking: false,
             model: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
@@ -719,7 +699,6 @@ mod tests {
             debug: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             stt: None,
             learning: right_agent::agent::types::LearningConfig::default(),
-            learning_drain_scheduler: smoke_drain_scheduler,
             claude_health: crate::keepalive::ClaudeHealth::new(
                 "smoke".to_owned(),
                 PathBuf::from("/tmp/smoke"),

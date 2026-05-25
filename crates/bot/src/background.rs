@@ -48,8 +48,6 @@ pub(crate) async fn spawn_background_continuation(
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     _session_guard: tokio::sync::OwnedMutexGuard<()>,
     debug: Arc<std::sync::atomic::AtomicBool>,
-    learning: right_agent::agent::types::LearningConfig,
-    learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
 ) -> HandoffStatus {
     let log_path = bg_log_path(&agent_dir, &request.run_id);
     if let Some(parent) = log_path.parent()
@@ -193,12 +191,10 @@ pub(crate) async fn spawn_background_continuation(
         ssh_config_path,
         resolved_sandbox,
         debug,
-        learning,
         inherited_model,
         child,
         reader_handle,
         stderr_handle,
-        learning_drain_scheduler,
     ));
     HandoffStatus::Spawned
 }
@@ -347,26 +343,7 @@ async fn read_background_stdout(
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut collected = Vec::new();
     let mut saw_init = false;
-    let conn = match right_db::open_connection(&agent_dir, false).await {
-        Ok(conn) => Some(conn),
-        Err(e) => {
-            tracing::warn!(
-                run_id = %run_id,
-                "failed to open DB for background execution events: {e:#}"
-            );
-            None
-        }
-    };
-    let execution_event_scope = crate::execution_events::ExecutionEventScope {
-        agent_name: &agent_name,
-        root_session_id: Some(&run_id),
-        invocation_id: None,
-        turn_id: None,
-        async_run_id: Some(&run_id),
-        cron_job_name: None,
-        cron_run_id: None,
-    };
-    let mut execution_event_seq = 0_i64;
+    let _ = (&agent_dir, &agent_name);
 
     loop {
         let line = match lines.next_line().await {
@@ -382,23 +359,6 @@ async fn read_background_stdout(
             send_init_failure(&mut init_tx, &reason);
             return Err(reason);
         }
-        if let Some(conn) = conn.as_ref()
-            && let Err(e) = crate::execution_events::persist_stream_line(
-                conn,
-                &execution_event_scope,
-                execution_event_seq,
-                &line,
-            )
-            .await
-        {
-            tracing::warn!(
-                run_id = %run_id,
-                seq = execution_event_seq,
-                "execution event persist failed: {e:#}"
-            );
-        }
-        execution_event_seq += 1;
-
         if !saw_init && is_handoff_init_for_run(&line, &run_id) {
             saw_init = true;
             if let Some(tx) = init_tx.take() {
@@ -540,12 +500,10 @@ async fn complete_background_run(
     ssh_config_path: Option<PathBuf>,
     resolved_sandbox: Option<String>,
     debug: Arc<std::sync::atomic::AtomicBool>,
-    learning: right_agent::agent::types::LearningConfig,
     inherited_model: Option<String>,
     mut child: right_process::ProcessGroupChild,
     reader_handle: JoinHandle<Result<Vec<String>, String>>,
     stderr_handle: Option<JoinHandle<Result<String, String>>>,
-    learning_drain_scheduler: Arc<crate::learning_episode::DrainScheduler>,
 ) {
     let lines = match reader_handle.await {
         Ok(Ok(lines)) => lines,
@@ -622,11 +580,9 @@ async fn complete_background_run(
                 ssh_config_path.as_deref(),
                 resolved_sandbox.as_deref(),
                 &debug,
-                &learning,
                 inherited_model.clone(),
                 request.target_chat_id,
                 request.target_thread_id,
-                &learning_drain_scheduler,
             )
             .await
             {
@@ -681,11 +637,9 @@ async fn persist_successful_background_output(
     ssh_config_path: Option<&Path>,
     resolved_sandbox: Option<&str>,
     debug: &Arc<std::sync::atomic::AtomicBool>,
-    learning: &right_agent::agent::types::LearningConfig,
     inherited_model: Option<String>,
     target_chat_id: i64,
     target_thread_id: Option<i64>,
-    learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
 ) -> Result<(), String> {
     let notify = output
         .delivery
@@ -719,65 +673,16 @@ async fn persist_successful_background_output(
     tx.commit()
         .await
         .map_err(|e| format!("commit background output: {e:#}"))?;
-    capture_background_completion_seed(
-        &conn,
-        agent_dir,
+    let _ = (
         agent_name,
-        run_id,
         ssh_config_path,
         resolved_sandbox,
         debug,
-        learning,
         inherited_model,
         target_chat_id,
         target_thread_id,
-        learning_drain_scheduler,
     );
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn capture_background_completion_seed(
-    conn: &right_db::Connection,
-    agent_dir: &Path,
-    agent_name: &str,
-    run_id: &str,
-    ssh_config_path: Option<&Path>,
-    resolved_sandbox: Option<&str>,
-    debug: &Arc<std::sync::atomic::AtomicBool>,
-    learning: &right_agent::agent::types::LearningConfig,
-    inherited_model: Option<String>,
-    target_chat_id: i64,
-    target_thread_id: Option<i64>,
-    learning_drain_scheduler: &Arc<crate::learning_episode::DrainScheduler>,
-) {
-    let seed_ref = format!("async:{run_id}");
-    let runtime = crate::learning_episode::LearningEpisodeRuntime::new(
-        agent_dir.to_path_buf(),
-        agent_dir.to_path_buf(),
-        agent_name.to_owned(),
-        inherited_model,
-        ssh_config_path.map(Path::to_path_buf),
-        resolved_sandbox.map(str::to_owned),
-        Arc::clone(debug),
-        learning.clone(),
-        Some(Arc::clone(learning_drain_scheduler)),
-        None,
-    );
-    if let Err(e) = runtime.capture_completion_seed(
-        conn,
-        right_agent::learning_episodes::LearningEpisodeKind::AsyncContinuation,
-        right_agent::learning_episodes::EpisodeSeedTriggerKind::AsyncResult,
-        &seed_ref,
-        Some(target_chat_id),
-        target_thread_id,
-    ) {
-        tracing::warn!(
-            agent = %agent_name,
-            run_id,
-            "background completion learning episode seed capture failed: {e:#}"
-        );
-    }
 }
 
 async fn serialize_notify_delivery_for_host(
