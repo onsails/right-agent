@@ -372,11 +372,11 @@ pub enum MemoryCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Full-text search memories (FTS5 BM25)
+    /// Full-text search memories
     Search {
         /// Agent name
         agent: String,
-        /// FTS5 search query
+        /// Full-text search query
         query: String,
         /// Max entries to show (default: 10)
         #[arg(long, default_value = "10")]
@@ -5317,31 +5317,42 @@ fn cmd_memory_search(
         .prepare(
             "SELECT m.id, m.content, m.tags, m.stored_by, m.created_at \
              FROM memories m \
-             JOIN memories_fts f ON m.id = f.rowid \
-             WHERE memories_fts MATCH ?1 \
+             WHERE m.content MATCH ?1 \
                AND m.deleted_at IS NULL \
-             ORDER BY bm25(memories_fts) \
+             ORDER BY m.created_at DESC, m.id DESC \
              LIMIT ?2 OFFSET ?3",
         )
-        .map_err(|e| miette::miette!(
-            help = "FTS5 syntax: use simple words or phrases. Avoid special chars like * at start.",
-            "search failed: {e:#}"
-        ))?;
+        .map_err(|e| {
+            miette::miette!(
+                help = "Full-text search uses Turso MATCH syntax: use simple words or phrases.",
+                "search failed: {e:#}"
+            )
+        })?;
     // Local SQLite row projection; extracting a named alias is out of scope.
     #[allow(clippy::type_complexity)]
     let entries: Vec<(i64, String, Option<String>, Option<String>, String)> = stmt
         .query_map(right_db::params![query, limit, offset], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })
-        .map_err(|e| miette::miette!(
-            help = "FTS5 syntax: use simple words or phrases. Avoid special chars like * at start.",
-            "search failed: {e:#}"
-        ))?
+        .map_err(|e| {
+            miette::miette!(
+                help = "Full-text search uses Turso MATCH syntax: use simple words or phrases.",
+                "search failed: {e:#}"
+            )
+        })?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| miette::miette!(
-            help = "FTS5 syntax: use simple words or phrases. Avoid special chars like * at start.",
-            "search failed: {e:#}"
-        ))?;
+        .map_err(|e| {
+            miette::miette!(
+                help = "Full-text search uses Turso MATCH syntax: use simple words or phrases.",
+                "search failed: {e:#}"
+            )
+        })?;
 
     if json {
         for (id, content, tags, stored_by, created_at) in &entries {

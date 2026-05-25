@@ -1,6 +1,7 @@
 use crate::{Connection, DbError};
 
 type Result<T> = std::result::Result<T, DbError>;
+const SEARCH_SNIPPET_MAX_CHARS: usize = 180;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationRole {
@@ -86,7 +87,7 @@ pub fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> R
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?
          )
-         ON CONFLICT(platform, chat_id, message_id, role) WHERE message_id IS NOT NULL
+         ON CONFLICT(platform, chat_id, message_id, role)
          DO UPDATE SET
             thread_id = excluded.thread_id,
             sender_user_id = excluded.sender_user_id,
@@ -116,10 +117,10 @@ pub fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> R
 }
 
 // UPSERT, not UPDATE: closes the race where worker turn-start beats the
-// async archive write to the row. The stub carries content='' so FTS5
-// indexes no terms — once the archive INSERT lands, ON CONFLICT DO
-// UPDATE replaces content while OR/COALESCE in archive_message preserves
-// routing fields regardless of which write wins.
+// async archive write to the row. The stub carries content='', which indexes
+// no searchable terms. Once the archive INSERT lands, ON CONFLICT DO UPDATE
+// replaces content while OR/COALESCE in archive_message preserves routing
+// fields regardless of which write wins.
 pub fn mark_routed(
     conn: &Connection,
     platform: &str,
@@ -140,7 +141,7 @@ pub fn mark_routed(
             0, 1, ?, ?,
             'user', ''
          )
-         ON CONFLICT(platform, chat_id, message_id, role) WHERE message_id IS NOT NULL
+         ON CONFLICT(platform, chat_id, message_id, role)
          DO UPDATE SET
             routed_to_agent = 1,
             root_session_id = excluded.root_session_id,
@@ -169,16 +170,15 @@ pub fn search_thread(
         "SELECT
             m.id,
             m.role,
-            snippet(conversation_messages_fts, 0, '[', ']', '...', 12),
+            m.content,
             m.sender_user_id,
             m.sender_name,
             m.created_at,
             m.thread_id,
             m.message_id,
             m.root_session_id
-         FROM conversation_messages_fts
-         JOIN conversation_messages m ON m.id = conversation_messages_fts.rowid
-         WHERE conversation_messages_fts MATCH ?
+         FROM conversation_messages m
+         WHERE m.content MATCH ?
            AND m.platform = 'telegram'
            AND m.chat_id = ?
            AND m.thread_id = ?
@@ -201,16 +201,15 @@ pub fn search_chat(
         "SELECT
             m.id,
             m.role,
-            snippet(conversation_messages_fts, 0, '[', ']', '...', 12),
+            m.content,
             m.sender_user_id,
             m.sender_name,
             m.created_at,
             m.thread_id,
             m.message_id,
             m.root_session_id
-         FROM conversation_messages_fts
-         JOIN conversation_messages m ON m.id = conversation_messages_fts.rowid
-         WHERE conversation_messages_fts MATCH ?
+         FROM conversation_messages m
+         WHERE m.content MATCH ?
            AND m.platform = 'telegram'
            AND m.chat_id = ?
          ORDER BY m.created_at DESC, m.id DESC
@@ -265,10 +264,11 @@ fn normalized_fts_query(query: &str) -> Result<String> {
 }
 
 fn search_result_from_row(row: &crate::row::Row<'_>) -> Result<ConversationSearchResult> {
+    let content: String = row.get(2)?;
     Ok(ConversationSearchResult {
         id: row.get(0)?,
         role: row.get(1)?,
-        snippet: row.get(2)?,
+        snippet: bounded_search_snippet(&content),
         sender_user_id: row.get(3)?,
         sender_name: row.get(4)?,
         created_at: row.get(5)?,
@@ -276,6 +276,21 @@ fn search_result_from_row(row: &crate::row::Row<'_>) -> Result<ConversationSearc
         message_id: row.get(7)?,
         root_session_id: row.get(8)?,
     })
+}
+
+fn bounded_search_snippet(content: &str) -> String {
+    let content = content.trim();
+    let mut chars = content.chars();
+    let snippet = chars
+        .by_ref()
+        .take(SEARCH_SNIPPET_MAX_CHARS)
+        .collect::<String>();
+
+    if chars.next().is_none() {
+        return snippet;
+    }
+
+    format!("{}...", snippet.trim_end())
 }
 
 fn invalid_parameter(message: &str) -> DbError {
