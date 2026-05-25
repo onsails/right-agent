@@ -9,13 +9,10 @@ use right_db::{Connection, params};
 
 use super::ReadModelError;
 
-const SOURCES: [&str; 9] = [
+const SOURCES: [&str; 6] = [
     "interactive",
     "cron",
     "reflection",
-    "learning_selector",
-    "learning_reviewer",
-    "learning_skill_review",
     "learning_prefilter",
     "learning_probe_writer",
     "learning_curator",
@@ -716,7 +713,7 @@ mod tests {
         insert_usage(
             &conn,
             "2026-05-21T01:00:00Z",
-            "learning_selector",
+            "learning_prefilter",
             0.10,
             "sonnet",
         )
@@ -724,7 +721,7 @@ mod tests {
         insert_usage(
             &conn,
             "2026-05-21T02:00:00Z",
-            "learning_reviewer",
+            "learning_probe_writer",
             0.20,
             "sonnet",
         )
@@ -732,7 +729,7 @@ mod tests {
         insert_usage(
             &conn,
             "2026-05-21T03:00:00Z",
-            "learning_skill_review",
+            "learning_curator",
             0.30,
             "sonnet",
         )
@@ -749,16 +746,16 @@ mod tests {
         .unwrap();
         let today = response.windows.iter().find(|w| w.key == "today").unwrap();
         let names: Vec<&str> = today.sources.iter().map(|s| s.source.as_str()).collect();
-        assert!(names.contains(&"learning_selector"));
-        assert!(names.contains(&"learning_reviewer"));
-        assert!(names.contains(&"learning_skill_review"));
+        assert!(names.contains(&"learning_prefilter"));
+        assert!(names.contains(&"learning_probe_writer"));
+        assert!(names.contains(&"learning_curator"));
 
-        let selector = today
+        let prefilter = today
             .sources
             .iter()
-            .find(|s| s.source == "learning_selector")
+            .find(|s| s.source == "learning_prefilter")
             .unwrap();
-        assert!((selector.cost_usd - 0.10).abs() < 1e-9);
+        assert!((prefilter.cost_usd - 0.10).abs() < 1e-9);
     }
 
     #[tokio::test]
