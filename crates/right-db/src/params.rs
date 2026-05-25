@@ -18,6 +18,13 @@ pub trait IntoValue {
     fn into_value(self) -> Result<libsql::Value, DbError>;
 }
 
+#[macro_export]
+macro_rules! params {
+    ($($value:expr),* $(,)?) => {
+        vec![$($crate::params::IntoValue::into_value($value)?),*]
+    };
+}
+
 impl IntoParams for () {
     fn into_params(self) -> Result<Params, DbError> {
         Ok(Params(libsql::params::Params::None))
