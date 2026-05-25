@@ -24,12 +24,9 @@ impl IntoParams for () {
     }
 }
 
-impl<T: IntoValue, const N: usize> IntoParams for [T; N] {
+impl IntoParams for [(); 0] {
     fn into_params(self) -> Result<Params, DbError> {
-        self.into_iter()
-            .map(IntoValue::into_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map(|values| Params(libsql::params::Params::Positional(values)))
+        Ok(Params(libsql::params::Params::None))
     }
 }
 
@@ -71,6 +68,26 @@ impl<A: IntoValue, B: IntoValue, C: IntoValue, D: IntoValue> IntoParams for (A, 
         ])))
     }
 }
+
+macro_rules! array_into_params {
+    ($($len:expr),+ $(,)?) => {
+        $(
+            impl<T: IntoValue> IntoParams for [T; $len] {
+                fn into_params(self) -> Result<Params, DbError> {
+                    self.into_iter()
+                        .map(IntoValue::into_value)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|values| Params(libsql::params::Params::Positional(values)))
+                }
+            }
+        )+
+    };
+}
+
+array_into_params!(
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32,
+);
 
 impl IntoValue for libsql::Value {
     fn into_value(self) -> Result<libsql::Value, DbError> {

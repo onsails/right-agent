@@ -80,6 +80,33 @@ fn libsql_open_connection_creates_file_and_preserves_local_path() {
 }
 
 #[test]
+fn open_connection_sync_api_works_inside_tokio_runtime() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    runtime.block_on(async {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), false).unwrap();
+
+        conn.execute_batch("CREATE TABLE runtime_probe (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        assert_eq!(query_table_count(&conn, "runtime_probe"), 1);
+    });
+}
+
+#[test]
+fn execute_accepts_rusqlite_style_empty_params_array() {
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), false).unwrap();
+
+    conn.execute("CREATE TABLE empty_params_probe (id INTEGER)", [])
+        .unwrap();
+    assert_eq!(query_table_count(&conn, "empty_params_probe"), 1);
+}
+
+#[test]
 fn open_connection_sets_sqlite_pragmas() {
     let dir = tempdir().unwrap();
     let conn = open_connection(dir.path(), false).unwrap();
