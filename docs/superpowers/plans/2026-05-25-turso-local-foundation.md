@@ -4,7 +4,7 @@
 
 **Goal:** Replace runtime `right-db` `libsql` usage with `turso`, enable the `sync` feature for future Turso Cloud work, and migrate local search from SQLite FTS5 virtual tables to Turso FTS indexes without adding cloud behavior.
 
-**Architecture:** `right-db` remains the only database-driver boundary. Every local Turso open enables `experimental_index_method(true)`. Fresh schemas create Turso FTS indexes over base tables. Migrated opens first run a private bundled-`rusqlite` scrubber to remove real legacy SQLite FTS5 virtual tables/triggers, then v34 creates equivalent Turso indexes. No `push()`, `pull()`, credential, config, UI, CLI, bot command, scheduler, or restore behavior is included.
+**Architecture:** `right-db` remains the only database-driver boundary. Every local Turso open enables `experimental_index_method(true)`. Fresh schemas create Turso FTS indexes over base tables. Writable `open_connection` opens first run a private bundled-`rusqlite` scrubber to remove real legacy SQLite FTS5 virtual tables/triggers, then migrated opens run v34 to create equivalent Turso indexes. Read-only helpers do not scrub or mutate. No `push()`, `pull()`, credential, config, UI, CLI, bot command, scheduler, or restore behavior is included.
 
 **Tech Stack:** Rust 2024, `right-db`, `turso` crate with `sync` feature, Turso index-method FTS, bundled `rusqlite` only for legacy FTS5 pre-scrub, Tokio runtime bridge, per-agent `data.db`, `devenv shell -- cargo`.
 
@@ -33,7 +33,7 @@
 - Modify `crates/right-db/src/error.rs`
   - Normalize `turso::Error` into project `DbError`.
 - Modify `crates/right-db/src/lib.rs`
-  - Run the legacy FTS5 scrubber before migrated Turso opens.
+  - Run the legacy FTS5 scrubber before writable Turso `open_connection` opens.
 - Modify `crates/right-db/src/params.rs`
   - Convert project params to `turso::Params` and `turso::Value`.
 - Modify `crates/right-db/src/row.rs`
@@ -673,8 +673,8 @@ Expected: PASS. If Turso FTS index metadata is not represented as `sqlite_master
 - [ ] **Step 4.1: Add the pre-Turso legacy FTS5 scrubber**
 
 Use bundled `rusqlite` inside `right-db` only. Before `Connection::open_local`
-in `open_connection(path, migrate: true)`, detect existing `data.db` files with
-legacy FTS5 objects and drop:
+in writable `open_connection(path, migrate)`, detect existing `data.db` files
+with legacy FTS5 objects and drop:
 
 - `memories_fts`
 - `conversation_messages_fts`
@@ -684,6 +684,8 @@ legacy FTS5 objects and drop:
 
 This step is outside the Turso migration transaction because Turso cannot
 reliably resolve real legacy FTS5 schemas before the virtual tables are removed.
+It also runs for `migrate=false` writable backup paths; read-only helpers must
+not run it.
 
 - [ ] **Step 4.2: Add v34 SQL**
 
@@ -796,6 +798,10 @@ and proves:
 - Turso FTS indexes exist;
 - existing and post-migration rows are both searchable through base-table
   `MATCH`.
+
+Add a second regression for `right_db::open_connection(..., false)` proving the
+scrubber still runs for writable backup-style opens before Turso resolves the
+schema.
 
 - [ ] **Step 4.5: Run v34 tests**
 

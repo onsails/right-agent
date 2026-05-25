@@ -41,6 +41,7 @@ fn shared_runtime() -> &'static tokio::runtime::Runtime {
 
 pub struct Connection {
     db_path: PathBuf,
+    // Kept alive because Turso connections are owned by their parent database.
     _database: turso::Database,
     inner: turso::Connection,
     readonly: bool,
@@ -130,18 +131,18 @@ impl Connection {
     ///
     /// On a readonly [`Connection`] the Rust-side gate accepts the following
     /// SQL forms (after stripping leading whitespace, `--` line comments, and
-    /// `/* ... */` block comments — comment stripping only affects what the
+    /// `/* ... */` block comments - comment stripping only affects what the
     /// gate sees, not the SQL sent to Turso):
     ///
     /// - `SELECT ...`
-    /// - `WITH cte AS (...) SELECT ...` — CTE-prefixed read; rejected if the
-    ///   remaining SQL contains `INSERT`, `UPDATE`, or `DELETE`.
-    /// - `EXPLAIN ...` / `EXPLAIN QUERY PLAN ...` — never executes the wrapped
+    /// - `WITH cte AS (...) SELECT ...` - CTE-prefixed read; rejected if the
+    ///   remaining SQL contains `INSERT`, `UPDATE`, `DELETE`, or `REPLACE`.
+    /// - `EXPLAIN ...` / `EXPLAIN QUERY PLAN ...` - never executes the wrapped
     ///   statement, always safe.
-    /// - `PRAGMA name` — bare read form only. Both `PRAGMA name(arg)` and
-    ///   `PRAGMA name = value` are rejected because Turso/SQLite treats them
-    ///   as writes; in particular `PRAGMA query_only(OFF)` would disable the
-    ///   readonly flag.
+    /// - `PRAGMA name` - bare read form only. `PRAGMA name(arg)` and
+    ///   `PRAGMA name = value` are rejected as a class because some forms
+    ///   mutate connection state; in particular `PRAGMA query_only(OFF)` would
+    ///   disable the readonly flag.
     ///
     /// Writable connections accept any SQL. The gate is a defense-in-depth
     /// layer on top of Turso's `PRAGMA query_only=1`.
@@ -335,11 +336,10 @@ fn is_readonly_query_sql(sql: &str) -> bool {
         if pragma_name.is_empty() {
             return false;
         }
-        // Only bare `PRAGMA name` is accepted as a read. The parenthesized
-        // form `PRAGMA name(arg)` and the assignment form
-        // `PRAGMA name = value` both mutate connection state in Turso/SQLite
-        // (verified: `PRAGMA query_only(OFF)` toggles `query_only` off), so
-        // both are rejected by the Rust-side gate.
+        // Only bare `PRAGMA name` is accepted as a read. Parenthesized and
+        // assignment forms are rejected as a class because some mutate
+        // connection state; `PRAGMA query_only(OFF)` would disable the
+        // readonly flag.
         let tail = rest[pragma_name.len()..].trim_start();
         return tail.is_empty();
     }
@@ -347,14 +347,14 @@ fn is_readonly_query_sql(sql: &str) -> bool {
 }
 
 /// Return true if a CTE prefix is followed only by read statements. We do not
-/// parse the CTE grammar; instead we reject any `INSERT`, `UPDATE`, or
-/// `DELETE` keyword in the remainder. False negatives (e.g. those words
-/// appearing inside a string literal) only over-restrict reads, never permit
-/// writes.
+/// parse the CTE grammar; instead we reject write keywords in the remainder.
+/// False negatives (e.g. those words appearing inside a string literal) only
+/// over-restrict reads, never permit writes.
 fn is_readonly_cte(rest: &str) -> bool {
     !contains_keyword_ascii_ci(rest, "INSERT")
         && !contains_keyword_ascii_ci(rest, "UPDATE")
         && !contains_keyword_ascii_ci(rest, "DELETE")
+        && !contains_keyword_ascii_ci(rest, "REPLACE")
 }
 
 fn contains_keyword_ascii_ci(haystack: &str, keyword: &str) -> bool {
@@ -731,6 +731,13 @@ mod tests {
                 "expected readonly database error for {sql:?}, got {err:#}",
             );
         }
+    }
+
+    #[test]
+    fn readonly_cte_gate_rejects_replace_statement() {
+        assert!(!is_readonly_query_sql(
+            "WITH x AS (SELECT 1) REPLACE INTO probe (value) VALUES (1)"
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
