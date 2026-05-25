@@ -66,12 +66,12 @@ fn open_connection_without_migration_preserves_existing_schema() {
 }
 
 #[test]
-fn libsql_open_connection_creates_file_and_preserves_local_path() {
+fn turso_open_connection_creates_file_and_preserves_local_path() {
     let dir = tempdir().unwrap();
     let conn = open_connection(dir.path(), false).unwrap();
     let db_path = dir.path().join("data.db");
 
-    assert!(db_path.exists(), "local libsql open should create data.db");
+    assert!(db_path.exists(), "local turso open should create data.db");
     assert_eq!(conn.path(), db_path.as_path());
 
     conn.execute_batch("CREATE TABLE local_probe (id INTEGER PRIMARY KEY)")
@@ -145,7 +145,7 @@ fn open_connection_sets_sqlite_pragmas() {
 }
 
 #[test]
-fn libsql_open_connection_readonly_requires_existing_db() {
+fn turso_open_connection_readonly_requires_existing_db() {
     let dir = tempdir().unwrap();
 
     let err = open_connection_readonly(dir.path()).expect_err("missing db should not open");
@@ -187,7 +187,7 @@ fn migrations_idempotent() {
 }
 
 #[test]
-fn libsql_migrations_set_latest_user_version() {
+fn turso_migrations_set_latest_user_version() {
     let dir = tempdir().unwrap();
     let conn = open_connection(dir.path(), true).unwrap();
 
@@ -198,7 +198,7 @@ fn libsql_migrations_set_latest_user_version() {
 }
 
 #[test]
-fn libsql_migrations_are_idempotent_on_existing_data_db() {
+fn turso_migrations_are_idempotent_on_existing_data_db() {
     let dir = tempdir().unwrap();
     open_db(dir.path(), true).unwrap();
     open_db(dir.path(), true).unwrap();
@@ -211,7 +211,7 @@ fn libsql_migrations_are_idempotent_on_existing_data_db() {
 }
 
 #[test]
-fn libsql_migrations_static_runs_with_right_db_connection() {
+fn turso_migrations_static_runs_with_right_db_connection() {
     let dir = tempdir().unwrap();
     let conn = open_connection(dir.path(), false).unwrap();
 
@@ -247,7 +247,7 @@ fn turso_supports_conversation_fts_index() {
 }
 
 #[test]
-fn libsql_supports_returning_clause() {
+fn turso_supports_returning_clause() {
     let dir = tempdir().unwrap();
     let conn = open_connection(dir.path(), true).unwrap();
 
@@ -265,7 +265,7 @@ fn libsql_supports_returning_clause() {
 }
 
 #[test]
-fn libsql_transaction_rolls_back_on_error() {
+fn turso_transaction_rolls_back_on_error() {
     let dir = tempdir().unwrap();
     let conn = open_connection(dir.path(), true).unwrap();
     conn.execute_batch("CREATE TABLE rollback_probe (id INTEGER PRIMARY KEY, value TEXT UNIQUE)")

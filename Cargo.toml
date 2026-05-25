@@ -45,7 +45,6 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio = { version = "1.52", features = ["full"] }
 which = "8.0"
-libsql = "0.9.30"
 turso = { version = "0.7.0-pre.3", features = ["sync"] }
 rmcp = { version = "1.7", default-features = false, features = ["client", "server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }
 futures = "0.3"
