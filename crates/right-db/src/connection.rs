@@ -98,8 +98,8 @@ impl Connection {
                 Ok(value)
             }
             Err(err) => {
-                tx.rollback()?;
-                Err(err)
+                let rollback = tx.rollback();
+                Err(preserve_transaction_error(err, rollback))
             }
         }
     }
@@ -128,6 +128,12 @@ impl Connection {
         future: impl Future<Output = libsql::Result<T>> + Send,
     ) -> Result<T, DbError> {
         self.runtime.block_on(future).map_err(Into::into)
+    }
+}
+
+fn preserve_transaction_error(original: DbError, rollback: Result<(), DbError>) -> DbError {
+    match rollback {
+        Ok(()) | Err(_) => original,
     }
 }
 
@@ -183,5 +189,23 @@ impl Drop for LibsqlRuntime {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transaction_error_result_prefers_operation_error_when_rollback_fails() {
+        let operation = DbError::InvalidParameter("operation failed".into());
+        let rollback = DbError::InvalidParameter("rollback failed".into());
+
+        let err = preserve_transaction_error(operation, Err(rollback));
+
+        assert_eq!(
+            err.to_string(),
+            "invalid database parameter: operation failed",
+        );
     }
 }

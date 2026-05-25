@@ -44,6 +44,11 @@ pub const LATEST_SCHEMA_VERSION: u32 = 33;
 
 type MigrationHook = fn(&dyn MigrationConnection) -> Result<(), crate::DbError>;
 
+mod sealed {
+    pub trait MigrationConnection {}
+    pub trait MigrationTarget {}
+}
+
 pub struct Migration {
     pub version: u32,
     pub sql: &'static str,
@@ -68,12 +73,12 @@ impl MigrationParams<'_> {
     }
 }
 
-pub trait MigrationConnection {
+pub trait MigrationConnection: sealed::MigrationConnection {
     fn execute_batch(&self, sql: &str) -> Result<(), crate::DbError>;
     fn query_i64(&self, sql: &str, params: MigrationParams<'_>) -> Result<i64, crate::DbError>;
 }
 
-pub trait MigrationTarget {
+pub trait MigrationTarget: sealed::MigrationTarget {
     fn migration_path(&self) -> &Path;
     fn migration_user_version(&self) -> Result<u32, crate::DbError>;
     fn with_migration_transaction<T>(
@@ -84,7 +89,7 @@ pub trait MigrationTarget {
 
 impl Migrations {
     pub fn to_latest<C: MigrationTarget>(&self, conn: C) -> Result<(), crate::DbError> {
-        self.to_version(conn, LATEST_SCHEMA_VERSION)
+        self.to_version(conn, self.highest_version())
     }
 
     pub fn to_version<C: MigrationTarget>(
@@ -95,13 +100,40 @@ impl Migrations {
         let current = conn
             .migration_user_version()
             .map_err(|source| migration_error(&conn, 0, source))?;
+        let highest = self.highest_version();
 
-        for migration in self.migrations {
-            if migration.version <= current || migration.version > target_version {
-                continue;
-            }
+        if current > highest {
+            return Err(migration_version_error(
+                &conn,
+                current,
+                format!("database schema is newer than known migrations ({highest})"),
+            ));
+        }
+        if target_version > highest {
+            return Err(migration_version_error(
+                &conn,
+                target_version,
+                format!("unknown migration target above highest known version {highest}"),
+            ));
+        }
+        if target_version < current {
+            return Err(migration_version_error(
+                &conn,
+                target_version,
+                format!("down migrations are unsupported from current version {current}"),
+            ));
+        }
+        if target_version == current {
+            return Ok(());
+        }
 
-            conn.with_migration_transaction(|tx| {
+        let mut active_version = current + 1;
+        conn.with_migration_transaction(|tx| {
+            for migration in self.migrations {
+                if migration.version <= current || migration.version > target_version {
+                    continue;
+                }
+                active_version = migration.version;
                 if !migration.sql.trim().is_empty() {
                     tx.execute_batch(migration.sql)?;
                 }
@@ -109,12 +141,19 @@ impl Migrations {
                     hook(tx)?;
                 }
                 tx.execute_batch(&format!("PRAGMA user_version = {}", migration.version))?;
-                Ok(())
-            })
-            .map_err(|source| migration_error(&conn, migration.version, source))?;
-        }
+            }
+            Ok(())
+        })
+        .map_err(|source| migration_error(&conn, active_version, source))?;
 
         Ok(())
+    }
+
+    fn highest_version(&self) -> u32 {
+        self.migrations
+            .last()
+            .map(|migration| migration.version)
+            .unwrap_or(0)
     }
 }
 
@@ -130,6 +169,18 @@ fn migration_error<C: MigrationTarget>(
     }
 }
 
+fn migration_version_error<C: MigrationTarget>(
+    conn: &C,
+    version: u32,
+    message: String,
+) -> crate::DbError {
+    crate::DbError::MigrationVersion {
+        path: conn.migration_path().to_path_buf(),
+        version,
+        message,
+    }
+}
+
 fn column_exists(
     conn: &dyn MigrationConnection,
     table: &str,
@@ -141,6 +192,8 @@ fn column_exists(
     )?;
     Ok(count > 0)
 }
+
+impl sealed::MigrationConnection for crate::Transaction<'_> {}
 
 impl MigrationConnection for crate::Transaction<'_> {
     fn execute_batch(&self, sql: &str) -> Result<(), crate::DbError> {
@@ -157,6 +210,8 @@ impl MigrationConnection for crate::Transaction<'_> {
         }
     }
 }
+
+impl sealed::MigrationTarget for &crate::Connection {}
 
 impl MigrationTarget for &crate::Connection {
     fn migration_path(&self) -> &Path {
@@ -178,6 +233,9 @@ impl MigrationTarget for &crate::Connection {
 }
 
 #[cfg(test)]
+impl sealed::MigrationConnection for rusqlite::Connection {}
+
+#[cfg(test)]
 impl MigrationConnection for rusqlite::Connection {
     fn execute_batch(&self, sql: &str) -> Result<(), crate::DbError> {
         rusqlite::Connection::execute_batch(self, sql)?;
@@ -197,6 +255,9 @@ impl MigrationConnection for rusqlite::Connection {
 }
 
 #[cfg(test)]
+impl sealed::MigrationConnection for rusqlite::Transaction<'_> {}
+
+#[cfg(test)]
 impl MigrationConnection for rusqlite::Transaction<'_> {
     fn execute_batch(&self, sql: &str) -> Result<(), crate::DbError> {
         rusqlite::Connection::execute_batch(self, sql)?;
@@ -214,6 +275,9 @@ impl MigrationConnection for rusqlite::Transaction<'_> {
         Ok(value)
     }
 }
+
+#[cfg(test)]
+impl sealed::MigrationTarget for &rusqlite::Connection {}
 
 #[cfg(test)]
 impl MigrationTarget for &rusqlite::Connection {
@@ -244,6 +308,9 @@ impl MigrationTarget for &rusqlite::Connection {
         }
     }
 }
+
+#[cfg(test)]
+impl sealed::MigrationTarget for &mut rusqlite::Connection {}
 
 #[cfg(test)]
 impl MigrationTarget for &mut rusqlite::Connection {
@@ -809,6 +876,111 @@ pub static MIGRATIONS: Migrations = Migrations {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    static FAILING_MIGRATIONS: Migrations = Migrations {
+        migrations: &[
+            Migration {
+                version: 1,
+                sql: "CREATE TABLE synthetic_probe (id INTEGER PRIMARY KEY)",
+                hook: None,
+            },
+            Migration {
+                version: 2,
+                sql: "CREATE TABLE synthetic_probe (id INTEGER PRIMARY KEY)",
+                hook: None,
+            },
+        ],
+    };
+
+    #[test]
+    fn migration_runner_semantics_latest_rejects_future_user_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {}",
+            LATEST_SCHEMA_VERSION + 1
+        ))
+        .unwrap();
+
+        let err = MIGRATIONS
+            .to_latest(&conn)
+            .expect_err("future user_version must be rejected");
+
+        assert!(err.to_string().contains("newer than known migrations"));
+    }
+
+    #[test]
+    fn migration_runner_semantics_rolls_back_all_pending_migrations_on_later_failure() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        let err = FAILING_MIGRATIONS
+            .to_latest(&conn)
+            .expect_err("second migration should fail");
+
+        assert!(
+            err.to_string().contains("migration 2"),
+            "expected migration 2 context, got {err:?}",
+        );
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 0);
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='synthetic_probe'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0);
+    }
+
+    #[test]
+    fn migration_runner_semantics_rejects_target_after_highest_known_version() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        let err = FAILING_MIGRATIONS
+            .to_version(&conn, 3)
+            .expect_err("target past registry end must be rejected");
+
+        assert!(err.to_string().contains("unknown migration target"));
+    }
+
+    #[test]
+    fn migration_runner_semantics_rejects_down_migrations() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA user_version = 2").unwrap();
+
+        let err = FAILING_MIGRATIONS
+            .to_version(&conn, 1)
+            .expect_err("down migrations must be rejected");
+
+        assert!(err.to_string().contains("down migrations are unsupported"));
+    }
+
+    #[test]
+    fn migration_runner_semantics_allows_current_version_noop() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA user_version = 2").unwrap();
+
+        FAILING_MIGRATIONS.to_version(&conn, 2).unwrap();
+
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 2);
+    }
+
+    #[test]
+    fn migration_runner_semantics_latest_schema_version_matches_highest_migration() {
+        assert_eq!(
+            MIGRATIONS
+                .migrations
+                .last()
+                .expect("migration registry should not be empty")
+                .version,
+            LATEST_SCHEMA_VERSION,
+        );
+    }
 
     #[test]
     fn migrations_apply_cleanly_to_v4() {
