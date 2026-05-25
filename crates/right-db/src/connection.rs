@@ -43,6 +43,7 @@ pub struct Connection {
     db_path: PathBuf,
     _database: turso::Database,
     inner: turso::Connection,
+    readonly: bool,
 }
 
 impl fmt::Debug for Connection {
@@ -55,7 +56,7 @@ impl fmt::Debug for Connection {
 
 impl Connection {
     pub fn open_in_memory() -> Result<Self, DbError> {
-        Self::build(PathBuf::from(":memory:"), true)
+        Self::build(PathBuf::from(":memory:"), true, false)
     }
 
     pub(crate) fn open_local(db_path: PathBuf, create: bool) -> Result<Self, DbError> {
@@ -68,12 +69,17 @@ impl Connection {
                 )),
             });
         }
-        Self::build(db_path, create)
+        Self::build(db_path, create, !create)
     }
 
-    fn build(db_path: PathBuf, create: bool) -> Result<Self, DbError> {
+    fn build(db_path: PathBuf, create: bool, readonly: bool) -> Result<Self, DbError> {
         let runtime = shared_runtime();
-        let path = db_path.to_string_lossy().into_owned();
+        let path = db_path.to_str().ok_or_else(|| {
+            DbError::InvalidParameter(format!(
+                "database path is not valid UTF-8: {}",
+                db_path.display()
+            ))
+        })?;
         let open_err = |source| DbError::Open {
             path: db_path.clone(),
             source,
@@ -90,9 +96,10 @@ impl Connection {
             db_path,
             _database: database,
             inner,
+            readonly,
         };
         if !create {
-            conn.block_on_turso(conn.inner.pragma_update("query_only", "ON"))
+            conn.block_on_turso(conn.inner.pragma_update("query_only", 1))
                 .map(drop)?;
         }
         Ok(conn)
@@ -103,6 +110,7 @@ impl Connection {
     }
 
     pub fn execute_batch(&self, sql: &str) -> Result<(), DbError> {
+        self.ensure_writable()?;
         self.block_on_turso(self.inner.execute_batch(sql)).map(drop)
     }
 
@@ -111,6 +119,7 @@ impl Connection {
         sql: &str,
         params: impl crate::params::IntoParams,
     ) -> Result<usize, DbError> {
+        self.ensure_writable()?;
         let params = params.into_params()?.into_turso();
         let changed = self.block_on_turso(self.inner.execute(sql, params))?;
         usize::try_from(changed)
@@ -123,6 +132,7 @@ impl Connection {
         params: impl crate::params::IntoParams,
         map: impl FnOnce(&crate::row::Row<'_>) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
+        self.ensure_query_allowed(sql)?;
         let params = params.into_params()?.into_turso();
         let mut rows = self.block_on_turso(self.inner.query(sql, params))?;
         let Some(row) = self.block_on_turso(rows.next())? else {
@@ -145,6 +155,7 @@ impl Connection {
         params: impl crate::params::IntoParams,
         mut map: impl FnMut(&crate::row::Row<'_>) -> Result<T, DbError>,
     ) -> Result<Vec<T>, DbError> {
+        self.ensure_query_allowed(sql)?;
         let params = params.into_params()?.into_turso();
         let mut rows = self.block_on_turso(self.inner.query(sql, params))?;
         let mut values = Vec::new();
@@ -166,6 +177,7 @@ impl Connection {
     /// For one-shot queries prefer [`Connection::query_all`] or
     /// [`Connection::query_row`] directly.
     pub fn prepare<'conn>(&'conn self, sql: &str) -> Result<Statement<'conn>, DbError> {
+        self.ensure_query_allowed(sql)?;
         Ok(Statement {
             conn: self,
             sql: sql.to_owned(),
@@ -183,6 +195,7 @@ impl Connection {
     /// transaction must be passed through helper boundaries or committed
     /// manually.
     pub fn transaction(&self) -> Result<crate::transaction::Transaction<'_>, DbError> {
+        self.ensure_writable()?;
         self.transaction_with_behavior(turso::transaction::TransactionBehavior::Immediate)
     }
 
@@ -190,6 +203,7 @@ impl Connection {
         &self,
         f: impl FnOnce(&crate::transaction::Transaction<'_>) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
+        self.ensure_writable()?;
         let tx =
             self.transaction_with_behavior(turso::transaction::TransactionBehavior::Immediate)?;
         match f(&tx) {
@@ -215,6 +229,7 @@ impl Connection {
         &self,
         behavior: turso::transaction::TransactionBehavior,
     ) -> Result<crate::transaction::Transaction<'_>, DbError> {
+        self.ensure_writable()?;
         let inner = self.block_on_turso(turso::transaction::Transaction::new_unchecked(
             &self.inner,
             behavior,
@@ -248,6 +263,48 @@ impl Connection {
     ) -> Result<T, DbError> {
         block_on_runtime_safe(shared_runtime(), future).map_err(Into::into)
     }
+
+    fn ensure_writable(&self) -> Result<(), DbError> {
+        if self.readonly {
+            return Err(readonly_error());
+        }
+        Ok(())
+    }
+
+    fn ensure_query_allowed(&self, sql: &str) -> Result<(), DbError> {
+        if self.readonly && !is_readonly_query_sql(sql) {
+            return Err(readonly_error());
+        }
+        Ok(())
+    }
+}
+
+fn readonly_error() -> DbError {
+    DbError::Database(turso::Error::Readonly("readonly database".into()))
+}
+
+fn is_readonly_query_sql(sql: &str) -> bool {
+    let sql = sql.trim_start();
+    let Some(keyword) = leading_keyword(sql) else {
+        return false;
+    };
+
+    if keyword.eq_ignore_ascii_case("SELECT") {
+        return true;
+    }
+    if keyword.eq_ignore_ascii_case("PRAGMA") {
+        let rest = sql[keyword.len()..].trim_start();
+        return !rest.is_empty() && !rest.contains('=');
+    }
+    false
+}
+
+fn leading_keyword(sql: &str) -> Option<&str> {
+    let len = sql
+        .char_indices()
+        .find_map(|(idx, ch)| (!ch.is_ascii_alphabetic()).then_some(idx))
+        .unwrap_or(sql.len());
+    (len > 0).then_some(&sql[..len])
 }
 
 /// Owns an SQL string for repeated execution via `query_map`/`query_row`.
@@ -363,6 +420,50 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM probe", (), |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0, "operation error must roll back the transaction");
+    }
+
+    #[test]
+    fn readonly_connection_cannot_disable_query_only_or_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+
+        let writable = Connection::open_local(db_path.clone(), true).unwrap();
+        writable
+            .execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
+            .unwrap();
+        writable
+            .execute("INSERT INTO probe (value) VALUES (?1)", [7_i64])
+            .unwrap();
+        drop(writable);
+
+        let readonly = Connection::open_local(db_path, false).unwrap();
+
+        for result in [
+            readonly.execute_batch("PRAGMA query_only = OFF"),
+            readonly.execute_batch("CREATE TABLE forbidden (value INTEGER NOT NULL)"),
+            readonly
+                .execute("INSERT INTO probe (value) VALUES (?1)", [8_i64])
+                .map(drop),
+            readonly
+                .query_row(
+                    "INSERT INTO probe (value) VALUES (9) RETURNING value",
+                    (),
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(drop),
+            readonly.transaction().map(drop),
+        ] {
+            let err = result.expect_err("readonly connection must reject writes");
+            assert!(
+                err.to_string().contains("readonly database"),
+                "expected readonly database error, got {err:#}",
+            );
+        }
+
+        let count: i64 = readonly
+            .query_row("SELECT COUNT(*) FROM probe", (), |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
