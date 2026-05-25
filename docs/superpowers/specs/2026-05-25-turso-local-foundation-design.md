@@ -1,69 +1,83 @@
-# Turso Local Foundation Migration Design
+# Turso Local Foundation And FTS Migration Design
 
 ## Context
 
-Right Agent currently uses local `libsql` behind the `right-db` boundary for
-each agent's `<agent>/data.db`. The earlier local `libsql` migration achieved
-the important boundary: other crates no longer expose direct SQLite driver
-types. The paused local-finalization plan was scoped to proving local `libsql`
-behavior only.
+Right Agent stores each agent's local state in `<agent>/data.db` behind the
+`right-db` crate. The previous local `libsql` migration already established the
+important boundary: callers use project-owned `right_db` types instead of raw
+database-driver types.
 
-The future cloud backup direction is now Turso Cloud push/pull, not generic
-object-storage backup. Official Turso Rust docs recommend the `turso` crate
-with the `sync` feature for local databases that can later synchronize with
-Turso Cloud. This means the local foundation should move to the `turso` crate
-instead of hardening more `libsql`-specific assumptions.
+The next storage direction is Turso Cloud push/pull backup. The local
+foundation should therefore use the `turso` Rust crate with its `sync` feature
+available, while leaving cloud URLs, credentials, push/pull calls, UI, CLI, bot
+commands, and schedulers out of this stage.
 
-This design is still local-only behavior. It prepares the storage engine for
-future Turso Cloud support, but it does not implement cloud sync, credentials,
-UI, CLI, bot commands, or scheduler behavior.
+The first implementation probe found a blocker for a pure driver swap:
+`turso 0.7.0-pre.3` opens the existing database file, but rejects SQLite FTS5
+virtual tables with `Parse error: no such module: fts5`. Turso's current Rust
+surface provides a different FTS model: enable
+`Builder::experimental_index_method(true)` and create indexes with
+`CREATE INDEX ... USING fts (...)`.
+
+This design therefore expands the local migration from a driver swap into a
+small schema and query migration for search. That is the cost of choosing the
+Turso path now.
 
 Relevant upstream references:
 
 - `https://docs.turso.tech/sdk/rust/quickstart`
 - `https://docs.turso.tech/sdk/rust/reference`
 - `https://github.com/tursodatabase/turso`
+- `turso 0.7.0-pre.3` crate source:
+  `Builder::experimental_index_method(true)` and
+  `CREATE INDEX idx ON table USING fts (...)`
 
 ## Goals
 
-- Replace `libsql` with the `turso` crate inside `right-db`.
-- Enable the `turso` `sync` feature as dependency preparation for future Turso
-  Cloud push/pull work.
-- Preserve current local `data.db` behavior, file paths, schema, migrations,
-  and caller APIs.
-- Keep raw database-driver types hidden inside `right-db`.
-- Prove compatibility with existing local database requirements before broad
-  migration work proceeds.
-- Remove or re-prove any local `libsql` assumptions that would be unsafe with
-  the `turso` backend.
+- Replace runtime `libsql` usage in `right-db` with the `turso` crate.
+- Enable the `turso` `sync` feature as local preparation for later Turso Cloud
+  push/pull backup work.
+- Enable Turso's experimental index method on every local database open.
+- Replace SQLite FTS5 virtual-table based search with Turso FTS indexes.
+- Preserve the existing `<agent>/data.db` path, migration runner, and
+  project-owned public API shape as far as Turso permits.
+- Keep raw driver types hidden inside `right-db`.
+- Prove fresh local databases and legacy `libsql`-created databases can still
+  migrate, write, and search locally.
 
 ## Non-Goals
 
-- No Turso Cloud URL, token, org, database name, or config model.
+- No Turso Cloud URL, auth token, org, database-name, or config model.
 - No `push()`, `pull()`, `checkpoint()`, sync stats, or sync scheduler.
 - No dashboard, Telegram bot, CLI, or agent-facing UI for cloud storage.
-- No cloud backup/restore UX.
-- No migration from local-only `data.db` to an attached cloud database.
+- No cloud backup or restore UX.
 - No object-storage backup design.
-- No schema redesign unrelated to driver migration correctness.
+- No exact byte-for-byte compatibility with SQLite FTS5 snippets or ranking.
+- No unrelated schema redesign beyond the FTS migration required by Turso.
 
 ## Recommended Approach
 
-Use a foundation migration with a hard compatibility gate:
+Use a local Turso migration with explicit FTS conversion:
 
-1. Query the current crate registry for the latest `turso` crate version during
-   planning/implementation, then add it with the `sync` feature.
-2. Add isolated compatibility tests or probes before replacing the production
-   `right-db` internals.
-3. If `turso` passes the local compatibility gate, migrate `right-db` internals
-   from `libsql` to `turso`.
-4. If a gate fails, stop and document the blocker instead of forcing the
-   migration.
-5. Keep all cloud sync behavior deferred, even though the sync-capable crate is
-   present.
+1. Keep the `right-db` boundary. Do not expose `turso` types outside it.
+2. Add `turso` with the `sync` feature while keeping `libsql` only long enough
+   for compatibility probes and legacy fixture construction.
+3. Replace the failed SQLite FTS5 gate with a Turso FTS gate that proves
+   `experimental_index_method(true)`, `CREATE INDEX ... USING fts`, `MATCH`,
+   triggers, `RETURNING`, and immediate transactions.
+4. Port the runtime wrapper from `libsql` to `turso`.
+5. Change fresh schema SQL to create Turso FTS indexes instead of SQLite FTS5
+   virtual tables and sync triggers.
+6. Add a new migration for existing databases that drops old FTS5 sync triggers
+   and creates Turso FTS indexes over the base tables.
+7. Rewrite search queries to search base tables with Turso `MATCH`.
+8. Remove runtime and test dependency on `libsql` after the gates no longer need
+   it.
 
-This is intentionally narrower than a cloud feature and broader than a pure
-dependency swap.
+The old SQLite FTS5 virtual tables may remain in legacy database files. They
+should not be queried or written by current code. Dropping those virtual tables
+is only allowed if a test proves Turso can drop them safely without loading the
+FTS5 module.
 
 ## Architecture
 
@@ -79,8 +93,7 @@ bot / aggregator / CLI / dashboard
      agent data.db
 ```
 
-`right-db` remains the sole database boundary. Other crates continue to use
-project-owned types:
+`right-db` remains the sole database boundary. Other crates continue to use:
 
 - `right_db::Connection`
 - `right_db::Transaction`
@@ -93,26 +106,22 @@ project-owned types:
 No crate outside `right-db` should depend on `turso` or expose raw `turso`
 connection, transaction, row, value, parameter, or error types.
 
-The public API should stay stable unless the implementation proves that a
-current API is semantically unsafe with `turso`. Any unavoidable public API
-change must be justified by a concrete compatibility failure.
-
 ## Components
 
 ### Dependency Boundary
 
-The workspace should remove the `libsql` dependency once no project code needs
-it. `right-db` should depend on `turso` with the `sync` feature enabled. The
-sync feature is present only to avoid another dependency migration when future
-Turso Cloud support is designed.
+The workspace should depend on `turso` with the `sync` feature enabled. Runtime
+code should not depend on `libsql` after the migration lands. Temporary tests
+may use `libsql` during the transition, but final committed code should remove
+it unless a test fixture has no other practical replacement.
 
-The implementation plan must not assume the currently known `turso` version.
-It must query the registry before editing `Cargo.toml`.
+The implementation must query the crate registry before editing `Cargo.toml`.
+At design time the current version is `0.7.0-pre.3`.
 
 ### Connection
 
 `right_db::Connection` should wrap local `turso` database state and expose the
-same project-level operations where possible:
+same project-level operations:
 
 - `open_in_memory`
 - local file open with create/read-only behavior
@@ -123,28 +132,77 @@ same project-level operations where possible:
 - `prepare`
 - `last_insert_rowid`
 - transaction creation
-- connection pragmas or their `turso` equivalents
+- connection pragmas or Turso equivalents
 
-The local file path remains `<agent>/data.db`.
+Every local Turso builder used by `right-db` must call:
+
+```rust
+turso::Builder::new_local(path).experimental_index_method(true)
+```
+
+Future cloud-sync builders must enable the equivalent sync builder flag, but no
+cloud builder is introduced in this stage.
+
+### Search Schema
+
+Fresh local databases should no longer create SQLite FTS5 virtual tables:
+
+- no `memories_fts` virtual table for fresh schema;
+- no `conversation_messages_fts` virtual table for fresh schema;
+- no FTS5 sync triggers for fresh schema.
+
+Fresh local databases should create Turso FTS indexes:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_memories_turso_fts
+ON memories USING fts(content);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_turso_fts
+ON conversation_messages USING fts(content);
+```
+
+Legacy databases created by earlier versions may still contain
+`memories_fts`, `conversation_messages_fts`, and their sync triggers. The new
+migration should drop the triggers so writes no longer try to maintain SQLite
+FTS5 virtual tables under Turso, then create the Turso FTS indexes over the base
+tables.
+
+### Search Queries
+
+Conversation search should query `conversation_messages` directly:
+
+```sql
+WHERE content MATCH ?
+```
+
+The existing platform, chat, thread, role, and ordering constraints remain
+server-side SQL predicates.
+
+SQLite-specific `snippet(conversation_messages_fts, ...)` is not available.
+Search result snippets should be generated in Rust from the matched
+`conversation_messages.content`. Exact SQLite snippet formatting is not an
+acceptance criterion; deterministic, bounded snippets are.
+
+Legacy memory search in `crates/right/src/main.rs` must stop querying
+`memories_fts` and use the base `memories` table with `content MATCH ?`.
 
 ### Transactions
 
-The current `Transaction` implementation has a documented
-`Deref<Target = Connection>` invariant that depends on local `libsql` handle
-behavior. This is the riskiest part of the backend swap.
+The current `Transaction` type implements `Deref<Target = Connection>` so
+helpers taking `&Connection` can run inside an open transaction. That invariant
+was explicitly tied to the local `libsql` handle model.
 
-The `turso` migration must choose one of two paths:
+The Turso migration must either:
 
 - prove the same invariant with a regression test showing helper writes reached
   through `&Transaction` roll back with the outer transaction; or
 - remove the `Deref` convenience and require transaction-aware helper calls.
 
-The implementation should prefer removing the invariant if the churn is
-reasonable. Keeping it is acceptable only if the compatibility test is explicit
-and the warning is rewritten for `turso`.
+Keeping `Deref` is acceptable only if the regression test passes under Turso and
+the warning text is rewritten for the new backend.
 
-The transaction rule remains unchanged: any operation with two or more writes
-uses one immediate transaction, and `with_immediate_transaction` centralizes
+The transaction rule remains unchanged: multi-write operations use one
+immediate transaction and `with_immediate_transaction` centralizes
 rollback-on-error.
 
 ### Rows, Params, And Errors
@@ -166,31 +224,30 @@ behavior rather than driver-specific types.
 - idempotent migration behavior;
 - concurrent bot/aggregator startup safety.
 
-If `turso` differs in PRAGMA, transaction, or DDL behavior, the migration must
-adapt inside `right-db` without exposing that difference upward.
+The new Turso FTS migration should advance `LATEST_SCHEMA_VERSION` from `33` to
+`34`.
 
-## Compatibility Gate
+## Compatibility Gates
 
-Before broad migration, the implementation must prove or reject these local
-requirements with narrow tests/probes:
+Before removing `libsql`, the implementation must prove:
 
-- `turso` can open a `data.db` created by the current local `libsql`
-  implementation.
-- Current migrations run to latest and preserve `user_version` expectations.
-- Failed migration batches roll back and include database path plus migration
-  version in the error.
-- FTS/search tables work for existing memory and conversation search.
-- Triggers still fire.
-- `RETURNING` queries still work.
+- Turso can open a `data.db` created by the current `libsql` backend.
+- Turso supports the required local SQL surface with index-method FTS:
+  `CREATE INDEX ... USING fts`, `MATCH`, triggers, `RETURNING`, and immediate
+  transaction rollback.
+- Fresh schema under Turso creates Turso FTS indexes and no longer depends on
+  SQLite FTS5 modules.
+- Legacy-style FTS5 sync triggers are removed by migration v34.
+- Legacy database writes after v34 do not attempt to write old FTS5 virtual
+  tables.
+- Conversation search and memory search return rows through Turso FTS.
 - Read-only opens do not create or mutate database files.
-- Transactions roll back helper writes correctly.
 - Constraint, not-found, type-conversion, busy, and locked errors remain
   observable through `DbError`.
 - Concurrent cold-boot migrators do not corrupt schema state.
 
-If any gate fails, stop the implementation and write down the exact blocker and
-minimum future work needed. Do not paper over compatibility gaps with silent
-fallbacks.
+If a gate fails, stop and document the exact blocker. Do not hide gaps with
+fallback search paths that silently bypass Turso FTS.
 
 ## Data Flow
 
@@ -199,7 +256,7 @@ Current local behavior remains:
 ```text
 right_db::open_connection(agent_dir, migrate: true)
   -> <agent>/data.db
-  -> local turso engine
+  -> local turso engine with index_method enabled
   -> right-db migrations if requested
   -> project-owned Connection
 ```
@@ -207,7 +264,7 @@ right_db::open_connection(agent_dir, migrate: true)
 Read-only consumers keep using read-only helpers and must not create, migrate,
 or mutate `data.db`.
 
-Future cloud sync is only a deferred extension point:
+Future cloud sync remains deferred:
 
 ```text
 local data.db
@@ -231,20 +288,19 @@ The migration should preserve project-level handling for:
 - busy or locked database failures;
 - invalid parameters and type conversion failures;
 - migration failures with database path and migration version;
-- backend unsupported-feature failures found during compatibility testing.
+- unsupported-feature failures found during compatibility testing.
 
 The implementation does not need byte-for-byte driver error compatibility, but
-it must preserve the semantic categories that callers and tests rely on.
+it must preserve the semantic categories callers and tests rely on.
 
 ## Documentation
 
 Update architecture docs if the migration lands:
 
-- `ARCHITECTURE.md`: local database driver rule changes from local `libsql` to
-  local `turso`.
+- `ARCHITECTURE.md`: local database driver and search rules change from local
+  `libsql` plus SQLite FTS5 to local `turso` plus Turso FTS indexes.
 - `docs/architecture/modules.md`: `right-db` module map and database boundary.
-- `docs/architecture/memory.md`: only if memory storage behavior or search
-  details drift.
+- `docs/architecture/memory.md`: memory and conversation search storage details.
 
 `PROMPT_SYSTEM.md` is not expected to change because this work does not affect
 agent-facing prompts, schemas, or MCP tool instructions.
@@ -254,11 +310,10 @@ agent-facing prompts, schemas, or MCP tool instructions.
 Use TDD for behavior changes. The implementation plan should use this cadence:
 
 - Run a targeted `right-db` baseline before edits.
-- Add compatibility-gate tests before production internals are broadly
-  migrated.
+- Add compatibility-gate tests before broad runtime migration.
 - Run targeted `right-db` tests after each coherent migration slice.
 - Run dependent package tests after `right-db` compiles and passes.
-- Finish with the mandatory full workspace checks:
+- Finish with:
 
 ```bash
 devenv shell -- cargo test --workspace
@@ -267,15 +322,15 @@ devenv shell -- cargo build --workspace
 
 ## Acceptance Criteria
 
-- `right-db` uses `turso` with the `sync` feature instead of `libsql`.
-- `libsql` is removed from workspace dependencies if no longer needed.
+- Runtime `right-db` uses `turso` with the `sync` feature instead of `libsql`.
+- Every local Turso open enables `experimental_index_method(true)`.
+- Fresh databases use Turso FTS indexes, not SQLite FTS5 virtual tables.
+- Legacy FTS5 sync triggers are removed by migration v34.
+- Conversation and memory search use Turso FTS over base tables.
 - Existing callers keep using project-owned `right_db` APIs.
 - No cloud sync behavior, credentials, UI, CLI, bot command, or scheduler is
   introduced.
-- Existing local `data.db` behavior is preserved.
-- Compatibility-gate tests pass or the implementation stops with a documented
-  blocker.
-- Architecture docs match the new local `turso` foundation.
+- Architecture docs match the new local Turso foundation.
 - `devenv shell -- cargo test --workspace` passes.
 - `devenv shell -- cargo build --workspace` passes.
 

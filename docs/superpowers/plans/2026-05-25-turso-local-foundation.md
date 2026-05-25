@@ -1,12 +1,12 @@
-# Turso Local Foundation Implementation Plan
+# Turso Local Foundation And FTS Migration Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the local `right-db` driver foundation from `libsql` to `turso` with the `sync` feature available for future Turso Cloud work, without adding cloud behavior.
+**Goal:** Replace runtime `right-db` `libsql` usage with `turso`, enable the `sync` feature for future Turso Cloud work, and migrate local search from SQLite FTS5 virtual tables to Turso FTS indexes without adding cloud behavior.
 
-**Architecture:** `right-db` remains the only database-driver boundary. The implementation first adds direct compatibility probes while the current `libsql` backend still exists, then migrates `right-db` internals to `turso` and preserves the existing project-owned `Connection`, `Transaction`, `Row`, `DbError`, params, migration, and read-only APIs. No `push()`, `pull()`, credential, config, UI, CLI, bot command, or scheduler work is included.
+**Architecture:** `right-db` remains the only database-driver boundary. Every local Turso open enables `experimental_index_method(true)`. Fresh schemas create Turso FTS indexes over base tables; legacy migrations drop old FTS5 sync triggers and create equivalent Turso indexes. No `push()`, `pull()`, credential, config, UI, CLI, bot command, scheduler, or restore behavior is included.
 
-**Tech Stack:** Rust 2024, `right-db`, `turso` crate with `sync` feature, Tokio runtime bridge, per-agent SQLite-compatible `data.db`, `devenv shell -- cargo`.
+**Tech Stack:** Rust 2024, `right-db`, `turso` crate with `sync` feature, Turso index-method FTS, Tokio runtime bridge, per-agent `data.db`, `devenv shell -- cargo`.
 
 **Spec:** `docs/superpowers/specs/2026-05-25-turso-local-foundation-design.md`.
 
@@ -15,24 +15,42 @@
 ## File Structure
 
 - Modify `Cargo.toml`
-  - Replace workspace `libsql` dependency with `turso` after compatibility probes pass.
+  - Add `turso = { version = "...", features = ["sync"] }`.
+  - Remove workspace `libsql` after runtime and temporary gates no longer use it.
 - Modify `crates/right-db/Cargo.toml`
-  - Move `right-db` from workspace `libsql` to workspace `turso`.
-- Create then delete after the gate passes: `crates/right-db/tests/turso_compat.rs`
-  - Direct `turso` compatibility probes. Direct driver usage is allowed here because this is a boundary test.
+  - Add workspace `turso`.
+  - Remove workspace `libsql` after the transition gates are removed.
+- Create then remove `crates/right-db/tests/turso_compat.rs`
+  - Direct Turso compatibility probes. Direct driver usage is allowed here because this is a temporary boundary test.
+- Modify `crates/right-db/src/connection.rs`
+  - Wrap `turso::Database` and `turso::Connection`.
+  - Enable `experimental_index_method(true)` for every local builder.
+- Modify `crates/right-db/src/transaction.rs`
+  - Wrap `turso::Transaction`.
 - Modify `crates/right-db/src/error.rs`
   - Normalize `turso::Error` into project `DbError`.
 - Modify `crates/right-db/src/params.rs`
   - Convert project params to `turso::Params` and `turso::Value`.
 - Modify `crates/right-db/src/row.rs`
   - Convert `turso::Row` values into project row conversions.
-- Modify `crates/right-db/src/connection.rs`
-  - Wrap `turso::Database` and `turso::Connection`.
-- Modify `crates/right-db/src/transaction.rs`
-  - Wrap `turso::Transaction`.
+- Modify `crates/right-db/src/sql/v1_schema.sql`
+  - Replace `memories_fts` SQLite FTS5 virtual table and sync triggers with `idx_memories_turso_fts`.
+- Modify `crates/right-db/src/sql/v21_conversation_messages.sql`
+  - Replace `conversation_messages_fts` SQLite FTS5 virtual table and sync triggers with `idx_conversation_messages_turso_fts`.
+- Create `crates/right-db/src/sql/v34_turso_fts_indexes.sql`
+  - Drop legacy FTS5 sync triggers.
+  - Create Turso FTS indexes for legacy databases.
+- Modify `crates/right-db/src/migrations.rs`
+  - Add v34 SQL, bump `LATEST_SCHEMA_VERSION`, update FTS tests.
+- Modify `crates/right-db/src/conversation.rs`
+  - Query `conversation_messages` with `content MATCH ?`.
+  - Generate deterministic bounded snippets in Rust.
 - Modify `crates/right-db/tests/smoke.rs`
-  - Rename `libsql_*` tests to `turso_*` or driver-neutral names and keep local contract coverage.
-- Inspect and likely modify:
+  - Rename `libsql_*` tests to `turso_*` or driver-neutral names.
+  - Assert Turso FTS index behavior instead of SQLite FTS5 virtual-table behavior.
+- Modify `crates/right/src/main.rs`
+  - Update memory search SQL from `memories_fts` joins to base-table Turso FTS.
+- Inspect and update:
   - `ARCHITECTURE.md`
   - `docs/architecture/modules.md`
   - `docs/architecture/memory.md`
@@ -40,32 +58,38 @@
   - `PROMPT_SYSTEM.md`
   - cloud/Turso config, credentials, bot, CLI, dashboard, scheduler, or restore behavior.
 
-## Baseline And Dependency Probe
+## Task 0: Baseline And Dependency Probe
 
-- [ ] **Step 0.1: Confirm Rust skill availability**
+**Files:**
+- Read: `docs/superpowers/specs/2026-05-25-turso-local-foundation-design.md`
+- Read: `ARCHITECTURE.md`
+- Read: `docs/architecture/modules.md`
+- Read: `docs/architecture/memory.md`
 
-This repository asks implementers to load `rust-dev:rust-dev` before writing Rust. If that skill is available in the implementation session, load it before Task 1. If it is not available, record this line in implementation notes before editing Rust:
+- [ ] **Step 0.1: Record Rust skill availability**
+
+This repository asks implementers to load `rust-dev:rust-dev` before writing Rust. If that skill is available in the implementation session, load it before Task 1. If it is not available, record this implementation note before editing Rust:
 
 ```text
 rust-dev:rust-dev unavailable in this Codex session; proceeding with direct Rust edits under project Rust conventions.
 ```
 
-- [ ] **Step 0.2: Re-read the spec and current local DB rules**
+- [ ] **Step 0.2: Re-read the revised spec and current local DB docs**
 
 Run:
 
 ```bash
-devenv shell -- sed -n '1,320p' docs/superpowers/specs/2026-05-25-turso-local-foundation-design.md
-devenv shell -- sed -n '481,506p' ARCHITECTURE.md
+devenv shell -- sed -n '1,360p' docs/superpowers/specs/2026-05-25-turso-local-foundation-design.md
+devenv shell -- sed -n '400,455p' ARCHITECTURE.md
 devenv shell -- sed -n '64,72p' docs/architecture/modules.md
-devenv shell -- sed -n '54,62p' docs/architecture/memory.md
+devenv shell -- sed -n '54,72p' docs/architecture/memory.md
 ```
 
 Expected:
 
-- Spec says migrate local foundation to `turso`.
+- Spec says migrate runtime `right-db` to `turso`.
+- Spec says migrate search from SQLite FTS5 virtual tables to Turso FTS indexes.
 - Spec says no cloud sync behavior in this stage.
-- Current docs still mention local `libsql`; update later only after migration lands.
 
 - [ ] **Step 0.3: Query latest `turso` crate version**
 
@@ -85,7 +109,7 @@ features:
   sync = [dep:hyper, dep:tokio, dep:hyper-tls, dep:hyper-util, dep:http-body-util, dep:bytes]
 ```
 
-If the latest version changed, use the latest registry version and update any version text in this plan while implementing. Do not pin an older version without user approval.
+Use the latest registry version returned by the command. If it differs from `0.7.0-pre.3`, update the version in every dependency edit in this plan before committing.
 
 - [ ] **Step 0.4: Run targeted baseline**
 
@@ -95,52 +119,53 @@ Run:
 devenv shell -- cargo test -p right-db
 ```
 
-Expected: PASS. If this fails, stop and fix the pre-existing `right-db` failure before adding `turso`.
+Expected: PASS. If this fails, stop and fix the pre-existing `right-db` failure before changing dependencies or code.
 
-- [ ] **Step 0.5: Confirm current direct `libsql` surface**
+- [ ] **Step 0.5: Confirm current direct driver surface**
 
 Run:
 
 ```bash
-devenv shell -- rg -n "libsql|rusqlite" Cargo.toml crates/right-db crates --glob '*.rs'
+devenv shell -- rg -n "libsql|rusqlite|memories_fts|conversation_messages_fts|USING fts5|snippet\\(|bm25\\(" Cargo.toml crates/right-db crates/right docs ARCHITECTURE.md --glob '*.rs' --glob '*.sql' --glob '*.md' --glob '*.toml'
 ```
 
 Expected:
 
-- `libsql` appears only in workspace deps, `right-db`, right-db smoke test names/messages, and docs/comments.
-- No `rusqlite` usage in `Cargo.toml` or `crates/`.
+- Runtime `libsql` usage is inside `right-db`.
+- SQLite FTS5 references are in schema SQL, `right-db` search, `right/src/main.rs` memory search, tests, docs, and older specs/plans.
+- No `rusqlite` dependency remains in active code.
 
-## Task 1: Add `turso` Beside `libsql` And Run Compatibility Gate
+## Task 1: Add Turso And Prove Local FTS Surface
 
 **Files:**
 - Modify `Cargo.toml`
 - Modify `crates/right-db/Cargo.toml`
 - Create `crates/right-db/tests/turso_compat.rs`
 
-- [ ] **Step 1.1: Add `turso` while keeping `libsql` for the probe**
+- [ ] **Step 1.1: Add `turso` while keeping `libsql` temporarily**
 
-In workspace [Cargo.toml](/Users/developer/dev/rightclaw/Cargo.toml), add the latest registry version from Step 0.3 near the current `libsql` entry:
+In workspace `Cargo.toml`, add the current registry version near the current `libsql` entry:
 
 ```toml
 libsql = "0.9.30"
 turso = { version = "0.7.0-pre.3", features = ["sync"] }
 ```
 
-In [crates/right-db/Cargo.toml](/Users/developer/dev/rightclaw/crates/right-db/Cargo.toml), add `turso` while keeping `libsql`:
+In `crates/right-db/Cargo.toml`, add `turso` while keeping `libsql`:
 
 ```toml
 [dependencies]
 libsql = { workspace = true }
-turso = { workspace = true }
 tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+turso = { workspace = true }
 ```
 
-- [ ] **Step 1.2: Write direct Turso compatibility probes**
+- [ ] **Step 1.2: Write the Turso compatibility gate**
 
-Create [turso_compat.rs](/Users/developer/dev/rightclaw/crates/right-db/tests/turso_compat.rs):
+Create or replace `crates/right-db/tests/turso_compat.rs` with:
 
 ```rust
 use right_db::{open_db, open_database_path_readonly};
@@ -150,7 +175,10 @@ async fn open_turso(path: &std::path::Path) -> turso::Result<turso::Connection> 
     let path = path
         .to_str()
         .expect("temp database path should be valid UTF-8");
-    let db = turso::Builder::new_local(path).build().await?;
+    let db = turso::Builder::new_local(path)
+        .experimental_index_method(true)
+        .build()
+        .await?;
     db.connect()
 }
 
@@ -192,9 +220,13 @@ async fn turso_direct_supports_required_local_sql_features() {
              id INTEGER PRIMARY KEY,
              content TEXT NOT NULL
          );
-         CREATE VIRTUAL TABLE docs_fts USING fts5(content);
+         CREATE TABLE docs_audit (
+             doc_id INTEGER NOT NULL,
+             content TEXT NOT NULL
+         );
+         CREATE INDEX docs_turso_fts ON docs USING fts(content);
          CREATE TRIGGER docs_ai AFTER INSERT ON docs BEGIN
-             INSERT INTO docs_fts(rowid, content) VALUES (new.id, new.content);
+             INSERT INTO docs_audit(doc_id, content) VALUES (new.id, new.content);
          END;",
     )
     .await
@@ -214,12 +246,20 @@ async fn turso_direct_supports_required_local_sql_features() {
     assert!(id > 0);
 
     let mut rows = conn
-        .query("SELECT COUNT(*) FROM docs_fts WHERE docs_fts MATCH ?", ["needle"])
+        .query("SELECT COUNT(*) FROM docs WHERE content MATCH ?", ["needle"])
         .await
         .unwrap();
     let row = rows.next().await.unwrap().expect("fts count row");
     let count: i64 = row.get(0).unwrap();
-    assert_eq!(count, 1, "FTS trigger should index inserted content");
+    assert_eq!(count, 1, "Turso FTS index should find inserted content");
+
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM docs_audit WHERE content = ?", ["needle phrase"])
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("trigger count row");
+    let count: i64 = row.get(0).unwrap();
+    assert_eq!(count, 1, "trigger should copy inserted content");
 
     let tx = conn
         .transaction_with_behavior(turso::transaction::TransactionBehavior::Immediate)
@@ -262,9 +302,7 @@ Run:
 devenv shell -- cargo test -p right-db --test turso_compat
 ```
 
-Expected: PASS.
-
-If this fails because `turso` does not support the existing local DB file, FTS5, triggers, `RETURNING`, immediate transactions, or other required semantics, stop the migration and report the exact failing capability. Do not proceed to Task 2.
+Expected: PASS. If it fails, stop and report the exact unsupported Turso capability.
 
 - [ ] **Step 1.4: Commit the compatibility gate**
 
@@ -272,21 +310,28 @@ Run:
 
 ```bash
 devenv shell -- git add Cargo.toml Cargo.lock crates/right-db/Cargo.toml crates/right-db/tests/turso_compat.rs
-devenv shell -- git commit -m "test(db): add turso compatibility gate"
+devenv shell -- git commit -m "test(db): add turso fts compatibility gate"
 ```
 
-## Task 2: Port Params, Rows, And Errors To `turso`
+## Task 2: Port `right-db` Core Types To Turso
 
 **Files:**
 - Modify `crates/right-db/src/params.rs`
 - Modify `crates/right-db/src/row.rs`
 - Modify `crates/right-db/src/error.rs`
+- Modify `crates/right-db/src/connection.rs`
+- Modify `crates/right-db/src/transaction.rs`
 
-- [ ] **Step 2.1: Port params to `turso::Params` and `turso::Value`**
+- [ ] **Step 2.1: Port params, rows, and errors**
 
-In [params.rs](/Users/developer/dev/rightclaw/crates/right-db/src/params.rs), replace all `libsql` references with `turso`, and rename `into_libsql` to `into_turso`.
+In `params.rs`:
 
-Key resulting definitions must be:
+- Replace `libsql::params::Params` with `turso::Params`.
+- Replace `libsql::Value` with `turso::Value`.
+- Rename `into_libsql` to `into_turso`.
+- Keep tuple, array, `Vec<T>`, `ParamsBuilder`, and `Option<T>` behavior unchanged.
+
+Key resulting definitions:
 
 ```rust
 #[derive(Debug)]
@@ -302,35 +347,11 @@ impl Params {
 pub trait IntoValue {
     fn into_value(self) -> Result<turso::Value, DbError>;
 }
-
-#[derive(Debug, Default)]
-pub struct ParamsBuilder {
-    values: Vec<turso::Value>,
-    error: Option<DbError>,
-}
-
-impl IntoParams for () {
-    fn into_params(self) -> Result<Params, DbError> {
-        Ok(Params(turso::Params::None))
-    }
-}
-
-impl IntoParams for [(); 0] {
-    fn into_params(self) -> Result<Params, DbError> {
-        Ok(Params(turso::Params::None))
-    }
-}
 ```
 
-Keep existing tuple/array/`Option<T>` behavior, but construct `turso::Params::Positional(values)` and `turso::Value::{Text,Integer,Real,Null}`.
-
-- [ ] **Step 2.2: Port rows to `turso::Row` and `turso::Value`**
-
-In [row.rs](/Users/developer/dev/rightclaw/crates/right-db/src/row.rs), replace the file with this driver-neutral public shape:
+In `row.rs`:
 
 ```rust
-use crate::DbError;
-
 pub struct Row<'row> {
     inner: &'row turso::Row,
 }
@@ -351,110 +372,33 @@ impl<'row> Row<'row> {
         T::from_value(self.inner.get_value(idx)?)
     }
 }
-
-pub trait FromValue: Sized {
-    fn from_value(value: turso::Value) -> Result<Self, DbError>;
-}
-
-impl FromValue for turso::Value {
-    fn from_value(value: turso::Value) -> Result<Self, DbError> {
-        Ok(value)
-    }
-}
 ```
 
-Keep the existing `FromValue` impls for `i64`, `i32`, `u64`, `u32`, `f64`, `bool`, `String`, `Vec<u8>`, and `Option<T>`, replacing `libsql::Value` with `turso::Value`. Keep the existing error text for type mismatches except the column-index integer type now says `usize`.
-
-- [ ] **Step 2.3: Port `DbError` to `turso::Error`**
-
-In [error.rs](/Users/developer/dev/rightclaw/crates/right-db/src/error.rs), replace `libsql::Error` with `turso::Error` and replace constraint classification with Turso variants:
+In `error.rs`, replace the driver error variants with:
 
 ```rust
-use std::path::PathBuf;
+#[error("database error: {0}")]
+Database(#[from] turso::Error),
 
-/// Errors from per-agent database operations.
-#[derive(Debug, thiserror::Error)]
-pub enum DbError {
-    #[error("database error: {0}")]
-    Database(#[from] turso::Error),
+#[error("open database {path}: {source}")]
+Open {
+    path: PathBuf,
+    #[source]
+    source: turso::Error,
+},
+```
 
-    #[error("database row not found")]
-    NotFound,
+and classify constraints with:
 
-    #[error("invalid database parameter: {0}")]
-    InvalidParameter(String),
-
-    #[error("database constraint violation: {0}")]
-    Constraint(String),
-
-    #[error("open database {path}: {source}")]
-    Open {
-        path: PathBuf,
-        #[source]
-        source: turso::Error,
-    },
-
-    #[error("migration {version} on {path}: {source}")]
-    Migration {
-        path: PathBuf,
-        version: u32,
-        #[source]
-        source: Box<DbError>,
-    },
-
-    #[error("migration version {version} on {path}: {message}")]
-    MigrationVersion {
-        path: PathBuf,
-        version: u32,
-        message: String,
-    },
-}
-
-impl DbError {
-    pub fn is_open_error(&self) -> bool {
-        matches!(self, Self::Open { .. })
-    }
-
-    pub fn is_constraint_violation(&self) -> bool {
-        match self {
-            Self::Constraint(_) => true,
-            Self::Database(error) => is_turso_constraint(error),
-            Self::Migration { source, .. } => source.is_constraint_violation(),
-            _ => false,
-        }
-    }
-}
-
+```rust
 fn is_turso_constraint(error: &turso::Error) -> bool {
     matches!(error, turso::Error::Constraint(_))
 }
 ```
 
-Keep the existing constraint-violation unit test in the same file.
+- [ ] **Step 2.2: Port connection storage and local opens**
 
-- [ ] **Step 2.4: Run params/row/error targeted tests**
-
-Run:
-
-```bash
-devenv shell -- cargo test -p right-db params::tests row::tests error::tests
-```
-
-Expected before connection migration: compile may fail only because connection/transaction still call `into_libsql` or expect `libsql` row/value types. That failure is acceptable at this step and should point to Task 3 changes. If errors are unrelated to the planned driver swap, fix them before continuing.
-
-## Task 3: Port Connection And Transaction To `turso`
-
-**Files:**
-- Modify `crates/right-db/src/connection.rs`
-- Modify `crates/right-db/src/transaction.rs`
-
-- [ ] **Step 3.1: Port `Connection` storage and open path**
-
-In [connection.rs](/Users/developer/dev/rightclaw/crates/right-db/src/connection.rs):
-
-- Replace `libSQL`/`libsql` wording in comments with `Turso`/`turso`.
-- Change the runtime initialization message to `right-db turso runtime should initialize`.
-- Change the struct fields to:
+In `connection.rs`, change the connection struct to:
 
 ```rust
 pub struct Connection {
@@ -464,7 +408,7 @@ pub struct Connection {
 }
 ```
 
-- Replace `open_in_memory`, `open_local`, and `build` with:
+Replace `open_in_memory`, `open_local`, and `build` with Turso opens that enable index-method FTS:
 
 ```rust
 pub fn open_in_memory() -> Result<Self, DbError> {
@@ -491,8 +435,13 @@ fn build(db_path: PathBuf, create: bool) -> Result<Self, DbError> {
         path: db_path.clone(),
         source,
     };
-    let database =
-        block_on_runtime_safe(runtime, turso::Builder::new_local(&path).build()).map_err(open_err)?;
+    let database = block_on_runtime_safe(
+        runtime,
+        turso::Builder::new_local(&path)
+            .experimental_index_method(true)
+            .build(),
+    )
+    .map_err(open_err)?;
     let inner = database.connect().map_err(open_err)?;
     let conn = Self {
         db_path,
@@ -506,11 +455,7 @@ fn build(db_path: PathBuf, create: bool) -> Result<Self, DbError> {
 }
 ```
 
-The `PRAGMA query_only = ON` line is the read-only fallback because the public `turso::Builder` API does not expose the same `OpenFlags` surface as `libsql`. The read-only smoke tests in Task 4 decide whether this is acceptable. If those tests show file mutation or write acceptance, stop and report the read-only blocker.
-
-- [ ] **Step 3.2: Port query/execute helpers to `block_on_turso`**
-
-In [connection.rs](/Users/developer/dev/rightclaw/crates/right-db/src/connection.rs), replace each `into_libsql()` call with `into_turso()`, and replace `block_on_libsql` with:
+Replace `block_on_libsql` with:
 
 ```rust
 pub(crate) fn block_on_turso<T: Send>(
@@ -521,339 +466,461 @@ pub(crate) fn block_on_turso<T: Send>(
 }
 ```
 
-Update caller examples:
+Replace every `.into_libsql()` call with `.into_turso()`.
+
+- [ ] **Step 2.3: Port transactions**
+
+In `transaction.rs`:
+
+- Replace `libsql::Transaction` with `turso::Transaction`.
+- Replace `.into_libsql()` with `.into_turso()`.
+- Replace `block_on_libsql` with `block_on_turso`.
+- Keep `Deref<Target = Connection>` only if `transaction_deref_helper_write_is_rolled_back` passes after this task.
+- Update the struct-level docs to refer to Turso, not libSQL, after the test passes.
+
+In `connection.rs`, change transaction behavior calls to:
 
 ```rust
-let params = params.into_params()?.into_turso();
-let changed = self.block_on_turso(self.inner.execute(sql, params))?;
-```
+pub fn transaction(&self) -> Result<crate::transaction::Transaction<'_>, DbError> {
+    self.transaction_with_behavior(turso::transaction::TransactionBehavior::Immediate)
+}
 
-```rust
-let params = params.into_params()?.into_turso();
-let mut rows = self.block_on_turso(self.inner.query(sql, params))?;
-let Some(row) = self.block_on_turso(rows.next())? else {
-    return Err(DbError::NotFound);
-};
-map(&crate::row::Row::new(&row))
-```
-
-- [ ] **Step 3.3: Port transactions to Turso immediate transactions**
-
-In [connection.rs](/Users/developer/dev/rightclaw/crates/right-db/src/connection.rs), replace `transaction_with_behavior` with:
-
-```rust
 fn transaction_with_behavior(
     &self,
     behavior: turso::transaction::TransactionBehavior,
 ) -> Result<crate::transaction::Transaction<'_>, DbError> {
-    let inner = self.block_on_turso(turso::Transaction::new_unchecked(&self.inner, behavior))?;
+    let inner = self.block_on_turso(self.inner.transaction_with_behavior(behavior))?;
     Ok(crate::transaction::Transaction::new(self, inner))
 }
 ```
 
-Then update `transaction()` and `with_immediate_transaction()` to use `turso::transaction::TransactionBehavior::Immediate`.
-
-- [ ] **Step 3.4: Port connection pragmas**
-
-In [connection.rs](/Users/developer/dev/rightclaw/crates/right-db/src/connection.rs), keep the busy timeout, and test whether Turso accepts WAL mode:
-
-```rust
-pub(crate) fn apply_connection_pragmas(&self) -> Result<(), DbError> {
-    self.execute_batch("PRAGMA journal_mode=WAL")?;
-    self.inner.busy_timeout(BUSY_TIMEOUT)?;
-    Ok(())
-}
-
-pub(crate) fn apply_readonly_pragmas(&self) -> Result<(), DbError> {
-    self.inner.busy_timeout(BUSY_TIMEOUT)?;
-    Ok(())
-}
-```
-
-If `PRAGMA journal_mode=WAL` is unsupported by the Turso engine, remove only this pragma and update `open_connection_sets_sqlite_pragmas` in Task 4 to assert the Turso-supported concurrency setting instead. Do not silently ignore the failed pragma.
-
-- [ ] **Step 3.5: Port `Transaction`**
-
-In [transaction.rs](/Users/developer/dev/rightclaw/crates/right-db/src/transaction.rs):
-
-- Replace `libsql::Transaction` with `turso::Transaction`.
-- Replace `into_libsql()` with `into_turso()`.
-- Replace `block_on_libsql` calls with `block_on_turso`.
-- Update docs from `libSQL/libsql` to `Turso/turso`.
-
-Key resulting fields and constructor:
-
-```rust
-pub struct Transaction<'conn> {
-    conn: &'conn Connection,
-    inner: Option<turso::Transaction<'conn>>,
-}
-
-impl<'conn> Transaction<'conn> {
-    pub(crate) fn new(conn: &'conn Connection, inner: turso::Transaction<'conn>) -> Self {
-        Self {
-            conn,
-            inner: Some(inner),
-        }
-    }
-}
-```
-
-Keep `Deref<Target = Connection>` for now. The existing `transaction_deref_helper_write_is_rolled_back` test must pass under Turso; if it fails, stop and replace the `Deref` convenience with explicit transaction-aware helper paths in a separate design update.
-
-- [ ] **Step 3.6: Run connection and transaction tests**
+- [ ] **Step 2.4: Run the narrow compile/test check**
 
 Run:
 
 ```bash
-devenv shell -- cargo test -p right-db connection::tests transaction
+devenv shell -- cargo test -p right-db transaction_deref_helper_write_is_rolled_back error::tests::is_constraint_violation_detects_unique_violation
 ```
 
-Expected: PASS. If the `transaction_deref_helper_write_is_rolled_back` test fails, stop and report that the backend swap invalidates the current `Deref<Target = Connection>` transaction invariant.
+Expected after Task 2 only: compile may still fail because schema SQL and search queries still use SQLite FTS5. Fix only driver-wrapper compile errors in this task; schema/search changes are Task 3.
 
-## Task 4: Rename Smoke Tests And Prove Local Contracts Under Turso
+## Task 3: Replace Fresh Schema And Search With Turso FTS
 
 **Files:**
+- Modify `crates/right-db/src/sql/v1_schema.sql`
+- Modify `crates/right-db/src/sql/v21_conversation_messages.sql`
+- Modify `crates/right-db/src/conversation.rs`
+- Modify `crates/right-db/src/migrations.rs`
 - Modify `crates/right-db/tests/smoke.rs`
-- Modify or remove `crates/right-db/tests/turso_compat.rs`
+- Modify `crates/right/src/main.rs`
 
-- [ ] **Step 4.1: Import explicit read-only path helper**
+- [ ] **Step 3.1: Replace fresh memory FTS schema**
 
-In [smoke.rs](/Users/developer/dev/rightclaw/crates/right-db/tests/smoke.rs), change the first import to:
+In `crates/right-db/src/sql/v1_schema.sql`, delete the `CREATE VIRTUAL TABLE memories_fts ...` block and the `memories_ai`, `memories_ad`, and `memories_au` triggers. Add:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_memories_turso_fts
+ON memories USING fts(content);
+```
+
+- [ ] **Step 3.2: Replace fresh conversation FTS schema**
+
+In `crates/right-db/src/sql/v21_conversation_messages.sql`, delete the `CREATE VIRTUAL TABLE conversation_messages_fts ...` block and the `conversation_messages_ai`, `conversation_messages_ad`, and `conversation_messages_au` triggers. Add:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_turso_fts
+ON conversation_messages USING fts(content);
+```
+
+- [ ] **Step 3.3: Rewrite conversation search queries**
+
+In `crates/right-db/src/conversation.rs`, change `search_thread` and `search_chat` to select `m.content` from `conversation_messages` directly:
+
+```sql
+SELECT
+    m.id,
+    m.role,
+    m.content,
+    m.sender_user_id,
+    m.sender_name,
+    m.created_at,
+    m.thread_id,
+    m.message_id,
+    m.root_session_id
+ FROM conversation_messages m
+ WHERE m.content MATCH ?
+   AND m.platform = 'telegram'
+   AND m.chat_id = ?
+   AND m.thread_id = ?
+ ORDER BY m.created_at DESC, m.id DESC
+ LIMIT ?
+```
+
+and for chat-wide search:
+
+```sql
+SELECT
+    m.id,
+    m.role,
+    m.content,
+    m.sender_user_id,
+    m.sender_name,
+    m.created_at,
+    m.thread_id,
+    m.message_id,
+    m.root_session_id
+ FROM conversation_messages m
+ WHERE m.content MATCH ?
+   AND m.platform = 'telegram'
+   AND m.chat_id = ?
+ ORDER BY m.created_at DESC, m.id DESC
+ LIMIT ?
+```
+
+Keep the existing normalized FTS query input. Replace SQLite `snippet(...)` output with a bounded Rust snippet:
 
 ```rust
-use right_db::{
-    MIGRATIONS, open_connection, open_connection_readonly, open_database_path_readonly, open_db,
-};
-use tempfile::tempdir;
+fn bounded_search_snippet(content: &str) -> String {
+    const MAX_SNIPPET_CHARS: usize = 180;
+    let mut snippet = content.trim().chars().take(MAX_SNIPPET_CHARS).collect::<String>();
+    if content.trim().chars().count() > MAX_SNIPPET_CHARS {
+        snippet.push_str("...");
+    }
+    snippet
+}
 ```
 
-- [ ] **Step 4.2: Rename `libsql_*` tests**
+Use that helper when mapping the `m.content` column into `ConversationSearchResult.snippet`.
 
-In [smoke.rs](/Users/developer/dev/rightclaw/crates/right-db/tests/smoke.rs), rename these tests and messages:
+- [ ] **Step 3.4: Rewrite memory search in `right` CLI/backend**
 
-```text
-libsql_open_connection_creates_file_and_preserves_local_path -> turso_open_connection_creates_file_and_preserves_local_path
-libsql_open_connection_readonly_requires_existing_db -> turso_open_connection_readonly_requires_existing_db
-libsql_migrations_set_latest_user_version -> turso_migrations_set_latest_user_version
-libsql_migrations_are_idempotent_on_existing_data_db -> turso_migrations_are_idempotent_on_existing_data_db
-libsql_migrations_static_runs_with_right_db_connection -> turso_migrations_static_runs_with_right_db_connection
-libsql_supports_conversation_fts_triggers -> turso_supports_conversation_fts_triggers
-libsql_supports_returning_clause -> turso_supports_returning_clause
-libsql_transaction_rolls_back_on_error -> turso_transaction_rolls_back_on_error
+In `crates/right/src/main.rs`, replace the current memory search join:
+
+```sql
+JOIN memories_fts f ON m.id = f.rowid
+WHERE memories_fts MATCH ?1
+ORDER BY bm25(memories_fts)
 ```
 
-Also replace message text like `local libsql open should create data.db` with `local turso open should create data.db`.
+with base-table Turso FTS:
 
-- [ ] **Step 4.3: Add explicit-path read-only tests**
+```sql
+WHERE m.content MATCH ?1
+ORDER BY m.created_at DESC, m.id DESC
+```
 
-Add these tests immediately after `turso_open_connection_readonly_requires_existing_db`:
+Keep existing tag/deleted/limit filters intact around that predicate.
+
+- [ ] **Step 3.5: Update schema/search tests**
+
+In `crates/right-db/tests/smoke.rs`:
+
+- Rename `libsql_supports_conversation_fts_triggers` to `turso_supports_conversation_fts_index`.
+- Change its count query to:
 
 ```rust
-#[test]
-fn open_database_path_readonly_missing_file_does_not_create_file() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("restore-probe.db");
+"SELECT COUNT(*) FROM conversation_messages WHERE content MATCH ?"
+```
 
-    let err = open_database_path_readonly(&db_path).expect_err("missing db should not open");
+- Rename `schema_has_memories_fts` to `schema_has_memories_turso_fts_index`.
+- Assert the index exists with:
 
-    assert!(
-        !db_path.exists(),
-        "readonly explicit path must not create a db file"
-    );
-    assert!(
-        err.is_open_error(),
-        "expected readonly open failure, got {err:?}"
-    );
-}
+```rust
+query_index_count(&conn, "idx_memories_turso_fts")
+```
 
-#[test]
-fn open_database_path_readonly_existing_file_rejects_writes_and_preserves_version() {
-    let dir = tempdir().unwrap();
-    open_db(dir.path(), true).unwrap();
-    let db_path = dir.path().join("data.db");
+- In `schema_has_conversation_messages_table`, assert `conversation_messages` exists and `idx_conversation_messages_turso_fts` exists.
 
-    let conn = open_database_path_readonly(&db_path).unwrap();
-    let before = query_user_version(&conn);
+Add this helper beside `query_table_count`:
 
-    let err = conn
-        .execute("CREATE TABLE explicit_readonly_write_probe (id INTEGER)", ())
-        .expect_err("readonly explicit path should reject writes");
-
-    assert!(err.to_string().contains("readonly"));
-    assert_eq!(
-        query_user_version(&conn),
-        before,
-        "readonly explicit path must not change user_version",
-    );
+```rust
+fn query_index_count(conn: &right_db::Connection, index_name: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?",
+        [index_name],
+        |row| row.get(0),
+    )
+    .unwrap()
 }
 ```
 
-- [ ] **Step 4.4: Remove direct Turso probe file**
+In `crates/right-db/src/migrations.rs`, update `conversation_messages_schema_exists` and `conversation_messages_fts_tracks_updates` to use `conversation_messages WHERE content MATCH ...` and index names instead of `conversation_messages_fts`.
 
-After `right-db` is fully migrated, `turso_compat.rs` no longer proves `libsql`-created files because it would create files through the new backend. Remove it after the pre-migration gate has passed and the production smoke tests cover the local contract:
-
-```bash
-devenv shell -- git rm crates/right-db/tests/turso_compat.rs
-```
-
-- [ ] **Step 4.5: Run right-db smoke and migration tests**
+- [ ] **Step 3.6: Run focused Turso search tests**
 
 Run:
 
 ```bash
-devenv shell -- cargo test -p right-db open_database_path_readonly
-devenv shell -- cargo test -p right-db turso_
-devenv shell -- cargo test -p right-db migration_runner_semantics
-devenv shell -- cargo test -p right-db cold_boot_concurrent_migrators_do_not_double_apply_v23
-devenv shell -- cargo test -p right-db
+devenv shell -- cargo test -p right-db turso_supports_conversation_fts_index schema_has_memories_turso_fts_index schema_has_conversation_messages_table conversation_messages_fts_tracks_updates
 ```
 
-Expected: PASS. If read-only tests pass only because writes fail but files are still mutated on open, stop and report the read-only limitation; do not weaken the structural read-only requirement without a design update.
+Expected: PASS. If Turso FTS index metadata is not represented as `sqlite_master type='index'`, update the helper to the observed metadata shape and keep the test name focused on the user-visible index contract.
 
-- [ ] **Step 4.6: Commit right-db Turso migration**
+## Task 4: Add Legacy v34 FTS Migration
+
+**Files:**
+- Create `crates/right-db/src/sql/v34_turso_fts_indexes.sql`
+- Modify `crates/right-db/src/migrations.rs`
+
+- [ ] **Step 4.1: Add v34 SQL**
+
+Create `crates/right-db/src/sql/v34_turso_fts_indexes.sql`:
+
+```sql
+DROP TRIGGER IF EXISTS memories_ai;
+DROP TRIGGER IF EXISTS memories_ad;
+DROP TRIGGER IF EXISTS memories_au;
+
+DROP TRIGGER IF EXISTS conversation_messages_ai;
+DROP TRIGGER IF EXISTS conversation_messages_ad;
+DROP TRIGGER IF EXISTS conversation_messages_au;
+
+CREATE INDEX IF NOT EXISTS idx_memories_turso_fts
+ON memories USING fts(content);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_turso_fts
+ON conversation_messages USING fts(content);
+```
+
+- [ ] **Step 4.2: Register v34**
+
+In `crates/right-db/src/migrations.rs`, add:
+
+```rust
+const V34_SCHEMA: &str = include_str!("sql/v34_turso_fts_indexes.sql");
+
+pub const LATEST_SCHEMA_VERSION: u32 = 34;
+```
+
+Add the migration after v33:
+
+```rust
+Migration {
+    version: 34,
+    sql: V34_SCHEMA,
+    hook: None,
+},
+```
+
+- [ ] **Step 4.3: Add v34 regression test**
+
+In `crates/right-db/src/migrations.rs`, add this test near the other migration tests:
+
+```rust
+#[test]
+fn v34_drops_legacy_fts_triggers_and_creates_turso_indexes() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    MIGRATIONS.to_version(&mut conn, 33).unwrap();
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS conversation_messages_fts (
+             rowid INTEGER PRIMARY KEY,
+             content TEXT NOT NULL
+         );
+         CREATE TRIGGER IF NOT EXISTS conversation_messages_ai
+         AFTER INSERT ON conversation_messages
+         BEGIN
+             INSERT INTO conversation_messages_fts(rowid, content)
+             VALUES (new.id, new.content);
+         END;",
+    )
+    .unwrap();
+
+    MIGRATIONS.to_latest(&mut conn).unwrap();
+
+    let trigger_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type='trigger' AND name='conversation_messages_ai'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(trigger_count, 0, "legacy FTS trigger must be removed");
+
+    let index_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type='index' AND name='idx_conversation_messages_turso_fts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(index_count, 1, "Turso FTS index must exist");
+
+    conn.execute(
+        "INSERT INTO conversation_messages (chat_id, thread_id, role, content)
+         VALUES (1, 0, 'user', 'legacy needle')",
+        [],
+    )
+    .unwrap();
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_messages WHERE content MATCH 'needle'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+```
+
+- [ ] **Step 4.4: Run v34 tests**
 
 Run:
 
 ```bash
-devenv shell -- git add Cargo.toml Cargo.lock crates/right-db/Cargo.toml crates/right-db/src crates/right-db/tests
-devenv shell -- git commit -m "refactor(db): migrate local driver to turso"
+devenv shell -- cargo test -p right-db v34_drops_legacy_fts_triggers_and_creates_turso_indexes migration_runner_semantics_libsql_rolls_back_partial_batch_and_reports_context
 ```
 
-## Task 5: Remove `libsql` And Update Architecture Docs
+Expected: PASS. Rename the migration-runner test from `libsql` to a driver-neutral name in the same edit if it still contains `libsql`.
+
+## Task 5: Remove Temporary Libsql Surface
 
 **Files:**
 - Modify `Cargo.toml`
 - Modify `crates/right-db/Cargo.toml`
-- Modify `ARCHITECTURE.md`
-- Modify `docs/architecture/modules.md`
-- Modify `docs/architecture/memory.md` if needed
+- Delete `crates/right-db/tests/turso_compat.rs`
+- Modify `crates/right-db/tests/smoke.rs`
+- Modify Rust comments mentioning `libSQL` or `libsql`
 
-- [ ] **Step 5.1: Remove `libsql` dependency**
+- [ ] **Step 5.1: Remove direct `libsql` dependency**
 
-In workspace [Cargo.toml](/Users/developer/dev/rightclaw/Cargo.toml), remove:
+Remove these dependency entries:
 
 ```toml
 libsql = "0.9.30"
-```
-
-In [crates/right-db/Cargo.toml](/Users/developer/dev/rightclaw/crates/right-db/Cargo.toml), remove:
-
-```toml
 libsql = { workspace = true }
 ```
 
-- [ ] **Step 5.2: Verify no project code references `libsql`**
+Keep:
+
+```toml
+turso = { version = "0.7.0-pre.3", features = ["sync"] }
+turso = { workspace = true }
+```
+
+- [ ] **Step 5.2: Remove temporary gate test**
+
+Delete `crates/right-db/tests/turso_compat.rs`. Its direct checks are now represented by production smoke and migration tests.
+
+- [ ] **Step 5.3: Remove stale driver wording**
 
 Run:
 
 ```bash
-devenv shell -- rg -n "libsql|libSQL|rusqlite|rusqlite_migration" Cargo.toml crates
+devenv shell -- rg -n "libsql|libSQL|rusqlite" Cargo.toml crates/right-db crates/right ARCHITECTURE.md docs/architecture --glob '*.rs' --glob '*.toml' --glob '*.md'
 ```
 
-Expected: no matches. If matches are only in historical docs outside `Cargo.toml` and `crates`, leave them unless they describe current behavior.
+Update only active runtime/test/docs references touched by this migration. Do not edit historical specs or unrelated old plans.
 
-- [ ] **Step 5.3: Update architecture docs**
-
-In [ARCHITECTURE.md](/Users/developer/dev/rightclaw/ARCHITECTURE.md), update the workspace table row:
-
-```markdown
-| **right-db** | `crates/right-db/` | Per-agent SQLite-compatible `data.db` boundary over local Turso: project DB types, migrations, `sql/v*.sql` |
-```
-
-In `ARCHITECTURE.md` Local Database Rules, replace:
-
-```markdown
-Per-agent `data.db` is a SQLite-compatible database. Local libSQL is the
-current driver implementation and is hidden behind `right-db`.
-```
-
-with:
-
-```markdown
-Per-agent `data.db` is a SQLite-compatible database. Local Turso is the
-current driver implementation and is hidden behind `right-db`.
-```
-
-In [docs/architecture/modules.md](/Users/developer/dev/rightclaw/docs/architecture/modules.md), update the `right-db` bullet:
-
-```markdown
-- `Connection`, `Transaction`, `DbError` — project-owned boundary over the local Turso driver for per-agent SQLite-compatible `data.db`.
-```
-
-In [docs/architecture/memory.md](/Users/developer/dev/rightclaw/docs/architecture/memory.md), replace current local-driver wording with:
-
-```markdown
-via `right-db`'s local Turso driver, not Hindsight.
-```
-
-- [ ] **Step 5.4: Run doc drift search**
+- [ ] **Step 5.4: Run right-db suite**
 
 Run:
 
 ```bash
-devenv shell -- rg -n "local libSQL|local libsql|libsql driver|libSQL driver|rusqlite|rusqlite_migration" ARCHITECTURE.md docs/architecture Cargo.toml crates
-```
-
-Expected:
-
-- No current-behavior references to local `libsql`.
-- Historical docs under `docs/superpowers/` may still mention `libsql`; do not rewrite history.
-
-- [ ] **Step 5.5: Commit dependency cleanup and docs**
-
-Run:
-
-```bash
-devenv shell -- git add Cargo.toml Cargo.lock crates/right-db/Cargo.toml ARCHITECTURE.md docs/architecture/modules.md docs/architecture/memory.md
-devenv shell -- git commit -m "docs(db): document local turso boundary"
-```
-
-## Task 6: Dependent Package Verification
-
-**Files:**
-- No planned edits unless tests expose a real compatibility issue.
-
-- [ ] **Step 6.1: Run targeted dependent package tests**
-
-Run:
-
-```bash
-devenv shell -- cargo test -p right-memory
-devenv shell -- cargo test -p right-mcp
-devenv shell -- cargo test -p right-lifecycle
-devenv shell -- cargo test -p right-agent
-devenv shell -- cargo test -p right-dashboard
-devenv shell -- cargo test -p right-bot
-devenv shell -- cargo test -p right
+devenv shell -- cargo test -p right-db
 ```
 
 Expected: PASS.
 
-If a failure is caused by a changed `right-db` error message or transaction behavior, add a focused regression test in the owning crate before fixing. Do not broaden public `right-db` APIs unless a caller break is unavoidable.
+- [ ] **Step 5.5: Commit runtime migration**
 
-- [ ] **Step 6.2: Commit any dependent fixes**
-
-If Step 6.1 required code changes, do not use a generic staging command. Run:
+Run:
 
 ```bash
-devenv shell -- git status --short
+devenv shell -- git add Cargo.toml Cargo.lock crates/right-db crates/right
+devenv shell -- git commit -m "refactor(db): migrate local storage to turso fts"
 ```
 
-Then stage only the exact files changed for the dependent fix and commit with:
+## Task 6: Update Architecture Docs
+
+**Files:**
+- Modify `ARCHITECTURE.md`
+- Modify `docs/architecture/modules.md`
+- Modify `docs/architecture/memory.md`
+
+- [ ] **Step 6.1: Update local database rules**
+
+In `ARCHITECTURE.md`, update the local database section to state:
+
+```markdown
+- `right-db` is the only crate that owns local database-driver details.
+- Runtime local storage uses the `turso` crate with `sync` enabled for future
+  Turso Cloud backup work.
+- Local opens must enable Turso's experimental index-method feature because
+  conversation and memory search use `CREATE INDEX ... USING fts`.
+- No crate outside `right-db` may expose raw `turso` connection, row,
+  transaction, value, parameter, or error types.
+```
+
+- [ ] **Step 6.2: Update module and memory docs**
+
+In `docs/architecture/modules.md`, update the `right-db` bullet to mention local Turso and project-owned wrappers.
+
+In `docs/architecture/memory.md`, replace SQLite FTS5 wording with:
+
+```markdown
+Conversation transcript search and legacy memory search use local Turso FTS
+indexes over the base tables. The schema no longer creates SQLite FTS5 virtual
+tables for fresh databases; migration v34 removes old FTS5 sync triggers and
+creates Turso FTS indexes for existing databases.
+```
+
+- [ ] **Step 6.3: Run doc reference scan**
+
+Run:
 
 ```bash
-devenv shell -- git commit -m "fix(db): preserve dependent database behavior"
+devenv shell -- rg -n "local libsql|SQLite FTS5|memories_fts|conversation_messages_fts|USING fts5" ARCHITECTURE.md docs/architecture crates/right-db/src crates/right-db/tests crates/right/src --glob '*.md' --glob '*.rs' --glob '*.sql'
 ```
 
-If no files changed, skip this step. If the dependent failure requires a public `right-db` API change, stop and revise the plan before committing.
+Expected:
 
-## Task 7: Final Workspace Verification
+- Historical old specs/plans may still mention the old model.
+- Active architecture docs and active runtime code describe Turso FTS.
+
+- [ ] **Step 6.4: Commit docs**
+
+Run:
+
+```bash
+devenv shell -- git add ARCHITECTURE.md docs/architecture/modules.md docs/architecture/memory.md
+devenv shell -- git commit -m "docs(db): document local turso fts boundary"
+```
+
+## Task 7: Dependent Package Checks
+
+**Files:**
+- No planned edits unless failures identify direct drift from this migration.
+
+- [ ] **Step 7.1: Run targeted dependent tests**
+
+Run:
+
+```bash
+devenv shell -- cargo test -p right
+```
+
+Expected: PASS. If memory search SQL changed in `crates/right/src/main.rs`, failures should point to missing Turso FTS query rewrites or test expectations.
+
+- [ ] **Step 7.2: Run direct search smoke filters**
+
+Run:
+
+```bash
+devenv shell -- cargo test -p right-db search_thread search_chat
+```
+
+Expected: PASS.
+
+## Task 8: Final Verification
 
 **Files:**
 - No planned edits.
 
-- [ ] **Step 7.1: Final full workspace test**
+- [ ] **Step 8.1: Run full workspace test suite**
 
 Run:
 
@@ -863,7 +930,7 @@ devenv shell -- cargo test --workspace
 
 Expected: PASS.
 
-- [ ] **Step 7.2: Final debug build**
+- [ ] **Step 8.2: Run full workspace build**
 
 Run:
 
@@ -871,29 +938,29 @@ Run:
 devenv shell -- cargo build --workspace
 ```
 
-- [ ] **Step 7.3: Final surface checks**
+Expected: PASS.
+
+- [ ] **Step 8.3: Final surface scan**
 
 Run:
 
 ```bash
-devenv shell -- rg -n "libsql|libSQL|rusqlite|rusqlite_migration" Cargo.toml crates ARCHITECTURE.md docs/architecture
-devenv shell -- rg -n "push\\(|pull\\(|checkpoint\\(|TURSO_DATABASE_URL|TURSO_AUTH_TOKEN|turso cloud|sync scheduler" crates ARCHITECTURE.md docs/architecture
-devenv shell -- git status --short
+devenv shell -- rg -n "libsql|rusqlite|USING fts5|conversation_messages_fts|memories_fts|push\\(|pull\\(|with_auth_token|new_remote" Cargo.toml crates docs/architecture ARCHITECTURE.md --glob '*.rs' --glob '*.sql' --glob '*.toml' --glob '*.md'
 ```
 
 Expected:
 
-- No current project code or architecture docs reference `libsql`/`rusqlite`.
-- No cloud sync behavior, credentials, UI, CLI, bot command, or scheduler was introduced.
-- `git status --short` is clean after final commits.
+- No runtime `libsql`/`rusqlite` references.
+- No active schema/search dependence on SQLite FTS5 virtual tables.
+- No cloud sync calls, remote URLs, auth-token setup, or sync scheduler code.
 
-- [ ] **Step 7.4: Final commit if verification changed generated files**
+- [ ] **Step 8.4: Commit any final cleanup**
 
-If final verification changed only `Cargo.lock`, commit it:
+If Step 8.3 required cleanup, commit with:
 
 ```bash
-devenv shell -- git add Cargo.lock
-devenv shell -- git commit -m "chore(db): finalize turso migration"
+devenv shell -- git add <changed-files>
+devenv shell -- git commit -m "chore(db): clean turso migration surface"
 ```
 
-If final verification changed Rust formatting, run `devenv shell -- git status --short`, stage only the Rust files listed there that were touched by this plan, and use the same commit message. Skip if the worktree is clean.
+If Step 8.3 required no cleanup, do not create an empty commit.
