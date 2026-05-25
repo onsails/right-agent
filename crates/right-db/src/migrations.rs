@@ -26,8 +26,9 @@ const V30_SCHEMA: &str = include_str!("sql/v30_skill_learning_hint_outcome.sql")
 const V31_SCHEMA: &str = include_str!("sql/v31_skill_learning_events_dashboard_index.sql");
 const V32_SCHEMA: &str = include_str!("sql/v32_skill_lifecycle.sql");
 const V33_SCHEMA: &str = include_str!("sql/v33_mcp_oauth_resource.sql");
+const V34_SCHEMA: &str = include_str!("sql/v34_turso_fts_indexes.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 33;
+pub const LATEST_SCHEMA_VERSION: u32 = 34;
 
 type MigrationHook = fn(&dyn MigrationConnection) -> Result<(), crate::DbError>;
 
@@ -786,6 +787,11 @@ pub static MIGRATIONS: Migrations = Migrations {
             sql: V33_SCHEMA,
             hook: None,
         },
+        Migration {
+            version: 34,
+            sql: V34_SCHEMA,
+            hook: None,
+        },
     ],
 };
 
@@ -921,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_runner_semantics_libsql_rolls_back_all_pending_migrations_on_later_failure() {
+    fn migration_runner_semantics_local_db_rolls_back_all_pending_migrations_on_later_failure() {
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::open_connection(dir.path(), false).unwrap();
 
@@ -945,6 +951,144 @@ mod tests {
             )
             .unwrap();
         assert_eq!(table_count, 0);
+    }
+
+    #[test]
+    fn v34_drops_legacy_fts_triggers_and_creates_turso_indexes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 33).unwrap();
+
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_memories_turso_fts;
+             DROP INDEX IF EXISTS idx_conversation_messages_turso_fts;
+
+             CREATE TABLE IF NOT EXISTS memories_fts (
+                 rowid INTEGER PRIMARY KEY,
+                 content TEXT NOT NULL
+             );
+             CREATE TRIGGER IF NOT EXISTS memories_ai
+             AFTER INSERT ON memories
+             BEGIN
+                 INSERT INTO memories_fts(rowid, content)
+                 VALUES (new.id, new.content);
+             END;
+             CREATE TRIGGER IF NOT EXISTS memories_ad
+             AFTER DELETE ON memories
+             BEGIN
+                 DELETE FROM memories_fts WHERE rowid = old.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS memories_au
+             AFTER UPDATE OF content ON memories
+             BEGIN
+                 UPDATE memories_fts SET content = new.content WHERE rowid = old.id;
+             END;
+
+             CREATE TABLE IF NOT EXISTS conversation_messages_fts (
+                 rowid INTEGER PRIMARY KEY,
+                 content TEXT NOT NULL
+             );
+             CREATE TRIGGER IF NOT EXISTS conversation_messages_ai
+             AFTER INSERT ON conversation_messages
+             BEGIN
+                 INSERT INTO conversation_messages_fts(rowid, content)
+                 VALUES (new.id, new.content);
+             END;
+             CREATE TRIGGER IF NOT EXISTS conversation_messages_ad
+             AFTER DELETE ON conversation_messages
+             BEGIN
+                 DELETE FROM conversation_messages_fts WHERE rowid = old.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS conversation_messages_au
+             AFTER UPDATE OF content ON conversation_messages
+             BEGIN
+                 UPDATE conversation_messages_fts
+                 SET content = new.content
+                 WHERE rowid = old.id;
+             END;",
+        )
+        .unwrap();
+
+        for trigger_name in [
+            "memories_ai",
+            "memories_ad",
+            "memories_au",
+            "conversation_messages_ai",
+            "conversation_messages_ad",
+            "conversation_messages_au",
+        ] {
+            let trigger_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?1",
+                    [trigger_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(trigger_count, 1, "{trigger_name} fixture trigger missing");
+        }
+
+        conn.execute(
+            "INSERT INTO memories (content) VALUES ('legacy memory needle')",
+            (),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_messages (chat_id, thread_id, role, content)
+             VALUES (1, 0, 'user', 'legacy conversation needle')",
+            (),
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        for trigger_name in [
+            "memories_ai",
+            "memories_ad",
+            "memories_au",
+            "conversation_messages_ai",
+            "conversation_messages_ad",
+            "conversation_messages_au",
+        ] {
+            let trigger_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?1",
+                    [trigger_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(trigger_count, 0, "{trigger_name} trigger must be removed");
+        }
+
+        for index_name in [
+            "idx_memories_turso_fts",
+            "idx_conversation_messages_turso_fts",
+        ] {
+            let index_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    [index_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(index_count, 1, "{index_name} index must exist");
+        }
+
+        let memory_match_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE content MATCH 'memory'",
+                (),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(memory_match_count, 1);
+
+        let conversation_match_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_messages WHERE content MATCH 'conversation'",
+                (),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(conversation_match_count, 1);
     }
 
     #[test]
