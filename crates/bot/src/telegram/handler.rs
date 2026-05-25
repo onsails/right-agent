@@ -946,8 +946,8 @@ async fn handle_mcp_auth(
     )
     .await?;
 
-    let metadata = match right_mcp::oauth::discover_as(&http_client, &server_url).await {
-        Ok(m) => m,
+    let discovery = match right_mcp::oauth::discover_oauth(&http_client, &server_url).await {
+        Ok(d) => d,
         Err(e) => {
             bot.send_message(
                 msg.chat.id,
@@ -957,6 +957,11 @@ async fn handle_mcp_auth(
             return Ok(());
         }
     };
+    let metadata = discovery.metadata;
+    let resource = discovery.resource;
+    let scopes = discovery.scopes;
+    let scope_param = right_mcp::oauth::scope_param(&scopes);
+    let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
 
     // 5. DCR or static clientId
     let agent_name = agent_dir
@@ -978,6 +983,7 @@ async fn handle_mcp_auth(
         &metadata,
         None, // no static clientId from .claude.json -- DCR only
         &redirect_uri,
+        &scope_refs,
     )
     .await
     {
@@ -1049,6 +1055,7 @@ async fn handle_mcp_auth(
     let pending = right_mcp::oauth::PendingAuth {
         server_name: server_name.to_string(),
         server_url: server_url.clone(),
+        resource: resource.clone(),
         code_verifier,
         state: state.clone(),
         token_endpoint: metadata.token_endpoint.clone(),
@@ -1066,7 +1073,8 @@ async fn handle_mcp_auth(
         &redirect_uri,
         &state,
         &code_challenge,
-        None,
+        &resource,
+        scope_param.as_deref(),
     );
     bot.send_message(
         msg.chat.id,
@@ -1237,7 +1245,7 @@ async fn handle_mcp_add(
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        let oauth_result = right_mcp::oauth::discover_as(&http_client, &bare_url).await;
+        let oauth_result = right_mcp::oauth::discover_oauth(&http_client, &bare_url).await;
         let discovered = oauth_result.is_ok();
         tracing::info!(url = %bare_url, oauth_discovered = discovered, err = ?oauth_result.err(), "mcp add: OAuth AS discovery complete");
         discovered

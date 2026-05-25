@@ -8,27 +8,6 @@ pub struct UsedSkillReceipt {
     pub message: String,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
-pub struct LearningSignal {
-    pub kind: String,
-    pub package_name_hint: String,
-    pub trigger: String,
-    pub reason_not_written: String,
-    pub event_refs: Vec<String>,
-    pub summary: String,
-}
-
-#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
-pub struct SkillIssueSignal {
-    pub kind: String,
-    pub skill_name: String,
-    pub issue: String,
-    pub reason_not_patched: String,
-    pub observed_effect: String,
-    pub event_refs: Vec<String>,
-    pub patch_hint: String,
-}
-
 /// Parsed output from CC structured JSON response (`result` field per D-03).
 #[derive(Debug, serde::Deserialize)]
 pub struct ReplyOutput {
@@ -36,8 +15,6 @@ pub struct ReplyOutput {
     pub reply_to_message_id: Option<i32>,
     pub attachments: Option<Vec<OutboundAttachment>>,
     pub used_skill_receipts: Option<Vec<UsedSkillReceipt>>,
-    pub learning_signal: Option<LearningSignal>,
-    pub skill_issue_signal: Option<SkillIssueSignal>,
     /// Bootstrap mode: `true` signals agent claims onboarding is complete.
     /// Server-side file check (`should_accept_bootstrap`) gates actual completion.
     pub bootstrap_complete: Option<bool>,
@@ -87,8 +64,6 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
             reply_to_message_id: None,
             attachments: None,
             used_skill_receipts: None,
-            learning_signal: None,
-            skill_issue_signal: None,
             bootstrap_complete: None,
         }
     } else {
@@ -272,16 +247,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_reply_output_accepts_learning_signal() {
+    fn parse_reply_output_ignores_legacy_learning_signal_fields() {
         let json = r#"{"result":{"content":"done","learning_signal":{"kind":"create_candidate","package_name_hint":"right-demo","trigger":"explicit_user_request","reason_not_written":"needs_full_context_review","event_refs":["event-1"],"summary":"Capture this workflow."}}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
-        let signal = output.learning_signal.unwrap();
-        assert_eq!(signal.kind, "create_candidate");
-        assert_eq!(signal.package_name_hint, "right-demo");
-        assert_eq!(signal.trigger, "explicit_user_request");
-        assert_eq!(signal.reason_not_written, "needs_full_context_review");
-        assert_eq!(signal.event_refs, vec!["event-1"]);
-        assert_eq!(signal.summary, "Capture this workflow.");
+        assert_eq!(output.content.as_deref(), Some("done"));
     }
 
     #[test]
@@ -289,8 +258,6 @@ mod tests {
         let json = r#"{"result":{"content":"hello"}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
         assert!(output.used_skill_receipts.is_none());
-        assert!(output.learning_signal.is_none());
-        assert!(output.skill_issue_signal.is_none());
     }
 
     #[test]

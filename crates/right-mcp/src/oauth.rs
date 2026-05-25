@@ -28,6 +28,7 @@ pub enum OAuthError {
 pub struct PendingAuth {
     pub server_name: String,
     pub server_url: String,
+    pub resource: String,
     pub code_verifier: String,
     pub state: String,
     pub token_endpoint: String,
@@ -38,19 +39,29 @@ pub struct PendingAuth {
 }
 
 /// Authorization Server Metadata (RFC 8414 / OIDC well-known).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AsMetadata {
     pub authorization_endpoint: String,
     pub token_endpoint: String,
     pub registration_endpoint: Option<String>,
     pub code_challenge_methods_supported: Option<Vec<String>>,
+    pub scopes_supported: Option<Vec<String>>,
 }
 
 /// Resource Metadata (RFC 9728) — points to the Authorization Server.
 #[derive(Debug, Deserialize)]
 pub struct ResourceMetadata {
+    pub resource: Option<String>,
     pub authorization_servers: Vec<String>,
     pub scopes_supported: Option<Vec<String>>,
+}
+
+/// OAuth discovery result for an MCP resource server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthDiscovery {
+    pub metadata: AsMetadata,
+    pub resource: String,
+    pub scopes: Vec<String>,
 }
 
 /// Dynamic Client Registration response (RFC 7591).
@@ -182,6 +193,26 @@ fn as_metadata_urls(as_url: &str) -> Vec<String> {
     urls
 }
 
+/// Build the canonical MCP resource URI used for OAuth Resource Indicators.
+pub fn canonical_resource_uri(server_url: &str) -> Result<String, OAuthError> {
+    let parsed = reqwest::Url::parse(server_url).map_err(|e| {
+        OAuthError::DiscoveryFailed(format!("invalid server URL {server_url}: {e}"))
+    })?;
+    Ok(canonical_resource_from_url(&parsed))
+}
+
+fn canonical_resource_from_url(parsed: &reqwest::Url) -> String {
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+    let path = parsed.path().trim_end_matches('/');
+    if path.is_empty() {
+        format!("{scheme}://{host}{port}")
+    } else {
+        format!("{scheme}://{host}{port}{path}")
+    }
+}
+
 /// Extract `resource_metadata="<url>"` (RFC 9728 §5.1) from a `WWW-Authenticate`
 /// header value. Returns `None` if the parameter is absent or malformed.
 ///
@@ -266,9 +297,20 @@ pub async fn discover_as(
     client: &reqwest::Client,
     server_url: &str,
 ) -> Result<AsMetadata, OAuthError> {
+    discover_oauth(client, server_url)
+        .await
+        .map(|discovery| discovery.metadata)
+}
+
+/// Discover MCP OAuth metadata plus the canonical resource URI.
+pub async fn discover_oauth(
+    client: &reqwest::Client,
+    server_url: &str,
+) -> Result<OAuthDiscovery, OAuthError> {
     let parsed = reqwest::Url::parse(server_url).map_err(|e| {
         OAuthError::DiscoveryFailed(format!("invalid server URL {server_url}: {e}"))
     })?;
+    let fallback_resource = canonical_resource_from_url(&parsed);
     let origin = {
         let scheme = parsed.scheme();
         let host = parsed.host_str().unwrap_or("");
@@ -300,6 +342,8 @@ pub async fn discover_as(
     };
 
     debug!("discover_as: trying RFC 9728 resource metadata at {rfc9728_url}");
+    let mut resource = fallback_resource;
+    let mut resource_scopes: Vec<String> = Vec::new();
     let as_url: Option<String> = match client.get(&rfc9728_url).send().await {
         Ok(resp) => {
             let status = resp.status();
@@ -313,6 +357,12 @@ pub async fn discover_as(
                     "discover_as: RFC 9728 succeeded, AS URL = {:?}",
                     meta.authorization_servers.first()
                 );
+                if let Some(meta_resource) = meta.resource.filter(|r| !r.trim().is_empty()) {
+                    resource = meta_resource;
+                }
+                if let Some(scopes) = meta.scopes_supported {
+                    resource_scopes = scopes;
+                }
                 Some(
                     meta.authorization_servers
                         .into_iter()
@@ -354,7 +404,12 @@ pub async fn discover_as(
                         ))
                     })?;
                     debug!("discover_as: succeeded via {url}");
-                    return Ok(meta);
+                    let scopes = select_oauth_scopes(&resource_scopes, &meta.scopes_supported);
+                    return Ok(OAuthDiscovery {
+                        metadata: meta,
+                        resource,
+                        scopes,
+                    });
                 }
                 debug!("discover_as: {url} returned {status}, trying next");
                 last_err = Some(format!("{status} at {url}"));
@@ -385,6 +440,8 @@ struct DcrRequest<'a> {
     response_types: Vec<&'a str>,
     token_endpoint_auth_method: &'a str,
     application_type: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
 }
 
 /// Register this client via Dynamic Client Registration (RFC 7591).
@@ -395,14 +452,16 @@ pub async fn register_client(
     client: &reqwest::Client,
     registration_endpoint: &str,
     redirect_uri: &str,
+    scopes: &[&str],
 ) -> Result<DcrResponse, OAuthError> {
     let body = DcrRequest {
         client_name: "Right Agent",
         redirect_uris: vec![redirect_uri],
-        grant_types: vec!["authorization_code"],
+        grant_types: vec!["authorization_code", "refresh_token"],
         response_types: vec!["code"],
         token_endpoint_auth_method: "none",
         application_type: "native",
+        scope: (!scopes.is_empty()).then(|| scopes.join(" ")),
     };
 
     debug!("register_client: POST to {registration_endpoint}");
@@ -439,9 +498,10 @@ pub async fn register_client_or_fallback(
     metadata: &AsMetadata,
     static_client_id: Option<&str>,
     redirect_uri: &str,
+    scopes: &[&str],
 ) -> Result<(String, Option<String>), OAuthError> {
     if let Some(reg_ep) = &metadata.registration_endpoint {
-        let dcr = register_client(client, reg_ep, redirect_uri).await?;
+        let dcr = register_client(client, reg_ep, redirect_uri, scopes).await?;
         Ok((dcr.client_id, dcr.client_secret))
     } else if let Some(id) = static_client_id {
         debug!("register_client_or_fallback: using static client_id (no registration_endpoint)");
@@ -449,6 +509,30 @@ pub async fn register_client_or_fallback(
     } else {
         Err(OAuthError::MissingClientId)
     }
+}
+
+pub fn scope_param(scopes: &[String]) -> Option<String> {
+    (!scopes.is_empty()).then(|| scopes.join(" "))
+}
+
+fn select_oauth_scopes(resource_scopes: &[String], as_scopes: &Option<Vec<String>>) -> Vec<String> {
+    let mut scopes = if resource_scopes.is_empty() {
+        as_scopes.clone().unwrap_or_default()
+    } else {
+        resource_scopes.to_vec()
+    };
+
+    let as_supports_offline_access = as_scopes
+        .as_ref()
+        .is_some_and(|supported| supported.iter().any(|scope| scope == "offline_access"));
+    if !scopes.is_empty()
+        && as_supports_offline_access
+        && !scopes.iter().any(|scope| scope == "offline_access")
+    {
+        scopes.push("offline_access".to_string());
+    }
+
+    scopes
 }
 
 /// Build the authorization URL with PKCE S256 parameters.
@@ -460,6 +544,7 @@ pub fn build_auth_url(
     redirect_uri: &str,
     state: &str,
     code_challenge: &str,
+    resource: &str,
     scope: Option<&str>,
 ) -> String {
     let encode = |s: &str| {
@@ -475,12 +560,13 @@ pub fn build_auth_url(
     };
 
     let mut url = format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
+        "{}?response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256&resource={}",
         metadata.authorization_endpoint,
         encode(client_id),
         encode(redirect_uri),
         encode(state),
         encode(code_challenge),
+        encode(resource),
     );
 
     if let Some(s) = scope {
@@ -502,6 +588,7 @@ pub async fn exchange_token(
     client_id: &str,
     client_secret: Option<&str>,
     code_verifier: &str,
+    resource: &str,
 ) -> Result<TokenResponse, OAuthError> {
     let mut params = vec![
         ("grant_type", "authorization_code"),
@@ -509,6 +596,7 @@ pub async fn exchange_token(
         ("redirect_uri", redirect_uri),
         ("client_id", client_id),
         ("code_verifier", code_verifier),
+        ("resource", resource),
     ];
 
     let secret_owned;
@@ -748,6 +836,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discover_oauth_preserves_resource_metadata() {
+        setup_crypto();
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let resource = format!("{}/mcp", server.uri());
+        let resource_meta_url =
+            format!("{}/.well-known/oauth-protected-resource/mcp", server.uri());
+        let as_base = format!("{}/api/v3/auth/dash", server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                format!("Bearer error=\"unauthorized\", resource_metadata=\"{resource_meta_url}\""),
+            ))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "resource": resource,
+                "authorization_servers": [as_base]
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/.well-known/oauth-authorization-server/api/v3/auth/dash",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "authorization_endpoint": format!("{}/oauth2/authorize", server.uri()),
+                "token_endpoint": format!("{}/oauth2/token", server.uri()),
+                "registration_endpoint": format!("{}/oauth2/register", server.uri()),
+                "code_challenge_methods_supported": ["S256"]
+            })))
+            .mount(&server)
+            .await;
+
+        let discovery = discover_oauth(&reqwest::Client::new(), &format!("{}/mcp", server.uri()))
+            .await
+            .expect("OAuth discovery should succeed");
+
+        assert_eq!(discovery.resource, format!("{}/mcp", server.uri()));
+        assert_eq!(
+            discovery.metadata.token_endpoint,
+            format!("{}/oauth2/token", server.uri())
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_oauth_selects_authorization_server_scopes() {
+        setup_crypto();
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let resource_meta_url =
+            format!("{}/.well-known/oauth-protected-resource/mcp", server.uri());
+        let as_base = format!("{}/api/v3/auth/dash", server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                format!(r#"Bearer resource_metadata="{resource_meta_url}""#),
+            ))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "resource": format!("{}/mcp", server.uri()),
+                "authorization_servers": [as_base]
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/.well-known/oauth-authorization-server/api/v3/auth/dash",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "authorization_endpoint": format!("{}/oauth2/authorize", server.uri()),
+                "token_endpoint": format!("{}/oauth2/token", server.uri()),
+                "registration_endpoint": format!("{}/oauth2/register", server.uri()),
+                "scopes_supported": ["openid", "profile", "email", "offline_access"]
+            })))
+            .mount(&server)
+            .await;
+
+        let discovery = discover_oauth(&reqwest::Client::new(), &format!("{}/mcp", server.uri()))
+            .await
+            .expect("OAuth discovery should succeed");
+
+        assert_eq!(
+            discovery.scopes,
+            vec!["openid", "profile", "email", "offline_access"]
+        );
+    }
+
+    #[tokio::test]
     async fn discover_as_5xx_skips_and_continues() {
         setup_crypto();
         use wiremock::matchers::{method, path};
@@ -847,6 +1041,7 @@ mod tests {
             token_endpoint: "https://auth.example.com/token".to_string(),
             registration_endpoint: None,
             code_challenge_methods_supported: Some(vec!["S256".to_string()]),
+            scopes_supported: None,
         };
         let url = build_auth_url(
             &metadata,
@@ -854,6 +1049,7 @@ mod tests {
             "https://cb.example.com/callback",
             "state456",
             "challenge789",
+            "https://mcp.example.com/server/mcp",
             Some("read write"),
         );
         assert!(
@@ -872,6 +1068,10 @@ mod tests {
             "must have S256 method"
         );
         assert!(url.contains("scope="), "must have scope when provided");
+        assert!(
+            url.contains("resource=https%3A%2F%2Fmcp.example.com%2Fserver%2Fmcp"),
+            "must include MCP resource indicator"
+        );
     }
 
     #[test]
@@ -881,6 +1081,7 @@ mod tests {
             token_endpoint: "https://auth.example.com/token".to_string(),
             registration_endpoint: None,
             code_challenge_methods_supported: None,
+            scopes_supported: None,
         };
         let url = build_auth_url(
             &metadata,
@@ -888,6 +1089,7 @@ mod tests {
             "https://cb.example.com/callback",
             "state456",
             "challenge789",
+            "https://mcp.example.com/mcp",
             None,
         );
         assert!(
@@ -920,6 +1122,14 @@ mod tests {
                 request.contains("authorization_code"),
                 "DCR body must contain authorization_code"
             );
+            assert!(
+                request.contains("refresh_token"),
+                "DCR body must request refresh_token grant when scopes include offline_access"
+            );
+            assert!(
+                request.contains(r#""scope":"openid profile email offline_access""#),
+                "DCR body must include selected OAuth scopes"
+            );
 
             let body = r#"{"client_id":"dcr-client-id-123","client_secret":null}"#;
             let resp = format!(
@@ -932,7 +1142,13 @@ mod tests {
 
         let client = reqwest::Client::new();
         let reg_ep = format!("http://127.0.0.1:{port}/register");
-        let result = register_client(&client, &reg_ep, "https://cb.example.com/callback").await;
+        let result = register_client(
+            &client,
+            &reg_ep,
+            "https://cb.example.com/callback",
+            &["openid", "profile", "email", "offline_access"],
+        )
+        .await;
         assert!(result.is_ok(), "register_client should succeed: {result:?}");
         assert_eq!(result.unwrap().client_id, "dcr-client-id-123");
     }
@@ -956,7 +1172,8 @@ mod tests {
 
         let client = reqwest::Client::new();
         let reg_ep = format!("http://127.0.0.1:{port}/register");
-        let result = register_client(&client, &reg_ep, "https://cb.example.com/callback").await;
+        let result =
+            register_client(&client, &reg_ep, "https://cb.example.com/callback", &[]).await;
         assert!(
             matches!(result, Err(OAuthError::DcrFailed(_))),
             "non-2xx should be DcrFailed: {result:?}"
@@ -974,12 +1191,14 @@ mod tests {
                 token_endpoint: "https://auth.example.com/token".to_string(),
                 registration_endpoint: None,
                 code_challenge_methods_supported: None,
+                scopes_supported: None,
             };
             let result = register_client_or_fallback(
                 &client,
                 &metadata,
                 Some("static-id-abc"),
                 "https://cb.example.com/callback",
+                &[],
             )
             .await;
             assert!(result.is_ok(), "static fallback should succeed");
@@ -999,12 +1218,14 @@ mod tests {
                 token_endpoint: "https://auth.example.com/token".to_string(),
                 registration_endpoint: None,
                 code_challenge_methods_supported: None,
+                scopes_supported: None,
             };
             let result = register_client_or_fallback(
                 &client,
                 &metadata,
                 None,
                 "https://cb.example.com/callback",
+                &[],
             )
             .await;
             assert!(
@@ -1039,6 +1260,10 @@ mod tests {
                 request.contains("code_verifier="),
                 "must have code_verifier"
             );
+            assert!(
+                request.contains("resource=https%3A%2F%2Fmcp.example.com%2Fmcp"),
+                "must include MCP resource indicator"
+            );
 
             let body = r#"{"access_token":"tok-abc","token_type":"Bearer","expires_in":3600}"#;
             let resp = format!(
@@ -1059,6 +1284,7 @@ mod tests {
             "client123",
             None,
             "verifier-string",
+            "https://mcp.example.com/mcp",
         )
         .await;
         assert!(result.is_ok(), "exchange_token should succeed: {result:?}");
@@ -1099,6 +1325,7 @@ mod tests {
             "client123",
             None,
             "verifier",
+            "https://mcp.example.com/mcp",
         )
         .await;
         assert!(

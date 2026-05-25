@@ -68,6 +68,8 @@ pub(crate) struct SetTokenRequest {
     pub client_id: String,
     #[serde(default)]
     pub client_secret: Option<String>,
+    #[serde(default)]
+    pub resource: String,
 }
 
 #[derive(Serialize)]
@@ -561,6 +563,12 @@ async fn handle_set_token(
         ))
         .into_response();
     };
+    let oauth_resource = if req.resource.trim().is_empty() {
+        right_mcp::oauth::canonical_resource_uri(handle.url())
+            .unwrap_or_else(|_| handle.url().to_string())
+    } else {
+        req.resource.clone()
+    };
 
     // Update the token in the shared Arc<RwLock<Option<String>>>
     {
@@ -594,6 +602,7 @@ async fn handle_set_token(
             &req.client_id,
             req.client_secret.as_deref(),
             &expires_at_str,
+            &oauth_resource,
         ) {
             return internal_error(format!("db_set_oauth_state: {e:#}")).into_response();
         }
@@ -615,6 +624,7 @@ async fn handle_set_token(
             client_secret: req.client_secret.clone(),
             expires_at,
             server_url: handle.url().to_string(),
+            resource: oauth_resource.clone(),
         };
         if let Err(e) = tx
             .send(RefreshMessage::NewEntry {
@@ -1395,7 +1405,7 @@ mod tests {
         let backend = Arc::new(ProxyBackend::new(
             "composio".into(),
             agent_dir,
-            mcp_url,
+            mcp_url.clone(),
             Arc::clone(&token),
             AuthMethod::Bearer,
         ));
@@ -1438,6 +1448,16 @@ mod tests {
             Some("fresh-token".to_string()),
             "fresh token should still be stored for the refresh scheduler after readiness failure",
         );
+        let persisted_resource: Option<String> = {
+            let conn = conn_arc.lock().unwrap();
+            conn.query_row(
+                "SELECT oauth_resource FROM mcp_servers WHERE name = 'composio'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(persisted_resource.as_deref(), Some(mcp_url.as_str()));
     }
 
     #[tokio::test]

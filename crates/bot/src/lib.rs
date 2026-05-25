@@ -273,29 +273,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     config.learning.warn_on_deprecated(&args.agent);
 
-    // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
-    if !config.learning.background_review_enabled.unwrap_or(false) {
-        match right_db::open_connection(&agent_dir, false) {
-            Ok(conn) => match crate::learning_episode::has_recent_legacy_activity(&conn) {
-                Ok(true) => {
-                    tracing::warn!(
-                        "{}",
-                        crate::learning_episode::deprecation_warn_message(&args.agent)
-                    );
-                }
-                Ok(false) => {}
-                Err(e) => tracing::warn!(
-                    agent = %args.agent,
-                    "deprecation activity check failed: {e:#}"
-                ),
-            },
-            Err(e) => tracing::warn!(
-                agent = %args.agent,
-                "deprecation activity check could not open data.db: {e:#}"
-            ),
-        }
-    }
-
     // Load (or migrate from legacy) the bot-managed allowlist, and spawn a
     // notify-based watcher so external edits hot-reload into the in-memory
     // handle without requiring a bot restart.
@@ -475,36 +452,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         );
     }
 
-    // One-shot startup reaper for stale `skill_nudge_state.review_running`
-    // rows left at 1 by the previous boot's non-graceful exit (panic,
-    // SIGKILL, OOM) between `try_mark_review_started` and
-    // `mark_review_finished`. Without this, the review gate would return
-    // `Skip(AlreadyRunning)` forever for that agent until someone manually
-    // edits SQLite. Must run BEFORE any `maybe_spawn_learned_skill_review`
-    // can fire, hence here at bot startup right after migrations.
-    let reset = right_agent::learned_skills::reset_stale_review_running(&conn)
-        .map_err(|e| miette::miette!("reset stale background-review gates: {:#}", e))?;
-    if reset > 0 {
-        tracing::info!(
-            agent = %args.agent,
-            count = reset,
-            "reset stale background-review gates"
-        );
-    }
-    let learning_recovery_now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let recovered_learning_episodes = crate::learning_episode::recover_stale_inflight_episodes(
-        &conn,
-        &args.agent,
-        &learning_recovery_now,
-    )
-    .map_err(|e| miette::miette!("recover stale learning episodes: {:#}", e))?;
-    if recovered_learning_episodes > 0 {
-        tracing::info!(
-            agent = %args.agent,
-            count = recovered_learning_episodes,
-            "recovered stale learning episodes"
-        );
-    }
     drop(conn);
 
     // Resolve Telegram token
@@ -990,65 +937,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         upgrade::run_startup_upgrade(cfg_path, &args.agent, sandbox).await;
     }
 
-    // Per-agent learning-episode drain scheduler. Spawned once at startup; all
-    // capture callsites notify this scheduler instead of spawning per-seed timers.
-    // The bootstrap runtime passed in is consumed by the spawn task; the returned
-    // `Arc<DrainScheduler>` is what production callers clone into their runtimes.
-    // The returned JoinHandle is awaited at shutdown so the drain task does not
-    // outlive `run_telegram` while still holding a CC selector/reviewer child.
-    //
-    // Gated on `learning.background_review_enabled`. When disabled (the
-    // default), the legacy Stage 2 selector/reviewer pipeline must not run —
-    // the post-turn fork-probe replaces it. Capture callsites still notify
-    // this scheduler via `schedule_drain`; the noop variant swallows the
-    // notifications cheaply.
-    let (learning_drain_scheduler, learning_drain_handle) =
-        // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
-        if config.learning.background_review_enabled.unwrap_or(false) {
-            let learning_bot = Arc::new(telegram::bot::build_bot(token.clone()));
-            let bootstrap_runtime = crate::learning_episode::LearningEpisodeRuntime::new(
-                agent_dir.clone(),
-                agent_dir.clone(),
-                args.agent.clone(),
-                config.model.clone(),
-                ssh_config_path.clone(),
-                resolved_sandbox.clone(),
-                Arc::clone(&debug_flag),
-                config.learning.clone(),
-                None,
-                Some(learning_bot),
-            );
-            let (scheduler, handle) = crate::learning_episode::DrainScheduler::spawn(
-                bootstrap_runtime,
-                // STUB: deprecated learning fields, will be rewritten in Task 16/18/25.
-                std::time::Duration::from_secs(config.learning.episode_settle_seconds.unwrap_or(90)),
-                shutdown.clone(),
-            );
-            (scheduler, Some(handle))
-        } else {
-            (
-                Arc::new(crate::learning_episode::DrainScheduler::noop()),
-                None,
-            )
-        };
-
-    {
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let conn = right_db::open_connection(&agent_dir, false).map_err(|e| {
-            miette::miette!("failed to open data.db for learning drain check: {e:#}")
-        })?;
-        let has_ready =
-            crate::learning_episode::has_ready_pending_episodes(&conn, &args.agent, &now)
-                .map_err(|e| miette::miette!("check ready learning episodes: {:#}", e))?;
-        if recovered_learning_episodes > 0 || has_ready {
-            // Route through the per-agent debounced scheduler instead of
-            // spawning a one-shot timer task. The scheduler's first iteration
-            // will sleep `episode_settle_seconds` before draining; this is the
-            // same effective delay the prior `drain_soon()` would have used
-            // once debouncing collapsed it with the initial production traffic.
-            learning_drain_scheduler.schedule_drain();
-        }
-    }
+    // Legacy Stage 2 selector/reviewer is no longer part of runtime. Keep a
+    // noop scheduler only so older call signatures can be unwound safely.
+    let learning_drain_scheduler = Arc::new(crate::learning_episode::DrainScheduler::noop());
+    let learning_drain_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // CRON-01: spawn cron task alongside Telegram dispatcher.
     // Cron results are persisted to DB; Telegram delivery is handled separately.
@@ -1542,6 +1434,11 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
                 .get("expires_at")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let oauth_resource = entry
+                .get("resource")
+                .or_else(|| entry.get("server_url"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             if let Err(e) = right_mcp::credentials::db_set_oauth_state(
                 &conn,
@@ -1552,6 +1449,7 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
                 client_id,
                 client_secret,
                 expires_at,
+                oauth_resource,
             ) {
                 tracing::warn!(server = %name, "skipping oauth-state migration: {e:#}");
                 all_succeeded = false;

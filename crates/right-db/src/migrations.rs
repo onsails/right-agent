@@ -39,8 +39,9 @@ const V29_SCHEMA: &str = include_str!("sql/v29_curator_state.sql");
 const V30_SCHEMA: &str = include_str!("sql/v30_skill_learning_hint_outcome.sql");
 const V31_SCHEMA: &str = include_str!("sql/v31_skill_learning_events_dashboard_index.sql");
 const V32_SCHEMA: &str = include_str!("sql/v32_skill_lifecycle.sql");
+const V33_SCHEMA: &str = include_str!("sql/v33_mcp_oauth_resource.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 32;
+pub const LATEST_SCHEMA_VERSION: u32 = 33;
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -514,6 +515,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up_with_hook("", v30_skill_learning_hint_outcome),
         M::up(V31_SCHEMA),
         M::up(V32_SCHEMA),
+        M::up(V33_SCHEMA),
     ])
 });
 
@@ -811,6 +813,25 @@ mod tests {
         ] {
             assert!(cols.contains(&col.to_string()), "{col} column missing");
         }
+    }
+
+    #[test]
+    fn v33_mcp_servers_has_oauth_resource_column() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('mcp_servers')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert!(
+            cols.contains(&"oauth_resource".to_string()),
+            "oauth_resource column missing"
+        );
     }
 
     #[test]

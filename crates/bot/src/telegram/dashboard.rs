@@ -1330,6 +1330,7 @@ mod tests {
     async fn activity_overview_returns_current_cron_payload() {
         let temp = tempfile::tempdir().expect("tempdir");
         let conn = right_db::open_connection(temp.path(), true).expect("open migrated db");
+        let run_note = "Checked 5 pairs";
         conn.execute(
             "INSERT INTO cron_specs (
                 job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
@@ -1342,6 +1343,21 @@ mod tests {
             [],
         )
         .expect("insert cron spec");
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id,
+                target_thread_id, status, started_at, finished_at, exit_code,
+                run_note, delivery_json, delivery_required, delivery_status,
+                created_at, updated_at
+             ) VALUES (
+                'run-1', 'cron', 'daily', 'run-1', 123, 456, 'success',
+                '2026-05-20T08:00:00Z', '2026-05-20T08:01:00Z', 0,
+                ?1, '{\"kind\":\"notify\",\"content\":\"daily summary\"}', 1, 'pending',
+                '2026-05-20T08:00:00Z', '2026-05-20T08:01:00Z'
+             )",
+            [run_note],
+        )
+        .expect("insert completed cron run");
 
         let (status, body) = get_json(
             "/dashboard/alpha/api/v1/activity/overview",
@@ -1356,6 +1372,10 @@ mod tests {
         assert_eq!(body["summary"]["cron_count"], 1);
         assert_eq!(body["crons"][0]["job_name"], "daily");
         assert_eq!(body["crons"][0]["schedule"], "0 8 * * *");
+        let last_run = &body["crons"][0]["last_run"];
+        assert_eq!(last_run["delivery_required"], true);
+        assert_eq!(last_run["delivery_kind"], "notify");
+        assert_eq!(last_run["run_note"], run_note);
         assert_eq!(body["active"]["foreground"].as_array().unwrap().len(), 0);
         assert_eq!(body["active"]["background"].as_array().unwrap().len(), 0);
     }

@@ -136,6 +136,7 @@ pub async fn do_refresh_cancellable(
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
             ("client_id", entry.client_id.as_str()),
+            ("resource", entry.resource.as_str()),
         ];
         if let Some(ref secret) = entry.client_secret {
             form.push(("client_secret", secret.as_str()));
@@ -181,6 +182,7 @@ pub async fn do_refresh_cancellable(
                         client_secret: entry.client_secret.clone(),
                         expires_at,
                         server_url: entry.server_url.clone(),
+                        resource: entry.resource.clone(),
                     },
                     access_token,
                 ));
@@ -411,6 +413,7 @@ mod tests {
             client_secret: None,
             expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
             server_url: "https://example.com/mcp".into(),
+            resource: "https://example.com/mcp".into(),
         }
     }
 
@@ -522,6 +525,39 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn refresh_posts_resource_parameter() {
+        setup_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "new-access-token",
+                "token_type": "Bearer",
+                "expires_in": 3600
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let entry = make_entry(format!("{}/token", server.uri()));
+        let client = reqwest::Client::new();
+        let cancel = CancellationToken::new();
+
+        let result = do_refresh_cancellable(&client, &entry, &cancel)
+            .await
+            .expect("refresh should succeed");
+
+        assert_eq!(result.0.resource, "https://example.com/mcp");
+
+        let requests = server.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&requests[0].body);
+        assert!(
+            body.contains("resource=https%3A%2F%2Fexample.com%2Fmcp"),
+            "refresh token request must include MCP resource indicator; body was {body}"
+        );
+    }
+
     /// When all refresh retries are exhausted, the backend status must NOT be set to
     /// `NeedsAuth` if it was already `Connected` — defense-in-depth guard.
     #[tokio::test]
@@ -627,6 +663,7 @@ mod tests {
             client_secret: None,
             expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
             server_url: "https://example.com/mcp".into(),
+            resource: "https://example.com/mcp".into(),
         };
 
         let tmp = tempfile::tempdir().unwrap();

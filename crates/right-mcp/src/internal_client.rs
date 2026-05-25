@@ -272,6 +272,7 @@ pub struct SetTokenRequest {
     pub expires_in: u64,
     pub token_endpoint: String,
     pub client_id: String,
+    pub resource: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
 }
@@ -411,11 +412,13 @@ mod tests {
             expires_in: 3600,
             token_endpoint: "https://auth.example.com/token".into(),
             client_id: "my-client".into(),
+            resource: "https://mcp.example.com/mcp".into(),
             client_secret: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["agent"], "bot");
         assert_eq!(json["expires_in"], 3600);
+        assert_eq!(json["resource"], "https://mcp.example.com/mcp");
         // client_secret should be skipped when None
         assert!(!json.as_object().unwrap().contains_key("client_secret"));
     }

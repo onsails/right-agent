@@ -42,6 +42,30 @@ fn runtime_for_dir(path: &std::path::Path) -> LearningEpisodeRuntime {
     }
 }
 
+#[test]
+fn completion_seed_capture_is_noop_for_deprecated_stage2() {
+    let conn = conn();
+    let mut runtime = runtime();
+    runtime.learning.background_review_enabled = Some(true);
+
+    let episode_id = runtime
+        .capture_completion_seed(
+            &conn,
+            LearningEpisodeKind::CronRun,
+            EpisodeSeedTriggerKind::Cron,
+            "cron:deprecated",
+            Some(10),
+            Some(20),
+        )
+        .unwrap();
+
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM learning_episodes", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(episode_id, 0);
+    assert_eq!(count, 0);
+}
+
 fn claimed_episode(
     conn: &rusqlite::Connection,
     kind: LearningEpisodeKind,

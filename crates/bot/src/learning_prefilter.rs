@@ -244,6 +244,68 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const PREFILTER_TIMEOUT: Duration = Duration::from_secs(30);
+const PREFILTER_LOG_EXCERPT_MAX_CHARS: usize = 2048;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrefilterFailureDiagnostics {
+    argv: Vec<String>,
+    stdout_bytes: usize,
+    stderr_bytes: usize,
+    stdout_excerpt: String,
+    stderr_excerpt: String,
+}
+
+fn redact_prefilter_args(args: &[String]) -> Vec<String> {
+    let mut redacted = Vec::with_capacity(args.len());
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json-schema" => {
+                redacted.push(args[i].clone());
+                if let Some(schema) = args.get(i + 1) {
+                    redacted.push(format!("<json-schema chars={}>", schema.chars().count()));
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "--" => {
+                redacted.push(args[i].clone());
+                let prompt = args[i + 1..].join(" ");
+                redacted.push(format!("<prompt chars={}>", prompt.chars().count()));
+                break;
+            }
+            _ => {
+                redacted.push(args[i].clone());
+                i += 1;
+            }
+        }
+    }
+    redacted
+}
+
+fn prefilter_log_excerpt(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    crate::learning_review::bounded_text(
+        &text,
+        PREFILTER_LOG_EXCERPT_MAX_CHARS,
+        crate::learning_review::TRUNCATED_SUFFIX,
+    )
+}
+
+fn prefilter_failure_diagnostics(
+    args: &[String],
+    stdout: &[u8],
+    stderr: &[u8],
+) -> PrefilterFailureDiagnostics {
+    PrefilterFailureDiagnostics {
+        argv: redact_prefilter_args(args),
+        stdout_bytes: stdout.len(),
+        stderr_bytes: stderr.len(),
+        stdout_excerpt: prefilter_log_excerpt(stdout),
+        stderr_excerpt: prefilter_log_excerpt(stderr),
+    }
+}
 
 /// Bundle of inputs needed to run one prefilter invocation.
 #[derive(Debug, Clone)]
@@ -332,8 +394,12 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
     let output = match tokio::time::timeout(PREFILTER_TIMEOUT, cmd.output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
+            let argv = redact_prefilter_args(&args);
             tracing::warn!(
                 agent = %ctx.agent_name,
+                model = %ctx.model,
+                sandbox = ?ctx.resolved_sandbox,
+                argv = ?argv,
                 "prefilter spawn failed: {e:#}"
             );
             return PrefilterDecision::Skip {
@@ -341,8 +407,12 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
             };
         }
         Err(_) => {
+            let argv = redact_prefilter_args(&args);
             tracing::warn!(
                 agent = %ctx.agent_name,
+                model = %ctx.model,
+                sandbox = ?ctx.resolved_sandbox,
+                argv = ?argv,
                 "prefilter timed out after {}s",
                 PREFILTER_TIMEOUT.as_secs()
             );
@@ -353,10 +423,17 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
     };
 
     if !output.status.success() {
+        let diagnostics = prefilter_failure_diagnostics(&args, &output.stdout, &output.stderr);
         tracing::warn!(
             agent = %ctx.agent_name,
+            model = %ctx.model,
+            sandbox = ?ctx.resolved_sandbox,
             status = ?output.status,
-            stderr = %String::from_utf8_lossy(&output.stderr),
+            argv = ?diagnostics.argv,
+            stdout_bytes = diagnostics.stdout_bytes,
+            stderr_bytes = diagnostics.stderr_bytes,
+            stdout_excerpt = %diagnostics.stdout_excerpt,
+            stderr_excerpt = %diagnostics.stderr_excerpt,
             "prefilter non-zero exit"
         );
         return PrefilterDecision::Skip {
@@ -379,7 +456,25 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
         tracing::warn!(agent = %ctx.agent_name, "prefilter usage insert failed: {e:#}");
     }
 
-    parse_output(&stdout)
+    let decision = parse_output(&stdout);
+    if matches!(
+        decision,
+        PrefilterDecision::Skip { ref reason } if reason == "envelope parse failed"
+    ) {
+        let diagnostics = prefilter_failure_diagnostics(&args, stdout.as_bytes(), &output.stderr);
+        tracing::warn!(
+            agent = %ctx.agent_name,
+            model = %ctx.model,
+            sandbox = ?ctx.resolved_sandbox,
+            argv = ?diagnostics.argv,
+            stdout_bytes = diagnostics.stdout_bytes,
+            stderr_bytes = diagnostics.stderr_bytes,
+            stdout_excerpt = %diagnostics.stdout_excerpt,
+            stderr_excerpt = %diagnostics.stderr_excerpt,
+            "prefilter output parse failed"
+        );
+    }
+    decision
 }
 
 #[cfg(test)]
@@ -443,6 +538,44 @@ mod tests {
         let p = build_prompt(&anchor("hello world", "hi back"), &bs, "");
         assert!(p.contains("hello world"));
         assert!(p.contains("hi back"));
+    }
+
+    #[test]
+    fn redacts_schema_and_prompt_from_prefilter_argv() {
+        let args = vec![
+            "claude".to_owned(),
+            "-p".to_owned(),
+            "--json-schema".to_owned(),
+            "SECRET_SCHEMA".to_owned(),
+            "--".to_owned(),
+            "SECRET_PROMPT".to_owned(),
+        ];
+
+        let redacted = redact_prefilter_args(&args).join(" ");
+
+        assert!(!redacted.contains("SECRET_SCHEMA"));
+        assert!(!redacted.contains("SECRET_PROMPT"));
+        assert!(redacted.contains("<json-schema chars=13>"));
+        assert!(redacted.contains("<prompt chars=13>"));
+    }
+
+    #[test]
+    fn prefilter_failure_diagnostics_bound_output_excerpts() {
+        let stdout = "s".repeat(PREFILTER_LOG_EXCERPT_MAX_CHARS + 100);
+        let stderr = "e".repeat(PREFILTER_LOG_EXCERPT_MAX_CHARS + 200);
+
+        let diagnostics = prefilter_failure_diagnostics(&[], stdout.as_bytes(), stderr.as_bytes());
+
+        assert_eq!(diagnostics.stdout_bytes, stdout.len());
+        assert_eq!(diagnostics.stderr_bytes, stderr.len());
+        assert!(
+            diagnostics.stdout_excerpt.chars().count()
+                <= PREFILTER_LOG_EXCERPT_MAX_CHARS + crate::learning_review::TRUNCATED_SUFFIX.len()
+        );
+        assert!(
+            diagnostics.stderr_excerpt.chars().count()
+                <= PREFILTER_LOG_EXCERPT_MAX_CHARS + crate::learning_review::TRUNCATED_SUFFIX.len()
+        );
     }
 
     #[test]

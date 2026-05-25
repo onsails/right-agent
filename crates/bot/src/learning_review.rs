@@ -94,6 +94,7 @@ pub(crate) struct ReviewReportContext {
     pub(crate) telegram_notified: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvidenceKind {
     Message,
@@ -102,6 +103,7 @@ pub(crate) enum EvidenceKind {
     Thinking,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct EpisodeEvidenceIndex {
     refs: std::collections::HashMap<String, EvidenceKind>,
@@ -185,6 +187,7 @@ impl ReviewOutput {
             && self.user_notice.is_some()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn validate_candidate_evidence(
         &self,
         index: &EpisodeEvidenceIndex,
