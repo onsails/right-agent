@@ -72,6 +72,10 @@ export function saveDashboardDisplayMode(
   }
 }
 
+export function nextDashboardDisplayModePreference(mode: DashboardDisplayMode): DashboardDisplayMode {
+  return mode === 'fullscreen' ? 'normal' : 'fullscreen'
+}
+
 export function initializeTelegramWebApp(
   webApp: TelegramWebApp | undefined = defaultWebApp(),
   preferredMode: DashboardDisplayMode = readDashboardDisplayMode(),

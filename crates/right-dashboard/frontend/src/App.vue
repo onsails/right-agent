@@ -21,6 +21,7 @@ import {
 import {
   applyTelegramDisplayMode,
   initializeTelegramWebApp,
+  nextDashboardDisplayModePreference,
   readDashboardDisplayMode,
   subscribeTelegramFullscreenChanges,
   type DashboardDisplayMode,
@@ -66,7 +67,8 @@ const selectedIdentityFile = ref<IdentityFileSummary | null>(null)
 
 const activeTab = ref<DashboardTab>('overview')
 const activeKnowledgeTab = ref<KnowledgeTab>('episodes')
-const displayMode = ref<DashboardDisplayMode>(readDashboardDisplayMode())
+const preferredDisplayMode = ref<DashboardDisplayMode>(readDashboardDisplayMode())
+const displayMode = ref<DashboardDisplayMode>('normal')
 const connectionState = ref<ConnectionState>('loading')
 const message = ref('Loading dashboard')
 const lastUpdatedAt = ref<string | null>(null)
@@ -106,7 +108,7 @@ const tabs = computed(() => {
 
 onMounted(() => {
   const webApp = window.Telegram?.WebApp
-  displayMode.value = initializeTelegramWebApp(webApp, displayMode.value)
+  displayMode.value = initializeTelegramWebApp(webApp, preferredDisplayMode.value)
   unsubscribeTelegramFullscreen = subscribeTelegramFullscreenChanges(webApp, (mode) => {
     displayMode.value = mode
   })
@@ -121,7 +123,8 @@ onBeforeUnmount(() => {
 })
 
 function toggleDisplayMode(): void {
-  const nextMode: DashboardDisplayMode = displayMode.value === 'fullscreen' ? 'normal' : 'fullscreen'
+  const nextMode = nextDashboardDisplayModePreference(preferredDisplayMode.value)
+  preferredDisplayMode.value = nextMode
   displayMode.value = applyTelegramDisplayMode(nextMode)
 }
 
@@ -437,6 +440,7 @@ async function selectIdentityFile(name: string): Promise<void> {
     :tabs="tabs"
     :active-tab="activeTab"
     :display-mode="displayMode"
+    :preferred-display-mode="preferredDisplayMode"
     @select="setActiveTab"
     @toggle-display-mode="toggleDisplayMode"
   >
