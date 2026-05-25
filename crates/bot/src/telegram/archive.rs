@@ -10,6 +10,8 @@ use super::session::effective_thread_id;
 // Why 4: bounded so a Telegram traffic burst cannot queue unbounded
 // blocking-pool tasks; SQLite WAL handles small write concurrency well.
 const MAX_ARCHIVE_WRITES: usize = 4;
+const ARCHIVE_WRITE_RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+const ARCHIVE_WRITE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
 
 static ARCHIVE_WRITE_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_ARCHIVE_WRITES)));
@@ -199,17 +201,20 @@ where
 }
 
 fn write_archive_payload(payload: ArchivePayload) {
+    let meta = ArchiveLogMeta {
+        chat_id: payload.chat_id,
+        thread_id: payload.thread_id,
+        message_id: Some(payload.message_id),
+    };
+    retry_archive_db_write(meta, "telegram archive", || {
+        write_archive_payload_once(&payload)
+    });
+}
+
+fn write_archive_payload_once(payload: &ArchivePayload) -> Result<(), right_db::DbError> {
     let conn = match right_db::open_connection(&payload.agent_dir, false) {
         Ok(conn) => conn,
-        Err(e) => {
-            tracing::warn!(
-                chat_id = payload.chat_id,
-                thread_id = payload.thread_id,
-                message_id = payload.message_id,
-                "telegram archive open_connection failed: {e:#}"
-            );
-            return;
-        }
+        Err(e) => return Err(e),
     };
 
     let message = ConversationMessage {
@@ -227,29 +232,26 @@ fn write_archive_payload(payload: ArchivePayload) {
         content: &payload.content,
     };
 
-    if let Err(e) = archive_message(&conn, message) {
-        tracing::warn!(
-            chat_id = payload.chat_id,
-            thread_id = payload.thread_id,
-            message_id = payload.message_id,
-            "telegram archive_message failed: {e:#}"
-        );
-    }
+    archive_message(&conn, message).map(drop)
 }
 
 fn write_assistant_payload(payload: AssistantArchivePayload) {
+    let meta = ArchiveLogMeta {
+        chat_id: payload.chat_id,
+        thread_id: payload.thread_id,
+        message_id: None,
+    };
+    retry_archive_db_write(meta, "assistant archive", || {
+        write_assistant_payload_once(&payload)
+    });
+}
+
+fn write_assistant_payload_once(
+    payload: &AssistantArchivePayload,
+) -> Result<(), right_db::DbError> {
     let conn = match right_db::open_connection(&payload.agent_dir, false) {
         Ok(conn) => conn,
-        Err(e) => {
-            tracing::warn!(
-                chat_id = payload.chat_id,
-                thread_id = payload.thread_id,
-                session_uuid = %payload.session_uuid,
-                turn_id = payload.turn_id,
-                "assistant archive open_connection failed: {e:#}"
-            );
-            return;
-        }
+        Err(e) => return Err(e),
     };
 
     let message = ConversationMessage {
@@ -267,15 +269,40 @@ fn write_assistant_payload(payload: AssistantArchivePayload) {
         content: &payload.content,
     };
 
-    if let Err(e) = archive_message(&conn, message) {
-        tracing::warn!(
-            chat_id = payload.chat_id,
-            thread_id = payload.thread_id,
-            session_uuid = %payload.session_uuid,
-            turn_id = payload.turn_id,
-            "assistant archive_message failed: {e:#}"
-        );
+    archive_message(&conn, message).map(drop)
+}
+
+fn retry_archive_db_write<F>(meta: ArchiveLogMeta, operation: &'static str, mut write: F)
+where
+    F: FnMut() -> Result<(), right_db::DbError>,
+{
+    let deadline = std::time::Instant::now() + ARCHIVE_WRITE_RETRY_TIMEOUT;
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match write() {
+            Ok(()) => return,
+            Err(e) if is_transient_archive_db_error(&e) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(ARCHIVE_WRITE_RETRY_DELAY);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    chat_id = meta.chat_id,
+                    thread_id = meta.thread_id,
+                    message_id = meta.message_id,
+                    attempts,
+                    operation,
+                    "archive database write failed: {e:#}"
+                );
+                return;
+            }
+        }
     }
+}
+
+fn is_transient_archive_db_error(error: &right_db::DbError) -> bool {
+    let error = error.to_string().to_ascii_lowercase();
+    error.contains("locked") || error.contains("busy")
 }
 
 #[cfg(test)]

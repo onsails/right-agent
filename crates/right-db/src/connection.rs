@@ -409,6 +409,29 @@ mod tests {
     }
 
     #[test]
+    fn dropped_transaction_is_rolled_back() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE dropped_tx_probe (value TEXT NOT NULL)")
+            .unwrap();
+
+        {
+            let tx = conn.transaction().unwrap();
+            tx.execute(
+                "INSERT INTO dropped_tx_probe (value) VALUES (?1)",
+                crate::params!["inside-tx"],
+            )
+            .unwrap();
+        }
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dropped_tx_probe", (), |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn with_immediate_transaction_returns_operation_error_and_rolls_back() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
