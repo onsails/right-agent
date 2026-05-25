@@ -1,6 +1,6 @@
-//! Shared Telegram alert dedup helpers. Both `memory_alerts` and
-//! `learning_alerts` use these to enforce a 24-hour dedup window per
-//! `alert_type` key against the `memory_alerts` SQLite table.
+//! Shared Telegram alert dedup helpers. Alerts use these to enforce a
+//! 24-hour dedup window per `alert_type` key against the `memory_alerts`
+//! SQLite table.
 
 use std::path::Path;
 

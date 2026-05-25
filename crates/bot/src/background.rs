@@ -62,8 +62,6 @@ pub(crate) async fn spawn_background_continuation(
 
     let mcp_instructions =
         fetch_mcp_instructions(&internal_client, &agent_name, &request.run_id).await;
-    let inherited_model = model.clone();
-
     let invocation = crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: Some(crate::cc::invocation::mcp_config_path(
             ssh_config_path.as_deref(),
@@ -139,8 +137,6 @@ pub(crate) async fn spawn_background_continuation(
     let (init_tx, init_rx) = tokio::sync::oneshot::channel();
     let reader_handle = tokio::spawn(read_background_stdout(
         stdout,
-        agent_dir.clone(),
-        agent_name.clone(),
         log_path.clone(),
         request.run_id.clone(),
         init_tx,
@@ -187,11 +183,7 @@ pub(crate) async fn spawn_background_continuation(
     tokio::spawn(complete_background_run(
         request,
         agent_dir,
-        agent_name,
-        ssh_config_path,
         resolved_sandbox,
-        debug,
-        inherited_model,
         child,
         reader_handle,
         stderr_handle,
@@ -320,8 +312,6 @@ async fn build_background_command(
 
 async fn read_background_stdout(
     stdout: tokio::process::ChildStdout,
-    agent_dir: PathBuf,
-    agent_name: String,
     log_path: PathBuf,
     run_id: String,
     init_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
@@ -343,7 +333,6 @@ async fn read_background_stdout(
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut collected = Vec::new();
     let mut saw_init = false;
-    let _ = (&agent_dir, &agent_name);
 
     loop {
         let line = match lines.next_line().await {
@@ -492,15 +481,10 @@ async fn kill_unconfirmed_child(
     await_stderr_reader(stderr_handle).await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn complete_background_run(
     request: BackgroundRunRequest,
     agent_dir: PathBuf,
-    agent_name: String,
-    ssh_config_path: Option<PathBuf>,
     resolved_sandbox: Option<String>,
-    debug: Arc<std::sync::atomic::AtomicBool>,
-    inherited_model: Option<String>,
     mut child: right_process::ProcessGroupChild,
     reader_handle: JoinHandle<Result<Vec<String>, String>>,
     stderr_handle: Option<JoinHandle<Result<String, String>>>,
@@ -573,16 +557,10 @@ async fn complete_background_run(
         Ok(output) => {
             if let Err(reason) = persist_successful_background_output(
                 &agent_dir,
-                &agent_name,
                 &request.run_id,
                 exit_code,
                 &output,
-                ssh_config_path.as_deref(),
                 resolved_sandbox.as_deref(),
-                &debug,
-                inherited_model.clone(),
-                request.target_chat_id,
-                request.target_thread_id,
             )
             .await
             {
@@ -627,19 +605,12 @@ fn append_stderr_to_reason(reason: &str, stderr: &str) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn persist_successful_background_output(
     agent_dir: &Path,
-    agent_name: &str,
     run_id: &str,
     exit_code: Option<i32>,
     output: &crate::cron::CronReplyOutput,
-    ssh_config_path: Option<&Path>,
     resolved_sandbox: Option<&str>,
-    debug: &Arc<std::sync::atomic::AtomicBool>,
-    inherited_model: Option<String>,
-    target_chat_id: i64,
-    target_thread_id: Option<i64>,
 ) -> Result<(), String> {
     let notify = output
         .delivery
@@ -673,15 +644,6 @@ async fn persist_successful_background_output(
     tx.commit()
         .await
         .map_err(|e| format!("commit background output: {e:#}"))?;
-    let _ = (
-        agent_name,
-        ssh_config_path,
-        resolved_sandbox,
-        debug,
-        inherited_model,
-        target_chat_id,
-        target_thread_id,
-    );
     Ok(())
 }
 
