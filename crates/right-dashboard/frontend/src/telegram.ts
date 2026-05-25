@@ -33,10 +33,14 @@ function defaultWebApp(): TelegramWebApp | undefined {
 }
 
 function defaultStorage(): DashboardDisplayModeStorage | undefined {
-  if (typeof localStorage === 'undefined') {
+  try {
+    if (typeof localStorage === 'undefined') {
+      return undefined
+    }
+    return localStorage
+  } catch {
     return undefined
   }
-  return localStorage
 }
 
 function normalizedDisplayMode(value: string | null): DashboardDisplayMode {
@@ -117,9 +121,17 @@ export function subscribeTelegramFullscreenChanges(
     onChange(event.is_fullscreen ? 'fullscreen' : 'normal')
   }
 
-  webApp?.onEvent?.('fullscreen_changed', handler)
+  try {
+    webApp?.onEvent?.('fullscreen_changed', handler)
+  } catch {
+    // Telegram event APIs vary by client; display mode tracking is opportunistic.
+  }
 
   return () => {
-    webApp?.offEvent?.('fullscreen_changed', handler)
+    try {
+      webApp?.offEvent?.('fullscreen_changed', handler)
+    } catch {
+      // Cleanup must not break dashboard teardown when a client rejects offEvent.
+    }
   }
 }

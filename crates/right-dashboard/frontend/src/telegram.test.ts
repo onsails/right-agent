@@ -39,7 +39,14 @@ function webAppWithFullscreen(isFullscreen = false): TelegramWebApp {
 }
 
 describe('Telegram dashboard display mode helpers', () => {
+  const originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+
   beforeEach(() => {
+    if (originalLocalStorageDescriptor) {
+      Object.defineProperty(globalThis, 'localStorage', originalLocalStorageDescriptor)
+    } else {
+      Reflect.deleteProperty(globalThis, 'localStorage')
+    }
     vi.restoreAllMocks()
   })
 
@@ -73,6 +80,20 @@ describe('Telegram dashboard display mode helpers', () => {
     })
 
     expect(readDashboardDisplayMode(storage)).toBe('normal')
+  })
+
+  test('defaults to normal when global storage acquisition fails during initialization', () => {
+    const webApp = webAppWithFullscreen(false)
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new Error('storage unavailable')
+      },
+    })
+
+    expect(() => {
+      expect(initializeTelegramWebApp(webApp)).toBe('normal')
+    }).not.toThrow()
   })
 
   test('saves dashboard display mode preferences', () => {
@@ -124,6 +145,17 @@ describe('Telegram dashboard display mode helpers', () => {
 
     expect(actualMode).toBe('normal')
     expect(webApp.expand).toHaveBeenCalledOnce()
+  })
+
+  test('returns fullscreen preference as best effort when fullscreen request is unsupported', () => {
+    const webApp: TelegramWebApp = {
+      ready: vi.fn(),
+      expand: vi.fn(),
+    }
+
+    expect(() => {
+      expect(initializeTelegramWebApp(webApp, 'fullscreen')).toBe('fullscreen')
+    }).not.toThrow()
   })
 
   test('applies fullscreen mode by saving preference and requesting fullscreen', () => {
@@ -183,5 +215,28 @@ describe('Telegram dashboard display mode helpers', () => {
     expect(onChange).toHaveBeenNthCalledWith(1, 'fullscreen')
     expect(onChange).toHaveBeenNthCalledWith(2, 'normal')
     expect(webApp.offEvent).toHaveBeenCalledOnce()
+  })
+
+  test('ignores Telegram event subscription failures', () => {
+    const webApp: TelegramWebApp = {
+      onEvent: vi.fn(() => {
+        throw new Error('event api unavailable')
+      }),
+    }
+
+    expect(() => subscribeTelegramFullscreenChanges(webApp, vi.fn())).not.toThrow()
+  })
+
+  test('ignores Telegram event unsubscribe failures', () => {
+    const webApp: TelegramWebApp = {
+      onEvent: vi.fn(),
+      offEvent: vi.fn(() => {
+        throw new Error('event api unavailable')
+      }),
+    }
+
+    const unsubscribe = subscribeTelegramFullscreenChanges(webApp, vi.fn())
+
+    expect(() => unsubscribe()).not.toThrow()
   })
 })
