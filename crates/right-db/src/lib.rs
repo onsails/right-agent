@@ -32,7 +32,7 @@ pub fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, D
     let conn = Connection::open_local(db_path, true)?;
     conn.apply_connection_pragmas()?;
     if migrate {
-        conn.run_rusqlite_migrations()?;
+        migrations::MIGRATIONS.to_latest(&conn)?;
     }
     Ok(conn)
 }

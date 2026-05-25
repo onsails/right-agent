@@ -22,8 +22,13 @@ pub enum DbError {
         source: libsql::Error,
     },
 
-    #[error("migration error: {0}")]
-    Migration(#[from] rusqlite_migration::Error),
+    #[error("migration {version} on {path}: {source}")]
+    Migration {
+        path: PathBuf,
+        version: u32,
+        #[source]
+        source: Box<DbError>,
+    },
 
     #[error("sqlite compatibility error: {0}")]
     Sqlite(#[from] rusqlite::Error),

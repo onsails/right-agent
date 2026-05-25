@@ -31,6 +31,38 @@ impl<'conn> Transaction<'conn> {
             .map_err(|_| DbError::InvalidParameter("changed row count exceeds usize".into()))
     }
 
+    pub fn execute_batch(&self, sql: &str) -> Result<(), DbError> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
+        self.conn
+            .block_on_libsql(inner.execute_batch(sql))
+            .map(drop)
+    }
+
+    pub fn query_one<T>(
+        &self,
+        sql: &str,
+        params: impl crate::params::IntoParams,
+        map: impl FnOnce(&crate::row::Row<'_>) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        let params = params.into_params()?.into_libsql();
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
+        let mut rows = self.conn.block_on_libsql(inner.query(sql, params))?;
+        let Some(row) = self.conn.block_on_libsql(rows.next())? else {
+            return Err(DbError::not_found());
+        };
+        map(&crate::row::Row::new(&row))
+    }
+
+    pub fn connection(&self) -> &Connection {
+        self.conn
+    }
+
     pub fn commit(mut self) -> Result<(), DbError> {
         let inner = self
             .inner
