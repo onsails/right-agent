@@ -236,9 +236,7 @@ is foreground-only. Learning tools are available only to registered
 calls must use their structured output delivery path.
 
 The learning prefilter is stricter: it omits MCP config and passes
-`--tools ""`, so no MCP or Claude Code tools are available. Selector,
-reviewer, and report-only `BackgroundReview` paths are not learning
-invocations and cannot call learning tools.
+`--tools ""`, so no MCP or Claude Code tools are available.
 
 ## Learned Skill MCP Tools
 
@@ -259,6 +257,5 @@ LLM and passed as the `message` argument to
 Create and update both require `rightx-*`. The learning flow never patches
 custom/manual/hub/core/platform/bundled/codegen-owned non-`rightx-*` skills.
 
-Deprecated Stage 2 background review is historical/read-only when encountered
-through legacy data; runtime no longer creates its episode/report rows. It is
-not a learning-capable invocation kind and does not expose learning MCP tools.
+The removed Stage 2 background review is not a learning-capable invocation
+kind and does not expose learning MCP tools.

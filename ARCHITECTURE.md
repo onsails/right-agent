@@ -217,14 +217,11 @@ append-only audit log for start/finish tool calls, while skill package content
 remains under `.claude/skills/<skill_name>/SKILL.md`. Foreground usage is
 recorded only from `used_skill_receipts`.
 
-Stage 2 background selector/reviewer (`crates/bot/src/learning_episode.rs`,
-`crates/bot/src/learning_review.rs`) is deprecated; legacy fields
-(`fork_probe_enabled`, `background_review_enabled`, `episode_settle_seconds`,
-`circuit_*`, `probe_model`) in `agent.yaml` are accepted and silently warned
-about by `LearningConfig::warn_on_deprecated`. Runtime completion seed capture
-is a no-op and startup must not spawn the Stage 2 drain scheduler. New
-deployments configure `prefilter_*` / `probe_writer_*` / `curator_*` via the
-`right config` wizard.
+The only learning runtime is the prefilter/probe-writer/curator pipeline. The
+old Stage 2 selector/reviewer, learning episode tables, nudge-signal gate, and
+review reports have been removed from runtime and schema. Deprecated
+`agent.yaml` learning keys are accepted only for upgrade compatibility and
+warn at load time.
 
 See `PROMPT_SYSTEM.md` for full documentation.
 
@@ -363,14 +360,13 @@ requires extending the diff in `crates/bot/src/config_watcher.rs::diff_classify`
 
 ### Skill learning loop
 
-The skill-learning pipeline replaces the deprecated Stage 2 reviewer with a
-per-turn writer + periodic curator. Two independent gates run today:
+The skill-learning pipeline is a per-turn writer plus periodic curator. Two
+independent gates run today:
 
 1. **Prefilter + probe-writer gate** (per turn, in worker): runs only when the
    prefilter is enabled, the foreground turn was a Normal prompt mode, and
    today's spend across `right_agent::usage::LEARNING_SOURCES`
-   (`learning_selector`, `learning_reviewer`, `learning_skill_review`,
-   `learning_prefilter`, `learning_probe_writer`, `learning_curator`) is below
+   (`learning_prefilter`, `learning_probe_writer`, `learning_curator`) is below
    `LearningConfig.max_daily_budget_usd` (default $1.00). A non-`skip`
    prefilter decision gates and directs the probe-writer fork. The session mutex on
    the main session UUID prevents concurrent `--resume` against the same
@@ -386,10 +382,10 @@ per-turn writer + periodic curator. Two independent gates run today:
    `circuit_open_until`, `last_spike_evidence_json`) lives in the per-agent
    `curator_state` singleton row.
 
-`try_mark_review_started` and the legacy Stage 2 selector/reviewer have been
-removed from the runtime path; their gate fields (`circuit_failure_threshold`,
-`circuit_cooldown_minutes`) are kept as Option<u32> in the config for
-backward-compatibility and silently ignored.
+The old Stage 2 selector/reviewer has been removed from runtime and schema.
+Its gate fields (`circuit_failure_threshold`, `circuit_cooldown_minutes`) are
+kept as `Option<u32>` in config for backward compatibility and ignored with a
+load-time warning.
 
 Adding a new learning-adjacent invocation requires extending
 `right_agent::usage::LEARNING_SOURCES` so both the budget gate and the
