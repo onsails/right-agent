@@ -271,13 +271,19 @@ fn libsql_transaction_rolls_back_on_error() {
     conn.execute_batch("CREATE TABLE rollback_probe (id INTEGER PRIMARY KEY, value TEXT UNIQUE)")
         .unwrap();
 
+    let mut observed_insert = false;
     let result = conn.with_immediate_transaction(|tx| {
         tx.execute_batch("INSERT INTO rollback_probe (value) VALUES ('same')")?;
+        let count: i64 =
+            tx.query_one("SELECT COUNT(*) FROM rollback_probe", (), |row| row.get(0))?;
+        assert_eq!(count, 1);
+        observed_insert = true;
         tx.execute_batch("INSERT INTO rollback_probe (value) VALUES ('same')")?;
         Ok(())
     });
 
     assert!(result.is_err());
+    assert!(observed_insert);
     let count: i64 = conn
         .query_one("SELECT COUNT(*) FROM rollback_probe", (), |row| row.get(0))
         .unwrap();
