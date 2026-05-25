@@ -1,4 +1,6 @@
-use rusqlite::{Connection, Result, named_params};
+use crate::{Connection, DbError};
+
+type Result<T> = std::result::Result<T, DbError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationRole {
@@ -50,39 +52,39 @@ pub fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> R
     let routed_to_agent = i64::from(message.routed_to_agent);
 
     if matches!(message.role, ConversationRole::Assistant) || message.message_id.is_none() {
-        return conn.query_row(
+        return conn.query_one(
             "INSERT INTO conversation_messages (
                 platform, chat_id, thread_id, message_id, sender_user_id, sender_name,
                 addressed_to_bot, routed_to_agent, root_session_id, turn_id, role, content
              ) VALUES (
-                :platform, :chat_id, :thread_id, NULL, :sender_user_id, :sender_name,
-                :addressed_to_bot, :routed_to_agent, :root_session_id, :turn_id, :role, :content
+                ?, ?, ?, NULL, ?, ?,
+                ?, ?, ?, ?, ?, ?
              )
              RETURNING id",
-            named_params! {
-                ":platform": message.platform,
-                ":chat_id": message.chat_id,
-                ":thread_id": message.thread_id,
-                ":sender_user_id": message.sender_user_id,
-                ":sender_name": message.sender_name,
-                ":addressed_to_bot": addressed_to_bot,
-                ":routed_to_agent": routed_to_agent,
-                ":root_session_id": message.root_session_id,
-                ":turn_id": turn_id,
-                ":role": role,
-                ":content": content,
-            },
+            crate::params![
+                message.platform,
+                message.chat_id,
+                message.thread_id,
+                message.sender_user_id,
+                message.sender_name,
+                addressed_to_bot,
+                routed_to_agent,
+                message.root_session_id,
+                turn_id,
+                role,
+                content,
+            ],
             |r| r.get(0),
         );
     }
 
-    conn.query_row(
+    conn.query_one(
         "INSERT INTO conversation_messages (
             platform, chat_id, thread_id, message_id, sender_user_id, sender_name,
             addressed_to_bot, routed_to_agent, root_session_id, turn_id, role, content
          ) VALUES (
-            :platform, :chat_id, :thread_id, :message_id, :sender_user_id, :sender_name,
-            :addressed_to_bot, :routed_to_agent, :root_session_id, :turn_id, :role, :content
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?
          )
          ON CONFLICT(platform, chat_id, message_id, role) WHERE message_id IS NOT NULL
          DO UPDATE SET
@@ -95,20 +97,20 @@ pub fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> R
             turn_id = COALESCE(excluded.turn_id, conversation_messages.turn_id),
             content = excluded.content
          RETURNING id",
-        named_params! {
-            ":platform": message.platform,
-            ":chat_id": message.chat_id,
-            ":thread_id": message.thread_id,
-            ":message_id": message.message_id,
-            ":sender_user_id": message.sender_user_id,
-            ":sender_name": message.sender_name,
-            ":addressed_to_bot": addressed_to_bot,
-            ":routed_to_agent": routed_to_agent,
-            ":root_session_id": message.root_session_id,
-            ":turn_id": turn_id,
-            ":role": role,
-            ":content": content,
-        },
+        crate::params![
+            message.platform,
+            message.chat_id,
+            message.thread_id,
+            message.message_id,
+            message.sender_user_id,
+            message.sender_name,
+            addressed_to_bot,
+            routed_to_agent,
+            message.root_session_id,
+            turn_id,
+            role,
+            content,
+        ],
         |r| r.get(0),
     )
 }
@@ -134,8 +136,8 @@ pub fn mark_routed(
             addressed_to_bot, routed_to_agent, root_session_id, turn_id,
             role, content
          ) VALUES (
-            :platform, :chat_id, :thread_id, :message_id,
-            0, 1, :root_session_id, :turn_id,
+            ?, ?, ?, ?,
+            0, 1, ?, ?,
             'user', ''
          )
          ON CONFLICT(platform, chat_id, message_id, role) WHERE message_id IS NOT NULL
@@ -143,14 +145,14 @@ pub fn mark_routed(
             routed_to_agent = 1,
             root_session_id = excluded.root_session_id,
             turn_id = excluded.turn_id",
-        named_params! {
-            ":platform": platform,
-            ":chat_id": chat_id,
-            ":thread_id": thread_id,
-            ":message_id": message_id,
-            ":root_session_id": root_session_id,
-            ":turn_id": turn_id,
-        },
+        crate::params![
+            platform,
+            chat_id,
+            thread_id,
+            message_id,
+            root_session_id,
+            turn_id
+        ],
     )
 }
 
@@ -163,7 +165,7 @@ pub fn search_thread(
 ) -> Result<Vec<ConversationSearchResult>> {
     let query = normalized_fts_query(query)?;
     let limit = clamped_limit(limit);
-    let mut stmt = conn.prepare(
+    conn.query_all(
         "SELECT
             m.id,
             m.role,
@@ -182,9 +184,8 @@ pub fn search_thread(
            AND m.thread_id = ?
          ORDER BY m.created_at DESC, m.id DESC
          LIMIT ?",
-    )?;
-    collect_search_results(
-        stmt.query_map((query, chat_id, thread_id, limit), search_result_from_row)?,
+        crate::params![query, chat_id, thread_id, limit],
+        search_result_from_row,
     )
 }
 
@@ -196,7 +197,7 @@ pub fn search_chat(
 ) -> Result<Vec<ConversationSearchResult>> {
     let query = normalized_fts_query(query)?;
     let limit = clamped_limit(limit);
-    let mut stmt = conn.prepare(
+    conn.query_all(
         "SELECT
             m.id,
             m.role,
@@ -214,8 +215,9 @@ pub fn search_chat(
            AND m.chat_id = ?
          ORDER BY m.created_at DESC, m.id DESC
          LIMIT ?",
-    )?;
-    collect_search_results(stmt.query_map((query, chat_id, limit), search_result_from_row)?)
+        crate::params![query, chat_id, limit],
+        search_result_from_row,
+    )
 }
 
 fn trimmed_content(content: &str) -> Result<&str> {
@@ -262,7 +264,7 @@ fn normalized_fts_query(query: &str) -> Result<String> {
         .join(" AND "))
 }
 
-fn search_result_from_row(row: &rusqlite::Row<'_>) -> Result<ConversationSearchResult> {
+fn search_result_from_row(row: &crate::row::Row<'_>) -> Result<ConversationSearchResult> {
     Ok(ConversationSearchResult {
         id: row.get(0)?,
         role: row.get(1)?,
@@ -276,28 +278,32 @@ fn search_result_from_row(row: &rusqlite::Row<'_>) -> Result<ConversationSearchR
     })
 }
 
-fn collect_search_results<F>(
-    rows: rusqlite::MappedRows<'_, F>,
-) -> Result<Vec<ConversationSearchResult>>
-where
-    F: FnMut(&rusqlite::Row<'_>) -> Result<ConversationSearchResult>,
-{
-    rows.collect()
-}
-
-fn invalid_parameter(message: &str) -> rusqlite::Error {
-    rusqlite::Error::InvalidParameterName(message.to_string())
+fn invalid_parameter(message: &str) -> DbError {
+    DbError::InvalidParameter(message.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
+    use tempfile::TempDir;
 
-    fn migrated_connection() -> Connection {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::MIGRATIONS.to_latest(&mut conn).unwrap();
-        conn
+    struct TestDb {
+        _dir: TempDir,
+        conn: Connection,
+    }
+
+    impl std::ops::Deref for TestDb {
+        type Target = Connection;
+
+        fn deref(&self) -> &Self::Target {
+            &self.conn
+        }
+    }
+
+    fn migrated_connection() -> TestDb {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::open_connection(dir.path(), true).unwrap();
+        TestDb { _dir: dir, conn }
     }
 
     fn user_message<'a>(
@@ -341,10 +347,10 @@ mod tests {
 
         assert_eq!(first_id, second_id);
         let (count, content): (i64, String) = conn
-            .query_row(
+            .query_one(
                 "SELECT COUNT(*), content FROM conversation_messages
                  WHERE platform='telegram' AND chat_id=100 AND message_id=25 AND role='user'",
-                [],
+                (),
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
@@ -361,11 +367,11 @@ mod tests {
 
         assert_eq!(changed, 1);
         let routed: (i64, Option<String>, Option<i64>) = conn
-            .query_row(
+            .query_one(
                 "SELECT routed_to_agent, root_session_id, turn_id
                  FROM conversation_messages
                  WHERE platform='telegram' AND chat_id=100 AND message_id=25 AND role='user'",
-                [],
+                (),
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
@@ -407,11 +413,11 @@ mod tests {
         archive_message(&conn, user_message(100, 10, 25, "real content")).unwrap();
 
         let (routed, session, turn, content): (i64, Option<String>, Option<i64>, String) = conn
-            .query_row(
+            .query_one(
                 "SELECT routed_to_agent, root_session_id, turn_id, content
                  FROM conversation_messages
                  WHERE platform='telegram' AND chat_id=100 AND message_id=25 AND role='user'",
-                [],
+                (),
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
@@ -435,11 +441,11 @@ mod tests {
         archive_message(&conn, user_message(100, 10, 25, "route me edited")).unwrap();
 
         let routed: (i64, Option<String>, Option<i64>, String) = conn
-            .query_row(
+            .query_one(
                 "SELECT routed_to_agent, root_session_id, turn_id, content
                  FROM conversation_messages
                  WHERE platform='telegram' AND chat_id=100 AND message_id=25 AND role='user'",
-                [],
+                (),
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();

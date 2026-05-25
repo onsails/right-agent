@@ -34,7 +34,7 @@ impl Connection {
         // SAFETY: right-db is only using local libSQL through synchronous
         // wrappers that drive each async operation to completion. During the
         // staged libSQL migration this crate still links and uses rusqlite in
-        // conversation storage and tests, so rusqlite can initialize SQLite
+        // compatibility tests, so rusqlite can initialize SQLite
         // before libSQL's one-time serialized-mode assertion runs. The project
         // still uses serialized, mutex-protected handles; this skips only that
         // temporary global init assertion until the remaining right-db rusqlite
@@ -90,6 +90,21 @@ impl Connection {
             return Err(DbError::not_found());
         };
         map(&crate::row::Row::new(&row))
+    }
+
+    pub fn query_all<T>(
+        &self,
+        sql: &str,
+        params: impl crate::params::IntoParams,
+        mut map: impl FnMut(&crate::row::Row<'_>) -> Result<T, DbError>,
+    ) -> Result<Vec<T>, DbError> {
+        let params = params.into_params()?.into_libsql();
+        let mut rows = self.block_on_libsql(self.inner.query(sql, params))?;
+        let mut values = Vec::new();
+        while let Some(row) = self.block_on_libsql(rows.next())? {
+            values.push(map(&crate::row::Row::new(&row))?);
+        }
+        Ok(values)
     }
 
     pub fn transaction(&self) -> Result<crate::transaction::Transaction<'_>, DbError> {
