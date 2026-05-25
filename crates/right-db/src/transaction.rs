@@ -203,6 +203,21 @@ impl fmt::Debug for Transaction<'_> {
     }
 }
 
+impl Drop for Transaction<'_> {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.take() else {
+            return;
+        };
+        if let Err(error) = self.conn.block_on_turso(inner.rollback()) {
+            tracing::warn!(
+                path = %self.conn.path().display(),
+                rollback_error = format!("{error:#}"),
+                "transaction rollback on drop failed",
+            );
+        }
+    }
+}
+
 /// Intentional `Deref` so `&Transaction` can be passed to helpers that take
 /// `&Connection`. See the [`Transaction`] struct-level docs for the
 /// transactional-semantics invariant and the backend-swap warning.
