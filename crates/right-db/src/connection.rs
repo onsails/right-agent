@@ -469,10 +469,11 @@ where
 {
     match tokio::runtime::Handle::try_current() {
         Err(_) => runtime.block_on(future),
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| runtime.block_on(future))
-        }
         Ok(_) => std::thread::scope(|scope| {
+            // `block_in_place` panics inside `LocalSet::run_until`, even when
+            // the surrounding runtime is multi-threaded. Keep the sync API
+            // compatible by driving Turso on a plain helper thread whenever
+            // callers are already inside any Tokio runtime.
             let handle = scope.spawn(move || runtime.block_on(future));
             match handle.join() {
                 Ok(output) => output,
@@ -766,5 +767,24 @@ mod tests {
             .query_row("SELECT value FROM probe", (), |row| row.get(0))
             .unwrap();
         assert_eq!(value, 9);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_queries_work_inside_local_set_on_multi_thread_runtime() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let conn = Connection::open_in_memory().unwrap();
+                conn.execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
+                    .unwrap();
+                conn.execute("INSERT INTO probe (value) VALUES (?1)", [11_i64])
+                    .unwrap();
+
+                let value: i64 = conn
+                    .query_row("SELECT value FROM probe", (), |row| row.get(0))
+                    .unwrap();
+                assert_eq!(value, 11);
+            })
+            .await;
     }
 }
