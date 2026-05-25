@@ -56,6 +56,121 @@ pub struct ResourceMetadata {
     pub scopes_supported: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MetadataProbe<T> {
+    Found(T),
+    NotMetadata(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataKind {
+    Resource,
+    AuthorizationServer,
+}
+
+impl MetadataKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Resource => "RFC 9728",
+            Self::AuthorizationServer => "AS metadata",
+        }
+    }
+
+    fn has_markers(self, value: &serde_json::Value) -> bool {
+        let Some(obj) = value.as_object() else {
+            return false;
+        };
+
+        match self {
+            Self::Resource => {
+                obj.contains_key("authorization_servers")
+                    || obj.contains_key("resource")
+                    || obj.contains_key("scopes_supported")
+            }
+            Self::AuthorizationServer => {
+                obj.contains_key("authorization_endpoint")
+                    || obj.contains_key("token_endpoint")
+                    || obj.contains_key("registration_endpoint")
+                    || obj.contains_key("scopes_supported")
+                    || obj.contains_key("code_challenge_methods_supported")
+            }
+        }
+    }
+}
+
+fn response_content_type(resp: &reqwest::Response) -> String {
+    resp.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+async fn parse_metadata_response<T>(
+    resp: reqwest::Response,
+    url: &str,
+    kind: MetadataKind,
+) -> Result<MetadataProbe<T>, OAuthError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let label = kind.label();
+    let content_type = response_content_type(&resp);
+    if !content_type.is_empty()
+        && content_type != "application/json"
+        && !content_type.ends_with("+json")
+    {
+        debug!(
+            "discover_as: {label} response from {url} had non-json content-type {content_type}, treating as no metadata"
+        );
+        return Ok(MetadataProbe::NotMetadata(format!(
+            "non-json content-type {content_type} at {url}"
+        )));
+    }
+
+    let body = resp.bytes().await.map_err(|e| {
+        OAuthError::DiscoveryFailed(format!("failed to read {label} response from {url}: {e}"))
+    })?;
+    match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(value) => {
+            if !kind.has_markers(&value) {
+                debug!(
+                    "discover_as: {label} response from {url} had no metadata marker fields, treating as no metadata"
+                );
+                return Ok(MetadataProbe::NotMetadata(format!(
+                    "json body without {label} markers at {url}"
+                )));
+            }
+
+            serde_json::from_value::<T>(value)
+                .map(MetadataProbe::Found)
+                .map_err(|e| {
+                    OAuthError::DiscoveryFailed(format!(
+                        "failed to parse {label} response from {url}: {e}"
+                    ))
+                })
+        }
+        Err(e) => {
+            let preview = String::from_utf8_lossy(&body);
+            let trimmed = preview.trim_start();
+            if trimmed.starts_with('<') {
+                debug!(
+                    "discover_as: {label} response from {url} looked like HTML, treating as no metadata"
+                );
+                Ok(MetadataProbe::NotMetadata(format!("html body at {url}")))
+            } else {
+                Err(OAuthError::DiscoveryFailed(format!(
+                    "failed to parse {label} response from {url}: {e}"
+                )))
+            }
+        }
+    }
+}
+
 /// OAuth discovery result for an MCP resource server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthDiscovery {
@@ -348,31 +463,43 @@ pub async fn discover_oauth(
         Ok(resp) => {
             let status = resp.status();
             if status.is_success() {
-                let meta: ResourceMetadata = resp.json().await.map_err(|e| {
-                    OAuthError::DiscoveryFailed(format!(
-                        "failed to parse RFC 9728 response from {rfc9728_url}: {e}"
-                    ))
-                })?;
-                debug!(
-                    "discover_as: RFC 9728 succeeded, AS URL = {:?}",
-                    meta.authorization_servers.first()
-                );
-                if let Some(meta_resource) = meta.resource.filter(|r| !r.trim().is_empty()) {
-                    resource = meta_resource;
-                }
-                if let Some(scopes) = meta.scopes_supported {
-                    resource_scopes = scopes;
-                }
-                Some(
-                    meta.authorization_servers
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| {
-                            OAuthError::DiscoveryFailed(
-                                "RFC 9728 authorization_servers array is empty".to_string(),
-                            )
-                        })?,
+                match parse_metadata_response::<ResourceMetadata>(
+                    resp,
+                    &rfc9728_url,
+                    MetadataKind::Resource,
                 )
+                .await?
+                {
+                    MetadataProbe::Found(meta) => {
+                        debug!(
+                            "discover_as: RFC 9728 succeeded, AS URL = {:?}",
+                            meta.authorization_servers.first()
+                        );
+                        if let Some(meta_resource) = meta.resource.filter(|r| !r.trim().is_empty())
+                        {
+                            resource = meta_resource;
+                        }
+                        if let Some(scopes) = meta.scopes_supported {
+                            resource_scopes = scopes;
+                        }
+                        Some(
+                            meta.authorization_servers
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| {
+                                    OAuthError::DiscoveryFailed(
+                                        "RFC 9728 authorization_servers array is empty".to_string(),
+                                    )
+                                })?,
+                        )
+                    }
+                    MetadataProbe::NotMetadata(reason) => {
+                        debug!(
+                            "discover_as: RFC 9728 response at {rfc9728_url} was not metadata ({reason}), falling back"
+                        );
+                        None
+                    }
+                }
             } else {
                 // Any non-2xx (404, 401, 5xx, …) → speculative URL didn't
                 // hit metadata. Skip and try the AS metadata fallback chain.
@@ -398,18 +525,31 @@ pub async fn discover_oauth(
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_success() {
-                    let meta: AsMetadata = resp.json().await.map_err(|e| {
-                        OAuthError::DiscoveryFailed(format!(
-                            "failed to parse AS metadata from {url}: {e}"
-                        ))
-                    })?;
-                    debug!("discover_as: succeeded via {url}");
-                    let scopes = select_oauth_scopes(&resource_scopes, &meta.scopes_supported);
-                    return Ok(OAuthDiscovery {
-                        metadata: meta,
-                        resource,
-                        scopes,
-                    });
+                    match parse_metadata_response::<AsMetadata>(
+                        resp,
+                        url,
+                        MetadataKind::AuthorizationServer,
+                    )
+                    .await?
+                    {
+                        MetadataProbe::Found(meta) => {
+                            debug!("discover_as: succeeded via {url}");
+                            let scopes =
+                                select_oauth_scopes(&resource_scopes, &meta.scopes_supported);
+                            return Ok(OAuthDiscovery {
+                                metadata: meta,
+                                resource,
+                                scopes,
+                            });
+                        }
+                        MetadataProbe::NotMetadata(reason) => {
+                            debug!(
+                                "discover_as: AS metadata response at {url} was not metadata ({reason}), trying next"
+                            );
+                            last_err = Some(reason);
+                            continue;
+                        }
+                    }
                 }
                 debug!("discover_as: {url} returned {status}, trying next");
                 last_err = Some(format!("{status} at {url}"));
@@ -1033,6 +1173,240 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn discover_as_skips_html_protected_resource_response() {
+        setup_crypto();
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "Authentication failed. The request is missing the Authorization header.",
+                    "code": "missing_auth_header"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .set_body_string("<!doctype html><html><title>Nango</title></html>"),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/mcp/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let server_url = format!("{}/mcp", server.uri());
+        let result = discover_as(&client, &server_url).await;
+
+        let err = result.expect_err("non-metadata HTML should not discover OAuth");
+        let detail = format!("{err:#}");
+        assert!(
+            detail.contains("no AS metadata found"),
+            "HTML metadata miss must fall through to normal discovery failure, got: {detail}"
+        );
+        assert!(
+            !detail.contains("failed to parse RFC 9728 response"),
+            "HTML metadata miss must not be reported as parse failure: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_as_skips_json_error_protected_resource_response() {
+        setup_crypto();
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": "missing_auth_header"
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "error": "not_found",
+                "message": "no protected resource metadata here"
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/mcp/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let server_url = format!("{}/mcp", server.uri());
+        let result = discover_as(&client, &server_url).await;
+
+        let err = result.expect_err("non-metadata JSON should not discover OAuth");
+        let detail = format!("{err:#}");
+        assert!(
+            detail.contains("no AS metadata found"),
+            "JSON metadata miss must fall through to normal discovery failure, got: {detail}"
+        );
+        assert!(
+            !detail.contains("failed to parse RFC 9728 response"),
+            "JSON metadata miss must not be reported as parse failure: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_as_skips_json_error_as_metadata_response_and_continues() {
+        setup_crypto();
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "error": "not_found",
+                "message": "no authorization server metadata here"
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/mcp/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "authorization_endpoint": "https://auth.example.com/authorize",
+                "token_endpoint": "https://auth.example.com/token"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let server_url = format!("{}/mcp", server.uri());
+        let meta = discover_as(&client, &server_url)
+            .await
+            .expect("AS JSON error body must be skipped so later metadata can succeed");
+
+        assert_eq!(meta.token_endpoint, "https://auth.example.com/token");
+    }
+
+    #[tokio::test]
+    async fn discover_as_reports_malformed_suffix_json_as_metadata() {
+        setup_crypto();
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"authorization_endpoint":123}"#,
+                "application/oauth-authorization-server+json; charset=utf-8",
+            ))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let server_url = format!("{}/mcp", server.uri());
+        let result = discover_as(&client, &server_url).await;
+
+        let err = result.expect_err("marker-bearing malformed metadata must fail discovery");
+        let detail = format!("{err:#}");
+        assert!(
+            detail.contains("failed to parse AS metadata response"),
+            "suffix +json content-type with metadata markers must be parsed and fail, got: {detail}"
+        );
+    }
+
     // Task 2: build_auth_url tests (pure function, no HTTP needed)
     #[test]
     fn build_auth_url_contains_required_params() {
@@ -1336,6 +1710,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_as_linear_pattern_uses_origin_well_known() {
+        setup_crypto();
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
