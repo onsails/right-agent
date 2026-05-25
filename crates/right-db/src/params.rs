@@ -2,10 +2,10 @@ use crate::DbError;
 
 #[derive(Debug)]
 #[doc(hidden)]
-pub struct Params(libsql::params::Params);
+pub struct Params(turso::params::Params);
 
 impl Params {
-    pub(crate) fn into_libsql(self) -> libsql::params::Params {
+    pub(crate) fn into_turso(self) -> turso::params::Params {
         self.0
     }
 }
@@ -15,12 +15,12 @@ pub trait IntoParams {
 }
 
 pub trait IntoValue {
-    fn into_value(self) -> Result<libsql::Value, DbError>;
+    fn into_value(self) -> Result<turso::Value, DbError>;
 }
 
 #[derive(Debug, Default)]
 pub struct ParamsBuilder {
-    values: Vec<libsql::Value>,
+    values: Vec<turso::Value>,
     error: Option<DbError>,
 }
 
@@ -71,13 +71,13 @@ macro_rules! params {
 
 impl IntoParams for () {
     fn into_params(self) -> Result<Params, DbError> {
-        Ok(Params(libsql::params::Params::None))
+        Ok(Params(turso::params::Params::None))
     }
 }
 
 impl IntoParams for [(); 0] {
     fn into_params(self) -> Result<Params, DbError> {
-        Ok(Params(libsql::params::Params::None))
+        Ok(Params(turso::params::Params::None))
     }
 }
 
@@ -86,7 +86,7 @@ impl<T: IntoValue> IntoParams for Vec<T> {
         self.into_iter()
             .map(IntoValue::into_value)
             .collect::<Result<Vec<_>, _>>()
-            .map(|values| Params(libsql::params::Params::Positional(values)))
+            .map(|values| Params(turso::params::Params::Positional(values)))
     }
 }
 
@@ -95,7 +95,7 @@ impl IntoParams for ParamsBuilder {
         if let Some(error) = self.error {
             return Err(error);
         }
-        Ok(Params(libsql::params::Params::Positional(self.values)))
+        Ok(Params(turso::params::Params::Positional(self.values)))
     }
 }
 
@@ -105,7 +105,7 @@ macro_rules! tuple_into_params {
             #[allow(non_snake_case)]
             fn into_params(self) -> Result<Params, DbError> {
                 let ($($name,)+) = self;
-                Ok(Params(libsql::params::Params::Positional(vec![
+                Ok(Params(turso::params::Params::Positional(vec![
                     $($name.into_value()?,)+
                 ])))
             }
@@ -133,7 +133,7 @@ macro_rules! array_into_params {
                     self.into_iter()
                         .map(IntoValue::into_value)
                         .collect::<Result<Vec<_>, _>>()
-                        .map(|values| Params(libsql::params::Params::Positional(values)))
+                        .map(|values| Params(turso::params::Params::Positional(values)))
                 }
             }
         )+
@@ -145,115 +145,115 @@ array_into_params!(
     27, 28, 29, 30, 31, 32,
 );
 
-impl IntoValue for libsql::Value {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
+impl IntoValue for turso::Value {
+    fn into_value(self) -> Result<turso::Value, DbError> {
         Ok(self)
     }
 }
 
 impl IntoValue for &str {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Text(self.to_owned()))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Text(self.to_owned()))
     }
 }
 
 impl IntoValue for String {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Text(self))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Text(self))
     }
 }
 
 impl IntoValue for &String {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Text(self.clone()))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Text(self.clone()))
     }
 }
 
 impl IntoValue for &&str {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Text((*self).to_owned()))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Text((*self).to_owned()))
     }
 }
 
 impl IntoValue for i64 {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Integer(self))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Integer(self))
     }
 }
 
 impl IntoValue for &i64 {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Integer(*self))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Integer(*self))
     }
 }
 
 impl IntoValue for i32 {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Integer(i64::from(self)))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Integer(i64::from(self)))
     }
 }
 
 impl IntoValue for &i32 {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Integer(i64::from(*self)))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Integer(i64::from(*self)))
     }
 }
 
 impl IntoValue for u32 {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Integer(i64::from(self)))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Integer(i64::from(self)))
     }
 }
 
 impl IntoValue for &u32 {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Integer(i64::from(*self)))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Integer(i64::from(*self)))
     }
 }
 
 impl IntoValue for u64 {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
+    fn into_value(self) -> Result<turso::Value, DbError> {
         let value = i64::try_from(self)
             .map_err(|_| DbError::InvalidParameter("u64 does not fit in SQLite INTEGER".into()))?;
-        Ok(libsql::Value::Integer(value))
+        Ok(turso::Value::Integer(value))
     }
 }
 
 impl IntoValue for &u64 {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
+    fn into_value(self) -> Result<turso::Value, DbError> {
         (*self).into_value()
     }
 }
 
 impl IntoValue for bool {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Integer(i64::from(self)))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Integer(i64::from(self)))
     }
 }
 
 impl IntoValue for &bool {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Integer(i64::from(*self)))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Integer(i64::from(*self)))
     }
 }
 
 impl IntoValue for f64 {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Real(self))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Real(self))
     }
 }
 
 impl IntoValue for &f64 {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
-        Ok(libsql::Value::Real(*self))
+    fn into_value(self) -> Result<turso::Value, DbError> {
+        Ok(turso::Value::Real(*self))
     }
 }
 
 impl<T: IntoValue> IntoValue for Option<T> {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
+    fn into_value(self) -> Result<turso::Value, DbError> {
         match self {
             Some(value) => value.into_value(),
-            None => Ok(libsql::Value::Null),
+            None => Ok(turso::Value::Null),
         }
     }
 }
@@ -262,7 +262,7 @@ impl<T> IntoValue for &Option<T>
 where
     T: Clone + IntoValue,
 {
-    fn into_value(self) -> Result<libsql::Value, DbError> {
+    fn into_value(self) -> Result<turso::Value, DbError> {
         self.clone().into_value()
     }
 }

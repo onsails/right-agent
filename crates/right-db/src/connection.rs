@@ -11,7 +11,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Number of worker threads in the process-wide shared runtime.
 ///
-/// Local libSQL wraps blocking SQLite, so each DB op is effectively
+/// Local Turso wraps blocking SQLite, so each DB op is effectively
 /// synchronous. We still want at least two workers so independent
 /// connections (different agents, dashboard, aggregator) do not serialize
 /// behind one another at the scheduler level.
@@ -19,7 +19,7 @@ const SHARED_RUNTIME_WORKER_THREADS: usize = 2;
 
 /// Process-wide tokio runtime shared by every [`Connection`].
 ///
-/// Local libSQL wraps blocking SQLite, so there is no genuine async work to
+/// Local Turso wraps blocking SQLite, so there is no genuine async work to
 /// overlap inside a single op. However, this runtime is shared across every
 /// agent DB, the dashboard, and the aggregator in the same process; a
 /// `current_thread` runtime would serialise all of them through one
@@ -35,13 +35,14 @@ fn shared_runtime() -> &'static tokio::runtime::Runtime {
             .worker_threads(SHARED_RUNTIME_WORKER_THREADS)
             .enable_all()
             .build()
-            .expect("right-db libsql runtime should initialize")
+            .expect("right-db Turso runtime should initialize")
     })
 }
 
 pub struct Connection {
     db_path: PathBuf,
-    inner: libsql::Connection,
+    _database: turso::Database,
+    inner: turso::Connection,
 }
 
 impl fmt::Debug for Connection {
@@ -54,34 +55,47 @@ impl fmt::Debug for Connection {
 
 impl Connection {
     pub fn open_in_memory() -> Result<Self, DbError> {
-        Self::build(PathBuf::from(":memory:"), libsql::OpenFlags::default())
+        Self::build(PathBuf::from(":memory:"), true)
     }
 
     pub(crate) fn open_local(db_path: PathBuf, create: bool) -> Result<Self, DbError> {
-        let flags = if create {
-            libsql::OpenFlags::default()
-        } else {
-            libsql::OpenFlags::SQLITE_OPEN_READ_ONLY
-        };
-        Self::build(db_path, flags)
+        if !create && !db_path.exists() {
+            return Err(DbError::Open {
+                path: db_path.clone(),
+                source: turso::Error::Readonly(format!(
+                    "database file does not exist: {}",
+                    db_path.display()
+                )),
+            });
+        }
+        Self::build(db_path, create)
     }
 
-    fn build(db_path: PathBuf, flags: libsql::OpenFlags) -> Result<Self, DbError> {
+    fn build(db_path: PathBuf, create: bool) -> Result<Self, DbError> {
         let runtime = shared_runtime();
-        let builder = libsql::Builder::new_local(&db_path).flags(flags);
-        // SAFETY: right-db drives local libSQL through synchronous wrappers
-        // that share a single process-wide runtime, so libSQL's
-        // process-wide serialized-mode assertion would be a false positive.
-        // The project still uses local SQLite through libSQL handles with
-        // SQLite mutex protection.
-        let builder = unsafe { builder.skip_safety_assert(true) };
+        let path = db_path.to_string_lossy().into_owned();
         let open_err = |source| DbError::Open {
             path: db_path.clone(),
             source,
         };
-        let database = block_on_runtime_safe(runtime, builder.build()).map_err(open_err)?;
+        let database = block_on_runtime_safe(
+            runtime,
+            turso::Builder::new_local(&path)
+                .experimental_index_method(true)
+                .build(),
+        )
+        .map_err(open_err)?;
         let inner = database.connect().map_err(open_err)?;
-        Ok(Self { db_path, inner })
+        let conn = Self {
+            db_path,
+            _database: database,
+            inner,
+        };
+        if !create {
+            conn.block_on_turso(conn.inner.pragma_update("query_only", "ON"))
+                .map(drop)?;
+        }
+        Ok(conn)
     }
 
     pub fn path(&self) -> &Path {
@@ -89,8 +103,7 @@ impl Connection {
     }
 
     pub fn execute_batch(&self, sql: &str) -> Result<(), DbError> {
-        self.block_on_libsql(self.inner.execute_batch(sql))
-            .map(drop)
+        self.block_on_turso(self.inner.execute_batch(sql)).map(drop)
     }
 
     pub fn execute(
@@ -98,8 +111,8 @@ impl Connection {
         sql: &str,
         params: impl crate::params::IntoParams,
     ) -> Result<usize, DbError> {
-        let params = params.into_params()?.into_libsql();
-        let changed = self.block_on_libsql(self.inner.execute(sql, params))?;
+        let params = params.into_params()?.into_turso();
+        let changed = self.block_on_turso(self.inner.execute(sql, params))?;
         usize::try_from(changed)
             .map_err(|_| DbError::InvalidParameter("changed row count exceeds usize".into()))
     }
@@ -110,9 +123,9 @@ impl Connection {
         params: impl crate::params::IntoParams,
         map: impl FnOnce(&crate::row::Row<'_>) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        let params = params.into_params()?.into_libsql();
-        let mut rows = self.block_on_libsql(self.inner.query(sql, params))?;
-        let Some(row) = self.block_on_libsql(rows.next())? else {
+        let params = params.into_params()?.into_turso();
+        let mut rows = self.block_on_turso(self.inner.query(sql, params))?;
+        let Some(row) = self.block_on_turso(rows.next())? else {
             return Err(DbError::NotFound);
         };
         map(&crate::row::Row::new(&row))
@@ -132,10 +145,10 @@ impl Connection {
         params: impl crate::params::IntoParams,
         mut map: impl FnMut(&crate::row::Row<'_>) -> Result<T, DbError>,
     ) -> Result<Vec<T>, DbError> {
-        let params = params.into_params()?.into_libsql();
-        let mut rows = self.block_on_libsql(self.inner.query(sql, params))?;
+        let params = params.into_params()?.into_turso();
+        let mut rows = self.block_on_turso(self.inner.query(sql, params))?;
         let mut values = Vec::new();
-        while let Some(row) = self.block_on_libsql(rows.next())? {
+        while let Some(row) = self.block_on_turso(rows.next())? {
             values.push(map(&crate::row::Row::new(&row))?);
         }
         Ok(values)
@@ -144,9 +157,9 @@ impl Connection {
     /// Capture `sql` for later execution via [`Statement::query_map`] or
     /// [`Statement::query_row`].
     ///
-    /// Despite the name, this does NOT prepare or cache a libSQL statement.
+    /// Despite the name, this does NOT prepare or cache a Turso statement.
     /// Each subsequent `query_map`/`query_row` re-issues
-    /// [`libsql::Connection::query`] with the same SQL, which re-parses on
+    /// [`turso::Connection::query`] with the same SQL, which re-parses on
     /// every call. The owned-`String` storage is only there so callers can
     /// hold the [`Statement`] across `query_map` iterations.
     ///
@@ -170,14 +183,15 @@ impl Connection {
     /// transaction must be passed through helper boundaries or committed
     /// manually.
     pub fn transaction(&self) -> Result<crate::transaction::Transaction<'_>, DbError> {
-        self.transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+        self.transaction_with_behavior(turso::transaction::TransactionBehavior::Immediate)
     }
 
     pub fn with_immediate_transaction<T>(
         &self,
         f: impl FnOnce(&crate::transaction::Transaction<'_>) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        let tx = self.transaction_with_behavior(libsql::TransactionBehavior::Immediate)?;
+        let tx =
+            self.transaction_with_behavior(turso::transaction::TransactionBehavior::Immediate)?;
         match f(&tx) {
             Ok(value) => {
                 tx.commit()?;
@@ -199,33 +213,45 @@ impl Connection {
 
     fn transaction_with_behavior(
         &self,
-        behavior: libsql::TransactionBehavior,
+        behavior: turso::transaction::TransactionBehavior,
     ) -> Result<crate::transaction::Transaction<'_>, DbError> {
-        let inner = self.block_on_libsql(self.inner.transaction_with_behavior(behavior))?;
+        let inner = self.block_on_turso(turso::transaction::Transaction::new_unchecked(
+            &self.inner,
+            behavior,
+        ))?;
         Ok(crate::transaction::Transaction::new(self, inner))
     }
 
     pub(crate) fn apply_connection_pragmas(&self) -> Result<(), DbError> {
-        self.execute_batch("PRAGMA journal_mode=WAL")?;
-        self.inner.busy_timeout(BUSY_TIMEOUT)?;
+        self.block_on_turso(self.inner.pragma_update("journal_mode", "WAL"))
+            .map(drop)?;
+        self.block_on_turso(
+            self.inner
+                .pragma_update("busy_timeout", BUSY_TIMEOUT.as_millis()),
+        )
+        .map(drop)?;
         Ok(())
     }
 
     pub(crate) fn apply_readonly_pragmas(&self) -> Result<(), DbError> {
-        self.inner.busy_timeout(BUSY_TIMEOUT)?;
+        self.block_on_turso(
+            self.inner
+                .pragma_update("busy_timeout", BUSY_TIMEOUT.as_millis()),
+        )
+        .map(drop)?;
         Ok(())
     }
 
-    pub(crate) fn block_on_libsql<T: Send>(
+    pub(crate) fn block_on_turso<T: Send>(
         &self,
-        future: impl Future<Output = libsql::Result<T>> + Send,
+        future: impl Future<Output = turso::Result<T>> + Send,
     ) -> Result<T, DbError> {
         block_on_runtime_safe(shared_runtime(), future).map_err(Into::into)
     }
 }
 
 /// Owns an SQL string for repeated execution via `query_map`/`query_row`.
-/// No libSQL-level prepared-statement caching is performed; each call
+/// No Turso-level prepared-statement caching is performed; each call
 /// re-issues the query.
 pub struct Statement<'conn> {
     conn: &'conn Connection,
@@ -242,12 +268,12 @@ impl<'conn> Statement<'conn> {
         P: crate::params::IntoParams,
         F: FnMut(&crate::row::Row<'_>) -> Result<T, DbError>,
     {
-        let params = params.into_params()?.into_libsql();
+        let params = params.into_params()?.into_turso();
         let mut query_rows = self
             .conn
-            .block_on_libsql(self.conn.inner.query(&self.sql, params))?;
+            .block_on_turso(self.conn.inner.query(&self.sql, params))?;
         let mut rows = Vec::new();
-        while let Some(row) = self.conn.block_on_libsql(query_rows.next())? {
+        while let Some(row) = self.conn.block_on_turso(query_rows.next())? {
             rows.push(map(&crate::row::Row::new(&row)));
         }
         Ok(rows.into_iter())

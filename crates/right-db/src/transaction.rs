@@ -15,29 +15,31 @@ use crate::connection::Connection;
 /// the writes still participate in the open `BEGIN IMMEDIATE`.
 ///
 /// This only preserves transactional semantics because the current local
-/// libSQL backend shares the underlying SQLite handle between `Connection`
-/// and `libsql::Transaction` (the transaction `Arc`-clones the parent
-/// connection's SQLite handle). The invariant is covered by
+/// Turso backend shares the underlying SQLite handle between `Connection`
+/// and `turso::transaction::Transaction`. The invariant is covered by
 /// `transaction_deref_helper_write_is_rolled_back` in `connection.rs`, which
 /// verifies that a `&Connection`-taking write reached through `Deref` is
 /// rolled back with the outer transaction.
 ///
 /// # WARNING: backend swap
 ///
-/// If `right-db` ever swaps to a backend where `libsql::Transaction.conn` is
-/// not the same wire-level handle as the parent `Connection` (e.g. sync
-/// libSQL, hrana, or remote libSQL), this `Deref` silently turns every
+/// If `right-db` ever swaps to a backend where
+/// `turso::transaction::Transaction` is not the same wire-level handle as
+/// the parent `Connection`, this `Deref` silently turns every
 /// `_tx`-less helper call into an autocommit write outside the transaction
 /// with no compile-time signal. Re-audit every `&Connection`-taking helper
 /// and the `transaction_deref_helper_write_is_rolled_back` test before
 /// changing backends.
 pub struct Transaction<'conn> {
     conn: &'conn Connection,
-    inner: Option<libsql::Transaction>,
+    inner: Option<turso::transaction::Transaction<'conn>>,
 }
 
 impl<'conn> Transaction<'conn> {
-    pub(crate) fn new(conn: &'conn Connection, inner: libsql::Transaction) -> Self {
+    pub(crate) fn new(
+        conn: &'conn Connection,
+        inner: turso::transaction::Transaction<'conn>,
+    ) -> Self {
         Self {
             conn,
             inner: Some(inner),
@@ -49,12 +51,12 @@ impl<'conn> Transaction<'conn> {
         sql: &str,
         params: impl crate::params::IntoParams,
     ) -> Result<usize, DbError> {
-        let params = params.into_params()?.into_libsql();
+        let params = params.into_params()?.into_turso();
         let inner = self
             .inner
             .as_ref()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        let changed = self.conn.block_on_libsql(inner.execute(sql, params))?;
+        let changed = self.conn.block_on_turso(inner.execute(sql, params))?;
         usize::try_from(changed)
             .map_err(|_| DbError::InvalidParameter("changed row count exceeds usize".into()))
     }
@@ -64,9 +66,7 @@ impl<'conn> Transaction<'conn> {
             .inner
             .as_ref()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        self.conn
-            .block_on_libsql(inner.execute_batch(sql))
-            .map(drop)
+        self.conn.block_on_turso(inner.execute_batch(sql)).map(drop)
     }
 
     pub fn query_one<T>(
@@ -75,13 +75,13 @@ impl<'conn> Transaction<'conn> {
         params: impl crate::params::IntoParams,
         map: impl FnOnce(&crate::row::Row<'_>) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        let params = params.into_params()?.into_libsql();
+        let params = params.into_params()?.into_turso();
         let inner = self
             .inner
             .as_ref()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        let mut rows = self.conn.block_on_libsql(inner.query(sql, params))?;
-        let Some(row) = self.conn.block_on_libsql(rows.next())? else {
+        let mut rows = self.conn.block_on_turso(inner.query(sql, params))?;
+        let Some(row) = self.conn.block_on_turso(rows.next())? else {
             return Err(DbError::NotFound);
         };
         map(&crate::row::Row::new(&row))
@@ -101,14 +101,14 @@ impl<'conn> Transaction<'conn> {
         params: impl crate::params::IntoParams,
         mut map: impl FnMut(&crate::row::Row<'_>) -> Result<T, DbError>,
     ) -> Result<Vec<T>, DbError> {
-        let params = params.into_params()?.into_libsql();
+        let params = params.into_params()?.into_turso();
         let inner = self
             .inner
             .as_ref()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        let mut rows = self.conn.block_on_libsql(inner.query(sql, params))?;
+        let mut rows = self.conn.block_on_turso(inner.query(sql, params))?;
         let mut values = Vec::new();
-        while let Some(row) = self.conn.block_on_libsql(rows.next())? {
+        while let Some(row) = self.conn.block_on_turso(rows.next())? {
             values.push(map(&crate::row::Row::new(&row))?);
         }
         Ok(values)
@@ -118,9 +118,9 @@ impl<'conn> Transaction<'conn> {
     /// [`TransactionStatement::query_map`] or
     /// [`TransactionStatement::query_row`].
     ///
-    /// Despite the name, this does NOT prepare or cache a libSQL statement.
+    /// Despite the name, this does NOT prepare or cache a Turso statement.
     /// Each subsequent `query_map`/`query_row` re-issues the query on the
-    /// underlying libSQL transaction with the same SQL, which re-parses on
+    /// underlying Turso transaction with the same SQL, which re-parses on
     /// every call. The owned-`String` storage is only there so callers can
     /// hold the [`TransactionStatement`] across `query_map` iterations.
     pub fn prepare<'tx>(&'tx self, sql: &str) -> Result<TransactionStatement<'tx, 'conn>, DbError> {
@@ -139,7 +139,7 @@ impl<'conn> Transaction<'conn> {
             .inner
             .take()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        self.conn.block_on_libsql(inner.commit())?;
+        self.conn.block_on_turso(inner.commit())?;
         Ok(())
     }
 
@@ -148,13 +148,13 @@ impl<'conn> Transaction<'conn> {
             .inner
             .take()
             .ok_or_else(|| DbError::InvalidParameter("transaction already closed".into()))?;
-        self.conn.block_on_libsql(inner.rollback())?;
+        self.conn.block_on_turso(inner.rollback())?;
         Ok(())
     }
 }
 
 /// Owns an SQL string for repeated execution via `query_map`/`query_row`.
-/// No libSQL-level prepared-statement caching is performed; each call
+/// No Turso-level prepared-statement caching is performed; each call
 /// re-issues the query on the underlying transaction.
 pub struct TransactionStatement<'tx, 'conn> {
     tx: &'tx Transaction<'conn>,
@@ -171,7 +171,7 @@ impl<'tx, 'conn> TransactionStatement<'tx, 'conn> {
         P: crate::params::IntoParams,
         F: FnMut(&crate::row::Row<'_>) -> Result<T, DbError>,
     {
-        let params = params.into_params()?.into_libsql();
+        let params = params.into_params()?.into_turso();
         let inner = self
             .tx
             .inner
@@ -180,9 +180,9 @@ impl<'tx, 'conn> TransactionStatement<'tx, 'conn> {
         let mut query_rows = self
             .tx
             .conn
-            .block_on_libsql(inner.query(&self.sql, params))?;
+            .block_on_turso(inner.query(&self.sql, params))?;
         let mut rows = Vec::new();
-        while let Some(row) = self.tx.conn.block_on_libsql(query_rows.next())? {
+        while let Some(row) = self.tx.conn.block_on_turso(query_rows.next())? {
             rows.push(map(&crate::row::Row::new(&row)));
         }
         Ok(rows.into_iter())
