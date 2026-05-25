@@ -50,10 +50,11 @@ No MCP memory tools.
 
 The legacy `store_record` / `query_records` / `search_records` / `delete_record`
 tools are removed from the surface; their backing tables (`memories`,
-`memory_events`) are retained for migration compat. Fresh local schemas index
-`memories.content` with a Turso FTS index; older databases may still contain
-the legacy `memories_fts` virtual table, but v34 removes the old sync triggers
-and adds the Turso FTS index used by base-table search.
+`memory_events`) are retained for migration compat. Conversation transcript
+search and legacy memory search use local Turso FTS indexes over the base
+tables. The schema no longer creates SQLite FTS5 virtual tables for fresh
+databases; migration v34 removes old FTS5 sync triggers and creates Turso FTS
+indexes for existing databases.
 
 ## Transcript Search
 
