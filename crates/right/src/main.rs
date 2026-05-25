@@ -552,6 +552,31 @@ fn restore_binding_mode_from_flags(
     }
 }
 
+fn restored_mcp_auth_method(
+    auth_type: Option<&str>,
+    auth_header: Option<&str>,
+    http_headers: Option<Vec<right_mcp::credentials::HttpHeaderSecret>>,
+) -> Option<right_mcp::proxy::AuthMethod> {
+    if auth_type == Some("headers") {
+        let headers = http_headers?;
+        if headers.is_empty() {
+            None
+        } else {
+            Some(right_mcp::proxy::AuthMethod::from_db_with_headers(
+                auth_type,
+                auth_header,
+                headers,
+            ))
+        }
+    } else {
+        Some(right_mcp::proxy::AuthMethod::from_db_with_headers(
+            auth_type,
+            auth_header,
+            Vec::new(),
+        ))
+    }
+}
+
 /// Intercept `BlockAlreadyRendered`: exit code 1, no miette formatting.
 /// Used when a command has already rendered a brand-conformant rail block
 /// explaining the failure.
@@ -1045,10 +1070,37 @@ async fn main() -> miette::Result<()> {
                     Ok(conn) => match right_mcp::credentials::db_list_servers(&conn).await {
                         Ok(servers) => {
                             for s in servers {
-                                let auth_method = right_mcp::proxy::AuthMethod::from_db(
+                                let http_headers = if s.auth_type.as_deref() == Some("headers") {
+                                    match right_mcp::credentials::db_list_http_headers(
+                                        &conn, &s.name,
+                                    ) {
+                                        Ok(headers) => Some(headers),
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                agent = agent_name.as_str(),
+                                                server = %s.name,
+                                                "failed to load MCP HTTP headers: {e:#}"
+                                            );
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+                                let auth_method = restored_mcp_auth_method(
                                     s.auth_type.as_deref(),
                                     s.auth_header.as_deref(),
+                                    http_headers,
                                 );
+                                let needs_auth_on_restore = auth_method.is_none();
+                                if needs_auth_on_restore {
+                                    tracing::warn!(
+                                        agent = agent_name.as_str(),
+                                        server = %s.name,
+                                        "MCP HTTP headers missing or empty during startup restore; marking NeedsAuth",
+                                    );
+                                }
+                                let auth_method = auth_method.unwrap_or_default();
                                 let token = std::sync::Arc::new(tokio::sync::RwLock::new(
                                     s.auth_token.clone(),
                                 ));
@@ -1088,14 +1140,20 @@ async fn main() -> miette::Result<()> {
                                     }
                                 }
 
-                                let backend = right_mcp::proxy::ProxyBackend::new(
-                                    s.name.clone(),
-                                    agent_dir.clone(),
-                                    s.url.clone(),
-                                    token,
-                                    auth_method,
-                                );
-                                proxies.insert(s.name, std::sync::Arc::new(backend));
+                                let backend =
+                                    std::sync::Arc::new(right_mcp::proxy::ProxyBackend::new(
+                                        s.name.clone(),
+                                        agent_dir.clone(),
+                                        s.url.clone(),
+                                        token,
+                                        auth_method,
+                                    ));
+                                if needs_auth_on_restore {
+                                    backend
+                                        .set_status(right_mcp::proxy::BackendStatus::NeedsAuth)
+                                        .await;
+                                }
+                                proxies.insert(s.name, backend);
                             }
                         }
                         Err(e) => tracing::error!(
@@ -1232,6 +1290,15 @@ async fn main() -> miette::Result<()> {
                 for (server_name, backend) in proxies_snapshot {
                     let http = http_client.clone();
                     let agent_name_owned = agent_name.clone();
+
+                    if backend.status().await == right_mcp::proxy::BackendStatus::NeedsAuth {
+                        tracing::warn!(
+                            agent = agent_name.as_str(),
+                            server = server_name.as_str(),
+                            "MCP backend restored as NeedsAuth; skipping startup reconnect",
+                        );
+                        continue;
+                    }
 
                     if let Some((oauth_state, token_arc)) = oauth_map.get(&server_name) {
                         // OAuth server — check token expiry before connecting.
@@ -4347,8 +4414,8 @@ mod tests {
     use super::{
         ConfigCommands, MemoryCommands, build_agent_ssh_command, cleanup_failed_restore_agent_dir,
         copy_agent_backup_config_files, copy_agent_restore_config_files, resolve_agent_db,
-        resolve_restored_policy_path, truncate_content, write_bootstrap_right_mcp_policy,
-        write_managed_settings,
+        resolve_restored_policy_path, restored_mcp_auth_method, truncate_content,
+        write_bootstrap_right_mcp_policy, write_managed_settings,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -4398,6 +4465,34 @@ mod tests {
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
             "<alpha beta>\n<$(nope)>\n<semi;colon>\n<quote'arg>\n"
+        );
+    }
+
+    #[test]
+    fn restored_mcp_auth_method_fails_closed_for_missing_header_secrets() {
+        assert!(
+            restored_mcp_auth_method(Some("headers"), None, None).is_none(),
+            "headers auth must not restore as an unauthenticated backend when secrets fail to load"
+        );
+    }
+
+    #[test]
+    fn restored_mcp_auth_method_fails_closed_for_empty_header_secrets() {
+        assert!(
+            restored_mcp_auth_method(Some("headers"), None, Some(Vec::new())).is_none(),
+            "headers auth must not restore as an unauthenticated backend with no stored headers"
+        );
+    }
+
+    #[test]
+    fn restored_mcp_auth_method_preserves_non_empty_header_secrets() {
+        let header =
+            right_mcp::credentials::HttpHeaderSecret::new("Authorization", "Bearer secret")
+                .unwrap();
+
+        assert_eq!(
+            restored_mcp_auth_method(Some("headers"), None, Some(vec![header.clone()])),
+            Some(right_mcp::proxy::AuthMethod::Headers(vec![header]))
         );
     }
 

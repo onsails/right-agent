@@ -147,14 +147,12 @@ tool-call-driven transitions:
 |---------|------|----|
 | Transient refresh failure | `Connected` | `Connected` (unchanged; retry pending) |
 | Permanent refresh failure | any | `NeedsAuth` |
+| `ProxyBackend::connect()` initialize/list_tools auth failure | any | `NeedsAuth` |
 | `/set-token` reconnect 5xx exhausted | any | `Unreachable` |
 | `/set-token` reconnect auth failure | any | `NeedsAuth` |
 | Tool-call upstream 401 (`Auth required`) | `Connected` | `NeedsAuth` |
 | Successful refresh | `NeedsAuth` | `NeedsAuth` → background `connect()` → `Connected` |
 | Successful refresh | `Connected` | `Connected` (no reconnect needed) |
-
-(Initial connect-time transitions — `Unreachable` → `Connected` on
-successful `connect()` — are unchanged from before this branch.)
 
 ## MCP Aggregator
 
