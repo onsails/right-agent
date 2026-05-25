@@ -5,10 +5,7 @@ import type {
   IdentityFileResponse,
   BootstrapResponse,
   IdentityResponse,
-  LearningEpisodeDetailResponse,
-  LearningEpisodesResponse,
   LearningOverviewResponse,
-  LearningReportDetailResponse,
   OverviewResponse,
   PinSkillRequest,
   PinSkillResponse,
@@ -53,18 +50,6 @@ export function runDetail(runId: string): Promise<RunDetailResponse> {
 
 export function learningOverview(): Promise<LearningOverviewResponse> {
   return requestJson<LearningOverviewResponse>('api/v1/knowledge/learning/overview')
-}
-
-export function learningEpisodes(): Promise<LearningEpisodesResponse> {
-  return requestJson<LearningEpisodesResponse>('api/v1/knowledge/learning/episodes')
-}
-
-export function learningEpisodeDetail(episodeId: number): Promise<LearningEpisodeDetailResponse> {
-  return requestJson<LearningEpisodeDetailResponse>(`api/v1/knowledge/learning/episodes/${encodeURIComponent(String(episodeId))}`)
-}
-
-export function learningReportDetail(reportId: number): Promise<LearningReportDetailResponse> {
-  return requestJson<LearningReportDetailResponse>(`api/v1/knowledge/learning/reports/${encodeURIComponent(String(reportId))}`)
 }
 
 export function usageOverview(): Promise<UsageOverviewResponse> {

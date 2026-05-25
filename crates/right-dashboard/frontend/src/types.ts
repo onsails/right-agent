@@ -270,11 +270,7 @@ export interface LearningOverviewResponse {
   generated_at: string
   refresh_interval_secs: number
   capabilities: LearningCapabilities
-  funnel: LearningFunnel
-  quality: LearningQuality
-  health: LearningHealth
   lifecycle: LearningLifecycle
-  recent_reports: LearningReportSummary[]
   flow_nodes: LearningFlowNode[]
   flow_edges: LearningFlowEdge[]
   recent_learning_signals: LearningSignalPoint[]
@@ -305,48 +301,6 @@ export interface LearningSignalPoint {
   count: number
 }
 
-export interface LearningFunnel {
-  signals_accepted_24h: number
-  episodes_pending_24h: number
-  episodes_selecting_24h: number
-  episodes_selected_24h: number
-  episodes_reviewing_24h: number
-  episodes_reviewed_24h: number
-  episodes_no_episode_24h: number
-  episodes_insufficient_context_24h: number
-  episodes_failed_24h: number
-  reports_total_24h: number
-  create_candidates_24h: number
-  update_candidates_24h: number
-  nothing_to_learn_24h: number
-  failed_reviews_24h: number
-  foreground_created_or_updated_7d: number
-}
-
-export interface LearningQuality {
-  candidate_rate: number | null
-  nothing_to_learn_rate: number | null
-  create_count_24h: number
-  update_count_24h: number
-  high_confidence_count_24h: number
-  medium_confidence_count_24h: number
-  low_confidence_count_24h: number
-  failed_count_24h: number
-}
-
-export interface LearningHealth {
-  review_running: boolean
-  daily_review_count: number
-  daily_limit: number
-  creation_review_interval: number
-  tool_iters_since_review: number
-  turns_since_review: number
-  skill_issue_hints_since_review: number
-  last_review_status: string | null
-  last_review_at: string | null
-  possibly_stuck: boolean
-}
-
 export interface LearningLifecycle {
   created_7d: number
   updated_7d: number
@@ -362,94 +316,6 @@ export interface LearningEventSummary {
   message: string | null
   summary: string | null
   created_at: string
-}
-
-export interface LearningReportSummary {
-  id: number
-  status: string
-  confidence: string
-  trigger_kind: string
-  candidate_skill_name: string | null
-  candidate_summary: string | null
-  telegram_notified: boolean
-  created_at: string
-}
-
-export interface LearningEpisodesResponse {
-  agent: string
-  generated_at: string
-  episodes: LearningEpisodeSummary[]
-}
-
-export interface LearningEpisodeSummary {
-  id: number
-  kind: string
-  seed_trigger_kind: string
-  seed_ref: string
-  status: string
-  target_chat_id: number | null
-  target_thread_id: number | null
-  start_ref: string | null
-  end_ref: string | null
-  confidence: string | null
-  context_incomplete: boolean
-  last_evidence_at: string
-  created_at: string
-  updated_at: string
-  reports: LearningReportSummary[]
-}
-
-export interface LearningEpisodeDetailResponse {
-  episode: LearningEpisodeSummary
-  selector: LearningSelectorDetail | null
-}
-
-export interface LearningReportDetailResponse {
-  report: LearningReportSummary
-  episode: LearningEpisodeDetail | null
-  selector: LearningSelectorDetail | null
-  evidence: LearningEvidenceSnippet[]
-  reviewer: LearningReviewerDetail
-}
-
-export interface LearningEpisodeDetail {
-  id: number
-  kind: string
-  seed_trigger_kind: string
-  status: string
-  start_ref: string | null
-  end_ref: string | null
-  boundary_rationale: string | null
-  confidence: string | null
-  context_incomplete: boolean
-}
-
-export interface LearningSelectorDetail {
-  model: string | null
-  boundary_rationale: string | null
-  selected_message_refs: string[]
-  selected_execution_event_refs: string[]
-}
-
-export interface LearningEvidenceSnippet {
-  ref_id: string
-  source: string
-  available: boolean
-  trust_label: string | null
-  role: string | null
-  event_kind: string | null
-  tool_name: string | null
-  created_at: string | null
-  text: string | null
-}
-
-export interface LearningReviewerDetail {
-  status: string
-  confidence: string
-  candidate_skill_name: string | null
-  candidate_summary: string | null
-  evidence_refs: string[]
-  user_notice_present: boolean
 }
 
 export interface SkillsResponse {

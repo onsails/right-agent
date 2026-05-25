@@ -7,10 +7,7 @@ import {
   doctorStatus,
   identityFile,
   identityFiles,
-  learningEpisodeDetail,
-  learningEpisodes,
   learningOverview,
-  learningReportDetail,
   overview as activityOverview,
   runDetail,
   sandboxStats,
@@ -35,21 +32,19 @@ import OverviewView from './views/OverviewView.vue'
 import UsageView from './views/UsageView.vue'
 import type {
   BootstrapResponse, DashboardOverviewResponse, DoctorResponse, IdentityFileSummary, IdentityResponse,
-  LearningEpisodeDetailResponse, LearningEpisodeSummary, LearningEpisodesResponse, LearningOverviewResponse,
-  LearningReportDetailResponse, LearningReportSummary, OverviewResponse, RunDetailResponse, RunSummary,
+  LearningOverviewResponse, OverviewResponse, RunDetailResponse, RunSummary,
   SandboxStatsResponse, SkillDetailResponse, SkillSummary, SkillsResponse, UsageOverviewResponse,
 } from './types'
 
 type ConnectionState = 'loading' | 'live' | 'stale' | 'offline' | 'locked'
 type DashboardTab = 'overview' | 'activity' | 'knowledge' | 'usage' | 'identity' | 'health'
-type KnowledgeTab = 'episodes' | 'reports' | 'skills'
+type KnowledgeTab = 'learning' | 'skills'
 
 const bootstrapData = ref<BootstrapResponse | null>(null)
 const dashboardData = ref<DashboardOverviewResponse | null>(null)
 const activityData = ref<OverviewResponse | null>(null)
 const usageData = ref<UsageOverviewResponse | null>(null)
 const learningData = ref<LearningOverviewResponse | null>(null)
-const learningEpisodesData = ref<LearningEpisodesResponse | null>(null)
 const skillsData = ref<SkillsResponse | null>(null)
 const identityData = ref<IdentityResponse | null>(null)
 const doctorData = ref<DoctorResponse | null>(null)
@@ -57,16 +52,12 @@ const sandboxData = ref<SandboxStatsResponse | null>(null)
 
 const selectedRun = ref<RunDetailResponse | null>(null)
 const selectedRunId = ref<string | null>(null)
-const selectedLearningReport = ref<LearningReportDetailResponse | null>(null)
-const selectedLearningReportId = ref<number | null>(null)
-const selectedEpisode = ref<LearningEpisodeDetailResponse | null>(null)
-const selectedEpisodeId = ref<number | null>(null)
 const selectedSkill = ref<SkillDetailResponse | null>(null)
 const selectedSkillName = ref<string | null>(null)
 const selectedIdentityFile = ref<IdentityFileSummary | null>(null)
 
 const activeTab = ref<DashboardTab>('overview')
-const activeKnowledgeTab = ref<KnowledgeTab>('episodes')
+const activeKnowledgeTab = ref<KnowledgeTab>('learning')
 const preferredDisplayMode = ref<DashboardDisplayMode>(readDashboardDisplayMode())
 const displayMode = ref<DashboardDisplayMode>('normal')
 const connectionState = ref<ConnectionState>('loading')
@@ -74,16 +65,12 @@ const message = ref('Loading dashboard')
 const lastUpdatedAt = ref<string | null>(null)
 
 const detailError = ref<string | null>(null)
-const reportError = ref<string | null>(null)
-const episodeError = ref<string | null>(null)
 const skillError = ref<string | null>(null)
 const identityError = ref<string | null>(null)
 const doctorError = ref<string | null>(null)
 const sandboxError = ref<string | null>(null)
 
 const loadingDetail = ref(false)
-const loadingReport = ref(false)
-const loadingEpisode = ref(false)
 const loadingSkill = ref(false)
 const loadingIdentity = ref(false)
 const loadingDoctor = ref(false)
@@ -228,13 +215,7 @@ async function refreshKnowledge(): Promise<void> {
   }
 
   await guarded(async () => {
-    if (activeKnowledgeTab.value === 'episodes') {
-      const [overviewData, episodes] = await Promise.all([learningOverview(), learningEpisodes()])
-      learningData.value = overviewData
-      learningEpisodesData.value = episodes
-    } else {
-      learningData.value = await learningOverview()
-    }
+    learningData.value = await learningOverview()
   })
 }
 
@@ -310,55 +291,6 @@ async function selectRun(run: RunSummary): Promise<void> {
   } finally {
     if (selectedRunId.value === runId) {
       loadingDetail.value = false
-    }
-  }
-}
-
-async function selectLearningReport(report: LearningReportSummary): Promise<void> {
-  const reportId = report.id
-  selectedLearningReportId.value = reportId
-  selectedLearningReport.value = null
-  loadingReport.value = true
-  reportError.value = null
-  try {
-    const detail = await learningReportDetail(reportId)
-    if (selectedLearningReportId.value === reportId) {
-      selectedLearningReport.value = detail
-    }
-  } catch (error) {
-    if (error instanceof DashboardApiError && error.isLocked) {
-      applyErrorState(error)
-    }
-    if (selectedLearningReportId.value === reportId) {
-      reportError.value = error instanceof Error ? error.message : 'Report unavailable'
-    }
-  } finally {
-    if (selectedLearningReportId.value === reportId) {
-      loadingReport.value = false
-    }
-  }
-}
-
-async function selectEpisode(episode: LearningEpisodeSummary): Promise<void> {
-  selectedEpisodeId.value = episode.id
-  selectedEpisode.value = null
-  loadingEpisode.value = true
-  episodeError.value = null
-  try {
-    const detail = await learningEpisodeDetail(episode.id)
-    if (selectedEpisodeId.value === episode.id) {
-      selectedEpisode.value = detail
-    }
-  } catch (error) {
-    if (error instanceof DashboardApiError && error.isLocked) {
-      applyErrorState(error)
-    }
-    if (selectedEpisodeId.value === episode.id) {
-      episodeError.value = error instanceof Error ? error.message : 'Episode unavailable'
-    }
-  } finally {
-    if (selectedEpisodeId.value === episode.id) {
-      loadingEpisode.value = false
     }
   }
 }
@@ -458,23 +390,12 @@ async function selectIdentityFile(name: string): Promise<void> {
       v-else-if="activeTab === 'knowledge'"
       :active-subtab="activeKnowledgeTab"
       :learning="learningData"
-      :episodes="learningEpisodesData"
-      :selected-episode="selectedEpisode"
-      :selected-episode-id="selectedEpisodeId"
-      :selected-report="selectedLearningReport"
-      :selected-report-id="selectedLearningReportId"
       :selected-skill="selectedSkill"
       :selected-skill-name="selectedSkillName"
       :skills="skillsData"
-      :loading-episode="loadingEpisode"
-      :loading-report="loadingReport"
       :loading-skill="loadingSkill"
-      :episode-error="episodeError"
-      :report-error="reportError"
       :skill-error="skillError"
       @set-subtab="setKnowledgeTab"
-      @select-episode="selectEpisode"
-      @select-report="selectLearningReport"
       @select-skill="selectSkill"
       @skill-pinned="applySkillPinned"
     />
