@@ -5,6 +5,7 @@ import {
   applyTelegramDisplayMode,
   DASHBOARD_DISPLAY_MODE_STORAGE_KEY,
   initializeTelegramWebApp,
+  nextDashboardDisplayModePreference,
   readDashboardDisplayMode,
   saveDashboardDisplayMode,
   subscribeTelegramFullscreenChanges,
@@ -201,6 +202,19 @@ describe('Telegram dashboard display mode helpers', () => {
 
     expect(actualMode).toBe('normal')
     expect(storage.setItem).toHaveBeenCalledWith(DASHBOARD_DISPLAY_MODE_STORAGE_KEY, 'fullscreen')
+  })
+
+  test('derives the next toggle target from saved preference after fullscreen falls back to normal', () => {
+    const webApp: TelegramWebApp = {}
+    const storage = storageWithValue('fullscreen')
+    const preferredMode = readDashboardDisplayMode(storage)
+    const actualMode = applyTelegramDisplayMode(preferredMode, webApp, storage)
+    const nextPreference = nextDashboardDisplayModePreference(preferredMode)
+
+    applyTelegramDisplayMode(nextPreference, webApp, storage)
+
+    expect(actualMode).toBe('normal')
+    expect(storage.setItem).toHaveBeenLastCalledWith(DASHBOARD_DISPLAY_MODE_STORAGE_KEY, 'normal')
   })
 
   test('subscribes to fullscreen changes and unsubscribes with offEvent', () => {
