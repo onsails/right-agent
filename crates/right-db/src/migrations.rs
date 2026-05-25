@@ -1,5 +1,4 @@
-use rusqlite::Transaction;
-use rusqlite_migration::{HookError, M, Migrations};
+use std::path::Path;
 
 const V1_SCHEMA: &str = include_str!("sql/v1_schema.sql");
 const V2_SCHEMA: &str = include_str!("sql/v2_telegram_sessions.sql");
@@ -43,6 +42,239 @@ const V33_SCHEMA: &str = include_str!("sql/v33_mcp_oauth_resource.sql");
 
 pub const LATEST_SCHEMA_VERSION: u32 = 33;
 
+type MigrationHook = fn(&dyn MigrationConnection) -> Result<(), crate::DbError>;
+
+pub struct Migration {
+    pub version: u32,
+    pub sql: &'static str,
+    pub hook: Option<MigrationHook>,
+}
+
+pub struct Migrations {
+    migrations: &'static [Migration],
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub enum MigrationParams<'a> {
+    Empty,
+    OneText(&'a str),
+    TwoText(&'a str, &'a str),
+}
+
+impl MigrationParams<'_> {
+    fn two_text<'a>(first: &'a str, second: &'a str) -> MigrationParams<'a> {
+        MigrationParams::TwoText(first, second)
+    }
+}
+
+pub trait MigrationConnection {
+    fn execute_batch(&self, sql: &str) -> Result<(), crate::DbError>;
+    fn query_i64(&self, sql: &str, params: MigrationParams<'_>) -> Result<i64, crate::DbError>;
+}
+
+pub trait MigrationTarget {
+    fn migration_path(&self) -> &Path;
+    fn migration_user_version(&self) -> Result<u32, crate::DbError>;
+    fn with_migration_transaction<T>(
+        &self,
+        f: impl FnOnce(&dyn MigrationConnection) -> Result<T, crate::DbError>,
+    ) -> Result<T, crate::DbError>;
+}
+
+impl Migrations {
+    pub fn to_latest<C: MigrationTarget>(&self, conn: C) -> Result<(), crate::DbError> {
+        self.to_version(conn, LATEST_SCHEMA_VERSION)
+    }
+
+    pub fn to_version<C: MigrationTarget>(
+        &self,
+        conn: C,
+        target_version: u32,
+    ) -> Result<(), crate::DbError> {
+        let current = conn
+            .migration_user_version()
+            .map_err(|source| migration_error(&conn, 0, source))?;
+
+        for migration in self.migrations {
+            if migration.version <= current || migration.version > target_version {
+                continue;
+            }
+
+            conn.with_migration_transaction(|tx| {
+                if !migration.sql.trim().is_empty() {
+                    tx.execute_batch(migration.sql)?;
+                }
+                if let Some(hook) = migration.hook {
+                    hook(tx)?;
+                }
+                tx.execute_batch(&format!("PRAGMA user_version = {}", migration.version))?;
+                Ok(())
+            })
+            .map_err(|source| migration_error(&conn, migration.version, source))?;
+        }
+
+        Ok(())
+    }
+}
+
+fn migration_error<C: MigrationTarget>(
+    conn: &C,
+    version: u32,
+    source: crate::DbError,
+) -> crate::DbError {
+    crate::DbError::Migration {
+        path: conn.migration_path().to_path_buf(),
+        version,
+        source: Box::new(source),
+    }
+}
+
+fn column_exists(
+    conn: &dyn MigrationConnection,
+    table: &str,
+    column: &str,
+) -> Result<bool, crate::DbError> {
+    let count = conn.query_i64(
+        "SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
+        MigrationParams::two_text(table, column),
+    )?;
+    Ok(count > 0)
+}
+
+impl MigrationConnection for crate::Transaction<'_> {
+    fn execute_batch(&self, sql: &str) -> Result<(), crate::DbError> {
+        crate::Transaction::execute_batch(self, sql)
+    }
+
+    fn query_i64(&self, sql: &str, params: MigrationParams<'_>) -> Result<i64, crate::DbError> {
+        match params {
+            MigrationParams::Empty => self.query_one(sql, (), |row| row.get(0)),
+            MigrationParams::OneText(value) => self.query_one(sql, [value], |row| row.get(0)),
+            MigrationParams::TwoText(first, second) => {
+                self.query_one(sql, [first, second], |row| row.get(0))
+            }
+        }
+    }
+}
+
+impl MigrationTarget for &crate::Connection {
+    fn migration_path(&self) -> &Path {
+        (*self).path()
+    }
+
+    fn migration_user_version(&self) -> Result<u32, crate::DbError> {
+        let version: i64 = (*self).query_one("PRAGMA user_version", (), |row| row.get(0))?;
+        u32::try_from(version)
+            .map_err(|_| crate::DbError::InvalidParameter("negative user_version".into()))
+    }
+
+    fn with_migration_transaction<T>(
+        &self,
+        f: impl FnOnce(&dyn MigrationConnection) -> Result<T, crate::DbError>,
+    ) -> Result<T, crate::DbError> {
+        (*self).with_immediate_transaction(|tx| f(tx))
+    }
+}
+
+#[cfg(test)]
+impl MigrationConnection for rusqlite::Connection {
+    fn execute_batch(&self, sql: &str) -> Result<(), crate::DbError> {
+        rusqlite::Connection::execute_batch(self, sql)?;
+        Ok(())
+    }
+
+    fn query_i64(&self, sql: &str, params: MigrationParams<'_>) -> Result<i64, crate::DbError> {
+        let value = match params {
+            MigrationParams::Empty => self.query_row(sql, [], |row| row.get(0))?,
+            MigrationParams::OneText(value) => self.query_row(sql, [value], |row| row.get(0))?,
+            MigrationParams::TwoText(first, second) => {
+                self.query_row(sql, [first, second], |row| row.get(0))?
+            }
+        };
+        Ok(value)
+    }
+}
+
+#[cfg(test)]
+impl MigrationConnection for rusqlite::Transaction<'_> {
+    fn execute_batch(&self, sql: &str) -> Result<(), crate::DbError> {
+        rusqlite::Connection::execute_batch(self, sql)?;
+        Ok(())
+    }
+
+    fn query_i64(&self, sql: &str, params: MigrationParams<'_>) -> Result<i64, crate::DbError> {
+        let value = match params {
+            MigrationParams::Empty => self.query_row(sql, [], |row| row.get(0))?,
+            MigrationParams::OneText(value) => self.query_row(sql, [value], |row| row.get(0))?,
+            MigrationParams::TwoText(first, second) => {
+                self.query_row(sql, [first, second], |row| row.get(0))?
+            }
+        };
+        Ok(value)
+    }
+}
+
+#[cfg(test)]
+impl MigrationTarget for &rusqlite::Connection {
+    fn migration_path(&self) -> &Path {
+        Path::new(":memory:")
+    }
+
+    fn migration_user_version(&self) -> Result<u32, crate::DbError> {
+        let version: i64 = (*self).query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        u32::try_from(version)
+            .map_err(|_| crate::DbError::InvalidParameter("negative user_version".into()))
+    }
+
+    fn with_migration_transaction<T>(
+        &self,
+        f: impl FnOnce(&dyn MigrationConnection) -> Result<T, crate::DbError>,
+    ) -> Result<T, crate::DbError> {
+        rusqlite::Connection::execute_batch(self, "BEGIN IMMEDIATE")?;
+        match f(*self) {
+            Ok(value) => {
+                rusqlite::Connection::execute_batch(self, "COMMIT")?;
+                Ok(value)
+            }
+            Err(err) => {
+                rusqlite::Connection::execute_batch(self, "ROLLBACK")?;
+                Err(err)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl MigrationTarget for &mut rusqlite::Connection {
+    fn migration_path(&self) -> &Path {
+        Path::new(":memory:")
+    }
+
+    fn migration_user_version(&self) -> Result<u32, crate::DbError> {
+        let version: i64 = (**self).query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        u32::try_from(version)
+            .map_err(|_| crate::DbError::InvalidParameter("negative user_version".into()))
+    }
+
+    fn with_migration_transaction<T>(
+        &self,
+        f: impl FnOnce(&dyn MigrationConnection) -> Result<T, crate::DbError>,
+    ) -> Result<T, crate::DbError> {
+        rusqlite::Connection::execute_batch(self, "BEGIN IMMEDIATE")?;
+        match f(&**self) {
+            Ok(value) => {
+                rusqlite::Connection::execute_batch(self, "COMMIT")?;
+                Ok(value)
+            }
+            Err(err) => {
+                rusqlite::Connection::execute_batch(self, "ROLLBACK")?;
+                Err(err)
+            }
+        }
+    }
+}
+
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
 ///
@@ -50,25 +282,16 @@ pub const LATEST_SCHEMA_VERSION: u32 = 33;
 /// `ADD COLUMN IF NOT EXISTS` — the ALTER TABLE would fail with
 /// "duplicate column name" if re-run on a database that already has
 /// the columns.
-fn v12_cron_diagnostics(tx: &Transaction) -> Result<(), HookError> {
-    let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
-        let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('cron_runs') WHERE name = ?1",
-            [col],
-            |r| r.get(0),
-        )?;
-        Ok(count > 0)
-    };
-
-    if !has_column("delivery_status")? {
-        tx.execute_batch("ALTER TABLE cron_runs ADD COLUMN delivery_status TEXT")?;
+fn v12_cron_diagnostics(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    if !column_exists(conn, "cron_runs", "delivery_status")? {
+        conn.execute_batch("ALTER TABLE cron_runs ADD COLUMN delivery_status TEXT")?;
     }
-    if !has_column("no_notify_reason")? {
-        tx.execute_batch("ALTER TABLE cron_runs ADD COLUMN no_notify_reason TEXT")?;
+    if !column_exists(conn, "cron_runs", "no_notify_reason")? {
+        conn.execute_batch("ALTER TABLE cron_runs ADD COLUMN no_notify_reason TEXT")?;
     }
 
     // Backfill existing rows (idempotent UPDATEs).
-    tx.execute_batch(
+    conn.execute_batch(
         "UPDATE cron_runs SET delivery_status = 'delivered'
            WHERE notify_json IS NOT NULL AND delivered_at IS NOT NULL;
          UPDATE cron_runs SET delivery_status = 'pending'
@@ -78,7 +301,7 @@ fn v12_cron_diagnostics(tx: &Transaction) -> Result<(), HookError> {
     )?;
 
     // Trigger: auto-set delivery_status on INSERT (IF NOT EXISTS is idempotent).
-    tx.execute_batch(
+    conn.execute_batch(
         "CREATE TRIGGER IF NOT EXISTS cron_runs_delivery_status_insert
          AFTER INSERT ON cron_runs
          WHEN NEW.delivery_status IS NULL
@@ -99,21 +322,14 @@ fn v12_cron_diagnostics(tx: &Transaction) -> Result<(), HookError> {
 /// v13: Add recurring and run_at columns to cron_specs for one-shot job support.
 ///
 /// Idempotent — checks pragma_table_info before each ALTER.
-fn v13_one_shot_cron(tx: &Transaction) -> Result<(), HookError> {
-    let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
-        let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('cron_specs') WHERE name = ?1",
-            [col],
-            |r| r.get(0),
+fn v13_one_shot_cron(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    if !column_exists(conn, "cron_specs", "recurring")? {
+        conn.execute_batch(
+            "ALTER TABLE cron_specs ADD COLUMN recurring INTEGER NOT NULL DEFAULT 1",
         )?;
-        Ok(count > 0)
-    };
-
-    if !has_column("recurring")? {
-        tx.execute_batch("ALTER TABLE cron_specs ADD COLUMN recurring INTEGER NOT NULL DEFAULT 1")?;
     }
-    if !has_column("run_at")? {
-        tx.execute_batch("ALTER TABLE cron_specs ADD COLUMN run_at TEXT")?;
+    if !column_exists(conn, "cron_specs", "run_at")? {
+        conn.execute_batch("ALTER TABLE cron_specs ADD COLUMN run_at TEXT")?;
     }
 
     Ok(())
@@ -124,14 +340,9 @@ fn v13_one_shot_cron(tx: &Transaction) -> Result<(), HookError> {
 /// Idempotent — checks pragma_table_info before ALTER. Column defaults
 /// to 'none' which matches the setup-token (subscription) auth mode all
 /// current Right Agent deployments use.
-fn v16_usage_api_key_source(tx: &Transaction) -> Result<(), HookError> {
-    let count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('usage_events') WHERE name = ?1",
-        ["api_key_source"],
-        |r| r.get(0),
-    )?;
-    if count == 0 {
-        tx.execute_batch(
+fn v16_usage_api_key_source(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    if !column_exists(conn, "usage_events", "api_key_source")? {
+        conn.execute_batch(
             "ALTER TABLE usage_events ADD COLUMN api_key_source TEXT NOT NULL DEFAULT 'none'",
         )?;
     }
@@ -143,21 +354,12 @@ fn v16_usage_api_key_source(tx: &Transaction) -> Result<(), HookError> {
 /// Idempotent — checks pragma_table_info before each ALTER. Both columns
 /// are nullable; the MCP layer validates presence on new rows. NULL on
 /// existing rows is surfaced by `doctor::check_cron_targets`.
-fn v17_cron_target(tx: &Transaction) -> Result<(), HookError> {
-    let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
-        let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('cron_specs') WHERE name = ?1",
-            [col],
-            |r| r.get(0),
-        )?;
-        Ok(count > 0)
-    };
-
-    if !has_column("target_chat_id")? {
-        tx.execute_batch("ALTER TABLE cron_specs ADD COLUMN target_chat_id INTEGER")?;
+fn v17_cron_target(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    if !column_exists(conn, "cron_specs", "target_chat_id")? {
+        conn.execute_batch("ALTER TABLE cron_specs ADD COLUMN target_chat_id INTEGER")?;
     }
-    if !has_column("target_thread_id")? {
-        tx.execute_batch("ALTER TABLE cron_specs ADD COLUMN target_thread_id INTEGER")?;
+    if !column_exists(conn, "cron_specs", "target_thread_id")? {
+        conn.execute_batch("ALTER TABLE cron_specs ADD COLUMN target_thread_id INTEGER")?;
     }
     Ok(())
 }
@@ -174,25 +376,16 @@ fn v17_cron_target(tx: &Transaction) -> Result<(), HookError> {
 /// it filters by `target_chat_id IS NULL` so re-runs are no-ops. Rows whose
 /// spec has already been deleted stay NULL and continue to surface as
 /// `delivery_status='no_target'` (no recovery path).
-fn v18_cron_runs_target(tx: &Transaction) -> Result<(), HookError> {
-    let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
-        let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('cron_runs') WHERE name = ?1",
-            [col],
-            |r| r.get(0),
-        )?;
-        Ok(count > 0)
-    };
-
-    if !has_column("target_chat_id")? {
-        tx.execute_batch("ALTER TABLE cron_runs ADD COLUMN target_chat_id INTEGER")?;
+fn v18_cron_runs_target(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    if !column_exists(conn, "cron_runs", "target_chat_id")? {
+        conn.execute_batch("ALTER TABLE cron_runs ADD COLUMN target_chat_id INTEGER")?;
     }
-    if !has_column("target_thread_id")? {
-        tx.execute_batch("ALTER TABLE cron_runs ADD COLUMN target_thread_id INTEGER")?;
+    if !column_exists(conn, "cron_runs", "target_thread_id")? {
+        conn.execute_batch("ALTER TABLE cron_runs ADD COLUMN target_thread_id INTEGER")?;
     }
     // Backfill target columns from cron_specs for runs whose spec still
     // exists. Idempotent — only touches rows where target_chat_id IS NULL.
-    tx.execute_batch(
+    conn.execute_batch(
         "UPDATE cron_runs \
            SET target_chat_id = (SELECT target_chat_id FROM cron_specs WHERE cron_specs.job_name = cron_runs.job_name), \
                target_thread_id = (SELECT target_thread_id FROM cron_specs WHERE cron_specs.job_name = cron_runs.job_name) \
@@ -206,40 +399,31 @@ fn v18_cron_runs_target(tx: &Transaction) -> Result<(), HookError> {
 ///
 /// The report table/indexes live in SQL. Column additions are guarded here
 /// because SQLite has no `ADD COLUMN IF NOT EXISTS`.
-fn v22_skill_review_reports(tx: &Transaction) -> Result<(), HookError> {
-    let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
-        let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('skill_nudge_state') WHERE name = ?1",
-            [col],
-            |r| r.get(0),
-        )?;
-        Ok(count > 0)
-    };
-
-    if !has_column("creation_review_interval")? {
-        tx.execute_batch(
+fn v22_skill_review_reports(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    if !column_exists(conn, "skill_nudge_state", "creation_review_interval")? {
+        conn.execute_batch(
             "ALTER TABLE skill_nudge_state
              ADD COLUMN creation_review_interval INTEGER NOT NULL DEFAULT 15",
         )?;
     }
-    if !has_column("daily_review_count")? {
-        tx.execute_batch(
+    if !column_exists(conn, "skill_nudge_state", "daily_review_count")? {
+        conn.execute_batch(
             "ALTER TABLE skill_nudge_state
              ADD COLUMN daily_review_count INTEGER NOT NULL DEFAULT 0",
         )?;
     }
-    if !has_column("daily_review_date")? {
-        tx.execute_batch("ALTER TABLE skill_nudge_state ADD COLUMN daily_review_date TEXT")?;
+    if !column_exists(conn, "skill_nudge_state", "daily_review_date")? {
+        conn.execute_batch("ALTER TABLE skill_nudge_state ADD COLUMN daily_review_date TEXT")?;
     }
-    if !has_column("last_review_status")? {
-        tx.execute_batch("ALTER TABLE skill_nudge_state ADD COLUMN last_review_status TEXT")?;
+    if !column_exists(conn, "skill_nudge_state", "last_review_status")? {
+        conn.execute_batch("ALTER TABLE skill_nudge_state ADD COLUMN last_review_status TEXT")?;
     }
     Ok(())
 }
 
-fn v23_async_runs(tx: &Transaction) -> Result<(), HookError> {
-    tx.execute_batch(V23_SCHEMA)?;
-    tx.execute_batch(
+fn v23_async_runs(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    conn.execute_batch(V23_SCHEMA)?;
+    conn.execute_batch(
         "INSERT INTO async_runs (
             id, kind, producer_ref, source_session_id, run_session_id,
             target_chat_id, target_thread_id, status, handoff_state,
@@ -312,7 +496,7 @@ fn v23_async_runs(tx: &Transaction) -> Result<(), HookError> {
          FROM cron_runs cr
          LEFT JOIN cron_specs cs ON cs.job_name = cr.job_name",
     )?;
-    tx.execute_batch(
+    conn.execute_batch(
         "INSERT INTO async_runs (
             id, kind, producer_ref, source_session_id, run_session_id,
             target_chat_id, target_thread_id, status, handoff_state,
@@ -368,7 +552,7 @@ fn v23_async_runs(tx: &Transaction) -> Result<(), HookError> {
            )
            AND NOT EXISTS (SELECT 1 FROM cron_runs cr WHERE cr.job_name = cs.job_name)",
     )?;
-    tx.execute(
+    conn.execute_batch(
         "DELETE FROM cron_specs
          WHERE schedule LIKE '@bg:%'
             OR (
@@ -376,25 +560,19 @@ fn v23_async_runs(tx: &Transaction) -> Result<(), HookError> {
               AND prompt LIKE 'X-FORK-FROM: %'
               AND instr(prompt, char(10)) > length('X-FORK-FROM: ') + 1
             )",
-        [],
     )?;
-    tx.execute_batch("DROP TABLE cron_runs")?;
+    conn.execute_batch("DROP TABLE cron_runs")?;
     Ok(())
 }
 
-fn v24_learning_episodes(tx: &Transaction) -> Result<(), HookError> {
-    tx.execute_batch(V24_SCHEMA)?;
-    let has_column: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('skill_review_reports') WHERE name=?1",
-        ["learning_episode_id"],
-        |r| r.get(0),
-    )?;
-    if has_column == 0 {
-        tx.execute_batch(
+fn v24_learning_episodes(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    conn.execute_batch(V24_SCHEMA)?;
+    if !column_exists(conn, "skill_review_reports", "learning_episode_id")? {
+        conn.execute_batch(
             "ALTER TABLE skill_review_reports ADD COLUMN learning_episode_id INTEGER",
         )?;
     }
-    tx.execute_batch(
+    conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_skill_review_reports_episode ON skill_review_reports(learning_episode_id)",
     )?;
     Ok(())
@@ -404,23 +582,14 @@ fn v24_learning_episodes(tx: &Transaction) -> Result<(), HookError> {
 ///
 /// Idempotent — checks pragma_table_info before each ALTER. SQLite has no
 /// `ADD COLUMN IF NOT EXISTS`.
-fn v26_skill_nudge_circuit_breaker(tx: &Transaction) -> Result<(), HookError> {
-    let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
-        let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('skill_nudge_state') WHERE name = ?1",
-            [col],
-            |r| r.get(0),
-        )?;
-        Ok(count > 0)
-    };
-
-    if !has_column("consecutive_review_failures")? {
-        tx.execute_batch(
+fn v26_skill_nudge_circuit_breaker(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    if !column_exists(conn, "skill_nudge_state", "consecutive_review_failures")? {
+        conn.execute_batch(
             "ALTER TABLE skill_nudge_state ADD COLUMN consecutive_review_failures INTEGER NOT NULL DEFAULT 0",
         )?;
     }
-    if !has_column("review_circuit_open_until")? {
-        tx.execute_batch(
+    if !column_exists(conn, "skill_nudge_state", "review_circuit_open_until")? {
+        conn.execute_batch(
             "ALTER TABLE skill_nudge_state ADD COLUMN review_circuit_open_until TEXT",
         )?;
     }
@@ -431,18 +600,13 @@ fn v26_skill_nudge_circuit_breaker(tx: &Transaction) -> Result<(), HookError> {
 ///
 /// Idempotent — checks pragma_table_info before ALTER. SQLite has no
 /// `ADD COLUMN IF NOT EXISTS`. The CREATE INDEX uses `IF NOT EXISTS`.
-fn v27_skill_nudge_signals_source(tx: &Transaction) -> Result<(), HookError> {
-    let has_column: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('skill_nudge_signals') WHERE name = ?1",
-        ["source"],
-        |r| r.get(0),
-    )?;
-    if has_column == 0 {
-        tx.execute_batch(
+fn v27_skill_nudge_signals_source(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    if !column_exists(conn, "skill_nudge_signals", "source")? {
+        conn.execute_batch(
             "ALTER TABLE skill_nudge_signals ADD COLUMN source TEXT NOT NULL DEFAULT 'reply_field'",
         )?;
     }
-    tx.execute_batch(
+    conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_skill_nudge_signals_source \
          ON skill_nudge_signals(source)",
     )?;
@@ -453,14 +617,9 @@ fn v27_skill_nudge_signals_source(tx: &Transaction) -> Result<(), HookError> {
 ///
 /// Idempotent — checks pragma_table_info before ALTER. Foreground worker
 /// turns populate this; non-foreground sources leave NULL.
-fn v28_usage_wall_elapsed_ms(tx: &Transaction) -> Result<(), HookError> {
-    let count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('usage_events') WHERE name = ?1",
-        ["wall_elapsed_ms"],
-        |r| r.get(0),
-    )?;
-    if count == 0 {
-        tx.execute_batch("ALTER TABLE usage_events ADD COLUMN wall_elapsed_ms INTEGER")?;
+fn v28_usage_wall_elapsed_ms(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    if !column_exists(conn, "usage_events", "wall_elapsed_ms")? {
+        conn.execute_batch("ALTER TABLE usage_events ADD COLUMN wall_elapsed_ms INTEGER")?;
     }
     Ok(())
 }
@@ -469,55 +628,182 @@ fn v28_usage_wall_elapsed_ms(tx: &Transaction) -> Result<(), HookError> {
 ///
 /// Idempotent — checks pragma_table_info before ALTER. The column carries a
 /// CHECK constraint for new writes, but remains nullable for historical rows.
-fn v30_skill_learning_hint_outcome(tx: &Transaction) -> Result<(), HookError> {
-    let count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('skill_learning_events') WHERE name = ?1",
-        ["hint_outcome"],
-        |r| r.get(0),
-    )?;
-    if count == 0 {
-        tx.execute_batch(V30_SCHEMA)?;
+fn v30_skill_learning_hint_outcome(conn: &dyn MigrationConnection) -> Result<(), crate::DbError> {
+    if !column_exists(conn, "skill_learning_events", "hint_outcome")? {
+        conn.execute_batch(V30_SCHEMA)?;
     }
     Ok(())
 }
 
-pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::LazyLock::new(|| {
-    Migrations::new(vec![
-        M::up(V1_SCHEMA),
-        M::up(V2_SCHEMA),
-        M::up(V3_SCHEMA),
-        M::up(V4_SCHEMA),
-        M::up(V5_SCHEMA),
-        M::up(V6_SCHEMA),
-        M::up(V7_SCHEMA),
-        M::up(V8_SCHEMA),
-        M::up(V9_SCHEMA),
-        M::up(V10_SCHEMA),
-        M::up(V11_SCHEMA),
-        M::up_with_hook("", v12_cron_diagnostics),
-        M::up_with_hook("", v13_one_shot_cron),
-        M::up(V14_SCHEMA),
-        M::up(V15_SCHEMA),
-        M::up_with_hook("", v16_usage_api_key_source),
-        M::up_with_hook("", v17_cron_target),
-        M::up_with_hook("", v18_cron_runs_target),
-        M::up(V19_SCHEMA),
-        M::up(V20_SCHEMA),
-        M::up(V21_SCHEMA),
-        M::up_with_hook(V22_SCHEMA, v22_skill_review_reports),
-        M::up_with_hook("", v23_async_runs),
-        M::up_with_hook("", v24_learning_episodes),
-        M::up(V25_SCHEMA),
-        M::up_with_hook("", v26_skill_nudge_circuit_breaker),
-        M::up_with_hook("", v27_skill_nudge_signals_source),
-        M::up_with_hook("", v28_usage_wall_elapsed_ms),
-        M::up(V29_SCHEMA),
-        M::up_with_hook("", v30_skill_learning_hint_outcome),
-        M::up(V31_SCHEMA),
-        M::up(V32_SCHEMA),
-        M::up(V33_SCHEMA),
-    ])
-});
+pub static MIGRATIONS: Migrations = Migrations {
+    migrations: &[
+        Migration {
+            version: 1,
+            sql: V1_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 2,
+            sql: V2_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 3,
+            sql: V3_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 4,
+            sql: V4_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 5,
+            sql: V5_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 6,
+            sql: V6_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 7,
+            sql: V7_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 8,
+            sql: V8_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 9,
+            sql: V9_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 10,
+            sql: V10_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 11,
+            sql: V11_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 12,
+            sql: "",
+            hook: Some(v12_cron_diagnostics),
+        },
+        Migration {
+            version: 13,
+            sql: "",
+            hook: Some(v13_one_shot_cron),
+        },
+        Migration {
+            version: 14,
+            sql: V14_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 15,
+            sql: V15_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 16,
+            sql: "",
+            hook: Some(v16_usage_api_key_source),
+        },
+        Migration {
+            version: 17,
+            sql: "",
+            hook: Some(v17_cron_target),
+        },
+        Migration {
+            version: 18,
+            sql: "",
+            hook: Some(v18_cron_runs_target),
+        },
+        Migration {
+            version: 19,
+            sql: V19_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 20,
+            sql: V20_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 21,
+            sql: V21_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 22,
+            sql: V22_SCHEMA,
+            hook: Some(v22_skill_review_reports),
+        },
+        Migration {
+            version: 23,
+            sql: "",
+            hook: Some(v23_async_runs),
+        },
+        Migration {
+            version: 24,
+            sql: "",
+            hook: Some(v24_learning_episodes),
+        },
+        Migration {
+            version: 25,
+            sql: V25_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 26,
+            sql: "",
+            hook: Some(v26_skill_nudge_circuit_breaker),
+        },
+        Migration {
+            version: 27,
+            sql: "",
+            hook: Some(v27_skill_nudge_signals_source),
+        },
+        Migration {
+            version: 28,
+            sql: "",
+            hook: Some(v28_usage_wall_elapsed_ms),
+        },
+        Migration {
+            version: 29,
+            sql: V29_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 30,
+            sql: "",
+            hook: Some(v30_skill_learning_hint_outcome),
+        },
+        Migration {
+            version: 31,
+            sql: V31_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 32,
+            sql: V32_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 33,
+            sql: V33_SCHEMA,
+            hook: None,
+        },
+    ],
+};
 
 #[cfg(test)]
 mod tests {

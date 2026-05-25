@@ -187,9 +187,40 @@ fn migrations_idempotent() {
 }
 
 #[test]
-fn migrations_static_runs_in_memory() {
-    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-    MIGRATIONS.to_latest(&mut conn).unwrap();
+fn libsql_migrations_set_latest_user_version() {
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), true).unwrap();
+
+    assert_eq!(
+        query_user_version(&conn),
+        right_db::migrations::LATEST_SCHEMA_VERSION as i64,
+    );
+}
+
+#[test]
+fn libsql_migrations_are_idempotent_on_existing_data_db() {
+    let dir = tempdir().unwrap();
+    open_db(dir.path(), true).unwrap();
+    open_db(dir.path(), true).unwrap();
+
+    let conn = open_connection(dir.path(), false).unwrap();
+    assert_eq!(
+        query_user_version(&conn),
+        right_db::migrations::LATEST_SCHEMA_VERSION as i64,
+    );
+}
+
+#[test]
+fn libsql_migrations_static_runs_with_right_db_connection() {
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), false).unwrap();
+
+    MIGRATIONS.to_latest(&conn).unwrap();
+
+    assert_eq!(
+        query_user_version(&conn),
+        right_db::migrations::LATEST_SCHEMA_VERSION as i64,
+    );
 }
 
 fn query_user_version(conn: &right_db::Connection) -> i64 {
@@ -390,8 +421,9 @@ fn v23_user_cron_with_bg_prefix_stays_cron() {
     // Regression: validate_job_name allows `bg-` prefixes, so a user could
     // create a real recurring cron named e.g. `bg-status-check`. The v22
     // migration must not reclassify such surviving cron rows as background.
-    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-    MIGRATIONS.to_version(&mut conn, 21).unwrap();
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), false).unwrap();
+    MIGRATIONS.to_version(&conn, 21).unwrap();
 
     conn.execute(
         "INSERT INTO cron_specs (
@@ -402,7 +434,7 @@ fn v23_user_cron_with_bg_prefix_stays_cron() {
             '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z',
             -100
          )",
-        [],
+        (),
     )
     .unwrap();
     conn.execute(
@@ -411,17 +443,17 @@ fn v23_user_cron_with_bg_prefix_stays_cron() {
             'bg-status-check-run', 'bg-status-check', '2026-05-18T09:00:00Z',
             'success', '/log/bg-status-check-run.ndjson', 'pending'
          )",
-        [],
+        (),
     )
     .unwrap();
 
-    MIGRATIONS.to_latest(&mut conn).unwrap();
+    MIGRATIONS.to_latest(&conn).unwrap();
 
     let (kind, handoff_state): (String, Option<String>) = conn
-        .query_row(
+        .query_one(
             "SELECT kind, handoff_state FROM async_runs WHERE id = 'bg-status-check-run'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            (),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
     assert_eq!(kind, "cron");
@@ -433,8 +465,9 @@ fn v23_orphan_bg_cron_run_classifies_as_background() {
     // Orphaned cron_runs row (cron_specs already deleted by the legacy
     // one-shot-bg-then-cleanup path) keeps the legacy bg-prefix heuristic so
     // the run still surfaces correctly post-migration.
-    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-    MIGRATIONS.to_version(&mut conn, 21).unwrap();
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), false).unwrap();
+    MIGRATIONS.to_version(&conn, 21).unwrap();
 
     conn.execute(
         "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, delivery_status)
@@ -442,17 +475,17 @@ fn v23_orphan_bg_cron_run_classifies_as_background() {
             'bg-orphan-run', 'bg-orphan', '2026-05-18T02:00:00Z',
             'success', '/log/bg-orphan-run.ndjson', 'silent'
          )",
-        [],
+        (),
     )
     .unwrap();
 
-    MIGRATIONS.to_latest(&mut conn).unwrap();
+    MIGRATIONS.to_latest(&conn).unwrap();
 
     let (kind, handoff_state): (String, Option<String>) = conn
-        .query_row(
+        .query_one(
             "SELECT kind, handoff_state FROM async_runs WHERE id = 'bg-orphan-run'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            (),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
     assert_eq!(kind, "background");

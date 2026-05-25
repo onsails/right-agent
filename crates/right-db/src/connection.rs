@@ -4,7 +4,7 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::{DbError, migrations};
+use crate::DbError;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -31,17 +31,6 @@ impl Connection {
             libsql::OpenFlags::SQLITE_OPEN_READ_ONLY
         };
         let builder = libsql::Builder::new_local(&db_path).flags(flags);
-        // SAFETY: this Task 1-2 wrapper is local-only and exposes only
-        // synchronous methods. Each async libSQL operation is driven to
-        // completion through `block_on_runtime_safe`, so callers cannot poll the
-        // same connection future concurrently, and we never alter SQLite's
-        // global threading mode ourselves. While rusqlite remains linked for
-        // migration compatibility, it can initialize SQLite before libSQL's
-        // one-time `SQLITE_CONFIG_SERIALIZED` assertion runs; the assertion then
-        // reports SQLITE_MISUSE even though the project still uses serialized,
-        // mutex-protected connection handles. This skips that temporary assert
-        // only. Remove it when Task 3 removes the rusqlite migration bridge.
-        let builder = unsafe { builder.skip_safety_assert(true) };
         let database = runtime
             .block_on(builder.build())
             .map_err(|source| DbError::Open {
@@ -95,7 +84,31 @@ impl Connection {
     }
 
     pub fn transaction(&self) -> Result<crate::transaction::Transaction<'_>, DbError> {
-        let inner = self.block_on_libsql(self.inner.transaction())?;
+        self.transaction_with_behavior(libsql::TransactionBehavior::Deferred)
+    }
+
+    pub fn with_immediate_transaction<T>(
+        &self,
+        f: impl FnOnce(&crate::transaction::Transaction<'_>) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        let tx = self.transaction_with_behavior(libsql::TransactionBehavior::Immediate)?;
+        match f(&tx) {
+            Ok(value) => {
+                tx.commit()?;
+                Ok(value)
+            }
+            Err(err) => {
+                tx.rollback()?;
+                Err(err)
+            }
+        }
+    }
+
+    fn transaction_with_behavior(
+        &self,
+        behavior: libsql::TransactionBehavior,
+    ) -> Result<crate::transaction::Transaction<'_>, DbError> {
+        let inner = self.block_on_libsql(self.inner.transaction_with_behavior(behavior))?;
         Ok(crate::transaction::Transaction::new(self, inner))
     }
 
@@ -108,23 +121,6 @@ impl Connection {
     pub(crate) fn apply_readonly_pragmas(&self) -> Result<(), DbError> {
         self.inner.busy_timeout(BUSY_TIMEOUT)?;
         Ok(())
-    }
-
-    pub(crate) fn run_rusqlite_migrations(&self) -> Result<(), DbError> {
-        let mut conn = self.open_rusqlite_connection_for_migrations()?;
-        migrations::MIGRATIONS.to_latest(&mut conn)?;
-        Ok(())
-    }
-
-    /// Temporary bridge until Task 3 replaces `rusqlite_migration` with a
-    /// driver-owned migration runner.
-    pub(crate) fn open_rusqlite_connection_for_migrations(
-        &self,
-    ) -> Result<rusqlite::Connection, DbError> {
-        let conn = rusqlite::Connection::open(&self.db_path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "busy_timeout", 5000)?;
-        Ok(conn)
     }
 
     pub(crate) fn block_on_libsql<T: Send>(
