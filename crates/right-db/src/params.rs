@@ -21,6 +21,7 @@ pub trait IntoValue {
 #[derive(Debug, Default)]
 pub struct ParamsBuilder {
     values: Vec<libsql::Value>,
+    error: Option<DbError>,
 }
 
 impl ParamsBuilder {
@@ -32,6 +33,17 @@ impl ParamsBuilder {
         self.values.push(value.into_value()?);
         Ok(())
     }
+
+    #[doc(hidden)]
+    pub fn push_deferred(&mut self, value: impl IntoValue) {
+        if self.error.is_some() {
+            return;
+        }
+        match value.into_value() {
+            Ok(value) => self.values.push(value),
+            Err(error) => self.error = Some(error),
+        }
+    }
 }
 
 pub fn params_from_iter<I, T>(iter: I) -> ParamsBuilder
@@ -41,9 +53,7 @@ where
 {
     let mut params = ParamsBuilder::new();
     for value in iter {
-        params
-            .push(value)
-            .expect("right-db parameter conversion should be valid");
+        params.push_deferred(value);
     }
     params
 }
@@ -53,9 +63,7 @@ macro_rules! params {
     ($($value:expr),* $(,)?) => {{
         let mut params = $crate::params::ParamsBuilder::new();
         $(
-            params
-                .push($value)
-                .expect("right-db parameter conversion should be valid");
+            params.push_deferred($value);
         )*
         params
     }};
@@ -84,6 +92,9 @@ impl<T: IntoValue> IntoParams for Vec<T> {
 
 impl IntoParams for ParamsBuilder {
     fn into_params(self) -> Result<Params, DbError> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
         Ok(Params(libsql::params::Params::Positional(self.values)))
     }
 }
@@ -280,5 +291,44 @@ where
 {
     fn into_value(self) -> Result<libsql::Value, DbError> {
         self.clone().into_value()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::DbError;
+
+    #[test]
+    fn params_macro_defers_large_u64_error_to_execute_result_without_panic() {
+        let conn = crate::Connection::open_in_memory().unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            conn.execute("SELECT ?1", crate::params![u64::MAX])
+        }));
+
+        let err = result
+            .expect("large u64 parameter conversion must not panic")
+            .expect_err("large u64 must be rejected as a database parameter");
+        assert!(
+            matches!(err, DbError::InvalidParameter(_)),
+            "expected InvalidParameter, got {err:#}"
+        );
+    }
+
+    #[test]
+    fn params_from_iter_defers_large_u64_error_to_execute_result_without_panic() {
+        let conn = crate::Connection::open_in_memory().unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            conn.execute("SELECT ?1", crate::params_from_iter([u64::MAX]))
+        }));
+
+        let err = result
+            .expect("large u64 parameter conversion must not panic")
+            .expect_err("large u64 must be rejected as a database parameter");
+        assert!(
+            matches!(err, DbError::InvalidParameter(_)),
+            "expected InvalidParameter, got {err:#}"
+        );
     }
 }

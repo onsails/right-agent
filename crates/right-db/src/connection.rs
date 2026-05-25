@@ -302,6 +302,32 @@ impl Drop for LibsqlRuntime {
 mod tests {
     use super::*;
 
+    fn insert_via_connection(conn: &Connection, value: &str) -> Result<(), DbError> {
+        conn.execute(
+            "INSERT INTO transaction_deref_probe (value) VALUES (?1)",
+            crate::params![value],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_deref_helper_write_is_rolled_back() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE transaction_deref_probe (value TEXT NOT NULL)")
+            .unwrap();
+        let tx = conn.transaction().unwrap();
+
+        insert_via_connection(&tx, "inside-tx").unwrap();
+        tx.rollback().unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transaction_deref_probe", (), |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
     #[test]
     fn transaction_error_result_prefers_operation_error_when_rollback_fails() {
         let operation = DbError::InvalidParameter("operation failed".into());
