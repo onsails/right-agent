@@ -51,7 +51,7 @@
 - Read: `crates/right-dashboard/src/read_model/learning.rs`
 - Read: `crates/right-dashboard/src/read_model/learning_episodes.rs`
 
-- [ ] **Step 1: Confirm clean starting state**
+- [x] **Step 1: Confirm clean starting state**
 
 Run:
 
@@ -61,7 +61,7 @@ devenv shell -- git status --short
 
 Expected: no unrelated unstaged edits. If there are unrelated edits, leave them alone and record them in the implementation notes.
 
-- [ ] **Step 2: Run baseline checks**
+- [x] **Step 2: Run baseline checks**
 
 Run:
 
@@ -74,7 +74,7 @@ devenv shell -- cargo test -p right-bot dashboard
 
 Expected: PASS, or record any pre-existing failures before editing.
 
-- [ ] **Step 3: Audit `execution_events` ownership**
+- [x] **Step 3: Audit `execution_events` ownership**
 
 Run:
 
@@ -83,6 +83,8 @@ devenv shell -- rg -n "execution_events|insert_execution_event|ExecutionEventKin
 ```
 
 Expected: all non-test hits are in deprecated Stage 2 files (`crates/bot/src/execution_events.rs`, `crates/bot/src/learning_episode.rs`, `crates/right-agent/src/learning_episodes.rs`, dashboard read models over legacy data, or callsites that exist only to feed those paths). If a live non-legacy consumer remains, stop and update the design before dropping `execution_events`.
+
+Result: baseline checks passed. `execution_events` still has live writers in Telegram turn, async background, and cron stream handling, but the audit found no non-legacy reader outside the deprecated Stage 2 learning pipeline and legacy dashboard learning read model. Treat those writers as part of the legacy cleanup in Task 3.
 
 ## Task 1: Drop Deprecated Learning Tables
 
