@@ -36,7 +36,6 @@ rmcp = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }
 schemars = { workspace = true }
-rusqlite = { workspace = true }
 axum = { workspace = true }
 dashmap = { workspace = true }
 tokio-util = { workspace = true }

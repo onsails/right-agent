@@ -1,9 +1,7 @@
 //! Errors raised by the Hindsight resilience layer + retain queue.
 //!
 //! DB plumbing errors delegated to `right_db` are represented as
-//! `MemoryError::Db`. The legacy `Sqlite` and `Migration` variants
-//! remain for call sites that still construct `MemoryError` directly
-//! from those error types during the staged crate split.
+//! `MemoryError::Db`.
 
 pub(crate) use right_db::DbError;
 
@@ -11,12 +9,6 @@ pub(crate) use right_db::DbError;
 pub enum MemoryError {
     #[error("db error: {0}")]
     Db(#[from] DbError),
-
-    #[error("sqlite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-
-    #[error("migration error: {0}")]
-    Migration(#[from] rusqlite_migration::Error),
 
     #[error("content rejected: possible prompt injection detected")]
     InjectionDetected,

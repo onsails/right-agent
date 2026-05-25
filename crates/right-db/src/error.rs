@@ -36,9 +36,6 @@ pub enum DbError {
         version: u32,
         message: String,
     },
-
-    #[error("sqlite compatibility error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
 }
 
 impl DbError {

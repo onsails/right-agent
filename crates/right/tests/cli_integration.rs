@@ -797,11 +797,10 @@ groups:
     fs::write(agent_dir.join("test-file.txt"), "hello world\n").unwrap();
 
     // Create a data.db with a test table.
-    let db_path = agent_dir.join("data.db");
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)", [])
+    let conn = right_db::open_connection(&agent_dir, false).unwrap();
+    conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)", ())
         .unwrap();
-    conn.execute("INSERT INTO test (val) VALUES ('backup-test')", [])
+    conn.execute("INSERT INTO test (val) VALUES ('backup-test')", ())
         .unwrap();
     drop(conn);
 
@@ -895,9 +894,9 @@ groups:
     );
 
     // Verify restored database.
-    let restored_db = rusqlite::Connection::open(restored_dir.join("data.db")).unwrap();
+    let restored_db = right_db::open_database_path_readonly(restored_dir.join("data.db")).unwrap();
     let val: String = restored_db
-        .query_row("SELECT val FROM test WHERE id = 1", [], |r| r.get(0))
+        .query_row("SELECT val FROM test WHERE id = 1", (), |r| r.get(0))
         .unwrap();
     assert_eq!(val, "backup-test");
 }

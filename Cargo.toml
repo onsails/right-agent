@@ -46,8 +46,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio = { version = "1.52", features = ["full"] }
 which = "8.0"
 libsql = "0.9.30"
-rusqlite = { version = "0.39", features = ["bundled"] }
-rusqlite_migration = "2.5"
 rmcp = { version = "1.7", default-features = false, features = ["client", "server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }
 futures = "0.3"
 http = "1.0"

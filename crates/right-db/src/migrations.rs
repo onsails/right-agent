@@ -232,55 +232,15 @@ impl MigrationTarget for &crate::Connection {
     }
 }
 
-impl sealed::MigrationConnection for rusqlite::Connection {}
+impl sealed::MigrationTarget for &mut crate::Connection {}
 
-impl MigrationConnection for rusqlite::Connection {
-    fn execute_batch(&self, sql: &str) -> Result<(), crate::DbError> {
-        rusqlite::Connection::execute_batch(self, sql)?;
-        Ok(())
-    }
-
-    fn query_i64(&self, sql: &str, params: MigrationParams<'_>) -> Result<i64, crate::DbError> {
-        let value = match params {
-            MigrationParams::Empty => self.query_row(sql, [], |row| row.get(0))?,
-            MigrationParams::OneText(value) => self.query_row(sql, [value], |row| row.get(0))?,
-            MigrationParams::TwoText(first, second) => {
-                self.query_row(sql, [first, second], |row| row.get(0))?
-            }
-        };
-        Ok(value)
-    }
-}
-
-impl sealed::MigrationConnection for rusqlite::Transaction<'_> {}
-
-impl MigrationConnection for rusqlite::Transaction<'_> {
-    fn execute_batch(&self, sql: &str) -> Result<(), crate::DbError> {
-        rusqlite::Connection::execute_batch(self, sql)?;
-        Ok(())
-    }
-
-    fn query_i64(&self, sql: &str, params: MigrationParams<'_>) -> Result<i64, crate::DbError> {
-        let value = match params {
-            MigrationParams::Empty => self.query_row(sql, [], |row| row.get(0))?,
-            MigrationParams::OneText(value) => self.query_row(sql, [value], |row| row.get(0))?,
-            MigrationParams::TwoText(first, second) => {
-                self.query_row(sql, [first, second], |row| row.get(0))?
-            }
-        };
-        Ok(value)
-    }
-}
-
-impl sealed::MigrationTarget for &rusqlite::Connection {}
-
-impl MigrationTarget for &rusqlite::Connection {
+impl MigrationTarget for &mut crate::Connection {
     fn migration_path(&self) -> &Path {
-        Path::new(":memory:")
+        (**self).path()
     }
 
     fn migration_user_version(&self) -> Result<u32, crate::DbError> {
-        let version: i64 = (*self).query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let version: i64 = (**self).query_one("PRAGMA user_version", (), |row| row.get(0))?;
         u32::try_from(version)
             .map_err(|_| crate::DbError::InvalidParameter("negative user_version".into()))
     }
@@ -289,48 +249,7 @@ impl MigrationTarget for &rusqlite::Connection {
         &self,
         f: impl FnOnce(&dyn MigrationConnection) -> Result<T, crate::DbError>,
     ) -> Result<T, crate::DbError> {
-        rusqlite::Connection::execute_batch(self, "BEGIN IMMEDIATE")?;
-        match f(*self) {
-            Ok(value) => {
-                rusqlite::Connection::execute_batch(self, "COMMIT")?;
-                Ok(value)
-            }
-            Err(err) => {
-                rusqlite::Connection::execute_batch(self, "ROLLBACK")?;
-                Err(err)
-            }
-        }
-    }
-}
-
-impl sealed::MigrationTarget for &mut rusqlite::Connection {}
-
-impl MigrationTarget for &mut rusqlite::Connection {
-    fn migration_path(&self) -> &Path {
-        Path::new(":memory:")
-    }
-
-    fn migration_user_version(&self) -> Result<u32, crate::DbError> {
-        let version: i64 = (**self).query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        u32::try_from(version)
-            .map_err(|_| crate::DbError::InvalidParameter("negative user_version".into()))
-    }
-
-    fn with_migration_transaction<T>(
-        &self,
-        f: impl FnOnce(&dyn MigrationConnection) -> Result<T, crate::DbError>,
-    ) -> Result<T, crate::DbError> {
-        rusqlite::Connection::execute_batch(self, "BEGIN IMMEDIATE")?;
-        match f(&**self) {
-            Ok(value) => {
-                rusqlite::Connection::execute_batch(self, "COMMIT")?;
-                Ok(value)
-            }
-            Err(err) => {
-                rusqlite::Connection::execute_batch(self, "ROLLBACK")?;
-                Err(err)
-            }
-        }
+        (**self).with_immediate_transaction(|tx| f(tx))
     }
 }
 
@@ -867,7 +786,7 @@ pub static MIGRATIONS: Migrations = Migrations {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
+    use crate::Connection;
 
     static FAILING_MIGRATIONS: Migrations = Migrations {
         migrations: &[
@@ -1013,10 +932,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 8, "sessions table should have all 8 columns");
-        let old_exists: bool = conn
-            .prepare("SELECT 1 FROM telegram_sessions LIMIT 1")
-            .is_ok();
-        assert!(!old_exists, "telegram_sessions should be dropped");
+        let old_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='telegram_sessions'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_count, 0, "telegram_sessions should be dropped");
     }
 
     #[test]
@@ -1123,7 +1046,7 @@ mod tests {
 
     #[test]
     fn learning_episode_tables_exist() {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_latest(&mut conn).unwrap();
         let events: String = conn
             .query_row(
@@ -1147,7 +1070,7 @@ mod tests {
 
     #[test]
     fn execution_events_do_not_create_fts() {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_latest(&mut conn).unwrap();
         let count: i64 = conn
             .query_row(
@@ -1161,7 +1084,7 @@ mod tests {
 
     #[test]
     fn skill_review_reports_links_learning_episode() {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_latest(&mut conn).unwrap();
         let count: i64 = conn
             .query_row(
@@ -1910,8 +1833,14 @@ mod tests {
             .unwrap();
         assert_eq!(async_count, 1, "async_runs table should exist");
 
-        let cron_runs_exists = conn.prepare("SELECT 1 FROM cron_runs LIMIT 1").is_ok();
-        assert!(!cron_runs_exists, "cron_runs must be dropped after v22");
+        let cron_runs_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cron_runs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cron_runs_count, 0, "cron_runs must be dropped after v22");
     }
 
     #[test]
@@ -2599,7 +2528,7 @@ continue background work',
 
     #[test]
     fn migration_v26_adds_circuit_breaker_columns_idempotently() {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_version(&mut conn, 25).unwrap();
         let pre_count: i64 = conn
             .query_row(
