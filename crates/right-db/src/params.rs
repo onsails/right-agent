@@ -14,6 +14,10 @@ pub trait IntoParams {
     fn into_params(self) -> Result<Params, DbError>;
 }
 
+/// Internal conversion seam. Public so the `params!` macro can name it; not
+/// part of the supported `right-db` surface. Downstream code should use
+/// `params!`/`params_from_iter`, never reference [`turso::Value`] directly.
+#[doc(hidden)]
 pub trait IntoValue {
     fn into_value(self) -> Result<turso::Value, DbError>;
 }

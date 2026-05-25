@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::DbError;
 
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Number of worker threads in the process-wide shared runtime.
 ///
@@ -126,6 +126,25 @@ impl Connection {
             .map_err(|_| DbError::InvalidParameter("changed row count exceeds usize".into()))
     }
 
+    /// Issue a read-only query and decode the first row.
+    ///
+    /// On a readonly [`Connection`] the Rust-side gate accepts the following
+    /// SQL forms (after stripping leading whitespace, `--` line comments, and
+    /// `/* ... */` block comments — comment stripping only affects what the
+    /// gate sees, not the SQL sent to Turso):
+    ///
+    /// - `SELECT ...`
+    /// - `WITH cte AS (...) SELECT ...` — CTE-prefixed read; rejected if the
+    ///   remaining SQL contains `INSERT`, `UPDATE`, or `DELETE`.
+    /// - `EXPLAIN ...` / `EXPLAIN QUERY PLAN ...` — never executes the wrapped
+    ///   statement, always safe.
+    /// - `PRAGMA name` — bare read form only. Both `PRAGMA name(arg)` and
+    ///   `PRAGMA name = value` are rejected because Turso/SQLite treats them
+    ///   as writes; in particular `PRAGMA query_only(OFF)` would disable the
+    ///   readonly flag.
+    ///
+    /// Writable connections accept any SQL. The gate is a defense-in-depth
+    /// layer on top of Turso's `PRAGMA query_only=1`.
     pub fn query_one<T>(
         &self,
         sql: &str,
@@ -149,6 +168,10 @@ impl Connection {
         self.query_one(sql, params, map)
     }
 
+    /// Issue a read-only query and decode every row.
+    ///
+    /// See [`Connection::query_one`] for the readonly SQL grammar accepted by
+    /// the Rust-side gate.
     pub fn query_all<T>(
         &self,
         sql: &str,
@@ -176,6 +199,9 @@ impl Connection {
     ///
     /// For one-shot queries prefer [`Connection::query_all`] or
     /// [`Connection::query_row`] directly.
+    ///
+    /// On a readonly [`Connection`] the same SQL grammar described on
+    /// [`Connection::query_one`] applies.
     pub fn prepare<'conn>(&'conn self, sql: &str) -> Result<Statement<'conn>, DbError> {
         self.ensure_query_allowed(sql)?;
         Ok(Statement {
@@ -284,7 +310,7 @@ fn readonly_error() -> DbError {
 }
 
 fn is_readonly_query_sql(sql: &str) -> bool {
-    let sql = sql.trim_start();
+    let sql = strip_leading_whitespace_and_comments(sql);
     let Some(keyword) = leading_keyword(sql) else {
         return false;
     };
@@ -292,14 +318,92 @@ fn is_readonly_query_sql(sql: &str) -> bool {
     if keyword.eq_ignore_ascii_case("SELECT") {
         return true;
     }
+    if keyword.eq_ignore_ascii_case("EXPLAIN") {
+        // EXPLAIN [QUERY PLAN] never executes the wrapped statement; it only
+        // dumps the plan. Safe regardless of what follows.
+        return true;
+    }
+    if keyword.eq_ignore_ascii_case("WITH") {
+        let rest = &sql[keyword.len()..];
+        return is_readonly_cte(rest);
+    }
     if keyword.eq_ignore_ascii_case("PRAGMA") {
         let rest = sql[keyword.len()..].trim_start();
         let Some(pragma_name) = leading_pragma_name(rest) else {
             return false;
         };
-        return !pragma_name.is_empty() && rest[pragma_name.len()..].trim().is_empty();
+        if pragma_name.is_empty() {
+            return false;
+        }
+        // Only bare `PRAGMA name` is accepted as a read. The parenthesized
+        // form `PRAGMA name(arg)` and the assignment form
+        // `PRAGMA name = value` both mutate connection state in Turso/SQLite
+        // (verified: `PRAGMA query_only(OFF)` toggles `query_only` off), so
+        // both are rejected by the Rust-side gate.
+        let tail = rest[pragma_name.len()..].trim_start();
+        return tail.is_empty();
     }
     false
+}
+
+/// Return true if a CTE prefix is followed only by read statements. We do not
+/// parse the CTE grammar; instead we reject any `INSERT`, `UPDATE`, or
+/// `DELETE` keyword in the remainder. False negatives (e.g. those words
+/// appearing inside a string literal) only over-restrict reads, never permit
+/// writes.
+fn is_readonly_cte(rest: &str) -> bool {
+    !contains_keyword_ascii_ci(rest, "INSERT")
+        && !contains_keyword_ascii_ci(rest, "UPDATE")
+        && !contains_keyword_ascii_ci(rest, "DELETE")
+}
+
+fn contains_keyword_ascii_ci(haystack: &str, keyword: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let kw = keyword.as_bytes();
+    if kw.is_empty() || bytes.len() < kw.len() {
+        return false;
+    }
+    let is_word_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    for start in 0..=bytes.len() - kw.len() {
+        let end = start + kw.len();
+        if !bytes[start..end].eq_ignore_ascii_case(kw) {
+            continue;
+        }
+        let prev_is_word = start > 0 && is_word_byte(bytes[start - 1]);
+        let next_is_word = end < bytes.len() && is_word_byte(bytes[end]);
+        if !prev_is_word && !next_is_word {
+            return true;
+        }
+    }
+    false
+}
+
+/// Skip leading ASCII whitespace and SQL comments (`--` line comments and
+/// `/* ... */` block comments). Used only by the Rust-side readonly gate to
+/// decide which form of statement is being issued; the original SQL is still
+/// sent to Turso untouched.
+fn strip_leading_whitespace_and_comments(sql: &str) -> &str {
+    let mut s = sql;
+    loop {
+        let trimmed = s.trim_start();
+        if let Some(after) = trimmed.strip_prefix("--") {
+            // Line comment: skip up to and including the next newline.
+            match after.find('\n') {
+                Some(nl) => s = &after[nl + 1..],
+                None => return "",
+            }
+            continue;
+        }
+        if let Some(after) = trimmed.strip_prefix("/*") {
+            // Block comment: skip up to and including the next `*/`.
+            match after.find("*/") {
+                Some(end) => s = &after[end + 2..],
+                None => return "",
+            }
+            continue;
+        }
+        return trimmed;
+    }
 }
 
 fn leading_keyword(sql: &str) -> Option<&str> {
@@ -507,6 +611,126 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM probe", (), |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn readonly_query_gate_accepts_documented_read_forms() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+
+        let writable = Connection::open_local(db_path.clone(), true).unwrap();
+        writable
+            .execute_batch(
+                "CREATE TABLE probe (value INTEGER NOT NULL); \
+                 INSERT INTO probe (value) VALUES (1); \
+                 INSERT INTO probe (value) VALUES (2);",
+            )
+            .unwrap();
+        drop(writable);
+
+        let readonly = Connection::open_local(db_path, false).unwrap();
+
+        // Plain SELECT.
+        let v: i64 = readonly
+            .query_row("SELECT COUNT(*) FROM probe", (), |row| row.get(0))
+            .unwrap();
+        assert_eq!(v, 2);
+
+        // SELECT with leading whitespace and a line comment.
+        let v: i64 = readonly
+            .query_row(
+                "-- this is a comment\nSELECT COUNT(*) FROM probe",
+                (),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, 2);
+
+        // SELECT with leading block comment.
+        let v: i64 = readonly
+            .query_row("/* preamble */ SELECT COUNT(*) FROM probe", (), |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(v, 2);
+
+        // SELECT with leading whitespace + block + line comments interleaved.
+        let v: i64 = readonly
+            .query_row(
+                "  /* one */\n-- two\n/* three */ SELECT COUNT(*) FROM probe",
+                (),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, 2);
+
+        // WITH-prefixed read CTE.
+        let v: i64 = readonly
+            .query_row(
+                "WITH doubled AS (SELECT value * 2 AS v FROM probe) \
+                 SELECT COUNT(*) FROM doubled",
+                (),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, 2);
+
+        // EXPLAIN gate-passes (we don't care about the row shape, only that
+        // it isn't rejected as a write).
+        let _ = readonly.query_all("EXPLAIN SELECT 1", (), |row| row.get::<_, i64>(0));
+        let _ = readonly.query_all("EXPLAIN QUERY PLAN SELECT 1", (), |row| {
+            row.get::<_, i64>(0)
+        });
+
+        // Bare PRAGMA read.
+        let _: i64 = readonly
+            .query_row("PRAGMA query_only", (), |row| row.get(0))
+            .unwrap();
+
+        // prepare() should also accept these forms.
+        let mut stmt = readonly
+            .prepare("WITH doubled AS (SELECT value * 2 AS v FROM probe) SELECT v FROM doubled")
+            .unwrap();
+        let _ = stmt.query_map((), |row| row.get::<_, i64>(0)).unwrap();
+    }
+
+    #[test]
+    fn readonly_query_gate_rejects_write_forms() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+
+        let writable = Connection::open_local(db_path.clone(), true).unwrap();
+        writable
+            .execute_batch("CREATE TABLE probe (value INTEGER NOT NULL)")
+            .unwrap();
+        drop(writable);
+
+        let readonly = Connection::open_local(db_path, false).unwrap();
+
+        for sql in [
+            // CTE that contains a write keyword is rejected.
+            "WITH x AS (SELECT 1) INSERT INTO probe (value) VALUES (1)",
+            "WITH x AS (SELECT 1) UPDATE probe SET value = 2",
+            "WITH x AS (SELECT 1) DELETE FROM probe",
+            // PRAGMA write forms — both parenthesized and assignment.
+            "PRAGMA query_only(OFF)",
+            "PRAGMA query_only = OFF",
+            // Bare writes.
+            "INSERT INTO probe (value) VALUES (1)",
+            "UPDATE probe SET value = 1",
+            "DELETE FROM probe",
+            // Leading comments do not rescue a write.
+            "-- safe?\nINSERT INTO probe (value) VALUES (1)",
+            "/* safe? */ UPDATE probe SET value = 1",
+        ] {
+            let err = readonly
+                .query_row(sql, (), |row| row.get::<_, i64>(0))
+                .expect_err(&format!("expected gate to reject {sql:?}"));
+            assert!(
+                err.to_string().contains("readonly database"),
+                "expected readonly database error for {sql:?}, got {err:#}",
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

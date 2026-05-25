@@ -3790,6 +3790,8 @@ async fn cmd_agent_backup(
         let db_path = agent_dir.join("data.db");
         if db_path.exists() {
             let backup_db = backup_dir.join("data.db");
+            // `open_connection(.., migrate=false)` returns a writable handle.
+            // Turso's `VACUUM INTO` needs writability on the source DB.
             let conn = right_db::open_connection(&agent_dir, false)
                 .into_diagnostic()
                 .map_err(|e| miette::miette!("failed to open data.db: {e:#}"))?;
@@ -5313,6 +5315,12 @@ fn cmd_memory_search(
     json: bool,
 ) -> miette::Result<()> {
     let conn = resolve_agent_db(home, agent)?;
+    let search_err = |e: right_db::DbError| {
+        miette::miette!(
+            help = "Full-text search uses Turso MATCH syntax: use simple words or phrases.",
+            "search failed: {e:#}"
+        )
+    };
     let mut stmt = conn
         .prepare(
             "SELECT m.id, m.content, m.tags, m.stored_by, m.created_at \
@@ -5322,12 +5330,7 @@ fn cmd_memory_search(
              ORDER BY m.created_at DESC, m.id DESC \
              LIMIT ?2 OFFSET ?3",
         )
-        .map_err(|e| {
-            miette::miette!(
-                help = "Full-text search uses Turso MATCH syntax: use simple words or phrases.",
-                "search failed: {e:#}"
-            )
-        })?;
+        .map_err(search_err)?;
     // Local SQLite row projection; extracting a named alias is out of scope.
     #[allow(clippy::type_complexity)]
     let entries: Vec<(i64, String, Option<String>, Option<String>, String)> = stmt
@@ -5340,19 +5343,9 @@ fn cmd_memory_search(
                 row.get(4)?,
             ))
         })
-        .map_err(|e| {
-            miette::miette!(
-                help = "Full-text search uses Turso MATCH syntax: use simple words or phrases.",
-                "search failed: {e:#}"
-            )
-        })?
+        .map_err(search_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            miette::miette!(
-                help = "Full-text search uses Turso MATCH syntax: use simple words or phrases.",
-                "search failed: {e:#}"
-            )
-        })?;
+        .map_err(search_err)?;
 
     if json {
         for (id, content, tags, stored_by, created_at) in &entries {

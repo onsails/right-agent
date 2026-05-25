@@ -10,7 +10,13 @@ use super::session::effective_thread_id;
 // Why 4: bounded so a Telegram traffic burst cannot queue unbounded
 // blocking-pool tasks; SQLite WAL handles small write concurrency well.
 const MAX_ARCHIVE_WRITES: usize = 4;
+// Why 6s: a hair longer than the connection-level `busy_timeout` (5s) so a
+// truly stuck writer surfaces as a logged failure rather than an indefinite
+// hang on the blocking pool.
 const ARCHIVE_WRITE_RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+// Why 25ms: short enough that contention from another short write resolves
+// within one or two sleeps; long enough that we are not spinning at busy-wait
+// speed on the blocking pool.
 const ARCHIVE_WRITE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
 
 static ARCHIVE_WRITE_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
@@ -206,33 +212,23 @@ fn write_archive_payload(payload: ArchivePayload) {
         thread_id: payload.thread_id,
         message_id: Some(payload.message_id),
     };
-    retry_archive_db_write(meta, "telegram archive", || {
-        write_archive_payload_once(&payload)
+    retry_archive_db_write(meta, "telegram archive", &payload.agent_dir, |conn| {
+        let message = ConversationMessage {
+            platform: "telegram",
+            chat_id: payload.chat_id,
+            thread_id: payload.thread_id,
+            message_id: Some(payload.message_id),
+            sender_user_id: payload.sender_user_id,
+            sender_name: payload.sender_name.as_deref(),
+            addressed_to_bot: payload.addressed_to_bot,
+            routed_to_agent: payload.routed_to_agent,
+            root_session_id: None,
+            turn_id: None,
+            role: ConversationRole::User,
+            content: &payload.content,
+        };
+        archive_message(conn, message).map(drop)
     });
-}
-
-fn write_archive_payload_once(payload: &ArchivePayload) -> Result<(), right_db::DbError> {
-    let conn = match right_db::open_connection(&payload.agent_dir, false) {
-        Ok(conn) => conn,
-        Err(e) => return Err(e),
-    };
-
-    let message = ConversationMessage {
-        platform: "telegram",
-        chat_id: payload.chat_id,
-        thread_id: payload.thread_id,
-        message_id: Some(payload.message_id),
-        sender_user_id: payload.sender_user_id,
-        sender_name: payload.sender_name.as_deref(),
-        addressed_to_bot: payload.addressed_to_bot,
-        routed_to_agent: payload.routed_to_agent,
-        root_session_id: None,
-        turn_id: None,
-        role: ConversationRole::User,
-        content: &payload.content,
-    };
-
-    archive_message(&conn, message).map(drop)
 }
 
 fn write_assistant_payload(payload: AssistantArchivePayload) {
@@ -241,48 +237,62 @@ fn write_assistant_payload(payload: AssistantArchivePayload) {
         thread_id: payload.thread_id,
         message_id: None,
     };
-    retry_archive_db_write(meta, "assistant archive", || {
-        write_assistant_payload_once(&payload)
+    retry_archive_db_write(meta, "assistant archive", &payload.agent_dir, |conn| {
+        let message = ConversationMessage {
+            platform: "telegram",
+            chat_id: payload.chat_id,
+            thread_id: payload.thread_id,
+            message_id: None,
+            sender_user_id: None,
+            sender_name: Some(payload.agent_name.as_str()),
+            addressed_to_bot: false,
+            routed_to_agent: true,
+            root_session_id: Some(payload.session_uuid.as_str()),
+            turn_id: Some(payload.turn_id),
+            role: ConversationRole::Assistant,
+            content: &payload.content,
+        };
+        archive_message(conn, message).map(drop)
     });
 }
 
-fn write_assistant_payload_once(
-    payload: &AssistantArchivePayload,
-) -> Result<(), right_db::DbError> {
-    let conn = match right_db::open_connection(&payload.agent_dir, false) {
-        Ok(conn) => conn,
-        Err(e) => return Err(e),
-    };
-
-    let message = ConversationMessage {
-        platform: "telegram",
-        chat_id: payload.chat_id,
-        thread_id: payload.thread_id,
-        message_id: None,
-        sender_user_id: None,
-        sender_name: Some(payload.agent_name.as_str()),
-        addressed_to_bot: false,
-        routed_to_agent: true,
-        root_session_id: Some(payload.session_uuid.as_str()),
-        turn_id: Some(payload.turn_id),
-        role: ConversationRole::Assistant,
-        content: &payload.content,
-    };
-
-    archive_message(&conn, message).map(drop)
-}
-
-fn retry_archive_db_write<F>(meta: ArchiveLogMeta, operation: &'static str, mut write: F)
-where
-    F: FnMut() -> Result<(), right_db::DbError>,
+fn retry_archive_db_write<F>(
+    meta: ArchiveLogMeta,
+    operation: &'static str,
+    agent_dir: &Path,
+    mut write: F,
+) where
+    F: FnMut(&right_db::Connection) -> Result<(), right_db::DbError>,
 {
     let deadline = std::time::Instant::now() + ARCHIVE_WRITE_RETRY_TIMEOUT;
     let mut attempts = 0;
+    let mut conn: Option<right_db::Connection> = None;
     loop {
         attempts += 1;
-        match write() {
+        if conn.is_none() {
+            match right_db::open_connection(agent_dir, false) {
+                Ok(opened) => conn = Some(opened),
+                Err(e) if e.is_transient() && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(ARCHIVE_WRITE_RETRY_DELAY);
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        chat_id = meta.chat_id,
+                        thread_id = meta.thread_id,
+                        message_id = meta.message_id,
+                        attempts,
+                        operation,
+                        "archive database open failed: {e:#}"
+                    );
+                    return;
+                }
+            }
+        }
+        let handle = conn.as_ref().expect("connection initialized above");
+        match write(handle) {
             Ok(()) => return,
-            Err(e) if is_transient_archive_db_error(&e) && std::time::Instant::now() < deadline => {
+            Err(e) if e.is_transient() && std::time::Instant::now() < deadline => {
                 std::thread::sleep(ARCHIVE_WRITE_RETRY_DELAY);
             }
             Err(e) => {
@@ -298,11 +308,6 @@ where
             }
         }
     }
-}
-
-fn is_transient_archive_db_error(error: &right_db::DbError) -> bool {
-    let error = error.to_string().to_ascii_lowercase();
-    error.contains("locked") || error.contains("busy")
 }
 
 #[cfg(test)]
