@@ -16,7 +16,7 @@ Nineteen crates in a Cargo workspace:
 | **right-platform-store** | `crates/right-platform-store/` | Content-addressed platform-managed sandbox file deployment |
 | **right-agent-config** | `crates/right-agent-config/` | Agent configuration DTOs, discovery DTOs, sandbox/memory/STT schema types |
 | **right-stt** | `crates/right-stt/` | Host-side STT model cache paths, ffmpeg detection, model download, cache warming |
-| **right-db** | `crates/right-db/` | Per-agent SQLite plumbing: `open_connection`, central migration registry, `sql/v*.sql` |
+| **right-db** | `crates/right-db/` | Per-agent SQLite-compatible `data.db` boundary over local libSQL: project DB types, migrations, `sql/v*.sql` |
 | **right-lifecycle** | `crates/right-lifecycle/` | Learned-skill lifecycle state machine and DB operations over `skill_lifecycle` |
 | **right-mcp** | `crates/right-mcp/` | MCP aggregator backend, proxy, reconnect, credentials, token derivation, auth tokens |
 | **right-codegen** | `crates/right-codegen/` | Per-agent codegen: settings.json, .mcp.json, prompts, process-compose, cloudflared, sandbox policy, bundled skills |
@@ -478,21 +478,26 @@ message pointing at `right up`". `PC_PORT` may still be referenced by
 `cmd_up` (passing `--port` to launch PC) and `pipeline.rs` (default into
 `state.json`).
 
-## SQLite Rules
+## Local Database Rules
+
+Per-agent `data.db` is a SQLite-compatible database. Local libSQL is the
+current driver implementation and is hidden behind `right-db`.
+
+`right-db` is the sole owner of local database driver details. Other crates
+must use project-owned `right_db` types and must not expose raw driver
+connection, transaction, row, error, or parameter types in public APIs.
 
 ### Migration Ownership
 
-Both the MCP aggregator (`right-mcp-server`) and bot processes run schema migrations on per-agent `data.db` via `right_db::open_connection(path, migrate: true)`. Migrations are idempotent — concurrent callers are safe (WAL mode + busy_timeout). CLI commands and other processes open with `migrate: false`. Bot processes still declare `depends_on: right-mcp-server` for MCP readiness, but no longer depend on it for schema migrations. The migration registry (`right_db::migrations::MIGRATIONS`) is the sole place to add new tables.
+Both the MCP aggregator (`right-mcp-server`) and bot processes run schema migrations on per-agent `data.db` via `right_db::open_connection(path, migrate: true)`. Migrations are idempotent — concurrent callers are safe (WAL mode + busy_timeout). CLI commands and other processes open with `migrate: false` or read-only helpers. Bot processes still declare `depends_on: right-mcp-server` for MCP readiness, but no longer depend on it for schema migrations. The migration registry (`right_db::migrations::MIGRATIONS`) is the sole place to add new tables.
 
 ### Transaction Rule
 
-Any operation that performs 2+ writes (INSERT, UPDATE, DELETE) MUST wrap them in a single `conn.unchecked_transaction()`. Single-statement writes don't need a transaction. Migrations are the sole exception (handled by `rusqlite_migration` internally).
-
-Use `unchecked_transaction()` (takes `&self`) rather than `transaction()` (takes `&mut self`) since most callsites hold `&Connection`.
+Any operation that performs 2+ writes (INSERT, UPDATE, DELETE) MUST wrap them in a single `Connection::with_immediate_transaction`. Single-statement writes don't need a transaction. Migrations are the sole exception because the `right-db` migration runner wraps each migration batch.
 
 ### Idempotent Migrations
 
-All migrations must be idempotent — safe to re-run if the schema already matches. SQLite lacks `ADD COLUMN IF NOT EXISTS`, so column additions must check `pragma_table_info` first. Use `M::up_with_hook()` for migrations that need conditional DDL. `CREATE TABLE/INDEX/TRIGGER IF NOT EXISTS` is naturally idempotent.
+All migrations must be idempotent — safe to re-run if the schema already matches. SQLite-compatible DDL lacks `ADD COLUMN IF NOT EXISTS`, so column additions must check `pragma_table_info` first. Use a Rust migration hook for migrations that need conditional DDL. `CREATE TABLE/INDEX/TRIGGER IF NOT EXISTS` is naturally idempotent.
 
 ## Upgrade & Migration Model
 
@@ -582,7 +587,7 @@ Direct `std::fs::write` inside codegen modules is a review-blocking defect.
 - Agent-owned content (`AgentOwned` files) — agent property; codegen never
   mutates them.
 - OpenShell server upgrades — covered by `OpenShell Integration Conventions`.
-- SQLite schema — handled by `rusqlite_migration` (see `SQLite Rules`).
+- SQLite-compatible schema — handled by `right-db` migrations (see `Local Database Rules`).
 
 ### Cross-references
 
