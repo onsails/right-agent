@@ -15,10 +15,7 @@ use right_dashboard::read_model::{
     ReadModelError,
     activity::{ActivityOverviewInput, activity_overview, activity_run_detail},
     dashboard_overview::{DashboardOverviewInput, dashboard_overview},
-    learning::{
-        LearningOverviewInput, learning_overview, learning_report_detail, skill_lifecycle_overview,
-    },
-    learning_episodes::{LearningEpisodesInput, learning_episode_detail, learning_episodes},
+    learning::{LearningOverviewInput, learning_overview, skill_lifecycle_overview},
     usage::{UsageOverviewInput, usage_overview},
 };
 use right_db::Connection;
@@ -102,22 +99,6 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
         .route(
             "/dashboard/{agent}/api/v1/knowledge/learning/overview",
             get(handle_learning_overview),
-        )
-        .route(
-            "/dashboard/{agent}/api/v1/knowledge/learning/episodes",
-            get(handle_learning_episodes),
-        )
-        .route(
-            "/dashboard/{agent}/api/v1/knowledge/learning/episodes/{episode_id}",
-            get(handle_learning_episode_detail),
-        )
-        .route(
-            "/dashboard/{agent}/api/v1/learning/reports/{report_id}",
-            get(handle_learning_report_detail),
-        )
-        .route(
-            "/dashboard/{agent}/api/v1/knowledge/learning/reports/{report_id}",
-            get(handle_learning_report_detail),
         )
         .route(
             "/dashboard/{agent}/api/v1/learning/skill_lifecycle",
@@ -364,129 +345,6 @@ async fn handle_learning_overview(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "learning_overview_failed",
                 Some("failed to read learning overview"),
-            )
-        }
-    }
-}
-
-async fn handle_learning_episodes(
-    AxumPath(agent): AxumPath<String>,
-    State(state): State<DashboardState>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(error) = authenticate_api(&state, &agent, &headers) {
-        return error.into_response();
-    }
-
-    let input = LearningEpisodesInput {
-        agent: state.agent_name.clone(),
-        generated_at: chrono::Utc::now().to_rfc3339(),
-    };
-
-    let agent_name = state.agent_name.clone();
-    match with_dashboard_conn(&state, move |conn| async move {
-        learning_episodes(&conn, input).await
-    })
-    .await
-    {
-        Ok(response) => Json(response).into_response(),
-        Err(DashboardConnError::Open(error)) => error.into_response(),
-        Err(DashboardConnError::Work(error)) => {
-            tracing::error!(agent = %agent_name, "dashboard learning episodes query failed: {error:#}");
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "learning_episodes_failed",
-                Some("failed to read learning episodes"),
-            )
-        }
-    }
-}
-
-async fn handle_learning_episode_detail(
-    AxumPath((agent, episode_id)): AxumPath<(String, String)>,
-    State(state): State<DashboardState>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(error) = authenticate_api(&state, &agent, &headers) {
-        return error.into_response();
-    }
-
-    let episode_id = match episode_id.parse::<i64>() {
-        Ok(episode_id) => episode_id,
-        Err(_) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_episode_id",
-                Some("learning episode id must be an integer"),
-            );
-        }
-    };
-
-    let agent_name = state.agent_name.clone();
-    let agent_name_for_query = state.agent_name.clone();
-    match with_dashboard_conn(&state, move |conn| async move {
-        learning_episode_detail(&conn, &agent_name_for_query, episode_id).await
-    })
-    .await
-    {
-        Ok(Some(response)) => Json(response).into_response(),
-        Ok(None) => json_error(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            Some("learning episode not found"),
-        ),
-        Err(DashboardConnError::Open(error)) => error.into_response(),
-        Err(DashboardConnError::Work(error)) => {
-            tracing::error!(agent = %agent_name, episode_id, "dashboard learning episode query failed: {error:#}");
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "learning_episode_failed",
-                Some("failed to read learning episode"),
-            )
-        }
-    }
-}
-
-async fn handle_learning_report_detail(
-    AxumPath((agent, report_id)): AxumPath<(String, String)>,
-    State(state): State<DashboardState>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(error) = authenticate_api(&state, &agent, &headers) {
-        return error.into_response();
-    }
-
-    let report_id = match report_id.parse::<i64>() {
-        Ok(report_id) => report_id,
-        Err(_) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_report_id",
-                Some("learning report id must be an integer"),
-            );
-        }
-    };
-
-    let agent_name = state.agent_name.clone();
-    let agent_name_for_query = state.agent_name.clone();
-    match with_dashboard_conn(&state, move |conn| async move {
-        learning_report_detail(&conn, &agent_name_for_query, report_id).await
-    })
-    .await
-    {
-        Ok(Some(response)) => Json(response).into_response(),
-        Ok(None) => json_error(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            Some("learning report not found"),
-        ),
-        Err(DashboardConnError::Open(error)) => error.into_response(),
-        Err(DashboardConnError::Work(error)) => {
-            tracing::error!(agent = %agent_name, report_id, "dashboard learning report query failed: {error:#}");
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "learning_report_failed",
-                Some("failed to read learning report"),
             )
         }
     }
@@ -1452,74 +1310,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn learning_episodes_returns_data_for_authorized_user() {
+    async fn legacy_learning_episode_routes_are_not_mounted() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(temp.path(), true)
+        let _conn = right_db::open_connection(temp.path(), true)
             .await
             .expect("open migrated db");
-        conn.execute(
-            "INSERT INTO learning_episodes (
-                id, agent_name, kind, seed_trigger_kind, seed_ref, status,
-                message_refs_json, execution_event_refs_json, selector_output_json,
-                ready_after, last_evidence_at, created_at, updated_at
-             ) VALUES (
-                1, 'alpha', 'foreground_thread', 'learning_signal', 'inv:inv-1',
-                'reviewed', '[]', '[]', '{}', '2026-05-20T10:01:30Z',
-                '2026-05-20T10:01:00Z', '2026-05-20T10:00:00Z',
-                '2026-05-20T10:02:00Z'
-             )",
-            [],
-        )
-        .await
-        .unwrap();
+        let auth = signed_init_data(42);
 
-        let (status, body) = get_json(
+        for path in [
             "/dashboard/alpha/api/v1/knowledge/learning/episodes",
-            Some(signed_init_data(42)),
-            temp.path().to_path_buf(),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["agent"], "alpha");
-        assert_eq!(body["episodes"][0]["id"], 1);
-        assert_eq!(body["episodes"][0]["status"], "reviewed");
-    }
-
-    #[tokio::test]
-    async fn learning_episode_detail_returns_data_for_authorized_user() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(temp.path(), true)
-            .await
-            .expect("open migrated db");
-        conn.execute(
-            "INSERT INTO learning_episodes (
-                id, agent_name, kind, seed_trigger_kind, seed_ref, status,
-                message_refs_json, execution_event_refs_json, selector_model,
-                selector_output_json, ready_after, last_evidence_at, created_at,
-                updated_at
-             ) VALUES (
-                1, 'alpha', 'foreground_thread', 'learning_signal', 'inv:inv-1',
-                'reviewed', '[\"msg:1\"]', '[]', 'claude-sonnet-4-6', '{}',
-                '2026-05-20T10:01:30Z', '2026-05-20T10:01:00Z',
-                '2026-05-20T10:00:00Z', '2026-05-20T10:02:00Z'
-             )",
-            [],
-        )
-        .await
-        .unwrap();
-
-        let (status, body) = get_json(
             "/dashboard/alpha/api/v1/knowledge/learning/episodes/1",
-            Some(signed_init_data(42)),
-            temp.path().to_path_buf(),
-        )
-        .await;
+            "/dashboard/alpha/api/v1/learning/reports/1",
+            "/dashboard/alpha/api/v1/knowledge/learning/reports/1",
+        ] {
+            let status = get(path, Some(auth.clone()), temp.path().to_path_buf()).await;
 
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["episode"]["id"], 1);
-        assert_eq!(body["selector"]["model"], "claude-sonnet-4-6");
-        assert_eq!(body["selector"]["selected_message_refs"][0], "msg:1");
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        }
     }
 
     #[tokio::test]
@@ -2078,88 +1885,5 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"], "not_found");
         assert_eq!(body["detail"], "run not found");
-    }
-
-    #[tokio::test]
-    async fn learning_report_detail_returns_not_found_for_unknown_report() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let _conn = right_db::open_connection(temp.path(), true)
-            .await
-            .expect("open migrated db");
-
-        let status = get(
-            "/dashboard/alpha/api/v1/learning/reports/999",
-            Some(signed_init_data(42)),
-            temp.path().to_path_buf(),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn learning_report_detail_rejects_malformed_id_after_auth() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let _conn = right_db::open_connection(temp.path(), true)
-            .await
-            .expect("open migrated db");
-
-        let (status, body) = get_json(
-            "/dashboard/alpha/api/v1/learning/reports/not-a-number",
-            Some(signed_init_data(42)),
-            temp.path().to_path_buf(),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "invalid_report_id");
-    }
-
-    #[tokio::test]
-    async fn learning_report_detail_rejects_missing_auth_before_malformed_id() {
-        let temp = tempfile::tempdir().expect("tempdir");
-
-        let (status, body) = get_json(
-            "/dashboard/alpha/api/v1/learning/reports/not-a-number",
-            None,
-            temp.path().to_path_buf(),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(body["error"], "unauthorized");
-    }
-
-    #[tokio::test]
-    async fn learning_report_detail_returns_data_for_authorized_user() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let conn = right_db::open_connection(temp.path(), true)
-            .await
-            .expect("open migrated db");
-        conn.execute(
-            "INSERT INTO skill_review_reports (
-                id, agent_name, source_invocation_id, trigger_kind, status,
-                confidence, evidence_refs_json, review_output_json, created_at
-             ) VALUES (
-                1, 'alpha', 'inv-1', 'effort_threshold', 'nothing_to_learn',
-                'medium', '[]',
-                '{\"status\":\"nothing_to_learn\",\"confidence\":\"medium\",\"evidence_refs\":[],\"user_notice\":null}',
-                '2026-05-20T11:00:00Z'
-             )",
-            [],
-        )
-        .await
-        .unwrap();
-
-        let (status, body) = get_json(
-            "/dashboard/alpha/api/v1/learning/reports/1",
-            Some(signed_init_data(42)),
-            temp.path().to_path_buf(),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["report"]["id"], 1);
-        assert_eq!(body["report"]["status"], "nothing_to_learn");
     }
 }
