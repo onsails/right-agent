@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_messages_inbound_unique
-ON conversation_messages (platform, chat_id, message_id, role);
+ON conversation_messages (platform, chat_id, message_id, role)
+WHERE message_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_conversation_messages_thread_created
 ON conversation_messages (platform, chat_id, thread_id, created_at);
