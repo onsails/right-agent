@@ -638,6 +638,10 @@ dt,
   margin-bottom: 10px;
 }
 
+.view-tabs {
+  overflow-x: auto;
+}
+
 .display-mode-button,
 .tab-button,
 .segment-button,
@@ -668,8 +672,12 @@ dt,
 }
 
 .display-mode-button {
+  flex: 0 1 auto;
+  max-width: 100%;
+  overflow: hidden;
   font-size: 0.78rem;
   font-weight: 700;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -1035,6 +1043,29 @@ td {
 }
 
 @media (max-width: 560px) {
+  .app-shell.display-normal {
+    padding-bottom: calc(78px + env(safe-area-inset-bottom));
+  }
+
+  .app-shell.display-normal .view-tabs {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 20;
+    flex-wrap: nowrap;
+    margin-bottom: 0;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+    overflow-x: auto;
+    border-top: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.18));
+    background: var(--tg-theme-secondary-bg-color, #ffffff);
+  }
+
+  .app-shell.display-normal .view-tabs .tab-button {
+    flex: 0 0 auto;
+    min-width: 82px;
+  }
+
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
