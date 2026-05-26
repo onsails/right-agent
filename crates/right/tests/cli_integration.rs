@@ -919,6 +919,18 @@ groups:
         "hello world\n"
     );
 
+    for sidecar in [
+        "data.db-wal",
+        "data.db-shm",
+        "data.db-tshm",
+        "data.db-future",
+    ] {
+        assert!(
+            !restored_dir.join(sidecar).exists(),
+            "restored agent must not contain database sidecar {sidecar}"
+        );
+    }
+
     // Verify restored database.
     let restored_db = right_db::open_database_path_readonly(restored_dir.join("data.db"))
         .await
@@ -928,6 +940,109 @@ groups:
         .await
         .unwrap();
     assert_eq!(val, "backup-test");
+}
+
+#[tokio::test]
+async fn test_agent_restore_no_sandbox_removes_legacy_db_sidecars() {
+    let home = tempdir().unwrap();
+    let home_str = home.path().to_str().unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        minimal_config_yaml(home.path()),
+    )
+    .unwrap();
+
+    let backup_dir = home
+        .path()
+        .join("backups")
+        .join("source-agent")
+        .join("20260527-0100");
+    fs::create_dir_all(&backup_dir).unwrap();
+    fs::write(backup_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    let backup_db = right_db::open_connection(&backup_dir, true).await.unwrap();
+    backup_db
+        .execute("CREATE TABLE legacy_restore_probe (val TEXT)", ())
+        .await
+        .unwrap();
+    backup_db
+        .execute(
+            "INSERT INTO legacy_restore_probe (val) VALUES ('canonical db snapshot')",
+            (),
+        )
+        .await
+        .unwrap();
+    let _: i64 = backup_db
+        .query_one("PRAGMA wal_checkpoint(TRUNCATE)", (), |row| row.get(0))
+        .await
+        .unwrap();
+    drop(backup_db);
+
+    let tar_root = home.path().join("legacy-tar-root");
+    let tar_agent = tar_root.join("source-agent");
+    fs::create_dir_all(&tar_agent).unwrap();
+    fs::write(tar_agent.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(tar_agent.join("notes.txt"), "from tar\n").unwrap();
+    for sidecar in [
+        "data.db-wal",
+        "data.db-shm",
+        "data.db-tshm",
+        "data.db-future",
+    ] {
+        fs::write(tar_agent.join(sidecar), format!("stale {sidecar}\n")).unwrap();
+    }
+
+    let tar_path = backup_dir.join("sandbox.tar.gz");
+    let status = StdCommand::new("tar")
+        .args([
+            "czf",
+            tar_path.to_str().unwrap(),
+            "-C",
+            tar_root.to_str().unwrap(),
+            "source-agent",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "test tar creation must succeed");
+
+    right()
+        .args([
+            "--home",
+            home_str,
+            "agent",
+            "init",
+            "restored-agent",
+            "--from-backup",
+            backup_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("restored"));
+
+    let restored_dir = home.path().join("agents").join("restored-agent");
+    assert_eq!(
+        fs::read_to_string(restored_dir.join("notes.txt")).unwrap(),
+        "from tar\n"
+    );
+    for sidecar in [
+        "data.db-wal",
+        "data.db-shm",
+        "data.db-tshm",
+        "data.db-future",
+    ] {
+        assert!(
+            !restored_dir.join(sidecar).exists(),
+            "restore must remove stale database sidecar {sidecar}"
+        );
+    }
+
+    let restored_db = right_db::open_database_path_readonly(restored_dir.join("data.db"))
+        .await
+        .unwrap();
+    let val: String = restored_db
+        .query_row("SELECT val FROM legacy_restore_probe", (), |row| row.get(0))
+        .await
+        .unwrap();
+    assert_eq!(val, "canonical db snapshot");
 }
 
 #[test]
