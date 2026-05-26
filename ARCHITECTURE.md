@@ -492,7 +492,10 @@ because conversation and memory search use `CREATE INDEX ... USING fts`, and
 must enable Turso's experimental multiprocess-WAL path so bot and MCP
 aggregator processes can open the same per-agent `data.db`; this may create
 Turso sidecar files such as `data.db-tshm` next to the standard database/WAL
-files. The in-memory test/helper path is the exception: Turso does not support
+files. Files matching `data.db-*` are disposable runtime sidecars, not durable
+backup state; backup and restore flows preserve only the canonical
+`VACUUM INTO` snapshot stored as `data.db` in the selected backup directory.
+The in-memory test/helper path is the exception: Turso does not support
 multiprocess WAL for `:memory:` databases. Other crates must use project-owned
 `right_db` types and must not expose raw `turso` connection, transaction, row,
 error, value, or parameter types in public APIs.
