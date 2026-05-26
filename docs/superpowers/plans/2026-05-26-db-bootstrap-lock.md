@@ -32,7 +32,7 @@ This plan covers one subsystem: per-agent database bootstrap in `right-db`. It d
 - Modify: `crates/right-db/src/lib.rs`
 - Modify: `crates/right-db/src/migrations.rs`
 
-- [ ] **Step 1: Add `fs4` to `right-db` dependencies**
+- [x] **Step 1: Add `fs4` to `right-db` dependencies**
 
 In `crates/right-db/Cargo.toml`, update `[dependencies]`:
 
@@ -47,7 +47,7 @@ turso = { workspace = true }
 rusqlite = { workspace = true }
 ```
 
-- [ ] **Step 2: Add a red test proving `migrate = true` waits for the bootstrap lock**
+- [x] **Step 2: Add a red test proving `migrate = true` waits for the bootstrap lock**
 
 In `crates/right-db/src/lib.rs`, inside the existing `#[cfg(test)] mod tests`, add this test after `open_connection_retries_transient_legacy_probe_lock`:
 
@@ -81,7 +81,7 @@ async fn migration_open_waits_for_existing_bootstrap_lock() {
 }
 ```
 
-- [ ] **Step 3: Replace the old runtime-scrub test with the new invariant**
+- [x] **Step 3: Replace the old runtime-scrub test with the new invariant**
 
 In `crates/right-db/src/migrations.rs`, replace the whole existing test function named `open_connection_without_migration_scrubs_legacy_fts5` with:
 
@@ -138,7 +138,7 @@ async fn open_connection_without_migration_does_not_scrub_legacy_fts5() {
 }
 ```
 
-- [ ] **Step 4: Add a concurrent startup migration scrubber-overlap regression test**
+- [x] **Step 4: Add a concurrent startup migration scrubber-overlap regression test**
 
 Add minimal `#[cfg(test)]` support in `crates/right-db/src/lib.rs` at the
 legacy FTS5 scrubber boundary. The test-only probe must be scoped to the exact
@@ -194,7 +194,7 @@ async fn concurrent_migration_opens_serialize_legacy_fts5_cleanup() {
 }
 ```
 
-- [ ] **Step 5: Run the new red tests**
+- [x] **Step 5: Run the new red tests**
 
 Run:
 
@@ -221,7 +221,7 @@ Expected: FAIL. The failure should show a legacy FTS table or trigger count of `
 - Modify: `crates/right-db/src/error.rs`
 - Modify: `crates/right-db/src/lib.rs`
 
-- [ ] **Step 1: Add the lock error variant**
+- [x] **Step 1: Add the lock error variant**
 
 In `crates/right-db/src/error.rs`, add this variant after `LegacySqlite`:
 
@@ -236,7 +236,7 @@ MigrationLock {
 
 Do not add `MigrationLock` to `DbError::transient_kind`; lock timeout and lock file I/O failures are startup bootstrap failures, not generic runtime retry signals.
 
-- [ ] **Step 2: Create the bootstrap lock module**
+- [x] **Step 2: Create the bootstrap lock module**
 
 Create `crates/right-db/src/bootstrap_lock.rs`:
 
@@ -327,7 +327,7 @@ impl Drop for BootstrapLockGuard {
 }
 ```
 
-- [ ] **Step 3: Register the new module**
+- [x] **Step 3: Register the new module**
 
 In `crates/right-db/src/lib.rs`, add the private module near the top:
 
@@ -339,7 +339,7 @@ pub mod error;
 pub mod migrations;
 ```
 
-- [ ] **Step 4: Route only `migrate=true` through legacy cleanup and migrations**
+- [x] **Step 4: Route only `migrate=true` through legacy cleanup and migrations**
 
 In `crates/right-db/src/lib.rs`, replace `open_connection_once` with:
 
@@ -364,7 +364,7 @@ async fn open_connection_once(agent_path: &Path, migrate: bool) -> Result<Connec
 
 Keep `prepare_legacy_fts5_schema_for_turso` and its retry loop. It now belongs to the locked startup path only.
 
-- [ ] **Step 5: Update the existing transient legacy probe test**
+- [x] **Step 5: Update the existing transient legacy probe test**
 
 In `crates/right-db/src/lib.rs`, update `open_connection_retries_transient_legacy_probe_lock` so the second open uses `migrate = true`:
 
@@ -378,7 +378,7 @@ Also update the expectation message:
 result.expect("migrate=true open_connection should recover from transient legacy probe lock");
 ```
 
-- [ ] **Step 6: Run targeted `right-db` tests**
+- [x] **Step 6: Run targeted `right-db` tests**
 
 Run:
 
@@ -412,7 +412,7 @@ devenv shell -- cargo test -p right-db open_connection_retries_transient_legacy_
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit the DB implementation**
+- [x] **Step 7: Commit the DB implementation**
 
 Run:
 
@@ -428,7 +428,7 @@ git commit -m "fix(db): serialize schema bootstrap"
 **Files:**
 - Modify: `ARCHITECTURE.md`
 
-- [ ] **Step 1: Replace the outdated migration ownership paragraph**
+- [x] **Step 1: Replace the outdated migration ownership paragraph**
 
 In `ARCHITECTURE.md`, replace the first paragraph under `### Migration Ownership` with:
 
@@ -447,7 +447,7 @@ not run the scrubber or mutate files. The migration registry
 (`right_db::migrations::MIGRATIONS`) is the sole place to add new tables.
 ```
 
-- [ ] **Step 2: Check for stale claims**
+- [x] **Step 2: Check for stale claims**
 
 Run:
 
@@ -457,7 +457,7 @@ rg -n "migrate: false backup|scrubber runs before any writable|including `migrat
 
 Expected: no stale claim says runtime `migrate=false` opens run the scrubber.
 
-- [ ] **Step 3: Commit the documentation update**
+- [x] **Step 3: Commit the documentation update**
 
 Run:
 

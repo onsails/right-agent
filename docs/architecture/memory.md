@@ -53,9 +53,10 @@ tools are removed from the surface; their backing tables (`memories`,
 `memory_events`) are retained for migration compat. Conversation transcript
 search and legacy memory search use local Turso FTS indexes over the base
 tables. The schema no longer creates SQLite FTS5 virtual tables for fresh
-databases. For real legacy databases, `right-db` removes the old SQLite FTS5
-virtual tables and sync triggers with a pre-Turso scrubber before opening the
-file with Turso; migration v34 then creates the Turso FTS indexes.
+databases. During locked `migrate: true` schema bootstrap for real legacy
+databases, `right-db` removes the old SQLite FTS5 virtual tables and sync
+triggers with a pre-Turso scrubber; migration v34 then creates the Turso FTS
+indexes. Old SQLite FTS index contents are not preserved.
 
 ## Transcript Search
 
