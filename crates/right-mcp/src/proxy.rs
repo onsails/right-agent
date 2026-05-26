@@ -530,6 +530,11 @@ impl ProxyBackend {
         &self.url
     }
 
+    /// Agent directory used for the backend's SQLite state.
+    pub fn agent_dir(&self) -> &std::path::Path {
+        &self.agent_dir
+    }
+
     /// Shared token reference for external token updates (e.g., from internal API).
     pub fn token(&self) -> &Arc<RwLock<Option<String>>> {
         &self.token
