@@ -31,6 +31,13 @@ HTTPS URLs, excludes loopback/private/link-local hosts, and returns a short
 registered. Telegram renders that warning through `telegram::tg`, not as raw
 `Warning:` prose. Explicit user-managed registration allows HTTP/HTTPS while
 broad private/link-local ranges remain rejected.
+Dashboard MCP detection applies the same public-network URL policy to every
+OAuth discovery fetch, including the original MCP probe, RFC 9728
+`resource_metadata` URLs, synthesized well-known URLs, and authorization-server
+metadata URLs. Literal private or localhost IP URLs are rejected before fetch;
+obvious localhost domain aliases such as `localhost` and `localhost.` are also
+rejected before fetch. Other domain names are allowed through the dashboard
+detection client's guarded DNS resolver.
 
 ## MCP Token Refresh
 
@@ -198,6 +205,8 @@ Tool routing:
 Internal REST API on Unix socket (~/.right/run/internal.sock):
   - POST /mcp-add — register external MCP server
   - POST /mcp-remove — remove external MCP server
+  - POST /mcp-set-headers — replace stored HTTP header credentials for an
+    external MCP server
   - POST /set-token — deliver OAuth tokens after authentication
   - POST /mcp-list — list MCP servers with status
   - POST /mcp-instructions — fetch MCP server instructions markdown
@@ -206,6 +215,8 @@ Internal REST API on Unix socket (~/.right/run/internal.sock):
   - POST /progress/unregister — remove that invocation when the run ends
 
 Telegram bot uses InternalClient (hyper UDS) to call these endpoints.
+Dashboard MCP management routes use the same InternalClient path; they do not
+edit MCP config files or credential stores directly.
 Agents cannot reach the Unix socket from inside the sandbox.
 
 ## Invocation-scoped MCP tools

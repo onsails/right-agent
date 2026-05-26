@@ -886,6 +886,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             sandbox_exec: dashboard_sandbox_exec,
             allowlist: allowlist.clone(),
             foreground: Arc::clone(&dashboard_foreground),
+            internal_client: Arc::clone(&internal_client),
+            pending_auth: Arc::clone(&pending_auth),
             #[cfg(test)]
             doctor_checks: None,
         });

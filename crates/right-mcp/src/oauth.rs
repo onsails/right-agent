@@ -432,17 +432,22 @@ fn parse_www_authenticate_resource_metadata(header: &str) -> Option<String> {
 /// the caller can fall through to the well-known chain.
 /// Only `401` is treated as the WWW-Authenticate signal — `403` and other
 /// status codes (including `200`) fall through to the well-known chain.
-async fn probe_resource_metadata_via_www_authenticate(
+async fn probe_resource_metadata_via_www_authenticate<F>(
     client: &reqwest::Client,
     server_url: &str,
     probes: &mut DiscoveryProbeState,
-) -> Option<String> {
+    url_policy: &F,
+) -> Result<Option<String>, OAuthError>
+where
+    F: Fn(&str) -> Result<(), OAuthError>,
+{
+    url_policy(server_url)?;
     let resp = match client.get(server_url).send().await {
         Ok(r) => r,
         Err(e) => {
             debug!("WWW-Authenticate probe: request failed for {server_url}: {e}");
             probes.record_request_error(server_url, &e);
-            return None;
+            return Ok(None);
         }
     };
     let status = resp.status();
@@ -452,16 +457,19 @@ async fn probe_resource_metadata_via_www_authenticate(
             "WWW-Authenticate probe: {server_url} returned {} (not 401), skipping",
             status
         );
-        return None;
+        return Ok(None);
     }
-    let header = resp
-        .headers()
-        .get(reqwest::header::WWW_AUTHENTICATE)?
-        .to_str()
-        .ok()?;
-    let url = parse_www_authenticate_resource_metadata(header)?;
+    let Some(header) = resp.headers().get(reqwest::header::WWW_AUTHENTICATE) else {
+        return Ok(None);
+    };
+    let Ok(header) = header.to_str() else {
+        return Ok(None);
+    };
+    let Some(url) = parse_www_authenticate_resource_metadata(header) else {
+        return Ok(None);
+    };
     debug!("WWW-Authenticate probe: resource_metadata = {url}");
-    Some(url)
+    Ok(Some(url))
 }
 
 /// Discover the Authorization Server metadata for a given MCP server URL.
@@ -489,6 +497,18 @@ pub async fn discover_oauth(
     client: &reqwest::Client,
     server_url: &str,
 ) -> Result<OAuthDiscovery, OAuthError> {
+    discover_oauth_with_url_policy(client, server_url, |_| Ok(())).await
+}
+
+/// Discover MCP OAuth metadata, applying `url_policy` before every discovery fetch.
+pub async fn discover_oauth_with_url_policy<F>(
+    client: &reqwest::Client,
+    server_url: &str,
+    url_policy: F,
+) -> Result<OAuthDiscovery, OAuthError>
+where
+    F: Fn(&str) -> Result<(), OAuthError>,
+{
     let parsed = reqwest::Url::parse(server_url).map_err(|e| {
         OAuthError::DiscoveryFailed(format!("invalid server URL {server_url}: {e}"))
     })?;
@@ -511,7 +531,8 @@ pub async fn discover_oauth(
     // well-known guesses below are best-effort fallbacks for servers that
     // don't follow the spec.
     let www_authenticate_url =
-        probe_resource_metadata_via_www_authenticate(client, server_url, &mut probes).await;
+        probe_resource_metadata_via_www_authenticate(client, server_url, &mut probes, &url_policy)
+            .await?;
 
     // --- Step 1: RFC 9728 resource metadata ---
     // Use the URL from Step 0 if we have it; otherwise synthesize the
@@ -527,6 +548,7 @@ pub async fn discover_oauth(
     debug!("discover_as: trying RFC 9728 resource metadata at {rfc9728_url}");
     let mut resource = fallback_resource;
     let mut resource_scopes: Vec<String> = Vec::new();
+    url_policy(&rfc9728_url)?;
     let as_url: Option<String> = match client.get(&rfc9728_url).send().await {
         Ok(resp) => {
             let status = resp.status();
@@ -596,6 +618,7 @@ pub async fn discover_oauth(
 
     for url in &as_meta_urls {
         debug!("discover_as: trying AS metadata at {url}");
+        url_policy(url)?;
         match client.get(url).send().await {
             Ok(resp) => {
                 let status = resp.status();
