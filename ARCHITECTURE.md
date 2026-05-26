@@ -487,10 +487,15 @@ the `turso` crate with `sync` enabled for future Turso Cloud backup work, and
 that driver implementation is hidden behind `right-db`.
 
 `right-db` is the only crate that owns local database-driver details. Local
-opens must enable Turso's experimental index-method feature because
-conversation and memory search use `CREATE INDEX ... USING fts`. Other crates
-must use project-owned `right_db` types and must not expose raw `turso`
-connection, transaction, row, error, value, or parameter types in public APIs.
+filesystem-backed opens must enable Turso's experimental index-method feature
+because conversation and memory search use `CREATE INDEX ... USING fts`, and
+must enable Turso's experimental multiprocess-WAL path so bot and MCP
+aggregator processes can open the same per-agent `data.db`; this may create
+Turso sidecar files such as `data.db-tshm` next to the standard database/WAL
+files. The in-memory test/helper path is the exception: Turso does not support
+multiprocess WAL for `:memory:` databases. Other crates must use project-owned
+`right_db` types and must not expose raw `turso` connection, transaction, row,
+error, value, or parameter types in public APIs.
 The runtime database API is async-first: `open_connection`, `open_db`,
 `execute`, `query_*`, migrations, and transactions are awaited directly by
 callers. Do not add sync facades, runtime `block_on` bridges, or shared-runtime

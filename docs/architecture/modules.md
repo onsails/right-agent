@@ -63,7 +63,8 @@
 
 ### right-db
 
-- `Connection`, `Transaction`, `DbError` — async project-owned wrappers over the local Turso driver for per-agent SQLite-compatible `data.db`; legacy FTS5 cleanup uses bundled `rusqlite` only inside locked `migrate: true` schema bootstrap, not runtime opens.
+- `Connection`, `Transaction`, `DbError` — async project-owned wrappers over the local Turso driver for per-agent SQLite-compatible `data.db`; filesystem opens use Turso multiprocess WAL so bot and MCP aggregator processes can share the same DB and may create Turso sidecar files such as `data.db-tshm`, while in-memory opens stay single-process. Legacy FTS5 cleanup uses bundled `rusqlite` only inside locked `migrate: true` schema bootstrap, not runtime opens.
+- `multiprocess_io.rs` — Turso IO adapter that disables legacy DB/WAL file locks for filesystem-backed multiprocess-WAL opens while preserving shared WAL coordination.
 - `migrations.rs` — ordered idempotent migration runner.
 - `conversation.rs` — transcript archive and FTS search storage helpers.
 - `test_support.rs` — migrated temp `data.db` fixtures for crate tests.
