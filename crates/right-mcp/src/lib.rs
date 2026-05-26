@@ -7,11 +7,21 @@ pub mod oauth;
 pub mod proxy;
 pub mod reconnect;
 pub mod refresh;
+pub mod ssrf;
 pub mod tool_error;
 
 /// Name of the built-in MCP server that right-agent manages.
 /// Protected from dashboard removal - required for core functionality.
 pub const PROTECTED_MCP_SERVER: &str = "right";
+
+/// Built-in aggregator management namespace; reserved like [`PROTECTED_MCP_SERVER`].
+pub const RIGHT_META_NAMESPACE: &str = "rightmeta";
+
+/// Returns true if `name` is a reserved built-in server namespace
+/// that cannot be registered, removed, or modified by users.
+pub fn is_protected_server_name(name: &str) -> bool {
+    name == PROTECTED_MCP_SERVER || name == RIGHT_META_NAMESPACE
+}
 
 pub(crate) fn ensure_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();

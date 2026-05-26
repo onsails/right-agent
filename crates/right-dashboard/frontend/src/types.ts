@@ -39,7 +39,6 @@ export interface McpServerSummary {
 }
 
 export interface McpServersResponse {
-  agent: string
   servers: McpServerSummary[]
 }
 

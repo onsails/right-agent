@@ -71,14 +71,6 @@ export function resetAddFlowState(state: AddFlowDetectionState): AddFlowDetectio
   }
 }
 
-export function shouldClearDetectBusy(
-  activeRequestId: number | null,
-  completedRequestId: number,
-  busyAction: string | null,
-): boolean {
-  return activeRequestId === completedRequestId && busyAction === 'detect'
-}
-
 export function nonEmptyHeaders(rows: McpHeaderInput[]): McpHeaderInput[] {
   return rows
     .map((header) => ({ name: header.name.trim(), value: header.value }))

@@ -1,7 +1,3 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::str::FromStr as _;
-use std::sync::Arc;
-
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, State};
@@ -14,7 +10,6 @@ use super::{DashboardState, authenticate_api, json_error};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct DashboardMcpServersResponse {
-    pub agent: String,
     pub servers: Vec<DashboardMcpServer>,
 }
 
@@ -80,7 +75,7 @@ pub(crate) async fn handle_mcp_servers(
                 .servers
                 .into_iter()
                 .map(|server| DashboardMcpServer {
-                    protected: is_protected_mcp_server(&server.name),
+                    protected: right_mcp::is_protected_server_name(&server.name),
                     name: server.name,
                     url: server.url,
                     status: server.status,
@@ -89,11 +84,7 @@ pub(crate) async fn handle_mcp_servers(
                     header_names: server.header_names,
                 })
                 .collect();
-            Json(DashboardMcpServersResponse {
-                agent: state.agent_name,
-                servers,
-            })
-            .into_response()
+            Json(DashboardMcpServersResponse { servers }).into_response()
         }
         Err(error) => json_error(
             StatusCode::BAD_GATEWAY,
@@ -158,7 +149,7 @@ pub(crate) async fn handle_mcp_detect(
             )
         }
         Err(right_mcp::oauth::OAuthError::DiscoveryFailed(detail))
-            if detail.contains(PUBLIC_DNS_ERROR_MARKER) =>
+            if detail.contains(right_mcp::ssrf::PUBLIC_DNS_ERROR_MARKER) =>
         {
             json_error(
                 StatusCode::BAD_REQUEST,
@@ -187,6 +178,13 @@ pub(crate) async fn handle_mcp_add(
         Ok(request) => request,
         Err(response) => return response,
     };
+    if !is_valid_mcp_detection_url(&request.url) {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_url",
+            Some("invalid MCP URL"),
+        );
+    }
 
     let DashboardMcpAddRequest {
         name,
@@ -194,6 +192,13 @@ pub(crate) async fn handle_mcp_add(
         mode,
         headers: request_headers,
     } = request;
+    if !request_headers.is_empty() && mode != right_mcp::detect::McpAuthMode::Headers {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            Some("headers must be empty unless mode is 'headers'"),
+        );
+    }
     let (auth_type, mcp_headers) = match mode {
         right_mcp::detect::McpAuthMode::OAuth => (Some("oauth"), Vec::new()),
         right_mcp::detect::McpAuthMode::Headers => (Some("headers"), request_headers),
@@ -229,7 +234,7 @@ pub(crate) async fn handle_mcp_headers(
         Ok(request) => request,
         Err(response) => return response,
     };
-    if is_protected_mcp_server(&server_name) {
+    if right_mcp::is_protected_server_name(&server_name) {
         return json_error(
             StatusCode::FORBIDDEN,
             "protected_mcp",
@@ -316,8 +321,23 @@ pub(crate) async fn handle_mcp_oauth_start(
         }
     };
 
-    let http_client = reqwest::Client::new();
-    let discovery = match right_mcp::oauth::discover_oauth(&http_client, &server_url).await {
+    let http_client = match detection_http_client() {
+        Ok(client) => client,
+        Err(error) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "oauth_client_failed",
+                Some(&format!("{error:#}")),
+            );
+        }
+    };
+    let discovery = match right_mcp::oauth::discover_oauth_with_url_policy(
+        &http_client,
+        &server_url,
+        mcp_detection_url_policy,
+    )
+    .await
+    {
         Ok(discovery) => discovery,
         Err(_error) => {
             return json_error(
@@ -388,7 +408,7 @@ pub(crate) async fn handle_mcp_remove(
     if let Err(error) = authenticate_api(&state, &agent, &headers) {
         return error.into_response();
     }
-    if is_protected_mcp_server(&server_name) {
+    if right_mcp::is_protected_server_name(&server_name) {
         return json_error(
             StatusCode::FORBIDDEN,
             "protected_mcp",
@@ -406,95 +426,11 @@ pub(crate) async fn handle_mcp_remove(
     }
 }
 
-const PUBLIC_DNS_ERROR_MARKER: &str = "MCP detection DNS resolved to a non-public address";
-
-#[derive(Debug, Clone, Copy)]
-struct PublicNetworkResolver;
-
-impl reqwest::dns::Resolve for PublicNetworkResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = name.as_str().to_owned();
-        Box::pin(async move {
-            let addrs = tokio::net::lookup_host((host.as_str(), 0))
-                .await
-                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
-            let public_addrs = addrs
-                .filter(|addr| is_public_ip(addr.ip()))
-                .collect::<Vec<_>>();
-            if public_addrs.is_empty() {
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!("{PUBLIC_DNS_ERROR_MARKER}: {host}"),
-                ))
-                    as Box<dyn std::error::Error + Send + Sync>);
-            }
-
-            Ok(Box::new(public_addrs.into_iter()) as reqwest::dns::Addrs)
-        })
-    }
-}
-
 fn detection_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
+    right_mcp::ssrf::hardened_client_builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .dns_resolver(Arc::new(PublicNetworkResolver))
         .build()
-}
-
-fn is_public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => is_public_ipv4(ip),
-        IpAddr::V6(ip) => is_public_ipv6(ip),
-    }
-}
-
-fn is_public_ipv4(ip: Ipv4Addr) -> bool {
-    let ip = u32::from(ip);
-    !([0, 10, 127].iter().any(|octet| ip >> 24 == *octet)
-        || in_ipv4_cidr(ip, Ipv4Addr::new(100, 64, 0, 0), 10)
-        || in_ipv4_cidr(ip, Ipv4Addr::new(169, 254, 0, 0), 16)
-        || in_ipv4_cidr(ip, Ipv4Addr::new(172, 16, 0, 0), 12)
-        || in_ipv4_cidr(ip, Ipv4Addr::new(192, 0, 0, 0), 24)
-        || in_ipv4_cidr(ip, Ipv4Addr::new(192, 0, 2, 0), 24)
-        || in_ipv4_cidr(ip, Ipv4Addr::new(192, 88, 99, 0), 24)
-        || in_ipv4_cidr(ip, Ipv4Addr::new(192, 168, 0, 0), 16)
-        || in_ipv4_cidr(ip, Ipv4Addr::new(198, 18, 0, 0), 15)
-        || in_ipv4_cidr(ip, Ipv4Addr::new(198, 51, 100, 0), 24)
-        || in_ipv4_cidr(ip, Ipv4Addr::new(203, 0, 113, 0), 24)
-        || in_ipv4_cidr(ip, Ipv4Addr::new(224, 0, 0, 0), 4)
-        || in_ipv4_cidr(ip, Ipv4Addr::new(240, 0, 0, 0), 4))
-}
-
-fn is_public_ipv6(ip: Ipv6Addr) -> bool {
-    if let Some(v4) = ip.to_ipv4_mapped() {
-        return is_public_ipv4(v4);
-    }
-
-    let ip = u128::from(ip);
-    !(ip == 0
-        || ip == 1
-        || in_ipv6_cidr(ip, Ipv6Addr::from_str("64:ff9b::").unwrap(), 96)
-        || in_ipv6_cidr(ip, Ipv6Addr::from_str("64:ff9b:1::").unwrap(), 48)
-        || in_ipv6_cidr(ip, Ipv6Addr::from_str("100::").unwrap(), 64)
-        || in_ipv6_cidr(ip, Ipv6Addr::from_str("2001:2::").unwrap(), 48)
-        || in_ipv6_cidr(ip, Ipv6Addr::from_str("2001:db8::").unwrap(), 32)
-        || in_ipv6_cidr(ip, Ipv6Addr::from_str("2002::").unwrap(), 16)
-        || in_ipv6_cidr(ip, Ipv6Addr::from_str("fc00::").unwrap(), 7)
-        || in_ipv6_cidr(ip, Ipv6Addr::from_str("fe80::").unwrap(), 10)
-        || in_ipv6_cidr(ip, Ipv6Addr::from_str("ff00::").unwrap(), 8))
-}
-
-fn in_ipv4_cidr(ip: u32, base: Ipv4Addr, prefix: u32) -> bool {
-    let mask = u32::MAX << (32 - prefix);
-    (ip & mask) == (u32::from(base) & mask)
-}
-
-fn in_ipv6_cidr(ip: u128, base: Ipv6Addr, prefix: u32) -> bool {
-    let mask = u128::MAX << (128 - prefix);
-    (ip & mask) == (u128::from(base) & mask)
 }
 
 fn parse_json_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, Response> {
@@ -558,10 +494,6 @@ fn dashboard_oauth_callback_redirect_uri(
     ))
 }
 
-fn is_protected_mcp_server(server_name: &str) -> bool {
-    server_name == right_mcp::PROTECTED_MCP_SERVER || server_name == "rightmeta"
-}
-
 fn is_valid_mcp_detection_url(input: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(input) else {
         return false;
@@ -572,16 +504,10 @@ fn is_valid_mcp_detection_url(input: &str) -> bool {
         && parsed.password().is_none()
         && parsed.fragment().is_none()
         && parsed.host().is_some_and(|host| match host {
-            url::Host::Domain(domain) => !is_localhost_domain(domain),
-            url::Host::Ipv4(ip) => is_public_ipv4(ip),
-            url::Host::Ipv6(ip) => is_public_ipv6(ip),
+            url::Host::Domain(domain) => !right_mcp::credentials::is_localhost_domain(domain),
+            url::Host::Ipv4(ip) => right_mcp::ssrf::is_public_ipv4(ip),
+            url::Host::Ipv6(ip) => right_mcp::ssrf::is_public_ipv6(ip),
         })
-}
-
-fn is_localhost_domain(domain: &str) -> bool {
-    domain
-        .trim_end_matches('.')
-        .eq_ignore_ascii_case("localhost")
 }
 
 fn mcp_detection_url_policy(input: &str) -> Result<(), right_mcp::oauth::OAuthError> {
@@ -590,15 +516,19 @@ fn mcp_detection_url_policy(input: &str) -> Result<(), right_mcp::oauth::OAuthEr
     }
 
     Err(right_mcp::oauth::OAuthError::DiscoveryFailed(
-        PUBLIC_DNS_ERROR_MARKER.to_string(),
+        right_mcp::ssrf::PUBLIC_DNS_ERROR_MARKER.to_string(),
     ))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv6Addr};
+    use std::str::FromStr as _;
+
     use super::*;
     use reqwest::dns::Resolve as _;
     use right_mcp::internal_client::InternalClientError;
+    use right_mcp::ssrf::{PUBLIC_DNS_ERROR_MARKER, PublicNetworkResolver, is_public_ip};
 
     #[test]
     fn public_ip_guard_rejects_private_addresses() {
