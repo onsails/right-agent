@@ -149,18 +149,24 @@ impl InternalClient {
         auth_header: Option<&str>,
         auth_token: Option<&str>,
     ) -> Result<McpAddResponse, InternalClientError> {
-        self.post(
-            "/mcp-add",
-            &serde_json::json!({
-                "agent": agent,
-                "name": name,
-                "url": url,
-                "auth_type": auth_type,
-                "auth_header": auth_header,
-                "auth_token": auth_token,
-            }),
-        )
+        self.mcp_add_request(&McpAddRequest {
+            agent,
+            name,
+            url,
+            auth_type,
+            auth_header,
+            auth_token,
+            headers: Vec::new(),
+        })
         .await
+    }
+
+    /// Add an MCP server with a structured request body.
+    pub async fn mcp_add_request(
+        &self,
+        request: &McpAddRequest<'_>,
+    ) -> Result<McpAddResponse, InternalClientError> {
+        self.post("/mcp-add", request).await
     }
 
     /// Remove an MCP server for the given agent.
@@ -182,6 +188,14 @@ impl InternalClient {
     pub async fn mcp_list(&self, agent: &str) -> Result<McpListResponse, InternalClientError> {
         self.post("/mcp-list", &serde_json::json!({"agent": agent}))
             .await
+    }
+
+    /// Replace HTTP header credentials for an MCP server.
+    pub async fn mcp_set_headers(
+        &self,
+        request: &McpSetHeadersRequest,
+    ) -> Result<McpSetHeadersResponse, InternalClientError> {
+        self.post("/mcp-set-headers", request).await
     }
 
     /// Fetch MCP server instructions markdown for the given agent.
@@ -235,6 +249,51 @@ impl InternalClient {
 // Response types (must match the internal UDS handlers on the server side)
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HttpHeaderInput {
+    pub name: String,
+    pub value: String,
+}
+
+impl std::fmt::Debug for HttpHeaderInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpHeaderInput")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct McpAddRequest<'a> {
+    pub agent: &'a str,
+    pub name: &'a str,
+    pub url: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_header: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<&'a str>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<HttpHeaderInput>,
+}
+
+impl std::fmt::Debug for McpAddRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let auth_token = self.auth_token.map(|_| "<redacted>");
+        f.debug_struct("McpAddRequest")
+            .field("agent", &self.agent)
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("auth_type", &self.auth_type)
+            .field("auth_header", &self.auth_header)
+            .field("auth_token", &auth_token)
+            .field("headers", &self.headers)
+            .finish()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct McpAddResponse {
     pub tools_count: usize,
@@ -246,6 +305,18 @@ pub struct McpAddResponse {
 #[derive(Debug, Deserialize)]
 pub struct McpRemoveResponse {
     pub removed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpSetHeadersRequest {
+    pub agent: String,
+    pub name: String,
+    pub headers: Vec<HttpHeaderInput>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpSetHeadersResponse {
+    pub ok: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -261,9 +332,11 @@ pub struct McpServerStatus {
     pub tool_count: usize,
     #[serde(default)]
     pub auth_type: Option<String>,
+    #[serde(default)]
+    pub header_names: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct SetTokenRequest {
     pub agent: String,
     pub server: String,
@@ -275,6 +348,23 @@ pub struct SetTokenRequest {
     pub resource: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
+}
+
+impl std::fmt::Debug for SetTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let client_secret = self.client_secret.as_ref().map(|_| "<redacted>");
+        f.debug_struct("SetTokenRequest")
+            .field("agent", &self.agent)
+            .field("server", &self.server)
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .field("token_endpoint", &self.token_endpoint)
+            .field("client_id", &self.client_id)
+            .field("resource", &self.resource)
+            .field("client_secret", &client_secret)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -523,5 +613,70 @@ mod tests {
         let s = format!("{request:?}");
         assert!(!s.contains("supersecret"), "Debug must redact token: {s}");
         assert!(s.contains("<redacted>"), "Debug must mark redaction: {s}");
+    }
+
+    #[test]
+    fn mcp_header_request_debug_redacts_secret_values() {
+        let header = HttpHeaderInput {
+            name: "Authorization".to_owned(),
+            value: "Bearer raw-header-secret".to_owned(),
+        };
+        let add_request = McpAddRequest {
+            agent: "agent-1",
+            name: "nango",
+            url: "https://mcp.example.com/mcp",
+            auth_type: Some("headers"),
+            auth_header: None,
+            auth_token: Some("raw-auth-token"),
+            headers: vec![header.clone()],
+        };
+        let set_headers_request = McpSetHeadersRequest {
+            agent: "agent-1".to_owned(),
+            name: "nango".to_owned(),
+            headers: vec![header.clone()],
+        };
+        let set_token_request = SetTokenRequest {
+            agent: "agent-1".to_owned(),
+            server: "nango".to_owned(),
+            access_token: "raw-access-token".to_owned(),
+            refresh_token: "raw-refresh-token".to_owned(),
+            expires_in: 3600,
+            token_endpoint: "https://auth.example.com/token".to_owned(),
+            client_id: "client-id".to_owned(),
+            resource: "https://mcp.example.com/mcp".to_owned(),
+            client_secret: Some("raw-client-secret".to_owned()),
+        };
+
+        for debug in [
+            format!("{header:?}"),
+            format!("{add_request:?}"),
+            format!("{set_headers_request:?}"),
+            format!("{set_token_request:?}"),
+        ] {
+            assert!(
+                !debug.contains("raw-header-secret"),
+                "Debug must redact header values: {debug}"
+            );
+            assert!(
+                !debug.contains("raw-auth-token"),
+                "Debug must redact auth tokens: {debug}"
+            );
+            assert!(
+                !debug.contains("raw-access-token"),
+                "Debug must redact access tokens: {debug}"
+            );
+            assert!(
+                !debug.contains("raw-refresh-token"),
+                "Debug must redact refresh tokens: {debug}"
+            );
+            assert!(
+                !debug.contains("raw-client-secret"),
+                "Debug must redact client secrets: {debug}"
+            );
+            assert!(
+                debug.contains("<redacted>"),
+                "Debug must mark redaction: {debug}"
+            );
+        }
     }
 }

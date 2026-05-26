@@ -1073,7 +1073,9 @@ async fn main() -> miette::Result<()> {
                                 let http_headers = if s.auth_type.as_deref() == Some("headers") {
                                     match right_mcp::credentials::db_list_http_headers(
                                         &conn, &s.name,
-                                    ) {
+                                    )
+                                    .await
+                                    {
                                         Ok(headers) => Some(headers),
                                         Err(e) => {
                                             tracing::warn!(

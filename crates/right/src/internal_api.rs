@@ -15,7 +15,7 @@ use crate::aggregator::{
     AgentInfo, AgentTokenMap, ReconnectManagers, RefreshSenders, ToolDispatcher,
 };
 use right_mcp::internal_client::{
-    ProgressInvocationKindDto, ProgressRegisterRequest, ProgressRegisterResponse,
+    HttpHeaderInput, ProgressInvocationKindDto, ProgressRegisterRequest, ProgressRegisterResponse,
     ProgressUnregisterRequest, ProgressUnregisterResponse,
 };
 use right_mcp::refresh::{OAuthServerState, RefreshMessage};
@@ -35,6 +35,8 @@ pub(crate) struct McpAddRequest {
     pub auth_header: Option<String>,
     #[serde(default)]
     pub auth_token: Option<String>,
+    #[serde(default)]
+    pub headers: Vec<HttpHeaderInput>,
 }
 
 #[derive(Serialize)]
@@ -55,6 +57,19 @@ pub(crate) struct McpRemoveRequest {
 #[derive(Serialize)]
 pub(crate) struct McpRemoveResponse {
     pub removed: bool,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct McpSetHeadersRequest {
+    pub agent: String,
+    pub name: String,
+    #[serde(default)]
+    pub headers: Vec<HttpHeaderInput>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct McpSetHeadersResponse {
+    pub ok: bool,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +113,8 @@ pub(crate) struct McpServerStatus {
     pub tool_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_type: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub header_names: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +167,7 @@ pub(crate) fn internal_router(
     Router::new()
         .route("/mcp-add", post(handle_mcp_add))
         .route("/mcp-remove", post(handle_mcp_remove))
+        .route("/mcp-set-headers", post(handle_mcp_set_headers))
         .route("/set-token", post(handle_set_token))
         .route("/mcp-list", post(handle_mcp_list))
         .route("/mcp-instructions", post(handle_mcp_instructions))
@@ -195,6 +213,23 @@ fn plain_http_warning(url: &str) -> Option<String> {
             Some("Plain HTTP: trusted/encrypted networks only.".to_string())
         }
         _ => None,
+    }
+}
+
+fn header_inputs_to_secrets(
+    headers: Vec<HttpHeaderInput>,
+) -> Result<Vec<credentials::HttpHeaderSecret>, CredentialError> {
+    headers
+        .into_iter()
+        .map(|header| credentials::HttpHeaderSecret::new(header.name, header.value))
+        .collect()
+}
+
+fn display_header_name(name: String) -> String {
+    if name == "authorization" {
+        "Authorization".to_string()
+    } else {
+        name
     }
 }
 
@@ -285,8 +320,25 @@ async fn handle_mcp_add(
         return validation_error(format!("{e}")).into_response();
     }
 
+    let header_secrets = match header_inputs_to_secrets(req.headers.clone()) {
+        Ok(headers) => headers,
+        Err(e) => return validation_error(format!("{e}")).into_response(),
+    };
+    if req.auth_type.as_deref() == Some("headers") && header_secrets.is_empty() {
+        return validation_error("headers auth requires at least one header").into_response();
+    }
+
     // Determine AuthMethod from request fields
-    let auth_method = AuthMethod::from_db(req.auth_type.as_deref(), req.auth_header.as_deref());
+    let auth_method = AuthMethod::from_db_with_headers(
+        req.auth_type.as_deref(),
+        req.auth_header.as_deref(),
+        header_secrets.clone(),
+    );
+    let auth_token = if req.auth_type.as_deref() == Some("headers") {
+        None
+    } else {
+        req.auth_token.clone()
+    };
     let http_warning = plain_http_warning(&req.url);
 
     // Get backend, agent_dir, and proxies from DashMap, then drop the guard before DB await.
@@ -311,13 +363,19 @@ async fn handle_mcp_add(
             return internal_error(format!("db_add_server: {e:#}")).into_response();
         }
         // Persist auth fields if provided
-        if let Some(ref auth_type_str) = req.auth_type
+        if req.auth_type.as_deref() == Some("headers") {
+            if let Err(e) =
+                credentials::db_set_http_headers(&conn, &req.name, &header_secrets).await
+            {
+                return internal_error(format!("db_set_http_headers: {e:#}")).into_response();
+            }
+        } else if let Some(ref auth_type_str) = req.auth_type
             && let Err(e) = credentials::db_set_auth(
                 &conn,
                 &req.name,
                 auth_type_str,
                 req.auth_header.as_deref(),
-                req.auth_token.as_deref(),
+                auth_token.as_deref(),
             )
             .await
         {
@@ -326,7 +384,7 @@ async fn handle_mcp_add(
     }
 
     // Create ProxyBackend with the resolved auth method and optional token
-    let token = Arc::new(tokio::sync::RwLock::new(req.auth_token.clone()));
+    let token = Arc::new(tokio::sync::RwLock::new(auth_token.clone()));
     let backend = ProxyBackend::new(
         req.name.clone(),
         agent_dir,
@@ -460,6 +518,91 @@ async fn handle_mcp_remove(
     }
 
     (StatusCode::OK, Json(McpRemoveResponse { removed: true })).into_response()
+}
+
+async fn handle_mcp_set_headers(
+    State(state): State<InternalState>,
+    Json(req): Json<McpSetHeadersRequest>,
+) -> axum::response::Response {
+    if req.name == right_mcp::PROTECTED_MCP_SERVER || req.name == "rightmeta" {
+        return validation_error("protected MCP server cannot be modified").into_response();
+    }
+
+    let header_secrets = match header_inputs_to_secrets(req.headers) {
+        Ok(headers) => headers,
+        Err(e) => return validation_error(format!("{e}")).into_response(),
+    };
+    if header_secrets.is_empty() {
+        return validation_error("headers auth requires at least one header").into_response();
+    }
+
+    let (right, proxies_lock) = {
+        let Some(registry) = state.dispatcher.agents.get(&req.agent) else {
+            return not_found(format!("agent '{}' not found", req.agent)).into_response();
+        };
+        (registry.right.clone(), Arc::clone(&registry.proxies))
+    };
+    let conn_arc = match right.get_conn(&req.agent).await {
+        Ok(c) => c,
+        Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
+    };
+
+    let existing = {
+        let proxies = proxies_lock.read().await;
+        let Some(existing) = proxies.get(&req.name) else {
+            return not_found(format!("server '{}' not found", req.name)).into_response();
+        };
+        Arc::clone(existing)
+    };
+
+    {
+        let conn = conn_arc.lock().await;
+        match credentials::db_list_servers(&conn).await {
+            Ok(servers) if servers.iter().any(|server| server.name == req.name) => {}
+            Ok(_) => return not_found(format!("server '{}' not found", req.name)).into_response(),
+            Err(e) => return internal_error(format!("db_list_servers: {e:#}")).into_response(),
+        }
+    }
+
+    let replacement = Arc::new(ProxyBackend::new(
+        req.name.clone(),
+        existing.agent_dir().to_path_buf(),
+        existing.url().to_string(),
+        Arc::new(tokio::sync::RwLock::new(None)),
+        AuthMethod::Headers(header_secrets.clone()),
+    ));
+    let connect_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    if let Err(e) = replacement.connect(connect_client).await {
+        let detail = format!("{e:#}");
+        let status = if right_mcp::proxy::is_upstream_auth_error(&detail) {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        return error_response(status, "mcp_set_headers_reconnect_failed", Some(detail))
+            .into_response();
+    }
+    {
+        let conn = conn_arc.lock().await;
+        if let Err(e) = credentials::db_set_http_headers(&conn, &req.name, &header_secrets).await {
+            return match e {
+                CredentialError::ServerNotFound(_) => {
+                    not_found(format!("server '{}' not found", req.name)).into_response()
+                }
+                _ => internal_error(format!("db_set_http_headers: {e:#}")).into_response(),
+            };
+        }
+    }
+    {
+        let mut proxies = proxies_lock.write().await;
+        proxies.insert(req.name, replacement);
+    }
+
+    (StatusCode::OK, Json(McpSetHeadersResponse { ok: true })).into_response()
 }
 
 async fn handle_progress_register(
@@ -690,21 +833,44 @@ async fn handle_mcp_list(
         status: "connected".into(),
         tool_count: right_tool_count,
         auth_type: None,
+        header_names: Vec::new(),
     });
 
     // Read auth_type from SQLite (preserves "oauth" — AuthMethod enum has no OAuth variant)
-    let db_auth_types: std::collections::HashMap<String, Option<String>> = {
+    let (db_auth_types, db_header_names): (
+        std::collections::HashMap<String, Option<String>>,
+        std::collections::HashMap<String, Vec<String>>,
+    ) = {
         match right.get_conn(&req.agent).await {
             Ok(conn_arc) => {
                 let conn = conn_arc.lock().await;
-                credentials::db_list_servers(&conn)
+                let servers = credentials::db_list_servers(&conn)
                     .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|s| (s.name, s.auth_type))
-                    .collect()
+                    .unwrap_or_default();
+                let auth_types = servers
+                    .iter()
+                    .map(|s| (s.name.clone(), s.auth_type.clone()))
+                    .collect();
+                let mut header_names = std::collections::HashMap::new();
+                for server in servers {
+                    let names = if server.auth_type.as_deref() == Some("headers") {
+                        credentials::db_list_http_header_names(&conn, &server.name)
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(display_header_name)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    header_names.insert(server.name, names);
+                }
+                (auth_types, header_names)
             }
-            Err(_) => std::collections::HashMap::new(),
+            Err(_) => (
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            ),
         }
     };
 
@@ -724,6 +890,7 @@ async fn handle_mcp_list(
             status: status.to_string(),
             tool_count,
             auth_type,
+            header_names: db_header_names.get(name).cloned().unwrap_or_default(),
         });
     }
 
@@ -978,6 +1145,63 @@ mod tests {
                 }
             }),
         );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/mcp")
+    }
+
+    async fn start_empty_mcp_server() -> String {
+        #[derive(Clone)]
+        struct EmptyMcpServer;
+
+        impl rmcp::ServerHandler for EmptyMcpServer {
+            fn get_info(&self) -> rmcp::model::ServerInfo {
+                rmcp::model::ServerInfo::new(
+                    rmcp::model::ServerCapabilities::builder()
+                        .enable_tools()
+                        .build(),
+                )
+                .with_server_info(rmcp::model::Implementation::new("test-mcp", "0.0.0"))
+            }
+
+            #[allow(clippy::manual_async_fn)]
+            fn list_tools(
+                &self,
+                _request: Option<rmcp::model::PaginatedRequestParams>,
+                _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+            ) -> impl std::future::Future<
+                Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>,
+            > + Send
+            + '_ {
+                async {
+                    Ok(rmcp::model::ListToolsResult {
+                        tools: Vec::new(),
+                        next_cursor: None,
+                        meta: None,
+                    })
+                }
+            }
+        }
+
+        let ct = tokio_util::sync::CancellationToken::new();
+        let config = rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default()
+            .with_stateful_mode(false)
+            .with_json_response(true)
+            .with_sse_keep_alive(None)
+            .with_cancellation_token(ct)
+            .disable_allowed_hosts();
+        let session_manager = Arc::new(
+            rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default(),
+        );
+        let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
+            || Ok::<_, std::io::Error>(EmptyMcpServer),
+            session_manager,
+            config,
+        );
+        let app = Router::new().nest_service("/mcp", service);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1245,6 +1469,195 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK, "body={body}");
         assert_eq!(body["tools_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn mcp_add_headers_auth_redacts_values_in_list() {
+        setup_crypto();
+        let tmp = tempfile::tempdir().unwrap();
+        let app = make_test_router(tmp.path()).await;
+        let mcp_url = start_empty_mcp_server().await;
+
+        let (status, body) = send_json(
+            app.clone(),
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "nango",
+                "url": mcp_url,
+                "auth_type": "headers",
+                "headers": [
+                    { "name": "Authorization", "value": "Bearer env-secret" },
+                    { "name": "connection-id", "value": "conn_123" },
+                    { "name": "provider-config-key", "value": "github" }
+                ]
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body={body}");
+
+        let (status, body) = send_json(
+            app,
+            "/mcp-list",
+            serde_json::json!({ "agent": "test-agent" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body={body}");
+        let servers = body["servers"].as_array().unwrap();
+        let nango = servers
+            .iter()
+            .find(|server| server["name"] == "nango")
+            .expect("nango listed");
+        assert_eq!(nango["auth_type"], "headers");
+        assert_eq!(
+            nango["header_names"],
+            serde_json::json!(["Authorization", "connection-id", "provider-config-key"])
+        );
+        assert!(
+            !body.to_string().contains("env-secret"),
+            "list response must not expose header values: {body}"
+        );
+        assert!(
+            !body.to_string().contains("conn_123"),
+            "list response must not expose header values: {body}"
+        );
+        assert!(
+            !body.to_string().contains("github"),
+            "list response must not expose header values: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_set_headers_replaces_existing_header_names() {
+        setup_crypto();
+        let tmp = tempfile::tempdir().unwrap();
+        let app = make_test_router(tmp.path()).await;
+        let mcp_url = start_empty_mcp_server().await;
+
+        let (status, body) = send_json(
+            app.clone(),
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "nango",
+                "url": mcp_url,
+                "auth_type": "headers",
+                "headers": [
+                    { "name": "Authorization", "value": "Bearer old" },
+                    { "name": "connection-id", "value": "old_conn" }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body={body}");
+
+        let (status, body) = send_json(
+            app.clone(),
+            "/mcp-set-headers",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "nango",
+                "headers": [
+                    { "name": "connection-id", "value": "new_conn" }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body={body}");
+
+        let (status, body) = send_json(
+            app,
+            "/mcp-list",
+            serde_json::json!({ "agent": "test-agent" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body={body}");
+        let nango = body["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|server| server["name"] == "nango")
+            .unwrap();
+        assert_eq!(nango["status"], "connected");
+        assert_eq!(nango["header_names"], serde_json::json!(["connection-id"]));
+        assert!(
+            !body.to_string().contains("new_conn"),
+            "list response must not expose header values: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_add_headers_auth_rejects_empty_headers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = make_test_router(tmp.path()).await;
+
+        let (status, body) = send_json(
+            app,
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "nango",
+                "url": "https://api.nango.dev/mcp",
+                "auth_type": "headers",
+                "headers": []
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("at least one header"),
+            "expected empty headers validation error, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_set_headers_rejects_empty_headers() {
+        setup_crypto();
+        let tmp = tempfile::tempdir().unwrap();
+        let app = make_test_router(tmp.path()).await;
+        let mcp_url = start_empty_mcp_server().await;
+
+        let (status, body) = send_json(
+            app.clone(),
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "nango",
+                "url": mcp_url,
+                "auth_type": "headers",
+                "headers": [
+                    { "name": "Authorization", "value": "Bearer old" }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body={body}");
+
+        let (status, body) = send_json(
+            app,
+            "/mcp-set-headers",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "nango",
+                "headers": []
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("at least one header"),
+            "expected empty headers validation error, got: {body}"
+        );
     }
 
     #[tokio::test]
