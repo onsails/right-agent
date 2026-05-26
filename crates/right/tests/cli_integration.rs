@@ -804,7 +804,19 @@ groups:
     conn.execute("INSERT INTO test (val) VALUES ('backup-test')", ())
         .await
         .unwrap();
+    let _: i64 = conn
+        .query_one("PRAGMA wal_checkpoint(TRUNCATE)", (), |row| row.get(0))
+        .await
+        .unwrap();
     drop(conn);
+    for sidecar in [
+        "data.db-wal",
+        "data.db-shm",
+        "data.db-tshm",
+        "data.db-future",
+    ] {
+        fs::write(agent_dir.join(sidecar), format!("{sidecar}\n")).unwrap();
+    }
 
     // Run backup.
     right()
@@ -845,6 +857,18 @@ groups:
         "backup must preserve allowlist.yaml content"
     );
     assert!(backup_dir.join("data.db").exists(), "should have data.db");
+    let tar_entries = tar_entries(&backup_dir.join("sandbox.tar.gz"));
+    for sidecar in [
+        "data.db-wal",
+        "data.db-shm",
+        "data.db-tshm",
+        "data.db-future",
+    ] {
+        assert!(
+            !tar_entries.contains(&format!("test-agent/{sidecar}")),
+            "no-sandbox backup tar must not contain database sidecar {sidecar}"
+        );
+    }
 
     // Delete original agent.
     fs::remove_dir_all(&agent_dir).unwrap();
