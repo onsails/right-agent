@@ -39,6 +39,14 @@ obvious localhost domain aliases such as `localhost` and `localhost.` are also
 rejected before fetch. Other domain names are allowed through the dashboard
 detection client's guarded DNS resolver.
 
+Dashboard OAuth start is a Mini-App-authenticated API flow. The route lists
+registered MCP servers through the Aggregator internal API, finds the selected
+server URL, requires a configured tunnel hostname, discovers OAuth metadata,
+optionally performs Dynamic Client Registration, stores an in-memory
+`PendingAuth` keyed by generated state, and returns only the authorization URL.
+The callback URI is always `https://<tunnel-hostname>/oauth/<agent>/callback`;
+tokens, client secrets, and PKCE verifiers remain out of dashboard responses.
+
 ## MCP Token Refresh
 
 ```
