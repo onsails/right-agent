@@ -872,6 +872,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use http::Request;
+    use right_db::test_support::{hold_exclusive_sqlite_lock, legacy_probe_retry_lock_hold};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
 
@@ -1537,6 +1538,26 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::OK);
+        let instructions = body["instructions"].as_str().unwrap();
+        assert_eq!(instructions, "# MCP Server Instructions\n");
+    }
+
+    #[tokio::test]
+    async fn mcp_instructions_recovers_from_transient_db_open_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = make_test_router(tmp.path()).await;
+        let db_path = tmp.path().join("agents/test-agent/data.db");
+        let lock = hold_exclusive_sqlite_lock(db_path, legacy_probe_retry_lock_hold());
+
+        let (status, body) = send_json(
+            app,
+            "/mcp-instructions",
+            serde_json::json!({ "agent": "test-agent" }),
+        )
+        .await;
+
+        lock.join().expect("release sqlite lock");
+        assert_eq!(status, StatusCode::OK, "body: {body:#}");
         let instructions = body["instructions"].as_str().unwrap();
         assert_eq!(instructions, "# MCP Server Instructions\n");
     }
