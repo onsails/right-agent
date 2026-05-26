@@ -54,6 +54,17 @@ pub(crate) struct DashboardMcpMutationResponse {
     pub ok: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct DashboardMcpOAuthStartResponse {
+    pub auth_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardOAuthCallbackRedirectUriError {
+    MissingTunnel,
+    InvalidTunnelHostname,
+}
+
 pub(crate) async fn handle_mcp_servers(
     AxumPath(agent): AxumPath<String>,
     State(state): State<DashboardState>,
@@ -246,13 +257,127 @@ pub(crate) async fn handle_mcp_oauth_start(
         return error.into_response();
     }
 
-    let _pending_auth = &state.pending_auth;
-    let _ = server_name;
-    json_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "oauth_start_not_implemented",
-        Some("dashboard OAuth start is not implemented yet"),
+    let server = match state.internal_client.mcp_list(&state.agent_name).await {
+        Ok(list) => list
+            .servers
+            .into_iter()
+            .find(|server| server.name == server_name),
+        Err(error) => {
+            return json_error(
+                StatusCode::BAD_GATEWAY,
+                "mcp_list_failed",
+                Some(&format!("{error:#}")),
+            );
+        }
+    };
+    let Some(server) = server else {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            Some("MCP server not found"),
+        );
+    };
+    let Some(server_url) = server.url else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "mcp_server_missing_url",
+            Some("MCP server has no URL"),
+        );
+    };
+
+    let global_config = match right_config::read_global_config(&state.home) {
+        Ok(config) => config,
+        Err(error) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "config_failed",
+                Some(&format!("{error:#}")),
+            );
+        }
+    };
+    let redirect_uri = match dashboard_oauth_callback_redirect_uri(
+        &global_config.tunnel.hostname,
+        &state.agent_name,
+    ) {
+        Ok(uri) => uri,
+        Err(DashboardOAuthCallbackRedirectUriError::MissingTunnel) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "tunnel_missing",
+                Some("tunnel hostname is not configured"),
+            );
+        }
+        Err(DashboardOAuthCallbackRedirectUriError::InvalidTunnelHostname) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_tunnel_hostname",
+                Some("tunnel hostname must be a bare host"),
+            );
+        }
+    };
+
+    let http_client = reqwest::Client::new();
+    let discovery = match right_mcp::oauth::discover_oauth(&http_client, &server_url).await {
+        Ok(discovery) => discovery,
+        Err(_error) => {
+            return json_error(
+                StatusCode::BAD_GATEWAY,
+                "oauth_discovery_failed",
+                Some("OAuth discovery failed"),
+            );
+        }
+    };
+    let scopes = discovery.scopes;
+    let scope_param = right_mcp::oauth::scope_param(&scopes);
+    let scope_refs = scopes.iter().map(String::as_str).collect::<Vec<_>>();
+    let (client_id, client_secret) = match right_mcp::oauth::register_client_or_fallback(
+        &http_client,
+        &discovery.metadata,
+        None,
+        &redirect_uri,
+        &scope_refs,
     )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(_error) => {
+            return json_error(
+                StatusCode::BAD_GATEWAY,
+                "client_registration_failed",
+                Some("OAuth client registration failed"),
+            );
+        }
+    };
+
+    let (code_verifier, code_challenge) = right_mcp::oauth::generate_pkce();
+    let oauth_state = right_mcp::oauth::generate_state();
+    state.pending_auth.lock().await.insert(
+        oauth_state.clone(),
+        right_mcp::oauth::PendingAuth {
+            server_name: server_name.clone(),
+            server_url,
+            resource: discovery.resource.clone(),
+            code_verifier,
+            state: oauth_state.clone(),
+            token_endpoint: discovery.metadata.token_endpoint.clone(),
+            client_id: client_id.clone(),
+            client_secret,
+            redirect_uri: redirect_uri.clone(),
+            created_at: std::time::Instant::now(),
+        },
+    );
+
+    let auth_url = right_mcp::oauth::build_auth_url(
+        &discovery.metadata,
+        &client_id,
+        &redirect_uri,
+        &oauth_state,
+        &code_challenge,
+        &discovery.resource,
+        scope_param.as_deref(),
+    );
+
+    Json(DashboardMcpOAuthStartResponse { auth_url }).into_response()
 }
 
 pub(crate) async fn handle_mcp_remove(
@@ -407,6 +532,32 @@ fn internal_api_error_response(
     }
 }
 
+fn dashboard_oauth_callback_redirect_uri(
+    tunnel_hostname: &str,
+    agent_name: &str,
+) -> Result<String, DashboardOAuthCallbackRedirectUriError> {
+    let tunnel_hostname = tunnel_hostname.trim();
+    if tunnel_hostname.is_empty() {
+        return Err(DashboardOAuthCallbackRedirectUriError::MissingTunnel);
+    }
+
+    let base = url::Url::parse(&format!("https://{tunnel_hostname}/"))
+        .map_err(|_| DashboardOAuthCallbackRedirectUriError::InvalidTunnelHostname)?;
+    if base.host_str().is_none()
+        || base.path() != "/"
+        || base.query().is_some()
+        || base.fragment().is_some()
+        || !base.username().is_empty()
+        || base.password().is_some()
+    {
+        return Err(DashboardOAuthCallbackRedirectUriError::InvalidTunnelHostname);
+    }
+
+    Ok(format!(
+        "https://{tunnel_hostname}/oauth/{agent_name}/callback"
+    ))
+}
+
 fn is_protected_mcp_server(server_name: &str) -> bool {
     server_name == right_mcp::PROTECTED_MCP_SERVER || server_name == "rightmeta"
 }
@@ -502,6 +653,40 @@ mod tests {
     #[test]
     fn mcp_detection_url_validation_allows_public_domains() {
         assert!(is_valid_mcp_detection_url("https://mcp.example.com/mcp"));
+    }
+
+    #[test]
+    fn dashboard_oauth_callback_redirect_uri_accepts_bare_host() {
+        let uri = dashboard_oauth_callback_redirect_uri("right.example.com:8443", "alpha").unwrap();
+
+        assert_eq!(uri, "https://right.example.com:8443/oauth/alpha/callback");
+    }
+
+    #[test]
+    fn dashboard_oauth_callback_redirect_uri_rejects_empty_hostname() {
+        let error = dashboard_oauth_callback_redirect_uri("  ", "alpha")
+            .expect_err("empty tunnel hostname must be rejected");
+
+        assert_eq!(error, DashboardOAuthCallbackRedirectUriError::MissingTunnel);
+    }
+
+    #[test]
+    fn dashboard_oauth_callback_redirect_uri_rejects_non_bare_hostname() {
+        for hostname in [
+            "https://right.example.com",
+            "right.example.com/oauth",
+            "right.example.com?token=abc",
+            "user@right.example.com",
+            "right.example.com#fragment",
+        ] {
+            let error = dashboard_oauth_callback_redirect_uri(hostname, "alpha")
+                .expect_err("non-bare tunnel hostname must be rejected");
+
+            assert_eq!(
+                error,
+                DashboardOAuthCallbackRedirectUriError::InvalidTunnelHostname
+            );
+        }
     }
 
     #[test]

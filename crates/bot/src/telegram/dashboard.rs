@@ -791,6 +791,7 @@ mod tests {
     };
     use serde_json::json;
     use sha2::Sha256;
+    use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
     use tower::ServiceExt as _;
 
     const BOT_TOKEN: &str = "123456:test-token";
@@ -993,6 +994,40 @@ mod tests {
         (status, value)
     }
 
+    async fn post_json_with_state(
+        path: &str,
+        auth: Option<String>,
+        state: super::DashboardState,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let router = super::build_dashboard_router(state);
+        let mut builder = Request::builder()
+            .uri(path)
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(auth) = auth {
+            builder = builder.header(header::AUTHORIZATION, format!("tma {auth}"));
+        }
+        let response = router
+            .oneshot(
+                builder
+                    .body(Body::from(body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .expect("body bytes");
+        let value = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).expect("json response")
+        };
+        (status, value)
+    }
+
     async fn post_raw(
         path: &str,
         auth: Option<String>,
@@ -1061,6 +1096,252 @@ mod tests {
             format!("---\nname: {skill_name}\ndescription: Test skill.\n---\n# {skill_name}\n"),
         )
         .unwrap();
+    }
+
+    fn setup_crypto() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    fn write_test_global_config(home: &std::path::Path) {
+        let credentials_file = home.join("tunnel-credentials.json");
+        std::fs::write(&credentials_file, "{}").expect("write tunnel credentials");
+        right_config::write_global_config(
+            home,
+            &right_config::GlobalConfig {
+                tunnel: right_config::TunnelConfig {
+                    tunnel_uuid: "00000000-0000-0000-0000-000000000000".to_string(),
+                    credentials_file,
+                    hostname: "right.example.com".to_string(),
+                },
+                aggregator: right_config::AggregatorConfig::default(),
+            },
+        )
+        .expect("write global config");
+    }
+
+    fn test_state_with_internal_socket(
+        agent_dir: std::path::PathBuf,
+        socket_path: std::path::PathBuf,
+        pending_auth: super::super::oauth_callback::PendingAuthMap,
+    ) -> super::DashboardState {
+        let mut state = test_state(agent_dir);
+        state.internal_client =
+            Arc::new(right_mcp::internal_client::InternalClient::new(socket_path));
+        state.pending_auth = pending_auth;
+        state
+    }
+
+    struct InternalApiFixture {
+        _dir: tempfile::TempDir,
+        socket_path: std::path::PathBuf,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    fn start_internal_mcp_list_server(servers: serde_json::Value) -> InternalApiFixture {
+        let dir = tempfile::tempdir().expect("internal API tempdir");
+        let socket_path = dir.path().join("internal.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind internal socket");
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept internal client");
+            let request = read_http_request(&mut stream).await;
+            assert!(
+                request.starts_with("POST /mcp-list "),
+                "unexpected internal request: {request}"
+            );
+            assert!(
+                request.contains(r#""agent":"alpha""#),
+                "internal request should be agent-scoped: {request}"
+            );
+            write_json_response(&mut stream, "200 OK", &json!({ "servers": servers })).await;
+        });
+
+        InternalApiFixture {
+            _dir: dir,
+            socket_path,
+            handle,
+        }
+    }
+
+    struct MockOAuthServer {
+        base_url: String,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    enum MockOAuthRegisterResponse {
+        Success,
+        Error { status: &'static str, body: String },
+    }
+
+    async fn start_mock_oauth_server() -> MockOAuthServer {
+        start_mock_oauth_server_with_register_response(MockOAuthRegisterResponse::Success).await
+    }
+
+    async fn start_mock_oauth_server_with_register_response(
+        register_response: MockOAuthRegisterResponse,
+    ) -> MockOAuthServer {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock OAuth server");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let server_base_url = base_url.clone();
+        let handle = tokio::spawn(async move {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().await.expect("accept OAuth client");
+                let request = read_http_request(&mut stream).await;
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .expect("request path");
+
+                match path {
+                    "/mcp" => {
+                        let metadata = format!(
+                            "{}/.well-known/oauth-protected-resource/mcp",
+                            server_base_url
+                        );
+                        write_http_response(
+                            &mut stream,
+                            "401 Unauthorized",
+                            &[(
+                                "WWW-Authenticate",
+                                format!(r#"Bearer resource_metadata="{metadata}""#),
+                            )],
+                            "",
+                        )
+                        .await;
+                    }
+                    "/.well-known/oauth-protected-resource/mcp" => {
+                        write_json_response(
+                            &mut stream,
+                            "200 OK",
+                            &json!({
+                                "resource": format!("{}/mcp", server_base_url),
+                                "authorization_servers": [server_base_url],
+                                "scopes_supported": ["tools.read"]
+                            }),
+                        )
+                        .await;
+                    }
+                    "/.well-known/oauth-authorization-server" => {
+                        write_json_response(
+                            &mut stream,
+                            "200 OK",
+                            &json!({
+                                "authorization_endpoint": format!("{}/authorize", server_base_url),
+                                "token_endpoint": format!("{}/token", server_base_url),
+                                "registration_endpoint": format!("{}/register", server_base_url),
+                                "scopes_supported": ["tools.read", "offline_access"]
+                            }),
+                        )
+                        .await;
+                    }
+                    "/register" => match &register_response {
+                        MockOAuthRegisterResponse::Success => {
+                            write_json_response(
+                                &mut stream,
+                                "200 OK",
+                                &json!({
+                                    "client_id": "dashboard-client",
+                                    "client_secret": "dashboard-secret"
+                                }),
+                            )
+                            .await;
+                        }
+                        MockOAuthRegisterResponse::Error { status, body } => {
+                            write_http_response(
+                                &mut stream,
+                                status,
+                                &[("Content-Type", "application/json".to_string())],
+                                body,
+                            )
+                            .await;
+                        }
+                    },
+                    _ => {
+                        write_http_response(&mut stream, "404 Not Found", &[], "").await;
+                    }
+                }
+            }
+        });
+
+        MockOAuthServer { base_url, handle }
+    }
+
+    async fn read_http_request<S>(stream: &mut S) -> String
+    where
+        S: AsyncRead + Unpin,
+    {
+        let mut buf = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let n = stream.read(&mut chunk).await.expect("read request");
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if http_request_complete(&buf) {
+                break;
+            }
+        }
+        String::from_utf8(buf).expect("utf8 request")
+    }
+
+    fn http_request_complete(buf: &[u8]) -> bool {
+        let Some(header_end) = buf.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&buf[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        buf.len() >= header_end + 4 + content_length
+    }
+
+    async fn write_json_response<S>(stream: &mut S, status: &str, body: &serde_json::Value)
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let body = body.to_string();
+        write_http_response(
+            stream,
+            status,
+            &[("Content-Type", "application/json".to_string())],
+            &body,
+        )
+        .await;
+    }
+
+    async fn write_http_response<S>(
+        stream: &mut S,
+        status: &str,
+        headers: &[(&str, String)],
+        body: &str,
+    ) where
+        S: AsyncWrite + Unpin,
+    {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
+        for (name, value) in headers {
+            response.push_str(name);
+            response.push_str(": ");
+            response.push_str(value);
+            response.push_str("\r\n");
+        }
+        response.push_str("\r\n");
+        response.push_str(body);
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
     }
 
     async fn insert_lifecycle_row(
@@ -1293,6 +1574,240 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn dashboard_mcp_oauth_start_unknown_server_returns_not_found() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let internal = start_internal_mcp_list_server(json!([
+            {
+                "name": "present",
+                "url": "https://mcp.example.com/mcp",
+                "status": "connected",
+                "tool_count": 0,
+                "auth_type": "oauth",
+                "header_names": []
+            }
+        ]));
+        let pending_auth = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let state = test_state_with_internal_socket(
+            temp.path().to_path_buf(),
+            internal.socket_path.clone(),
+            pending_auth.clone(),
+        );
+
+        let (status, body) = post_json_with_state(
+            "/dashboard/alpha/api/v1/mcp/servers/missing/oauth/start",
+            Some(signed_init_data(42)),
+            state,
+            json!({}),
+        )
+        .await;
+        internal.handle.await.expect("internal API task");
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "not_found");
+        assert!(!body.to_string().contains("access_token"));
+        assert!(
+            pending_auth.lock().await.is_empty(),
+            "unknown server must not create pending auth"
+        );
+    }
+
+    #[tokio::test]
+    async fn dashboard_mcp_oauth_start_existing_server_missing_url_returns_distinct_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let internal = start_internal_mcp_list_server(json!([
+            {
+                "name": "no-url",
+                "url": null,
+                "status": "needs-auth",
+                "tool_count": 0,
+                "auth_type": "oauth",
+                "header_names": []
+            }
+        ]));
+        let pending_auth = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let state = test_state_with_internal_socket(
+            temp.path().to_path_buf(),
+            internal.socket_path.clone(),
+            pending_auth.clone(),
+        );
+
+        let (status, body) = post_json_with_state(
+            "/dashboard/alpha/api/v1/mcp/servers/no-url/oauth/start",
+            Some(signed_init_data(42)),
+            state,
+            json!({}),
+        )
+        .await;
+        internal.handle.await.expect("internal API task");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "mcp_server_missing_url");
+        assert!(!body.to_string().contains("access_token"));
+        assert!(!body.to_string().contains("refresh_token"));
+        assert!(!body.to_string().contains("client_secret"));
+        assert!(!body.to_string().contains("code_verifier"));
+        assert!(
+            pending_auth.lock().await.is_empty(),
+            "missing URL must not create pending auth"
+        );
+    }
+
+    #[tokio::test]
+    async fn dashboard_mcp_oauth_start_success_returns_auth_url_and_stores_pending_auth() {
+        setup_crypto();
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_global_config(temp.path());
+        let oauth = start_mock_oauth_server().await;
+        let server_url = format!("{}/mcp", oauth.base_url);
+        let internal = start_internal_mcp_list_server(json!([
+            {
+                "name": "linear",
+                "url": server_url,
+                "status": "needs-auth",
+                "tool_count": 0,
+                "auth_type": "oauth",
+                "header_names": []
+            }
+        ]));
+        let pending_auth = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let state = test_state_with_internal_socket(
+            temp.path().to_path_buf(),
+            internal.socket_path.clone(),
+            pending_auth.clone(),
+        );
+
+        let (status, body) = post_json_with_state(
+            "/dashboard/alpha/api/v1/mcp/servers/linear/oauth/start",
+            Some(signed_init_data(42)),
+            state,
+            json!({}),
+        )
+        .await;
+        internal.handle.await.expect("internal API task");
+        oauth.handle.await.expect("OAuth server task");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.as_object()
+                .expect("response object")
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["auth_url"]
+        );
+        let body_text = body.to_string();
+        assert!(!body_text.contains("access_token"));
+        assert!(!body_text.contains("refresh_token"));
+        assert!(!body_text.contains("client_secret"));
+        assert!(!body_text.contains("code_verifier"));
+
+        let auth_url = body["auth_url"].as_str().expect("auth_url string");
+        let parsed_auth_url = url::Url::parse(auth_url).expect("parse auth URL");
+        assert_eq!(
+            parsed_auth_url.as_str().split('?').next(),
+            Some(format!("{}/authorize", oauth.base_url).as_str())
+        );
+        let query = parsed_auth_url
+            .query_pairs()
+            .into_owned()
+            .collect::<std::collections::HashMap<_, _>>();
+        let state_param = query.get("state").expect("state query parameter");
+        assert_eq!(
+            query.get("redirect_uri").map(String::as_str),
+            Some("https://right.example.com/oauth/alpha/callback")
+        );
+        assert_eq!(
+            query.get("resource").map(String::as_str),
+            Some(format!("{}/mcp", oauth.base_url).as_str())
+        );
+        assert_eq!(
+            query.get("client_id").map(String::as_str),
+            Some("dashboard-client")
+        );
+        assert_eq!(
+            query.get("scope").map(String::as_str),
+            Some("tools.read offline_access")
+        );
+
+        let pending = pending_auth.lock().await;
+        assert_eq!(pending.len(), 1);
+        let pending = pending.get(state_param).expect("pending auth by state");
+        assert_eq!(pending.server_name, "linear");
+        assert_eq!(pending.server_url, format!("{}/mcp", oauth.base_url));
+        assert_eq!(pending.resource, format!("{}/mcp", oauth.base_url));
+        assert_eq!(pending.token_endpoint, format!("{}/token", oauth.base_url));
+        assert_eq!(pending.client_id, "dashboard-client");
+        assert_eq!(pending.client_secret.as_deref(), Some("dashboard-secret"));
+        assert_eq!(
+            pending.redirect_uri,
+            "https://right.example.com/oauth/alpha/callback"
+        );
+        assert_eq!(pending.state, *state_param);
+        assert!(!pending.code_verifier.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dashboard_mcp_oauth_start_registration_error_omits_upstream_secret_body() {
+        setup_crypto();
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_global_config(temp.path());
+        let leaked_body = json!({
+            "error": "server_error",
+            "client_secret": "leaked-client-secret",
+            "access_token": "leaked-access-token",
+            "code_verifier": "leaked-code-verifier"
+        })
+        .to_string();
+        let oauth =
+            start_mock_oauth_server_with_register_response(MockOAuthRegisterResponse::Error {
+                status: "500 Internal Server Error",
+                body: leaked_body,
+            })
+            .await;
+        let server_url = format!("{}/mcp", oauth.base_url);
+        let internal = start_internal_mcp_list_server(json!([
+            {
+                "name": "linear",
+                "url": server_url,
+                "status": "needs-auth",
+                "tool_count": 0,
+                "auth_type": "oauth",
+                "header_names": []
+            }
+        ]));
+        let pending_auth = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let state = test_state_with_internal_socket(
+            temp.path().to_path_buf(),
+            internal.socket_path.clone(),
+            pending_auth.clone(),
+        );
+
+        let (status, body) = post_json_with_state(
+            "/dashboard/alpha/api/v1/mcp/servers/linear/oauth/start",
+            Some(signed_init_data(42)),
+            state,
+            json!({}),
+        )
+        .await;
+        internal.handle.await.expect("internal API task");
+        oauth.handle.await.expect("OAuth server task");
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "client_registration_failed");
+        assert_eq!(body["detail"], "OAuth client registration failed");
+        let body_text = body.to_string();
+        assert!(!body_text.contains("leaked-client-secret"));
+        assert!(!body_text.contains("leaked-access-token"));
+        assert!(!body_text.contains("leaked-code-verifier"));
+        assert!(!body_text.contains("client_secret"));
+        assert!(!body_text.contains("access_token"));
+        assert!(!body_text.contains("code_verifier"));
+        assert!(
+            pending_auth.lock().await.is_empty(),
+            "failed registration must not create pending auth"
+        );
     }
 
     #[tokio::test]
