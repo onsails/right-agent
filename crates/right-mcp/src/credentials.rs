@@ -248,15 +248,9 @@ fn parse_url(url_str: &str) -> Result<Url, CredentialError> {
     Url::parse(url_str).map_err(|e| CredentialError::InvalidServerUrl(format!("invalid URL: {e}")))
 }
 
-/// Returns true if `domain` is `localhost` (with optional trailing dot,
-/// ASCII-case-insensitive).
-pub fn is_localhost_domain(domain: &str) -> bool {
-    crate::ssrf::is_localhost_domain(domain)
-}
-
 fn is_loopback_host(host: &url::Host<&str>) -> bool {
     match host {
-        url::Host::Domain(domain) => is_localhost_domain(domain),
+        url::Host::Domain(domain) => crate::ssrf::is_localhost_domain(domain),
         url::Host::Ipv4(v4) => v4.is_loopback(),
         url::Host::Ipv6(v6) => {
             v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()) || v6.is_loopback()
@@ -327,6 +321,17 @@ pub struct McpServerEntry {
     pub client_secret: Option<String>,
     pub expires_at: Option<String>,
     pub oauth_resource: Option<String>,
+}
+
+/// Returns true if a server with the given name is registered.
+pub async fn db_server_exists(conn: &Connection, name: &str) -> Result<bool, CredentialError> {
+    let row: Option<i64> = conn
+        .query_one("SELECT 1 FROM mcp_servers WHERE name = ?1", [name], |row| {
+            row.get(0)
+        })
+        .await
+        .optional()?;
+    Ok(row.is_some())
 }
 
 /// Register (or update) an external MCP server in the SQLite registry.
@@ -625,6 +630,22 @@ pub async fn db_list_http_header_names(
             "SELECT header_name FROM mcp_http_headers WHERE server_name = ?1 ORDER BY header_name",
             [server_name],
             |row| row.get(0),
+        )
+        .await?)
+}
+
+/// List stored HTTP header names for every server in one query.
+///
+/// Returns `(server_name, header_name)` rows ordered by server, then header.
+pub async fn db_list_all_http_header_names(
+    conn: &Connection,
+) -> Result<Vec<(String, String)>, CredentialError> {
+    Ok(conn
+        .query_all(
+            "SELECT server_name, header_name FROM mcp_http_headers
+         ORDER BY server_name, header_name",
+            (),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .await?)
 }

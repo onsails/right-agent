@@ -107,7 +107,7 @@ pub(crate) async fn handle_mcp_detect(
         Ok(request) => request,
         Err(response) => return response,
     };
-    if !is_valid_mcp_detection_url(&request.url) {
+    if !right_mcp::ssrf::is_public_http_url(&request.url) {
         return json_error(
             StatusCode::BAD_REQUEST,
             "invalid_url",
@@ -178,7 +178,7 @@ pub(crate) async fn handle_mcp_add(
         Ok(request) => request,
         Err(response) => return response,
     };
-    if !is_valid_mcp_detection_url(&request.url) {
+    if !right_mcp::ssrf::is_public_http_url(&request.url) {
         return json_error(
             StatusCode::BAD_REQUEST,
             "invalid_url",
@@ -495,12 +495,8 @@ fn dashboard_oauth_callback_redirect_uri(
     ))
 }
 
-fn is_valid_mcp_detection_url(input: &str) -> bool {
-    right_mcp::ssrf::is_public_http_url(input)
-}
-
 fn mcp_detection_url_policy(input: &str) -> Result<(), right_mcp::oauth::OAuthError> {
-    if is_valid_mcp_detection_url(input) {
+    if right_mcp::ssrf::is_public_http_url(input) {
         return Ok(());
     }
 
@@ -576,7 +572,7 @@ mod tests {
             "https://LocalHost./mcp",
         ] {
             assert!(
-                !is_valid_mcp_detection_url(url),
+                !right_mcp::ssrf::is_public_http_url(url),
                 "localhost domain URL must be rejected: {url}"
             );
         }
@@ -584,7 +580,9 @@ mod tests {
 
     #[test]
     fn mcp_detection_url_validation_allows_public_domains() {
-        assert!(is_valid_mcp_detection_url("https://mcp.example.com/mcp"));
+        assert!(right_mcp::ssrf::is_public_http_url(
+            "https://mcp.example.com/mcp"
+        ));
     }
 
     #[test]
