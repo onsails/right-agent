@@ -114,7 +114,7 @@ const LEGACY_FTS5_PROBE_MAX_RETRIES: usize = 1;
 async fn prepare_legacy_fts5_schema_for_turso(db_path: &Path) -> Result<(), DbError> {
     let mut retries = 0;
     loop {
-        match prepare_legacy_fts5_schema_for_turso_once(db_path) {
+        match prepare_legacy_fts5_schema_for_turso_once(db_path).await {
             Ok(()) => return Ok(()),
             Err(error) if error.is_transient() && retries < LEGACY_FTS5_PROBE_MAX_RETRIES => {
                 retries += 1;
@@ -182,11 +182,129 @@ fn current_process_name() -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
-fn prepare_legacy_fts5_schema_for_turso_once(db_path: &Path) -> Result<(), DbError> {
+async fn prepare_legacy_fts5_schema_for_turso_once(db_path: &Path) -> Result<(), DbError> {
     if legacy_fts5_schema_exists(db_path)? {
+        legacy_fts5_scrubber_overlap_probe(db_path).await;
         scrub_legacy_fts5_schema(db_path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn arm_legacy_fts5_scrubber_overlap_probe(
+    db_path: &Path,
+) -> LegacyFts5ScrubberOverlapProbeGuard {
+    legacy_fts5_scrubber_overlap_probe_test_support::arm(db_path)
+}
+
+#[cfg(test)]
+pub(crate) struct LegacyFts5ScrubberOverlapProbeGuard {
+    db_path: std::path::PathBuf,
+    probe: std::sync::Arc<legacy_fts5_scrubber_overlap_probe_test_support::ProbeState>,
+}
+
+#[cfg(test)]
+impl LegacyFts5ScrubberOverlapProbeGuard {
+    pub(crate) fn overlap_observed(&self) -> bool {
+        self.probe.overlap_observed()
+    }
+}
+
+#[cfg(test)]
+impl Drop for LegacyFts5ScrubberOverlapProbeGuard {
+    fn drop(&mut self) {
+        legacy_fts5_scrubber_overlap_probe_test_support::disarm(&self.db_path, &self.probe);
+    }
+}
+
+#[cfg(test)]
+async fn legacy_fts5_scrubber_overlap_probe(db_path: &Path) {
+    legacy_fts5_scrubber_overlap_probe_test_support::enter(db_path).await;
+}
+
+#[cfg(not(test))]
+async fn legacy_fts5_scrubber_overlap_probe(_db_path: &Path) {}
+
+#[cfg(test)]
+mod legacy_fts5_scrubber_overlap_probe_test_support {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::Duration;
+
+    use super::LegacyFts5ScrubberOverlapProbeGuard;
+
+    const PROBE_HOLD: Duration = Duration::from_millis(100);
+
+    pub(crate) struct ProbeState {
+        active: AtomicUsize,
+        overlap: AtomicBool,
+    }
+
+    impl ProbeState {
+        fn new() -> Self {
+            Self {
+                active: AtomicUsize::new(0),
+                overlap: AtomicBool::new(false),
+            }
+        }
+
+        pub(crate) fn overlap_observed(&self) -> bool {
+            self.overlap.load(Ordering::SeqCst)
+        }
+    }
+
+    struct ActiveProbe {
+        probe: Arc<ProbeState>,
+    }
+
+    impl Drop for ActiveProbe {
+        fn drop(&mut self) {
+            self.probe.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    static PROBES: OnceLock<Mutex<HashMap<PathBuf, Arc<ProbeState>>>> = OnceLock::new();
+
+    pub(crate) fn arm(db_path: &Path) -> LegacyFts5ScrubberOverlapProbeGuard {
+        let probe = Arc::new(ProbeState::new());
+        probes()
+            .lock()
+            .unwrap()
+            .insert(db_path.to_path_buf(), Arc::clone(&probe));
+        LegacyFts5ScrubberOverlapProbeGuard {
+            db_path: db_path.to_path_buf(),
+            probe,
+        }
+    }
+
+    pub(crate) async fn enter(db_path: &Path) {
+        let probe = probes().lock().unwrap().get(db_path).cloned();
+        let Some(probe) = probe else {
+            return;
+        };
+
+        if probe.active.fetch_add(1, Ordering::SeqCst) > 0 {
+            probe.overlap.store(true, Ordering::SeqCst);
+        }
+        let _active = ActiveProbe { probe };
+        tokio::time::sleep(PROBE_HOLD).await;
+    }
+
+    pub(crate) fn disarm(db_path: &Path, probe: &Arc<ProbeState>) {
+        let mut probes = probes().lock().unwrap();
+        if probes
+            .get(db_path)
+            .is_some_and(|current| Arc::ptr_eq(current, probe))
+        {
+            probes.remove(db_path);
+        }
+    }
+
+    fn probes() -> &'static Mutex<HashMap<PathBuf, Arc<ProbeState>>> {
+        PROBES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
 }
 
 fn legacy_fts5_schema_exists(db_path: &Path) -> Result<bool, DbError> {
