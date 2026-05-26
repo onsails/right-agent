@@ -982,6 +982,23 @@ async fn test_agent_restore_no_sandbox_removes_legacy_db_sidecars() {
     fs::create_dir_all(&tar_agent).unwrap();
     fs::write(tar_agent.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
     fs::write(tar_agent.join("notes.txt"), "from tar\n").unwrap();
+    let tar_db = right_db::open_connection(&tar_agent, true).await.unwrap();
+    tar_db
+        .execute("CREATE TABLE legacy_restore_probe (val TEXT)", ())
+        .await
+        .unwrap();
+    tar_db
+        .execute(
+            "INSERT INTO legacy_restore_probe (val) VALUES ('stale tar db')",
+            (),
+        )
+        .await
+        .unwrap();
+    let _: i64 = tar_db
+        .query_one("PRAGMA wal_checkpoint(TRUNCATE)", (), |row| row.get(0))
+        .await
+        .unwrap();
+    drop(tar_db);
     for sidecar in [
         "data.db-wal",
         "data.db-shm",

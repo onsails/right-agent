@@ -3461,6 +3461,7 @@ async fn cmd_agent_restore(
                 ));
             }
             remove_database_sidecars(&agent_dir)?;
+            copy_database_snapshot_for_restore(backup_path, &agent_dir)?;
 
             restore::apply_memory_action(
                 &agent_dir.join("agent.yaml"),
@@ -3609,6 +3610,56 @@ fn remove_database_sidecars(agent_dir: &Path) -> miette::Result<usize> {
     Ok(removed)
 }
 
+fn copy_database_snapshot_for_restore(backup_dir: &Path, agent_dir: &Path) -> miette::Result<bool> {
+    use miette::IntoDiagnostic;
+
+    let rel = Path::new("data.db");
+    let src = backup_dir.join(rel);
+    match std::fs::symlink_metadata(&src) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(miette::miette!(
+                    "agent file {} is a symlink; symlinks are rejected",
+                    src.display()
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(miette::miette!("failed to stat {}: {e:#}", src.display()));
+        }
+    }
+
+    let dest = agent_dir.join(rel);
+    match std::fs::symlink_metadata(&dest) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            std::fs::remove_dir_all(&dest)
+                .into_diagnostic()
+                .map_err(|e| {
+                    miette::miette!(
+                        "failed to remove restored database directory {}: {e:#}",
+                        dest.display()
+                    )
+                })?;
+        }
+        Ok(_) => {
+            std::fs::remove_file(&dest).into_diagnostic().map_err(|e| {
+                miette::miette!(
+                    "failed to remove restored database file {}: {e:#}",
+                    dest.display()
+                )
+            })?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(miette::miette!("failed to stat {}: {e:#}", dest.display()));
+        }
+    }
+
+    copy_required_agent_file(backup_dir, agent_dir, rel)?;
+    Ok(true)
+}
+
 fn resolve_restored_policy_path(
     agent_dir: &Path,
     policy_file: Option<&Path>,
@@ -3652,11 +3703,14 @@ fn copy_agent_restore_config_files(
     agent_dir: &Path,
     config: &right_agent::agent::types::AgentConfig,
 ) -> miette::Result<()> {
-    for filename in ["agent.yaml", "policy.yaml", "allowlist.yaml", "data.db"] {
+    for filename in ["agent.yaml", "policy.yaml", "allowlist.yaml"] {
         let rel = Path::new(filename);
         if copy_agent_file_if_exists(backup_dir, agent_dir, rel)? {
             println!("{filename} restored");
         }
+    }
+    if copy_database_snapshot_for_restore(backup_dir, agent_dir)? {
+        println!("data.db restored");
     }
 
     if let Some(policy_file) = custom_sandbox_policy_file(Some(config))? {
@@ -4488,8 +4542,9 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
 mod tests {
     use super::{
         ConfigCommands, MemoryCommands, build_agent_ssh_command, cleanup_failed_restore_agent_dir,
-        copy_agent_backup_config_files, copy_agent_restore_config_files, remove_database_sidecars,
-        resolve_agent_db, resolve_restored_policy_path, restored_mcp_auth_method, truncate_content,
+        copy_agent_backup_config_files, copy_agent_restore_config_files,
+        copy_database_snapshot_for_restore, remove_database_sidecars, resolve_agent_db,
+        resolve_restored_policy_path, restored_mcp_auth_method, truncate_content,
         write_bootstrap_right_mcp_policy, write_managed_settings,
     };
     use std::fs;
@@ -4700,6 +4755,58 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(agent_dir.join("target.txt").exists());
         assert!(!agent_dir.join("data.db-link").exists());
+    }
+
+    #[test]
+    fn copy_database_snapshot_for_restore_replaces_stale_data_db() {
+        let tmp = TempDir::new().unwrap();
+        let backup_dir = tmp.path().join("backup");
+        let agent_dir = tmp.path().join("agents").join("right-drill");
+        fs::create_dir_all(&backup_dir).unwrap();
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(backup_dir.join("data.db"), "canonical").unwrap();
+        fs::write(agent_dir.join("data.db"), "stale").unwrap();
+
+        let copied = copy_database_snapshot_for_restore(&backup_dir, &agent_dir).unwrap();
+
+        assert!(copied);
+        assert_eq!(
+            fs::read_to_string(agent_dir.join("data.db")).unwrap(),
+            "canonical"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_database_snapshot_for_restore_unlinks_symlink_destination() {
+        let tmp = TempDir::new().unwrap();
+        let backup_dir = tmp.path().join("backup");
+        let agent_dir = tmp.path().join("agents").join("right-drill");
+        fs::create_dir_all(&backup_dir).unwrap();
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(backup_dir.join("data.db"), "canonical").unwrap();
+        fs::write(agent_dir.join("target.txt"), "target").unwrap();
+        std::os::unix::fs::symlink(agent_dir.join("target.txt"), agent_dir.join("data.db"))
+            .unwrap();
+
+        let copied = copy_database_snapshot_for_restore(&backup_dir, &agent_dir).unwrap();
+
+        assert!(copied);
+        assert_eq!(
+            fs::read_to_string(agent_dir.join("target.txt")).unwrap(),
+            "target"
+        );
+        assert_eq!(
+            fs::read_to_string(agent_dir.join("data.db")).unwrap(),
+            "canonical"
+        );
+        assert!(
+            !fs::symlink_metadata(agent_dir.join("data.db"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "restored data.db must be a regular copied file, not the tar symlink"
+        );
     }
 
     #[test]
