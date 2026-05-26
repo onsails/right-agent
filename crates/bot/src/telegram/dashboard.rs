@@ -71,6 +71,8 @@ pub(crate) struct DashboardState {
     pub internal_client: std::sync::Arc<right_mcp::internal_client::InternalClient>,
     pub pending_auth: super::oauth_callback::PendingAuthMap,
     #[cfg(test)]
+    pub mcp_oauth_allow_private_urls: bool,
+    #[cfg(test)]
     pub doctor_checks: Option<Vec<right_agent::doctor::DoctorCheck>>,
 }
 
@@ -822,6 +824,7 @@ mod tests {
                 agent_dir.join("missing-internal.sock"),
             )),
             pending_auth: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            mcp_oauth_allow_private_urls: false,
             doctor_checks: Some(vec![
                 right_agent::doctor::DoctorCheck {
                     name: "right".to_string(),
@@ -1656,6 +1659,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashboard_mcp_oauth_start_rejects_private_server_url_without_pending_auth() {
+        setup_crypto();
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_global_config(temp.path());
+        let internal = start_internal_mcp_list_server(json!([
+            {
+                "name": "local",
+                "url": "http://127.0.0.1:9/mcp",
+                "status": "needs-auth",
+                "tool_count": 0,
+                "auth_type": "oauth",
+                "header_names": []
+            }
+        ]));
+        let pending_auth = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let state = test_state_with_internal_socket(
+            temp.path().to_path_buf(),
+            internal.socket_path.clone(),
+            pending_auth.clone(),
+        );
+
+        let (status, body) = post_json_with_state(
+            "/dashboard/alpha/api/v1/mcp/servers/local/oauth/start",
+            Some(signed_init_data(42)),
+            state,
+            json!({}),
+        )
+        .await;
+        internal.handle.await.expect("internal API task");
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "oauth_discovery_failed");
+        assert!(!body.to_string().contains("127.0.0.1"));
+        assert!(
+            pending_auth.lock().await.is_empty(),
+            "private URL rejection must not create pending auth"
+        );
+    }
+
+    #[tokio::test]
     async fn dashboard_mcp_oauth_start_success_returns_auth_url_and_stores_pending_auth() {
         setup_crypto();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1673,11 +1716,12 @@ mod tests {
             }
         ]));
         let pending_auth = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-        let state = test_state_with_internal_socket(
+        let mut state = test_state_with_internal_socket(
             temp.path().to_path_buf(),
             internal.socket_path.clone(),
             pending_auth.clone(),
         );
+        state.mcp_oauth_allow_private_urls = true;
 
         let (status, body) = post_json_with_state(
             "/dashboard/alpha/api/v1/mcp/servers/linear/oauth/start",
@@ -1778,11 +1822,12 @@ mod tests {
             }
         ]));
         let pending_auth = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-        let state = test_state_with_internal_socket(
+        let mut state = test_state_with_internal_socket(
             temp.path().to_path_buf(),
             internal.socket_path.clone(),
             pending_auth.clone(),
         );
+        state.mcp_oauth_allow_private_urls = true;
 
         let (status, body) = post_json_with_state(
             "/dashboard/alpha/api/v1/mcp/servers/linear/oauth/start",

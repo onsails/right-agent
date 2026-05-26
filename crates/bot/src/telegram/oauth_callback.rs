@@ -22,7 +22,7 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
 use right_mcp::internal_client::{InternalClient, SetTokenRequest};
-use right_mcp::oauth::{PendingAuth, exchange_token, verify_state};
+use right_mcp::oauth::{OAuthError, PendingAuth, exchange_token_with_url_policy, verify_state};
 
 use super::markdown::html_escape;
 
@@ -230,10 +230,14 @@ async fn complete_oauth_flow(
     cb_state: OAuthCallbackState,
     agent_name: &str,
 ) -> miette::Result<()> {
-    let http_client = reqwest::Client::new();
+    let http_client = right_mcp::ssrf::hardened_client_builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| miette::miette!("oauth token HTTP client failed: {e:#}"))?;
 
     // Token exchange
-    let token_resp = exchange_token(
+    let token_resp = exchange_token_with_url_policy(
         &http_client,
         &pending.token_endpoint,
         &code,
@@ -242,6 +246,7 @@ async fn complete_oauth_flow(
         pending.client_secret.as_deref(),
         &pending.code_verifier,
         &pending.resource,
+        oauth_token_url_policy,
     )
     .await
     .map_err(|e| miette::miette!("token exchange failed: {e:#}"))?;
@@ -316,6 +321,16 @@ async fn complete_oauth_flow(
     }
 
     Ok(())
+}
+
+fn oauth_token_url_policy(input: &str) -> Result<(), OAuthError> {
+    if right_mcp::ssrf::is_public_http_url(input) {
+        return Ok(());
+    }
+
+    Err(OAuthError::TokenExchangeFailed(
+        right_mcp::ssrf::PUBLIC_DNS_ERROR_MARKER.to_string(),
+    ))
 }
 
 fn set_token_failure_message(
@@ -596,5 +611,15 @@ mod tests {
         assert!(msg.contains("</pre>"));
         assert!(msg.contains("&lt;bad&gt;&amp;\"detail\""));
         assert!(!msg.contains("<bad>"));
+    }
+
+    #[test]
+    fn oauth_token_url_policy_rejects_private_literals_without_echoing_url() {
+        let err = oauth_token_url_policy("http://127.0.0.1:8080/token")
+            .expect_err("private token endpoints must be rejected");
+        let detail = format!("{err:#}");
+
+        assert!(detail.contains(right_mcp::ssrf::PUBLIC_DNS_ERROR_MARKER));
+        assert!(!detail.contains("127.0.0.1"));
     }
 }

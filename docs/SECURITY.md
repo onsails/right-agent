@@ -15,9 +15,9 @@ Sandboxes are Docker containers. Back them up, snapshot them, migrate them — s
 
 ## Credential Isolation
 
-Host credentials (`.credentials.json`) are **never** uploaded to sandboxes. Each agent authenticates independently through an OAuth login flow that happens entirely inside the sandbox. The login flow is PTY-driven and managed through Telegram — the user receives an OAuth URL, clicks it, and pastes the auth code back in chat.
+Host credentials (`.credentials.json`) are **never** uploaded to sandboxes. Each agent authenticates independently through an OAuth login flow that is initiated from Telegram and completed through the bot callback endpoint. The user receives an OAuth URL, approves it in the browser, and the callback delivers the resulting MCP token to the host-side aggregator over its internal Unix socket.
 
-MCP OAuth tokens are stored per-agent and refreshed automatically (10 minutes before expiry). Token refresh happens on the host and the updated `.mcp.json` is uploaded to the sandbox.
+MCP OAuth tokens and HTTP header secrets are stored per-agent in the host-side SQLite credential store. Token refresh happens on the host; agents see MCP tools through the aggregator/proxy layer, not through sandbox-local `.mcp.json` uploads.
 
 ## Network Policy
 

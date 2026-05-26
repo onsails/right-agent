@@ -61,6 +61,43 @@ pub struct AsMetadata {
     pub scopes_supported: Option<Vec<String>>,
 }
 
+/// Validate the AS metadata endpoints before the host process uses them.
+///
+/// Discovery fetches are policy-checked before each HTTP request. Metadata can
+/// still point subsequent server-side POSTs at different URLs, so token and
+/// registration endpoints must be checked explicitly before use or persistence.
+pub fn validate_as_metadata_endpoints_with_url_policy<F>(
+    metadata: &AsMetadata,
+    url_policy: F,
+) -> Result<(), OAuthError>
+where
+    F: Fn(&str) -> Result<(), OAuthError>,
+{
+    validate_as_metadata_endpoint(
+        "authorization_endpoint",
+        &metadata.authorization_endpoint,
+        &url_policy,
+    )?;
+    validate_as_metadata_endpoint("token_endpoint", &metadata.token_endpoint, &url_policy)?;
+    if let Some(registration_endpoint) = &metadata.registration_endpoint {
+        validate_as_metadata_endpoint("registration_endpoint", registration_endpoint, &url_policy)?;
+    }
+    Ok(())
+}
+
+fn validate_as_metadata_endpoint<F>(
+    field: &str,
+    url: &str,
+    url_policy: &F,
+) -> Result<(), OAuthError>
+where
+    F: Fn(&str) -> Result<(), OAuthError>,
+{
+    url_policy(url).map_err(|error| {
+        OAuthError::DiscoveryFailed(format!("unsafe OAuth metadata {field}: {error}"))
+    })
+}
+
 /// Resource Metadata (RFC 9728) — points to the Authorization Server.
 #[derive(Debug, Deserialize)]
 pub struct ResourceMetadata {
@@ -632,6 +669,7 @@ where
                     {
                         MetadataProbe::Found(meta) => {
                             debug!("discover_as: succeeded via {url}");
+                            validate_as_metadata_endpoints_with_url_policy(&meta, &url_policy)?;
                             let scopes =
                                 select_oauth_scopes(&resource_scopes, &meta.scopes_supported);
                             return Ok(OAuthDiscovery {
@@ -735,7 +773,34 @@ pub async fn register_client_or_fallback(
     redirect_uri: &str,
     scopes: &[&str],
 ) -> Result<(String, Option<String>), OAuthError> {
+    register_client_or_fallback_with_url_policy(
+        client,
+        metadata,
+        static_client_id,
+        redirect_uri,
+        scopes,
+        |_| Ok(()),
+    )
+    .await
+}
+
+/// Try DCR with an explicit URL policy for the metadata-provided registration
+/// endpoint; fall back to a static `client_id` when registration is unavailable.
+pub async fn register_client_or_fallback_with_url_policy<F>(
+    client: &reqwest::Client,
+    metadata: &AsMetadata,
+    static_client_id: Option<&str>,
+    redirect_uri: &str,
+    scopes: &[&str],
+    url_policy: F,
+) -> Result<(String, Option<String>), OAuthError>
+where
+    F: Fn(&str) -> Result<(), OAuthError>,
+{
     if let Some(reg_ep) = &metadata.registration_endpoint {
+        url_policy(reg_ep).map_err(|error| {
+            OAuthError::DcrFailed(format!("unsafe registration_endpoint: {error}"))
+        })?;
         let dcr = register_client(client, reg_ep, redirect_uri, scopes).await?;
         Ok((dcr.client_id, dcr.client_secret))
     } else if let Some(id) = static_client_id {
@@ -825,6 +890,41 @@ pub async fn exchange_token(
     code_verifier: &str,
     resource: &str,
 ) -> Result<TokenResponse, OAuthError> {
+    exchange_token_with_url_policy(
+        client,
+        token_endpoint,
+        code,
+        redirect_uri,
+        client_id,
+        client_secret,
+        code_verifier,
+        resource,
+        |_| Ok(()),
+    )
+    .await
+}
+
+/// Exchange an authorization code for tokens after checking the token endpoint
+/// with the caller's outbound URL policy.
+#[allow(clippy::too_many_arguments)]
+pub async fn exchange_token_with_url_policy<F>(
+    client: &reqwest::Client,
+    token_endpoint: &str,
+    code: &str,
+    redirect_uri: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    code_verifier: &str,
+    resource: &str,
+    url_policy: F,
+) -> Result<TokenResponse, OAuthError>
+where
+    F: Fn(&str) -> Result<(), OAuthError>,
+{
+    url_policy(token_endpoint).map_err(|error| {
+        OAuthError::TokenExchangeFailed(format!("unsafe token_endpoint: {error}"))
+    })?;
+
     let mut params = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -1130,6 +1230,89 @@ mod tests {
             discovery.metadata.token_endpoint,
             format!("{}/oauth2/token", server.uri())
         );
+    }
+
+    #[tokio::test]
+    async fn discover_oauth_policy_rejects_private_metadata_token_endpoint() {
+        setup_crypto();
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let server_origin = server.uri();
+
+        Mock::given(method("GET"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "resource": format!("{server_origin}/mcp"),
+                "authorization_servers": [server_origin]
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "authorization_endpoint": "https://auth.example.com/authorize",
+                "token_endpoint": "http://127.0.0.1:9/token"
+            })))
+            .mount(&server)
+            .await;
+
+        let allowed_discovery_origin = server.uri();
+        let err = discover_oauth_with_url_policy(
+            &reqwest::Client::new(),
+            &format!("{}/mcp", server.uri()),
+            move |url| {
+                if url.starts_with(&allowed_discovery_origin)
+                    || url.starts_with("https://auth.example.com/")
+                {
+                    Ok(())
+                } else {
+                    Err(OAuthError::DiscoveryFailed(
+                        crate::ssrf::PUBLIC_DNS_ERROR_MARKER.to_string(),
+                    ))
+                }
+            },
+        )
+        .await
+        .expect_err("private token endpoint from AS metadata must be rejected");
+
+        let detail = format!("{err:#}");
+        assert!(detail.contains("unsafe OAuth metadata token_endpoint"));
+        assert!(!detail.contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn validate_as_metadata_endpoints_rejects_private_registration_endpoint() {
+        let metadata = AsMetadata {
+            authorization_endpoint: "https://auth.example.com/authorize".into(),
+            token_endpoint: "https://auth.example.com/token".into(),
+            registration_endpoint: Some("http://127.0.0.1:9/register".into()),
+            code_challenge_methods_supported: None,
+            scopes_supported: None,
+        };
+
+        let err = validate_as_metadata_endpoints_with_url_policy(&metadata, |url| {
+            if url.starts_with("https://auth.example.com/") {
+                Ok(())
+            } else {
+                Err(OAuthError::DiscoveryFailed(
+                    crate::ssrf::PUBLIC_DNS_ERROR_MARKER.to_string(),
+                ))
+            }
+        })
+        .expect_err("private registration endpoint must be rejected");
+
+        let detail = format!("{err:#}");
+        assert!(detail.contains("unsafe OAuth metadata registration_endpoint"));
+        assert!(!detail.contains("127.0.0.1"));
     }
 
     #[tokio::test]
@@ -1874,6 +2057,37 @@ mod tests {
             matches!(result, Err(OAuthError::TokenExchangeFailed(_))),
             "non-2xx should be TokenExchangeFailed: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn exchange_token_with_url_policy_rejects_private_endpoint_before_request() {
+        setup_crypto();
+        let client = reqwest::Client::new();
+        let result = exchange_token_with_url_policy(
+            &client,
+            "http://127.0.0.1:9/token",
+            "auth-code",
+            "https://cb.example.com/callback",
+            "client123",
+            None,
+            "verifier",
+            "https://mcp.example.com/mcp",
+            |url| {
+                if crate::ssrf::is_public_http_url(url) {
+                    Ok(())
+                } else {
+                    Err(OAuthError::TokenExchangeFailed(
+                        crate::ssrf::PUBLIC_DNS_ERROR_MARKER.to_string(),
+                    ))
+                }
+            },
+        )
+        .await;
+
+        let err = result.expect_err("private token endpoint must be rejected");
+        let detail = format!("{err:#}");
+        assert!(detail.contains("unsafe token_endpoint"));
+        assert!(!detail.contains("127.0.0.1"));
     }
 
     #[tokio::test]

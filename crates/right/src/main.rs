@@ -1030,11 +1030,19 @@ async fn main() -> miette::Result<()> {
                 String,
                 tokio::sync::Mutex<right_mcp::reconnect::ReconnectManager>,
             > = std::collections::HashMap::new();
-            let http_client = reqwest::Client::builder()
+            let http_client = match right_mcp::ssrf::hardened_client_builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    tracing::error!("MCP reconnect HTTP client build failed: {error:#}");
+                    return Err(miette::miette!(
+                        "MCP reconnect HTTP client build failed: {error:#}"
+                    ));
+                }
+            };
 
             for agent_name in token_entries.keys() {
                 let agent_dir = agents_dir.join(agent_name);

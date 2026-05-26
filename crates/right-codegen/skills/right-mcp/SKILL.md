@@ -39,8 +39,8 @@ what happens behind the scenes:
 
 ### Step 1: Check current servers
 
-Call `mcp__right__mcp_list()` DIRECTLY by name — do NOT use ToolSearch (it does not
-index MCP tools) and do NOT delegate to a subagent (subagents have no MCP access).
+Call `mcp__right__rightmeta__mcp_list()` DIRECTLY by name — do NOT use ToolSearch
+(it does not index MCP tools) and do NOT delegate to a subagent (subagents have no MCP access).
 If the requested service is already connected, tell the user and stop.
 If the tool call fails, skip this step and continue.
 
@@ -96,4 +96,4 @@ Tell the user the service may not have MCP support yet. Suggest:
 - **NEVER** guess or fabricate URLs from training data — only use URLs from known-endpoints.yaml or search results
 - **NEVER** attempt to call internal MCP management APIs — they don't exist as agent tools
 - **ALWAYS** check known-endpoints.yaml first, then search the web if no match — do not rely on prior knowledge of MCP endpoints
-- **ALWAYS** call `mcp__right__mcp_list()` first to check existing servers
+- **ALWAYS** call `mcp__right__rightmeta__mcp_list()` first to check existing servers

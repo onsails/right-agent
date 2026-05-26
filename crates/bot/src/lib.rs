@@ -889,6 +889,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             internal_client: Arc::clone(&internal_client),
             pending_auth: Arc::clone(&pending_auth),
             #[cfg(test)]
+            mcp_oauth_allow_private_urls: false,
+            #[cfg(test)]
             doctor_checks: None,
         });
 

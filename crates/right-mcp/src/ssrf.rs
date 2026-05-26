@@ -60,6 +60,37 @@ pub fn hardened_client_builder() -> reqwest::ClientBuilder {
         .dns_resolver(Arc::new(PublicNetworkResolver))
 }
 
+/// Returns true if `domain` is `localhost` (with optional trailing dot,
+/// ASCII-case-insensitive).
+pub fn is_localhost_domain(domain: &str) -> bool {
+    domain
+        .strip_suffix('.')
+        .unwrap_or(domain)
+        .eq_ignore_ascii_case("localhost")
+}
+
+/// Validate a user- or metadata-supplied HTTP URL before the host process uses
+/// it for outbound network I/O.
+///
+/// This catches private and loopback IP literals before `reqwest` can bypass
+/// DNS resolution entirely. Domain names are still filtered at connection time
+/// by [`PublicNetworkResolver`].
+pub fn is_public_http_url(input: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(input) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some()
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.fragment().is_none()
+        && parsed.host().is_some_and(|host| match host {
+            url::Host::Domain(domain) => !is_localhost_domain(domain),
+            url::Host::Ipv4(ip) => is_public_ipv4(ip),
+            url::Host::Ipv6(ip) => is_public_ipv6(ip),
+        })
+}
+
 pub fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_public_ipv4(ip),
@@ -111,4 +142,41 @@ fn in_ipv4_cidr(ip: u32, base: Ipv4Addr, prefix: u32) -> bool {
 fn in_ipv6_cidr(ip: u128, base: Ipv6Addr, prefix: u32) -> bool {
     let mask = u128::MAX << (128 - prefix);
     (ip & mask) == (u128::from(base) & mask)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_http_url_rejects_loopback_and_private_literals() {
+        for url in [
+            "http://127.0.0.1:8080/token",
+            "http://localhost:8080/token",
+            "http://localhost.:8080/token",
+            "https://192.168.1.1/token",
+            "https://[::1]/token",
+            "https://[::ffff:10.0.0.1]/token",
+        ] {
+            assert!(!is_public_http_url(url), "{url} must be rejected");
+        }
+    }
+
+    #[test]
+    fn public_http_url_rejects_non_http_credentials_and_fragments() {
+        for url in [
+            "ftp://mcp.example.com/token",
+            "https://user@mcp.example.com/token",
+            "https://mcp.example.com/token#fragment",
+            "not a url",
+        ] {
+            assert!(!is_public_http_url(url), "{url} must be rejected");
+        }
+    }
+
+    #[test]
+    fn public_http_url_allows_public_hosts() {
+        assert!(is_public_http_url("https://mcp.example.com/token"));
+        assert!(is_public_http_url("http://8.8.8.8/token"));
+    }
 }
