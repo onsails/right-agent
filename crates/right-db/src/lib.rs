@@ -63,16 +63,19 @@ impl<T> OptionalExtension<T> for Result<T, DbError> {
 ///   version. Under WAL + 5s `busy_timeout`, a slow first-boot batch can
 ///   force the second opener to time out.
 pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
+    let db_path = agent_path.join("data.db");
     let mut retries = 0;
     loop {
         match open_connection_once(agent_path, migrate).await {
             Ok(conn) => return Ok(conn),
             Err(error) if error.is_transient() && retries < DB_OPEN_MAX_RETRIES => {
                 retries += 1;
-                tracing::warn!(
-                    path = %agent_path.display(),
+                log_transient_db_retry(
+                    &db_path,
                     retries,
-                    "transient database open failed; retrying: {error:#}"
+                    DB_OPEN_MAX_RETRIES,
+                    &error,
+                    "transient database open failed; retrying",
                 );
                 tokio::time::sleep(DB_OPEN_RETRY_DELAY).await;
             }
@@ -115,16 +118,68 @@ async fn prepare_legacy_fts5_schema_for_turso(db_path: &Path) -> Result<(), DbEr
             Ok(()) => return Ok(()),
             Err(error) if error.is_transient() && retries < LEGACY_FTS5_PROBE_MAX_RETRIES => {
                 retries += 1;
-                tracing::warn!(
-                    path = %db_path.display(),
+                log_transient_db_retry(
+                    db_path,
                     retries,
-                    "transient legacy SQLite scrubber probe failed; retrying: {error:#}"
+                    LEGACY_FTS5_PROBE_MAX_RETRIES,
+                    &error,
+                    "transient legacy SQLite scrubber probe failed; retrying",
                 );
                 tokio::time::sleep(LEGACY_FTS5_PROBE_RETRY_DELAY).await;
             }
             Err(error) => return Err(error),
         }
     }
+}
+
+fn log_transient_db_retry(
+    db_path: &Path,
+    retries: usize,
+    max_retries: usize,
+    error: &DbError,
+    message: &'static str,
+) {
+    let diagnostics = DbRetryDiagnostics::capture(error);
+    tracing::warn!(
+        path = %db_path.display(),
+        pid = diagnostics.pid,
+        process = %diagnostics.process,
+        transient_kind = diagnostics.transient_kind,
+        retries,
+        max_retries,
+        error = format!("{error:#}"),
+        "{message}",
+    );
+}
+
+struct DbRetryDiagnostics {
+    pid: u32,
+    process: String,
+    transient_kind: &'static str,
+}
+
+impl DbRetryDiagnostics {
+    fn capture(error: &DbError) -> Self {
+        Self {
+            pid: std::process::id(),
+            process: current_process_name(),
+            transient_kind: error
+                .transient_kind()
+                .map(|kind| kind.as_str())
+                .unwrap_or("unknown"),
+        }
+    }
+}
+
+fn current_process_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 fn prepare_legacy_fts5_schema_for_turso_once(db_path: &Path) -> Result<(), DbError> {
@@ -267,5 +322,25 @@ mod tests {
         lock.join().expect("release sqlite lock");
 
         result.expect("open_connection should recover from transient legacy probe lock");
+    }
+
+    #[test]
+    fn transient_retry_diagnostics_include_process_identity_and_kind() {
+        let error = DbError::LegacySqlite {
+            path: "data.db".into(),
+            source: rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                None,
+            ),
+        };
+
+        let diagnostics = DbRetryDiagnostics::capture(&error);
+
+        assert_eq!(diagnostics.pid, std::process::id());
+        assert_eq!(diagnostics.transient_kind, "sqlite_busy");
+        assert!(
+            !diagnostics.process.trim().is_empty(),
+            "process name must be present"
+        );
     }
 }

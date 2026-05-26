@@ -63,12 +63,37 @@ impl DbError {
     /// `BUSY_SNAPSHOT`). Callers retrying their own write loop should use
     /// this predicate instead of stringly classifying the `Display` form.
     pub fn is_transient(&self) -> bool {
+        self.transient_kind().is_some()
+    }
+
+    pub(crate) fn transient_kind(&self) -> Option<DbTransientKind> {
         match self {
-            Self::Database(error) => is_turso_transient(error),
-            Self::Open { source, .. } => is_turso_transient(source),
-            Self::LegacySqlite { source, .. } => is_rusqlite_transient(source),
-            Self::Migration { source, .. } => source.is_transient(),
-            _ => false,
+            Self::Database(error) => turso_transient_kind(error),
+            Self::Open { source, .. } => turso_transient_kind(source),
+            Self::LegacySqlite { source, .. } => rusqlite_transient_kind(source),
+            Self::Migration { source, .. } => source.transient_kind(),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DbTransientKind {
+    TursoBusy,
+    TursoBusySnapshot,
+    TursoFileLock,
+    SqliteBusy,
+    SqliteLocked,
+}
+
+impl DbTransientKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::TursoBusy => "turso_busy",
+            Self::TursoBusySnapshot => "turso_busy_snapshot",
+            Self::TursoFileLock => "turso_file_lock",
+            Self::SqliteBusy => "sqlite_busy",
+            Self::SqliteLocked => "sqlite_locked",
         }
     }
 }
@@ -77,24 +102,27 @@ fn is_turso_constraint(error: &turso::Error) -> bool {
     matches!(error, turso::Error::Constraint(_))
 }
 
-fn is_turso_transient(error: &turso::Error) -> bool {
+fn turso_transient_kind(error: &turso::Error) -> Option<DbTransientKind> {
     match error {
-        turso::Error::Busy(_) | turso::Error::BusySnapshot(_) => true,
+        turso::Error::Busy(_) => Some(DbTransientKind::TursoBusy),
+        turso::Error::BusySnapshot(_) => Some(DbTransientKind::TursoBusySnapshot),
         // Turso currently maps its lower-level file-locking error into the
         // generic Error variant, so classify only the precise lock owner case.
         turso::Error::Error(message) => {
             message.starts_with("Locking error:")
                 && message.contains("File is locked by another process")
         }
-        _ => false,
+        .then_some(DbTransientKind::TursoFileLock),
+        _ => None,
     }
 }
 
-fn is_rusqlite_transient(error: &rusqlite::Error) -> bool {
-    matches!(
-        error.sqlite_error_code(),
-        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
-    )
+fn rusqlite_transient_kind(error: &rusqlite::Error) -> Option<DbTransientKind> {
+    match error.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::DatabaseBusy) => Some(DbTransientKind::SqliteBusy),
+        Some(rusqlite::ErrorCode::DatabaseLocked) => Some(DbTransientKind::SqliteLocked),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
