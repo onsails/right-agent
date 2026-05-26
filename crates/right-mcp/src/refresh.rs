@@ -187,11 +187,17 @@ pub async fn run_refresh_scheduler(
 ) {
     crate::ensure_crypto_provider();
 
-    let http_client = reqwest::Client::builder()
+    let http_client = match crate::ssrf::hardened_client_builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::error!("refresh scheduler HTTP client build failed: {error:#}");
+            return;
+        }
+    };
 
     // Start with empty state — callers send NewEntry messages for all OAuth servers.
     // This avoids a race where a DB-loaded timer fires before the NewEntry arrives,

@@ -363,12 +363,16 @@ async fn handle_mcp_add(
 
     {
         let conn = conn_arc.lock().await;
+        let existed_before = match credentials::db_list_servers(&conn).await {
+            Ok(servers) => servers.iter().any(|server| server.name == req.name),
+            Err(e) => return internal_error(format!("db_list_servers: {e:#}")).into_response(),
+        };
         if let Err(e) = credentials::db_add_server(&conn, &req.name, &req.url).await {
             return internal_error(format!("db_add_server: {e:#}")).into_response();
         }
-        // Persist auth fields if provided. On failure, roll back the freshly
-        // inserted mcp_servers row so we don't leave a row without auth state
-        // (the two credentials helpers run in separate transactions).
+        // Persist auth fields for the selected mode. On failure, roll back only
+        // if this request created the row; an upsert over an existing server
+        // must not delete the previous registration.
         let auth_result: Result<(), (String, CredentialError)> =
             if req.auth_type.as_deref() == Some("headers") {
                 credentials::db_set_http_headers(&conn, &req.name, &header_secrets)
@@ -385,17 +389,21 @@ async fn handle_mcp_add(
                 .await
                 .map_err(|e| ("db_set_auth".to_string(), e))
             } else {
-                Ok(())
+                credentials::db_clear_auth(&conn, &req.name)
+                    .await
+                    .map_err(|e| ("db_clear_auth".to_string(), e))
             };
         if let Err((label, e)) = auth_result {
-            // Best-effort rollback of the just-inserted mcp_servers row.
-            match credentials::db_remove_server(&conn, &req.name).await {
-                Ok(()) | Err(CredentialError::ServerNotFound(_)) => {}
-                Err(db_err) => {
-                    tracing::warn!(
-                        server = %req.name,
-                        "rollback db_remove_server after {label} failure failed: {db_err:#}"
-                    );
+            if !existed_before {
+                // Best-effort rollback of the just-inserted mcp_servers row.
+                match credentials::db_remove_server(&conn, &req.name).await {
+                    Ok(()) | Err(CredentialError::ServerNotFound(_)) => {}
+                    Err(db_err) => {
+                        tracing::warn!(
+                            server = %req.name,
+                            "rollback db_remove_server after {label} failure failed: {db_err:#}"
+                        );
+                    }
                 }
             }
             return internal_error(format!("{label}: {e:#}")).into_response();
@@ -721,6 +729,10 @@ async fn handle_set_token(
     } else {
         req.resource.clone()
     };
+    if !right_mcp::ssrf::is_public_http_url(&req.token_endpoint) {
+        return validation_error("OAuth token endpoint must be a public HTTP(S) URL")
+            .into_response();
+    }
 
     // Update the token in the shared Arc<RwLock<Option<String>>>
     {
@@ -898,11 +910,10 @@ async fn handle_mcp_list(
     for (name, proxy) in proxies.iter() {
         let status = proxy.status().await;
         let tool_count = proxy.try_tools().map(|t| t.len()).unwrap_or(0);
-        let auth_type = db_auth_types
-            .get(name)
-            .cloned()
-            .flatten()
-            .or_else(|| Some(proxy.auth_method().to_string()));
+        let auth_type = match db_auth_types.get(name) {
+            Some(auth_type) => auth_type.clone(),
+            None => Some(proxy.auth_method().to_string()),
+        };
         servers.push(McpServerStatus {
             name: name.clone(),
             url: Some(proxy.url().to_string()),
@@ -1549,6 +1560,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_add_url_as_is_clears_stale_headers_auth() {
+        setup_crypto();
+        let tmp = tempfile::tempdir().unwrap();
+        let app = make_test_router(tmp.path()).await;
+        let mcp_url = start_empty_mcp_server().await;
+
+        let (status, body) = send_json(
+            app.clone(),
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "nango",
+                "url": mcp_url,
+                "auth_type": "headers",
+                "headers": [
+                    { "name": "Authorization", "value": "Bearer old" }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body={body}");
+
+        let (status, body) = send_json(
+            app.clone(),
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "nango",
+                "url": mcp_url
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body={body}");
+
+        let (status, body) = send_json(
+            app,
+            "/mcp-list",
+            serde_json::json!({ "agent": "test-agent" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body={body}");
+        let servers = body["servers"].as_array().unwrap();
+        let nango = servers
+            .iter()
+            .find(|server| server["name"] == "nango")
+            .expect("nango listed");
+        assert!(nango.get("auth_type").is_none(), "body={body}");
+        assert!(nango.get("header_names").is_none(), "body={body}");
+        assert!(
+            !body.to_string().contains("Bearer old"),
+            "list response must not expose stale header values: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_set_headers_replaces_existing_header_names() {
         setup_crypto();
         let tmp = tempfile::tempdir().unwrap();
@@ -1799,6 +1866,73 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn set_token_rejects_private_token_endpoint_before_storing_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
+
+        let (agent_dir, proxies, conn_arc) = {
+            let registry = dispatcher
+                .agents
+                .get("test-agent")
+                .expect("test-agent registered");
+            (
+                registry.agent_dir.clone(),
+                Arc::clone(&registry.proxies),
+                registry
+                    .right
+                    .get_conn("test-agent")
+                    .await
+                    .expect("test db connection"),
+            )
+        };
+        {
+            let conn = conn_arc.lock().await;
+            conn.execute(
+                "INSERT INTO mcp_servers (name, url, auth_type) VALUES ('composio', 'https://mcp.example.com/mcp', 'oauth')",
+                [],
+            )
+            .await
+            .unwrap();
+        }
+
+        let token = Arc::new(tokio::sync::RwLock::new(Some("old-token".to_string())));
+        let backend = Arc::new(ProxyBackend::new(
+            "composio".into(),
+            agent_dir,
+            "https://mcp.example.com/mcp".into(),
+            Arc::clone(&token),
+            AuthMethod::Bearer,
+        ));
+        proxies
+            .write()
+            .await
+            .insert("composio".into(), Arc::clone(&backend));
+
+        let (status, body) = send_json(
+            app,
+            "/set-token",
+            serde_json::json!({
+                "agent": "test-agent",
+                "server": "composio",
+                "access_token": "fresh-token",
+                "refresh_token": "fresh-refresh",
+                "expires_in": 3600,
+                "token_endpoint": "http://127.0.0.1:9/token",
+                "client_id": "my-client"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+        assert!(!body.to_string().contains("127.0.0.1"));
+        assert_eq!(
+            *token.read().await,
+            Some("old-token".to_string()),
+            "private token endpoint must be rejected before in-memory token update"
+        );
     }
 
     #[tokio::test]

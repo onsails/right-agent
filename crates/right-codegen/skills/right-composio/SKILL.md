@@ -29,7 +29,7 @@ tool calls when one MULTI_EXECUTE would do.
 - The user's request maps to a Composio-fronted service.
 - You're about to invoke `mcp__right__composio__*` and need to decide:
   workbench yes/no, MULTI_EXECUTE vs single, search_tools first?
-- If composio is not in `mcp__right__mcp_list`, this skill does not
+- If composio is not in `mcp__right__rightmeta__mcp_list`, this skill does not
   apply — ask the user to open `/mcp` and add Composio in the dashboard.
 
 ## Workbench discipline

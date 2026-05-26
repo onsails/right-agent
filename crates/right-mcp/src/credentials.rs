@@ -251,10 +251,7 @@ fn parse_url(url_str: &str) -> Result<Url, CredentialError> {
 /// Returns true if `domain` is `localhost` (with optional trailing dot,
 /// ASCII-case-insensitive).
 pub fn is_localhost_domain(domain: &str) -> bool {
-    domain
-        .strip_suffix('.')
-        .unwrap_or(domain)
-        .eq_ignore_ascii_case("localhost")
+    crate::ssrf::is_localhost_domain(domain)
 }
 
 fn is_loopback_host(host: &url::Host<&str>) -> bool {
@@ -486,6 +483,62 @@ pub async fn db_set_auth(
                     operation_error = format!("{err:#}"),
                     rollback_error = format!("{rollback_err:#}"),
                     "mcp auth transaction rollback failed; returning original operation error",
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Clear all stored authentication fields for an MCP server.
+///
+/// Used when a server is switched back to URL-as-is mode. This must delete
+/// multi-header rows as well as legacy single-header and OAuth fields so stale
+/// secrets cannot reappear in list output or after restart.
+pub async fn db_clear_auth(conn: &Connection, name: &str) -> Result<(), CredentialError> {
+    let tx = conn.transaction().await?;
+    let result: Result<(), CredentialError> = async {
+        let changed = tx
+            .execute(
+                "UPDATE mcp_servers
+             SET auth_type = NULL,
+                 auth_header = NULL,
+                 auth_token = NULL,
+                 refresh_token = NULL,
+                 token_endpoint = NULL,
+                 client_id = NULL,
+                 client_secret = NULL,
+                 expires_at = NULL,
+                 oauth_resource = NULL
+             WHERE name = ?1",
+                [name],
+            )
+            .await?;
+        if changed == 0 {
+            return Err(CredentialError::ServerNotFound(name.to_string()));
+        }
+
+        tx.execute(
+            "DELETE FROM mcp_http_headers WHERE server_name = ?1",
+            [name],
+        )
+        .await?;
+
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            tx.commit().await?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback_err) = tx.rollback().await {
+                tracing::warn!(
+                    operation_error = format!("{err:#}"),
+                    rollback_error = format!("{rollback_err:#}"),
+                    "mcp auth clear transaction rollback failed; returning original operation error",
                 );
             }
             Err(err)
@@ -1052,6 +1105,62 @@ mod db_tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn db_clear_auth_removes_headers_and_oauth_fields() {
+        let (_dir, conn) = setup_db().await;
+        db_add_server(&conn, "nango", "https://api.nango.dev/mcp")
+            .await
+            .unwrap();
+        db_set_oauth_state(
+            &conn,
+            "nango",
+            "access-tok",
+            Some("refresh-tok"),
+            "https://api.nango.dev/oauth/token",
+            "client-id",
+            Some("client-secret"),
+            "2026-04-13T12:00:00Z",
+            "https://api.nango.dev/mcp",
+        )
+        .await
+        .unwrap();
+        db_set_http_headers(
+            &conn,
+            "nango",
+            &[HttpHeaderSecret::new("Authorization", "Bearer secret").unwrap()],
+        )
+        .await
+        .unwrap();
+
+        db_clear_auth(&conn, "nango").await.unwrap();
+
+        let servers = db_list_servers(&conn).await.unwrap();
+        let server = &servers[0];
+        assert!(server.auth_type.is_none());
+        assert!(server.auth_header.is_none());
+        assert!(server.auth_token.is_none());
+        assert!(server.refresh_token.is_none());
+        assert!(server.token_endpoint.is_none());
+        assert!(server.client_id.is_none());
+        assert!(server.client_secret.is_none());
+        assert!(server.expires_at.is_none());
+        assert!(server.oauth_resource.is_none());
+        assert!(
+            db_list_http_headers(&conn, "nango")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn db_clear_auth_rejects_missing_server() {
+        let (_dir, conn) = setup_db().await;
+        let err = db_clear_auth(&conn, "missing").await.unwrap_err();
+
+        assert!(matches!(err, CredentialError::ServerNotFound(_)));
     }
 
     #[tokio::test]

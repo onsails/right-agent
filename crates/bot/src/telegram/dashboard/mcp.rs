@@ -331,43 +331,44 @@ pub(crate) async fn handle_mcp_oauth_start(
             );
         }
     };
-    let discovery = match right_mcp::oauth::discover_oauth_with_url_policy(
-        &http_client,
-        &server_url,
-        mcp_detection_url_policy,
-    )
-    .await
-    {
-        Ok(discovery) => discovery,
-        Err(_error) => {
-            return json_error(
-                StatusCode::BAD_GATEWAY,
-                "oauth_discovery_failed",
-                Some("OAuth discovery failed"),
-            );
-        }
-    };
+    let discovery =
+        match right_mcp::oauth::discover_oauth_with_url_policy(&http_client, &server_url, |url| {
+            dashboard_oauth_url_policy(&state, url)
+        })
+        .await
+        {
+            Ok(discovery) => discovery,
+            Err(_error) => {
+                return json_error(
+                    StatusCode::BAD_GATEWAY,
+                    "oauth_discovery_failed",
+                    Some("OAuth discovery failed"),
+                );
+            }
+        };
     let scopes = discovery.scopes;
     let scope_param = right_mcp::oauth::scope_param(&scopes);
     let scope_refs = scopes.iter().map(String::as_str).collect::<Vec<_>>();
-    let (client_id, client_secret) = match right_mcp::oauth::register_client_or_fallback(
-        &http_client,
-        &discovery.metadata,
-        None,
-        &redirect_uri,
-        &scope_refs,
-    )
-    .await
-    {
-        Ok(pair) => pair,
-        Err(_error) => {
-            return json_error(
-                StatusCode::BAD_GATEWAY,
-                "client_registration_failed",
-                Some("OAuth client registration failed"),
-            );
-        }
-    };
+    let (client_id, client_secret) =
+        match right_mcp::oauth::register_client_or_fallback_with_url_policy(
+            &http_client,
+            &discovery.metadata,
+            None,
+            &redirect_uri,
+            &scope_refs,
+            |url| dashboard_oauth_url_policy(&state, url),
+        )
+        .await
+        {
+            Ok(pair) => pair,
+            Err(_error) => {
+                return json_error(
+                    StatusCode::BAD_GATEWAY,
+                    "client_registration_failed",
+                    Some("OAuth client registration failed"),
+                );
+            }
+        };
 
     let (code_verifier, code_challenge) = right_mcp::oauth::generate_pkce();
     let oauth_state = right_mcp::oauth::generate_state();
@@ -495,19 +496,7 @@ fn dashboard_oauth_callback_redirect_uri(
 }
 
 fn is_valid_mcp_detection_url(input: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(input) else {
-        return false;
-    };
-    matches!(parsed.scheme(), "http" | "https")
-        && parsed.host_str().is_some()
-        && parsed.username().is_empty()
-        && parsed.password().is_none()
-        && parsed.fragment().is_none()
-        && parsed.host().is_some_and(|host| match host {
-            url::Host::Domain(domain) => !right_mcp::credentials::is_localhost_domain(domain),
-            url::Host::Ipv4(ip) => right_mcp::ssrf::is_public_ipv4(ip),
-            url::Host::Ipv6(ip) => right_mcp::ssrf::is_public_ipv6(ip),
-        })
+    right_mcp::ssrf::is_public_http_url(input)
 }
 
 fn mcp_detection_url_policy(input: &str) -> Result<(), right_mcp::oauth::OAuthError> {
@@ -518,6 +507,19 @@ fn mcp_detection_url_policy(input: &str) -> Result<(), right_mcp::oauth::OAuthEr
     Err(right_mcp::oauth::OAuthError::DiscoveryFailed(
         right_mcp::ssrf::PUBLIC_DNS_ERROR_MARKER.to_string(),
     ))
+}
+
+fn dashboard_oauth_url_policy(
+    state: &DashboardState,
+    input: &str,
+) -> Result<(), right_mcp::oauth::OAuthError> {
+    #[cfg(test)]
+    if state.mcp_oauth_allow_private_urls {
+        return Ok(());
+    }
+
+    let _ = state;
+    mcp_detection_url_policy(input)
 }
 
 #[cfg(test)]

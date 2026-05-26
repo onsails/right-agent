@@ -98,7 +98,7 @@ Do NOT delegate when:
 - You need to see the intermediate output to decide the next step in
   the same turn.
 - The task is one cheap tool call with a small response (e.g.
-  `mcp__right__mcp_list`, a single `mcp__right__cron_trigger`, a
+  `mcp__right__rightmeta__mcp_list`, a single `mcp__right__cron_trigger`, a
   `mcp__right__send_progress` update).
 - The work is a short edit, single command, or quick verification
   whose entire output you'd read anyway.

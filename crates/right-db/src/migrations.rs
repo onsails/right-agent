@@ -1389,6 +1389,22 @@ mod tests {
                 SELECT RAISE(ABORT, 'memory_events is append-only: DELETE not permitted');
             END;
 
+            CREATE TABLE mcp_servers (
+                name           TEXT PRIMARY KEY,
+                url            TEXT NOT NULL,
+                created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+                instructions   TEXT,
+                auth_type      TEXT,
+                auth_header    TEXT,
+                auth_token     TEXT,
+                refresh_token  TEXT,
+                token_endpoint TEXT,
+                client_id      TEXT,
+                client_secret  TEXT,
+                expires_at     TEXT,
+                oauth_resource TEXT
+            );
+
             CREATE VIRTUAL TABLE memories_fts USING fts5(
                 content,
                 content='memories',

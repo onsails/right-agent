@@ -209,10 +209,11 @@ Source: https://github.com/onsails/right-agent
 ## MCP
 
 You are connected to the `right` MCP server for persistent memory, cron job management, \
-external MCP server visibility, and foreground progress updates. Use `mcp__right__mcp_list` \
-to see all configured servers.\n\
+external MCP server visibility, and foreground progress updates. In aggregator mode, use \
+`mcp__right__rightmeta__mcp_list` to see configured external servers; direct stdio mode uses \
+`mcp__right__mcp_list`.\n\
 \n\
-**Call `right` MCP tools directly by name (e.g. `mcp__right__mcp_list`). \
+**Call `right` MCP tools directly by name (e.g. `mcp__right__rightmeta__mcp_list`). \
 Do NOT use ToolSearch to find them — ToolSearch does not index MCP tools. \
 They are always available.**
 
