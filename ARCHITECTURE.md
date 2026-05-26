@@ -47,11 +47,13 @@ validation logic, read models, and static asset lookup. `right-bot` owns runtime
 route mounting, Telegram menu/button integration, allowlist lookup, and custody
 of the bot token used for server-side `initData` validation. The current v1
 dashboard API covers overview, activity, knowledge, usage, identity, health,
-and authenticated learned-skill pin/unpin. Explicit health, identity, and
-knowledge-skill routes may run bounded bot-owned sandbox probes; overview must
-use injected runtime state and must not run doctor or sandbox commands
-implicitly. Dashboard pin/unpin is the operator surface for curator-managed
-learned skills; do not add CLI pinning.
+authenticated learned-skill pin/unpin, and authenticated MCP management.
+Explicit health, identity, and knowledge-skill routes may run bounded bot-owned
+sandbox probes; overview must use injected runtime state and must not run
+doctor or sandbox commands implicitly. Dashboard pin/unpin is the operator
+surface for curator-managed learned skills; do not add CLI pinning. Dashboard
+MCP routes must go through the internal Unix socket API and must not edit MCP
+files or credential storage directly.
 Future write routes must call bot-owned control-plane services instead of
 directly editing agent files, credentials, or aggregator state.
 
@@ -124,16 +126,16 @@ See: `docs/architecture/mcp.md` (MCP Token Refresh).
 
 ### MCP Auth Types
 
-Four auth methods are supported. The dashboard MCP flow runs
-discovery/classification heuristics, then asks the user to choose `OAuth`,
-`Header`, or `URL as-is`. The heuristic is a recommendation; the user's
-choice is authoritative. Telegram `/mcp` only opens the dashboard MCP view.
+Dashboard MCP management runs URL-first detection, then asks the user to choose
+`OAuth`, `Headers`, or `URL as-is`. Detection is advisory; the dashboard choice
+is authoritative. Telegram `/mcp` opens the dashboard MCP view and has no
+management subcommands.
 
 | auth_type | How token is injected | Selection |
 |-----------|----------------------|-----------|
 | `oauth` | `Authorization: Bearer` via DynamicAuthClient | User chooses `OAuth`; OAuth AS discovery recommends it |
-| `bearer` | `Authorization: Bearer` header | User chooses `Header` with bearer recommendation/fallback |
-| `header` | Custom header (e.g. `X-Api-Key`) | User chooses `Header`; Haiku may recommend the header name; user may override with `HeaderName: token` |
+| `bearer` | `Authorization: Bearer` header | User chooses `Headers` with bearer recommendation/fallback |
+| `headers` | Multiple configured HTTP headers | User chooses `Headers`; values are write-only and redacted from list/detail APIs |
 | `query_string` | Embedded in URL | User chooses `URL as-is` for a URL containing `?` query params |
 
 `URL as-is` also covers no-auth and loopback development MCP servers. Explicit
@@ -155,10 +157,13 @@ per-agent Bearer-token auth. Tool routing rules:
 - `{server}__` prefix → `ProxyBackend` (forwarded to upstream MCP).
 
 Internal REST API on Unix socket (`~/.right/run/internal.sock`):
-`POST /mcp-add`, `POST /mcp-remove`, `POST /set-token`, `POST /mcp-list`,
-`POST /mcp-instructions`, `POST /progress/register`,
-`POST /progress/unregister`. Telegram dashboard routes use `InternalClient`
-(hyper UDS). Agents cannot reach the Unix socket from inside the sandbox.
+`POST /mcp-add`, `POST /mcp-remove`, `POST /mcp-set-headers`,
+`POST /set-token`, `POST /mcp-list`, `POST /mcp-instructions`,
+`POST /progress/register`,
+`POST /progress/unregister`. MCP management goes through authenticated
+Telegram Mini App dashboard routes, which route through this internal Unix
+socket API with `InternalClient` (hyper UDS). Agents cannot reach the Unix
+socket from inside the sandbox.
 
 Foreground progress uses the built-in `mcp__right__send_progress` tool. The
 worker creates a per-invocation MCP config with `X-Right-Invocation`, registers

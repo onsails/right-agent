@@ -6,20 +6,18 @@
 
 ## MCP Dashboard Management Flow
 
-Telegram `/mcp` opens the dashboard Mini App directly at `view=mcp`; Telegram
-no longer implements MCP add/auth/remove/list subcommands. The dashboard MCP
-flow treats detection as advice, not authority. It parses the original URL,
-derives a bare URL for probes, runs OAuth discovery when the bare URL is public
-and has no query string, and runs auth-header classification only when OAuth was
-not discovered. The user then chooses `OAuth`, `Header`, or `URL as-is`; the
-recommendation is advisory.
+Telegram `/mcp` opens the Telegram Mini App dashboard on the MCP view; Telegram
+no longer implements MCP add/auth/remove/list subcommands. The add flow is
+URL-first: the dashboard collects server name + URL, runs detection, then shows
+`OAuth`, `Headers`, and `URL as-is` choices. Detection is advisory.
 
-No upstream MCP server is registered until the dashboard submits the user's
-choice. `OAuth` registers the bare URL as `auth_type=oauth` and uses the
-dashboard OAuth start route to return an authorization URL. `Header` stores
-user-supplied HTTP header credentials through the dashboard headers route.
-`URL as-is` registers the exact original URL without token/header injection,
-preserving query-string credentials.
+No upstream MCP server is registered until the user saves a chosen mode.
+`OAuth` registers the bare URL as `auth_type=oauth` and uses the dashboard OAuth
+start route to return an authorization URL. `Headers` stores configured HTTP
+header credentials through the dashboard headers route. Header values are
+write-only secrets; list APIs return header names only. `URL as-is` registers
+the exact original URL without token/header injection, preserving query-string
+credentials.
 
 OAuth-capable HTTP MCP servers can advertise a canonical resource URI through
 RFC 9728 protected-resource metadata. Right persists that resource with the

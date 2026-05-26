@@ -65,13 +65,14 @@ right bot --agent <name>  (spawned by process-compose)
   ├─ Start bot-owned UDS server with OAuth callback, progress, healthz,
   │   dashboard, and nested Telegram webhook routes; dashboard serves
   │   `/dashboard/<agent>/` static assets, explicit v1 read APIs for bootstrap,
-  │   overview, activity, knowledge, usage, identity, and health, plus the
-  │   authenticated learned-skill pin/unpin route.
+  │   overview, activity, knowledge, usage, identity, health, and authenticated
+  │   MCP management APIs, plus the learned-skill pin/unpin route.
   │   Health endpoints are explicit probes: overview reports injected status and
   │   never runs doctor or sandbox commands implicitly.
   ├─ Clear stale Telegram per-chat command scopes for current allowlist ids
   │   and legacy `allowed_chat_ids`, then register current command autocomplete
-  │   in Default, AllPrivateChats, and AllGroupChats scopes
+  │   in Default, AllPrivateChats, and AllGroupChats scopes; `/mcp` opens the
+  │   dashboard MCP view
   ├─ Start teloxide long-polling dispatcher
   └─ On SIGINT/SIGTERM:
       ├─ Stop accepting Telegram updates

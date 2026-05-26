@@ -34,7 +34,7 @@ Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw
 
 ## Conventions
 
-- **Bot-first management**: All agent/MCP configuration goes through the Telegram bot (`/mcp add`, `/mcp remove`, `/mcp auth`, etc.). Never create or edit `.mcp.json`, agent configs, or credential files manually — the bot is the control plane.
+- **Bot-first management**: MCP management goes through the Telegram Mini App dashboard opened by `/mcp`; model/runtime controls such as `/model` remain bot-managed. Never create or edit `.mcp.json`, agent configs, or credential files manually — the bot/dashboard is the control plane.
 - **Debuggability over convenience**: Always prefer direct, observable signals over indirect heuristics. If an API provides status, use it — don't infer status from side effects (e.g. SSH connectivity as a proxy for sandbox readiness). Errors must propagate to logs, never be silently swallowed.
 - **Domain research before implementation**: Always verify external tool APIs by reading source code or running `--help` before writing integration code. Never rely solely on web documentation — it may be outdated or wrong.
 - **PROMPT_SYSTEM.md**: Always keep PROMPT_SYSTEM.md in sync with the actual prompting system. When changing system prompt generation, agent definitions, JSON schemas, or MCP instructions, update PROMPT_SYSTEM.md to match.
@@ -44,7 +44,7 @@ Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw
 - **Self-healing platform**: Never manually fix agent sandboxes, configs, or state. If a platform change breaks an agent, the platform code must detect and recover automatically (re-upload if files are missing, adjust policy, etc.). Manual fixes mask bugs and prevent proper testing.
 - **Never delete sandboxes for recovery**: Sandboxes contain agent data (credentials, installed tools, agent-created files). Deleting a sandbox destroys this data. Platform changes must be designed to work with existing sandboxes — never require sandbox recreation as a migration path.
 - **Upgrade-friendly design**: Every new feature must be adoptable by already-deployed agents without recreation. New config fields default to the previous behavior (backward-compatible defaults). `agent config` must expose all user-facing settings — if a feature exists but can't be toggled via CLI, it's incomplete. Think in terms of upgrades, not fresh installs.
-  - **Bot-managed fields are a documented exception to the CLI-exposure rule.** Operational/runtime concerns reached over Telegram (`/mcp add`, `/mcp remove`, `/mcp auth`, `/model`) are intentionally **not** mirrored as `right agent config` flags — the bot is the control plane for these, and `agent.yaml` (the source of truth) remains directly user-editable for out-of-band changes.
+  - **Bot-managed fields are a documented exception to the CLI-exposure rule.** Operational/runtime concerns reached over Telegram or the Telegram Mini App dashboard (`/mcp`, `/model`) are intentionally **not** mirrored as `right agent config` flags — the bot/dashboard is the control plane for these, and `agent.yaml` (the source of truth) remains directly user-editable for out-of-band changes.
 ## Architecture docs split
 
 `ARCHITECTURE.md` is **prescriptive only** — load-bearing rules, contracts,
