@@ -63,7 +63,7 @@
 
 ### right-db
 
-- `Connection`, `Transaction`, `DbError` — async project-owned wrappers over the local Turso driver for per-agent SQLite-compatible `data.db`; legacy FTS5 cleanup uses bundled `rusqlite` before writable Turso opens.
+- `Connection`, `Transaction`, `DbError` — async project-owned wrappers over the local Turso driver for per-agent SQLite-compatible `data.db`; legacy FTS5 cleanup uses bundled `rusqlite` only inside locked `migrate: true` schema bootstrap, not runtime opens.
 - `migrations.rs` — ordered idempotent migration runner.
 - `conversation.rs` — transcript archive and FTS search storage helpers.
 - `test_support.rs` — migrated temp `data.db` fixtures for crate tests.

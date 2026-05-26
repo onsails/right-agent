@@ -495,12 +495,13 @@ The runtime database API is async-first: `open_connection`, `open_db`,
 `execute`, `query_*`, migrations, and transactions are awaited directly by
 callers. Do not add sync facades, runtime `block_on` bridges, or shared-runtime
 adapters around `right-db`.
-`right-db` may use bundled `rusqlite` only for the pre-Turso legacy FTS5
-scrubber described below; it is not a general runtime database boundary.
+`right-db` may use bundled `rusqlite` only inside locked `migrate: true`
+schema bootstrap for legacy FTS5 cleanup; it is not a general runtime database
+boundary.
 
 ### Migration Ownership
 
-Both the MCP aggregator (`right-mcp-server`) and bot processes run schema migrations on per-agent `data.db` via `right_db::open_connection(path, migrate: true)`. Before any writable Turso open through `open_connection`, `right-db` runs a narrow bundled-`rusqlite` scrubber that drops only the legacy SQLite FTS5 virtual tables and sync triggers; Turso cannot resolve all later tables in those old schemas until that cleanup is done. This includes `migrate: false` backup paths because `VACUUM INTO` needs a writable source handle. Read-only helpers do not run the scrubber or mutate files. Migrations are idempotent — concurrent callers are safe (WAL mode + busy_timeout). Bot processes still declare `depends_on: right-mcp-server` for MCP readiness, but no longer depend on it for schema migrations. The migration registry (`right_db::migrations::MIGRATIONS`) is the sole place to add new tables.
+Both the MCP aggregator (`right-mcp-server`) and bot processes run schema bootstrap on per-agent `data.db` via `right_db::open_connection(path, migrate: true)`. This is the only path that may run legacy schema cleanup or database migrations. `right-db` serializes that bootstrap with a per-agent advisory lock file so concurrent startup of MCP and bot processes is safe without relying on process-compose ordering. Under the lock, `right-db` may use bundled `rusqlite` to drop legacy SQLite FTS5 virtual tables and sync triggers before opening the database through Turso, because Turso cannot resolve every old FTS5 schema. Runtime opens with `migrate: false` do not run the scrubber, do not inspect legacy FTS tables, and do not apply migrations. Read-only helpers do not run the scrubber or mutate files. The migration registry (`right_db::migrations::MIGRATIONS`) is the sole place to add new tables.
 
 All pending migrations run inside a single immediate transaction. Rollback is all-or-nothing: a failure at migration N rolls back every prior migration in the same batch and leaves `user_version` unchanged. A concurrent caller that opens the database during a cold-boot batch blocks on that transaction for the full batch duration, not just the next pending version, and may exhaust the 5s `busy_timeout` under WAL. Tests must not assume per-version commit boundaries; see `migration_runner_semantics_rolls_back_all_pending_migrations_on_later_failure`.
 
