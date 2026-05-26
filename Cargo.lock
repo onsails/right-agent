@@ -3930,6 +3930,7 @@ name = "right-db"
 version = "0.2.15"
 dependencies = [
  "chrono",
+ "fs4 1.1.0",
  "rusqlite",
  "tempfile",
  "thiserror 2.0.18",

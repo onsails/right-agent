@@ -324,6 +324,34 @@ mod tests {
         result.expect("open_connection should recover from transient legacy probe lock");
     }
 
+    #[tokio::test]
+    async fn migration_open_waits_for_existing_bootstrap_lock() {
+        use fs4::FileExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(".right-db-migrate.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        lock_file.lock().unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(750),
+            open_connection(dir.path(), true),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "migrate=true open must wait for the bootstrap lock"
+        );
+
+        FileExt::unlock(&lock_file).unwrap();
+        open_connection(dir.path(), true).await.unwrap();
+    }
+
     #[test]
     fn transient_retry_diagnostics_include_process_identity_and_kind() {
         let error = DbError::LegacySqlite {
