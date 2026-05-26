@@ -138,9 +138,18 @@ async fn open_connection_without_migration_does_not_scrub_legacy_fts5() {
 }
 ```
 
-- [ ] **Step 4: Add a concurrent startup migration regression test**
+- [ ] **Step 4: Add a concurrent startup migration scrubber-overlap regression test**
 
-In `crates/right-db/src/migrations.rs`, add this test after `v34_migrates_real_legacy_fts5_virtual_tables`:
+Add minimal `#[cfg(test)]` support in `crates/right-db/src/lib.rs` at the
+legacy FTS5 scrubber boundary. The test-only probe must be scoped to the exact
+fixture `data.db` path, must yield while the legacy scrubber window is active,
+must record whether a second caller enters that same window, and must not hold a
+mutex across `.await`.
+
+In `crates/right-db/src/migrations.rs`, add this regression after
+`v34_migrates_real_legacy_fts5_virtual_tables`. A bare `tokio::join!` without
+the scrubber probe is not sufficient: the synchronous pre-open scrubber can run
+through the first caller before the second future reaches the race.
 
 ```rust
 #[tokio::test]
@@ -149,9 +158,15 @@ async fn concurrent_migration_opens_serialize_legacy_fts5_cleanup() {
     let db_path = dir.path().join("data.db");
     create_legacy_v33_fts5_database(&db_path);
 
+    let probe = crate::arm_legacy_fts5_scrubber_overlap_probe(&db_path);
+
     let (first, second) = tokio::join!(
         crate::open_connection(dir.path(), true),
         crate::open_connection(dir.path(), true),
+    );
+    assert!(
+        !probe.overlap_observed(),
+        "concurrent migrate=true opens must not overlap legacy FTS5 cleanup"
     );
 
     let conn1 = first.expect("first migrator must succeed");

@@ -1304,38 +1304,19 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_migration_opens_serialize_legacy_fts5_cleanup() {
-        use fs4::FileExt;
-
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("data.db");
         create_legacy_v33_fts5_database(&db_path);
 
-        let lock_path = dir.path().join(".right-db-migrate.lock");
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .unwrap();
-        lock_file.lock().unwrap();
-
-        let result = tokio::time::timeout(std::time::Duration::from_millis(750), async {
-            tokio::join!(
-                crate::open_connection(dir.path(), true),
-                crate::open_connection(dir.path(), true),
-            )
-        })
-        .await;
-        assert!(
-            result.is_err(),
-            "concurrent migrate=true opens must wait for the bootstrap lock"
-        );
-
-        FileExt::unlock(&lock_file).unwrap();
+        let probe = crate::arm_legacy_fts5_scrubber_overlap_probe(&db_path);
 
         let (first, second) = tokio::join!(
             crate::open_connection(dir.path(), true),
             crate::open_connection(dir.path(), true),
+        );
+        assert!(
+            !probe.overlap_observed(),
+            "concurrent migrate=true opens must not overlap legacy FTS5 cleanup"
         );
 
         let conn1 = first.expect("first migrator must succeed");
