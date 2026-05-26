@@ -17,6 +17,7 @@ export interface TelegramWebApp {
   isFullscreen?: boolean
   onEvent?: (eventType: FullscreenChangedEvent, eventHandler: TelegramFullscreenChangedHandler) => void
   offEvent?: (eventType: FullscreenChangedEvent, eventHandler: TelegramFullscreenChangedHandler) => void
+  openLink?: (url: string) => void
 }
 
 declare global {

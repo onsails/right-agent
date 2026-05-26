@@ -15,6 +15,12 @@ import {
   skillsOverview,
   usageOverview,
 } from './api'
+import {
+  dashboardTabItems,
+  isDashboardTab,
+  normalizeInitialTab,
+  type DashboardTab,
+} from './dashboardTabs'
 import { initialDashboardTabFromLocation } from './format'
 import {
   applyTelegramDisplayMode,
@@ -29,6 +35,7 @@ import ActivityView from './views/ActivityView.vue'
 import HealthView from './views/HealthView.vue'
 import IdentityView from './views/IdentityView.vue'
 import KnowledgeView from './views/KnowledgeView.vue'
+import McpView from './views/McpView.vue'
 import OverviewView from './views/OverviewView.vue'
 import UsageView from './views/UsageView.vue'
 import type {
@@ -38,7 +45,6 @@ import type {
 } from './types'
 
 type ConnectionState = 'loading' | 'live' | 'stale' | 'offline' | 'locked'
-type DashboardTab = 'overview' | 'activity' | 'knowledge' | 'usage' | 'identity' | 'health' | 'mcp'
 type KnowledgeTab = 'learning' | 'skills'
 
 const bootstrapData = ref<BootstrapResponse | null>(null)
@@ -83,16 +89,7 @@ let unsubscribeTelegramFullscreen: (() => void) | undefined
 const shellTitle = computed(() => bootstrapData.value?.agent ?? dashboardData.value?.agent ?? 'Dashboard')
 const refreshIntervalMs = computed(() => Math.max(bootstrapData.value?.refresh_interval_secs ?? 5, 1) * 1000)
 const tabs = computed(() => {
-  const features = bootstrapData.value?.features
-  return [
-    { key: 'overview', label: 'Overview', enabled: true },
-    { key: 'activity', label: 'Activity', enabled: features?.activity ?? true },
-    { key: 'knowledge', label: 'Knowledge', enabled: (features?.knowledge_learning ?? true) || (features?.knowledge_skills ?? true) },
-    { key: 'usage', label: 'Usage', enabled: features?.usage ?? true },
-    { key: 'identity', label: 'Identity', enabled: features?.identity ?? true },
-    { key: 'health', label: 'Health', enabled: (features?.doctor ?? true) || (features?.sandbox_stats ?? true) },
-    { key: 'mcp', label: 'MCP', enabled: true },
-  ]
+  return dashboardTabItems(bootstrapData.value?.features)
 })
 
 onMounted(() => {
@@ -151,14 +148,6 @@ function setActiveTab(tab: string): void {
 function setKnowledgeTab(tab: KnowledgeTab): void {
   activeKnowledgeTab.value = tab
   void refreshKnowledge()
-}
-
-function normalizeInitialTab(tab: string): DashboardTab {
-  return isDashboardTab(tab) ? tab : 'overview'
-}
-
-function isDashboardTab(tab: string): tab is DashboardTab {
-  return ['overview', 'activity', 'knowledge', 'usage', 'identity', 'health', 'mcp'].includes(tab)
 }
 
 async function refreshActiveTab(): Promise<void> {
@@ -414,9 +403,7 @@ async function selectIdentityFile(name: string): Promise<void> {
       :error="identityError"
       @select-file="selectIdentityFile"
     />
-    <section v-else-if="activeTab === 'mcp'" class="empty-panel">
-      MCP controls are not available in this build yet.
-    </section>
+    <McpView v-else-if="activeTab === 'mcp'" />
     <HealthView
       v-else-if="activeTab === 'health'"
       :doctor="doctorData"
