@@ -3551,6 +3551,63 @@ fn cleanup_failed_restore_agent_dir(agent_dir: &Path) -> miette::Result<()> {
         })
 }
 
+#[allow(dead_code)]
+fn remove_database_sidecars(agent_dir: &Path) -> miette::Result<usize> {
+    use miette::IntoDiagnostic;
+
+    if !agent_dir.exists() {
+        return Ok(0);
+    }
+
+    let entries = std::fs::read_dir(agent_dir)
+        .into_diagnostic()
+        .map_err(|e| {
+            miette::miette!(
+                "failed to read agent dir {} for database sidecar cleanup: {e:#}",
+                agent_dir.display()
+            )
+        })?;
+
+    let mut removed = 0usize;
+    for entry in entries {
+        let entry = entry.into_diagnostic().map_err(|e| {
+            miette::miette!(
+                "failed to inspect agent dir {} during database sidecar cleanup: {e:#}",
+                agent_dir.display()
+            )
+        })?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !file_name.starts_with("data.db-") {
+            continue;
+        }
+
+        let file_type = entry.file_type().into_diagnostic().map_err(|e| {
+            miette::miette!(
+                "failed to read file type for {} during database sidecar cleanup: {e:#}",
+                entry.path().display()
+            )
+        })?;
+        if file_type.is_dir() {
+            continue;
+        }
+
+        std::fs::remove_file(entry.path())
+            .into_diagnostic()
+            .map_err(|e| {
+                miette::miette!(
+                    "failed to remove database sidecar {}: {e:#}",
+                    entry.path().display()
+                )
+            })?;
+        removed += 1;
+    }
+
+    Ok(removed)
+}
+
 fn resolve_restored_policy_path(
     agent_dir: &Path,
     policy_file: Option<&Path>,
@@ -4423,8 +4480,8 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
 mod tests {
     use super::{
         ConfigCommands, MemoryCommands, build_agent_ssh_command, cleanup_failed_restore_agent_dir,
-        copy_agent_backup_config_files, copy_agent_restore_config_files, resolve_agent_db,
-        resolve_restored_policy_path, restored_mcp_auth_method, truncate_content,
+        copy_agent_backup_config_files, copy_agent_restore_config_files, remove_database_sidecars,
+        resolve_agent_db, resolve_restored_policy_path, restored_mcp_auth_method, truncate_content,
         write_bootstrap_right_mcp_policy, write_managed_settings,
     };
     use std::fs;
@@ -4594,6 +4651,47 @@ mod tests {
             !agent_dir.exists(),
             "failed restore cleanup must remove the partial agent directory"
         );
+    }
+
+    #[test]
+    fn remove_database_sidecars_deletes_runtime_files_only() {
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = tmp.path().join("agents").join("right-drill");
+        fs::create_dir_all(agent_dir.join("data.db-dir")).unwrap();
+        fs::write(agent_dir.join("data.db"), "canonical").unwrap();
+        fs::write(agent_dir.join("data.db-wal"), "wal").unwrap();
+        fs::write(agent_dir.join("data.db-shm"), "shm").unwrap();
+        fs::write(agent_dir.join("data.db-tshm"), "tshm").unwrap();
+        fs::write(agent_dir.join("data.db-future"), "future").unwrap();
+        fs::write(agent_dir.join("notes.txt"), "notes").unwrap();
+
+        let removed = remove_database_sidecars(&agent_dir).unwrap();
+
+        assert_eq!(removed, 4);
+        assert!(agent_dir.join("data.db").exists());
+        assert!(agent_dir.join("data.db-dir").exists());
+        assert!(agent_dir.join("notes.txt").exists());
+        assert!(!agent_dir.join("data.db-wal").exists());
+        assert!(!agent_dir.join("data.db-shm").exists());
+        assert!(!agent_dir.join("data.db-tshm").exists());
+        assert!(!agent_dir.join("data.db-future").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_database_sidecars_unlinks_symlink_without_touching_target() {
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = tmp.path().join("agents").join("right-drill");
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(agent_dir.join("target.txt"), "target").unwrap();
+        std::os::unix::fs::symlink(agent_dir.join("target.txt"), agent_dir.join("data.db-link"))
+            .unwrap();
+
+        let removed = remove_database_sidecars(&agent_dir).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(agent_dir.join("target.txt").exists());
+        assert!(!agent_dir.join("data.db-link").exists());
     }
 
     #[test]
