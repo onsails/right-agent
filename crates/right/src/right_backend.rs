@@ -110,7 +110,7 @@ impl RightBackend {
                 right_agent::cron_spec::TRIGGER_TOOL_DESC,
                 schema_for_type::<CronTriggerParams>(),
             ),
-            // MCP management tools (read-only — write ops are user-only via Telegram /mcp)
+            // MCP management tools (read-only — write ops are user-only via the dashboard MCP view)
             Tool::new(
                 "mcp_list",
                 "List all registered MCP servers for this agent. Shows name, URL, and optional instructions.",

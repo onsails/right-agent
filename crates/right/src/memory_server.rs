@@ -514,7 +514,7 @@ impl rmcp::ServerHandler for MemoryServer {
                  - mcp__right__cron_show_run: Get full details of a specific cron run (run_note + delivery)\n\
                  - mcp__right__cron_trigger: Trigger a cron job for immediate execution\n\n\
                  ## MCP Management\n\
-                 - mcp__right__mcp_list: List all registered MCP servers (read-only — add/remove/auth via Telegram /mcp)\n\n\
+                 - mcp__right__mcp_list: List all registered MCP servers (read-only — add/remove/auth through the Telegram dashboard MCP view opened by /mcp)\n\n\
                  ## Conversation Search\n\
                  - mcp__right__thread_search: Search archived transcript snippets in the current Telegram chat/thread only. Use for \"what did we say in this topic/thread?\"\n\
                  - mcp__right__chat_search: Search archived transcript snippets in the current Telegram chat. In a DM this searches only that DM; in a group this searches the whole group across topics, including unaddressed messages.\n\
