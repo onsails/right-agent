@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { beforeEach, describe, expect, it, test, vi } from 'vitest'
 import type { Mock } from 'vitest'
 
+import { initialDashboardTabFromLocation } from './format'
 import {
   applyTelegramDisplayMode,
   DASHBOARD_DISPLAY_MODE_STORAGE_KEY,
@@ -257,5 +258,19 @@ describe('Telegram dashboard display mode helpers', () => {
     const unsubscribe = subscribeTelegramFullscreenChanges(webApp, vi.fn())
 
     expect(() => unsubscribe()).not.toThrow()
+  })
+})
+
+describe('initialDashboardTabFromLocation', () => {
+  it('prefers query view', () => {
+    expect(initialDashboardTabFromLocation('?view=mcp', '')).toBe('mcp')
+  })
+
+  it('uses hash view', () => {
+    expect(initialDashboardTabFromLocation('', '#mcp')).toBe('mcp')
+  })
+
+  it('defaults to overview', () => {
+    expect(initialDashboardTabFromLocation('', '')).toBe('overview')
   })
 })

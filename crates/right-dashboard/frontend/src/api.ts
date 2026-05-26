@@ -6,6 +6,14 @@ import type {
   BootstrapResponse,
   IdentityResponse,
   LearningOverviewResponse,
+  McpAddRequest,
+  McpDetectRequest,
+  McpDetectResponse,
+  McpHeaderInput,
+  McpHeadersRequest,
+  McpMutationResponse,
+  McpOAuthStartResponse,
+  McpServersResponse,
   OverviewResponse,
   PinSkillRequest,
   PinSkillResponse,
@@ -38,6 +46,46 @@ export function bootstrap(): Promise<BootstrapResponse> {
 
 export function dashboardOverview(): Promise<DashboardOverviewResponse> {
   return requestJson<DashboardOverviewResponse>('api/v1/overview')
+}
+
+export function mcpServers(): Promise<McpServersResponse> {
+  return requestJson<McpServersResponse>('api/v1/mcp/servers')
+}
+
+export function mcpDetect(url: string): Promise<McpDetectResponse> {
+  const body: McpDetectRequest = { url }
+  return requestJson<McpDetectResponse>('api/v1/mcp/detect', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function mcpAdd(request: McpAddRequest): Promise<McpMutationResponse> {
+  return requestJson<McpMutationResponse>('api/v1/mcp/servers', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  })
+}
+
+export function mcpSetHeaders(serverName: string, headers: McpHeaderInput[]): Promise<McpMutationResponse> {
+  const body: McpHeadersRequest = { headers }
+  return requestJson<McpMutationResponse>(`api/v1/mcp/servers/${encodeURIComponent(serverName)}/headers`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export function mcpStartOAuth(serverName: string): Promise<McpOAuthStartResponse> {
+  return requestJson<McpOAuthStartResponse>(`api/v1/mcp/servers/${encodeURIComponent(serverName)}/oauth/start`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}
+
+export function mcpRemove(serverName: string): Promise<McpMutationResponse> {
+  return requestJson<McpMutationResponse>(`api/v1/mcp/servers/${encodeURIComponent(serverName)}`, {
+    method: 'DELETE',
+  })
 }
 
 export function overview(): Promise<OverviewResponse> {
