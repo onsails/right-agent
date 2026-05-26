@@ -7,6 +7,7 @@
 
 #![warn(unreachable_pub)]
 
+mod bootstrap_lock;
 pub mod connection;
 pub mod conversation;
 pub mod error;
@@ -86,12 +87,18 @@ pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connect
 
 async fn open_connection_once(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
     let db_path = agent_path.join("data.db");
-    prepare_legacy_fts5_schema_for_turso(&db_path).await?;
+
+    if migrate {
+        let _bootstrap_lock = bootstrap_lock::acquire(agent_path).await?;
+        prepare_legacy_fts5_schema_for_turso(&db_path).await?;
+        let conn = Connection::open_local(db_path, true).await?;
+        conn.apply_connection_pragmas().await?;
+        migrations::MIGRATIONS.to_latest(&conn).await?;
+        return Ok(conn);
+    }
+
     let conn = Connection::open_local(db_path, true).await?;
     conn.apply_connection_pragmas().await?;
-    if migrate {
-        migrations::MIGRATIONS.to_latest(&conn).await?;
-    }
     Ok(conn)
 }
 
@@ -436,10 +443,11 @@ mod tests {
 
         let db_path = dir.path().join("data.db");
         let lock = hold_exclusive_sqlite_lock(db_path, legacy_probe_retry_lock_hold());
-        let result = open_connection(dir.path(), false).await;
+        let result = open_connection(dir.path(), true).await;
         lock.join().expect("release sqlite lock");
 
-        result.expect("open_connection should recover from transient legacy probe lock");
+        result
+            .expect("migrate=true open_connection should recover from transient legacy probe lock");
     }
 
     #[tokio::test]
@@ -454,7 +462,7 @@ mod tests {
             .truncate(false)
             .open(&lock_path)
             .unwrap();
-        lock_file.lock().unwrap();
+        FileExt::lock(&lock_file).unwrap();
 
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(750),
