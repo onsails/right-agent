@@ -9,7 +9,7 @@ use tempfile::NamedTempFile;
 use url::Url;
 
 /// Reserved server names that cannot be registered.
-const RESERVED_NAMES: &[&str] = &["right", "rightmeta"];
+const RESERVED_NAMES: &[&str] = &[crate::PROTECTED_MCP_SERVER, crate::RIGHT_META_NAMESPACE];
 
 /// Error type for credential operations.
 #[derive(Debug, thiserror::Error)]
@@ -248,7 +248,9 @@ fn parse_url(url_str: &str) -> Result<Url, CredentialError> {
     Url::parse(url_str).map_err(|e| CredentialError::InvalidServerUrl(format!("invalid URL: {e}")))
 }
 
-fn is_localhost_domain(domain: &str) -> bool {
+/// Returns true if `domain` is `localhost` (with optional trailing dot,
+/// ASCII-case-insensitive).
+pub fn is_localhost_domain(domain: &str) -> bool {
     domain
         .strip_suffix('.')
         .unwrap_or(domain)
@@ -599,7 +601,6 @@ pub async fn db_list_http_headers(
 /// Sets `auth_type` to `"oauth"` and stores the current access token plus
 /// refresh metadata. Empty access tokens are stored as NULL. Returns
 /// `CredentialError::ServerNotFound` if no matching row exists.
-// internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
 pub async fn db_set_oauth_state(
     conn: &Connection,

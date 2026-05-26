@@ -676,7 +676,6 @@ fn dashboard_mcp_button_label() -> &'static str {
 }
 
 /// Handle the /mcp command by opening the dashboard MCP view.
-// internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_mcp(
     bot: BotType,

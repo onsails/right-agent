@@ -253,11 +253,15 @@ fn oauth_reconnect_retry_delay(attempt: usize) -> std::time::Duration {
 }
 
 fn oauth_reconnect_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    right_mcp::ssrf::hardened_client_builder()
         .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+        // SSRF-hardened builder uses only static config (no proxy, no redirect,
+        // static DNS resolver). The build step is infallible in practice — a
+        // failure here would mean a broken rustls/TLS setup, not bad runtime
+        // input, so propagating up the OAuth reconnect path adds no value.
+        .unwrap_or_else(|e| panic!("reqwest builder failed: {e:#}"))
 }
 
 async fn reconnect_after_oauth_update(
@@ -362,24 +366,39 @@ async fn handle_mcp_add(
         if let Err(e) = credentials::db_add_server(&conn, &req.name, &req.url).await {
             return internal_error(format!("db_add_server: {e:#}")).into_response();
         }
-        // Persist auth fields if provided
-        if req.auth_type.as_deref() == Some("headers") {
-            if let Err(e) =
-                credentials::db_set_http_headers(&conn, &req.name, &header_secrets).await
-            {
-                return internal_error(format!("db_set_http_headers: {e:#}")).into_response();
+        // Persist auth fields if provided. On failure, roll back the freshly
+        // inserted mcp_servers row so we don't leave a row without auth state
+        // (the two credentials helpers run in separate transactions).
+        let auth_result: Result<(), (String, CredentialError)> =
+            if req.auth_type.as_deref() == Some("headers") {
+                credentials::db_set_http_headers(&conn, &req.name, &header_secrets)
+                    .await
+                    .map_err(|e| ("db_set_http_headers".to_string(), e))
+            } else if let Some(ref auth_type_str) = req.auth_type {
+                credentials::db_set_auth(
+                    &conn,
+                    &req.name,
+                    auth_type_str,
+                    req.auth_header.as_deref(),
+                    auth_token.as_deref(),
+                )
+                .await
+                .map_err(|e| ("db_set_auth".to_string(), e))
+            } else {
+                Ok(())
+            };
+        if let Err((label, e)) = auth_result {
+            // Best-effort rollback of the just-inserted mcp_servers row.
+            match credentials::db_remove_server(&conn, &req.name).await {
+                Ok(()) | Err(CredentialError::ServerNotFound(_)) => {}
+                Err(db_err) => {
+                    tracing::warn!(
+                        server = %req.name,
+                        "rollback db_remove_server after {label} failure failed: {db_err:#}"
+                    );
+                }
             }
-        } else if let Some(ref auth_type_str) = req.auth_type
-            && let Err(e) = credentials::db_set_auth(
-                &conn,
-                &req.name,
-                auth_type_str,
-                req.auth_header.as_deref(),
-                auth_token.as_deref(),
-            )
-            .await
-        {
-            return internal_error(format!("db_set_auth: {e:#}")).into_response();
+            return internal_error(format!("{label}: {e:#}")).into_response();
         }
     }
 
@@ -416,11 +435,16 @@ async fn handle_mcp_add(
 
     // Attempt connection (with timeout to prevent hanging on slow upstreams)
     tracing::info!(server = %req.name, url = %req.url, "mcp-add: connecting to upstream MCP server");
-    let connect_client = reqwest::Client::builder()
+    let connect_client = match right_mcp::ssrf::hardened_client_builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return internal_error(format!("reqwest client build: {e:#}")).into_response();
+        }
+    };
     match handle.connect(connect_client).await {
         Ok(_instructions) => {
             tracing::info!(server = %req.name, "mcp-add: upstream connection successful");
@@ -471,8 +495,7 @@ async fn handle_mcp_remove(
     Json(req): Json<McpRemoveRequest>,
 ) -> axum::response::Response {
     let dispatcher = &state.dispatcher;
-    // Reject protected names
-    if req.name == right_mcp::PROTECTED_MCP_SERVER || req.name == "rightmeta" {
+    if right_mcp::is_protected_server_name(&req.name) {
         return validation_error(format!(
             "'{}' is a protected server and cannot be removed",
             req.name
@@ -524,7 +547,7 @@ async fn handle_mcp_set_headers(
     State(state): State<InternalState>,
     Json(req): Json<McpSetHeadersRequest>,
 ) -> axum::response::Response {
-    if req.name == right_mcp::PROTECTED_MCP_SERVER || req.name == "rightmeta" {
+    if right_mcp::is_protected_server_name(&req.name) {
         return validation_error("protected MCP server cannot be modified").into_response();
     }
 
@@ -555,15 +578,6 @@ async fn handle_mcp_set_headers(
         Arc::clone(existing)
     };
 
-    {
-        let conn = conn_arc.lock().await;
-        match credentials::db_list_servers(&conn).await {
-            Ok(servers) if servers.iter().any(|server| server.name == req.name) => {}
-            Ok(_) => return not_found(format!("server '{}' not found", req.name)).into_response(),
-            Err(e) => return internal_error(format!("db_list_servers: {e:#}")).into_response(),
-        }
-    }
-
     let replacement = Arc::new(ProxyBackend::new(
         req.name.clone(),
         existing.agent_dir().to_path_buf(),
@@ -571,11 +585,16 @@ async fn handle_mcp_set_headers(
         Arc::new(tokio::sync::RwLock::new(None)),
         AuthMethod::Headers(header_secrets.clone()),
     ));
-    let connect_client = reqwest::Client::builder()
+    let connect_client = match right_mcp::ssrf::hardened_client_builder()
         .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return internal_error(format!("reqwest client build: {e:#}")).into_response();
+        }
+    };
     if let Err(e) = replacement.connect(connect_client).await {
         let detail = format!("{e:#}");
         let status = if right_mcp::proxy::is_upstream_auth_error(&detail) {
@@ -836,7 +855,7 @@ async fn handle_mcp_list(
         header_names: Vec::new(),
     });
 
-    // Read auth_type from SQLite (preserves "oauth" — AuthMethod enum has no OAuth variant)
+    // SQLite preserves "oauth" as auth_type; AuthMethod enum has no OAuth variant.
     let (db_auth_types, db_header_names): (
         std::collections::HashMap<String, Option<String>>,
         std::collections::HashMap<String, Vec<String>>,

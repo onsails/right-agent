@@ -7,7 +7,6 @@ import {
   openOAuthUrl,
   resetAddFlowState,
   seedHeaderRows,
-  shouldClearDetectBusy,
   shouldApplyDetectionResult,
 } from './mcpViewModel'
 
@@ -79,15 +78,6 @@ describe('McpView model behavior', () => {
       latestRequestId: 3,
       url: 'https://changed.test/mcp',
     })).toBe(false)
-  })
-
-  it('clears detect busy when the completed request is still active', () => {
-    const request = createDetectionRequest({ formGeneration: 1, latestRequestId: 0, url: 'https://example.test/mcp' })
-
-    expect(shouldClearDetectBusy(request!.requestId, request!.requestId, 'detect')).toBe(true)
-    expect(shouldClearDetectBusy(null, request!.requestId, 'detect')).toBe(false)
-    expect(shouldClearDetectBusy(request!.requestId + 1, request!.requestId, 'detect')).toBe(false)
-    expect(shouldClearDetectBusy(request!.requestId, request!.requestId, 'add')).toBe(false)
   })
 
   it('invalidates pending detection when the add flow resets', () => {
