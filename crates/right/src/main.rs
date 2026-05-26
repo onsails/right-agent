@@ -3614,22 +3614,6 @@ fn copy_database_snapshot_for_restore(backup_dir: &Path, agent_dir: &Path) -> mi
     use miette::IntoDiagnostic;
 
     let rel = Path::new("data.db");
-    let src = backup_dir.join(rel);
-    match std::fs::symlink_metadata(&src) {
-        Ok(meta) => {
-            if meta.file_type().is_symlink() {
-                return Err(miette::miette!(
-                    "agent file {} is a symlink; symlinks are rejected",
-                    src.display()
-                ));
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => {
-            return Err(miette::miette!("failed to stat {}: {e:#}", src.display()));
-        }
-    }
-
     let dest = agent_dir.join(rel);
     match std::fs::symlink_metadata(&dest) {
         Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
@@ -3653,6 +3637,22 @@ fn copy_database_snapshot_for_restore(backup_dir: &Path, agent_dir: &Path) -> mi
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
             return Err(miette::miette!("failed to stat {}: {e:#}", dest.display()));
+        }
+    }
+
+    let src = backup_dir.join(rel);
+    match std::fs::symlink_metadata(&src) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(miette::miette!(
+                    "agent file {} is a symlink; symlinks are rejected",
+                    src.display()
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(miette::miette!("failed to stat {}: {e:#}", src.display()));
         }
     }
 
@@ -4773,6 +4773,24 @@ mod tests {
         assert_eq!(
             fs::read_to_string(agent_dir.join("data.db")).unwrap(),
             "canonical"
+        );
+    }
+
+    #[test]
+    fn copy_database_snapshot_for_restore_removes_stale_data_db_without_canonical_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let backup_dir = tmp.path().join("backup");
+        let agent_dir = tmp.path().join("agents").join("right-drill");
+        fs::create_dir_all(&backup_dir).unwrap();
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(agent_dir.join("data.db"), "stale").unwrap();
+
+        let copied = copy_database_snapshot_for_restore(&backup_dir, &agent_dir).unwrap();
+
+        assert!(!copied);
+        assert!(
+            !agent_dir.join("data.db").exists(),
+            "stale restored data.db must be removed when no canonical snapshot exists"
         );
     }
 

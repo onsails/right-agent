@@ -1062,6 +1062,82 @@ async fn test_agent_restore_no_sandbox_removes_legacy_db_sidecars() {
     assert_eq!(val, "canonical db snapshot");
 }
 
+#[tokio::test]
+async fn test_agent_restore_no_sandbox_ignores_tar_db_without_canonical_snapshot() {
+    let home = tempdir().unwrap();
+    let home_str = home.path().to_str().unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        minimal_config_yaml(home.path()),
+    )
+    .unwrap();
+
+    let backup_dir = home
+        .path()
+        .join("backups")
+        .join("source-agent")
+        .join("20260527-0200");
+    fs::create_dir_all(&backup_dir).unwrap();
+    fs::write(backup_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+
+    let tar_root = home.path().join("legacy-tar-root-no-canonical");
+    let tar_agent = tar_root.join("source-agent");
+    fs::create_dir_all(&tar_agent).unwrap();
+    fs::write(tar_agent.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(tar_agent.join("notes.txt"), "from tar\n").unwrap();
+    let tar_db = right_db::open_connection(&tar_agent, true).await.unwrap();
+    tar_db
+        .execute("CREATE TABLE tar_only_probe (val TEXT)", ())
+        .await
+        .unwrap();
+    tar_db
+        .execute("INSERT INTO tar_only_probe (val) VALUES ('tar db')", ())
+        .await
+        .unwrap();
+    let _: i64 = tar_db
+        .query_one("PRAGMA wal_checkpoint(TRUNCATE)", (), |row| row.get(0))
+        .await
+        .unwrap();
+    drop(tar_db);
+
+    let tar_path = backup_dir.join("sandbox.tar.gz");
+    let status = StdCommand::new("tar")
+        .args([
+            "czf",
+            tar_path.to_str().unwrap(),
+            "-C",
+            tar_root.to_str().unwrap(),
+            "source-agent",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "test tar creation must succeed");
+
+    right()
+        .args([
+            "--home",
+            home_str,
+            "agent",
+            "init",
+            "restored-agent",
+            "--from-backup",
+            backup_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("restored"));
+
+    let restored_dir = home.path().join("agents").join("restored-agent");
+    assert_eq!(
+        fs::read_to_string(restored_dir.join("notes.txt")).unwrap(),
+        "from tar\n"
+    );
+    assert!(
+        !restored_dir.join("data.db").exists(),
+        "restore must not accept data.db from sandbox.tar.gz when backup root has no canonical data.db"
+    );
+}
+
 #[test]
 fn test_agent_restore_fails_before_partial_agent_for_missing_binding_mode() {
     let home = tempdir().unwrap();
