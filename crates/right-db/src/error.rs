@@ -78,7 +78,16 @@ fn is_turso_constraint(error: &turso::Error) -> bool {
 }
 
 fn is_turso_transient(error: &turso::Error) -> bool {
-    matches!(error, turso::Error::Busy(_) | turso::Error::BusySnapshot(_))
+    match error {
+        turso::Error::Busy(_) | turso::Error::BusySnapshot(_) => true,
+        // Turso currently maps its lower-level file-locking error into the
+        // generic Error variant, so classify only the precise lock owner case.
+        turso::Error::Error(message) => {
+            message.starts_with("Locking error:")
+                && message.contains("File is locked by another process")
+        }
+        _ => false,
+    }
 }
 
 fn is_rusqlite_transient(error: &rusqlite::Error) -> bool {
@@ -119,6 +128,17 @@ mod tests {
             })
             .is_transient(),
             "Open(BusySnapshot) must be transient",
+        );
+        assert!(
+            (DbError::Open {
+                path: "data.db".into(),
+                source: turso::Error::Error(
+                    "Locking error: Failed locking file '/tmp/data.db'. File is locked by another process"
+                        .into()
+                ),
+            })
+            .is_transient(),
+            "Turso file locking errors must be transient",
         );
         assert!(
             (DbError::LegacySqlite {
