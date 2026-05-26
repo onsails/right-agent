@@ -63,6 +63,25 @@ impl<T> OptionalExtension<T> for Result<T, DbError> {
 ///   version. Under WAL + 5s `busy_timeout`, a slow first-boot batch can
 ///   force the second opener to time out.
 pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
+    let mut retries = 0;
+    loop {
+        match open_connection_once(agent_path, migrate).await {
+            Ok(conn) => return Ok(conn),
+            Err(error) if error.is_transient() && retries < DB_OPEN_MAX_RETRIES => {
+                retries += 1;
+                tracing::warn!(
+                    path = %agent_path.display(),
+                    retries,
+                    "transient database open failed; retrying: {error:#}"
+                );
+                tokio::time::sleep(DB_OPEN_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn open_connection_once(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
     let db_path = agent_path.join("data.db");
     prepare_legacy_fts5_schema_for_turso(&db_path).await?;
     let conn = Connection::open_local(db_path, true).await?;
@@ -78,6 +97,11 @@ pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connect
 /// guaranteed to no longer contain the legacy schema, so the scrubber probe
 /// is permanently a no-op and we skip it.
 const LEGACY_FTS5_SCRUBBED_AT_USER_VERSION: i64 = 34;
+const DB_OPEN_RETRY_DELAY: Duration = Duration::from_millis(50);
+// Turso's open and WAL setup already do their own lock waiting. One full retry
+// covers a lock released just after that internal wait without masking stuck
+// duplicate processes.
+const DB_OPEN_MAX_RETRIES: usize = 1;
 const LEGACY_FTS5_PROBE_RETRY_DELAY: Duration = Duration::from_millis(50);
 // The rusqlite pre-Turso probe already uses SQLite's 5s busy_timeout. One
 // extra attempt covers a lock released just after that timeout without hiding
