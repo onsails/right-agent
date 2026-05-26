@@ -47,26 +47,55 @@ Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw
   - **Bot-managed fields are a documented exception to the CLI-exposure rule.** Operational/runtime concerns reached over Telegram or the Telegram Mini App dashboard (`/mcp`, `/model`) are intentionally **not** mirrored as `right agent config` flags — the bot/dashboard is the control plane for these, and `agent.yaml` (the source of truth) remains directly user-editable for out-of-band changes.
 ## Architecture docs split
 
-`ARCHITECTURE.md` is **prescriptive only** — load-bearing rules, contracts,
-gotchas, reference tables. It is `@`-imported and loads on every
-conversation; every line costs tokens.
+`ARCHITECTURE.md` is **prescriptive only** — load-bearing rules,
+contracts, gotchas, reference tables, schema/protocol invariants. It is
+`@`-imported and loads on every conversation; every line costs tokens.
 
-Descriptive content (data flows, feature mechanics, walkthroughs) lives in
-`docs/architecture/*.md`. Reference these files by **plain path** in
-`ARCHITECTURE.md` or here — never `@`-import them. That is the whole point
-of the split.
+**Hard budget:** ARCHITECTURE.md MUST stay under 40k characters. If an
+edit would push it over, cut something else or move content to a
+satellite in the same commit. This is non-negotiable — at 40k+ the
+CLI warns and downstream conversations pay the cost on every turn.
 
-When adding new content to `ARCHITECTURE.md`, ask: "is this a rule the
-codebase enforces, or a description of how it works?" Rule →
-`ARCHITECTURE.md`. Description → `docs/architecture/`.
+Descriptive content (data flows, feature walkthroughs, mechanism
+narration, "first X happens, then Y, then Z" sequences, helper-method
+inventories) lives in `docs/architecture/*.md`. Reference satellites by
+**plain path** in `ARCHITECTURE.md` or here — never `@`-import them.
+That is the whole point of the split.
+
+**Default for new content is the satellite.** Before adding to
+`ARCHITECTURE.md`, the change must clear all three tests:
+
+1. **Rule test:** does it say what code MUST or MUST NOT do? ("X is
+   forbidden", "every Y goes through Z", "MUST use helper W") If it
+   narrates what happens, it's descriptive — satellite.
+2. **Enforcement test:** is there a compiler check, test, or
+   review-blocking pattern that catches violations? If it's just "good
+   to know", it's descriptive — satellite.
+3. **Brevity test:** can the rule be stated in ≤3 sentences (or one
+   table row)? If you need a walkthrough to convey it, the walkthrough
+   belongs in the satellite and only the rule statement stays here.
+
+**Sentinel phrases that mean "move it out":** "The X subsystem works
+by…", "First X, then Y, then Z", "X is implemented as…", "The flow is…",
+"This was historically…", numbered step-by-step procedures longer than
+3 steps, helper-method bullet lists.
 
 **Cite-on-touch (mandatory):** when modifying a subsystem, re-read the
 corresponding `docs/architecture/<x>.md` and update it if drifted. These
 docs are not auto-loaded, so they will rot silently if not maintained.
 Code is authoritative; the satellite doc is a courtesy to readers.
 
+**When in doubt, put it in the satellite and link from ARCHITECTURE.md
+with a one-line summary.** It is always easier to promote a rule later
+than to evict descriptive text once it's wedged into the prescriptive
+doc.
+
 ## Architecture
 
 @ARCHITECTURE.md
 
-Always update ARCHITECTURE.md when significant parts of the architecture change (new crates, module reorganization, new integrations, changed data flows).
+Update ARCHITECTURE.md only when **contracts, invariants, or
+review-blocking rules** change (new mandatory crate boundary, new
+codegen category, new MCP routing rule, new sandbox-policy invariant).
+Routine evolution — added features, new data flows, refactored helpers,
+new walkthroughs — goes into `docs/architecture/*.md` instead.
