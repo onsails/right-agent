@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use super::backup::push_no_sandbox_database_tar_excludes;
 use crate::agent::types::AgentConfig;
 
 /// Options for destroying an agent (resolved by caller — no TTY interaction).
@@ -24,7 +25,7 @@ pub struct DestroyResult {
 
 /// Run a pre-destroy backup. Returns the backup directory path.
 ///
-/// For non-sandboxed agents: tars the agent directory (excluding data.db).
+/// For non-sandboxed agents: tars the agent directory (excluding data.db and runtime sidecars).
 /// For sandboxed agents: attempts SSH tar of sandbox, falls back to config-only backup.
 /// Always copies agent.yaml, policy.yaml, allowlist.yaml, and VACUUM-copies data.db.
 async fn run_backup(
@@ -60,19 +61,24 @@ async fn run_backup(
         let parent = agent_dir
             .parent()
             .ok_or_else(|| miette::miette!("agent_dir has no parent"))?;
+        let mut tar_args = vec![
+            "czpf".to_string(),
+            dest_tar
+                .to_str()
+                .ok_or_else(|| miette::miette!("non-UTF-8 backup path"))?
+                .to_string(),
+        ];
+        push_no_sandbox_database_tar_excludes(&mut tar_args, agent_name);
+        tar_args.extend([
+            "-C".to_string(),
+            parent
+                .to_str()
+                .ok_or_else(|| miette::miette!("non-UTF-8 agents_dir"))?
+                .to_string(),
+            agent_name.to_string(),
+        ]);
         let status = tokio::process::Command::new("tar")
-            .args([
-                "czpf",
-                dest_tar
-                    .to_str()
-                    .ok_or_else(|| miette::miette!("non-UTF-8 backup path"))?,
-                "--exclude=data.db",
-                "-C",
-                parent
-                    .to_str()
-                    .ok_or_else(|| miette::miette!("non-UTF-8 agents_dir"))?,
-                agent_name,
-            ])
+            .args(&tar_args)
             .status()
             .await
             .map_err(|e| miette::miette!("failed to spawn tar: {e:#}"))?;
@@ -314,6 +320,23 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
 mod tests {
     use super::*;
 
+    fn tar_entries(path: &Path) -> Vec<String> {
+        let output = std::process::Command::new("tar")
+            .args(["-tzf", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "tar -tzf failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
     #[tokio::test]
     async fn destroy_nonsandboxed_agent_removes_dir() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -428,6 +451,50 @@ mod tests {
             result.dir_removed,
             "agent dir should be removed after backup"
         );
+    }
+
+    #[tokio::test]
+    async fn destroy_with_backup_excludes_database_sidecars_from_no_sandbox_tar() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+
+        let agents_dir = home.join("agents").join("backup-sidecars");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+        std::fs::write(agents_dir.join("notes.txt"), "keep me").unwrap();
+        for sidecar in [
+            "data.db-wal",
+            "data.db-shm",
+            "data.db-tshm",
+            "data.db-future",
+        ] {
+            std::fs::write(agents_dir.join(sidecar), sidecar).unwrap();
+        }
+
+        let options = DestroyOptions {
+            agent_name: "backup-sidecars".into(),
+            backup: true,
+        };
+
+        let result = destroy_agent(home, &options).await.unwrap();
+        let backup_path = result.backup_path.expect("backup path must be recorded");
+        let entries = tar_entries(&backup_path.join("sandbox.tar.gz"));
+
+        assert!(
+            entries.contains(&"backup-sidecars/notes.txt".to_string()),
+            "regular no-sandbox files should still be archived"
+        );
+        for sidecar in [
+            "data.db-wal",
+            "data.db-shm",
+            "data.db-tshm",
+            "data.db-future",
+        ] {
+            assert!(
+                !entries.contains(&format!("backup-sidecars/{sidecar}")),
+                "pre-destroy no-sandbox backup tar must not contain database sidecar {sidecar}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -3691,13 +3691,6 @@ fn copy_agent_backup_config_files(
     Ok(())
 }
 
-fn push_no_sandbox_database_tar_excludes(tar_args: &mut Vec<String>, agent_name: &str) {
-    tar_args.push("--exclude=data.db".to_string());
-    tar_args.push("--exclude=data.db-*".to_string());
-    tar_args.push(format!("--exclude={agent_name}/data.db"));
-    tar_args.push(format!("--exclude={agent_name}/data.db-*"));
-}
-
 fn copy_agent_restore_config_files(
     backup_dir: &Path,
     agent_dir: &Path,
@@ -3950,7 +3943,7 @@ async fn cmd_agent_backup(
                 .ok_or_else(|| miette::miette!("non-UTF-8 backup path"))?
                 .to_string(),
         ];
-        push_no_sandbox_database_tar_excludes(&mut tar_args, agent_name);
+        right_agent::agent::push_no_sandbox_database_tar_excludes(&mut tar_args, agent_name);
 
         if !include_rebuildable {
             for path in right_openshell::openshell::DEFAULT_REBUILDABLE_BACKUP_EXCLUDES {
