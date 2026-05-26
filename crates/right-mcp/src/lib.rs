@@ -10,7 +10,7 @@ pub mod refresh;
 pub mod tool_error;
 
 /// Name of the built-in MCP server that right-agent manages.
-/// Protected from `/mcp remove` - required for core functionality.
+/// Protected from dashboard removal - required for core functionality.
 pub const PROTECTED_MCP_SERVER: &str = "right";
 
 pub(crate) fn ensure_crypto_provider() {

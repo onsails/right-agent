@@ -4,18 +4,20 @@
 > subsystem (see `AGENTS.md` → "Architecture docs split"). Code is
 > authoritative; this file may have drifted.
 
-## MCP Auth Choice Flow
+## MCP Dashboard Management Flow
 
-`/mcp add <name> <url>` treats detection as advice, not authority. The bot
-parses the original URL, derives a bare URL for probes, runs OAuth discovery
-when the bare URL is public and has no query string, and runs auth-header
-classification only when OAuth was not discovered. It then shows inline buttons
-for `OAuth`, `Header`, and `URL as-is`, marking the recommendation.
+Telegram `/mcp` opens the dashboard Mini App directly at `view=mcp`; Telegram
+no longer implements MCP add/auth/remove/list subcommands. The dashboard MCP
+flow treats detection as advice, not authority. It parses the original URL,
+derives a bare URL for probes, runs OAuth discovery when the bare URL is public
+and has no query string, and runs auth-header classification only when OAuth was
+not discovered. The user then chooses `OAuth`, `Header`, or `URL as-is`; the
+recommendation is advisory.
 
-No upstream MCP server is registered until the user clicks a button. `OAuth`
-registers the bare URL as `auth_type=oauth` and asks the user to run
-`/mcp auth <server>`. `Header` prompts for a token using the detected bearer or
-custom-header recommendation; the user can override with `HeaderName: token`.
+No upstream MCP server is registered until the dashboard submits the user's
+choice. `OAuth` registers the bare URL as `auth_type=oauth` and uses the
+dashboard OAuth start route to return an authorization URL. `Header` stores
+user-supplied HTTP header credentials through the dashboard headers route.
 `URL as-is` registers the exact original URL without token/header injection,
 preserving query-string credentials.
 
@@ -28,9 +30,8 @@ canonicalized MCP server URL.
 URL validation has two modes. Public detection accepts network-routable HTTP and
 HTTPS URLs, excludes loopback/private/link-local hosts, and returns a short
 `Plain HTTP: trusted/encrypted networks only.` warning when plain HTTP is
-registered. Telegram renders that warning through `telegram::tg`, not as raw
-`Warning:` prose. Explicit user-managed registration allows HTTP/HTTPS while
-broad private/link-local ranges remain rejected.
+registered. Explicit user-managed registration allows HTTP/HTTPS while broad
+private/link-local ranges remain rejected.
 Dashboard MCP detection applies the same public-network URL policy to every
 OAuth discovery fetch, including the original MCP probe, RFC 9728
 `resource_metadata` URLs, synthesized well-known URLs, and authorization-server
@@ -98,12 +99,12 @@ its OAuth entry does not wait for a slow token endpoint or client timeout.
 | Class | Triggered by | Scheduler response |
 |-------|--------------|--------------------|
 | `Transient` | Network error, 5xx, 408, 429, Cloudflare 403 challenge page | Reschedule with exponential backoff, retry indefinitely. Backend status unchanged (stays `Connected` from the user's perspective). |
-| `Permanent` | Non-recoverable 4xx (typically `invalid_grant` / `invalid_client`) | Flip backend to `NeedsAuth`, drop the timer, clear retry counter. User must re-OAuth via `/mcp auth <server>`. |
+| `Permanent` | Non-recoverable 4xx (typically `invalid_grant` / `invalid_client`) | Flip backend to `NeedsAuth`, drop the timer, clear retry counter. User must re-OAuth from the dashboard MCP view. |
 
 Transient backoff schedule (`refresh.rs::transient_backoff_secs`,
 1-indexed): `60, 120, 300, 600, 1200, 1800` seconds, capped at 1800s
 (30 min) for all subsequent attempts. The counter resets on success and
-on any new `RefreshMessage::NewEntry` (e.g. after `/mcp auth`), so a
+on any new `RefreshMessage::NewEntry` (e.g. after dashboard OAuth), so a
 stale counter from prior failures can't push the next retry past the
 60-second first step.
 
@@ -136,7 +137,7 @@ timer wake-up. Refresh attempts are **spawned** into the `JoinSet`, not
 awaited inline — this keeps the `rx.recv()` arm responsive while a refresh
 runs. An exhausting-backoff path (~210s) on one server would otherwise
 starve `RemoveServer` for a different server, or block a `NewEntry`
-arriving from a just-completed `/mcp auth` for minutes.
+arriving from a just-completed dashboard OAuth flow for minutes.
 
 Two correctness handles keep stale results from polluting state:
 
@@ -187,11 +188,11 @@ outward, while Right MCP needs sandbox-to-host access.
 
 ## Agent-Facing MCP Health
 
-`/mcp list` reports Aggregator backend status through the internal Unix-socket
-API. It does not prove that a specific Claude Code process loaded the same MCP
-tool registry. Agent turns are checked separately through Claude Code's
-`system/init` stream-json event, which lists the MCP servers visible to that
-process.
+The dashboard MCP server list reports Aggregator backend status through the
+internal Unix-socket API. It does not prove that a specific Claude Code process
+loaded the same MCP tool registry. Agent turns are checked separately through
+Claude Code's `system/init` stream-json event, which lists the MCP servers
+visible to that process.
 
 The bot runs a periodic Haiku health probe using the same strict MCP config
 path as real turns (`/sandbox/mcp.json` in OpenShell mode, host `mcp.json` in
@@ -222,9 +223,10 @@ Internal REST API on Unix socket (~/.right/run/internal.sock):
     foreground learning, probe-writer learning, curator learning, or search scope
   - POST /progress/unregister — remove that invocation when the run ends
 
-Telegram bot uses InternalClient (hyper UDS) to call these endpoints.
-Dashboard MCP management routes use the same InternalClient path; they do not
-edit MCP config files or credential stores directly.
+Telegram dashboard routes use InternalClient (hyper UDS) to call these
+endpoints; the `/mcp` Telegram command only opens the dashboard MCP view.
+Dashboard MCP management routes do not edit MCP config files or credential
+stores directly.
 Agents cannot reach the Unix socket from inside the sandbox.
 
 ## Invocation-scoped MCP tools

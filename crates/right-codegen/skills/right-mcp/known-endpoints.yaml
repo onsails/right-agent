@@ -2,7 +2,7 @@
 # Checked BEFORE web search — if service matches, skip search entirely.
 #
 # Fields:
-#   name  — server name for /mcp add
+#   name  — suggested dashboard server name
 #   url   — streamable HTTP endpoint
 #   auth  — oauth | query_string | bearer | header
 #   note  — one-line description

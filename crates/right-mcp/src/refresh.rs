@@ -166,8 +166,8 @@ fn transient_backoff_delay(attempt: u32) -> Duration {
 /// [`do_refresh_cancellable`] outcome.
 ///
 /// The generation lets the scheduler discard results whose source entry has
-/// been superseded by a fresh `NewEntry` (typically from `/mcp auth`). Without
-/// it, an HTTP response that races with cancellation could overwrite freshly-
+/// been superseded by a fresh `NewEntry` (typically from dashboard OAuth).
+/// Without it, an HTTP response that races with cancellation could overwrite freshly
 /// rotated credentials with the outcome of a refresh against the old
 /// refresh_token — masking the rotation until the next expiry.
 type RefreshTaskOutput = (
@@ -281,7 +281,7 @@ pub async fn run_refresh_scheduler(
                         token_handles.insert(server_name.clone(), token);
                         backend_handles.insert(server_name.clone(), backend);
                         // Reset retry counter: a fresh NewEntry (e.g. after
-                        // /mcp auth) supersedes any in-flight retry cycle. Without
+                        // dashboard OAuth) supersedes any in-flight retry cycle. Without
                         // this, a stale counter from prior transient failures
                         // would push the next backoff well past the 60s first step.
                         retry_attempts.remove(&server_name);

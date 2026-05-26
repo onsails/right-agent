@@ -50,7 +50,9 @@ pub enum ProxyError {
         source: rmcp::service::ServiceError,
     },
 
-    #[error("Authentication required for '{server}'. Use /mcp auth {server} in Telegram.")]
+    #[error(
+        "Authentication required for '{server}'. Open /mcp in Telegram and re-authenticate {server} in the dashboard."
+    )]
     NeedsAuth { server: String },
 
     #[error("Server '{server}' is currently unreachable.")]
@@ -310,7 +312,7 @@ pub struct ProxyBackend {
     /// Active MCP client session handle.
     client: RwLock<Option<RunningService<RoleClient, ()>>>,
     /// Serializes concurrent `connect()` calls so refresh-driven reconnects and
-    /// `/mcp auth`-driven reconnects can't race on `client`/`cached_tools`/`status`.
+    /// dashboard OAuth reconnects can't race on `client`/`cached_tools`/`status`.
     connect_mutex: Mutex<()>,
 }
 
@@ -343,7 +345,7 @@ impl ProxyBackend {
         http_client: reqwest::Client,
     ) -> Result<Option<String>, ProxyError> {
         // Hold this guard for the full body — serializes concurrent `connect()` calls
-        // so refresh-driven reconnects and `/mcp auth`-driven reconnects can't
+        // so refresh-driven reconnects and dashboard OAuth reconnects can't
         // interleave writes to `client`/`cached_tools`/`status`.
         let _guard = self.connect_mutex.lock().await;
         let dynamic =
@@ -664,7 +666,7 @@ mod tests {
             "expected auth error, got: {msg}"
         );
         assert!(
-            msg.contains("/mcp auth notion"),
+            msg.contains("Open /mcp in Telegram"),
             "expected auth instructions, got: {msg}"
         );
     }

@@ -4,7 +4,7 @@
 //! handle_new: deactivates current session, optionally creates a named one.
 //! handle_list: shows all sessions for the current chat+thread.
 //! handle_switch: switches to a different session by partial UUID match.
-//! handle_mcp: MCP server management (list/auth/add/remove).
+//! handle_mcp: opens the dashboard MCP view.
 //! handle_doctor: runs right doctor and returns results.
 
 use std::path::{Path, PathBuf};
@@ -23,19 +23,11 @@ use crate::cc::markdown_utils::{html_escape, strip_html_tags};
 use super::BotType;
 #[cfg(test)]
 use super::ThinkingVisibility;
-use super::mcp_auth_choice::{
-    AuthChoiceSignals, AuthDetectionResult as AuthChoiceDetectionResult, MCP_AUTH_CHOICE_TTL,
-    McpAuthChoice, McpAuthRecommendation, PendingMcpAuthChoiceRequest, PendingMcpAuthChoiceSlot,
-    PendingMcpAuthChoiceTake, next_mcp_auth_choice_id, parse_auth_choice_callback_data,
-    parse_token_input, recommend_auth_choice, render_auth_choice_keyboard,
-    take_pending_auth_choice,
-};
 use super::oauth_callback::PendingAuthMap;
 use super::session::{
     activate_session, create_session, deactivate_current, effective_thread_id,
     find_sessions_by_uuid, list_sessions, truncate_label,
 };
-use super::tg;
 use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
 
 /// Newtype wrapper for the agent directory passed via dptree dependencies.
@@ -52,36 +44,19 @@ pub struct SshConfigPath(pub Option<PathBuf>);
 #[derive(Clone)]
 pub struct RightHome(pub PathBuf);
 
-/// Shared slot for pending MCP token requests. When /mcp add needs a token,
-/// a oneshot::Sender is placed here. Message handler checks before routing to worker.
+/// Compatibility dependency for the former Telegram MCP token prompt flow.
 #[derive(Clone)]
-pub struct PendingTokenSlot(pub Arc<tokio::sync::Mutex<Option<PendingTokenRequest>>>);
+pub struct PendingTokenSlot;
 
-/// Pending token request from /mcp add flow.
-pub struct PendingTokenRequest {
-    /// Process-monotonic id, allocated from `NEXT_TOKEN_REQ_ID`. Used by the
-    /// task spawned in `request_token_and_register` to detect supersession:
-    /// on timeout/error, the task only `take()`s the slot if its id still
-    /// matches, so a later `/mcp ...` invocation that already parked a fresh
-    /// `PendingTokenRequest` is not silently discarded.
-    pub id: u64,
-    pub chat_id: i64,
-    pub thread_id: i64,
-    pub sender: tokio::sync::oneshot::Sender<String>,
-}
-
-/// Process-local monotonic id allocator for `PendingTokenRequest`. Wraps after
-/// 2^64-1 increments — well beyond any plausible bot lifetime, so wraparound
-/// is not a correctness concern in practice.
-static NEXT_TOKEN_REQ_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// Compatibility dependency for the former Telegram MCP auth-choice prompt flow.
+#[derive(Clone)]
+pub struct PendingMcpAuthChoiceSlot;
 
 /// Bundle of message-intercept slots to reduce dptree DI parameter count.
-/// Contains both auth code and MCP token intercept slots, plus the
-/// auth-watcher-active flag (true while a token request task is running).
+/// Contains the auth code intercept slot plus the auth-watcher-active flag.
 #[derive(Clone)]
 pub struct InterceptSlots {
     pub auth_code: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
-    pub pending_token: Arc<tokio::sync::Mutex<Option<PendingTokenRequest>>>,
     pub auth_watcher: Arc<AtomicBool>,
 }
 
@@ -151,17 +126,6 @@ async fn send_html_reply(
         )));
     }
     send.await
-}
-
-/// Send a `Failed: <error>` reply with the error chain escaped for HTML.
-async fn send_failed_reply(
-    bot: &BotType,
-    chat_id: teloxide::types::ChatId,
-    eff_thread_id: i64,
-    err: &impl std::fmt::Display,
-) -> Result<teloxide::types::Message, RequestError> {
-    let escaped = html_escape(&format!("{err:#}"));
-    send_html_reply(bot, chat_id, eff_thread_id, &tg::error(&escaped)).await
 }
 
 /// Handle an incoming text message.
@@ -278,20 +242,6 @@ pub async fn handle_message(
 
     let chat_id = msg.chat.id;
     let eff_thread_id = effective_thread_id(&msg);
-
-    // Intercept pending MCP token: if /mcp add is waiting for a token, forward this message.
-    if let Some(ref text_val) = text {
-        let mut slot = intercept_slots.pending_token.lock().await;
-        if let Some(ref pending) = *slot
-            && pending.chat_id == chat_id.0
-            && pending.thread_id == eff_thread_id
-            && let Some(pending) = slot.take()
-        {
-            tracing::info!("handle_message: forwarding message as MCP token");
-            let _ = pending.sender.send(text_val.clone());
-            return Ok(());
-        }
-    }
     super::archive::archive_routed_dm_message(&agent_dir.0, &msg, decision.address.clone());
 
     let key: SessionKey = (chat_id.0, eff_thread_id);
@@ -721,1033 +671,60 @@ pub async fn handle_switch(
 // /mcp command handler
 // ---------------------------------------------------------------------------
 
-/// Handle the /mcp command -- routes to subcommands: list, auth, add, remove.
-///
-/// Teloxide captures everything after `/mcp` as a single String (RESEARCH.md Pitfall 9).
-/// We split manually and dispatch.
+fn dashboard_mcp_button_label() -> &'static str {
+    "Open MCP dashboard"
+}
+
+/// Handle the /mcp command by opening the dashboard MCP view.
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_mcp(
     bot: BotType,
     msg: Message,
-    args: String,
+    _args: String,
     agent_dir: Arc<AgentDir>,
-    pending_auth: PendingAuthMap,
+    _pending_auth: PendingAuthMap,
     home: Arc<RightHome>,
-    internal: Arc<InternalApi>,
-    pending_token_slot: Arc<PendingTokenSlot>,
-    pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
-    ssh_config: Arc<SshConfigPath>,
-    settings: Arc<AgentSettings>,
+    _internal: Arc<InternalApi>,
+    _pending_token_slot: Arc<PendingTokenSlot>,
+    _pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
+    _ssh_config: Arc<SshConfigPath>,
+    _settings: Arc<AgentSettings>,
 ) -> ResponseResult<()> {
     if !is_private_chat(&msg.chat.kind) {
         tracing::debug!(cmd = "mcp", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
-    tracing::info!(agent_dir = %agent_dir.0.display(), "mcp: dispatching");
+    tracing::info!(agent_dir = %agent_dir.0.display(), "mcp: opening dashboard");
+    let global_config = right_config::read_global_config(&home.0)
+        .map_err(|e| to_request_err(format!("mcp dashboard: read config.yaml: {e:#}")))?;
     let agent_name = agent_dir
         .0
         .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            to_request_err(format!(
+                "mcp dashboard: invalid agent directory name: {}",
+                agent_dir.0.display()
+            ))
+        })?;
+    let mut url = super::dashboard::dashboard_url(&global_config.tunnel.hostname, agent_name)
+        .map_err(|e| to_request_err(format!("mcp dashboard: invalid URL: {e:#}")))?;
+    url.set_query(Some("view=mcp"));
 
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let result = match parts.first().copied() {
-        None | Some("list") => handle_mcp_list(&bot, &msg, agent_name, &internal.0).await,
-        Some("auth") => {
-            let server = match parts.get(1) {
-                Some(s) => *s,
-                None => {
-                    bot.send_message(msg.chat.id, "Usage: /mcp auth <server>")
-                        .await?;
-                    return Ok(());
-                }
-            };
-            handle_mcp_auth(
-                &bot,
-                &msg,
-                server,
-                &agent_dir.0,
-                pending_auth,
-                &home.0,
-                &internal.0,
-                &pending_token_slot,
-                ssh_config.0.as_deref(),
-                settings.resolved_sandbox.as_deref(),
-            )
-            .await
-        }
-        Some("add") => {
-            let rest = parts[1..].join(" ");
-            handle_mcp_add(
-                &bot,
-                &msg,
-                &rest,
-                &agent_dir.0,
-                &pending_auth_choice_slot,
-                ssh_config.0.as_deref(),
-                settings.resolved_sandbox.as_deref(),
-            )
-            .await
-        }
-        Some("remove") => {
-            let server = match parts.get(1) {
-                Some(s) => *s,
-                None => {
-                    bot.send_message(msg.chat.id, "Usage: /mcp remove <server>")
-                        .await?;
-                    return Ok(());
-                }
-            };
-            handle_mcp_remove(&bot, &msg, server, &agent_dir.0, &internal.0).await
-        }
-        Some(unknown) => bot
-            .send_message(
-                msg.chat.id,
-                format!("Unknown /mcp subcommand: {unknown}\nUsage: /mcp [list|add|remove]"),
-            )
-            .await
-            .map(|_| ()),
-    };
-    result.map_err(|e| to_request_err(format!("{e:#}")))?;
-    Ok(())
-}
+    let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::web_app(
+        dashboard_mcp_button_label(),
+        teloxide::types::WebAppInfo { url },
+    )]]);
 
-/// `/mcp list` -- show all MCP servers via the internal aggregator API.
-async fn handle_mcp_list(
-    bot: &BotType,
-    msg: &Message,
-    agent_name: &str,
-    internal: &right_mcp::internal_client::InternalClient,
-) -> Result<(), RequestError> {
-    tracing::info!(agent = %agent_name, "mcp list");
-
-    let result = match internal.mcp_list(agent_name).await {
-        Ok(r) => r,
-        Err(e) => {
-            bot.send_message(msg.chat.id, format!("Error listing MCP servers: {e:#}"))
-                .await?;
-            return Ok(());
-        }
-    };
-
-    if result.servers.is_empty() {
-        bot.send_message(msg.chat.id, "No MCP servers configured.")
-            .await?;
-        return Ok(());
-    }
-
-    let mut text = String::from("MCP Servers:\n\n");
-    for s in &result.servers {
-        let url_part = s
-            .url
-            .as_deref()
-            .map(|u| format!(" [{u}]"))
-            .unwrap_or_default();
-        let auth_part = s
-            .auth_type
-            .as_deref()
-            .map(|a| format!(" [{a}]"))
-            .unwrap_or_default();
-        text.push_str(&format!(
-            "  {} -- {} ({} tools){}{}\n",
-            s.name, s.status, s.tool_count, auth_part, url_part
-        ));
-    }
-    bot.send_message(msg.chat.id, text).await?;
-    Ok(())
-}
-
-/// `/mcp auth <server>` -- initiate OAuth flow: discovery, PKCE, send auth URL.
-///
-/// If Dynamic Client Registration fails (some servers advertise OAuth metadata
-/// but never implement DCR — e.g. browser-use's `/oauth/register` returns 404),
-/// fall back to API-key auth: run Haiku auth-type detection (when a sandbox is
-/// available) and ask the user for a token via `PendingTokenSlot`.
-// internal helper; refactor to a config struct is out of scope for this cleanup pass
-#[allow(clippy::too_many_arguments)]
-async fn handle_mcp_auth(
-    bot: &BotType,
-    msg: &Message,
-    server_name: &str,
-    agent_dir: &Path,
-    pending_auth: PendingAuthMap,
-    home: &Path,
-    internal: &right_mcp::internal_client::InternalClient,
-    pending_token_slot: &PendingTokenSlot,
-    ssh_config_path: Option<&Path>,
-    resolved_sandbox: Option<&str>,
-) -> Result<(), RequestError> {
-    tracing::info!(agent_dir = %agent_dir.display(), server = %server_name, "mcp auth");
-
-    let agent_name = agent_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-
-    // 1. Look up server URL from aggregator (not mcp.json — external servers live in SQLite)
-    let server_url = match internal.mcp_list(agent_name).await {
-        Ok(resp) => {
-            match resp.servers.iter().find(|s| s.name == server_name) {
-                Some(s) => match &s.url {
-                    Some(url) => url.clone(),
-                    None => {
-                        bot.send_message(
-                            msg.chat.id,
-                            format!("Server '{server_name}' has no URL configured"),
-                        )
-                        .await?;
-                        return Ok(());
-                    }
-                },
-                None => {
-                    bot.send_message(
-                        msg.chat.id,
-                        format!("Server '{server_name}' not found. Run /mcp list to see registered servers."),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-            }
-        }
-        Err(e) => {
-            bot.send_message(msg.chat.id, format!("Cannot query MCP servers: {e:#}"))
-                .await?;
-            return Ok(());
-        }
-    };
-
-    // 2. Read tunnel config
-    let global_config = match right_config::read_global_config(home) {
-        Ok(c) => c,
-        Err(e) => {
-            bot.send_message(msg.chat.id, format!("Cannot read config.yaml: {e:#}"))
-                .await?;
-            return Ok(());
-        }
-    };
-    let tunnel = global_config.tunnel.clone();
-
-    // 3. Check cloudflared binary
-    if which::which("cloudflared").is_err() {
-        bot.send_message(
-            msg.chat.id,
-            "Error: cloudflared binary not found in PATH. Install cloudflared first.",
-        )
-        .await?;
-        return Ok(());
-    }
-
-    // 4. AS discovery
-    let http_client = reqwest::Client::new();
-    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
-        .await
-        .ok();
-    bot.send_message(
-        msg.chat.id,
-        format!("Discovering OAuth endpoints for {server_name}..."),
-    )
-    .await?;
-
-    let discovery = match right_mcp::oauth::discover_oauth(&http_client, &server_url).await {
-        Ok(d) => d,
-        Err(e) => {
-            bot.send_message(
-                msg.chat.id,
-                format!("AS discovery failed for {server_name}: {e:#}"),
-            )
-            .await?;
-            return Ok(());
-        }
-    };
-    let metadata = discovery.metadata;
-    let resource = discovery.resource;
-    let scopes = discovery.scopes;
-    let scope_param = right_mcp::oauth::scope_param(&scopes);
-    let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
-
-    // 5. DCR or static clientId
-    let agent_name = agent_dir
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    if tunnel.hostname.is_empty() {
-        bot.send_message(
-            msg.chat.id,
-            "Tunnel hostname not configured -- run `right init --tunnel-hostname HOSTNAME`",
-        )
-        .await?;
-        return Ok(());
-    }
-    let redirect_uri = format!("https://{}/oauth/{agent_name}/callback", tunnel.hostname);
-    let (client_id, client_secret) = match right_mcp::oauth::register_client_or_fallback(
-        &http_client,
-        &metadata,
-        None, // no static clientId from .claude.json -- DCR only
-        &redirect_uri,
-        &scope_refs,
-    )
-    .await
-    {
-        Ok(pair) => pair,
-        Err(right_mcp::oauth::OAuthError::DcrFailed(detail)) => {
-            // Some servers advertise OAuth metadata (RFC 8414) but never implement
-            // Dynamic Client Registration — `registration_endpoint` 404s. Falling
-            // back to API-key auth: detect header name via Haiku, then ask the
-            // user for a token. The server stays registered; mcp_add overwrites
-            // auth_type from "oauth" to whatever the user provides.
-            tracing::warn!(server = server_name, %detail, "mcp auth: DCR failed, falling back to API-key auth");
-            return dcr_failure_fallback(
-                bot,
-                msg,
-                server_name,
-                &server_url,
-                agent_dir,
-                &agent_name,
-                detail,
-                pending_token_slot,
-                ssh_config_path,
-                resolved_sandbox,
-                internal,
-            )
-            .await;
-        }
-        Err(e) => {
-            bot.send_message(msg.chat.id, format!("Client registration failed: {e:#}"))
-                .await?;
-            return Ok(());
-        }
-    };
-
-    // 6. Generate PKCE + state
-    let (code_verifier, code_challenge) = right_mcp::oauth::generate_pkce();
-    let state = right_mcp::oauth::generate_state();
-
-    // 7. Tunnel healthcheck -- hit tunnel root to verify cloudflared is running
-    let healthcheck_url = format!("https://{}/", tunnel.hostname);
-    match http_client
-        .get(&healthcheck_url)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_server_error() => {
-            bot.send_message(
-                msg.chat.id,
-                format!(
-                    "Tunnel healthcheck returned {} -- cloudflared may be misconfigured",
-                    resp.status()
-                ),
-            )
-            .await?;
-            return Ok(());
-        }
-        Ok(_) => {} // 2xx/3xx/4xx = tunnel is reachable
-        Err(e) => {
-            bot.send_message(
-                msg.chat.id,
-                format!("Tunnel healthcheck failed: {e:#}\nIs cloudflared running?"),
-            )
-            .await?;
-            return Ok(());
-        }
-    }
-
-    // 8. Store PendingAuth
-    let pending = right_mcp::oauth::PendingAuth {
-        server_name: server_name.to_string(),
-        server_url: server_url.clone(),
-        resource: resource.clone(),
-        code_verifier,
-        state: state.clone(),
-        token_endpoint: metadata.token_endpoint.clone(),
-        client_id: client_id.clone(),
-        client_secret,
-        redirect_uri: redirect_uri.clone(),
-        created_at: std::time::Instant::now(),
-    };
-    pending_auth.lock().await.insert(state.clone(), pending);
-
-    // 9. Build and send auth URL
-    let auth_url = right_mcp::oauth::build_auth_url(
-        &metadata,
-        &client_id,
-        &redirect_uri,
-        &state,
-        &code_challenge,
-        &resource,
-        scope_param.as_deref(),
-    );
-    bot.send_message(
-        msg.chat.id,
-        format!("Authenticate {server_name}:\n\n{auth_url}"),
-    )
-    .await?;
-    Ok(())
-}
-
-/// Recovery path when an OAuth-advertising MCP server fails Dynamic Client
-/// Registration. Tells the user, runs Haiku auth-type detection (when a
-/// sandbox is configured), and prompts for an API-key token via
-/// `request_token_and_register`. The token-prompt task overwrites the
-/// existing `auth_type=oauth` row with the resolved bearer/header values.
-#[allow(clippy::too_many_arguments)]
-async fn dcr_failure_fallback(
-    bot: &BotType,
-    msg: &Message,
-    server_name: &str,
-    server_url: &str,
-    agent_dir: &Path,
-    agent_name: &str,
-    dcr_detail: String,
-    pending_token_slot: &PendingTokenSlot,
-    ssh_config_path: Option<&Path>,
-    resolved_sandbox: Option<&str>,
-    internal: &right_mcp::internal_client::InternalClient,
-) -> Result<(), RequestError> {
-    let escaped_detail = html_escape(&dcr_detail);
-    send_html_reply(
-        bot,
-        msg.chat.id,
-        effective_thread_id(msg),
-        &format!(
-            "OAuth metadata advertised a registration endpoint, but DCR failed:\n<code>{escaped_detail}</code>\n\nFalling back to API-key authentication."
-        ),
-    )
-    .await?;
-
-    // The aggregator stores the bare URL at registration time (see
-    // handle_mcp_add's OAuth branch), so server_url here should already be
-    // bare. Log anomalies instead of silently rewriting them — a query
-    // string or parse failure here signals a registration-time integrity
-    // bug worth surfacing.
-    let bare_url = match reqwest::Url::parse(server_url) {
-        Ok(u) if u.query().is_some() => {
-            tracing::warn!(
-                server = server_name,
-                %server_url,
-                "registered server URL unexpectedly has a query string"
-            );
-            let mut clean = u;
-            clean.set_query(None);
-            clean.to_string()
-        }
-        Ok(_) => server_url.to_string(),
-        Err(e) => {
-            tracing::warn!(
-                server = server_name,
-                %server_url,
-                err = %e,
-                "registered server URL failed to parse — using as-is"
-            );
-            server_url.to_string()
-        }
-    };
-
-    // Detect auth type via Haiku when a sandbox is available; otherwise default
-    // to bearer. The user can always override with `HeaderName: token` syntax.
-    let (auth_type, auth_header): (String, Option<String>) =
-        if ssh_config_path.is_some() && right_mcp::credentials::is_public_url(&bare_url) {
-            bot.send_message(msg.chat.id, "Detecting authentication method...")
-                .await?;
-            let (t, h) = detect_auth_with_typing_indicator(
-                bot,
-                msg.chat.id,
-                &bare_url,
-                agent_dir,
-                ssh_config_path,
-                resolved_sandbox,
-            )
-            .await;
-            // query_string is impossible after stripping the URL query;
-            // downgrade so the user can still supply a token.
-            if t == "bearer" || t == "header" {
-                (t, h)
-            } else {
-                ("bearer".into(), None)
-            }
-        } else {
-            ("bearer".into(), None)
-        };
-
-    request_token_and_register(
-        bot.clone(),
-        msg.chat.id,
-        effective_thread_id(msg),
-        right_mcp::internal_client::InternalClient::new(internal.socket_path()),
-        agent_name.to_string(),
-        server_name.to_string(),
-        bare_url,
-        auth_type,
-        auth_header,
-        pending_token_slot.clone(),
-    )
-    .await
-}
-
-/// `/mcp add <name> <url>` -- add an MCP server via the internal aggregator API.
-///
-/// Flow:
-/// 1. Strip query string and compute auth signals
-/// 2. Run OAuth/Header detection only when useful for public URLs
-/// 3. Park a pending auth-choice request and show an inline keyboard
-#[allow(clippy::too_many_arguments)]
-async fn handle_mcp_add(
-    bot: &BotType,
-    msg: &Message,
-    config_str: &str,
-    agent_dir: &Path,
-    pending_auth_choice_slot: &PendingMcpAuthChoiceSlot,
-    ssh_config_path: Option<&Path>,
-    resolved_sandbox: Option<&str>,
-) -> Result<(), RequestError> {
-    tracing::info!(agent_dir = %agent_dir.display(), "mcp add");
-    let parts: Vec<&str> = config_str.split_whitespace().collect();
-    if parts.len() < 2 {
-        bot.send_message(msg.chat.id, "Usage: /mcp add <name> <url>")
-            .await?;
-        return Ok(());
-    }
-    let name = parts[0];
-    let original_url = parts[1];
-
-    // Parse URL early — reject garbage before any network calls
-    let parsed = match reqwest::Url::parse(original_url) {
-        Ok(u) => u,
-        Err(e) => {
-            bot.send_message(msg.chat.id, format!("Invalid URL: {e}"))
-                .await?;
-            return Ok(());
-        }
-    };
-
-    let has_query = parsed.query().is_some();
-    let bare_url = {
-        let mut clean = parsed.clone();
-        clean.set_query(None);
-        clean.to_string()
-    };
-
-    let agent_name = agent_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-    let eff_thread_id = effective_thread_id(msg);
-
-    let is_loopback = right_mcp::credentials::is_loopback_url(original_url);
-    let is_public = right_mcp::credentials::is_public_url(&bare_url);
-
-    let oauth_discovered = if !has_query && is_public {
-        bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
-            .await
-            .ok();
-        tracing::info!(url = %bare_url, "mcp add: starting OAuth AS discovery");
-        let http_client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        let oauth_result = right_mcp::oauth::discover_oauth(&http_client, &bare_url).await;
-        let discovered = oauth_result.is_ok();
-        tracing::info!(url = %bare_url, oauth_discovered = discovered, err = ?oauth_result.err(), "mcp add: OAuth AS discovery complete");
-        discovered
-    } else {
-        false
-    };
-
-    let detection = if !has_query && !oauth_discovered && is_public {
-        bot.send_message(msg.chat.id, "Detecting authentication method...")
-            .await?;
-        let (auth_type, header_name) = detect_auth_with_typing_indicator(
-            bot,
-            msg.chat.id,
-            &bare_url,
-            agent_dir,
-            ssh_config_path,
-            resolved_sandbox,
-        )
-        .await;
-        Some(AuthChoiceDetectionResult {
-            auth_type,
-            header_name,
-        })
-    } else {
-        None
-    };
-
-    let recommendation = recommend_auth_choice(AuthChoiceSignals {
-        has_query,
-        oauth_discovered,
-        is_loopback,
-        is_public,
-        detection: detection.as_ref(),
-    });
-
-    prompt_mcp_auth_choice(
-        bot,
-        msg.chat.id,
-        eff_thread_id,
-        agent_name.to_string(),
-        name.to_string(),
-        original_url.to_string(),
-        bare_url,
-        recommendation,
-        pending_auth_choice_slot,
-    )
-    .await
-}
-
-/// Park an `/mcp add` auth-choice request and prompt the user with the
-/// available registration modes.
-#[allow(clippy::too_many_arguments)]
-async fn prompt_mcp_auth_choice(
-    bot: &BotType,
-    chat_id: teloxide::types::ChatId,
-    eff_thread_id: i64,
-    agent_name: String,
-    server_name: String,
-    original_url: String,
-    bare_url: String,
-    recommendation: McpAuthRecommendation,
-    pending_auth_choice_slot: &PendingMcpAuthChoiceSlot,
-) -> Result<(), RequestError> {
-    let request_id = next_mcp_auth_choice_id();
-    let prev = {
-        let mut slot = pending_auth_choice_slot.0.lock().await;
-        let prev = slot.take();
-        *slot = Some(PendingMcpAuthChoiceRequest {
-            id: request_id,
-            chat_id: chat_id.0,
-            thread_id: eff_thread_id,
-            agent_name,
-            server_name: server_name.clone(),
-            original_url,
-            bare_url,
-            recommendation: recommendation.clone(),
-            expires_at: std::time::Instant::now() + MCP_AUTH_CHOICE_TTL,
-        });
-        prev
-    };
-
-    if let Some(prev) = prev {
-        let prev_server = html_escape(&prev.server_name);
-        send_html_reply(
-            bot,
-            teloxide::types::ChatId(prev.chat_id),
-            prev.thread_id,
-            &format!(
-                "Cancelled the previous MCP auth prompt for <b>{prev_server}</b> because a newer /mcp command started."
-            ),
-        )
-        .await
-        .ok();
-    }
-
-    let recommendation_text = match recommendation.choice {
-        McpAuthChoice::OAuth => "OAuth".to_string(),
-        McpAuthChoice::Header => match recommendation.header_name.as_deref() {
-            Some(header) if recommendation.header_auth_type == "header" => {
-                format!("Header ({header})")
-            }
-            _ => "Header (Authorization: Bearer)".to_string(),
-        },
-        McpAuthChoice::UrlAsIs => "URL as-is".to_string(),
-    };
-    let mut send = bot
-        .send_message(
-            chat_id,
-            format!(
-                "Choose authentication method for {server_name}. Recommended: {recommendation_text}."
-            ),
-        )
-        .reply_markup(render_auth_choice_keyboard(
-            request_id,
-            recommendation.choice,
-        ));
+    let mut send = bot.send_message(msg.chat.id, "MCP").reply_markup(keyboard);
+    let eff_thread_id = effective_thread_id(&msg);
     if eff_thread_id != 0 {
         send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
             eff_thread_id as i32,
         )));
     }
     send.await?;
-
-    Ok(())
-}
-
-fn format_token_request_prompt(header_hint: &str, server_name: &str) -> String {
-    format!(
-        "Send {} for {}, or <code>HeaderName: token</code> to specify a custom header:",
-        html_escape(header_hint),
-        html_escape(server_name)
-    )
-}
-
-fn format_mcp_add_reply(
-    server_name: &str,
-    label: Option<&str>,
-    tools_count: usize,
-    warning: Option<&str>,
-    include_auth_action: bool,
-) -> String {
-    let escaped_server = html_escape(server_name);
-    let mut success = format!("Added MCP server <b>{escaped_server}</b>");
-    if let Some(label) = label {
-        success.push_str(&format!(" ({})", html_escape(label)));
-    }
-    success.push('.');
-    if tools_count > 0 {
-        success.push_str(&format!(" {tools_count} tools available."));
-    }
-
-    let mut blocks = vec![tg::success(&success)];
-    if let Some(warning) = warning {
-        blocks.push(tg::warning(&html_escape(warning)));
-    }
-    if include_auth_action {
-        blocks.push(tg::action(&format!(
-            "Run <code>/mcp auth {escaped_server}</code> to authenticate."
-        )));
-    }
-    tg::blocks(blocks)
-}
-
-/// Prompt the user for an auth token, then spawn a background task that waits
-/// for it (via `PendingTokenSlot`), parses optional `HeaderName: token` syntax,
-/// and registers/updates the MCP server with the resolved auth fields.
-///
-/// Used by both `/mcp add` (for non-OAuth servers) and `/mcp auth` (as a
-/// DCR-failure fallback when an OAuth-advertising server doesn't actually
-/// implement Dynamic Client Registration).
-///
-/// Returns immediately after parking the oneshot sender so the dispatcher
-/// remains free to deliver the token message into the slot.
-#[allow(clippy::too_many_arguments)]
-async fn request_token_and_register(
-    bot: BotType,
-    chat_id: teloxide::types::ChatId,
-    eff_thread_id: i64,
-    internal: right_mcp::internal_client::InternalClient,
-    agent_name: String,
-    server_name: String,
-    bare_url: String,
-    initial_auth_type: String,
-    initial_auth_header: Option<String>,
-    pending_token_slot: PendingTokenSlot,
-) -> Result<(), RequestError> {
-    let header_hint = initial_auth_header
-        .as_deref()
-        .map(|h| format!("the {h} token"))
-        .unwrap_or_else(|| "the token".into());
-    send_html_reply(
-        &bot,
-        chat_id,
-        eff_thread_id,
-        &format_token_request_prompt(&header_hint, &server_name),
-    )
-    .await?;
-
-    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
-    let req_id = NEXT_TOKEN_REQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let prev = {
-        let mut slot = pending_token_slot.0.lock().await;
-        let prev = slot.take();
-        *slot = Some(PendingTokenRequest {
-            id: req_id,
-            chat_id: chat_id.0,
-            thread_id: eff_thread_id,
-            sender: tx,
-        });
-        prev
-    };
-    // Drop the prior request OUTSIDE the lock. Dropping it closes the oneshot
-    // synchronously, so the prior waiter wakes immediately with RecvError.
-    if let Some(prev) = prev {
-        let prev_chat_id = teloxide::types::ChatId(prev.chat_id);
-        let prev_thread_id = prev.thread_id;
-        let mut send = bot.send_message(
-            prev_chat_id,
-            "Cancelled the previous MCP token prompt because a newer /mcp command started.",
-        );
-        if prev_thread_id != 0 {
-            send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
-                prev_thread_id as i32,
-            )));
-        }
-        send.await.ok();
-        drop(prev); // explicit — closes the oneshot
-    }
-
-    tokio::spawn(async move {
-        let raw_input = match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
-            Ok(Ok(input)) => input,
-            _ => {
-                // Only take the slot if it still belongs to *this* request.
-                // Otherwise a newer /mcp invocation has already parked its own
-                // PendingTokenRequest in the slot — clearing it here would
-                // silently drop the user's next token message.
-                let mut slot = pending_token_slot.0.lock().await;
-                if slot.as_ref().map(|s| s.id) == Some(req_id) {
-                    slot.take();
-                }
-                drop(slot);
-                bot.send_message(
-                    chat_id,
-                    "Timed out waiting for token. MCP authentication cancelled.",
-                )
-                .await
-                .ok();
-                return;
-            }
-        };
-
-        let parsed = parse_token_input(raw_input, initial_auth_type, initial_auth_header);
-        let token = parsed.token;
-        let auth_type = parsed.auth_type;
-        let auth_header = parsed.auth_header;
-
-        tracing::info!(url = %bare_url, %auth_type, "mcp: registering server with token");
-        match internal
-            .mcp_add(
-                &agent_name,
-                &server_name,
-                &bare_url,
-                Some(&auth_type),
-                auth_header.as_deref(),
-                Some(&token),
-            )
-            .await
-        {
-            Ok(resp) => {
-                let reply = format_mcp_add_reply(
-                    &server_name,
-                    None,
-                    resp.tools_count,
-                    resp.warning.as_deref(),
-                    false,
-                );
-                send_html_reply(&bot, chat_id, eff_thread_id, &reply)
-                    .await
-                    .ok();
-            }
-            Err(e) => {
-                send_failed_reply(&bot, chat_id, eff_thread_id, &e)
-                    .await
-                    .ok();
-            }
-        }
-    });
-
-    Ok(())
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct AuthDetectionResult {
-    auth_type: String,
-    #[serde(default)]
-    header_name: Option<String>,
-}
-
-/// Run Haiku auth-type detection wrapped in a Telegram typing-indicator that
-/// pulses every 5s. Returns `(auth_type, auth_header)` defaulting to bearer
-/// when detection fails or no sandbox is configured.
-///
-/// Used by `/mcp add` (after stripping query string) and the `/mcp auth`
-/// DCR-failure fallback.
-///
-/// PRECONDITION: caller MUST gate this on
-/// `right_mcp::credentials::is_public_url(bare_url) && ssh_config_path.is_some()`.
-/// Calling this for a private URL burns a Haiku invocation for no benefit; calling it
-/// without a sandbox falls through to the bearer default.
-async fn detect_auth_with_typing_indicator(
-    bot: &BotType,
-    chat_id: teloxide::types::ChatId,
-    bare_url: &str,
-    agent_dir: &Path,
-    ssh_config_path: Option<&Path>,
-    resolved_sandbox: Option<&str>,
-) -> (String, Option<String>) {
-    let typing_bot = bot.clone();
-    let typing_cancel = tokio_util::sync::CancellationToken::new();
-    let typing_token = typing_cancel.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = typing_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing) => {}
-                _ = typing_token.cancelled() => break,
-            }
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-                _ = typing_token.cancelled() => break,
-            }
-        }
-    });
-
-    let result =
-        detect_auth_type_via_haiku(bare_url, agent_dir, ssh_config_path, resolved_sandbox).await;
-    typing_cancel.cancel();
-
-    match result {
-        Ok(r) => {
-            tracing::info!(auth_type = %r.auth_type, header = ?r.header_name, "haiku detected auth type");
-            (r.auth_type, r.header_name)
-        }
-        Err(e) => {
-            tracing::warn!("haiku auth detection failed: {e}, falling back to bearer");
-            ("bearer".into(), None)
-        }
-    }
-}
-
-/// Run haiku in sandbox to detect MCP server auth type.
-/// Returns Err if no sandbox is configured (caller should fall back to bearer).
-async fn detect_auth_type_via_haiku(
-    bare_url: &str,
-    agent_dir: &Path,
-    ssh_config_path: Option<&Path>,
-    resolved_sandbox: Option<&str>,
-) -> Result<AuthDetectionResult, String> {
-    if ssh_config_path.is_none() {
-        return Err("no sandbox configured, skipping haiku detection".into());
-    }
-
-    let prompt = format!(
-        "Find what authentication method the MCP server at {bare_url} uses.\n\
-         Steps:\n\
-         1. WebSearch for the API documentation of this service\n\
-         2. WebFetch the most relevant documentation page to find auth details\n\
-         3. Return the result as JSON\n\n\
-         One of:\n\
-         {{\"auth_type\": \"bearer\"}} — if it uses Authorization: Bearer header\n\
-         {{\"auth_type\": \"header\", \"header_name\": \"X-Custom-Header\"}} — if it uses a custom header (include the exact header name)\n\
-         {{\"auth_type\": \"query_string\"}} — if the API key goes in the URL query string\n\
-         If you cannot determine, default to: {{\"auth_type\": \"bearer\"}}"
-    );
-
-    const AUTH_DETECTION_SCHEMA: &str = r#"{"type":"object","properties":{"auth_type":{"type":"string","enum":["bearer","header","query_string"]},"header_name":{"type":"string"}},"required":["auth_type"]}"#;
-
-    let invocation = crate::cc::invocation::ClaudeInvocation {
-        mcp_config_path: None,
-        json_schema: Some(AUTH_DETECTION_SCHEMA.into()),
-        output_format: crate::cc::invocation::OutputFormat::Json,
-        model: Some("haiku".into()),
-        max_budget_usd: Some(0.20),
-        max_turns: Some(10),
-        resume_session_id: None,
-        new_session_id: None,
-        fork_session: false,
-        allowed_tools: vec!["WebSearch".into(), "WebFetch".into()],
-        disallowed_tools: vec![],
-        extra_args: vec![],
-        prompt: Some(prompt),
-        debug_flag: None, // Haiku auth-detection is a one-off; debug mode doesn't apply.
-    };
-    let claude_args = invocation.into_args();
-
-    let mut cmd = crate::cc::invocation::build_claude_command(
-        &claude_args,
-        agent_dir,
-        ssh_config_path,
-        resolved_sandbox,
-    )
-    .await;
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let mut child = right_process::ProcessGroupChild::spawn(cmd)
-        .map_err(|e| format!("spawn haiku failed: {e:#}"))?;
-
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| "haiku timed out after 120s".to_string())?
-    .map_err(|e| format!("haiku failed: {e:#}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    tracing::info!(
-        exit_code = ?output.status.code(),
-        stdout_preview = %stdout.chars().take(500).collect::<String>(),
-        stderr_preview = %stderr.chars().take(500).collect::<String>(),
-        "haiku auth detection raw output"
-    );
-    if !output.status.success() {
-        return Err(format!(
-            "haiku exited with {:?}\nstdout: {}\nstderr: {}",
-            output.status.code(),
-            stdout.chars().take(300).collect::<String>(),
-            stderr.chars().take(300).collect::<String>(),
-        ));
-    }
-
-    // CC --output-format json + --json-schema puts schema-validated JSON in
-    // `structured_output`, while `result` gets the text reply. Fall back to `result`
-    // for older CC versions that don't have `structured_output`.
-    let envelope: serde_json::Value = serde_json::from_str(stdout.trim())
-        .map_err(|e| format!("failed to parse CC output envelope: {e:#}"))?;
-
-    let result_val = envelope
-        .get("structured_output")
-        .filter(|v| !v.is_null())
-        .or_else(|| envelope.get("result"))
-        .ok_or("CC output missing both 'structured_output' and 'result' fields")?;
-
-    // structured_output is already a JSON object; result may be a string that needs parsing
-    if result_val.is_object() {
-        serde_json::from_value::<AuthDetectionResult>(result_val.clone())
-            .map_err(|e| format!("failed to parse auth detection result: {e:#}"))
-    } else if let Some(s) = result_val.as_str() {
-        serde_json::from_str::<AuthDetectionResult>(s)
-            .map_err(|e| format!("failed to parse haiku response: {e:#}\nRaw: {s}"))
-    } else {
-        Err(format!("unexpected result type: {result_val}"))
-    }
-}
-
-/// `/mcp remove <server>` -- remove an MCP server via the internal aggregator API.
-async fn handle_mcp_remove(
-    bot: &BotType,
-    msg: &Message,
-    server_name: &str,
-    agent_dir: &Path,
-    internal: &right_mcp::internal_client::InternalClient,
-) -> Result<(), RequestError> {
-    tracing::info!(agent_dir = %agent_dir.display(), server = %server_name, "mcp remove");
-
-    if server_name == right_mcp::PROTECTED_MCP_SERVER {
-        bot.send_message(
-            msg.chat.id,
-            format!("Cannot remove '{server_name}' — required for core functionality."),
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let agent_name = agent_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-
-    let eff_thread_id = effective_thread_id(msg);
-    let escaped_name = html_escape(server_name);
-
-    match internal.mcp_remove(agent_name, server_name).await {
-        Ok(_) => {
-            send_html_reply(
-                bot,
-                msg.chat.id,
-                eff_thread_id,
-                &format!("Removed MCP server <b>{escaped_name}</b>."),
-            )
-            .await?;
-        }
-        Err(e) => {
-            send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {e:#}")).await?;
-        }
-    }
     Ok(())
 }
 
@@ -1995,164 +972,6 @@ pub async fn handle_usage(
 }
 
 // ---------------------------------------------------------------------------
-// MCP auth choice callback query handler
-// ---------------------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_mcp_auth_choice_callback(
-    bot: BotType,
-    q: CallbackQuery,
-    internal: Arc<InternalApi>,
-    pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
-    pending_token_slot: Arc<PendingTokenSlot>,
-) -> ResponseResult<()> {
-    let qid = q.id.clone();
-    let Some((request_id, choice)) = q.data.as_deref().and_then(parse_auth_choice_callback_data)
-    else {
-        bot.answer_callback_query(qid)
-            .text("Invalid MCP choice")
-            .await?;
-        return Ok(());
-    };
-
-    let callback_chat_id = q.message.as_ref().map(|message| message.chat().id.0);
-    let callback_thread_id = q.regular_message().map(effective_thread_id);
-    let pending = match take_pending_auth_choice(
-        pending_auth_choice_slot.as_ref(),
-        request_id,
-        callback_chat_id,
-        callback_thread_id,
-        std::time::Instant::now(),
-    )
-    .await
-    {
-        PendingMcpAuthChoiceTake::Ready(pending) => pending,
-        PendingMcpAuthChoiceTake::Missing => {
-            bot.answer_callback_query(qid)
-                .text("MCP choice no longer active")
-                .await?;
-            return Ok(());
-        }
-        PendingMcpAuthChoiceTake::Expired => {
-            bot.answer_callback_query(qid)
-                .text("MCP choice expired")
-                .await?;
-            return Ok(());
-        }
-        PendingMcpAuthChoiceTake::ChatMismatch => {
-            bot.answer_callback_query(qid).text("Not allowed").await?;
-            return Ok(());
-        }
-    };
-
-    // best-effort UX ack: failing here must not abort the actual MCP registration below
-    if let Err(e) = bot.answer_callback_query(qid).text("Selected").await {
-        tracing::warn!(err = %e, "failed to answer MCP auth choice callback");
-    }
-
-    match choice {
-        McpAuthChoice::OAuth => {
-            match internal
-                .0
-                .mcp_add(
-                    &pending.agent_name,
-                    &pending.server_name,
-                    &pending.original_url,
-                    Some("oauth"),
-                    None,
-                    None,
-                )
-                .await
-            {
-                Ok(resp) => {
-                    let reply = format_mcp_add_reply(
-                        &pending.server_name,
-                        Some("OAuth"),
-                        resp.tools_count,
-                        resp.warning.as_deref(),
-                        true,
-                    );
-                    send_html_reply(
-                        &bot,
-                        teloxide::types::ChatId(pending.chat_id),
-                        pending.thread_id,
-                        &reply,
-                    )
-                    .await?;
-                }
-                Err(e) => {
-                    send_failed_reply(
-                        &bot,
-                        teloxide::types::ChatId(pending.chat_id),
-                        pending.thread_id,
-                        &e,
-                    )
-                    .await?;
-                }
-            }
-        }
-        McpAuthChoice::Header => {
-            request_token_and_register(
-                bot.clone(),
-                teloxide::types::ChatId(pending.chat_id),
-                pending.thread_id,
-                right_mcp::internal_client::InternalClient::new(internal.0.socket_path()),
-                pending.agent_name,
-                pending.server_name,
-                pending.bare_url,
-                pending.recommendation.header_auth_type,
-                pending.recommendation.header_name,
-                pending_token_slot.as_ref().clone(),
-            )
-            .await?;
-        }
-        McpAuthChoice::UrlAsIs => {
-            let auth_type = pending.has_query().then_some("query_string");
-            match internal
-                .0
-                .mcp_add(
-                    &pending.agent_name,
-                    &pending.server_name,
-                    &pending.original_url,
-                    auth_type,
-                    None,
-                    None,
-                )
-                .await
-            {
-                Ok(resp) => {
-                    let reply = format_mcp_add_reply(
-                        &pending.server_name,
-                        None,
-                        resp.tools_count,
-                        resp.warning.as_deref(),
-                        false,
-                    );
-                    send_html_reply(
-                        &bot,
-                        teloxide::types::ChatId(pending.chat_id),
-                        pending.thread_id,
-                        &reply,
-                    )
-                    .await?;
-                }
-                Err(e) => {
-                    send_failed_reply(
-                        &bot,
-                        teloxide::types::ChatId(pending.chat_id),
-                        pending.thread_id,
-                        &e,
-                    )
-                    .await?;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Stop button callback query handler
 // ---------------------------------------------------------------------------
 
@@ -2342,8 +1161,13 @@ mod tests {
         assert_ne!(agent.0, home.0);
     }
 
-    #[tokio::test]
-    async fn parse_stop_callback_data_valid() {
+    #[test]
+    fn dashboard_mcp_button_label_names_destination() {
+        assert_eq!(dashboard_mcp_button_label(), "Open MCP dashboard");
+    }
+
+    #[test]
+    fn parse_stop_callback_data_valid() {
         let data = "stop:12345:678";
         let parts: Vec<&str> = data.splitn(3, ':').collect();
         assert_eq!(parts.len(), 3);
@@ -2366,34 +1190,8 @@ mod tests {
         assert!(parts[1].parse::<i64>().is_err());
     }
 
-    #[tokio::test]
-    async fn token_request_prompt_formats_header_override_as_code() {
-        let text = format_token_request_prompt("the X<Api> token", "obs<idian>");
-
-        assert!(text.contains("<code>HeaderName: token</code>"));
-        assert!(text.contains("the X&lt;Api&gt; token"));
-        assert!(text.contains("obs&lt;idian&gt;"));
-        assert!(!text.contains("or HeaderName: token"));
-    }
-
-    #[tokio::test]
-    async fn mcp_add_reply_formats_success_and_warning_as_telegram_status_blocks() {
-        let text = format_mcp_add_reply(
-            "obsidian",
-            None,
-            15,
-            Some("Plain HTTP: trusted/encrypted networks only."),
-            false,
-        );
-
-        assert_eq!(
-            text,
-            "✅ Added MCP server <b>obsidian</b>. 15 tools available.\n\n⚠️ Plain HTTP: trusted/encrypted networks only."
-        );
-    }
-
-    #[tokio::test]
-    async fn format_doctor_result_messages_splits_long_output_for_telegram() {
+    #[test]
+    fn format_doctor_result_messages_splits_long_output_for_telegram() {
         let checks: Vec<_> = (0..40)
             .map(|i| right_agent::doctor::DoctorCheck {
                 name: format!("long-check-{i}"),
@@ -2572,87 +1370,5 @@ mod tests {
 
         assert_eq!(apply_thinking_toggle_callback(&map, "think:42:7"), None);
         assert_eq!(apply_thinking_toggle_callback(&map, "stop:42:7"), None);
-    }
-
-    /// Regression: a stale supersession-cleanup task must NOT clear a freshly
-    /// parked PendingTokenRequest. See
-    /// `request_token_and_register` — without the id-stamp guard, task A's
-    /// timeout/error arm would `take()` whatever currently sits in the slot,
-    /// silently dropping request B that the user just parked via a second
-    /// `/mcp auth` command.
-    #[tokio::test]
-    async fn supersession_cleanup_does_not_clobber_newer_request() {
-        // Park request A.
-        let slot = PendingTokenSlot(Arc::new(tokio::sync::Mutex::new(None)));
-        let (tx_a, _rx_a) = tokio::sync::oneshot::channel::<String>();
-        let req_a_id = NEXT_TOKEN_REQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        {
-            let mut s = slot.0.lock().await;
-            *s = Some(PendingTokenRequest {
-                id: req_a_id,
-                chat_id: 100,
-                thread_id: 0,
-                sender: tx_a,
-            });
-        }
-
-        // Supersede with request B.
-        let (tx_b, _rx_b) = tokio::sync::oneshot::channel::<String>();
-        let req_b_id = NEXT_TOKEN_REQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        assert!(req_b_id > req_a_id);
-        {
-            let mut s = slot.0.lock().await;
-            // Drop the prior sender (would wake task A's `rx_a` with RecvError).
-            let _prev = s.take();
-            *s = Some(PendingTokenRequest {
-                id: req_b_id,
-                chat_id: 200,
-                thread_id: 0,
-                sender: tx_b,
-            });
-        }
-
-        // Now exercise the guarded cleanup that task A performs in its
-        // timeout/error arm. With the id guard it must NOT clear the slot.
-        {
-            let mut s = slot.0.lock().await;
-            if s.as_ref().map(|p| p.id) == Some(req_a_id) {
-                s.take();
-            }
-        }
-
-        // Slot should still contain request B.
-        let s = slot.0.lock().await;
-        let pending = s.as_ref().expect("slot must still contain request B");
-        assert_eq!(pending.id, req_b_id);
-        assert_eq!(pending.chat_id, 200);
-    }
-
-    /// Sanity: when the slot still holds the same request that scheduled the
-    /// cleanup, the guarded `take()` clears it (the non-superseded path).
-    #[tokio::test]
-    async fn supersession_cleanup_clears_when_id_matches() {
-        let slot = PendingTokenSlot(Arc::new(tokio::sync::Mutex::new(None)));
-        let (tx, _rx) = tokio::sync::oneshot::channel::<String>();
-        let req_id = NEXT_TOKEN_REQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        {
-            let mut s = slot.0.lock().await;
-            *s = Some(PendingTokenRequest {
-                id: req_id,
-                chat_id: 300,
-                thread_id: 0,
-                sender: tx,
-            });
-        }
-
-        {
-            let mut s = slot.0.lock().await;
-            if s.as_ref().map(|p| p.id) == Some(req_id) {
-                s.take();
-            }
-        }
-
-        let s = slot.0.lock().await;
-        assert!(s.is_none(), "slot must be empty after matching cleanup");
     }
 }

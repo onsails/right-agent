@@ -394,7 +394,7 @@ async fn handle_mcp_add(
     );
     let handle = Arc::new(backend);
 
-    // Skip connection for OAuth servers without a token — they need /mcp auth first.
+    // Skip connection for OAuth servers without a token — they need dashboard OAuth first.
     let skip_connect = req.auth_type.as_deref() == Some("oauth") && req.auth_token.is_none();
 
     if skip_connect {
