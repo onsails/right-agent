@@ -25,6 +25,7 @@ pub use row::Row;
 pub use transaction::Transaction;
 
 use std::path::Path;
+use std::time::Duration;
 
 pub trait OptionalExtension<T> {
     fn optional(self) -> Result<Option<T>, DbError>;
@@ -63,9 +64,7 @@ impl<T> OptionalExtension<T> for Result<T, DbError> {
 ///   force the second opener to time out.
 pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
     let db_path = agent_path.join("data.db");
-    if legacy_fts5_schema_exists(&db_path)? {
-        scrub_legacy_fts5_schema(&db_path)?;
-    }
+    prepare_legacy_fts5_schema_for_turso(&db_path).await?;
     let conn = Connection::open_local(db_path, true).await?;
     conn.apply_connection_pragmas().await?;
     if migrate {
@@ -79,6 +78,37 @@ pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connect
 /// guaranteed to no longer contain the legacy schema, so the scrubber probe
 /// is permanently a no-op and we skip it.
 const LEGACY_FTS5_SCRUBBED_AT_USER_VERSION: i64 = 34;
+const LEGACY_FTS5_PROBE_RETRY_DELAY: Duration = Duration::from_millis(50);
+// The rusqlite pre-Turso probe already uses SQLite's 5s busy_timeout. One
+// extra attempt covers a lock released just after that timeout without hiding
+// stuck writers.
+const LEGACY_FTS5_PROBE_MAX_RETRIES: usize = 1;
+
+async fn prepare_legacy_fts5_schema_for_turso(db_path: &Path) -> Result<(), DbError> {
+    let mut retries = 0;
+    loop {
+        match prepare_legacy_fts5_schema_for_turso_once(db_path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.is_transient() && retries < LEGACY_FTS5_PROBE_MAX_RETRIES => {
+                retries += 1;
+                tracing::warn!(
+                    path = %db_path.display(),
+                    retries,
+                    "transient legacy SQLite scrubber probe failed; retrying: {error:#}"
+                );
+                tokio::time::sleep(LEGACY_FTS5_PROBE_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn prepare_legacy_fts5_schema_for_turso_once(db_path: &Path) -> Result<(), DbError> {
+    if legacy_fts5_schema_exists(db_path)? {
+        scrub_legacy_fts5_schema(db_path)?;
+    }
+    Ok(())
+}
 
 fn legacy_fts5_schema_exists(db_path: &Path) -> Result<bool, DbError> {
     if !db_path.exists() {
@@ -195,4 +225,23 @@ pub async fn open_database_path_readonly(db_path: impl AsRef<Path>) -> Result<Co
     let conn = Connection::open_local(db_path, false).await?;
     conn.apply_readonly_pragmas().await?;
     Ok(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{hold_exclusive_sqlite_lock, legacy_probe_retry_lock_hold};
+
+    #[tokio::test]
+    async fn open_connection_retries_transient_legacy_probe_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        open_connection(dir.path(), true).await.unwrap();
+
+        let db_path = dir.path().join("data.db");
+        let lock = hold_exclusive_sqlite_lock(db_path, legacy_probe_retry_lock_hold());
+        let result = open_connection(dir.path(), false).await;
+        lock.join().expect("release sqlite lock");
+
+        result.expect("open_connection should recover from transient legacy probe lock");
+    }
 }

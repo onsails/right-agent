@@ -22,7 +22,7 @@ pub enum DbError {
         source: turso::Error,
     },
 
-    #[error("legacy SQLite migration on {path}: {source}")]
+    #[error("legacy SQLite scrubber on {path}: {source}")]
     LegacySqlite {
         path: PathBuf,
         #[source]

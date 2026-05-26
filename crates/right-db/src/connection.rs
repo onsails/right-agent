@@ -202,12 +202,13 @@ impl Connection {
     }
 
     pub(crate) async fn apply_connection_pragmas(&self) -> Result<(), DbError> {
+        // WAL switching takes the file lock, so install SQLite's busy wait first.
         self.inner
-            .pragma_update("journal_mode", "WAL")
+            .pragma_update("busy_timeout", BUSY_TIMEOUT.as_millis())
             .await
             .map(drop)?;
         self.inner
-            .pragma_update("busy_timeout", BUSY_TIMEOUT.as_millis())
+            .pragma_update("journal_mode", "WAL")
             .await
             .map(drop)?;
         Ok(())
@@ -419,6 +420,26 @@ mod tests {
             .unwrap();
 
         assert_eq!(value, 7);
+    }
+
+    #[tokio::test]
+    async fn writable_pragmas_wait_for_existing_file_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch("CREATE TABLE lock_probe (id INTEGER PRIMARY KEY)")
+                .unwrap();
+        }
+
+        let conn = Connection::open_local(db_path.clone(), true).await.unwrap();
+        let lock =
+            crate::test_support::hold_exclusive_sqlite_lock(db_path, Duration::from_millis(500));
+
+        let result = conn.apply_connection_pragmas().await;
+        lock.join().expect("release sqlite lock");
+
+        result.expect("writable pragmas should honor busy_timeout");
     }
 
     #[tokio::test]
