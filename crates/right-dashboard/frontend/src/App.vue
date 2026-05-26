@@ -15,6 +15,7 @@ import {
   skillsOverview,
   usageOverview,
 } from './api'
+import { initialDashboardTabFromLocation } from './format'
 import {
   applyTelegramDisplayMode,
   initializeTelegramWebApp,
@@ -37,7 +38,7 @@ import type {
 } from './types'
 
 type ConnectionState = 'loading' | 'live' | 'stale' | 'offline' | 'locked'
-type DashboardTab = 'overview' | 'activity' | 'knowledge' | 'usage' | 'identity' | 'health'
+type DashboardTab = 'overview' | 'activity' | 'knowledge' | 'usage' | 'identity' | 'health' | 'mcp'
 type KnowledgeTab = 'learning' | 'skills'
 
 const bootstrapData = ref<BootstrapResponse | null>(null)
@@ -56,7 +57,7 @@ const selectedSkill = ref<SkillDetailResponse | null>(null)
 const selectedSkillName = ref<string | null>(null)
 const selectedIdentityFile = ref<IdentityFileSummary | null>(null)
 
-const activeTab = ref<DashboardTab>('overview')
+const activeTab = ref<DashboardTab>(normalizeInitialTab(initialDashboardTabFromLocation(window.location.search, window.location.hash)))
 const activeKnowledgeTab = ref<KnowledgeTab>('learning')
 const preferredDisplayMode = ref<DashboardDisplayMode>(readDashboardDisplayMode())
 const displayMode = ref<DashboardDisplayMode>('normal')
@@ -90,6 +91,7 @@ const tabs = computed(() => {
     { key: 'usage', label: 'Usage', enabled: features?.usage ?? true },
     { key: 'identity', label: 'Identity', enabled: features?.identity ?? true },
     { key: 'health', label: 'Health', enabled: (features?.doctor ?? true) || (features?.sandbox_stats ?? true) },
+    { key: 'mcp', label: 'MCP', enabled: true },
   ]
 })
 
@@ -151,8 +153,12 @@ function setKnowledgeTab(tab: KnowledgeTab): void {
   void refreshKnowledge()
 }
 
+function normalizeInitialTab(tab: string): DashboardTab {
+  return isDashboardTab(tab) ? tab : 'overview'
+}
+
 function isDashboardTab(tab: string): tab is DashboardTab {
-  return ['overview', 'activity', 'knowledge', 'usage', 'identity', 'health'].includes(tab)
+  return ['overview', 'activity', 'knowledge', 'usage', 'identity', 'health', 'mcp'].includes(tab)
 }
 
 async function refreshActiveTab(): Promise<void> {
@@ -408,8 +414,11 @@ async function selectIdentityFile(name: string): Promise<void> {
       :error="identityError"
       @select-file="selectIdentityFile"
     />
+    <section v-else-if="activeTab === 'mcp'" class="empty-panel">
+      MCP controls are not available in this build yet.
+    </section>
     <HealthView
-      v-else
+      v-else-if="activeTab === 'health'"
       :doctor="doctorData"
       :sandbox="sandboxData"
       :loading-doctor="loadingDoctor"
@@ -419,6 +428,7 @@ async function selectIdentityFile(name: string): Promise<void> {
       @refresh-doctor="refreshDoctor"
       @refresh-sandbox="refreshSandbox"
     />
+    <section v-else class="empty-panel">Unknown dashboard view</section>
   </AppShell>
 </template>
 

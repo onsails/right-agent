@@ -26,6 +26,65 @@ export interface DashboardFeatures {
   sandbox_stats: boolean
 }
 
+export type McpAuthMode = 'oauth' | 'headers' | 'url_as_is'
+
+export interface McpServerSummary {
+  name: string
+  url: string | null
+  status: string
+  tool_count: number
+  auth_type: string | null
+  header_names: string[]
+  protected: boolean
+}
+
+export interface McpServersResponse {
+  agent: string
+  servers: McpServerSummary[]
+}
+
+export interface McpDetectRequest {
+  url: string
+}
+
+export interface McpDetectResponse {
+  bare_url: string
+  oauth_discovered: boolean
+  recommended_mode: McpAuthMode
+  reason: string
+  oauth: {
+    resource: string
+    scopes: string[]
+    authorization_endpoint: string
+    token_endpoint: string
+    registration_endpoint: string | null
+  } | null
+}
+
+export interface McpHeaderInput {
+  name: string
+  value: string
+}
+
+export interface McpAddRequest {
+  name: string
+  url: string
+  mode: McpAuthMode
+  headers: McpHeaderInput[]
+}
+
+export interface McpHeadersRequest {
+  headers: McpHeaderInput[]
+}
+
+export interface McpMutationResponse {
+  ok: boolean
+}
+
+export interface McpOAuthStartResponse {
+  auth_url: string
+}
+
 export interface OverviewResponse {
   agent: string
   generated_at: string

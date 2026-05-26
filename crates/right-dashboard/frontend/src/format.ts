@@ -43,6 +43,16 @@ export function bytes(value: number | null | undefined): string {
   return `${next >= 10 || unit === 0 ? next.toFixed(0) : next.toFixed(1)} ${units[unit]}`
 }
 
+export function initialDashboardTabFromLocation(search: string, hash: string): string {
+  const params = new URLSearchParams(search)
+  const queryView = params.get('view')
+  if (queryView !== null && queryView.length > 0) {
+    return queryView
+  }
+  const hashView = hash.replace(/^#/, '')
+  return hashView.length > 0 ? hashView : 'overview'
+}
+
 export function statusTone(status: string | null | undefined): string {
   const normalized = (status ?? '').toLowerCase()
   if (
