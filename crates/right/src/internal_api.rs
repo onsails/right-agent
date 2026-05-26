@@ -363,9 +363,9 @@ async fn handle_mcp_add(
 
     {
         let conn = conn_arc.lock().await;
-        let existed_before = match credentials::db_list_servers(&conn).await {
-            Ok(servers) => servers.iter().any(|server| server.name == req.name),
-            Err(e) => return internal_error(format!("db_list_servers: {e:#}")).into_response(),
+        let existed_before = match credentials::db_server_exists(&conn, &req.name).await {
+            Ok(exists) => exists,
+            Err(e) => return internal_error(format!("db_server_exists: {e:#}")).into_response(),
         };
         if let Err(e) = credentials::db_add_server(&conn, &req.name, &req.url).await {
             return internal_error(format!("db_add_server: {e:#}")).into_response();
@@ -523,29 +523,30 @@ async fn handle_mcp_remove(
         Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
     };
 
-    // Remove from proxies
-    let removed = {
+    // Remove from proxies (in-memory).
+    let removed_from_proxies = {
         let mut proxies = proxies_lock.write().await;
         proxies.remove(&req.name).is_some()
     };
 
-    if !removed {
+    // Remove from SQLite regardless of in-memory presence. DB rows can
+    // outlive the in-memory map (e.g. after an aggregator restart where the
+    // proxy failed to reconnect), and leaving them orphans the dashboard.
+    let removed_from_db = {
+        let conn = conn_arc.lock().await;
+        match credentials::db_remove_server(&conn, &req.name).await {
+            Ok(()) => true,
+            Err(CredentialError::ServerNotFound(_)) => false,
+            Err(e) => return internal_error(format!("db_remove_server: {e:#}")).into_response(),
+        }
+    };
+
+    if !removed_from_proxies && !removed_from_db {
         return not_found(format!(
             "server '{}' not found for agent '{}'",
             req.name, req.agent
         ))
         .into_response();
-    }
-
-    // Remove from SQLite
-    {
-        let conn = conn_arc.lock().await;
-        // Ignore ServerNotFound — we already removed from the in-memory map.
-        match credentials::db_remove_server(&conn, &req.name).await {
-            Ok(()) => {}
-            Err(CredentialError::ServerNotFound(_)) => {}
-            Err(e) => return internal_error(format!("db_remove_server: {e:#}")).into_response(),
-        }
     }
 
     (StatusCode::OK, Json(McpRemoveResponse { removed: true })).into_response()
@@ -868,41 +869,41 @@ async fn handle_mcp_list(
     });
 
     // SQLite preserves "oauth" as auth_type; AuthMethod enum has no OAuth variant.
+    let conn_arc = match right.get_conn(&req.agent).await {
+        Ok(c) => c,
+        Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
+    };
     let (db_auth_types, db_header_names): (
         std::collections::HashMap<String, Option<String>>,
         std::collections::HashMap<String, Vec<String>>,
     ) = {
-        match right.get_conn(&req.agent).await {
-            Ok(conn_arc) => {
-                let conn = conn_arc.lock().await;
-                let servers = credentials::db_list_servers(&conn)
-                    .await
-                    .unwrap_or_default();
-                let auth_types = servers
-                    .iter()
-                    .map(|s| (s.name.clone(), s.auth_type.clone()))
-                    .collect();
-                let mut header_names = std::collections::HashMap::new();
-                for server in servers {
-                    let names = if server.auth_type.as_deref() == Some("headers") {
-                        credentials::db_list_http_header_names(&conn, &server.name)
-                            .await
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(display_header_name)
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    header_names.insert(server.name, names);
-                }
-                (auth_types, header_names)
+        let conn = conn_arc.lock().await;
+        let server_entries = match credentials::db_list_servers(&conn).await {
+            Ok(s) => s,
+            Err(e) => return internal_error(format!("db_list_servers: {e:#}")).into_response(),
+        };
+        let auth_types = server_entries
+            .iter()
+            .map(|s| (s.name.clone(), s.auth_type.clone()))
+            .collect();
+        let mut header_names: std::collections::HashMap<String, Vec<String>> = server_entries
+            .iter()
+            .filter(|s| s.auth_type.as_deref() == Some("headers"))
+            .map(|s| (s.name.clone(), Vec::new()))
+            .collect();
+        let all_headers = match credentials::db_list_all_http_header_names(&conn).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                return internal_error(format!("db_list_all_http_header_names: {e:#}"))
+                    .into_response();
             }
-            Err(_) => (
-                std::collections::HashMap::new(),
-                std::collections::HashMap::new(),
-            ),
+        };
+        for (server_name, header_name) in all_headers {
+            if let Some(list) = header_names.get_mut(&server_name) {
+                list.push(display_header_name(header_name));
+            }
         }
+        (auth_types, header_names)
     };
 
     // External proxy backends
@@ -960,7 +961,7 @@ async fn handle_mcp_instructions(
 
 async fn handle_reload(State(state): State<InternalState>) -> axum::response::Response {
     // 1. Read token map from disk
-    let content = match std::fs::read_to_string(&state.token_map_path) {
+    let content = match tokio::fs::read_to_string(&state.token_map_path).await {
         Ok(c) => c,
         Err(e) => return internal_error(format!("read token map: {e:#}")).into_response(),
     };
@@ -970,10 +971,36 @@ async fn handle_reload(State(state): State<InternalState>) -> axum::response::Re
             Err(e) => return internal_error(format!("parse token map: {e:#}")).into_response(),
         };
 
-    // 2. Find new agents (in disk but not in dispatcher)
+    // 2. Find new agents (in disk but not in dispatcher) and detect token
+    //    rotations for agents that already exist.
     let mut added = Vec::new();
     for (agent_name, token) in &disk_entries {
         if state.dispatcher.agents.contains_key(agent_name) {
+            // Existing agent: check if the on-disk token differs from the
+            // current in-memory token. If so, atomically swap the mapping so
+            // the aggregator accepts the new token without a full restart.
+            let mut map = state.token_map.write().await;
+            let current_token = map
+                .iter()
+                .find(|(_, info)| info.name == *agent_name)
+                .map(|(tok, _)| tok.clone());
+            if let Some(current) = current_token {
+                if current != *token {
+                    let dir = map
+                        .get(&current)
+                        .map(|info| info.dir.clone())
+                        .unwrap_or_else(|| state.agents_dir.join(agent_name));
+                    map.remove(&current);
+                    map.insert(
+                        token.clone(),
+                        AgentInfo {
+                            name: agent_name.clone(),
+                            dir,
+                        },
+                    );
+                    tracing::info!(agent = %agent_name, "reload: rotated token");
+                }
+            }
             continue;
         }
 
@@ -1823,6 +1850,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_remove_purges_orphan_db_row_without_proxy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
+
+        // Pre-insert a DB row with no matching in-memory proxy. This simulates
+        // an orphan left behind when the aggregator restarted but the proxy
+        // failed to reconnect.
+        let conn_arc = {
+            let registry = dispatcher
+                .agents
+                .get("test-agent")
+                .expect("test-agent registered");
+            registry
+                .right
+                .get_conn("test-agent")
+                .await
+                .expect("test db connection")
+        };
+        {
+            let conn = conn_arc.lock().await;
+            credentials::db_add_server(&conn, "orphan", "https://example.com/mcp")
+                .await
+                .expect("seed orphan row");
+            assert!(
+                credentials::db_server_exists(&conn, "orphan")
+                    .await
+                    .expect("server exists check")
+            );
+        }
+
+        let (status, body) = send_json(
+            app,
+            "/mcp-remove",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "orphan"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body={body}");
+        assert_eq!(body["removed"], true);
+
+        let conn = conn_arc.lock().await;
+        assert!(
+            !credentials::db_server_exists(&conn, "orphan")
+                .await
+                .expect("server exists check"),
+            "DB row must be deleted even when proxy was missing"
+        );
+    }
+
+    #[tokio::test]
     async fn set_token_agent_not_found() {
         let tmp = tempfile::tempdir().unwrap();
         let app = make_test_router(tmp.path()).await;
@@ -2182,6 +2262,56 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body["added"].as_array().unwrap().is_empty());
         assert_eq!(body["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn reload_rotates_existing_agent_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        let agent_dir = agents_dir.join("test-agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        right_db::open_db(&agent_dir, true).await.unwrap();
+
+        let token_map_path = tmp.path().join("agent-tokens.json");
+        std::fs::write(
+            &token_map_path,
+            serde_json::json!({"test-agent": "tok-new"}).to_string(),
+        )
+        .unwrap();
+
+        let dispatcher = make_test_dispatcher(tmp.path()).await;
+        let token_map: crate::aggregator::AgentTokenMap = {
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "tok-old".into(),
+                crate::aggregator::AgentInfo {
+                    name: "test-agent".into(),
+                    dir: agent_dir.clone(),
+                },
+            );
+            std::sync::Arc::new(tokio::sync::RwLock::new(map))
+        };
+        let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
+        let reconnect_managers: ReconnectManagers = Arc::new(std::collections::HashMap::new());
+
+        let app = internal_router(
+            dispatcher,
+            refresh_senders,
+            reconnect_managers,
+            token_map.clone(),
+            token_map_path,
+            agents_dir,
+        );
+
+        let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["added"].as_array().unwrap().is_empty());
+        assert_eq!(body["total"], 1);
+
+        let map = token_map.read().await;
+        assert!(!map.contains_key("tok-old"));
+        assert_eq!(map.get("tok-new").unwrap().name, "test-agent");
+        assert_eq!(map.get("tok-new").unwrap().dir, agent_dir);
     }
 
     #[tokio::test]
