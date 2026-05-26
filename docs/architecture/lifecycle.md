@@ -141,7 +141,7 @@ right agent backup <name> [--sandbox-only] [--include-rebuildable]
   ├─ --include-rebuildable: include those rebuildable dirs for forensic backup
   ├─ No-sandbox mode: tar agent dir → sandbox.tar.gz, excluding data.db and data.db-* sidecars
   ├─ Full mode: + agent.yaml, allowlist.yaml, policy.yaml, VACUUM INTO data.db
-  └─ Stored at ~/.right/backups/<agent>/<YYYYMMDD-HHMM>/
+  └─ Stored at ~/.right/backups/<agent>/<YYYYMMDD-HHMM>/; destroy --backup uses the same DB exclude contract
 
 right agent rebootstrap <name> [-y]
   ├─ Confirm (yes/no) unless -y
@@ -159,7 +159,7 @@ right agent init <name> --from-backup <path>
   ├─ Resolve restore binding mode for clone-sensitive implicit defaults
   ├─ Fail before creating target agent state if binding mode is required
   ├─ Restore config/control-plane files to new agent dir (agent.yaml, allowlist.yaml, policy.yaml, data.db when present)
-  ├─ Remove restored data.db-* sidecars; the canonical DB snapshot is data.db only
+  ├─ Remove restored data.db-* sidecars; discard tar-extracted data.db; the canonical DB snapshot is backup/data.db only
   ├─ Normalize restored agent.yaml before codegen/sandbox creation
   ├─ Regenerate bootstrap policy before sandbox creation; copied policy IPs are treated as stale generated state
   ├─ Warn when clone restore copies explicit external state (Telegram, MCP, cron)

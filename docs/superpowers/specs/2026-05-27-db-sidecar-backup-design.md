@@ -25,12 +25,14 @@ The durable database backup contract is:
 - `backup/data.db` must be produced by the existing `VACUUM INTO` path.
 - Files matching `data.db-*` are disposable runtime sidecars.
 - Backup flows must not archive `data.db-*`.
+- Restore flows must not accept `data.db` from `sandbox.tar.gz`; only the
+  top-level `backup/data.db` snapshot may become the restored database.
 - Restore flows must remove `data.db-*` from the restored agent directory before
   any restored database is opened.
 
 This rule applies globally to agent backup and restore paths, including
-sandboxed agents, no-sandbox agents, destroy safety backups when they use the
-agent backup flow, and legacy backups created before this rule existed.
+sandboxed agents, no-sandbox agents, the pre-destroy safety backup flow, and
+legacy backups created before this rule existed.
 
 `--include-rebuildable` does not include database sidecars. Rebuildable caches
 and database sidecars are different categories: sidecars can be inconsistent
@@ -88,7 +90,10 @@ database.
 The implementation should include targeted regression coverage for:
 
 - no-sandbox backup tar excludes `data.db` and `data.db-*`;
+- destroy safety backup tar excludes `data.db` and `data.db-*`;
 - restore removes stale `data.db-*` sidecars from a restored agent directory;
+- restore ignores tar-contained `data.db` with or without a canonical
+  `backup/data.db` snapshot;
 - legacy-style backups containing sidecars are cleaned during restore;
 - full backup still produces canonical `backup/data.db` through the existing
   `VACUUM INTO` path.
