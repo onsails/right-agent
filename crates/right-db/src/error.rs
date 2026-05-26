@@ -29,6 +29,13 @@ pub enum DbError {
         source: rusqlite::Error,
     },
 
+    #[error("database migration lock {path}: {source}")]
+    MigrationLock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("migration {version} on {path}: {source}")]
     Migration {
         path: PathBuf,
