@@ -3214,6 +3214,7 @@ async fn cmd_agent_restore(
     // half-populated agent dir, instead of relying on ad-hoc per-callsite rollback.
     let result: miette::Result<()> = async {
         copy_agent_restore_config_files(backup_path, &agent_dir, &backup_config)?;
+        remove_database_sidecars(&agent_dir)?;
 
         if is_sandboxed {
             // 4. Sandboxed restore: normalize restored agent.yaml before codegen
@@ -3459,6 +3460,7 @@ async fn cmd_agent_restore(
                     "tar extraction failed with status {status}"
                 ));
             }
+            remove_database_sidecars(&agent_dir)?;
 
             restore::apply_memory_action(
                 &agent_dir.join("agent.yaml"),
@@ -3551,7 +3553,6 @@ fn cleanup_failed_restore_agent_dir(agent_dir: &Path) -> miette::Result<()> {
         })
 }
 
-#[allow(dead_code)]
 fn remove_database_sidecars(agent_dir: &Path) -> miette::Result<usize> {
     use miette::IntoDiagnostic;
 
