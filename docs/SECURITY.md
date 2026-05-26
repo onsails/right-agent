@@ -100,7 +100,7 @@ Patterns, severity tiers, and wrap text are owned by `ironclaw_safety` and track
 ## Access Control
 
 - **Chat ID allowlist** — each agent has a per-agent list of allowed Telegram chat IDs. Empty list = block all (secure default).
-- **Protected MCP servers** — the built-in "right" MCP server cannot be removed via `/mcp remove`
+- **Protected MCP servers** — the built-in "right" MCP server cannot be removed via the dashboard MCP controls
 - **OAuth CSRF protection** — token matching in the OAuth callback server prevents cross-site request forgery
 
 ## Compliance

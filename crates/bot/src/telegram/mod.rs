@@ -11,7 +11,6 @@ pub mod filter;
 pub mod handler;
 pub(crate) mod idle;
 pub mod markdown;
-pub(crate) mod mcp_auth_choice;
 pub mod memory_alerts;
 pub mod mention;
 pub(crate) mod model_command;
@@ -19,7 +18,6 @@ pub mod oauth_callback;
 pub(crate) mod progress;
 pub mod session;
 pub mod shutdown_listener;
-pub(crate) mod tg;
 pub mod webhook;
 pub mod worker;
 

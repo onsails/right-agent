@@ -3,9 +3,9 @@ name: right-mcp
 description: >-
   Finds and adds MCP servers for this Right Agent agent. Searches for OAuth-capable
   endpoints first (Claude Code / Codex integration docs), falls back to API-key
-  endpoints. All management goes through the user's Telegram commands — the agent
-  never handles credentials directly. Use when the user asks to add, connect,
-  or set up an MCP server or integration.
+  endpoints. All management goes through the user's Telegram dashboard MCP view —
+  the agent never handles credentials directly. Use when the user asks to add,
+  connect, or set up an MCP server or integration.
 version: 0.1.0
 ---
 
@@ -23,17 +23,17 @@ Activate this skill when:
 ## Architecture
 
 You have NO direct MCP management access. All management goes through the user's
-Telegram commands. Here's what happens behind the scenes:
+Telegram dashboard MCP view. Telegram `/mcp` opens that dashboard view. Here's
+what happens behind the scenes:
 
 - The **Right Agent MCP Aggregator** proxies all MCP traffic, stores tokens, and
   refreshes OAuth automatically. You never see or handle credentials.
-- `/mcp add <name> <url>` auto-detects authentication:
-  1. Tries OAuth AS discovery on the URL — if found, registers and tells user to `/mcp auth`
-  2. Detects query-string auth (key embedded in URL) — registers as-is
-  3. For other URLs — detects auth type, asks user for token in Telegram if needed
-- `/mcp auth <name>` — starts browser-based OAuth flow
-- `/mcp remove <name>` — unregisters a server (`right` is protected)
-- `/mcp list` — shows all servers with status
+- The dashboard add flow auto-detects authentication:
+  1. Tries OAuth AS discovery on the URL and offers OAuth when discovered
+  2. Detects query-string auth (key embedded in URL) and can register as-is
+  3. For other URLs, detects header auth and asks the user for credentials in the dashboard
+- The dashboard starts browser-based OAuth, removes servers, and lists all
+  servers with status. The built-in `right` server is protected.
 
 ## Procedure
 
@@ -53,7 +53,8 @@ go straight to Step 4 with the URL from the file — skip web search entirely.
 
 Only if the service is NOT in known endpoints, search the web.
 Your first search query MUST target Claude Code or Codex integration docs.
-These describe OAuth-capable MCP endpoints that work with `/mcp auth`.
+These describe OAuth-capable MCP endpoints that work with the dashboard OAuth
+flow.
 
 Use these search queries (in order, stop when you find a URL):
 1. `"<service> MCP server Claude Code"`
@@ -69,12 +70,9 @@ Look for streamable HTTP or SSE URLs like:
 
 ### Step 4: If OAuth URL found
 
-Give the user the Telegram commands:
-```
-/mcp add <name> <url>
-/mcp auth <name>
-```
-The bot detects OAuth automatically.
+Tell the user to open `/mcp`, add the server with the name and URL you found,
+and choose OAuth in the dashboard if it is offered. Include the exact name and
+URL; do not invent credentials.
 
 ### Step 5: If no OAuth endpoint found
 
@@ -83,10 +81,8 @@ Search more broadly for any MCP endpoint:
 2. Check the service's official docs for MCP/API integration pages
 
 If you find an API-key URL (token in query string or requires header), give:
-```
-/mcp add <name> <url>
-```
-The bot will determine the auth method and ask the user for credentials if needed.
+Tell the user to open `/mcp`, add the server with the name and URL you found,
+and follow the dashboard credential prompt if one appears.
 
 ### Step 6: If no MCP endpoint found
 

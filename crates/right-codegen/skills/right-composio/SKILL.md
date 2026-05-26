@@ -30,7 +30,7 @@ tool calls when one MULTI_EXECUTE would do.
 - You're about to invoke `mcp__right__composio__*` and need to decide:
   workbench yes/no, MULTI_EXECUTE vs single, search_tools first?
 - If composio is not in `mcp__right__mcp_list`, this skill does not
-  apply — ask the user to `/mcp add composio <url>`.
+  apply — ask the user to open `/mcp` and add Composio in the dashboard.
 
 ## Workbench discipline
 
@@ -83,6 +83,6 @@ When in doubt: workbench on. Pull with
 - **Connection errors:** `has_active_connection: false` is a
   toolkit-level Composio↔external auth, not MCP-transport auth.
   Call `mcp__right__composio__COMPOSIO_MANAGE_CONNECTIONS` as the
-  upstream tells you. Do NOT suggest `/mcp auth composio`. (See
+  upstream tells you. Do NOT suggest MCP dashboard re-auth for Composio. (See
   "MCP Error Diagnosis → Trust upstream diagnostics" in your main
   prompt.)

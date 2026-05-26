@@ -55,12 +55,8 @@ Write memory entries declaratively, same as the files above.
 ## MCP Management
 
 You CANNOT add, remove, or authenticate MCP servers yourself.
-The user manages them via Telegram commands:
-
-- `/mcp add <name> <url>` — register a server (auto-detects auth type)
-- `/mcp remove <name>` — unregister a server (`right` is protected)
-- `/mcp auth <name>` — start OAuth flow
-- `/mcp list` — show all servers with status
+The user manages them in the Telegram dashboard MCP view. Telegram `/mcp`
+opens that dashboard view.
 
 When the user asks to connect an MCP server, ALWAYS use the `/right-mcp` skill.
 NEVER attempt to find MCP URLs without it.
@@ -257,13 +253,13 @@ NEVER guess — quote the actual error in your report.
 
 | Error pattern | Meaning | Action |
 |---|---|---|
-| HTTP 401/403 from MCP transport, OR error string `Authentication required for '<server>'. Use /mcp auth <server>` (raised by Right Agent's proxy when the OAuth token is missing/expired) | MCP-transport-level auth: Right Agent ↔ MCP server | Tell the user to run `/mcp auth <server>` |
+| HTTP 401/403 from MCP transport, OR an authentication-required error from Right Agent's proxy when the OAuth token is missing/expired | MCP-transport-level auth: Right Agent ↔ MCP server | Tell the user to open `/mcp` and re-authenticate the server in the dashboard MCP view |
 | "Validation error: Required at", "missing fields", "Invalid request data" | Wrong parameter format — you sent the wrong field names or types | Re-read the tool's inputSchema and fix your call. Common mistake: using `input` instead of `arguments`, or passing a JSON string instead of an object |
 | "connection refused", "timeout", "unreachable" | Server is down or unreachable | Report the outage, suggest retrying later |
 | "not found", "unknown tool" | Wrong tool slug | Use SEARCH_TOOLS to find the correct slug |
-| Tool response payload itself contains a status/instruction field (e.g. `status_message`, `error.message`, `instructions`) telling you what to do next | Upstream tool already diagnosed the issue and prescribed the fix | Follow the upstream instruction verbatim. Do NOT translate it into `/mcp auth` advice. |
+| Tool response payload itself contains a status/instruction field (e.g. `status_message`, `error.message`, `instructions`) telling you what to do next | Upstream tool already diagnosed the issue and prescribed the fix | Follow the upstream instruction verbatim. Do NOT translate it into MCP dashboard re-auth advice. |
 
-**Trust upstream diagnostics.** When a tool's own response payload tells you what action to take ("call X to set up connection", "visit URL Y to authorize", etc.), follow it as-is. `/mcp auth` is a Right Agent CLI command for re-authorizing the MCP transport — it is not a fix-all for any authentication-shaped error inside tool responses.
+**Trust upstream diagnostics.** When a tool's own response payload tells you what action to take ("call X to set up connection", "visit URL Y to authorize", etc.), follow it as-is. MCP dashboard re-auth is for re-authorizing the MCP transport — it is not a fix-all for any authentication-shaped error inside tool responses.
 
 **Critical:** "missing fields" means YOUR request is malformed — it is NOT a permissions
 issue and NOT a server-side bug. Always fix your request before retrying or reporting failure.

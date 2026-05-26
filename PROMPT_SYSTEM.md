@@ -460,10 +460,10 @@ memory (`mcp__right__memory_retain`, `mcp__right__memory_recall`, and
 `mcp__right__memory_retain` is residual storage after `/right-memory` routing
 chooses memory as the fallback target),
 conversation search (`mcp__right__thread_search` and
-`mcp__right__chat_search`), cron (list/show runs), MCP management
+`mcp__right__chat_search`), cron (list/show runs), MCP visibility
 (`mcp__right__rightmeta__mcp_list` via the HTTP aggregator, and
 `mcp__right__mcp_list` only in direct stdio mode; add/remove/auth stay in the
-Telegram `/mcp` control plane), foreground progress (mcp__right__send_progress),
+Telegram dashboard MCP view), foreground progress (mcp__right__send_progress),
 learned-skill metadata/progress/receipt tools (mcp__right__skill_learning_start and
 mcp__right__skill_learning_finish), and bootstrap
 (mcp__right__bootstrap_done).
@@ -536,7 +536,7 @@ enable selector/reviewer invocations or historical dashboard report data.
 
 ## Upstream MCP Server Instructions
 
-When external MCP servers are registered (via `/mcp add`), their usage instructions are
+When external MCP servers are registered through the dashboard MCP view, their usage instructions are
 fetched from the aggregator's internal API (`POST /mcp-instructions`) at prompt assembly
 time and inlined into the composite system prompt. This replaces the previous file-based
 approach (MCP_INSTRUCTIONS.md).

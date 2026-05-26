@@ -655,10 +655,10 @@ mod tests {
             "SKILL.md must reference the MULTI_EXECUTE tool by name"
         );
         // Auth pitfall must defer to the main MCP Error Diagnosis section,
-        // not duplicate /mcp auth advice (per the 2026-05-06 spec).
+        // not duplicate MCP transport re-auth advice (per the 2026-05-06 spec).
         assert!(
-            content.contains("Do NOT suggest `/mcp auth composio`"),
-            "SKILL.md must steer the agent away from suggesting /mcp auth composio"
+            content.contains("Do NOT suggest MCP dashboard re-auth for Composio"),
+            "SKILL.md must steer the agent away from suggesting MCP dashboard re-auth for Composio"
         );
     }
 

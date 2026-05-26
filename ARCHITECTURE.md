@@ -124,9 +124,10 @@ See: `docs/architecture/mcp.md` (MCP Token Refresh).
 
 ### MCP Auth Types
 
-Four auth methods are supported. `/mcp add` runs discovery/classification
-heuristics, then asks the user to choose `OAuth`, `Header`, or `URL as-is`.
-The heuristic is a recommendation; the user's button choice is authoritative.
+Four auth methods are supported. The dashboard MCP flow runs
+discovery/classification heuristics, then asks the user to choose `OAuth`,
+`Header`, or `URL as-is`. The heuristic is a recommendation; the user's
+choice is authoritative. Telegram `/mcp` only opens the dashboard MCP view.
 
 | auth_type | How token is injected | Selection |
 |-----------|----------------------|-----------|
@@ -156,8 +157,8 @@ per-agent Bearer-token auth. Tool routing rules:
 Internal REST API on Unix socket (`~/.right/run/internal.sock`):
 `POST /mcp-add`, `POST /mcp-remove`, `POST /set-token`, `POST /mcp-list`,
 `POST /mcp-instructions`, `POST /progress/register`,
-`POST /progress/unregister`. Telegram bot uses `InternalClient` (hyper UDS).
-Agents cannot reach the Unix socket from inside the sandbox.
+`POST /progress/unregister`. Telegram dashboard routes use `InternalClient`
+(hyper UDS). Agents cannot reach the Unix socket from inside the sandbox.
 
 Foreground progress uses the built-in `mcp__right__send_progress` tool. The
 worker creates a per-invocation MCP config with `X-Right-Invocation`, registers
@@ -650,8 +651,8 @@ Rules:
   wrap is the primary defense; phase-1 sanitize is hygiene. See
   `docs/architecture/memory.md`.
 - **Chat ID allowlist**: Empty = block all (secure default); per-agent in `agents/<name>/allowlist.yaml`. Legacy `agent.yaml::allowed_chat_ids` is migration input only.
-- **Protected MCP**: "right" cannot be removed via `/mcp remove`
-- **MCP tool restriction**: Agents cannot register/remove external MCP servers — `mcp_add`, `mcp_remove`, `mcp_auth` are not exposed as MCP tools. Only the user can manage servers via Telegram `/mcp` commands routed through the internal Unix socket API. This prevents sandbox escape via data exfiltration to attacker-controlled MCP endpoints.
+- **Protected MCP**: "right" cannot be removed via the dashboard MCP controls
+- **MCP tool restriction**: Agents cannot register/remove external MCP servers — `mcp_add`, `mcp_remove`, `mcp_auth` are not exposed as MCP tools. Only the user can manage servers via the Telegram dashboard MCP view routed through the internal Unix socket API. This prevents sandbox escape via data exfiltration to attacker-controlled MCP endpoints.
 - **OAuth CSRF**: Token matching in callback server
 
 ## Brand-conformant CLI output
@@ -669,13 +670,10 @@ theme detection. Do not repeat; migrate existing offenders when touched.
 
 ## Telegram message UX
 
-Bot-authored Telegram status messages MUST use
-`crates/bot/src/telegram/tg.rs` helpers instead of raw severity prose.
-Success uses `✅`, warnings use `⚠️`, errors use `❌`, and next actions use
-`➡️`. Keep each block short and separate success/warning/action blocks with a
-blank line. Do not send raw `Warning:`, `Failed:`, or similar CLI-style
-prefixes for status replies. Escape untrusted text before passing it into
-`tg::*` helpers because the helpers accept Telegram HTML fragments.
+Bot-authored Telegram HTML messages MUST escape untrusted text before setting
+`ParseMode::Html`. Shared send helpers should preserve effective topic thread
+ids. Do not send raw CLI-style prefixes such as `Warning:` or `Failed:` when a
+clear user-facing sentence is available.
 
 ## OpenShell Integration Conventions
 

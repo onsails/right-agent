@@ -55,7 +55,7 @@ pub enum RefreshFailure {
 
     /// Permanent — token endpoint returned a non-recoverable 4xx (typically
     /// `invalid_grant` / `invalid_client`). Refresh token is dead; user must
-    /// re-authenticate via `/mcp auth <server>`.
+    /// re-authenticate from the dashboard MCP view.
     #[error("permanent refresh failure: {0}")]
     Permanent(String),
 }

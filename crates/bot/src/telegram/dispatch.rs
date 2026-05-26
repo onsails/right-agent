@@ -26,13 +26,11 @@ use super::BotType;
 use super::bot::build_bot;
 use super::filter::make_routing_filter;
 use super::handler::{
-    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot,
-    RightHome, SshConfigPath, handle_bg_callback, handle_cron, handle_dashboard, handle_doctor,
-    handle_list, handle_mcp, handle_mcp_auth_choice_callback, handle_message, handle_new,
-    handle_start, handle_stop_callback, handle_switch, handle_thinking_toggle_callback,
-    handle_usage,
+    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingMcpAuthChoiceSlot,
+    PendingTokenSlot, RightHome, SshConfigPath, handle_bg_callback, handle_cron, handle_dashboard,
+    handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start,
+    handle_stop_callback, handle_switch, handle_thinking_toggle_callback, handle_usage,
 };
-use super::mcp_auth_choice::PendingMcpAuthChoiceSlot;
 use super::mention::BotIdentity;
 use super::model_command::{handle_model, handle_model_callback};
 use super::oauth_callback::PendingAuthMap;
@@ -49,7 +47,7 @@ enum BotCommand {
     List,
     #[command(description = "Switch to another session")]
     Switch(String),
-    #[command(description = "MCP server management (list/add/remove)")]
+    #[command(description = "Open MCP dashboard")]
     Mcp(String),
     #[command(description = "Run diagnostics")]
     Doctor,
@@ -197,17 +195,12 @@ where
     let auth_watcher_arc: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let auth_code_arc = Arc::new(tokio::sync::Mutex::new(None));
-    let pending_token_arc = Arc::new(tokio::sync::Mutex::new(None));
     let intercept_slots_arc: Arc<InterceptSlots> = Arc::new(InterceptSlots {
         auth_code: Arc::clone(&auth_code_arc),
-        pending_token: Arc::clone(&pending_token_arc),
         auth_watcher: Arc::clone(&auth_watcher_arc),
     });
-    let pending_token_slot_arc: Arc<PendingTokenSlot> =
-        Arc::new(PendingTokenSlot(pending_token_arc));
-    let pending_auth_choice_slot = Arc::new(PendingMcpAuthChoiceSlot(Arc::new(
-        tokio::sync::Mutex::new(None),
-    )));
+    let pending_token_slot_arc: Arc<PendingTokenSlot> = Arc::new(PendingTokenSlot);
+    let pending_auth_choice_slot = Arc::new(PendingMcpAuthChoiceSlot);
     let internal_api_arc: Arc<InternalApi> = Arc::new(InternalApi(internal_client));
     let worker_shutdown = CancellationToken::new();
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
@@ -606,12 +599,6 @@ fn build_dispatcher(
             })
             .endpoint(handle_bg_callback),
         )
-        .branch(
-            dptree::filter(|q: CallbackQuery| {
-                q.data.as_deref().is_some_and(|d| d.starts_with("mcpauth:"))
-            })
-            .endpoint(handle_mcp_auth_choice_callback),
-        )
         .endpoint(handle_stop_callback);
 
     let schema = dptree::entry()
@@ -680,12 +667,10 @@ mod tests {
         let ssh_config = Arc::new(SshConfigPath(None));
         let intercept_slots = Arc::new(InterceptSlots {
             auth_code: Arc::new(Mutex::new(None)),
-            pending_token: Arc::new(Mutex::new(None)),
             auth_watcher: Arc::new(AtomicBool::new(false)),
         });
-        let pending_token_slot = Arc::new(PendingTokenSlot(Arc::new(Mutex::new(None))));
-        let pending_auth_choice_slot =
-            Arc::new(PendingMcpAuthChoiceSlot(Arc::new(Mutex::new(None))));
+        let pending_token_slot = Arc::new(PendingTokenSlot);
+        let pending_auth_choice_slot = Arc::new(PendingMcpAuthChoiceSlot);
         let internal_api = Arc::new(InternalApi(Arc::new(InternalClient::new(
             "/tmp/smoke.sock",
         ))));
