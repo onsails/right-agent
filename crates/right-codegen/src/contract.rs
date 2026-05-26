@@ -503,6 +503,7 @@ mod tests {
         ".git",
         "data.db",
         "data.db-shm",
+        "data.db-tshm",
         "data.db-wal",
         "bot.sock",
         ".claude/shell-snapshots",

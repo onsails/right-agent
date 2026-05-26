@@ -12,6 +12,7 @@ pub mod connection;
 pub mod conversation;
 pub mod error;
 pub mod migrations;
+mod multiprocess_io;
 pub mod params;
 pub mod row;
 #[cfg(any(test, feature = "test-support"))]

@@ -1,6 +1,9 @@
 use right_db::{MIGRATIONS, open_connection, open_connection_readonly, open_db};
 use tempfile::tempdir;
 
+const MULTIPROCESS_OPEN_CHILD_TEST: &str = "multiprocess_open_child_can_read_existing_db";
+const MULTIPROCESS_OPEN_ENV: &str = "RIGHT_DB_MULTIPROCESS_AGENT_DIR";
+
 #[tokio::test]
 async fn open_db_creates_file() {
     let dir = tempdir().unwrap();
@@ -63,6 +66,44 @@ async fn open_connection_without_migration_preserves_existing_schema() {
         query_table_count(&conn, "sessions").await,
         1,
         "sessions table should still exist"
+    );
+}
+
+#[tokio::test]
+async fn open_connection_allows_second_process_while_parent_connection_alive() {
+    let dir = tempdir().unwrap();
+    let _parent = open_connection(dir.path(), true).await.unwrap();
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(MULTIPROCESS_OPEN_CHILD_TEST)
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(MULTIPROCESS_OPEN_ENV, dir.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "child process failed to open the live parent DB\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn multiprocess_open_child_can_read_existing_db() {
+    let Some(agent_dir) = std::env::var_os(MULTIPROCESS_OPEN_ENV) else {
+        return;
+    };
+
+    let conn = open_connection(std::path::Path::new(&agent_dir), false)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        query_table_count(&conn, "sessions").await,
+        1,
+        "child process should read schema from parent-opened database"
     );
 }
 

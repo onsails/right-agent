@@ -51,11 +51,15 @@ impl Connection {
             path: db_path.clone(),
             source,
         };
-        let database = turso::Builder::new_local(path)
-            .experimental_index_method(true)
-            .build()
-            .await
-            .map_err(open_err)?;
+        let mut builder = turso::Builder::new_local(path).experimental_index_method(true);
+        if path != ":memory:" {
+            let io = crate::multiprocess_io::new().map_err(|source| DbError::Open {
+                path: db_path.clone(),
+                source: turso::Error::Error(format!("multiprocess WAL IO setup failed: {source}")),
+            })?;
+            builder = builder.experimental_multiprocess_wal(true).with_io_impl(io);
+        }
+        let database = builder.build().await.map_err(open_err)?;
         let inner = database.connect().map_err(open_err)?;
         let conn = Self {
             db_path,

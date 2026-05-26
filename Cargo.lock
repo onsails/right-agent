@@ -3937,6 +3937,7 @@ dependencies = [
  "tokio",
  "tracing",
  "turso",
+ "turso_core",
 ]
 
 [[package]]
