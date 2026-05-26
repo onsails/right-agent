@@ -1,5 +1,7 @@
 use crate::credentials::{is_loopback_url, is_public_url};
-use crate::oauth::{OAuthDiscovery, OAuthError, canonical_resource_uri, discover_oauth};
+use crate::oauth::{
+    OAuthDiscovery, OAuthError, canonical_resource_uri, discover_oauth_with_url_policy,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +57,18 @@ pub async fn detect_mcp_auth(
     client: &reqwest::Client,
     original_url: &str,
 ) -> Result<McpAuthDetection, OAuthError> {
+    detect_mcp_auth_with_url_policy(client, original_url, |_| Ok(())).await
+}
+
+/// Detect MCP authentication mode, applying `url_policy` before every OAuth discovery fetch.
+pub async fn detect_mcp_auth_with_url_policy<F>(
+    client: &reqwest::Client,
+    original_url: &str,
+    url_policy: F,
+) -> Result<McpAuthDetection, OAuthError>
+where
+    F: Fn(&str) -> Result<(), OAuthError>,
+{
     let parsed = reqwest::Url::parse(original_url).map_err(|_| invalid_server_url())?;
     validate_detection_url(&parsed)?;
     let has_query = parsed.query().is_some();
@@ -82,7 +96,7 @@ pub async fn detect_mcp_auth(
         });
     }
 
-    match discover_oauth(client, &bare_url).await {
+    match discover_oauth_with_url_policy(client, &bare_url, url_policy).await {
         Ok(discovery) => Ok(oauth_detected(bare_url, discovery)),
         Err(error) if error.is_no_as_metadata() => Ok(McpAuthDetection {
             bare_url,
@@ -384,6 +398,60 @@ mod tests {
         assert!(!result.oauth_discovered);
         assert_eq!(result.recommended_mode, McpAuthMode::Headers);
         assert_eq!(result.reason, DetectionReason::NoOAuthMetadata);
+    }
+
+    #[tokio::test]
+    async fn guarded_detection_rejects_private_resource_metadata_before_fetch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let test_host = "mcp-guarded-resource.test";
+        let server_addr = *server.address();
+        let client = client_resolving(test_host, server_addr);
+        let server_url = format!("http://{test_host}:{}/mcp", server_addr.port());
+        let private_resource_metadata_url =
+            format!("http://127.0.0.1:{}/private-resource", server_addr.port());
+
+        Mock::given(method("GET"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                format!(r#"Bearer resource_metadata="{private_resource_metadata_url}""#),
+            ))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/private-resource"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "authorization_servers": [server.uri()]
+            })))
+            .mount(&server)
+            .await;
+
+        let result = detect_mcp_auth_with_url_policy(&client, &server_url, |url| {
+            if url.contains("127.0.0.1") {
+                Err(OAuthError::DiscoveryFailed(
+                    "blocked private literal".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+
+        match result {
+            Err(OAuthError::DiscoveryFailed(detail)) => {
+                assert!(
+                    detail.contains("blocked private literal"),
+                    "unexpected discovery error: {detail}"
+                );
+            }
+            Ok(result) => panic!("private resource metadata URL must not classify as {result:?}"),
+            Err(error) => panic!("unexpected OAuth error: {error}"),
+        }
+        assert_eq!(request_count(&server).await, 1);
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use axum::Json;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch};
+use axum::routing::{delete, get, patch, post};
 use right_dashboard::api_types::{
     ApiErrorBody, BootstrapResponse, DashboardFeatures, ForegroundActivity, PinSkillRequest,
 };
@@ -22,6 +22,7 @@ use right_db::Connection;
 
 mod health;
 mod identity;
+mod mcp;
 mod skills;
 
 const REFRESH_INTERVAL_SECS: u64 = 5;
@@ -67,6 +68,8 @@ pub(crate) struct DashboardState {
     pub sandbox_exec: Option<right_openshell::sandbox_exec::SandboxExec>,
     pub allowlist: right_agent::agent::allowlist::AllowlistHandle,
     pub foreground: super::StopTokens,
+    pub internal_client: std::sync::Arc<right_mcp::internal_client::InternalClient>,
+    pub pending_auth: super::oauth_callback::PendingAuthMap,
     #[cfg(test)]
     pub doctor_checks: Option<Vec<right_agent::doctor::DoctorCheck>>,
 }
@@ -131,6 +134,26 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
         .route(
             "/dashboard/{agent}/api/v1/health/sandbox",
             get(handle_health_sandbox),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/mcp/servers",
+            get(mcp::handle_mcp_servers).post(mcp::handle_mcp_add),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/mcp/detect",
+            post(mcp::handle_mcp_detect),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/mcp/servers/{server_name}/headers",
+            patch(mcp::handle_mcp_headers),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/mcp/servers/{server_name}/oauth/start",
+            post(mcp::handle_mcp_oauth_start),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/mcp/servers/{server_name}",
+            delete(mcp::handle_mcp_remove),
         )
         .route("/dashboard/{agent}/{*asset}", get(handle_static_asset))
         .with_state(state)
@@ -789,11 +812,15 @@ mod tests {
             agent_name: "alpha".to_string(),
             bot_token: BOT_TOKEN.to_string(),
             home: agent_dir.clone(),
-            agent_dir,
+            agent_dir: agent_dir.clone(),
             resolved_sandbox: None,
             sandbox_exec: None,
             allowlist,
             foreground: Arc::new(DashMap::new()),
+            internal_client: Arc::new(right_mcp::internal_client::InternalClient::new(
+                agent_dir.join("missing-internal.sock"),
+            )),
+            pending_auth: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             doctor_checks: Some(vec![
                 right_agent::doctor::DoctorCheck {
                     name: "right".to_string(),
@@ -918,6 +945,70 @@ mod tests {
                     .body(Body::from(body.to_string()))
                     .expect("valid request"),
             )
+            .await
+            .expect("router response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .expect("body bytes");
+        let value = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).expect("json response")
+        };
+        (status, value)
+    }
+
+    async fn post_json(
+        path: &str,
+        auth: Option<String>,
+        agent_dir: std::path::PathBuf,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let router = super::build_dashboard_router(test_state(agent_dir));
+        let mut builder = Request::builder()
+            .uri(path)
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(auth) = auth {
+            builder = builder.header(header::AUTHORIZATION, format!("tma {auth}"));
+        }
+        let response = router
+            .oneshot(
+                builder
+                    .body(Body::from(body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .expect("body bytes");
+        let value = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).expect("json response")
+        };
+        (status, value)
+    }
+
+    async fn post_raw(
+        path: &str,
+        auth: Option<String>,
+        agent_dir: std::path::PathBuf,
+        body: &'static str,
+    ) -> (StatusCode, serde_json::Value) {
+        let router = super::build_dashboard_router(test_state(agent_dir));
+        let mut builder = Request::builder()
+            .uri(path)
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(auth) = auth {
+            builder = builder.header(header::AUTHORIZATION, format!("tma {auth}"));
+        }
+        let response = router
+            .oneshot(builder.body(Body::from(body)).expect("valid request"))
             .await
             .expect("router response");
         let status = response.status();
@@ -1140,6 +1231,68 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn dashboard_mcp_servers_requires_auth() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let status = get(
+            "/dashboard/alpha/api/v1/mcp/servers",
+            None,
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn dashboard_mcp_detect_rejects_bad_url() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let (status, body) = post_json(
+            "/dashboard/alpha/api/v1/mcp/detect",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+            json!({ "url": "not a url" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_url");
+    }
+
+    #[tokio::test]
+    async fn dashboard_mcp_json_routes_authenticate_before_body_parse() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let (status, _) = post_raw(
+            "/dashboard/alpha/api/v1/mcp/detect",
+            None,
+            temp.path().to_path_buf(),
+            "{",
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = post_raw(
+            "/dashboard/alpha/api/v1/mcp/servers",
+            None,
+            temp.path().to_path_buf(),
+            "{",
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = patch_raw(
+            "/dashboard/alpha/api/v1/mcp/servers/nango/headers",
+            None,
+            temp.path().to_path_buf(),
+            "{",
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
