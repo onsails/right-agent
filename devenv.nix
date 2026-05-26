@@ -30,6 +30,18 @@
   env.CARGO_TARGET_DIR = "target/devenv";
 
   enterShell = ''
+    current_root="''${DEVENV_ROOT:-$PWD}"
+    if git_common_dir="$(${pkgs.git}/bin/git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+      repo_root="$(dirname "$git_common_dir")"
+      if [ "$repo_root" = "$current_root" ]; then
+        export SCCACHE_BASEDIRS="$current_root"
+      else
+        export SCCACHE_BASEDIRS="$current_root:$repo_root"
+      fi
+    else
+      export SCCACHE_BASEDIRS="$current_root"
+    fi
+
     case "$-" in
       *i*) echo "Right Agent dev environment" ;;
     esac
