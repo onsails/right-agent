@@ -119,6 +119,59 @@ pub async fn gateway_version_check(
     Ok(())
 }
 
+use std::future::Future;
+
+/// Top-level preflight. CLI check first (fast-fail when binary is
+/// missing or too old), then gateway Health.
+///
+/// Production wrapper around [`openshell_preflight_with`]. Spawns
+/// `openshell --version` and connects to the gRPC gateway.
+pub async fn openshell_preflight(
+    client: &mut OpenShellClient<Channel>,
+) -> Result<(), PreflightError> {
+    openshell_preflight_with(
+        || async {
+            let out = tokio::process::Command::new("openshell")
+                .arg("--version")
+                .output()
+                .await
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        PreflightError::CliMissing
+                    } else {
+                        PreflightError::CliVersionUnparseable(format!("spawn failed: {e:#}"))
+                    }
+                })?;
+            if !out.status.success() {
+                return Err(PreflightError::CliVersionUnparseable(format!(
+                    "openshell --version exited {}",
+                    out.status.code().unwrap_or(-1)
+                )));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        },
+        client,
+    )
+    .await
+}
+
+/// Test-friendly form of [`openshell_preflight`]. Takes an
+/// async closure that returns the raw `openshell --version` stdout,
+/// so tests can inject a fake without `std::env::set_var`.
+pub async fn openshell_preflight_with<F, Fut>(
+    cli_version_source: F,
+    client: &mut OpenShellClient<Channel>,
+) -> Result<(), PreflightError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<String, PreflightError>>,
+{
+    let cli_output = cli_version_source().await?;
+    cli_version_check_str(&cli_output)?;
+    gateway_version_check(client).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "preflight_tests.rs"]
 mod tests;

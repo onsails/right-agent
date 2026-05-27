@@ -141,3 +141,82 @@ async fn gateway_version_check_fails_when_health_rpc_errors() {
     let result = super::gateway_version_check(&mut client).await;
     assert!(matches!(result, Err(PreflightError::GatewayUnreachable(_))));
 }
+
+// ---------------------------------------------------------------------------
+// openshell_preflight_with tests
+// ---------------------------------------------------------------------------
+
+// Integration-style: spawn the mock server, hand a configured client to
+// openshell_preflight, and assert it composes cli + gateway checks.
+//
+// The CLI half is exercised by spawning a fake `openshell --version`
+// shim via env override. To keep this test hermetic without setting
+// process env (forbidden by AGENTS.rust.md), we route via
+// `openshell_preflight_with` which takes both a closure returning the
+// CLI version string and the gRPC client.
+
+#[tokio::test]
+async fn openshell_preflight_with_succeeds_when_both_ok() {
+    let mock = MockOpenShell {
+        mock_health: Some(Box::new(|| {
+            Ok(proto_v1::HealthResponse {
+                status: 0,
+                version: "0.0.50".into(),
+            })
+        })),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    let result = super::openshell_preflight_with(
+        || async { Ok("openshell 0.0.50\n".to_string()) },
+        &mut client,
+    )
+    .await;
+    assert!(result.is_ok(), "expected Ok, got: {result:?}");
+}
+
+#[tokio::test]
+async fn openshell_preflight_with_fails_fast_on_cli_too_old() {
+    let mock = MockOpenShell {
+        mock_health: Some(Box::new(|| {
+            Ok(proto_v1::HealthResponse {
+                status: 0,
+                version: "0.0.50".into(),
+            })
+        })),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    let result = super::openshell_preflight_with(
+        || async { Ok("openshell 0.0.42\n".to_string()) },
+        &mut client,
+    )
+    .await;
+    assert!(matches!(result, Err(PreflightError::CliTooOld { .. })));
+}
+
+#[tokio::test]
+async fn openshell_preflight_with_fails_on_gateway_too_old() {
+    let mock = MockOpenShell {
+        mock_health: Some(Box::new(|| {
+            Ok(proto_v1::HealthResponse {
+                status: 0,
+                version: "0.0.49".into(),
+            })
+        })),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    let result = super::openshell_preflight_with(
+        || async { Ok("openshell 0.0.50\n".to_string()) },
+        &mut client,
+    )
+    .await;
+    assert!(matches!(result, Err(PreflightError::GatewayTooOld { .. })));
+}
