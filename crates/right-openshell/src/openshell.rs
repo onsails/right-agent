@@ -163,6 +163,34 @@ pub fn preflight_check() -> OpenShellStatus {
     }
 }
 
+/// A resolved OpenShell gateway endpoint URL (or absence thereof).
+///
+/// Pass to CLI helpers via [`GatewayEndpoint::apply_to_cli`].  When the
+/// inner value is `None`, `apply_to_cli` is a no-op and the CLI uses its
+/// own default.
+#[derive(Debug, Clone)]
+pub struct GatewayEndpoint(pub Option<String>);
+
+impl GatewayEndpoint {
+    /// Append `--gateway-endpoint <url>` to `cmd` when a URL is present.
+    pub fn apply_to_cli(&self, cmd: &mut tokio::process::Command) {
+        if let Some(url) = &self.0 {
+            cmd.args(["--gateway-endpoint", url]);
+        }
+    }
+}
+
+/// Resolve the gateway endpoint for CLI provider commands.
+///
+/// Reads `OPENSHELL_GATEWAY_ENDPOINT` from the environment.  If the variable
+/// is unset or empty, returns `GatewayEndpoint(None)` and CLI calls will use
+/// the OpenShell CLI's own default.
+pub async fn resolve_gateway_endpoint() -> miette::Result<GatewayEndpoint> {
+    Ok(GatewayEndpoint(
+        std::env::var("OPENSHELL_GATEWAY_ENDPOINT").ok(),
+    ))
+}
+
 fn gateway_endpoint() -> String {
     std::env::var("OPENSHELL_GATEWAY_ENDPOINT")
         .ok()
