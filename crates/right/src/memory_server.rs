@@ -33,7 +33,10 @@ pub struct CronCreateParams {
     #[schemars(description = "Job name (lowercase alphanumeric and hyphens, e.g. 'health-check')")]
     pub job_name: String,
     #[schemars(
-        description = "5-field cron expression in UTC (e.g. '17 9 * * 1-5'). Required if run_at is not set. Mutually exclusive with run_at."
+        description = "5-field cron expression in UTC (e.g. '17 9 * * 1-5'). Required if run_at is not set. Mutually exclusive with run_at. \
+                       NEVER silently pick a schedule that fires at minute :00 or :30 (peak minutes where automated jobs cluster and spike API rate limits) — this includes literals like '0' or '30' AND step expressions like '*/30', '*/15', '*/10', '*/5'. \
+                       If the user asks for a round interval (e.g. 'every 30 minutes', 'every hour at :00'), offset the minute field instead (e.g. '17,47 * * * *' for half-hourly, '43 * * * *' for hourly) and tell the user. \
+                       Only use a :00 or :30 minute when the user EXPLICITLY insists on that exact round time."
     )]
     pub schedule: Option<String>,
     #[schemars(description = "Task prompt that Claude executes when the cron fires")]
@@ -65,7 +68,11 @@ pub struct CronCreateParams {
 pub struct CronUpdateParams {
     #[schemars(description = "Job name to update")]
     pub job_name: String,
-    #[schemars(description = "New 5-field cron expression. Clears run_at if set.")]
+    #[schemars(
+        description = "New 5-field cron expression. Clears run_at if set. Same peak-minute rule as cron_create.schedule: \
+                       NEVER silently pick a schedule that fires at minute :00 or :30 (including '*/30', '*/15', '*/10', '*/5'). \
+                       Use an offset like ':17' or ':43' unless the user explicitly insisted on the round minute."
+    )]
     pub schedule: Option<String>,
     #[schemars(
         description = "New ISO8601 UTC datetime. Clears schedule and forces recurring=false."

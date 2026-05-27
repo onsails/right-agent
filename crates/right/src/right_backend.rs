@@ -77,12 +77,16 @@ impl RightBackend {
             // Cron tools
             Tool::new(
                 "cron_create",
-                "Create a new cron job spec. Supports recurring schedules and one-shot jobs (via run_at or recurring=false). The job will be picked up by the cron engine on its next reload cycle. Errors: chat_id_not_in_allowlist (the target chat must first be approved via /allow or /allow_all).",
+                "Create a new cron job spec. Supports recurring schedules and one-shot jobs (via run_at or recurring=false). The job will be picked up by the cron engine on its next reload cycle. \
+                 SCHEDULE RULE: never silently pick a schedule that fires at minute :00 or :30 (peak minutes — `*/30`, `*/15`, `*/10`, `*/5`, literal `0`/`30` all qualify); offset to e.g. `:17` or `:43` and tell the user, unless they explicitly insisted on the round minute. The tool returns a `Warning:` line when this rule is broken. \
+                 Errors: chat_id_not_in_allowlist (the target chat must first be approved via /allow or /allow_all).",
                 schema_for_type::<CronCreateParams>(),
             ),
             Tool::new(
                 "cron_update",
-                "Update an existing cron job spec. Only pass fields you want to change — unspecified fields keep their current values. Setting schedule clears run_at; setting run_at clears schedule. Errors: chat_id_not_in_allowlist (when updating target_chat_id to a chat not in the allowlist).",
+                "Update an existing cron job spec. Only pass fields you want to change — unspecified fields keep their current values. Setting schedule clears run_at; setting run_at clears schedule. \
+                 SCHEDULE RULE: same peak-minute guidance as cron_create — never silently pick `*/30`, `*/15`, `*/10`, `*/5`, or literal :00/:30 unless the user explicitly insisted. \
+                 Errors: chat_id_not_in_allowlist (when updating target_chat_id to a chat not in the allowlist).",
                 schema_for_type::<CronUpdateParams>(),
             ),
             Tool::new(

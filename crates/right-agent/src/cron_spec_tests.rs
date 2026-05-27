@@ -18,9 +18,10 @@ async fn validate_job_name_invalid() {
 }
 
 #[tokio::test]
-async fn validate_schedule_valid() {
-    assert!(validate_schedule("*/5 * * * *").is_ok());
-    assert!(validate_schedule("17 9 * * 1-5").is_ok());
+async fn validate_schedule_valid_no_warning() {
+    assert!(validate_schedule("17 9 * * 1-5").unwrap().is_none());
+    assert!(validate_schedule("43 */4 * * *").unwrap().is_none());
+    assert!(validate_schedule("7,23,47 * * * *").unwrap().is_none());
 }
 
 #[tokio::test]
@@ -30,10 +31,30 @@ async fn validate_schedule_invalid() {
 }
 
 #[tokio::test]
-async fn validate_schedule_round_minutes_warning() {
+async fn validate_schedule_peak_minute_warning() {
+    // Literal :00 and :30 minutes
     assert!(validate_schedule("0 9 * * *").unwrap().is_some());
     assert!(validate_schedule("30 9 * * *").unwrap().is_some());
-    assert!(validate_schedule("17 9 * * *").unwrap().is_none());
+    assert!(validate_schedule("00 9 * * *").unwrap().is_some());
+    // Step expressions that hit :00 and/or :30
+    assert!(validate_schedule("*/30 * * * *").unwrap().is_some());
+    assert!(validate_schedule("*/15 * * * *").unwrap().is_some());
+    assert!(validate_schedule("*/10 * * * *").unwrap().is_some());
+    assert!(validate_schedule("*/5 * * * *").unwrap().is_some());
+    // Lists that include :00 or :30
+    assert!(validate_schedule("0,30 * * * *").unwrap().is_some());
+    assert!(validate_schedule("17,30 * * * *").unwrap().is_some());
+    // Wildcard fires every minute → hits both peaks
+    assert!(validate_schedule("* * * * *").unwrap().is_some());
+}
+
+#[tokio::test]
+async fn validate_schedule_peak_minute_offsets_pass() {
+    // Step expressions that never hit :00 or :30
+    assert!(validate_schedule("7-59/15 * * * *").unwrap().is_none());
+    // Single non-round literal
+    assert!(validate_schedule("17 * * * *").unwrap().is_none());
+    assert!(validate_schedule("43 * * * *").unwrap().is_none());
 }
 
 #[tokio::test]
@@ -102,7 +123,9 @@ async fn insert_async_cron_run(
 #[tokio::test]
 async fn create_spec_success() {
     let (_dir, conn) = setup_db().await;
-    let result = create_spec(&conn, "my-job", "*/5 * * * *", "do stuff", None, None)
+    // Use an offset minute that never lands on :00 or :30 so the peak-minute
+    // warning does not trip — this test asserts a clean creation path.
+    let result = create_spec(&conn, "my-job", "7-59/15 * * * *", "do stuff", None, None)
         .await
         .unwrap();
     assert!(result.message.contains("Created"));
