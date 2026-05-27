@@ -135,12 +135,16 @@ async fn handle_oauth_callback(
             "OAuth callback error from provider"
         );
         if let Some(state_param) = params.state.as_deref() {
-            let provider_detail = format!("{err} -- {desc}");
-            let safe_detail = super::oauth_status::compact_dashboard_error(&provider_detail);
-            state
-                .oauth_status
-                .mark_failed(state_param, format!("OAuth provider error: {safe_detail}"))
-                .await;
+            if state.oauth_status.status(state_param).await.status
+                == super::oauth_status::OAuthFlowStatus::Pending
+            {
+                let provider_detail = format!("{err} -- {desc}");
+                let safe_detail = super::oauth_status::compact_dashboard_error(&provider_detail);
+                state
+                    .oauth_status
+                    .mark_failed(state_param, format!("OAuth provider error: {safe_detail}"))
+                    .await;
+            }
         }
         return (
             axum::http::StatusCode::BAD_REQUEST,
@@ -663,6 +667,38 @@ mod tests {
         assert!(!message.contains("access_token_secret"));
         assert!(!message.contains("client_secret"));
         assert!(!message.contains("abc"));
+    }
+
+    #[tokio::test]
+    async fn provider_error_does_not_overwrite_succeeded_status() {
+        let state_val = "completed-provider-flow";
+        let cb_state = dummy_state(Arc::new(Mutex::new(HashMap::new())));
+        cb_state
+            .oauth_status
+            .insert_pending(state_val.to_string(), "test-server".to_string())
+            .await;
+        cb_state.oauth_status.mark_succeeded(state_val).await;
+
+        let response = handle_oauth_callback(
+            AxumPath("test-agent".to_string()),
+            Query(CallbackParams {
+                code: None,
+                state: Some(state_val.to_string()),
+                error: Some("access_denied".to_string()),
+                error_description: Some("anything".to_string()),
+            }),
+            State(cb_state.clone()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let status = cb_state.oauth_status.status(state_val).await;
+        assert_eq!(
+            status.status,
+            super::super::oauth_status::OAuthFlowStatus::Succeeded
+        );
+        assert_eq!(status.message, None);
     }
 
     #[test]
