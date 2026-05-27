@@ -545,7 +545,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let progress_state = telegram::progress::ProgressState::default();
     let dashboard_foreground: telegram::StopTokens = Arc::new(DashMap::new());
 
-    let notify_bot = teloxide::Bot::new(token.clone());
+    let progress_bot = teloxide::Bot::new(token.clone());
     let agent_name = args.agent.clone();
 
     // Internal API client for bot→aggregator IPC (MCP add/remove/set-token)
@@ -558,8 +558,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         pending_auth: Arc::clone(&pending_auth),
         oauth_status: oauth_status.clone(),
         agent_name: agent_name.clone(),
-        bot: notify_bot,
-        allowlist: allowlist.clone(),
+        bot: progress_bot,
         internal_client: Arc::clone(&internal_client),
     };
     // Spawn cleanup task

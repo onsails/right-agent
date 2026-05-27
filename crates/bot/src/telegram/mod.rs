@@ -31,7 +31,7 @@ pub type BotType =
     teloxide::adaptors::CacheMe<teloxide::adaptors::throttle::Throttle<teloxide::Bot>>;
 
 /// Best-effort broadcast to a list of chat IDs. Errors are logged and swallowed
-/// (alerts and OAuth notifications shouldn't fail hard if one chat is unreachable).
+/// (alerts shouldn't fail hard if one chat is unreachable).
 pub(crate) async fn broadcast_to_chats<R>(bot: &R, chat_ids: &[i64], text: &str)
 where
     R: teloxide::prelude::Requester + Send + Sync,

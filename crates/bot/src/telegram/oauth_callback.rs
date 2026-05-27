@@ -42,12 +42,10 @@ pub struct CallbackParams {
 pub struct OAuthCallbackState {
     pub pending_auth: PendingAuthMap,
     pub(crate) oauth_status: super::oauth_status::OAuthFlowStatusStore,
-    /// Agent name (for logging and notifications)
+    /// Agent name used in logs and internal API requests.
     pub agent_name: String,
-    /// Telegram Bot for sending notifications
+    /// Telegram bot clone reused by the progress endpoint.
     pub bot: teloxide::Bot,
-    /// Live allowlist — DM users are notified after OAuth completes
-    pub allowlist: right_agent::agent::allowlist::AllowlistHandle,
     /// Internal API client for delivering OAuth tokens to the aggregator
     pub internal_client: Arc<InternalClient>,
 }
@@ -438,13 +436,11 @@ mod tests {
 
     /// Build a minimal OAuthCallbackState for tests (no real bot/credentials)
     fn dummy_state(map: PendingAuthMap) -> OAuthCallbackState {
-        use right_agent::agent::allowlist::{AllowlistHandle, AllowlistState};
         OAuthCallbackState {
             pending_auth: map,
             oauth_status: super::super::oauth_status::OAuthFlowStatusStore::default(),
             agent_name: "test-agent".to_string(),
             bot: teloxide::Bot::new("0:fake_token_for_tests"),
-            allowlist: AllowlistHandle::new(AllowlistState::default()),
             internal_client: Arc::new(InternalClient::new("/tmp/fake-internal.sock")),
         }
     }
@@ -564,39 +560,6 @@ mod tests {
     async fn test_dummy_state_construction() {
         let map: PendingAuthMap = Arc::new(Mutex::new(HashMap::new()));
         let _state = dummy_state(map);
-    }
-
-    #[tokio::test]
-    async fn oauth_callback_state_uses_allowlist_users() {
-        use right_agent::agent::allowlist::{AllowedUser, AllowlistHandle, AllowlistState};
-
-        let now = chrono::Utc::now();
-        let mut state = AllowlistState::default();
-        state.add_user(AllowedUser {
-            id: 100,
-            label: None,
-            added_by: None,
-            added_at: now,
-        });
-        let handle = AllowlistHandle::new(state);
-        let cb_state = OAuthCallbackState {
-            pending_auth: Arc::new(Mutex::new(Default::default())),
-            oauth_status: super::super::oauth_status::OAuthFlowStatusStore::default(),
-            agent_name: "test".into(),
-            bot: teloxide::Bot::new("123:abc"),
-            allowlist: handle.clone(),
-            internal_client: Arc::new(InternalClient::new("/nonexistent.sock")),
-        };
-        let user_ids: Vec<i64> = cb_state
-            .allowlist
-            .0
-            .read()
-            .unwrap()
-            .users()
-            .iter()
-            .map(|u| u.id)
-            .collect();
-        assert_eq!(user_ids, vec![100]);
     }
 
     #[tokio::test]
