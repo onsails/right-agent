@@ -71,3 +71,29 @@ fn strip_provider_endpoint_removes_tagged() {
     assert!(!after.contains("managed-by: right-providers:myagent-acme"));
     assert!(!after.contains("api.acme.com"));
 }
+
+#[test]
+fn append_provider_endpoint_handles_crlf_policy() {
+    let policy = "network:\r\n  endpoints:\r\n    - host: api.anthropic.com\r\n      protocol: rest\r\n      access: full\r\n";
+    let after = providers_append(policy, "myagent-acme", "api.acme.com", None);
+    // The new stanza must be present.
+    assert!(after.contains("- domain: api.acme.com"));
+    assert!(after.contains("managed-by: right-providers:myagent-acme"));
+    // The original CRLF content must not be mid-line corrupted: existing
+    // endpoint still present.
+    assert!(after.contains("- host: api.anthropic.com"));
+}
+
+#[test]
+fn strip_one_of_two_adjacent_providers_does_not_touch_neighbor() {
+    let policy = providers_append("network:\n  endpoints:\n", "myagent-a", "api.a.com", None);
+    let policy = providers_append(&policy, "myagent-b", "api.b.com", None);
+    let stripped = providers_strip(&policy, "myagent-a", "api.a.com");
+    // A is gone
+    assert!(!stripped.contains("right-providers:myagent-a"));
+    assert!(!stripped.contains("- domain: api.a.com"));
+    // B survives intact
+    assert!(stripped.contains("right-providers:myagent-b"));
+    assert!(stripped.contains("- domain: api.b.com"));
+    assert!(stripped.contains("protocol: rest"));
+}

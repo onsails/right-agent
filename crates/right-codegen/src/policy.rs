@@ -982,20 +982,27 @@ pub fn providers_append_checked(
     // Find the byte offset of the end of the endpoints list so we can append
     // inside it rather than after the whole section.
     let after_endpoints = &policy[endpoints_idx..];
+    // Use split_inclusive('\n') so each chunk includes its actual terminator
+    // ('\n' or '\r\n'), giving correct byte lengths for both LF and CRLF files.
     let list_end_line = after_endpoints
-        .lines()
+        .split_inclusive('\n')
         .enumerate()
         .skip(1) // skip the "endpoints:" line itself
-        .find(|(_, l)| !l.is_empty() && !l.starts_with(' '))
+        .find(|(_, l)| {
+            let body = l.trim_end_matches(['\r', '\n']);
+            !body.is_empty() && !body.starts_with(' ')
+        })
         .map(|(i, _)| i)
-        .unwrap_or_else(|| after_endpoints.lines().count());
+        .unwrap_or_else(|| after_endpoints.split_inclusive('\n').count());
 
     let mut byte_offset = endpoints_idx;
-    for (i, line) in after_endpoints.lines().enumerate() {
+    let mut i = 0;
+    for line in after_endpoints.split_inclusive('\n') {
         if i == list_end_line {
             break;
         }
-        byte_offset += line.len() + 1; // +1 for '\n'
+        byte_offset += line.len();
+        i += 1;
     }
 
     let mut out = String::with_capacity(policy.len() + stanza.len());
@@ -1007,7 +1014,7 @@ pub fn providers_append_checked(
 
 /// Remove the managed-by tag comment and its associated endpoint stanza for
 /// `provider_name` from the policy YAML string.
-pub fn providers_strip(policy: &str, provider_name: &str, host: &str) -> String {
+pub fn providers_strip(policy: &str, provider_name: &str, _host: &str) -> String {
     let tag = format!("# managed-by: right-providers:{provider_name}");
     let Some(tag_idx) = policy.find(&tag) else {
         return policy.to_string();
@@ -1026,7 +1033,8 @@ pub fn providers_strip(policy: &str, provider_name: &str, host: &str) -> String 
     }
 
     // Consume subsequent lines that are part of this stanza (indented ≥ 4 spaces
-    // or blank).
+    // or blank), but stop as soon as we see another `# managed-by:` marker so
+    // that adjacent provider stanzas are not consumed as collateral.
     loop {
         let remaining = &policy[end_byte..];
         let next_line = remaining.lines().next().unwrap_or("");
@@ -1034,14 +1042,19 @@ pub fn providers_strip(policy: &str, provider_name: &str, host: &str) -> String 
             // Blank line — stop here to avoid eating unrelated blank separators.
             break;
         }
-        if next_line.starts_with("    ") {
-            end_byte += next_line.len() + 1;
-        } else {
+        if !next_line.starts_with("    ") {
+            // Un-indented line — left the network/sandbox block entirely.
             break;
         }
+        // Another managed-by marker means the next provider's stanza starts here.
+        if next_line.trim_start().starts_with("# managed-by:") {
+            break;
+        }
+        end_byte += next_line.len() + 1;
     }
 
-    let _ = host; // host is available for future use (e.g. verify we're stripping the right entry)
+    // `host` is available for caller context; the strip boundary is determined
+    // by the next managed-by marker rather than by matching the domain value.
 
     let mut out = String::with_capacity(policy.len());
     out.push_str(&policy[..line_start]);
