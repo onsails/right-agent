@@ -42,7 +42,13 @@ Dashboard OAuth start is a Mini-App-authenticated API flow. The route lists
 registered MCP servers through the Aggregator internal API, finds the selected
 server URL, requires a configured tunnel hostname, discovers OAuth metadata,
 optionally performs Dynamic Client Registration, stores an in-memory
-`PendingAuth` keyed by generated state, and returns only the authorization URL.
+`PendingAuth` keyed by generated state, stores a matching transient dashboard
+OAuth status under the same state value, and returns the authorization URL plus
+`flow_id`. The OAuth callback records completion in that transient status store
+instead of sending Telegram DMs. The dashboard polls
+`/dashboard/<agent>/api/v1/mcp/oauth/<flow_id>/status` until terminal status,
+then refreshes the MCP server list. Bot restarts lose in-flight status; the
+dashboard treats that as `unknown`, and the user starts OAuth again.
 The callback URI is always `https://<tunnel-hostname>/oauth/<agent>/callback`;
 tokens, client secrets, and PKCE verifiers remain out of dashboard responses.
 
@@ -71,10 +77,11 @@ the background token exchange and Aggregator `/set-token` call finish.
 `/set-token` persists the fresh OAuth state and schedules refresh before probing
 upstream readiness. It then runs a bounded `ProxyBackend::connect()` retry loop
 with the new token. A 5xx initialize failure is retried; if all attempts fail,
-the backend is marked `Unreachable` and `/set-token` returns `502` so Telegram
-reports a failure instead of "Authenticated". If the reconnect failure is an
-upstream auth error (`"Auth required"`), the backend remains `NeedsAuth` and
-`/set-token` returns `401`.
+the backend is marked `Unreachable` and `/set-token` returns `502`. If
+readiness fails, the dashboard OAuth status reports a failure instead of
+showing a false success. If the reconnect failure is an upstream auth error
+(`"Auth required"`), the backend remains `NeedsAuth` and `/set-token` returns
+`401`.
 
 ### Refresh margin
 
