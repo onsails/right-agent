@@ -92,6 +92,7 @@ signal-hook = { version = "0.4", features = ["extended-siginfo"] }
 const_format = "0.2"
 arc-swap = "1.0"
 secrecy = { version = "0.10", features = ["serde"] }
+semver = "1.0"
 
 [profile.dev]
 panic = "abort"

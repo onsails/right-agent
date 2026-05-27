@@ -4020,6 +4020,7 @@ dependencies = [
  "right-agent-config",
  "right-codegen",
  "right-process",
+ "semver",
  "serde-saphyr",
  "serde_json",
  "shlex 2.0.1",
