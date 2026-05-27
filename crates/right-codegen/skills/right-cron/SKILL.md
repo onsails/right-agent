@@ -17,6 +17,12 @@ Activate this skill when:
 - The user asks to schedule, create, remove, or change a recurring or one-shot task
 - The user asks to run something at a specific time or after a delay
 - The user asks about cron run history or why a job failed
+- **You (the agent) need to return to a task without a new user message** —
+  e.g. retrying a transient upstream failure (502/timeout), polling a
+  long-running external job, or honoring a "let me know when X" request.
+  Cron is the only deferred-action mechanism available to you; if you'd
+  otherwise say "I'll try again later", create a one-shot cron instead of
+  promising it.
 
 ## How It Works
 

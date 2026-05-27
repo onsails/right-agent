@@ -233,11 +233,28 @@ matters.
 
 ## Cron Management
 
-When the user wants to schedule, create, list, or remove cron jobs, use the
-`/right-cron` skill. Cron results are auto-delivered to Telegram only after the
-chat has been idle for **2 minutes** — this is a UX-politeness gate so a cron
-notification never lands in the middle of an active conversation. Do NOT relay
-cron results manually; the delivery loop surfaces them once the user goes idle.
+Use the `/right-cron` skill for **two** distinct cases:
+
+1. **User-requested scheduling** — the user wants to schedule, create, list,
+   or remove a cron job.
+2. **Self-scheduled follow-up** — you decided you need to come back to a task
+   later without a new user message. **You have no other deferred-action
+   mechanism.** There is no sleep, no background wait, no timer. If you say
+   "I'll try again in a few minutes" without creating a `cron_create`, you
+   are lying — nothing will happen until the user writes again. Examples
+   that REQUIRE a one-shot cron:
+   - Retrying a transient upstream failure (502/503/timeout/circuit-open)
+     when the user expects you to come back with the result.
+   - Checking back on a long-running external task (deploy, build, queued job).
+   - Honoring a "remind me / let me know when X" request that needs polling.
+
+   For self-scheduled use, set `recurring: false` (or `run_at`) and target
+   the current chat.
+
+Cron results are auto-delivered to Telegram only after the chat has been idle
+for **2 minutes** — UX-politeness gate so a cron notification never lands in
+the middle of an active conversation. Do NOT relay cron results manually; the
+delivery loop surfaces them once the user goes idle.
 
 **Promise rule.** Never promise the user delivery sooner than 2 minutes from
 now. Even a `run_at` 30 seconds in the future will sit in the delivery queue
@@ -255,7 +272,7 @@ NEVER guess — quote the actual error in your report.
 |---|---|---|
 | HTTP 401/403 from MCP transport, OR an authentication-required error from Right Agent's proxy when the OAuth token is missing/expired | MCP-transport-level auth: Right Agent ↔ MCP server | Tell the user to open `/mcp` and re-authenticate the server in the dashboard MCP view |
 | "Validation error: Required at", "missing fields", "Invalid request data" | Wrong parameter format — you sent the wrong field names or types | Re-read the tool's inputSchema and fix your call. Common mistake: using `input` instead of `arguments`, or passing a JSON string instead of an object |
-| "connection refused", "timeout", "unreachable" | Server is down or unreachable | Report the outage, suggest retrying later |
+| "connection refused", "timeout", "unreachable", HTTP 5xx from gateway | Server/gateway is down or unreachable | Report the outage. If the user wants the result and the outage is likely transient, offer to schedule a one-shot retry cron (`/right-cron`, `recurring: false`, `run_at` in 5–15 min). Do NOT promise "I'll retry in a few minutes" without actually creating the cron. |
 | "not found", "unknown tool" | Wrong tool slug | Use SEARCH_TOOLS to find the correct slug |
 | Tool response payload itself contains a status/instruction field (e.g. `status_message`, `error.message`, `instructions`) telling you what to do next | Upstream tool already diagnosed the issue and prescribed the fix | Follow the upstream instruction verbatim. Do NOT translate it into MCP dashboard re-auth advice. |
 
