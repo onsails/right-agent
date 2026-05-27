@@ -18,6 +18,10 @@ import type {
   OverviewResponse,
   PinSkillRequest,
   PinSkillResponse,
+  ProviderCreateBody,
+  ProviderGenericBody,
+  ProviderProfileView,
+  ProviderView,
   RunDetailResponse,
   SkillDetailResponse,
   SkillsResponse,
@@ -139,6 +143,41 @@ export function doctorStatus(): Promise<DoctorResponse> {
 
 export function sandboxStats(): Promise<SandboxStatsResponse> {
   return requestJson<SandboxStatsResponse>('api/v1/health/sandbox')
+}
+
+export function providerList(): Promise<{ providers: ProviderView[] }> {
+  return requestJson<{ providers: ProviderView[] }>('api/v1/providers')
+}
+
+export function providerTypes(): Promise<{ types: ProviderProfileView[] }> {
+  return requestJson<{ types: ProviderProfileView[] }>('api/v1/providers/types')
+}
+
+export function providerCreate(body: ProviderCreateBody): Promise<ProviderView> {
+  return requestJson<ProviderView>('api/v1/providers', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function providerRotate(name: string, credential: string): Promise<ProviderView> {
+  return requestJson<ProviderView>(`api/v1/providers/${encodeURIComponent(name)}/rotate`, {
+    method: 'POST',
+    body: JSON.stringify({ credential }),
+  })
+}
+
+export function providerConfigUpdate(name: string, body: Partial<ProviderGenericBody>): Promise<ProviderView> {
+  return requestJson<ProviderView>(`api/v1/providers/${encodeURIComponent(name)}/config`, {
+    method: 'PATCH',
+    body: JSON.stringify({ generic: body }),
+  })
+}
+
+export function providerRemove(name: string): Promise<void> {
+  return requestJson<void>(`api/v1/providers/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  })
 }
 
 async function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {

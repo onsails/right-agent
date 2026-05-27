@@ -37,6 +37,7 @@ import IdentityView from './views/IdentityView.vue'
 import KnowledgeView from './views/KnowledgeView.vue'
 import McpView from './views/McpView.vue'
 import OverviewView from './views/OverviewView.vue'
+import ProvidersView from './views/ProvidersView.vue'
 import UsageView from './views/UsageView.vue'
 import type {
   BootstrapResponse, DashboardOverviewResponse, DoctorResponse, IdentityFileSummary, IdentityResponse,
@@ -404,6 +405,7 @@ async function selectIdentityFile(name: string): Promise<void> {
       @select-file="selectIdentityFile"
     />
     <McpView v-else-if="activeTab === 'mcp'" />
+    <ProvidersView v-else-if="activeTab === 'providers'" />
     <HealthView
       v-else-if="activeTab === 'health'"
       :doctor="doctorData"
