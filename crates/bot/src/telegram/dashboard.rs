@@ -1793,6 +1793,7 @@ mod tests {
             internal.socket_path.clone(),
             pending_auth.clone(),
         );
+        let oauth_status = state.oauth_status.clone();
         state.mcp_oauth_allow_private_urls = true;
 
         let (status, body) = post_json_with_state(
@@ -1806,13 +1807,14 @@ mod tests {
         oauth.handle.await.expect("OAuth server task");
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            body.as_object()
-                .expect("response object")
-                .keys()
-                .collect::<Vec<_>>(),
-            vec!["auth_url"]
-        );
+        let mut keys = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(keys, vec!["auth_url", "flow_id"]);
         let body_text = body.to_string();
         assert!(!body_text.contains("access_token"));
         assert!(!body_text.contains("refresh_token"));
@@ -1830,6 +1832,13 @@ mod tests {
             .into_owned()
             .collect::<std::collections::HashMap<_, _>>();
         let state_param = query.get("state").expect("state query parameter");
+        assert_eq!(body["flow_id"].as_str(), Some(state_param.as_str()));
+        let status = oauth_status.status(state_param).await;
+        assert_eq!(status.server_name.as_deref(), Some("linear"));
+        assert_eq!(
+            status.status,
+            super::super::oauth_status::OAuthFlowStatus::Pending
+        );
         assert_eq!(
             query.get("redirect_uri").map(String::as_str),
             Some("https://right.example.com/oauth/alpha/callback")
