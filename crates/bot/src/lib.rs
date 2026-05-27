@@ -541,6 +541,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     };
 
     let pending_auth: PendingAuthMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let oauth_status = telegram::oauth_status::OAuthFlowStatusStore::default();
     let progress_state = telegram::progress::ProgressState::default();
     let dashboard_foreground: telegram::StopTokens = Arc::new(DashMap::new());
 
@@ -555,13 +556,17 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     let oauth_state = OAuthCallbackState {
         pending_auth: Arc::clone(&pending_auth),
+        oauth_status: oauth_status.clone(),
         agent_name: agent_name.clone(),
         bot: notify_bot,
         allowlist: allowlist.clone(),
         internal_client: Arc::clone(&internal_client),
     };
     // Spawn cleanup task
-    tokio::spawn(run_pending_auth_cleanup(Arc::clone(&pending_auth)));
+    tokio::spawn(run_pending_auth_cleanup(
+        Arc::clone(&pending_auth),
+        oauth_status.clone(),
+    ));
 
     // Spawn axum bot UDS server and wait for it to bind before starting teloxide
     let socket_path = agent_dir.join("bot.sock");
@@ -888,6 +893,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             foreground: Arc::clone(&dashboard_foreground),
             internal_client: Arc::clone(&internal_client),
             pending_auth: Arc::clone(&pending_auth),
+            oauth_status: oauth_status.clone(),
             #[cfg(test)]
             mcp_oauth_allow_private_urls: false,
             #[cfg(test)]
