@@ -3,28 +3,12 @@
 
 #[tokio::test]
 #[ignore = "ci-openshell: requires a live OpenShell gateway"]
-async fn ci_openshell_provider_v2_flip() {
-    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
-        .await
-        .expect("resolve gateway");
-    let first = right_openshell::providers::ensure_v2_enabled(&endpoint)
-        .await
-        .expect("ensure_v2_enabled #1");
-    let second = right_openshell::providers::ensure_v2_enabled(&endpoint)
-        .await
-        .expect("ensure_v2_enabled #2");
-    assert!(second.was_already_on);
-    let _ = first;
-}
-
-#[tokio::test]
-#[ignore = "ci-openshell: requires a live OpenShell gateway"]
 async fn ci_openshell_provider_create_get_delete_roundtrip() {
     use right_openshell::providers::*;
-    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
         .await
         .unwrap();
-    let _ = ensure_v2_enabled(&endpoint).await.unwrap();
 
     let name = format!("rightprobe-{}-roundtrip", std::process::id());
     let mut creds = std::collections::HashMap::new();
@@ -35,16 +19,16 @@ async fn ci_openshell_provider_create_get_delete_roundtrip() {
         credentials: creds,
         config: Default::default(),
     };
-    let created = create_provider(&endpoint, &spec).await.unwrap();
+    let created = create_provider(&mut client, &spec).await.unwrap();
     assert_eq!(created.name, name);
     assert_eq!(created.type_, "generic");
 
-    let got = get_provider(&endpoint, &name).await.unwrap();
+    let got = get_provider(&mut client, &name).await.unwrap();
     assert_eq!(got.name, name);
 
-    delete_provider(&endpoint, &name).await.unwrap();
+    delete_provider(&mut client, &name).await.unwrap();
 
-    let after = get_provider(&endpoint, &name).await;
+    let after = get_provider(&mut client, &name).await;
     assert!(matches!(after, Err(ProviderError::NotFound(_))));
 }
 
@@ -53,17 +37,17 @@ async fn ci_openshell_provider_create_get_delete_roundtrip() {
 async fn ci_openshell_provider_attach_detach() {
     use right_openshell::providers::*;
     use right_openshell::test_support::TestSandbox;
-    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
         .await
         .unwrap();
-    let _ = ensure_v2_enabled(&endpoint).await.unwrap();
 
     let pid = std::process::id();
     let prov_name = format!("rightprobe-{pid}-attachprov");
     let mut creds = std::collections::HashMap::new();
     creds.insert("RIGHTPROBE_TOKEN".into(), "secret".into());
     create_provider(
-        &endpoint,
+        &mut client,
         &ProviderSpec {
             name: prov_name.clone(),
             type_: "generic".into(),
@@ -75,14 +59,14 @@ async fn ci_openshell_provider_attach_detach() {
     .unwrap();
 
     let sandbox = TestSandbox::create("ci-openshell-provider-attach-detach").await;
-    attach_to_sandbox(&endpoint, sandbox.name(), &prov_name)
+    attach_to_sandbox(&mut client, sandbox.name(), &prov_name)
         .await
         .unwrap();
-    detach_from_sandbox(&endpoint, sandbox.name(), &prov_name)
+    detach_from_sandbox(&mut client, sandbox.name(), &prov_name)
         .await
         .unwrap();
 
-    delete_provider(&endpoint, &prov_name).await.unwrap();
+    delete_provider(&mut client, &prov_name).await.unwrap();
 }
 
 #[tokio::test]
@@ -90,17 +74,17 @@ async fn ci_openshell_provider_attach_detach() {
 async fn ci_openshell_provider_create_attach_env_visible() {
     use right_openshell::providers::*;
     use right_openshell::test_support::TestSandbox;
-    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
         .await
         .unwrap();
-    let _ = ensure_v2_enabled(&endpoint).await.unwrap();
 
     let pid = std::process::id();
     let prov = format!("rightprobe-{pid}-envvisible");
     let mut creds = std::collections::HashMap::new();
     creds.insert("RIGHTPROBE_ENVVISIBLE".into(), "secret".into());
     create_provider(
-        &endpoint,
+        &mut client,
         &ProviderSpec {
             name: prov.clone(),
             type_: "generic".into(),
@@ -111,7 +95,7 @@ async fn ci_openshell_provider_create_attach_env_visible() {
     .await
     .unwrap();
     let sandbox = TestSandbox::create("ci-openshell-provider-env-visible").await;
-    attach_to_sandbox(&endpoint, sandbox.name(), &prov)
+    attach_to_sandbox(&mut client, sandbox.name(), &prov)
         .await
         .unwrap();
 
@@ -122,10 +106,10 @@ async fn ci_openshell_provider_create_attach_env_visible() {
         "expected placeholder, got: {output}"
     );
 
-    detach_from_sandbox(&endpoint, sandbox.name(), &prov)
+    detach_from_sandbox(&mut client, sandbox.name(), &prov)
         .await
         .unwrap();
-    delete_provider(&endpoint, &prov).await.unwrap();
+    delete_provider(&mut client, &prov).await.unwrap();
 }
 
 #[tokio::test]
@@ -133,17 +117,17 @@ async fn ci_openshell_provider_create_attach_env_visible() {
 async fn ci_openshell_provider_rotate_no_restart() {
     use right_openshell::providers::*;
     use right_openshell::test_support::TestSandbox;
-    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
         .await
         .unwrap();
-    let _ = ensure_v2_enabled(&endpoint).await.unwrap();
 
     let pid = std::process::id();
     let prov = format!("rightprobe-{pid}-rotate");
     let mut creds = std::collections::HashMap::new();
     creds.insert("ROT_TOKEN".into(), "first".into());
     create_provider(
-        &endpoint,
+        &mut client,
         &ProviderSpec {
             name: prov.clone(),
             type_: "generic".into(),
@@ -155,7 +139,7 @@ async fn ci_openshell_provider_rotate_no_restart() {
     .unwrap();
 
     let sandbox = TestSandbox::create("ci-openshell-provider-rotate").await;
-    attach_to_sandbox(&endpoint, sandbox.name(), &prov)
+    attach_to_sandbox(&mut client, sandbox.name(), &prov)
         .await
         .unwrap();
 
@@ -170,7 +154,7 @@ async fn ci_openshell_provider_rotate_no_restart() {
     let mut creds2 = std::collections::HashMap::new();
     creds2.insert("ROT_TOKEN".into(), "second".into());
     update_provider(
-        &endpoint,
+        &mut client,
         &ProviderSpec {
             name: prov.clone(),
             type_: "generic".into(),
@@ -194,10 +178,10 @@ async fn ci_openshell_provider_rotate_no_restart() {
         "placeholder must change after credential rotation (version suffix differs)"
     );
 
-    detach_from_sandbox(&endpoint, sandbox.name(), &prov)
+    detach_from_sandbox(&mut client, sandbox.name(), &prov)
         .await
         .unwrap();
-    delete_provider(&endpoint, &prov).await.unwrap();
+    delete_provider(&mut client, &prov).await.unwrap();
 }
 
 #[tokio::test]
@@ -252,17 +236,17 @@ async fn ci_openshell_provider_policy_hot_apply() {
 #[ignore = "ci-openshell: requires a live OpenShell gateway"]
 async fn ci_openshell_provider_destroy_cascade() {
     use right_openshell::providers::*;
-    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
         .await
         .unwrap();
-    let _ = ensure_v2_enabled(&endpoint).await.unwrap();
 
     let pid = std::process::id();
     let prov = format!("rightprobe-{pid}-cascade");
     let mut creds = std::collections::HashMap::new();
     creds.insert("CASCADE_TOKEN".into(), "value".into());
     create_provider(
-        &endpoint,
+        &mut client,
         &ProviderSpec {
             name: prov.clone(),
             type_: "generic".into(),
@@ -273,9 +257,9 @@ async fn ci_openshell_provider_destroy_cascade() {
     .await
     .unwrap();
 
-    delete_provider(&endpoint, &prov).await.unwrap();
+    delete_provider(&mut client, &prov).await.unwrap();
 
-    let after = get_provider(&endpoint, &prov).await;
+    let after = get_provider(&mut client, &prov).await;
     assert!(
         matches!(after, Err(ProviderError::NotFound(_))),
         "provider must be NotFound after delete, got: {after:?}"
