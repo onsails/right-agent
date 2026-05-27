@@ -22,6 +22,7 @@ pub mod openshell_proto {
         }
     }
 }
+pub mod preflight;
 pub mod sandbox_exec;
 #[cfg(unix)]
 pub mod test_cleanup;
