@@ -34,6 +34,10 @@ tonic-prost-build = "0.14"
 [dev-dependencies]
 tokio-stream = { version = "0.1", features = ["net"] }
 
+[[test]]
+name = "ci_openshell_provider"
+required-features = ["test-support"]
+
 [package.metadata.cargo-machete]
 ignored = ["prost", "prost-types", "tonic-prost", "tonic-prost-build"]
 # prost/prost-types/tonic-prost: used via fully-qualified paths inside code
