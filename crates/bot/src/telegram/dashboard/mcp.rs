@@ -52,6 +52,7 @@ pub(crate) struct DashboardMcpMutationResponse {
 #[derive(Debug, Serialize)]
 pub(crate) struct DashboardMcpOAuthStartResponse {
     pub auth_url: String,
+    pub flow_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,6 +388,10 @@ pub(crate) async fn handle_mcp_oauth_start(
             created_at: std::time::Instant::now(),
         },
     );
+    state
+        .oauth_status
+        .insert_pending(oauth_state.clone(), server_name.clone())
+        .await;
 
     let auth_url = right_mcp::oauth::build_auth_url(
         &discovery.metadata,
@@ -398,7 +403,11 @@ pub(crate) async fn handle_mcp_oauth_start(
         scope_param.as_deref(),
     );
 
-    Json(DashboardMcpOAuthStartResponse { auth_url }).into_response()
+    Json(DashboardMcpOAuthStartResponse {
+        auth_url,
+        flow_id: oauth_state,
+    })
+    .into_response()
 }
 
 pub(crate) async fn handle_mcp_oauth_status(
