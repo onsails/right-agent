@@ -135,12 +135,11 @@ async fn handle_oauth_callback(
             "OAuth callback error from provider"
         );
         if let Some(state_param) = params.state.as_deref() {
+            let provider_detail = format!("{err} -- {desc}");
+            let safe_detail = super::oauth_status::compact_dashboard_error(&provider_detail);
             state
                 .oauth_status
-                .mark_failed(
-                    state_param,
-                    format!("OAuth provider error: {err} -- {desc}"),
-                )
+                .mark_failed(state_param, format!("OAuth provider error: {safe_detail}"))
                 .await;
         }
         return (
@@ -195,10 +194,6 @@ async fn handle_oauth_callback(
                 state = %received_state,
                 "OAuth callback: unknown or already-consumed state"
             );
-            state
-                .oauth_status
-                .mark_failed(&received_state, "OAuth state is invalid or expired.")
-                .await;
             return (
                 axum::http::StatusCode::BAD_REQUEST,
                 "invalid or expired state -- flow already completed or state is unknown"
@@ -239,11 +234,24 @@ async fn complete_oauth_flow(
     cb_state: OAuthCallbackState,
     agent_name: &str,
 ) -> miette::Result<()> {
-    let http_client = right_mcp::ssrf::hardened_client_builder()
+    let http_client = match right_mcp::ssrf::hardened_client_builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| miette::miette!("oauth token HTTP client failed: {e:#}"))?;
+    {
+        Ok(http_client) => http_client,
+        Err(error) => {
+            let detail = format!("{error:#}");
+            cb_state
+                .oauth_status
+                .mark_failed(
+                    &pending.state,
+                    token_exchange_failure_dashboard_message(&detail),
+                )
+                .await;
+            return Err(miette::miette!("oauth token HTTP client failed: {detail}"));
+        }
+    };
 
     let token_resp = match exchange_token_with_url_policy(
         &http_client,
@@ -265,10 +273,7 @@ async fn complete_oauth_flow(
                 .oauth_status
                 .mark_failed(
                     &pending.state,
-                    format!(
-                        "Token exchange failed: {}",
-                        super::oauth_status::compact_dashboard_error(&detail)
-                    ),
+                    token_exchange_failure_dashboard_message(&detail),
                 )
                 .await;
             return Err(miette::miette!("token exchange failed: {detail}"));
@@ -331,6 +336,13 @@ fn set_token_failure_dashboard_message(err: impl std::fmt::Display) -> String {
     format!(
         "Token exchange completed, but MCP readiness failed: {}",
         super::oauth_status::compact_dashboard_error(&err.to_string())
+    )
+}
+
+fn token_exchange_failure_dashboard_message(detail: &str) -> String {
+    format!(
+        "Token exchange failed: {}",
+        super::oauth_status::compact_dashboard_error(detail)
     )
 }
 
@@ -587,6 +599,83 @@ mod tests {
         assert_eq!(user_ids, vec![100]);
     }
 
+    #[tokio::test]
+    async fn replayed_callback_does_not_overwrite_succeeded_status() {
+        let state_val = "completed-flow";
+        let cb_state = dummy_state(Arc::new(Mutex::new(HashMap::new())));
+        cb_state
+            .oauth_status
+            .insert_pending(state_val.to_string(), "test-server".to_string())
+            .await;
+        cb_state.oauth_status.mark_succeeded(state_val).await;
+
+        let response = handle_oauth_callback(
+            AxumPath("test-agent".to_string()),
+            Query(CallbackParams {
+                code: Some("code-123".to_string()),
+                state: Some(state_val.to_string()),
+                error: None,
+                error_description: None,
+            }),
+            State(cb_state.clone()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let status = cb_state.oauth_status.status(state_val).await;
+        assert_eq!(
+            status.status,
+            super::super::oauth_status::OAuthFlowStatus::Succeeded
+        );
+        assert_eq!(status.message, None);
+    }
+
+    #[tokio::test]
+    async fn provider_error_status_message_redacts_secret_like_detail() {
+        let state_val = "provider-error-flow";
+        let cb_state = dummy_state(Arc::new(Mutex::new(HashMap::new())));
+        cb_state
+            .oauth_status
+            .insert_pending(state_val.to_string(), "test-server".to_string())
+            .await;
+
+        let response = handle_oauth_callback(
+            AxumPath("test-agent".to_string()),
+            Query(CallbackParams {
+                code: None,
+                state: Some(state_val.to_string()),
+                error: Some("access_token_secret".to_string()),
+                error_description: Some("client_secret=abc".to_string()),
+            }),
+            State(cb_state.clone()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let status = cb_state.oauth_status.status(state_val).await;
+        assert_eq!(
+            status.status,
+            super::super::oauth_status::OAuthFlowStatus::Failed
+        );
+        let message = status.message.expect("provider failure message");
+        assert!(!message.contains("access_token_secret"));
+        assert!(!message.contains("client_secret"));
+        assert!(!message.contains("abc"));
+    }
+
+    #[test]
+    fn token_exchange_failure_dashboard_message_redacts_secret_like_detail() {
+        let msg = token_exchange_failure_dashboard_message(
+            "oauth token HTTP client failed: client_secret=abc",
+        );
+
+        assert!(msg.contains("Token exchange failed"));
+        assert!(!msg.contains("client_secret"));
+        assert!(!msg.contains("abc"));
+    }
+
     #[test]
     fn set_token_failure_dashboard_message_does_not_claim_success() {
         let msg = set_token_failure_dashboard_message(
@@ -605,7 +694,6 @@ mod tests {
 
         assert!(html.contains("dashboard"));
         assert!(!html.contains("Telegram"));
-        assert!(!html.contains(&format!("{} {}", "Check", "Telegram")));
     }
 
     #[test]

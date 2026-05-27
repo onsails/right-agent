@@ -47,26 +47,6 @@ where
     }
 }
 
-/// Best-effort HTML broadcast to a list of chat IDs.
-pub(crate) async fn broadcast_html_to_chats<R>(bot: &R, chat_ids: &[i64], html: &str)
-where
-    R: teloxide::prelude::Requester + Send + Sync,
-    R::Err: std::fmt::Display,
-{
-    use teloxide::payloads::SendMessageSetters;
-    use teloxide::types::ParseMode;
-
-    for &chat_id in chat_ids {
-        if let Err(e) = bot
-            .send_message(teloxide::types::ChatId(chat_id), html)
-            .parse_mode(ParseMode::Html)
-            .await
-        {
-            tracing::warn!(chat_id, "broadcast_html_to_chats send failed: {e}");
-        }
-    }
-}
-
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
