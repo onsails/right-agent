@@ -224,6 +224,73 @@ mod provider_validation_tests {
         assert!(validate_type_slug("anthropic").is_ok());
         assert!(validate_type_slug("generic").is_ok());
     }
+
+    // ── config-update env_var collision tests ────────────────────────────────
+
+    fn make_generic_entry(name: &str, env_var: &str) -> right_agent_config::ProviderEntry {
+        right_agent_config::ProviderEntry {
+            name: name.to_string(),
+            type_: right_agent_config::ProviderType::Generic,
+            label: None,
+            generic: Some(right_agent_config::GenericProvider {
+                env_var: env_var.to_string(),
+                header_name: "Authorization".to_string(),
+                upstream_host: "api.example.com".to_string(),
+                upstream_path_prefix: None,
+            }),
+        }
+    }
+
+    fn make_builtin_entry(name: &str, slug: &str) -> right_agent_config::ProviderEntry {
+        right_agent_config::ProviderEntry {
+            name: name.to_string(),
+            type_: right_agent_config::ProviderType::BuiltIn(slug.to_string()),
+            label: None,
+            generic: None,
+        }
+    }
+
+    #[test]
+    fn would_collide_detects_env_var_clash_with_other_provider() {
+        let providers = vec![
+            make_generic_entry("agent-openai", "OPENAI_API_KEY"),
+            make_builtin_entry("agent-anthropic", "anthropic"),
+        ];
+        // Renaming "agent-openai" to a new env var that doesn't collide → false.
+        assert!(!would_collide(&providers, "agent-openai", "MY_CUSTOM_KEY"));
+        // Renaming "agent-openai" to the same var it already has → false (no-op, caller skips).
+        assert!(!would_collide(&providers, "agent-openai", "OPENAI_API_KEY"));
+        // Renaming some other provider to OPENAI_API_KEY → collides with agent-openai.
+        assert!(would_collide(&providers, "agent-other", "OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn would_collide_rename_to_builtin_env_var_detected() {
+        // Built-in "anthropic" provider uses ANTHROPIC_API_KEY (from catalog).
+        // A generic provider renaming its env_var to match the builtin's should collide.
+        // We can't call profile_catalog() in a unit test since it may need OpenShell,
+        // so we model the builtin env_var explicitly as a generic for the collision check.
+        let providers = vec![
+            make_generic_entry("agent-custom", "MY_KEY"),
+            make_generic_entry("agent-anthropic", "ANTHROPIC_API_KEY"),
+        ];
+        // Renaming agent-custom to ANTHROPIC_API_KEY → collision detected.
+        assert!(would_collide(
+            &providers,
+            "agent-custom",
+            "ANTHROPIC_API_KEY"
+        ));
+        // Renaming agent-custom to something else → no collision.
+        assert!(!would_collide(&providers, "agent-custom", "OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn would_collide_single_provider_never_collides_with_itself() {
+        let providers = vec![make_generic_entry("agent-foo", "FOO_API_KEY")];
+        // The only provider is the one being updated — should never collide with itself.
+        assert!(!would_collide(&providers, "agent-foo", "FOO_API_KEY"));
+        assert!(!would_collide(&providers, "agent-foo", "NEW_KEY"));
+    }
 }
 
 // ── Task 15: /provider-list ───────────────────────────────────────────────────
@@ -286,13 +353,19 @@ pub(crate) async fn handle_provider_list(
     let catalog = right_openshell::providers::profile_catalog();
     let mut views = Vec::with_capacity(sandbox.providers.len());
     for entry in &sandbox.providers {
-        let status = match right_openshell::providers::get_provider(&endpoint, &entry.name).await {
-            Ok(_) => ProviderStatus::Healthy,
-            Err(right_openshell::providers::ProviderError::NotFound(_)) => ProviderStatus::Missing,
-            Err(e) => ProviderStatus::GatewayError {
-                message: format!("{e:#}"),
-            },
-        };
+        let (status, updated_at) =
+            match right_openshell::providers::get_provider(&endpoint, &entry.name).await {
+                Ok(p) => (ProviderStatus::Healthy, p.updated_at),
+                Err(right_openshell::providers::ProviderError::NotFound(_)) => {
+                    (ProviderStatus::Missing, None)
+                }
+                Err(e) => (
+                    ProviderStatus::GatewayError {
+                        message: format!("{e:#}"),
+                    },
+                    None,
+                ),
+            };
         let env_var = match &entry.type_ {
             right_agent_config::ProviderType::Generic => entry
                 .generic
@@ -315,7 +388,7 @@ pub(crate) async fn handle_provider_list(
             label: entry.label.clone(),
             env_var,
             generic: entry.generic.clone(),
-            updated_at: None,
+            updated_at,
             status,
         });
     }
@@ -422,7 +495,15 @@ pub(crate) async fn handle_provider_create(
     if let Err(attach_err) =
         right_openshell::providers::attach_to_sandbox(&endpoint, &sandbox_name, &name).await
     {
-        let _ = right_openshell::providers::delete_provider(&endpoint, &name).await;
+        if let Err(rollback_err) =
+            right_openshell::providers::delete_provider(&endpoint, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %attach_err,
+                "provider rollback failed: could not delete provider after attach failure: {rollback_err:#}"
+            );
+        }
         return Err(ProviderApiError::Gateway(format!("{attach_err:#}")));
     }
 
@@ -433,9 +514,24 @@ pub(crate) async fn handle_provider_create(
         generic: None,
     };
     if let Err(e) = append_provider_to_yaml(&state.agents_dir, &req.agent, &entry) {
-        let _ =
-            right_openshell::providers::detach_from_sandbox(&endpoint, &sandbox_name, &name).await;
-        let _ = right_openshell::providers::delete_provider(&endpoint, &name).await;
+        if let Err(rollback_err) =
+            right_openshell::providers::detach_from_sandbox(&endpoint, &sandbox_name, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %e,
+                "provider rollback failed: could not detach provider after yaml-write failure: {rollback_err:#}"
+            );
+        }
+        if let Err(rollback_err) =
+            right_openshell::providers::delete_provider(&endpoint, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %e,
+                "provider rollback failed: could not delete provider after yaml-write failure: {rollback_err:#}"
+            );
+        }
         return Err(ProviderApiError::AgentYamlWrite(format!("{e:#}")));
     }
 
@@ -448,6 +544,18 @@ pub(crate) async fn handle_provider_create(
         updated_at: None,
         status: ProviderStatus::Healthy,
     }))
+}
+
+/// Returns `true` if renaming `excluding_name`'s env_var to `new_env_var`
+/// would collide with another provider in `providers`.
+fn would_collide(
+    providers: &[right_agent_config::ProviderEntry],
+    excluding_name: &str,
+    new_env_var: &str,
+) -> bool {
+    providers
+        .iter()
+        .any(|p| p.name != excluding_name && extract_env_var(p) == new_env_var)
 }
 
 fn extract_env_var(entry: &right_agent_config::ProviderEntry) -> String {
@@ -661,15 +769,35 @@ async fn create_generic_provider(
         config,
     };
     if let Err(e) = right_openshell::providers::create_provider(&endpoint, &spec).await {
-        let _ = snapshot.restore().await;
+        if let Err(rollback_err) = snapshot.restore().await {
+            tracing::warn!(
+                provider = %name,
+                original_err = %e,
+                "provider rollback failed: could not restore policy snapshot after create_provider failure: {rollback_err:#}"
+            );
+        }
         return Err(ProviderApiError::Gateway(format!("{e:#}")));
     }
 
     if let Err(attach_err) =
         right_openshell::providers::attach_to_sandbox(&endpoint, &sandbox_name, &name).await
     {
-        let _ = right_openshell::providers::delete_provider(&endpoint, &name).await;
-        let _ = snapshot.restore().await;
+        if let Err(rollback_err) =
+            right_openshell::providers::delete_provider(&endpoint, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %attach_err,
+                "provider rollback failed: could not delete provider after attach failure: {rollback_err:#}"
+            );
+        }
+        if let Err(rollback_err) = snapshot.restore().await {
+            tracing::warn!(
+                provider = %name,
+                original_err = %attach_err,
+                "provider rollback failed: could not restore policy snapshot after attach failure: {rollback_err:#}"
+            );
+        }
         return Err(ProviderApiError::Gateway(format!("{attach_err:#}")));
     }
 
@@ -686,10 +814,31 @@ async fn create_generic_provider(
         generic: Some(generic_entry.clone()),
     };
     if let Err(e) = append_provider_to_yaml(&state.agents_dir, &req.agent, &entry) {
-        let _ =
-            right_openshell::providers::detach_from_sandbox(&endpoint, &sandbox_name, &name).await;
-        let _ = right_openshell::providers::delete_provider(&endpoint, &name).await;
-        let _ = snapshot.restore().await;
+        if let Err(rollback_err) =
+            right_openshell::providers::detach_from_sandbox(&endpoint, &sandbox_name, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %e,
+                "provider rollback failed: could not detach provider after yaml-write failure: {rollback_err:#}"
+            );
+        }
+        if let Err(rollback_err) =
+            right_openshell::providers::delete_provider(&endpoint, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %e,
+                "provider rollback failed: could not delete provider after yaml-write failure: {rollback_err:#}"
+            );
+        }
+        if let Err(rollback_err) = snapshot.restore().await {
+            tracing::warn!(
+                provider = %name,
+                original_err = %e,
+                "provider rollback failed: could not restore policy snapshot after yaml-write failure: {rollback_err:#}"
+            );
+        }
         return Err(ProviderApiError::AgentYamlWrite(format!("{e:#}")));
     }
 
@@ -915,6 +1064,12 @@ pub(crate) async fn handle_provider_config_update(
         Some(v) => v,
     };
     validate_env_var(&new_env_var)?;
+    if new_env_var != current.env_var && would_collide(&sandbox.providers, &req.name, &new_env_var)
+    {
+        return Err(ProviderApiError::EnvVarCollision {
+            env_var: new_env_var,
+        });
+    }
     validate_header_name(&new_header)?;
     validate_upstream_host(&new_host)?;
     if let Some(p) = &new_path {
@@ -977,7 +1132,13 @@ pub(crate) async fn handle_provider_config_update(
     };
     if let Err(e) = right_openshell::providers::update_provider(&endpoint, &spec).await {
         if let Some(s) = snapshot {
-            let _ = s.restore().await;
+            if let Err(rollback_err) = s.restore().await {
+                tracing::warn!(
+                    provider = %req.name,
+                    original_err = %e,
+                    "provider rollback failed: could not restore policy snapshot after update_provider failure: {rollback_err:#}"
+                );
+            }
         }
         return Err(ProviderApiError::Gateway(format!("{e:#}")));
     }
@@ -995,7 +1156,13 @@ pub(crate) async fn handle_provider_config_update(
     };
     if let Err(e) = replace_provider_in_yaml(&state.agents_dir, &req.agent, &updated) {
         if let Some(s) = snapshot {
-            let _ = s.restore().await;
+            if let Err(rollback_err) = s.restore().await {
+                tracing::warn!(
+                    provider = %req.name,
+                    original_err = %e,
+                    "provider rollback failed: could not restore policy snapshot after yaml-write failure: {rollback_err:#}"
+                );
+            }
         }
         return Err(ProviderApiError::AgentYamlWrite(format!("{e:#}")));
     }
