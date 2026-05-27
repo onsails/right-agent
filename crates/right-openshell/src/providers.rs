@@ -523,6 +523,28 @@ pub async fn reconcile_for_sandbox(
 // Internal helpers
 // ────────────────────────────────────────────────────────────────────────────
 
+async fn get_v2_flag(endpoint: &crate::openshell::GatewayEndpoint) -> Result<bool, ProviderError> {
+    let mut cmd = Command::new("openshell");
+    cmd.args([
+        "settings",
+        "get",
+        "--global",
+        "--key",
+        "providers_v2_enabled",
+    ]);
+    endpoint.apply_to_cli(&mut cmd);
+    let out = cmd.output().await.map_err(|e| ProviderError::Cli {
+        cmd: "openshell settings get".into(),
+        status: -1,
+        stderr: e.to_string(),
+    })?;
+    if !out.status.success() {
+        return Ok(false);
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(stdout.contains("true"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,26 +587,4 @@ mod tests {
             .unwrap();
         assert_eq!(entry.env_var, "ANTHROPIC_API_KEY");
     }
-}
-
-async fn get_v2_flag(endpoint: &crate::openshell::GatewayEndpoint) -> Result<bool, ProviderError> {
-    let mut cmd = Command::new("openshell");
-    cmd.args([
-        "settings",
-        "get",
-        "--global",
-        "--key",
-        "providers_v2_enabled",
-    ]);
-    endpoint.apply_to_cli(&mut cmd);
-    let out = cmd.output().await.map_err(|e| ProviderError::Cli {
-        cmd: "openshell settings get".into(),
-        status: -1,
-        stderr: e.to_string(),
-    })?;
-    if !out.status.success() {
-        return Ok(false);
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    Ok(stdout.contains("true"))
 }
