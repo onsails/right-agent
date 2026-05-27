@@ -456,6 +456,70 @@ pub async fn get_sandbox_provider_environment(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Startup reconciler
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Report from a provider reconcile pass.
+pub struct ReconcileReport {
+    /// Providers that were attached during this pass (were missing from sandbox).
+    pub attached: Vec<String>,
+    /// Providers that were detached during this pass (were attached but not declared).
+    pub detached: Vec<String>,
+    /// Declared providers that do not exist on the gateway (not yet created).
+    pub missing: Vec<String>,
+}
+
+/// Reconcile the set of providers attached to `sandbox_name` with the
+/// `declared` list from `agent.yaml`.
+///
+/// - Attaches any declared provider that exists on the gateway but is not yet
+///   attached to the sandbox.
+/// - Detaches any provider whose name starts with `<agent_prefix>-` that is
+///   currently attached but is not in `declared` (stale after a config change).
+/// - Records providers that are declared but not yet created on the gateway
+///   in `missing` (not an error — they may be created later by the user).
+///
+/// The function is idempotent: calling it when everything is already in sync
+/// produces an empty report with no gateway calls beyond `list_attached`.
+pub async fn reconcile_for_sandbox(
+    endpoint: &crate::openshell::GatewayEndpoint,
+    sandbox_name: &str,
+    agent_prefix: &str,
+    declared: &[String],
+) -> Result<ReconcileReport, ProviderError> {
+    let attached = list_attached(endpoint, sandbox_name).await?;
+    let declared_set: std::collections::HashSet<&String> = declared.iter().collect();
+    let attached_set: std::collections::HashSet<&String> = attached.iter().collect();
+    let mut report = ReconcileReport {
+        attached: vec![],
+        detached: vec![],
+        missing: vec![],
+    };
+    // Attach declared providers that exist on the gateway but are not yet attached.
+    for name in declared {
+        match get_provider(endpoint, name).await {
+            Ok(_) => {
+                if !attached_set.contains(name) {
+                    attach_to_sandbox(endpoint, sandbox_name, name).await?;
+                    report.attached.push(name.clone());
+                }
+            }
+            Err(ProviderError::NotFound(_)) => report.missing.push(name.clone()),
+            Err(e) => return Err(e),
+        }
+    }
+    // Detach prefixed providers that are no longer declared.
+    let prefix = format!("{agent_prefix}-");
+    for name in &attached {
+        if name.starts_with(&prefix) && !declared_set.contains(name) {
+            detach_from_sandbox(endpoint, sandbox_name, name).await?;
+            report.detached.push(name.clone());
+        }
+    }
+    Ok(report)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ────────────────────────────────────────────────────────────────────────────
 

@@ -815,6 +815,46 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
         tracing::info!(agent = %args.agent, "OpenShell sandbox ready");
 
+        // Reconcile attached providers with the `sandbox.providers` list in agent.yaml.
+        // Attaches declared providers that exist on the gateway but are not yet attached,
+        // and detaches stale `<agent>-*` entries that were removed from the config.
+        // Non-fatal: a reconcile failure is logged but never prevents the bot from starting.
+        if let Some(sandbox_cfg) = config.sandbox.as_ref() {
+            match right_openshell::openshell::resolve_gateway_endpoint().await {
+                Ok(endpoint) => {
+                    let declared: Vec<String> = sandbox_cfg
+                        .providers
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect();
+                    match right_openshell::providers::reconcile_for_sandbox(
+                        &endpoint,
+                        &sandbox,
+                        &args.agent,
+                        &declared,
+                    )
+                    .await
+                    {
+                        Ok(report) => tracing::info!(
+                            agent = %args.agent,
+                            attached = ?report.attached,
+                            detached = ?report.detached,
+                            missing = ?report.missing,
+                            "provider reconcile complete"
+                        ),
+                        Err(e) => tracing::warn!(
+                            agent = %args.agent,
+                            "provider reconcile failed: {e:#}"
+                        ),
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    agent = %args.agent,
+                    "could not resolve gateway endpoint for provider reconcile: {e:#}"
+                ),
+            }
+        }
+
         (Some(config_path), Some((mtls_dir, sandbox_id)))
     } else {
         (None, None)
