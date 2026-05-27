@@ -82,6 +82,17 @@ export interface McpMutationResponse {
 
 export interface McpOAuthStartResponse {
   auth_url: string
+  flow_id: string
+}
+
+export type McpOAuthFlowStatus = 'pending' | 'succeeded' | 'failed' | 'expired' | 'unknown'
+
+export interface McpOAuthStatusResponse {
+  flow_id: string
+  server_name: string | null
+  status: McpOAuthFlowStatus
+  message: string | null
+  updated_at: string
 }
 
 export interface OverviewResponse {
