@@ -175,8 +175,10 @@ pub fn validate_job_name(name: &str) -> Result<(), String> {
 
 /// Validate a 5-field cron schedule expression.
 ///
-/// Returns `Ok(Some(warning))` if the minute field is a round value (0 or 30),
-/// `Ok(None)` if valid with no warning, or `Err` if the expression is invalid.
+/// Returns `Ok(Some(warning))` if the schedule fires at minute :00 or :30 in
+/// any hour (peak minutes that cluster with other automated jobs and spike
+/// API rate limits), `Ok(None)` if valid with no warning, or `Err` if the
+/// expression is invalid.
 pub fn validate_schedule(schedule: &str) -> Result<Option<String>, String> {
     let trimmed = schedule.trim();
     if trimmed.is_empty() {
@@ -185,18 +187,42 @@ pub fn validate_schedule(schedule: &str) -> Result<Option<String>, String> {
 
     // Convert 5-field to 7-field for the cron crate (seconds + year)
     let seven_field = format!("0 {} *", trimmed);
-    cron::Schedule::from_str(&seven_field)
+    let parsed = cron::Schedule::from_str(&seven_field)
         .map_err(|e| format!("invalid cron schedule '{trimmed}': {e}"))?;
 
-    // Check for round-minute warning
-    let minute_field = trimmed.split_whitespace().next().unwrap_or("");
-    let is_round = matches!(minute_field, "0" | "00" | "30");
-    if is_round {
-        Ok(Some(format!(
-            "schedule runs at minute {minute_field} — consider offsetting to reduce thundering-herd"
-        )))
-    } else {
+    // Peak-minute detection: walk the first N upcoming fires from a
+    // deterministic anchor and check whether any lands on minute :00 or :30.
+    // Catches `*/30`, `*/15`, `*/10`, `*/5`, `0,30 * * * *`, `0 9 * * *`,
+    // literal `0`/`30` etc. — not just the literal minute field. N=60 is
+    // enough: for sub-hourly schedules every distinct minute slot is observed
+    // within the first 60 fires; for less frequent schedules (daily, monthly)
+    // the minute value is fixed per spec so the first fire suffices.
+    let anchor = chrono::TimeZone::with_ymd_and_hms(&Utc, 2030, 1, 1, 0, 0, 0)
+        .single()
+        .expect("anchor is a valid UTC datetime");
+    let mut peak_hits: Vec<u32> = Vec::new();
+    for dt in parsed.after(&anchor).take(60) {
+        let m = chrono::Timelike::minute(&dt);
+        if (m == 0 || m == 30) && !peak_hits.contains(&m) {
+            peak_hits.push(m);
+            if peak_hits.len() == 2 {
+                break;
+            }
+        }
+    }
+    if peak_hits.is_empty() {
         Ok(None)
+    } else {
+        peak_hits.sort_unstable();
+        let mins = peak_hits
+            .iter()
+            .map(|m| format!(":{m:02}"))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        Ok(Some(format!(
+            "schedule fires at peak minute {mins}. Many automated jobs cluster on round minutes and spike API rate limits. \
+             If the user did not explicitly ask for a round minute, update via mcp__right__cron_update to an offset like :17 or :43."
+        )))
     }
 }
 

@@ -199,7 +199,9 @@ One-shot jobs (both `run_at` and `recurring: false`) auto-delete from `cron_spec
 
 ### Schedule Guidelines
 
-**Never silently use :00 or :30 minutes.** These are peak times when many automated jobs fire simultaneously, causing API rate limit spikes. If the user asks for a round time (e.g. "every day at 9:00"), propose an offset like `:17` or `:43` and explain why. If the user insists on the exact round time, create it as requested.
+**Never silently fire at minute :00 or :30.** Peak minutes cluster with other automated jobs and spike API rate limits. This covers literal `0`/`30` AND step expressions that hit those minutes: `*/30`, `*/15`, `*/10`, `*/5`. The `cron_create` / `cron_update` tools also enforce this — they always return a `Warning:` line when the chosen schedule hits a peak minute.
+
+If the user asks for a round interval (e.g. "every 30 minutes", "every hour at :00"), offset the minute field and tell them: `17,47 * * * *` for half-hourly, `43 * * * *` for hourly. Only use a peak minute when the user EXPLICITLY insists on the exact round time.
 
 ## Checking Run History
 
