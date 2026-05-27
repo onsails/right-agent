@@ -835,13 +835,22 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                     )
                     .await
                     {
-                        Ok(report) => tracing::info!(
-                            agent = %args.agent,
-                            attached = ?report.attached,
-                            detached = ?report.detached,
-                            missing = ?report.missing,
-                            "provider reconcile complete"
-                        ),
+                        Ok(report) => {
+                            tracing::info!(
+                                agent = %args.agent,
+                                attached = ?report.attached,
+                                detached = ?report.detached,
+                                missing = ?report.missing,
+                                "provider reconcile complete"
+                            );
+                            if !report.errors.is_empty() {
+                                tracing::warn!(
+                                    agent = %args.agent,
+                                    errors = ?report.errors,
+                                    "provider reconcile had per-provider errors; will retry on next pass"
+                                );
+                            }
+                        }
                         Err(e) => tracing::warn!(
                             agent = %args.agent,
                             "provider reconcile failed: {e:#}"

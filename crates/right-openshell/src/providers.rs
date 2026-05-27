@@ -219,7 +219,12 @@ pub async fn create_provider(
         &spec.type_,
     ]);
     for (k, v) in &spec.credentials {
-        cmd.arg("--credential").arg(format!("{k}={v}"));
+        // Pass only the key name — the CLI resolves the value from the
+        // child's environment. This keeps the credential out of argv
+        // (/proc/<pid>/cmdline), visible only via /proc/<pid>/environ
+        // (mode 0500, same-UID access required).
+        cmd.arg("--credential").arg(k.as_str());
+        cmd.env(k.as_str(), v.as_str());
     }
     for (k, v) in &spec.config {
         cmd.arg("--config").arg(format!("{k}={v}"));
@@ -249,7 +254,7 @@ pub async fn get_provider(
         })?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr.contains("not found") || stderr.contains("NotFound") {
+        if stderr_is_not_found(&stderr) {
             return Err(ProviderError::NotFound(name.to_string()));
         }
         return Err(ProviderError::Cli {
@@ -268,7 +273,12 @@ pub async fn update_provider(
     let mut cmd = Command::new("openshell");
     cmd.args(["provider", "update", "--name", &spec.name]);
     for (k, v) in &spec.credentials {
-        cmd.arg("--credential").arg(format!("{k}={v}"));
+        // Pass only the key name — the CLI resolves the value from the
+        // child's environment. This keeps the credential out of argv
+        // (/proc/<pid>/cmdline), visible only via /proc/<pid>/environ
+        // (mode 0500, same-UID access required).
+        cmd.arg("--credential").arg(k.as_str());
+        cmd.env(k.as_str(), v.as_str());
     }
     for (k, v) in &spec.config {
         cmd.arg("--config").arg(format!("{k}={v}"));
@@ -286,7 +296,27 @@ pub async fn delete_provider(
     let mut cmd = Command::new("openshell");
     cmd.args(["provider", "delete", "--name", name, "--yes"]);
     endpoint.apply_to_cli(&mut cmd);
-    let _ = run_cli(cmd, "openshell provider delete").await?;
+    let out = cmd
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| ProviderError::Cli {
+            cmd: "openshell provider delete".into(),
+            status: -1,
+            stderr: e.to_string(),
+        })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr_is_not_found(&stderr) {
+            return Err(ProviderError::NotFound(name.to_string()));
+        }
+        return Err(ProviderError::Cli {
+            cmd: "openshell provider delete".into(),
+            status: out.status.code().unwrap_or(-1),
+            stderr: stderr.into_owned(),
+        });
+    }
     Ok(())
 }
 
@@ -344,7 +374,27 @@ pub async fn detach_from_sandbox(
     let mut cmd = Command::new("openshell");
     cmd.args(["sandbox", "provider", "detach", sandbox_name, provider_name]);
     endpoint.apply_to_cli(&mut cmd);
-    let _ = run_cli(cmd, "openshell sandbox provider detach").await?;
+    let out = cmd
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| ProviderError::Cli {
+            cmd: "openshell sandbox provider detach".into(),
+            status: -1,
+            stderr: e.to_string(),
+        })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr_is_not_found(&stderr) {
+            return Err(ProviderError::NotFound(provider_name.to_string()));
+        }
+        return Err(ProviderError::Cli {
+            cmd: "openshell sandbox provider detach".into(),
+            status: out.status.code().unwrap_or(-1),
+            stderr: stderr.into_owned(),
+        });
+    }
     Ok(())
 }
 
@@ -384,6 +434,13 @@ pub async fn list_attached(
         }
     }
     Ok(names)
+}
+
+/// Return `true` if a CLI failure stderr indicates the resource was not found /
+/// not attached. Used by `get_provider`, `delete_provider`, and
+/// `detach_from_sandbox` to map "already absent" exits to `NotFound`.
+fn stderr_is_not_found(stderr: &str) -> bool {
+    stderr.contains("not found") || stderr.contains("NotFound") || stderr.contains("not attached")
 }
 
 async fn run_cli(mut cmd: Command, label: &str) -> Result<Vec<u8>, ProviderError> {
@@ -485,6 +542,10 @@ pub struct ReconcileReport {
     pub detached: Vec<String>,
     /// Declared providers that do not exist on the gateway (not yet created).
     pub missing: Vec<String>,
+    /// Per-provider errors encountered during attach/detach. Each entry is
+    /// `(provider_name, formatted_error)`. Reconcile continues past these so
+    /// a single transient failure does not sink the whole pass.
+    pub errors: Vec<(String, String)>,
 }
 
 /// Reconcile the set of providers attached to `sandbox_name` with the
@@ -499,6 +560,13 @@ pub struct ReconcileReport {
 ///
 /// The function is idempotent: calling it when everything is already in sync
 /// produces an empty report with no gateway calls beyond `list_attached`.
+///
+/// **Partial-failure semantics**: transient attach/detach/get errors for
+/// individual providers are collected into `ReconcileReport::errors` and the
+/// loop continues. Only `list_attached` failure returns `Err` — without the
+/// attached set we cannot make any safe decisions. Callers should log
+/// `report.errors` and schedule a retry so the bot converges on the next
+/// reconcile tick.
 pub async fn reconcile_for_sandbox(
     endpoint: &crate::openshell::GatewayEndpoint,
     sandbox_name: &str,
@@ -512,26 +580,31 @@ pub async fn reconcile_for_sandbox(
         attached: vec![],
         detached: vec![],
         missing: vec![],
+        errors: vec![],
     };
     // Attach declared providers that exist on the gateway but are not yet attached.
     for name in declared {
         match get_provider(endpoint, name).await {
             Ok(_) => {
                 if !attached_set.contains(name) {
-                    attach_to_sandbox(endpoint, sandbox_name, name).await?;
-                    report.attached.push(name.clone());
+                    match attach_to_sandbox(endpoint, sandbox_name, name).await {
+                        Ok(()) => report.attached.push(name.clone()),
+                        Err(e) => report.errors.push((name.clone(), format!("attach: {e:#}"))),
+                    }
                 }
             }
             Err(ProviderError::NotFound(_)) => report.missing.push(name.clone()),
-            Err(e) => return Err(e),
+            Err(e) => report.errors.push((name.clone(), format!("get: {e:#}"))),
         }
     }
     // Detach prefixed providers that are no longer declared.
     let prefix = format!("{agent_prefix}-");
     for name in &attached {
         if name.starts_with(&prefix) && !declared_set.contains(name) {
-            detach_from_sandbox(endpoint, sandbox_name, name).await?;
-            report.detached.push(name.clone());
+            match detach_from_sandbox(endpoint, sandbox_name, name).await {
+                Ok(()) => report.detached.push(name.clone()),
+                Err(e) => report.errors.push((name.clone(), format!("detach: {e:#}"))),
+            }
         }
     }
     Ok(report)
@@ -765,5 +838,40 @@ mod tests {
             debug_output.contains("upstream_host"),
             "Debug output should show config keys/values; got: {debug_output}"
         );
+    }
+
+    // ── stderr_is_not_found classifier ───────────────────────────────────────
+
+    #[test]
+    fn stderr_is_not_found_matches_lowercase_not_found() {
+        assert!(stderr_is_not_found("Error: provider \"foo\" not found"));
+    }
+
+    #[test]
+    fn stderr_is_not_found_matches_grpc_not_found() {
+        assert!(stderr_is_not_found(
+            "status: NotFound, message: provider does not exist"
+        ));
+    }
+
+    #[test]
+    fn stderr_is_not_found_matches_not_attached() {
+        assert!(stderr_is_not_found(
+            "Error: provider \"foo\" is not attached to sandbox \"bar\""
+        ));
+    }
+
+    #[test]
+    fn stderr_is_not_found_does_not_match_unrelated_error() {
+        assert!(!stderr_is_not_found(
+            "Error: connection refused (os error 61)"
+        ));
+        assert!(!stderr_is_not_found("Error: transport timeout"));
+        assert!(!stderr_is_not_found("Error: invalid argument"));
+    }
+
+    #[test]
+    fn stderr_is_not_found_empty_string_is_false() {
+        assert!(!stderr_is_not_found(""));
     }
 }

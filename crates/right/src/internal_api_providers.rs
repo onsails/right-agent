@@ -1270,12 +1270,21 @@ pub(crate) async fn handle_provider_remove(
         .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
 
-    right_openshell::providers::detach_from_sandbox(&endpoint, &sandbox_name, &req.name)
-        .await
-        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
-    right_openshell::providers::delete_provider(&endpoint, &req.name)
-        .await
-        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    match right_openshell::providers::detach_from_sandbox(&endpoint, &sandbox_name, &req.name).await
+    {
+        Ok(()) => {}
+        Err(right_openshell::providers::ProviderError::NotFound(_)) => {
+            tracing::info!(provider = %req.name, "detach: provider already not attached");
+        }
+        Err(e) => return Err(ProviderApiError::Gateway(format!("{e:#}"))),
+    }
+    match right_openshell::providers::delete_provider(&endpoint, &req.name).await {
+        Ok(()) => {}
+        Err(right_openshell::providers::ProviderError::NotFound(_)) => {
+            tracing::info!(provider = %req.name, "delete: provider already absent");
+        }
+        Err(e) => return Err(ProviderApiError::Gateway(format!("{e:#}"))),
+    }
 
     // Gateway state is gone. The agent.yaml entry would now be ghost
     // data — remove it first, then strip the policy stanza. If the
