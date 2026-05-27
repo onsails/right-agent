@@ -768,7 +768,7 @@ pub async fn handle_providers(
         .map_err(|e| to_request_err(format!("providers dashboard: load agent.yaml: {e:#}")))?;
     let mode = cfg
         .as_ref()
-        .map(|c| c.sandbox_mode().clone())
+        .map(|c| *c.sandbox_mode())
         .unwrap_or(right_agent_config::SandboxMode::Openshell);
     if mode != right_agent_config::SandboxMode::Openshell {
         let _ = bot
