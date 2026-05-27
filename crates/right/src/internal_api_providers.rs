@@ -1,5 +1,7 @@
 //! Provider management routes — see ARCHITECTURE.md "Providers".
-// Callers arrive in Tasks 15+; suppress dead_code until then.
+// Handlers below use validators and helpers added in Tasks 13-14.
+// The `#[allow(dead_code)]` is narrowed here: Tasks 17+ will consume the
+// validators, but they are not dead — suppressed until then.
 #![allow(dead_code)]
 
 #[derive(Debug, thiserror::Error)]
@@ -181,4 +183,125 @@ mod provider_validation_tests {
         assert!(validate_type_slug("anthropic").is_ok());
         assert!(validate_type_slug("generic").is_ok());
     }
+}
+
+// ── Task 15: /provider-list ───────────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProviderListReq {
+    pub agent: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProviderView {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub label: Option<String>,
+    pub env_var: String,
+    pub generic: Option<right_agent_config::GenericProvider>,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub status: ProviderStatus,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderStatus {
+    Healthy,
+    Missing,
+    GatewayError { message: String },
+}
+
+/// Load and parse `agent.yaml` for the given agent name from `agents_dir`.
+///
+/// Returns `Err(String)` (mapped to `ProviderApiError::AgentYamlWrite`) on
+/// IO or parse failure, or if the agent has no `agent.yaml`.
+fn load_agent_config(
+    agents_dir: &std::path::Path,
+    agent: &str,
+) -> Result<right_agent_config::AgentConfig, String> {
+    let agent_dir = agents_dir.join(agent);
+    right_agent::agent::discovery::parse_agent_config(&agent_dir)
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or_else(|| format!("agent.yaml not found for agent '{agent}'"))
+}
+
+pub(crate) async fn handle_provider_list(
+    axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
+    axum::Json(req): axum::Json<ProviderListReq>,
+) -> Result<axum::Json<Vec<ProviderView>>, ProviderApiError> {
+    let cfg = load_agent_config(&state.agents_dir, &req.agent)
+        .map_err(ProviderApiError::AgentYamlWrite)?;
+    let sandbox = cfg
+        .sandbox
+        .as_ref()
+        .ok_or(ProviderApiError::SandboxModeNone)?;
+    if sandbox.mode != right_agent_config::SandboxMode::Openshell {
+        return Err(ProviderApiError::SandboxModeNone);
+    }
+    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let catalog = right_openshell::providers::profile_catalog();
+    let mut views = Vec::with_capacity(sandbox.providers.len());
+    for entry in &sandbox.providers {
+        let status = match right_openshell::providers::get_provider(&endpoint, &entry.name).await {
+            Ok(_) => ProviderStatus::Healthy,
+            Err(right_openshell::providers::ProviderError::NotFound(_)) => ProviderStatus::Missing,
+            Err(e) => ProviderStatus::GatewayError {
+                message: format!("{e:#}"),
+            },
+        };
+        let env_var = match &entry.type_ {
+            right_agent_config::ProviderType::Generic => entry
+                .generic
+                .as_ref()
+                .map(|g| g.env_var.clone())
+                .unwrap_or_default(),
+            right_agent_config::ProviderType::BuiltIn(slug) => catalog
+                .iter()
+                .find(|p| &p.type_slug == slug)
+                .map(|p| p.env_var.clone())
+                .unwrap_or_default(),
+        };
+        let type_str = match &entry.type_ {
+            right_agent_config::ProviderType::Generic => "generic".to_string(),
+            right_agent_config::ProviderType::BuiltIn(s) => s.clone(),
+        };
+        views.push(ProviderView {
+            name: entry.name.clone(),
+            type_: type_str,
+            label: entry.label.clone(),
+            env_var,
+            generic: entry.generic.clone(),
+            updated_at: None,
+            status,
+        });
+    }
+    Ok(axum::Json(views))
+}
+
+// ── Task 16: /provider-types ──────────────────────────────────────────────────
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProviderProfileView {
+    #[serde(rename = "type")]
+    pub type_slug: String,
+    pub env_var: String,
+    pub display_name: String,
+    pub category: String,
+}
+
+pub(crate) async fn handle_provider_types() -> axum::Json<Vec<ProviderProfileView>> {
+    let catalog = right_openshell::providers::profile_catalog();
+    let views: Vec<_> = catalog
+        .into_iter()
+        .map(|p| ProviderProfileView {
+            type_slug: p.type_slug,
+            env_var: p.env_var,
+            display_name: p.display_name,
+            category: format!("{:?}", p.category).to_lowercase(),
+        })
+        .collect();
+    axum::Json(views)
 }
