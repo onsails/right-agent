@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 pub(crate) mod aggregator;
 pub(crate) mod internal_api;
+pub(crate) mod internal_api_providers;
 pub(crate) mod learning;
 mod memory_server;
 pub(crate) mod progress;
