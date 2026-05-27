@@ -731,15 +731,23 @@ fn auth_error_response(error: AuthError) -> DashboardRouteError {
             "forbidden",
             Some("Telegram user is not trusted for this agent"),
         ),
-        AuthError::MissingInitData
-        | AuthError::MalformedInitData
-        | AuthError::InvalidHash
-        | AuthError::Expired
-        | AuthError::MissingUser => DashboardRouteError::new(
+        AuthError::MissingInitData => DashboardRouteError::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
-            Some("invalid Telegram Mini App authorization"),
+            Some("missing Telegram Mini App authorization"),
         ),
+        AuthError::Expired => DashboardRouteError::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            Some("Telegram Mini App authorization expired; reopen the dashboard from Telegram"),
+        ),
+        AuthError::MalformedInitData | AuthError::InvalidHash | AuthError::MissingUser => {
+            DashboardRouteError::new(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                Some("invalid Telegram Mini App authorization"),
+            )
+        }
     }
 }
 
@@ -855,13 +863,17 @@ mod tests {
     }
 
     fn signed_init_data(user_id: i64) -> String {
+        signed_init_data_at(user_id, chrono::Utc::now().timestamp())
+    }
+
+    fn signed_init_data_at(user_id: i64, auth_date: i64) -> String {
         let user = json!({
             "id": user_id,
             "username": "tester",
             "first_name": "Test",
         })
         .to_string();
-        let auth_date = chrono::Utc::now().timestamp().to_string();
+        let auth_date = auth_date.to_string();
         let mut pairs = vec![
             ("auth_date", auth_date),
             ("query_id", "test-query".to_string()),
@@ -1501,6 +1513,42 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn api_reports_empty_tma_header_as_missing_auth() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/bootstrap",
+            Some(String::new()),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "unauthorized");
+        assert_eq!(body["detail"], "missing Telegram Mini App authorization");
+    }
+
+    #[tokio::test]
+    async fn api_reports_expired_tma_header_as_reopen_required() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let expired_auth_date = chrono::Utc::now().timestamp() - super::INIT_DATA_MAX_AGE_SECS - 1;
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/bootstrap",
+            Some(signed_init_data_at(42, expired_auth_date)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "unauthorized");
+        assert_eq!(
+            body["detail"],
+            "Telegram Mini App authorization expired; reopen the dashboard from Telegram"
+        );
     }
 
     #[tokio::test]
