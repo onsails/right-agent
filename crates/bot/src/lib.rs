@@ -701,6 +701,16 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
         // Check if sandbox already exists and is READY.
         let mut grpc_client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
+
+        // OpenShell version preflight — hard-fail on too-old CLI or
+        // gateway before any further interaction. Both must be
+        // >= MIN_OPENSHELL_VERSION.
+        if let Err(e) = right_openshell::preflight::openshell_preflight(&mut grpc_client).await {
+            tracing::error!(error = %e, "OpenShell version preflight failed; refusing to start");
+            return Err(miette::miette!("{e}"));
+        }
+        tracing::info!("OpenShell version preflight passed");
+
         let sandbox_exists =
             right_openshell::openshell::is_sandbox_ready(&mut grpc_client, &sandbox).await?;
 
