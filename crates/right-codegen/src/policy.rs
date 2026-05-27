@@ -947,8 +947,15 @@ pub fn providers_append_checked(
     host: &str,
     path_prefix: Option<&str>,
 ) -> Result<String, PolicyConflict> {
+    // Line-anchored match so a prefix-collision host (e.g. existing
+    // "api.openai.com.evil.tld") doesn't satisfy the idempotency check
+    // for "api.openai.com" and cause us to silently skip the real add.
     let host_marker = format!("- domain: {host}");
-    if let Some(idx) = policy.find(&host_marker) {
+    let found_match = policy.match_indices(&host_marker).find(|(idx, marker)| {
+        let after = idx + marker.len();
+        after == policy.len() || matches!(policy.as_bytes().get(after), Some(b'\n' | b'\r'))
+    });
+    if let Some((idx, _)) = found_match {
         let window_end = (idx + 400).min(policy.len());
         let window = &policy[idx..window_end];
         if window.contains("tls: skip") {

@@ -110,6 +110,51 @@ pub fn validate_env_var(name: &str) -> Result<(), ProviderApiError> {
     Ok(())
 }
 
+/// Validate a free-form text field that will be written verbatim into
+/// `agent.yaml` as an unquoted scalar. Rejects YAML metacharacters,
+/// control chars, and anything that would shift indentation. The
+/// allowed alphabet is intentionally narrow — hostnames, HTTP header
+/// names, URL path prefixes, and human labels all fit.
+fn validate_yaml_scalar(
+    value: &str,
+    field: &str,
+    max_len: usize,
+    extra_allowed: &str,
+) -> Result<(), ProviderApiError> {
+    if value.is_empty() || value.len() > max_len {
+        return Err(ProviderApiError::InvalidName {
+            name: value.into(),
+            reason: format!("{field} must be 1-{max_len} chars"),
+        });
+    }
+    for c in value.chars() {
+        let ok = c.is_ascii_alphanumeric() || extra_allowed.contains(c);
+        if !ok {
+            return Err(ProviderApiError::InvalidName {
+                name: value.into(),
+                reason: format!("{field} contains disallowed character {c:?}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_label(label: &str) -> Result<(), ProviderApiError> {
+    validate_yaml_scalar(label, "label", 32, "-_")
+}
+
+pub fn validate_upstream_host(host: &str) -> Result<(), ProviderApiError> {
+    validate_yaml_scalar(host, "upstream_host", 253, ".-_:")
+}
+
+pub fn validate_header_name(name: &str) -> Result<(), ProviderApiError> {
+    validate_yaml_scalar(name, "header_name", 64, "-_")
+}
+
+pub fn validate_path_prefix(path: &str) -> Result<(), ProviderApiError> {
+    validate_yaml_scalar(path, "upstream_path_prefix", 128, "-_/.~")
+}
+
 pub fn validate_type_slug(slug: &str) -> Result<(), ProviderApiError> {
     if slug == "claude" {
         return Err(ProviderApiError::InvalidName {
@@ -303,6 +348,18 @@ pub(crate) async fn handle_provider_create(
 ) -> Result<axum::Json<ProviderView>, ProviderApiError> {
     use secrecy::ExposeSecret;
     validate_type_slug(&req.type_)?;
+    if let Some(label) = &req.label {
+        validate_label(label)?;
+    }
+    if let Some(g) = &req.generic {
+        validate_upstream_host(&g.upstream_host)?;
+        if let Some(h) = &g.header_name {
+            validate_header_name(h)?;
+        }
+        if let Some(p) = &g.upstream_path_prefix {
+            validate_path_prefix(p)?;
+        }
+    }
     let label_slug = req.label.clone().unwrap_or_else(|| req.type_.clone());
     let name = format!("{}-{}", req.agent, label_slug);
     validate_name(&req.agent, &name)?;
@@ -553,7 +610,10 @@ async fn create_generic_provider(
 
     let cfg = load_agent_config(&state.agents_dir, &req.agent)
         .map_err(ProviderApiError::AgentYamlWrite)?;
-    let sandbox = cfg.sandbox.as_ref().unwrap();
+    let sandbox = cfg
+        .sandbox
+        .as_ref()
+        .ok_or(ProviderApiError::SandboxModeNone)?;
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
     let policy_path = state.agents_dir.join(&req.agent).join(
         sandbox
@@ -828,7 +888,13 @@ pub(crate) async fn handle_provider_config_update(
             reason: "config-update only valid on generic providers".into(),
         });
     }
-    let current = entry.generic.clone().unwrap();
+    let current = entry
+        .generic
+        .clone()
+        .ok_or_else(|| ProviderApiError::InvalidName {
+            name: req.name.clone(),
+            reason: "generic provider entry missing 'generic:' block in agent.yaml".into(),
+        })?;
     let new_env_var = req
         .generic
         .env_var
@@ -849,6 +915,11 @@ pub(crate) async fn handle_provider_config_update(
         Some(v) => v,
     };
     validate_env_var(&new_env_var)?;
+    validate_header_name(&new_header)?;
+    validate_upstream_host(&new_host)?;
+    if let Some(p) = &new_path {
+        validate_path_prefix(p)?;
+    }
 
     let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
         .await
@@ -1039,6 +1110,13 @@ pub(crate) async fn handle_provider_remove(
         .await
         .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
 
+    // Gateway state is gone. The agent.yaml entry would now be ghost
+    // data — remove it first, then strip the policy stanza. If the
+    // policy strip fails the user sees a degraded-state error, but
+    // they don't end up with a permanently stranded agent.yaml row.
+    remove_provider_from_yaml(&state.agents_dir, &req.agent, &req.name)
+        .map_err(|e| ProviderApiError::AgentYamlWrite(format!("{e:#}")))?;
+
     if let Some(g) = &entry.generic {
         let policy_path = state.agents_dir.join(&req.agent).join(
             sandbox
@@ -1068,8 +1146,6 @@ pub(crate) async fn handle_provider_remove(
         }
     }
 
-    remove_provider_from_yaml(&state.agents_dir, &req.agent, &req.name)
-        .map_err(|e| ProviderApiError::AgentYamlWrite(format!("{e:#}")))?;
     Ok(axum::Json(ProviderRemoveResp { removed: true }))
 }
 

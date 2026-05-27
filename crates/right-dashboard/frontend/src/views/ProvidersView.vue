@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   providerList,
   providerTypes,
@@ -62,6 +62,10 @@ const busyDelete = ref<string | null>(null)
 
 onMounted(() => {
   void refresh()
+})
+
+onBeforeUnmount(() => {
+  disposed = true
 })
 
 async function refresh(): Promise<void> {
