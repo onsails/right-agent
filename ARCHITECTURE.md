@@ -270,6 +270,17 @@ Per-agent `data.db` schema lives in `right-db` migrations
 (`right_db::migrations::MIGRATIONS`). Run `sqlite3 data.db .schema` for
 column-level definitions.
 
+### Providers
+
+Provider credential management is owned by `right_openshell::providers`.
+Credentials never enter `agent.yaml`, backups, or host logs. Per-agent
+provider list lives in `agent.yaml::sandbox::providers: [...]`. Gateway
+holds the credential bytes. Sandbox sees opaque placeholder env vars
+substituted at the proxy on outbound HTTPS.
+
+See: `docs/architecture/providers.md` for the placeholder mechanism,
+substitution flow, reconciler walkthrough, and policy interaction.
+
 ## External Integrations
 
 See: `docs/architecture/integrations.md` for the protocol inventory.
@@ -503,6 +514,10 @@ Rules:
   view routed through the internal Unix socket API. Prevents sandbox
   escape via data exfiltration to attacker-controlled MCP endpoints.
 - **OAuth CSRF**: Token matching in callback server.
+- **Provider credential isolation**: Provider credential values and
+  gateway placeholder values (`openshell:resolve:env:v…_<NAME>`) are
+  never logged on the host. Use `secrecy::SecretString` for in-memory
+  transport; do not pass credential fields to tracing macros.
 
 ## Brand-conformant CLI output
 
@@ -555,6 +570,11 @@ or `Failed:` when a clear user-facing sentence is available.
 - **Known CLI bug**: Directory uploads may silently drop small files.
   Always verify critical files after directory upload, and re-upload
   individually if missing.
+- **All Provider operations** (Create/Get/Update/Delete/ListProviders,
+  sandbox attach/detach, GetSandboxProviderEnvironment,
+  ensure_v2_enabled) MUST go through `right_openshell::providers`. Direct
+  gRPC or `openshell provider` CLI invocations from other crates are a
+  review-blocking defect.
 
 ## OpenShell Policy Gotchas
 

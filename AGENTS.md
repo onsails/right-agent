@@ -35,6 +35,7 @@ Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw
 ## Conventions
 
 - **Bot-first management**: MCP management goes through the Telegram Mini App dashboard opened by `/mcp`; model/runtime controls such as `/model` remain bot-managed. Never create or edit `.mcp.json`, agent configs, or credential files manually — the bot/dashboard is the control plane.
+- **Provider management**: Provider management goes through the Telegram Mini App dashboard opened by `/providers`. Never create or edit gateway providers via host CLI or `agent.yaml` directly — the bot/dashboard is the control plane.
 - **Debuggability over convenience**: Always prefer direct, observable signals over indirect heuristics. If an API provides status, use it — don't infer status from side effects (e.g. SSH connectivity as a proxy for sandbox readiness). Errors must propagate to logs, never be silently swallowed.
 - **Domain research before implementation**: Always verify external tool APIs by reading source code or running `--help` before writing integration code. Never rely solely on web documentation — it may be outdated or wrong.
 - **PROMPT_SYSTEM.md**: Always keep PROMPT_SYSTEM.md in sync with the actual prompting system. When changing system prompt generation, agent definitions, JSON schemas, or MCP instructions, update PROMPT_SYSTEM.md to match.
