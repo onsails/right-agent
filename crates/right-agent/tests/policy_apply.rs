@@ -66,7 +66,7 @@ async fn spawn_with_policy(test_name: &str, policy_yaml: &str) -> String {
     let policy_path = tmp.path().join("policy.yaml");
     std::fs::write(&policy_path, policy_yaml).expect("write policy.yaml");
 
-    let mut child = openshell::spawn_sandbox(&name, &policy_path, None)
+    let mut child = openshell::spawn_sandbox(&name, &policy_path, None, &[])
         .expect("codegen policy must be accepted at sandbox creation");
     openshell::wait_for_ready(
         &mut client,
