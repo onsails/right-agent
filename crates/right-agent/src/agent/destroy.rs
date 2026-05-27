@@ -266,31 +266,29 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
 
     // Cascade-delete provider entries from the gateway (best-effort).
     // Failure is logged but non-fatal — destroy proceeds regardless.
-    if let Some(sandbox) = config.as_ref().and_then(|c| c.sandbox.as_ref()) {
-        if matches!(sandbox.mode, right_agent_config::SandboxMode::Openshell)
-            && !sandbox.providers.is_empty()
-        {
-            let mtls_dir = right_openshell::openshell::default_mtls_dir();
-            match right_openshell::openshell::connect_grpc(&mtls_dir).await {
-                Ok(mut client) => {
-                    for entry in &sandbox.providers {
-                        if let Err(e) =
-                            right_openshell::providers::delete_provider(&mut client, &entry.name)
-                                .await
-                        {
-                            tracing::warn!(
-                                name = %entry.name,
-                                error = %format!("{e:#}"),
-                                "failed to delete provider during destroy; continuing"
-                            );
-                        }
+    if let Some(sandbox) = config.as_ref().and_then(|c| c.sandbox.as_ref())
+        && matches!(sandbox.mode, right_agent_config::SandboxMode::Openshell)
+        && !sandbox.providers.is_empty()
+    {
+        let mtls_dir = right_openshell::openshell::default_mtls_dir();
+        match right_openshell::openshell::connect_grpc(&mtls_dir).await {
+            Ok(mut client) => {
+                for entry in &sandbox.providers {
+                    if let Err(e) =
+                        right_openshell::providers::delete_provider(&mut client, &entry.name).await
+                    {
+                        tracing::warn!(
+                            name = %entry.name,
+                            error = %format!("{e:#}"),
+                            "failed to delete provider during destroy; continuing"
+                        );
                     }
                 }
-                Err(e) => tracing::warn!(
-                    error = %format!("{e:#}"),
-                    "could not connect to openshell gateway for provider cleanup; continuing destroy"
-                ),
             }
+            Err(e) => tracing::warn!(
+                error = %format!("{e:#}"),
+                "could not connect to openshell gateway for provider cleanup; continuing destroy"
+            ),
         }
     }
 
