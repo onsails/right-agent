@@ -235,6 +235,70 @@ pub async fn list_providers_by_prefix(
     Ok(providers)
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Sandbox ↔ Provider attachment
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Attach a provider to a sandbox so the sandbox can use its credentials.
+///
+/// Note: the JSON shape of `openshell sandbox provider list` has not been
+/// confirmed against a live gateway. JSON parsing in `list_attached` will need
+/// CI verification (Task 10b).
+pub async fn attach_to_sandbox(
+    endpoint: &crate::openshell::GatewayEndpoint,
+    sandbox_name: &str,
+    provider_name: &str,
+) -> Result<(), ProviderError> {
+    let mut cmd = Command::new("openshell");
+    cmd.args(["sandbox", "provider", "attach", sandbox_name, provider_name]);
+    endpoint.apply_to_cli(&mut cmd);
+    let _ = run_cli(cmd, "openshell sandbox provider attach").await?;
+    Ok(())
+}
+
+/// Detach a provider from a sandbox.
+pub async fn detach_from_sandbox(
+    endpoint: &crate::openshell::GatewayEndpoint,
+    sandbox_name: &str,
+    provider_name: &str,
+) -> Result<(), ProviderError> {
+    let mut cmd = Command::new("openshell");
+    cmd.args(["sandbox", "provider", "detach", sandbox_name, provider_name]);
+    endpoint.apply_to_cli(&mut cmd);
+    let _ = run_cli(cmd, "openshell sandbox provider detach").await?;
+    Ok(())
+}
+
+/// List provider names currently attached to a sandbox.
+///
+/// Note: JSON field path (`name`) assumed from `openshell sandbox provider list
+/// --output json`. CI verification required (Task 10b).
+pub async fn list_attached(
+    endpoint: &crate::openshell::GatewayEndpoint,
+    sandbox_name: &str,
+) -> Result<Vec<String>, ProviderError> {
+    let mut cmd = Command::new("openshell");
+    cmd.args([
+        "sandbox",
+        "provider",
+        "list",
+        sandbox_name,
+        "--output",
+        "json",
+    ]);
+    endpoint.apply_to_cli(&mut cmd);
+    let out = run_cli(cmd, "openshell sandbox provider list").await?;
+    let arr: Vec<serde_json::Value> = serde_json::from_slice(&out)
+        .map_err(|e| ProviderError::Grpc(format!("parse attached: {e:#}")))?;
+    let mut names = Vec::new();
+    for v in arr {
+        if let Some(n) = v.get("name").and_then(|s| s.as_str()) {
+            names.push(n.to_string());
+        }
+    }
+    Ok(names)
+}
+
 async fn run_cli(mut cmd: Command, label: &str) -> Result<Vec<u8>, ProviderError> {
     let out = cmd
         .stderr(Stdio::piped())

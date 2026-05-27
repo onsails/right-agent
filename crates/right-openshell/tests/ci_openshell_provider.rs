@@ -47,3 +47,40 @@ async fn ci_openshell_provider_create_get_delete_roundtrip() {
     let after = get_provider(&endpoint, &name).await;
     assert!(matches!(after, Err(ProviderError::NotFound(_))));
 }
+
+#[tokio::test]
+#[ignore = "ci-openshell: requires a live OpenShell gateway"]
+async fn ci_openshell_provider_attach_detach() {
+    use right_openshell::providers::*;
+    use right_openshell::test_support::TestSandbox;
+    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+        .await
+        .unwrap();
+    let _ = ensure_v2_enabled(&endpoint).await.unwrap();
+
+    let pid = std::process::id();
+    let prov_name = format!("rightprobe-{pid}-attachprov");
+    let mut creds = std::collections::HashMap::new();
+    creds.insert("RIGHTPROBE_TOKEN".into(), "secret".into());
+    create_provider(
+        &endpoint,
+        &ProviderSpec {
+            name: prov_name.clone(),
+            type_: "generic".into(),
+            credentials: creds,
+            config: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let sandbox = TestSandbox::create("ci-openshell-provider-attach-detach").await;
+    attach_to_sandbox(&endpoint, sandbox.name(), &prov_name)
+        .await
+        .unwrap();
+    detach_from_sandbox(&endpoint, sandbox.name(), &prov_name)
+        .await
+        .unwrap();
+
+    delete_provider(&endpoint, &prov_name).await.unwrap();
+}
