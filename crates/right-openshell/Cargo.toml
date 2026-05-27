@@ -8,9 +8,11 @@ publish = false
 test-support = []
 
 [dependencies]
+chrono = { workspace = true }
 dirs = { workspace = true }
 futures = { workspace = true }
 miette = { workspace = true }
+thiserror = { workspace = true }
 nix = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
