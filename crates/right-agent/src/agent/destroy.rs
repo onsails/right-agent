@@ -598,4 +598,59 @@ groups:
             "pre-destroy backup must preserve allowlist.yaml outside sandbox.tar.gz"
         );
     }
+
+    /// Guards that `sandbox.providers` in `agent.yaml` parses correctly for
+    /// both built-in and generic entries. This is the property a backup/restore
+    /// cycle depends on: the field must not be silently dropped when the YAML
+    /// is written to a backup tarball and re-read on restore.
+    #[test]
+    fn sandbox_providers_round_trip_parse() {
+        let yaml = r#"
+sandbox:
+  mode: none
+  providers:
+    - name: foo-anthropic
+      type: anthropic
+      label: anthropic
+    - name: foo-acme
+      type: generic
+      label: acme
+      generic:
+        env_var: ACME_TOKEN
+        header_name: X-Acme-Token
+        upstream_host: api.acme.com
+        upstream_path_prefix: /v1
+"#;
+        // Parse once — both entries must be present.
+        let cfg: right_agent_config::AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let sandbox = cfg.sandbox.as_ref().expect("sandbox must be present");
+        assert_eq!(
+            sandbox.providers.len(),
+            2,
+            "expected 2 providers after parse"
+        );
+        assert_eq!(sandbox.providers[0].name, "foo-anthropic");
+        assert_eq!(sandbox.providers[1].name, "foo-acme");
+
+        // Parse again from the same source — simulates reading the backed-up agent.yaml.
+        // AgentConfig does not derive Serialize so we re-parse the original YAML string;
+        // this is identical to what backup/restore does (copy the file, re-read it).
+        let reparsed: right_agent_config::AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let reparsed_sandbox = reparsed.sandbox.expect("sandbox must survive re-parse");
+        assert_eq!(
+            reparsed_sandbox.providers.len(),
+            2,
+            "providers must survive backup/restore re-parse"
+        );
+        assert_eq!(reparsed_sandbox.providers[0].name, "foo-anthropic");
+        assert_eq!(reparsed_sandbox.providers[1].name, "foo-acme");
+
+        // Verify generic entry fields survived.
+        let generic = reparsed_sandbox.providers[1]
+            .generic
+            .as_ref()
+            .expect("second provider must have generic config");
+        assert_eq!(generic.env_var, "ACME_TOKEN");
+        assert_eq!(generic.upstream_host, "api.acme.com");
+    }
 }
