@@ -91,6 +91,7 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 signal-hook = { version = "0.4", features = ["extended-siginfo"] }
 const_format = "0.2"
 arc-swap = "1.0"
+secrecy = { version = "0.10", features = ["serde"] }
 
 [profile.dev]
 panic = "abort"
