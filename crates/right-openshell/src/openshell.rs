@@ -9,11 +9,10 @@ use std::time::Duration;
 use tokio::process::Command;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
-use crate::openshell_proto::openshell::datamodel::v1::{
-    Sandbox, SandboxCondition, SandboxPhase, SandboxStatus,
+use crate::openshell_proto::openshell::v1::{
+    ExecSandboxRequest, GetSandboxRequest, Sandbox, SandboxCondition, SandboxPhase, SandboxStatus,
+    open_shell_client::OpenShellClient,
 };
-use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
-use crate::openshell_proto::openshell::v1::{ExecSandboxRequest, GetSandboxRequest};
 
 /// SANDBOX_PHASE_READY value from openshell.datamodel.v1.SandboxPhase.
 const SANDBOX_PHASE_READY: i32 = SandboxPhase::Ready as i32;
