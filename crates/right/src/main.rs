@@ -2695,52 +2695,6 @@ async fn cmd_up(
     );
     t_phase = std::time::Instant::now();
 
-    // Providers: ensure providers_v2_enabled is set on the gateway.
-    // Fatal only when at least one agent declares providers — otherwise
-    // we log a warning and continue so the user can still start without providers.
-    if any_sandboxed {
-        let any_provider = agents.iter().any(|a| {
-            a.config
-                .as_ref()
-                .and_then(|c| c.sandbox.as_ref())
-                .map(|s| !s.providers.is_empty())
-                .unwrap_or(false)
-        });
-        match right_openshell::openshell::resolve_gateway_endpoint().await {
-            Ok(endpoint) => match right_openshell::providers::ensure_v2_enabled(&endpoint).await {
-                Ok(r) => tracing::info!(
-                    was_already_on = r.was_already_on,
-                    "up: providers_v2_enabled OK"
-                ),
-                Err(e) if any_provider => {
-                    return Err(miette::miette!(
-                        "providers_v2_enabled could not be set: {e:#}. At least one agent uses providers; refusing to start."
-                    ));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "up: providers_v2_enabled could not be set, but no agent uses providers — continuing: {e:#}"
-                    );
-                }
-            },
-            Err(e) if any_provider => {
-                return Err(miette::miette!(
-                    "resolve openshell gateway: {e:#}. At least one agent uses providers; refusing to start."
-                ));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "up: could not resolve gateway endpoint for providers_v2_enabled — continuing: {e:#}"
-                );
-            }
-        }
-    }
-    tracing::info!(
-        elapsed_ms = t_phase.elapsed().as_millis() as u64,
-        "up: providers_v2_check"
-    );
-    t_phase = std::time::Instant::now();
-
     // Download any whisper models needed by STT-enabled agents.
     {
         use right_agent_config::WhisperModel;

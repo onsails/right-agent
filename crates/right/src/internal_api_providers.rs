@@ -14,8 +14,6 @@ pub enum ProviderApiError {
     InvalidEnvVar { env_var: String },
     #[error("providers are only available for sandboxed agents (sandbox.mode = openshell)")]
     SandboxModeNone,
-    #[error("providers_v2_enabled is not on the gateway")]
-    V2NotEnabled,
     #[error("policy conflict on host \"{host}\": {kind}")]
     PolicyConflict { host: String, kind: String },
     #[error("openshell gateway: {0}")]
@@ -34,7 +32,6 @@ impl axum::response::IntoResponse for ProviderApiError {
             Self::InvalidName { .. } => (StatusCode::BAD_REQUEST, "invalid_name"),
             Self::InvalidEnvVar { .. } => (StatusCode::BAD_REQUEST, "invalid_env_var"),
             Self::SandboxModeNone => (StatusCode::BAD_REQUEST, "sandbox_mode_none"),
-            Self::V2NotEnabled => (StatusCode::SERVICE_UNAVAILABLE, "v2_not_enabled"),
             Self::PolicyConflict { .. } => (StatusCode::CONFLICT, "policy_conflict"),
             Self::Gateway(_) => (StatusCode::BAD_GATEWAY, "gateway"),
             Self::AgentYamlWrite(_) => (StatusCode::INTERNAL_SERVER_ERROR, "agent_yaml_write"),
@@ -45,6 +42,21 @@ impl axum::response::IntoResponse for ProviderApiError {
         )
             .into_response()
     }
+}
+
+/// Open one gRPC client per request. The returned client wraps a
+/// tonic::Channel (internally Arc-shared) and is threaded through every
+/// provider call in this handler.
+async fn open_openshell_client() -> Result<
+    right_openshell::openshell_proto::openshell::v1::open_shell_client::OpenShellClient<
+        tonic::transport::Channel,
+    >,
+    ProviderApiError,
+> {
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    right_openshell::openshell::connect_grpc(&mtls_dir)
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("connect: {e:#}")))
 }
 
 pub fn validate_name(agent: &str, name: &str) -> Result<(), ProviderApiError> {
@@ -347,14 +359,12 @@ pub(crate) async fn handle_provider_list(
     if sandbox.mode != right_agent_config::SandboxMode::Openshell {
         return Err(ProviderApiError::SandboxModeNone);
     }
-    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
-        .await
-        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let mut client = open_openshell_client().await?;
     let catalog = right_openshell::providers::profile_catalog();
     let mut views = Vec::with_capacity(sandbox.providers.len());
     for entry in &sandbox.providers {
         let (status, updated_at) =
-            match right_openshell::providers::get_provider(&endpoint, &entry.name).await {
+            match right_openshell::providers::get_provider(&mut client, &entry.name).await {
                 Ok(p) => (ProviderStatus::Healthy, p.updated_at),
                 Err(right_openshell::providers::ProviderError::NotFound(_)) => {
                     (ProviderStatus::Missing, None)
@@ -476,9 +486,7 @@ pub(crate) async fn handle_provider_create(
     }
 
     // Built-in flow: OpenShell manages endpoints; no policy mutation needed.
-    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
-        .await
-        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let mut client = open_openshell_client().await?;
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
 
     let mut creds = std::collections::HashMap::new();
@@ -489,14 +497,14 @@ pub(crate) async fn handle_provider_create(
         credentials: creds,
         config: Default::default(),
     };
-    right_openshell::providers::create_provider(&endpoint, &spec)
+    right_openshell::providers::create_provider(&mut client, &spec)
         .await
         .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
     if let Err(attach_err) =
-        right_openshell::providers::attach_to_sandbox(&endpoint, &sandbox_name, &name).await
+        right_openshell::providers::attach_to_sandbox(&mut client, &sandbox_name, &name).await
     {
         if let Err(rollback_err) =
-            right_openshell::providers::delete_provider(&endpoint, &name).await
+            right_openshell::providers::delete_provider(&mut client, &name).await
         {
             tracing::warn!(
                 provider = %name,
@@ -515,7 +523,7 @@ pub(crate) async fn handle_provider_create(
     };
     if let Err(e) = append_provider_to_yaml(&state.agents_dir, &req.agent, &entry) {
         if let Err(rollback_err) =
-            right_openshell::providers::detach_from_sandbox(&endpoint, &sandbox_name, &name).await
+            right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
         {
             tracing::warn!(
                 provider = %name,
@@ -524,7 +532,7 @@ pub(crate) async fn handle_provider_create(
             );
         }
         if let Err(rollback_err) =
-            right_openshell::providers::delete_provider(&endpoint, &name).await
+            right_openshell::providers::delete_provider(&mut client, &name).await
         {
             tracing::warn!(
                 provider = %name,
@@ -751,9 +759,7 @@ async fn create_generic_provider(
             .await
             .map_err(|e| ProviderApiError::Gateway(format!("policy apply: {e:#}")))?;
 
-    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
-        .await
-        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let mut client = open_openshell_client().await?;
     let mut creds = std::collections::HashMap::new();
     creds.insert(env_var.clone(), req.credential.expose_secret().to_string());
     let mut config = std::collections::HashMap::new();
@@ -768,7 +774,7 @@ async fn create_generic_provider(
         credentials: creds,
         config,
     };
-    if let Err(e) = right_openshell::providers::create_provider(&endpoint, &spec).await {
+    if let Err(e) = right_openshell::providers::create_provider(&mut client, &spec).await {
         if let Err(rollback_err) = snapshot.restore().await {
             tracing::warn!(
                 provider = %name,
@@ -780,10 +786,10 @@ async fn create_generic_provider(
     }
 
     if let Err(attach_err) =
-        right_openshell::providers::attach_to_sandbox(&endpoint, &sandbox_name, &name).await
+        right_openshell::providers::attach_to_sandbox(&mut client, &sandbox_name, &name).await
     {
         if let Err(rollback_err) =
-            right_openshell::providers::delete_provider(&endpoint, &name).await
+            right_openshell::providers::delete_provider(&mut client, &name).await
         {
             tracing::warn!(
                 provider = %name,
@@ -815,7 +821,7 @@ async fn create_generic_provider(
     };
     if let Err(e) = append_provider_to_yaml(&state.agents_dir, &req.agent, &entry) {
         if let Err(rollback_err) =
-            right_openshell::providers::detach_from_sandbox(&endpoint, &sandbox_name, &name).await
+            right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
         {
             tracing::warn!(
                 provider = %name,
@@ -824,7 +830,7 @@ async fn create_generic_provider(
             );
         }
         if let Err(rollback_err) =
-            right_openshell::providers::delete_provider(&endpoint, &name).await
+            right_openshell::providers::delete_provider(&mut client, &name).await
         {
             tracing::warn!(
                 provider = %name,
@@ -965,9 +971,7 @@ pub(crate) async fn handle_provider_rotate(
         })?;
 
     let env_var = extract_env_var(entry);
-    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
-        .await
-        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let mut client = open_openshell_client().await?;
     let mut creds = std::collections::HashMap::new();
     creds.insert(env_var.clone(), req.credential.expose_secret().to_string());
     let type_str = match &entry.type_ {
@@ -980,7 +984,7 @@ pub(crate) async fn handle_provider_rotate(
         credentials: creds,
         config: Default::default(),
     };
-    right_openshell::providers::update_provider(&endpoint, &spec)
+    right_openshell::providers::update_provider(&mut client, &spec)
         .await
         .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
 
@@ -1076,9 +1080,7 @@ pub(crate) async fn handle_provider_config_update(
         validate_path_prefix(p)?;
     }
 
-    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
-        .await
-        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let mut client = open_openshell_client().await?;
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
     let policy_path = state.agents_dir.join(&req.agent).join(
         sandbox
@@ -1130,7 +1132,7 @@ pub(crate) async fn handle_provider_config_update(
         credentials: Default::default(),
         config,
     };
-    if let Err(e) = right_openshell::providers::update_provider(&endpoint, &spec).await {
+    if let Err(e) = right_openshell::providers::update_provider(&mut client, &spec).await {
         if let Some(s) = snapshot {
             if let Err(rollback_err) = s.restore().await {
                 tracing::warn!(
@@ -1265,12 +1267,11 @@ pub(crate) async fn handle_provider_remove(
             name: req.name.clone(),
         })?
         .clone();
-    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
-        .await
-        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let mut client = open_openshell_client().await?;
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
 
-    match right_openshell::providers::detach_from_sandbox(&endpoint, &sandbox_name, &req.name).await
+    match right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &req.name)
+        .await
     {
         Ok(()) => {}
         Err(right_openshell::providers::ProviderError::NotFound(_)) => {
@@ -1278,7 +1279,7 @@ pub(crate) async fn handle_provider_remove(
         }
         Err(e) => return Err(ProviderApiError::Gateway(format!("{e:#}"))),
     }
-    match right_openshell::providers::delete_provider(&endpoint, &req.name).await {
+    match right_openshell::providers::delete_provider(&mut client, &req.name).await {
         Ok(()) => {}
         Err(right_openshell::providers::ProviderError::NotFound(_)) => {
             tracing::info!(provider = %req.name, "delete: provider already absent");
