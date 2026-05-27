@@ -47,6 +47,7 @@ const oauthFlows = ref<Record<string, string>>({})
 const oauthStatuses = ref<Record<string, McpOAuthStatusResponse>>({})
 const oauthPollTimers = new Map<string, ReturnType<typeof window.setTimeout>>()
 const detectingAddAuth = ref(false)
+let disposed = false
 let addFormGeneration = 0
 let latestDetectionRequestId = 0
 let activeDetectionRequestId: number | null = null
@@ -64,6 +65,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   for (const timer of oauthPollTimers.values()) {
     window.clearTimeout(timer)
   }
@@ -77,14 +79,26 @@ watch(url, () => {
 })
 
 async function refresh(): Promise<void> {
+  if (disposed) {
+    return
+  }
   loading.value = true
   error.value = null
   try {
-    servers.value = await mcpServers()
+    const response = await mcpServers()
+    if (disposed) {
+      return
+    }
+    servers.value = response
   } catch (err) {
+    if (disposed) {
+      return
+    }
     error.value = err instanceof Error ? err.message : 'MCP unavailable'
   } finally {
-    loading.value = false
+    if (!disposed) {
+      loading.value = false
+    }
   }
 }
 
@@ -222,12 +236,17 @@ async function startOAuth(server: McpServerSummary): Promise<void> {
       },
     }
     scheduleOAuthPoll(server.name, response.flow_id)
-    openOAuthUrl(response.auth_url, {
-      openTelegramLink: window.Telegram?.WebApp?.openLink?.bind(window.Telegram.WebApp),
-      assignLocation: (authUrl) => {
-        window.location.href = authUrl
-      },
-    })
+    try {
+      openOAuthUrl(response.auth_url, {
+        openTelegramLink: window.Telegram?.WebApp?.openLink?.bind(window.Telegram.WebApp),
+        assignLocation: (authUrl) => {
+          window.location.href = authUrl
+        },
+      })
+    } catch (err) {
+      clearOAuthFlow(server.name)
+      throw err
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to start OAuth'
   } finally {
@@ -236,6 +255,9 @@ async function startOAuth(server: McpServerSummary): Promise<void> {
 }
 
 function scheduleOAuthPoll(serverName: string, flowId: string): void {
+  if (disposed) {
+    return
+  }
   clearOAuthPoll(serverName)
   const timer = window.setTimeout(() => {
     void pollOAuthStatus(serverName, flowId)
@@ -251,9 +273,22 @@ function clearOAuthPoll(serverName: string): void {
   }
 }
 
+function clearOAuthFlow(serverName: string): void {
+  clearOAuthPoll(serverName)
+  const nextFlows = { ...oauthFlows.value }
+  delete nextFlows[serverName]
+  oauthFlows.value = nextFlows
+  const nextStatuses = { ...oauthStatuses.value }
+  delete nextStatuses[serverName]
+  oauthStatuses.value = nextStatuses
+}
+
 async function pollOAuthStatus(serverName: string, flowId: string): Promise<void> {
   try {
     const response = await mcpOAuthStatus(flowId)
+    if (disposed) {
+      return
+    }
     if (!shouldApplyOAuthPollResult(response.flow_id, oauthFlows.value[serverName])) {
       return
     }
@@ -261,10 +296,16 @@ async function pollOAuthStatus(serverName: string, flowId: string): Promise<void
     if (isOAuthTerminalStatus(response.status)) {
       clearOAuthPoll(serverName)
       await refresh()
+      if (disposed) {
+        return
+      }
       return
     }
     scheduleOAuthPoll(serverName, flowId)
   } catch (err) {
+    if (disposed) {
+      return
+    }
     if (!shouldApplyOAuthPollResult(flowId, oauthFlows.value[serverName])) {
       return
     }
@@ -280,6 +321,9 @@ async function pollOAuthStatus(serverName: string, flowId: string): Promise<void
     }
     clearOAuthPoll(serverName)
     await refresh()
+    if (disposed) {
+      return
+    }
   }
 }
 
@@ -291,6 +335,7 @@ async function removeServer(server: McpServerSummary): Promise<void> {
   error.value = null
   try {
     await mcpRemove(server.name)
+    clearOAuthFlow(server.name)
     if (editingServer.value === server.name) {
       editingServer.value = null
     }
