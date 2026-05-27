@@ -32,12 +32,25 @@ pub enum ProviderError {
 }
 
 /// Input for create/update.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProviderSpec {
     pub name: String,
     pub type_: String, // raw slug
     pub credentials: HashMap<String, String>,
     pub config: HashMap<String, String>,
+}
+
+impl std::fmt::Debug for ProviderSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ProviderSpec {{ name: {:?}, type_: {:?}, credentials: <{} redacted>, config: {:?} }}",
+            self.name,
+            self.type_,
+            self.credentials.len(),
+            self.config,
+        )
+    }
 }
 
 /// Output of get/list. Credentials field is INTENTIONALLY OMITTED — the
@@ -442,11 +455,8 @@ fn provider_from_json(v: &serde_json::Value) -> Result<Provider, ProviderError> 
 /// `openshell:resolve:env:v<digits>_<NAME>`) — never log them. They look
 /// secret-shaped to operators and create false alarms in audits.
 pub async fn get_sandbox_provider_environment(
-    _endpoint: &crate::openshell::GatewayEndpoint,
     sandbox_id: &str,
 ) -> Result<HashMap<String, String>, ProviderError> {
-    // TODO: thread GatewayEndpoint override into connect_grpc when needed.
-    // For now, connect_grpc reads OPENSHELL_GATEWAY_ENDPOINT itself.
     let mtls_dir = crate::openshell::default_mtls_dir();
     let mut client = crate::openshell::connect_grpc(&mtls_dir)
         .await
@@ -531,26 +541,80 @@ pub async fn reconcile_for_sandbox(
 // Internal helpers
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Pure classification helper — separated for unit testing.
+///
+/// `settings get --global --json` returns an object like:
+/// ```json
+/// { "scope": "global", "settings": { "providers_v2_enabled": "true" }, ... }
+/// ```
+/// The value is a string: `"true"`, `"false"`, or `"<unset>"`.
+fn classify_v2_get_output(
+    status_success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<bool, ProviderError> {
+    if status_success {
+        // Parse the JSON output.
+        let parsed: serde_json::Value =
+            serde_json::from_slice(stdout).map_err(|_| ProviderError::Cli {
+                cmd: "openshell settings get".into(),
+                status: 0,
+                stderr: format!("unexpected output: {:?}", String::from_utf8_lossy(stdout)),
+            })?;
+        let value = parsed
+            .get("settings")
+            .and_then(|s| s.get("providers_v2_enabled"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProviderError::Cli {
+                cmd: "openshell settings get".into(),
+                status: 0,
+                stderr: format!("unexpected output: {:?}", String::from_utf8_lossy(stdout)),
+            })?;
+        // "<unset>" means the flag has never been set — treat as false.
+        Ok(value == "true")
+    } else {
+        // Distinguish "key not set / not found" from a genuine gateway error.
+        let stderr_str = String::from_utf8_lossy(stderr);
+        if stderr_str.contains("not found") || stderr_str.contains("not set") {
+            return Ok(false);
+        }
+        let status = -1i32; // non-zero; exact code unavailable in this helper
+        Err(ProviderError::Cli {
+            cmd: "openshell settings get".into(),
+            status,
+            stderr: stderr_str.into_owned(),
+        })
+    }
+}
+
 async fn get_v2_flag(endpoint: &crate::openshell::GatewayEndpoint) -> Result<bool, ProviderError> {
     let mut cmd = Command::new("openshell");
-    cmd.args([
-        "settings",
-        "get",
-        "--global",
-        "--key",
-        "providers_v2_enabled",
-    ]);
+    cmd.args(["settings", "get", "--global", "--json"]);
     endpoint.apply_to_cli(&mut cmd);
-    let out = cmd.output().await.map_err(|e| ProviderError::Cli {
-        cmd: "openshell settings get".into(),
-        status: -1,
-        stderr: e.to_string(),
-    })?;
-    if !out.status.success() {
-        return Ok(false);
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    Ok(stdout.contains("true"))
+    let out = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| ProviderError::Cli {
+            cmd: "openshell settings get".into(),
+            status: -1,
+            stderr: e.to_string(),
+        })?;
+    let status_code = out.status.code().unwrap_or(-1);
+    classify_v2_get_output(out.status.success(), &out.stdout, &out.stderr).map_err(|e| {
+        // Re-attach the real exit code when we have it.
+        if let ProviderError::Cli { cmd, stderr, .. } = e {
+            ProviderError::Cli {
+                cmd,
+                status: status_code,
+                stderr,
+            }
+        } else {
+            e
+        }
+    })
 }
 
 #[cfg(test)]
@@ -594,5 +658,112 @@ mod tests {
             .find(|p| p.type_slug == "anthropic")
             .unwrap();
         assert_eq!(entry.env_var, "ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn classify_v2_get_output_success_true() {
+        let stdout = br#"{"scope":"global","settings":{"providers_v2_enabled":"true"},"settings_revision":1}"#;
+        assert_eq!(
+            classify_v2_get_output(true, stdout, b"").unwrap(),
+            true,
+            "success + true JSON should return Ok(true)"
+        );
+    }
+
+    #[test]
+    fn classify_v2_get_output_success_false() {
+        let stdout = br#"{"scope":"global","settings":{"providers_v2_enabled":"false"},"settings_revision":1}"#;
+        assert_eq!(
+            classify_v2_get_output(true, stdout, b"").unwrap(),
+            false,
+            "success + false JSON should return Ok(false)"
+        );
+    }
+
+    #[test]
+    fn classify_v2_get_output_success_unset() {
+        let stdout = br#"{"scope":"global","settings":{"providers_v2_enabled":"<unset>"},"settings_revision":1}"#;
+        assert_eq!(
+            classify_v2_get_output(true, stdout, b"").unwrap(),
+            false,
+            "success + '<unset>' should return Ok(false)"
+        );
+    }
+
+    #[test]
+    fn classify_v2_get_output_not_found_returns_false() {
+        let stderr = b"Error: key not found\n";
+        assert_eq!(
+            classify_v2_get_output(false, b"", stderr).unwrap(),
+            false,
+            "non-success stderr 'not found' should return Ok(false)"
+        );
+    }
+
+    #[test]
+    fn classify_v2_get_output_gateway_error_returns_err() {
+        let stderr = b"Error: transport error\n  connection refused (os error 61)\n";
+        assert!(
+            matches!(
+                classify_v2_get_output(false, b"", stderr),
+                Err(ProviderError::Cli { .. })
+            ),
+            "non-success stderr 'connection refused' should return Err(Cli)"
+        );
+    }
+
+    #[test]
+    fn classify_v2_get_output_bad_json_returns_err() {
+        let stdout = b"not json at all";
+        assert!(
+            matches!(
+                classify_v2_get_output(true, stdout, b""),
+                Err(ProviderError::Cli { .. })
+            ),
+            "success + invalid JSON should return Err(Cli)"
+        );
+    }
+
+    #[test]
+    fn provider_spec_debug_redacts_credentials() {
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "ANTHROPIC_API_KEY".to_string(),
+            "super-secret-key".to_string(),
+        );
+        credentials.insert("ANOTHER_KEY".to_string(), "another-secret".to_string());
+        let mut config = HashMap::new();
+        config.insert("upstream_host".to_string(), "api.example.com".to_string());
+        let spec = ProviderSpec {
+            name: "my-provider".to_string(),
+            type_: "anthropic".to_string(),
+            credentials,
+            config,
+        };
+        let debug_output = format!("{spec:?}");
+        assert!(
+            !debug_output.contains("super-secret-key"),
+            "Debug output must not contain credential value; got: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("another-secret"),
+            "Debug output must not contain credential value; got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("2 redacted"),
+            "Debug output should show credential count; got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("my-provider"),
+            "Debug output should show name; got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("anthropic"),
+            "Debug output should show type_; got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("upstream_host"),
+            "Debug output should show config keys/values; got: {debug_output}"
+        );
     }
 }
