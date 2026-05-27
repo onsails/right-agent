@@ -520,7 +520,7 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
         output_format: OutputFormat::Json,
         model: Some(ctx.model.clone()),
         max_budget_usd: None,
-        max_turns: Some(1),
+        max_turns: Some(5),
         resume_session_id: None,
         new_session_id: None,
         fork_session: false,
