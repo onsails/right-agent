@@ -94,6 +94,12 @@ bot-owned `SandboxExec` handle, are bounded by short per-request timeouts, and
 read only the requested dashboard material: sandbox stats, identity files, or
 skill inventory/details. Overview rendering does not run these probes.
 
+Sandbox supervisors inject provider env-var placeholders at boot from the gateway's
+attached-providers list (see `docs/architecture/providers.md`). The gateway proxy
+substitutes the real credential on outbound HTTPS for TLS-terminated endpoints; raw
+tunnels (tls: skip) cannot substitute and Right refuses to attach generic providers
+against those hosts.
+
 ### User-Local CLI Environment
 
 For OpenShell agents, Right Agent treats `/sandbox/.local/bin` as the canonical
