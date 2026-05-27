@@ -24,8 +24,6 @@ use tokio::sync::Mutex;
 use right_mcp::internal_client::{InternalClient, SetTokenRequest};
 use right_mcp::oauth::{OAuthError, PendingAuth, exchange_token_with_url_policy, verify_state};
 
-use super::markdown::html_escape;
-
 /// Shared in-memory map of OAuth state -> pending auth session.
 /// Key is the PKCE state parameter (random, one-shot).
 pub type PendingAuthMap = Arc<Mutex<HashMap<String, PendingAuth>>>;
@@ -43,7 +41,6 @@ pub struct CallbackParams {
 #[derive(Clone)]
 pub struct OAuthCallbackState {
     pub pending_auth: PendingAuthMap,
-    #[allow(dead_code)]
     pub(crate) oauth_status: super::oauth_status::OAuthFlowStatusStore,
     /// Agent name (for logging and notifications)
     pub agent_name: String,
@@ -137,6 +134,15 @@ async fn handle_oauth_callback(
             description = %desc,
             "OAuth callback error from provider"
         );
+        if let Some(state_param) = params.state.as_deref() {
+            state
+                .oauth_status
+                .mark_failed(
+                    state_param,
+                    format!("OAuth provider error: {err} -- {desc}"),
+                )
+                .await;
+        }
         return (
             axum::http::StatusCode::BAD_REQUEST,
             format!("OAuth error: {err} -- {desc}"),
@@ -189,6 +195,10 @@ async fn handle_oauth_callback(
                 state = %received_state,
                 "OAuth callback: unknown or already-consumed state"
             );
+            state
+                .oauth_status
+                .mark_failed(&received_state, "OAuth state is invalid or expired.")
+                .await;
             return (
                 axum::http::StatusCode::BAD_REQUEST,
                 "invalid or expired state -- flow already completed or state is unknown"
@@ -215,10 +225,7 @@ async fn handle_oauth_callback(
 
     (
         axum::http::StatusCode::OK,
-        axum::response::Html(
-            "<!DOCTYPE html><html><body><h1>Authorization received</h1>\
-             <p>You may close this window. Check Telegram for final status.</p></body></html>",
-        ),
+        axum::response::Html(callback_received_html()),
     )
         .into_response()
 }
@@ -238,8 +245,7 @@ async fn complete_oauth_flow(
         .build()
         .map_err(|e| miette::miette!("oauth token HTTP client failed: {e:#}"))?;
 
-    // Token exchange
-    let token_resp = exchange_token_with_url_policy(
+    let token_resp = match exchange_token_with_url_policy(
         &http_client,
         &pending.token_endpoint,
         &code,
@@ -251,7 +257,23 @@ async fn complete_oauth_flow(
         oauth_token_url_policy,
     )
     .await
-    .map_err(|e| miette::miette!("token exchange failed: {e:#}"))?;
+    {
+        Ok(token_resp) => token_resp,
+        Err(error) => {
+            let detail = format!("{error:#}");
+            cb_state
+                .oauth_status
+                .mark_failed(
+                    &pending.state,
+                    format!(
+                        "Token exchange failed: {}",
+                        super::oauth_status::compact_dashboard_error(&detail)
+                    ),
+                )
+                .await;
+            return Err(miette::miette!("token exchange failed: {detail}"));
+        }
+    };
 
     tracing::info!(
         agent = %agent_name,
@@ -275,50 +297,20 @@ async fn complete_oauth_flow(
     };
 
     match cb_state.internal_client.set_token(&set_token_req).await {
-        Ok(resp) => {
-            let msg = if let Some(ref warning) = resp.warning {
-                format!(
-                    "Authenticated with {} (agent {agent_name}). {warning}",
-                    pending.server_name,
-                )
-            } else {
-                format!(
-                    "Authenticated with {} (agent {agent_name}).",
-                    pending.server_name,
-                )
-            };
-            let chat_ids: Vec<i64> = cb_state
-                .allowlist
-                .0
-                .read()
-                .expect("allowlist lock poisoned")
-                .users()
-                .iter()
-                .map(|u| u.id)
-                .collect();
-            notify_telegram(&cb_state.bot, &chat_ids, &msg).await;
+        Ok(_resp) => {
+            cb_state.oauth_status.mark_succeeded(&pending.state).await;
         }
-        Err(e) => {
+        Err(error) => {
+            let detail = format!("{error:#}");
             tracing::error!(
                 agent = %agent_name,
                 server = %pending.server_name,
-                "set_token failed: {e:#}"
+                "set_token failed: {detail}"
             );
-            let chat_ids: Vec<i64> = cb_state
-                .allowlist
-                .0
-                .read()
-                .expect("allowlist lock poisoned")
-                .users()
-                .iter()
-                .map(|u| u.id)
-                .collect();
-            notify_html_telegram(
-                &cb_state.bot,
-                &chat_ids,
-                &set_token_failure_message(&pending.server_name, agent_name, &e),
-            )
-            .await;
+            cb_state
+                .oauth_status
+                .mark_failed(&pending.state, set_token_failure_dashboard_message(&detail))
+                .await;
         }
     }
 
@@ -335,21 +327,17 @@ fn oauth_token_url_policy(input: &str) -> Result<(), OAuthError> {
     ))
 }
 
-fn set_token_failure_message(
-    server_name: &str,
-    agent_name: &str,
-    err: impl std::fmt::Display,
-) -> String {
+fn set_token_failure_dashboard_message(err: impl std::fmt::Display) -> String {
     format!(
-        "Could not finish OAuth for {} (agent {}). Token exchange completed, but MCP readiness failed:\n<pre>{}</pre>",
-        html_escape(server_name),
-        html_escape(agent_name),
-        html_escape(&err.to_string()),
+        "Token exchange completed, but MCP readiness failed: {}",
+        super::oauth_status::compact_dashboard_error(&err.to_string())
     )
 }
 
-use super::broadcast_html_to_chats as notify_html_telegram;
-use super::broadcast_to_chats as notify_telegram;
+fn callback_received_html() -> &'static str {
+    "<!DOCTYPE html><html><body><h1>Authorization received</h1>\
+     <p>You may close this window. The dashboard will update when MCP readiness finishes.</p></body></html>"
+}
 
 /// Bind axum to a Unix socket at `socket_path` and serve the bot's UDS app.
 ///
@@ -599,29 +587,25 @@ mod tests {
         assert_eq!(user_ids, vec![100]);
     }
 
-    #[tokio::test]
-    async fn set_token_failure_message_does_not_claim_success() {
-        let msg = set_token_failure_message("composio", "him", "HTTP 502");
-        assert!(
-            !msg.contains("Authenticated"),
-            "failure message must not claim authenticated: {msg}",
+    #[test]
+    fn set_token_failure_dashboard_message_does_not_claim_success() {
+        let msg = set_token_failure_dashboard_message(
+            "Server error (502): {\"error\":\"mcp_reconnect_failed\"}",
         );
-        assert!(
-            !msg.contains("succeeded"),
-            "failure message must not claim success: {msg}",
-        );
-        assert!(msg.contains("composio"));
-        assert!(msg.contains("him"));
-        assert!(msg.contains("HTTP 502"));
+
+        assert!(!msg.contains("Authenticated"));
+        assert!(!msg.contains("succeeded"));
+        assert!(msg.contains("Token exchange completed"));
+        assert!(msg.contains("mcp_reconnect_failed"));
     }
 
-    #[tokio::test]
-    async fn set_token_failure_message_wraps_detail_in_pre() {
-        let msg = set_token_failure_message("composio", "him", "<bad>&\"detail\"");
-        assert!(msg.contains("<pre>"));
-        assert!(msg.contains("</pre>"));
-        assert!(msg.contains("&lt;bad&gt;&amp;\"detail\""));
-        assert!(!msg.contains("<bad>"));
+    #[test]
+    fn callback_received_html_points_back_to_dashboard_not_telegram() {
+        let html = callback_received_html();
+
+        assert!(html.contains("dashboard"));
+        assert!(!html.contains("Telegram"));
+        assert!(!html.contains(&format!("{} {}", "Check", "Telegram")));
     }
 
     #[test]
