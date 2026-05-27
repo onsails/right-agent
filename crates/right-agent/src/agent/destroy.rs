@@ -270,11 +270,12 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         if matches!(sandbox.mode, right_agent_config::SandboxMode::Openshell)
             && !sandbox.providers.is_empty()
         {
-            match right_openshell::openshell::resolve_gateway_endpoint().await {
-                Ok(endpoint) => {
+            let mtls_dir = right_openshell::openshell::default_mtls_dir();
+            match right_openshell::openshell::connect_grpc(&mtls_dir).await {
+                Ok(mut client) => {
                     for entry in &sandbox.providers {
                         if let Err(e) =
-                            right_openshell::providers::delete_provider(&endpoint, &entry.name)
+                            right_openshell::providers::delete_provider(&mut client, &entry.name)
                                 .await
                         {
                             tracing::warn!(
@@ -287,7 +288,7 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
                 }
                 Err(e) => tracing::warn!(
                     error = %format!("{e:#}"),
-                    "could not resolve gateway endpoint for provider cleanup; continuing destroy"
+                    "could not connect to openshell gateway for provider cleanup; continuing destroy"
                 ),
             }
         }

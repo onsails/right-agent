@@ -820,15 +820,16 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         // and detaches stale `<agent>-*` entries that were removed from the config.
         // Non-fatal: a reconcile failure is logged but never prevents the bot from starting.
         if let Some(sandbox_cfg) = config.sandbox.as_ref() {
-            match right_openshell::openshell::resolve_gateway_endpoint().await {
-                Ok(endpoint) => {
+            let mtls_dir = right_openshell::openshell::default_mtls_dir();
+            match right_openshell::openshell::connect_grpc(&mtls_dir).await {
+                Ok(mut client) => {
                     let declared: Vec<String> = sandbox_cfg
                         .providers
                         .iter()
                         .map(|p| p.name.clone())
                         .collect();
                     match right_openshell::providers::reconcile_for_sandbox(
-                        &endpoint,
+                        &mut client,
                         &sandbox,
                         &args.agent,
                         &declared,
@@ -859,7 +860,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 }
                 Err(e) => tracing::warn!(
                     agent = %args.agent,
-                    "could not resolve gateway endpoint for provider reconcile: {e:#}"
+                    "could not connect to openshell gateway for provider reconcile: {e:#}"
                 ),
             }
         }
