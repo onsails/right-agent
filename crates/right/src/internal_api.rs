@@ -146,6 +146,11 @@ pub(crate) struct InternalState {
     token_map: AgentTokenMap,
     token_map_path: PathBuf,
     pub(crate) agents_dir: PathBuf,
+    pub(crate) provider_locks: std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<(String, String), std::sync::Arc<tokio::sync::Mutex<()>>>,
+        >,
+    >,
 }
 
 pub(crate) fn internal_router(
@@ -163,6 +168,7 @@ pub(crate) fn internal_router(
         token_map,
         token_map_path,
         agents_dir,
+        provider_locks: Default::default(),
     };
     Router::new()
         .route("/mcp-add", post(handle_mcp_add))
@@ -185,6 +191,18 @@ pub(crate) fn internal_router(
         .route(
             "/provider-create",
             post(crate::internal_api_providers::handle_provider_create),
+        )
+        .route(
+            "/provider-rotate",
+            post(crate::internal_api_providers::handle_provider_rotate),
+        )
+        .route(
+            "/provider-config-update",
+            post(crate::internal_api_providers::handle_provider_config_update),
+        )
+        .route(
+            "/provider-remove",
+            post(crate::internal_api_providers::handle_provider_remove),
         )
         .with_state(state)
 }

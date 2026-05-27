@@ -1,8 +1,4 @@
 //! Provider management routes — see ARCHITECTURE.md "Providers".
-// Handlers below use validators and helpers added in Tasks 13-14.
-// The `#[allow(dead_code)]` is narrowed here: Tasks 17+ will consume the
-// validators, but they are not dead — suppressed until then.
-#![allow(dead_code)]
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderApiError {
@@ -310,6 +306,7 @@ pub(crate) async fn handle_provider_create(
     let label_slug = req.label.clone().unwrap_or_else(|| req.type_.clone());
     let name = format!("{}-{}", req.agent, label_slug);
     validate_name(&req.agent, &name)?;
+    let _guard = provider_lock(&state, &req.agent, &name).await;
 
     let cfg = load_agent_config(&state.agents_dir, &req.agent)
         .map_err(ProviderApiError::AgentYamlWrite)?;
@@ -543,6 +540,8 @@ async fn create_generic_provider(
     env_var: String,
 ) -> Result<axum::Json<ProviderView>, ProviderApiError> {
     use secrecy::ExposeSecret;
+    // Lock is already held by the caller (handle_provider_create acquires it
+    // before dispatching here), so no second acquisition needed.
     let g = req
         .generic
         .clone()
@@ -674,6 +673,452 @@ mod insert_tests {
             "existing entry missing from:\n{out}"
         );
     }
+
+    #[test]
+    fn replace_existing_provider_swaps_in_place() {
+        let original = "sandbox:\n  providers:\n    - name: foo-x\n      type: anthropic\n    - name: foo-y\n      type: github\n";
+        let new_entry = "    - name: foo-x\n      type: openai\n";
+        let out = replace_provider_entry(original, "foo-x", new_entry).unwrap();
+        assert!(
+            out.contains("- name: foo-x\n      type: openai"),
+            "replaced entry not found in:\n{out}"
+        );
+        assert!(
+            out.contains("- name: foo-y\n      type: github"),
+            "sibling entry missing from:\n{out}"
+        );
+        assert!(
+            !out.contains("type: anthropic"),
+            "old entry still present in:\n{out}"
+        );
+    }
+
+    #[test]
+    fn remove_provider_drops_entry_only() {
+        let original = "sandbox:\n  providers:\n    - name: foo-x\n      type: anthropic\n    - name: foo-y\n      type: github\n";
+        let out = remove_provider_entry(original, "foo-x");
+        assert!(!out.contains("foo-x"), "foo-x still present in:\n{out}");
+        assert!(
+            out.contains("- name: foo-y"),
+            "sibling entry missing from:\n{out}"
+        );
+    }
+}
+
+// ── Tasks 19–22: /provider-rotate, /provider-config-update, /provider-remove ─
+
+// ── Task 22 (mutex helper) ───────────────────────────────────────────────────
+
+pub(crate) async fn provider_lock(
+    state: &crate::internal_api::InternalState,
+    agent: &str,
+    name: &str,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    let key = (agent.to_string(), name.to_string());
+    let lock = {
+        let mut map = state.provider_locks.lock().await;
+        map.entry(key)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    lock.lock_owned().await
+}
+
+// ── Task 19: /provider-rotate ────────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProviderRotateReq {
+    pub agent: String,
+    pub name: String,
+    pub credential: secrecy::SecretString,
+}
+
+pub(crate) async fn handle_provider_rotate(
+    axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
+    axum::Json(req): axum::Json<ProviderRotateReq>,
+) -> Result<axum::Json<ProviderView>, ProviderApiError> {
+    use secrecy::ExposeSecret;
+    validate_name(&req.agent, &req.name)?;
+    let _guard = provider_lock(&state, &req.agent, &req.name).await;
+
+    let cfg = load_agent_config(&state.agents_dir, &req.agent)
+        .map_err(ProviderApiError::AgentYamlWrite)?;
+    let sandbox = cfg
+        .sandbox
+        .as_ref()
+        .ok_or(ProviderApiError::SandboxModeNone)?;
+    let entry = sandbox
+        .providers
+        .iter()
+        .find(|p| p.name == req.name)
+        .ok_or_else(|| ProviderApiError::NotFound {
+            name: req.name.clone(),
+        })?;
+
+    let env_var = extract_env_var(entry);
+    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let mut creds = std::collections::HashMap::new();
+    creds.insert(env_var.clone(), req.credential.expose_secret().to_string());
+    let type_str = match &entry.type_ {
+        right_agent_config::ProviderType::Generic => "generic".to_string(),
+        right_agent_config::ProviderType::BuiltIn(s) => s.clone(),
+    };
+    let spec = right_openshell::providers::ProviderSpec {
+        name: req.name.clone(),
+        type_: type_str.clone(),
+        credentials: creds,
+        config: Default::default(),
+    };
+    right_openshell::providers::update_provider(&endpoint, &spec)
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+
+    Ok(axum::Json(ProviderView {
+        name: req.name,
+        type_: type_str,
+        label: entry.label.clone(),
+        env_var,
+        generic: entry.generic.clone(),
+        updated_at: Some(chrono::Utc::now()),
+        status: ProviderStatus::Healthy,
+    }))
+}
+
+// ── Task 20: /provider-config-update ─────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProviderConfigUpdateReq {
+    pub agent: String,
+    pub name: String,
+    pub generic: ProviderConfigUpdateGeneric,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProviderConfigUpdateGeneric {
+    pub env_var: Option<String>,
+    pub header_name: Option<String>,
+    pub upstream_host: Option<String>,
+    pub upstream_path_prefix: Option<Option<String>>,
+}
+
+pub(crate) async fn handle_provider_config_update(
+    axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
+    axum::Json(req): axum::Json<ProviderConfigUpdateReq>,
+) -> Result<axum::Json<ProviderView>, ProviderApiError> {
+    let _guard = provider_lock(&state, &req.agent, &req.name).await;
+
+    let cfg = load_agent_config(&state.agents_dir, &req.agent)
+        .map_err(ProviderApiError::AgentYamlWrite)?;
+    let sandbox = cfg
+        .sandbox
+        .as_ref()
+        .ok_or(ProviderApiError::SandboxModeNone)?;
+    let entry = sandbox
+        .providers
+        .iter()
+        .find(|p| p.name == req.name)
+        .ok_or_else(|| ProviderApiError::NotFound {
+            name: req.name.clone(),
+        })?;
+    if !matches!(entry.type_, right_agent_config::ProviderType::Generic) {
+        return Err(ProviderApiError::InvalidName {
+            name: req.name.clone(),
+            reason: "config-update only valid on generic providers".into(),
+        });
+    }
+    let current = entry.generic.clone().unwrap();
+    let new_env_var = req
+        .generic
+        .env_var
+        .clone()
+        .unwrap_or(current.env_var.clone());
+    let new_header = req
+        .generic
+        .header_name
+        .clone()
+        .unwrap_or(current.header_name.clone());
+    let new_host = req
+        .generic
+        .upstream_host
+        .clone()
+        .unwrap_or(current.upstream_host.clone());
+    let new_path = match req.generic.upstream_path_prefix.clone() {
+        None => current.upstream_path_prefix.clone(),
+        Some(v) => v,
+    };
+    validate_env_var(&new_env_var)?;
+
+    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
+    let policy_path = state.agents_dir.join(&req.agent).join(
+        sandbox
+            .policy_file
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("policy.yaml")),
+    );
+
+    let mut snapshot: Option<right_codegen::contract::PolicySnapshot> = None;
+    if new_host != current.upstream_host {
+        let prior = std::fs::read_to_string(&policy_path)
+            .map_err(|e| ProviderApiError::AgentYamlWrite(format!("read policy: {e:#}")))?;
+        let stripped =
+            right_codegen::policy::providers_strip(&prior, &req.name, &current.upstream_host);
+        let new_policy = right_codegen::policy::providers_append_checked(
+            &stripped,
+            &req.name,
+            &new_host,
+            new_path.as_deref(),
+        )
+        .map_err(|e| match e {
+            right_codegen::policy::PolicyConflict::RawTunnel { host } => {
+                ProviderApiError::PolicyConflict {
+                    host,
+                    kind: "raw-tunnel".into(),
+                }
+            }
+        })?;
+        snapshot = Some(
+            right_codegen::contract::write_apply_with_snapshot(
+                &sandbox_name,
+                &policy_path,
+                new_policy,
+            )
+            .await
+            .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?,
+        );
+    }
+
+    let mut config = std::collections::HashMap::new();
+    config.insert("header_name".into(), new_header.clone());
+    config.insert("upstream_host".into(), new_host.clone());
+    if let Some(p) = &new_path {
+        config.insert("upstream_path_prefix".into(), p.clone());
+    }
+    let spec = right_openshell::providers::ProviderSpec {
+        name: req.name.clone(),
+        type_: "generic".into(),
+        credentials: Default::default(),
+        config,
+    };
+    if let Err(e) = right_openshell::providers::update_provider(&endpoint, &spec).await {
+        if let Some(s) = snapshot {
+            let _ = s.restore().await;
+        }
+        return Err(ProviderApiError::Gateway(format!("{e:#}")));
+    }
+
+    let updated = right_agent_config::ProviderEntry {
+        name: req.name.clone(),
+        type_: right_agent_config::ProviderType::Generic,
+        label: entry.label.clone(),
+        generic: Some(right_agent_config::GenericProvider {
+            env_var: new_env_var.clone(),
+            header_name: new_header.clone(),
+            upstream_host: new_host.clone(),
+            upstream_path_prefix: new_path.clone(),
+        }),
+    };
+    if let Err(e) = replace_provider_in_yaml(&state.agents_dir, &req.agent, &updated) {
+        if let Some(s) = snapshot {
+            let _ = s.restore().await;
+        }
+        return Err(ProviderApiError::AgentYamlWrite(format!("{e:#}")));
+    }
+
+    Ok(axum::Json(ProviderView {
+        name: req.name,
+        type_: "generic".into(),
+        label: entry.label.clone(),
+        env_var: new_env_var,
+        generic: updated.generic,
+        updated_at: Some(chrono::Utc::now()),
+        status: ProviderStatus::Healthy,
+    }))
+}
+
+/// Replace an existing provider entry by name. Line-walking YAML mutator.
+fn replace_provider_in_yaml(
+    agents_dir: &std::path::Path,
+    agent: &str,
+    updated: &right_agent_config::ProviderEntry,
+) -> miette::Result<()> {
+    let path = agents_dir.join(agent).join("agent.yaml");
+    let new_entry = serialize_provider_entry(updated);
+    let name = updated.name.clone();
+    right_codegen::contract::write_merged_rmw(&path, |existing| {
+        let original = existing.unwrap_or("");
+        replace_provider_entry(original, &name, &new_entry)
+    })
+}
+
+/// Replace the entry whose `    - name: <name>` matches. Returns Err if not found.
+fn replace_provider_entry(original: &str, name: &str, new_entry: &str) -> miette::Result<String> {
+    let name_marker = format!("    - name: {name}");
+    let Some(start_byte) = original.find(&name_marker) else {
+        return Err(miette::miette!("provider '{}' not in agent.yaml", name));
+    };
+    // Find start of the line containing the marker.
+    let line_start = original[..start_byte]
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    // Find end: the next `    - ` sibling OR a column-2 key OR EOF.
+    let first_line_end = line_start
+        + original[line_start..]
+            .find('\n')
+            .map(|i| i + 1)
+            .unwrap_or(original.len() - line_start);
+    let mut end_byte = first_line_end;
+    let rest = &original[first_line_end..];
+    for line in rest.split_inclusive('\n') {
+        if line.starts_with("    - ") {
+            break;
+        }
+        if line.starts_with("  ") && !line.starts_with("    ") && !line.trim().is_empty() {
+            break;
+        }
+        if !line.starts_with(' ') && !line.starts_with('\t') && !line.trim().is_empty() {
+            break;
+        }
+        end_byte += line.len();
+    }
+    let mut out = String::with_capacity(original.len());
+    out.push_str(&original[..line_start]);
+    out.push_str(new_entry);
+    out.push_str(&original[end_byte..]);
+    Ok(out)
+}
+
+// ── Task 21: /provider-remove ─────────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProviderRemoveReq {
+    pub agent: String,
+    pub name: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProviderRemoveResp {
+    pub removed: bool,
+}
+
+pub(crate) async fn handle_provider_remove(
+    axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
+    axum::Json(req): axum::Json<ProviderRemoveReq>,
+) -> Result<axum::Json<ProviderRemoveResp>, ProviderApiError> {
+    validate_name(&req.agent, &req.name)?;
+    let _guard = provider_lock(&state, &req.agent, &req.name).await;
+
+    let cfg = load_agent_config(&state.agents_dir, &req.agent)
+        .map_err(ProviderApiError::AgentYamlWrite)?;
+    let sandbox = cfg
+        .sandbox
+        .as_ref()
+        .ok_or(ProviderApiError::SandboxModeNone)?;
+    let entry = sandbox
+        .providers
+        .iter()
+        .find(|p| p.name == req.name)
+        .ok_or_else(|| ProviderApiError::NotFound {
+            name: req.name.clone(),
+        })?
+        .clone();
+    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
+
+    right_openshell::providers::detach_from_sandbox(&endpoint, &sandbox_name, &req.name)
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    right_openshell::providers::delete_provider(&endpoint, &req.name)
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+
+    if let Some(g) = &entry.generic {
+        let policy_path = state.agents_dir.join(&req.agent).join(
+            sandbox
+                .policy_file
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from("policy.yaml")),
+        );
+        let used_by_other = sandbox.providers.iter().any(|p| {
+            p.name != req.name
+                && p.generic
+                    .as_ref()
+                    .map(|gp| gp.upstream_host == g.upstream_host)
+                    .unwrap_or(false)
+        });
+        if !used_by_other {
+            let prior = std::fs::read_to_string(&policy_path)
+                .map_err(|e| ProviderApiError::AgentYamlWrite(format!("read policy: {e:#}")))?;
+            let stripped =
+                right_codegen::policy::providers_strip(&prior, &req.name, &g.upstream_host);
+            right_codegen::contract::write_and_apply_sandbox_policy(
+                &sandbox_name,
+                &policy_path,
+                &stripped,
+            )
+            .await
+            .map_err(|e| ProviderApiError::Gateway(format!("policy apply: {e:#}")))?;
+        }
+    }
+
+    remove_provider_from_yaml(&state.agents_dir, &req.agent, &req.name)
+        .map_err(|e| ProviderApiError::AgentYamlWrite(format!("{e:#}")))?;
+    Ok(axum::Json(ProviderRemoveResp { removed: true }))
+}
+
+fn remove_provider_from_yaml(
+    agents_dir: &std::path::Path,
+    agent: &str,
+    name: &str,
+) -> miette::Result<()> {
+    let path = agents_dir.join(agent).join("agent.yaml");
+    let name = name.to_string();
+    right_codegen::contract::write_merged_rmw(&path, |existing| {
+        let original = existing.unwrap_or("");
+        Ok(remove_provider_entry(original, &name))
+    })
+}
+
+/// Remove the entry whose `    - name: <name>` matches. No-op if not present.
+fn remove_provider_entry(original: &str, name: &str) -> String {
+    let name_marker = format!("    - name: {name}");
+    let Some(start_byte) = original.find(&name_marker) else {
+        return original.to_string();
+    };
+    let line_start = original[..start_byte]
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let first_line_end = line_start
+        + original[line_start..]
+            .find('\n')
+            .map(|i| i + 1)
+            .unwrap_or(original.len() - line_start);
+    let mut end_byte = first_line_end;
+    let rest = &original[first_line_end..];
+    for line in rest.split_inclusive('\n') {
+        if line.starts_with("    - ") {
+            break;
+        }
+        if line.starts_with("  ") && !line.starts_with("    ") && !line.trim().is_empty() {
+            break;
+        }
+        if !line.starts_with(' ') && !line.starts_with('\t') && !line.trim().is_empty() {
+            break;
+        }
+        end_byte += line.len();
+    }
+    let mut out = String::with_capacity(original.len() - (end_byte - line_start));
+    out.push_str(&original[..line_start]);
+    out.push_str(&original[end_byte..]);
+    out
 }
 
 // ── Task 16: /provider-types ──────────────────────────────────────────────────
