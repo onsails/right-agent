@@ -139,6 +139,41 @@ pub async fn write_and_apply_sandbox_policy(
     right_openshell::openshell::apply_policy(sandbox, path).await
 }
 
+/// Write policy + hot-apply with rollback support.
+///
+/// Returns a [`PolicySnapshot`] carrying the prior bytes; call
+/// [`PolicySnapshot::restore`] to roll back if a follow-on gateway
+/// operation fails.
+pub async fn write_apply_with_snapshot(
+    sandbox_name: &str,
+    policy_path: &Path,
+    new_content: String,
+) -> miette::Result<PolicySnapshot> {
+    let prior = std::fs::read_to_string(policy_path)
+        .map_err(|e| miette::miette!("read policy.yaml: {e:#}"))?;
+    write_and_apply_sandbox_policy(sandbox_name, policy_path, &new_content).await?;
+    Ok(PolicySnapshot {
+        path: policy_path.to_path_buf(),
+        prior,
+        sandbox: sandbox_name.to_string(),
+    })
+}
+
+/// Snapshot of a policy file prior to a hot-apply. Created by
+/// [`write_apply_with_snapshot`]; call [`PolicySnapshot::restore`] to
+/// roll back the sandbox to the previous policy.
+pub struct PolicySnapshot {
+    path: PathBuf,
+    prior: String,
+    sandbox: String,
+}
+
+impl PolicySnapshot {
+    pub async fn restore(self) -> miette::Result<()> {
+        write_and_apply_sandbox_policy(&self.sandbox, &self.path, &self.prior).await
+    }
+}
+
 /// Per-agent codegen outputs. Source of truth for guard tests.
 ///
 /// Every file produced by [`crate::run_single_agent_codegen`] MUST
