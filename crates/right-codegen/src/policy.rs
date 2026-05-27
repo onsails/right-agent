@@ -911,3 +911,133 @@ network_policies:
             serde_saphyr::from_str(&policy).expect("policy with dynamic IP must be valid YAML");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Provider-managed endpoint append/strip
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum PolicyConflict {
+    #[error(
+        "host {host} is configured as raw tunnel (tls: skip) — cannot terminate for substitution"
+    )]
+    RawTunnel { host: String },
+}
+
+/// Append a TLS-terminated endpoint for `host` tagged with the provider name,
+/// unless an entry for the same domain already exists.
+///
+/// Panics on conflict — use [`providers_append_checked`] when you need to
+/// handle conflicts explicitly.
+pub fn providers_append(
+    policy: &str,
+    provider_name: &str,
+    host: &str,
+    path_prefix: Option<&str>,
+) -> String {
+    providers_append_checked(policy, provider_name, host, path_prefix)
+        .unwrap_or_else(|e| panic!("policy conflict: {e:#}"))
+}
+
+/// Like [`providers_append`] but returns `Err(PolicyConflict)` instead of
+/// panicking when the host is already configured as a raw tunnel.
+pub fn providers_append_checked(
+    policy: &str,
+    provider_name: &str,
+    host: &str,
+    path_prefix: Option<&str>,
+) -> Result<String, PolicyConflict> {
+    let host_marker = format!("- domain: {host}");
+    if let Some(idx) = policy.find(&host_marker) {
+        let window_end = (idx + 400).min(policy.len());
+        let window = &policy[idx..window_end];
+        if window.contains("tls: skip") {
+            return Err(PolicyConflict::RawTunnel {
+                host: host.to_string(),
+            });
+        }
+        // Domain already present as a TLS-terminated endpoint — idempotent.
+        return Ok(policy.to_string());
+    }
+
+    let path_line = path_prefix
+        .map(|p| format!("      path: {p}\n"))
+        .unwrap_or_default();
+    let stanza = format!(
+        "    # managed-by: right-providers:{provider_name}\n    - domain: {host}\n      protocol: rest\n      access: full\n{path_line}"
+    );
+
+    let Some(endpoints_idx) = policy.find("endpoints:") else {
+        // No endpoints section at all — synthesise a minimal network block.
+        return Ok(format!("{policy}\nnetwork:\n  endpoints:\n{stanza}"));
+    };
+
+    // Find the byte offset of the end of the endpoints list so we can append
+    // inside it rather than after the whole section.
+    let after_endpoints = &policy[endpoints_idx..];
+    let list_end_line = after_endpoints
+        .lines()
+        .enumerate()
+        .skip(1) // skip the "endpoints:" line itself
+        .find(|(_, l)| !l.is_empty() && !l.starts_with(' '))
+        .map(|(i, _)| i)
+        .unwrap_or_else(|| after_endpoints.lines().count());
+
+    let mut byte_offset = endpoints_idx;
+    for (i, line) in after_endpoints.lines().enumerate() {
+        if i == list_end_line {
+            break;
+        }
+        byte_offset += line.len() + 1; // +1 for '\n'
+    }
+
+    let mut out = String::with_capacity(policy.len() + stanza.len());
+    out.push_str(&policy[..byte_offset]);
+    out.push_str(&stanza);
+    out.push_str(&policy[byte_offset..]);
+    Ok(out)
+}
+
+/// Remove the managed-by tag comment and its associated endpoint stanza for
+/// `provider_name` from the policy YAML string.
+pub fn providers_strip(policy: &str, provider_name: &str, host: &str) -> String {
+    let tag = format!("# managed-by: right-providers:{provider_name}");
+    let Some(tag_idx) = policy.find(&tag) else {
+        return policy.to_string();
+    };
+
+    // Start of the comment line (include leading indentation).
+    let line_start = policy[..tag_idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
+
+    // Walk forward past the comment line and all indented continuation lines
+    // that belong to this stanza (lines that start with spaces, i.e. deeper
+    // indented YAML content following the `- domain:` entry).
+    let mut end_byte = tag_idx + tag.len();
+    // Consume the rest of the tag line.
+    if let Some(nl) = policy[end_byte..].find('\n') {
+        end_byte += nl + 1;
+    }
+
+    // Consume subsequent lines that are part of this stanza (indented ≥ 4 spaces
+    // or blank).
+    loop {
+        let remaining = &policy[end_byte..];
+        let next_line = remaining.lines().next().unwrap_or("");
+        if next_line.is_empty() {
+            // Blank line — stop here to avoid eating unrelated blank separators.
+            break;
+        }
+        if next_line.starts_with("    ") {
+            end_byte += next_line.len() + 1;
+        } else {
+            break;
+        }
+    }
+
+    let _ = host; // host is available for future use (e.g. verify we're stripping the right entry)
+
+    let mut out = String::with_capacity(policy.len());
+    out.push_str(&policy[..line_start]);
+    out.push_str(&policy[end_byte..]);
+    out
+}

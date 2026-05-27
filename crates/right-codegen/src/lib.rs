@@ -26,3 +26,6 @@ pub use pipeline::{CodegenOutcome, run_agent_codegen};
 pub use process_compose::{ProcessComposeConfig, generate_process_compose};
 pub use settings::generate_settings;
 pub use skills::{BUILTIN_SKILL_LEGACY_NAMES, BUILTIN_SKILL_NAMES, install_builtin_skills};
+
+#[cfg(test)]
+mod policy_provider_tests;
