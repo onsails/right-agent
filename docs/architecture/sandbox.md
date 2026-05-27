@@ -11,6 +11,9 @@ Sandboxes are **persistent** — never deleted automatically. They live as long 
 ```
 Bot startup:
   ├─ Resolve OpenShell gateway endpoint (OPENSHELL_GATEWAY_ENDPOINT or openshell status)
+  ├─ openshell_preflight (right_openshell::preflight::openshell_preflight)
+  │   ├─ Spawn `openshell --version` — fail with CliTooOld if < MIN_OPENSHELL_VERSION
+  │   └─ gRPC Health → fail with GatewayTooOld if reported version is too old
   ├─ gRPC GetSandbox → READY?
   │   ├─ YES: resolve sandbox id + all sandbox-visible host IPs
   │   └─ NO: startup exits; creating a missing sandbox is an init/migration job

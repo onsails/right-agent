@@ -79,9 +79,9 @@ missing }` per agent which is surfaced to the dashboard.
 Two distinct paths into `policy.yaml`:
 
 **Path A — built-in providers.** Right does not mutate `policy.yaml`.
-With `providers_v2_enabled=true`, the OpenShell gateway contributes the
-profile's endpoints to the effective sandbox policy automatically when
-a provider is attached. Right's `policy.yaml` stays unchanged.
+The OpenShell gateway (v0.0.50+) contributes the profile's endpoints to
+the effective sandbox policy automatically when a provider is attached.
+Right's `policy.yaml` stays unchanged.
 
 **Path B — generic providers.** Right owns the `policy.yaml` mutation.
 On create or upstream-host change:
