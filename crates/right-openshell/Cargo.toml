@@ -32,6 +32,8 @@ which = { workspace = true }
 tonic-prost-build = "0.14"
 
 [dev-dependencies]
+right-agent-config = { path = "../right-agent-config" }
+right-codegen = { path = "../right-codegen" }
 tokio-stream = { version = "0.1", features = ["net"] }
 
 [[test]]
