@@ -103,7 +103,7 @@ impl OAuthFlowStatusStore {
     async fn update(&self, flow_id: &str, status: OAuthFlowStatus, message: Option<String>) {
         if let Some(entry) = self.inner.lock().await.get_mut(flow_id) {
             entry.status = status;
-            entry.message = message.map(|detail| compact_dashboard_error(&detail));
+            entry.message = message;
             entry.updated_at = chrono::Utc::now();
         }
     }
@@ -123,6 +123,9 @@ pub(crate) fn compact_dashboard_error(detail: &str) -> String {
         && let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
         && let Some(error) = value.get("error").and_then(|error| error.as_str())
     {
+        if contains_secret_like_word(error) {
+            return "OAuth error details were redacted.".to_string();
+        }
         return format!("{SERVER_ERROR_PREFIX}{error}");
     }
 
@@ -139,6 +142,7 @@ fn contains_secret_like_word(detail: &str) -> bool {
         "api_key",
         "authorization",
         "client_secret",
+        "code_verifier",
         "password",
         "secret",
         "token",
@@ -183,6 +187,21 @@ mod tests {
         let status = store.status("flow-1").await;
         assert_eq!(status.status, OAuthFlowStatus::Succeeded);
         assert_eq!(status.message, None);
+    }
+
+    #[tokio::test]
+    async fn mark_failed_preserves_already_sanitized_dashboard_message() {
+        let store = OAuthFlowStatusStore::default();
+        store
+            .insert_pending("flow-1".to_string(), "composio".to_string())
+            .await;
+        let message = "Token exchange completed, but MCP readiness failed: Server error (502): mcp_reconnect_failed";
+
+        store.mark_failed("flow-1", message).await;
+
+        let status = store.status("flow-1").await;
+        assert_eq!(status.status, OAuthFlowStatus::Failed);
+        assert_eq!(status.message.as_deref(), Some(message));
     }
 
     #[tokio::test]
@@ -232,5 +251,23 @@ mod tests {
         assert!(!message.contains("secret"));
         assert!(!message.contains("access_token"));
         assert!(!message.contains("Unavailable resource"));
+    }
+
+    #[test]
+    fn compact_dashboard_error_redacts_secret_like_json_error() {
+        let message =
+            compact_dashboard_error("Server error (502): {\"error\":\"access_token_secret\"}");
+
+        assert_eq!(message, "OAuth error details were redacted.");
+        assert!(!message.contains("access_token_secret"));
+    }
+
+    #[test]
+    fn compact_dashboard_error_redacts_code_verifier() {
+        let message = compact_dashboard_error("OAuth failed: code_verifier=abc123");
+
+        assert_eq!(message, "OAuth error details were redacted.");
+        assert!(!message.contains("code_verifier"));
+        assert!(!message.contains("abc123"));
     }
 }

@@ -15,7 +15,6 @@ pub mod memory_alerts;
 pub mod mention;
 pub(crate) mod model_command;
 pub mod oauth_callback;
-#[allow(dead_code)]
 pub(crate) mod oauth_status;
 pub(crate) mod progress;
 pub mod session;
