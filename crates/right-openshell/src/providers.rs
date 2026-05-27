@@ -358,7 +358,15 @@ pub async fn list_attached(
         .map_err(|e| ProviderError::Grpc(format!("parse attached: {e:#}")))?;
     let mut names = Vec::new();
     for v in arr {
-        if let Some(n) = v.get("name").and_then(|s| s.as_str()) {
+        // OpenShell exposes provider name under `metadata.name` (matches
+        // `list_providers_by_prefix` and `provider_from_json`); fall back to
+        // a flat `name` for older CLI shapes the CI suite hasn't pinned yet.
+        let name = v
+            .get("metadata")
+            .and_then(|m| m.get("name"))
+            .and_then(|n| n.as_str())
+            .or_else(|| v.get("name").and_then(|s| s.as_str()));
+        if let Some(n) = name {
             names.push(n.to_string());
         }
     }

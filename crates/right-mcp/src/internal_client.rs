@@ -300,7 +300,7 @@ pub struct ProviderListRequest<'a> {
     pub agent: &'a str,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(serde::Serialize)]
 pub struct ProviderCreateRequest<'a> {
     pub agent: &'a str,
     #[serde(rename = "type")]
@@ -310,6 +310,18 @@ pub struct ProviderCreateRequest<'a> {
     pub credential: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generic: Option<ProviderCreateGenericArg<'a>>,
+}
+
+impl std::fmt::Debug for ProviderCreateRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderCreateRequest")
+            .field("agent", &self.agent)
+            .field("type_", &self.type_)
+            .field("label", &self.label)
+            .field("credential", &"<redacted>")
+            .field("generic", &self.generic)
+            .finish()
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -322,11 +334,21 @@ pub struct ProviderCreateGenericArg<'a> {
     pub upstream_path_prefix: Option<&'a str>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(serde::Serialize)]
 pub struct ProviderRotateRequest<'a> {
     pub agent: &'a str,
     pub name: &'a str,
     pub credential: &'a str,
+}
+
+impl std::fmt::Debug for ProviderRotateRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderRotateRequest")
+            .field("agent", &self.agent)
+            .field("name", &self.name)
+            .field("credential", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, serde::Serialize)]

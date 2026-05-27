@@ -55,6 +55,17 @@ fn append_provider_endpoint_conflicting_domain_raw_tunnel_returns_err() {
 }
 
 #[test]
+fn append_provider_endpoint_prefix_collision_is_not_idempotent() {
+    // Regression: a substring host-marker match used to treat
+    // "api.acme.com.evil.tld" as collision-matching "api.acme.com",
+    // causing the real endpoint to be silently skipped.
+    let policy = "network:\n  endpoints:\n    - domain: api.acme.com.evil.tld\n      protocol: rest\n      access: full\n";
+    let after = providers_append(policy, "myagent-acme", "api.acme.com", None);
+    assert!(after.contains("- domain: api.acme.com\n"));
+    assert!(after.contains("managed-by: right-providers:myagent-acme"));
+}
+
+#[test]
 fn strip_provider_endpoint_removes_tagged() {
     let after = providers_strip(POLICY_WITH_ONE_PROVIDER, "myagent-acme", "api.acme.com");
     assert!(!after.contains("managed-by: right-providers:myagent-acme"));
