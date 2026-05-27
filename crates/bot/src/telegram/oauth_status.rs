@@ -35,18 +35,21 @@ struct OAuthFlowStatusEntry {
     status: OAuthFlowStatus,
     message: Option<String>,
     started_at: Instant,
+    updated_at_instant: Instant,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl OAuthFlowStatusStore {
     pub(crate) async fn insert_pending(&self, flow_id: String, server_name: String) {
+        let now = Instant::now();
         self.inner.lock().await.insert(
             flow_id,
             OAuthFlowStatusEntry {
                 server_name,
                 status: OAuthFlowStatus::Pending,
                 message: None,
-                started_at: Instant::now(),
+                started_at: now,
+                updated_at_instant: now,
                 updated_at: chrono::Utc::now(),
             },
         );
@@ -76,6 +79,7 @@ impl OAuthFlowStatusStore {
 
         entry.status = OAuthFlowStatus::Failed;
         entry.message = Some(message.into());
+        entry.updated_at_instant = Instant::now();
         entry.updated_at = chrono::Utc::now();
         true
     }
@@ -111,6 +115,7 @@ impl OAuthFlowStatusStore {
             {
                 entry.status = OAuthFlowStatus::Expired;
                 entry.message = Some("OAuth flow expired before completion.".to_string());
+                entry.updated_at_instant = now;
                 entry.updated_at = updated_at;
                 expired += 1;
             }
@@ -119,8 +124,8 @@ impl OAuthFlowStatusStore {
         expired
     }
 
-    /// Drop entries in a terminal state (`Succeeded`, `Failed`, `Expired`) whose
-    /// `started_at` is older than `grace`. Pending entries are never removed by
+    /// Drop entries in a terminal state (`Succeeded`, `Failed`, `Expired`) whose last
+    /// state update is older than `grace`. Pending entries are never removed by
     /// this method -- expiry is handled separately by
     /// `expire_pending_older_than`.
     ///
@@ -136,7 +141,7 @@ impl OAuthFlowStatusStore {
                 entry.status,
                 OAuthFlowStatus::Succeeded | OAuthFlowStatus::Failed | OAuthFlowStatus::Expired
             );
-            !(is_terminal && now.duration_since(entry.started_at) > grace)
+            !(is_terminal && now.duration_since(entry.updated_at_instant) > grace)
         });
 
         before - inner.len()
@@ -146,6 +151,7 @@ impl OAuthFlowStatusStore {
         if let Some(entry) = self.inner.lock().await.get_mut(flow_id) {
             entry.status = status;
             entry.message = message;
+            entry.updated_at_instant = Instant::now();
             entry.updated_at = chrono::Utc::now();
         }
     }
@@ -154,6 +160,13 @@ impl OAuthFlowStatusStore {
     async fn force_started_at_for_test(&self, flow_id: &str, started_at: Instant) {
         if let Some(entry) = self.inner.lock().await.get_mut(flow_id) {
             entry.started_at = started_at;
+        }
+    }
+
+    #[cfg(test)]
+    async fn force_updated_at_instant_for_test(&self, flow_id: &str, updated_at: Instant) {
+        if let Some(entry) = self.inner.lock().await.get_mut(flow_id) {
+            entry.updated_at_instant = updated_at;
         }
     }
 }
@@ -316,7 +329,7 @@ mod tests {
             .await;
         store.mark_succeeded("done").await;
         store
-            .force_started_at_for_test("done", Instant::now() - Duration::from_secs(120))
+            .force_updated_at_instant_for_test("done", Instant::now() - Duration::from_secs(120))
             .await;
 
         store
@@ -337,6 +350,27 @@ mod tests {
         let pending_status = store.status("still-pending").await;
         assert_eq!(pending_status.status, OAuthFlowStatus::Pending);
         assert_eq!(pending_status.server_name.as_deref(), Some("composio"));
+    }
+
+    #[tokio::test]
+    async fn purge_keeps_recently_terminal_flow_even_when_started_long_ago() {
+        let store = OAuthFlowStatusStore::default();
+        store
+            .insert_pending("slow-flow".to_string(), "composio".to_string())
+            .await;
+        store
+            .force_started_at_for_test("slow-flow", Instant::now() - Duration::from_secs(120))
+            .await;
+        store.mark_succeeded("slow-flow").await;
+
+        let purged = store
+            .purge_terminal_older_than(Duration::from_secs(60))
+            .await;
+
+        assert_eq!(purged, 0);
+        let status = store.status("slow-flow").await;
+        assert_eq!(status.status, OAuthFlowStatus::Succeeded);
+        assert_eq!(status.server_name.as_deref(), Some("composio"));
     }
 
     #[tokio::test]
