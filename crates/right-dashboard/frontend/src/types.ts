@@ -509,3 +509,34 @@ export interface SandboxProcess {
   rss_bytes: number
   command: string
 }
+
+export interface ProviderView {
+  name: string
+  type: string
+  label: string | null
+  env_var: string
+  generic: ProviderGenericBody | null
+  updated_at: string | null
+  status: { kind: 'healthy' } | { kind: 'missing' } | { kind: 'gateway_error'; message: string }
+}
+
+export interface ProviderProfileView {
+  type: string
+  env_var: string
+  display_name: string
+  category: string
+}
+
+export interface ProviderGenericBody {
+  env_var: string
+  header_name?: string
+  upstream_host: string
+  upstream_path_prefix?: string
+}
+
+export interface ProviderCreateBody {
+  type: string
+  label?: string
+  credential: string
+  generic?: ProviderGenericBody
+}
