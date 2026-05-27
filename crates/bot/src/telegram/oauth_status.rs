@@ -61,6 +61,25 @@ impl OAuthFlowStatusStore {
             .await;
     }
 
+    pub(crate) async fn mark_failed_if_pending(
+        &self,
+        flow_id: &str,
+        message: impl Into<String>,
+    ) -> bool {
+        let mut inner = self.inner.lock().await;
+        let Some(entry) = inner.get_mut(flow_id) else {
+            return false;
+        };
+        if entry.status != OAuthFlowStatus::Pending {
+            return false;
+        }
+
+        entry.status = OAuthFlowStatus::Failed;
+        entry.message = Some(message.into());
+        entry.updated_at = chrono::Utc::now();
+        true
+    }
+
     pub(crate) async fn status(&self, flow_id: &str) -> OAuthFlowStatusResponse {
         match self.inner.lock().await.get(flow_id) {
             Some(entry) => OAuthFlowStatusResponse {
@@ -202,6 +221,41 @@ mod tests {
         let status = store.status("flow-1").await;
         assert_eq!(status.status, OAuthFlowStatus::Failed);
         assert_eq!(status.message.as_deref(), Some(message));
+    }
+
+    #[tokio::test]
+    async fn mark_failed_if_pending_updates_pending_flow() {
+        let store = OAuthFlowStatusStore::default();
+        store
+            .insert_pending("flow-1".to_string(), "composio".to_string())
+            .await;
+
+        let updated = store
+            .mark_failed_if_pending("flow-1", "provider denied")
+            .await;
+
+        assert!(updated);
+        let status = store.status("flow-1").await;
+        assert_eq!(status.status, OAuthFlowStatus::Failed);
+        assert_eq!(status.message.as_deref(), Some("provider denied"));
+    }
+
+    #[tokio::test]
+    async fn mark_failed_if_pending_does_not_overwrite_succeeded_flow() {
+        let store = OAuthFlowStatusStore::default();
+        store
+            .insert_pending("flow-1".to_string(), "composio".to_string())
+            .await;
+        store.mark_succeeded("flow-1").await;
+
+        let updated = store
+            .mark_failed_if_pending("flow-1", "provider denied")
+            .await;
+
+        assert!(!updated);
+        let status = store.status("flow-1").await;
+        assert_eq!(status.status, OAuthFlowStatus::Succeeded);
+        assert_eq!(status.message, None);
     }
 
     #[tokio::test]
