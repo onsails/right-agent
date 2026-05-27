@@ -3,6 +3,7 @@
 #![warn(unreachable_pub)]
 
 pub mod openshell;
+pub mod providers;
 #[allow(clippy::large_enum_variant)]
 pub mod openshell_proto {
     pub mod openshell {
