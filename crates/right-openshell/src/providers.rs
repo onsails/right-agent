@@ -68,6 +68,72 @@ pub enum ProviderCategory {
     Other,
 }
 
+/// Return the hardcoded catalog of known provider profiles.
+///
+/// `claude` and `outlook` are intentionally excluded:
+/// - `claude` is the built-in Claude Code identity — not user-configurable.
+/// - `outlook` was found on the gateway but is out of scope for Right.
+///
+/// `generic` is included as an escape hatch for any provider not in the list.
+pub fn profile_catalog() -> Vec<ProviderProfile> {
+    vec![
+        ProviderProfile {
+            type_slug: "anthropic".into(),
+            display_name: "Anthropic API".into(),
+            category: ProviderCategory::Inference,
+            env_var: "ANTHROPIC_API_KEY".into(),
+        },
+        ProviderProfile {
+            type_slug: "openai".into(),
+            display_name: "OpenAI".into(),
+            category: ProviderCategory::Inference,
+            env_var: "OPENAI_API_KEY".into(),
+        },
+        ProviderProfile {
+            type_slug: "nvidia".into(),
+            display_name: "NVIDIA".into(),
+            category: ProviderCategory::Inference,
+            env_var: "NVIDIA_API_KEY".into(),
+        },
+        ProviderProfile {
+            type_slug: "codex".into(),
+            display_name: "Codex".into(),
+            category: ProviderCategory::Agent,
+            env_var: "OPENAI_API_KEY".into(),
+        },
+        ProviderProfile {
+            type_slug: "copilot".into(),
+            display_name: "GitHub Copilot".into(),
+            category: ProviderCategory::Agent,
+            env_var: "COPILOT_GITHUB_TOKEN".into(),
+        },
+        ProviderProfile {
+            type_slug: "opencode".into(),
+            display_name: "OpenCode".into(),
+            category: ProviderCategory::Agent,
+            env_var: "OPENCODE_API_KEY".into(),
+        },
+        ProviderProfile {
+            type_slug: "github".into(),
+            display_name: "GitHub".into(),
+            category: ProviderCategory::SourceControl,
+            env_var: "GITHUB_TOKEN".into(),
+        },
+        ProviderProfile {
+            type_slug: "gitlab".into(),
+            display_name: "GitLab".into(),
+            category: ProviderCategory::SourceControl,
+            env_var: "GITLAB_TOKEN".into(),
+        },
+        ProviderProfile {
+            type_slug: "generic".into(),
+            display_name: "Generic".into(),
+            category: ProviderCategory::Other,
+            env_var: String::new(),
+        },
+    ]
+}
+
 /// Return value of [`ensure_v2_enabled`].
 pub struct V2EnableResult {
     pub was_already_on: bool,
@@ -392,6 +458,50 @@ pub async fn get_sandbox_provider_environment(
 // ────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_excludes_claude() {
+        let catalog = profile_catalog();
+        assert!(!catalog.iter().any(|p| p.type_slug == "claude"));
+    }
+
+    #[test]
+    fn catalog_has_8_built_in_plus_generic() {
+        let catalog = profile_catalog();
+        let built_in: Vec<&str> = catalog
+            .iter()
+            .filter(|p| p.type_slug != "generic")
+            .map(|p| p.type_slug.as_str())
+            .collect();
+        assert_eq!(built_in.len(), 8);
+        for expected in [
+            "anthropic",
+            "codex",
+            "copilot",
+            "github",
+            "gitlab",
+            "nvidia",
+            "openai",
+            "opencode",
+        ] {
+            assert!(built_in.contains(&expected), "missing {expected}");
+        }
+        assert!(catalog.iter().any(|p| p.type_slug == "generic"));
+    }
+
+    #[test]
+    fn catalog_anthropic_uses_anthropic_api_key() {
+        let entry = profile_catalog()
+            .into_iter()
+            .find(|p| p.type_slug == "anthropic")
+            .unwrap();
+        assert_eq!(entry.env_var, "ANTHROPIC_API_KEY");
+    }
+}
 
 async fn get_v2_flag(endpoint: &crate::openshell::GatewayEndpoint) -> Result<bool, ProviderError> {
     let mut cmd = Command::new("openshell");
