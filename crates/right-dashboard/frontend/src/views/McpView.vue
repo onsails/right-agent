@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   mcpAdd,
   mcpDetect,
+  mcpOAuthStatus,
   mcpRemove,
   mcpServers,
   mcpSetHeaders,
@@ -12,6 +13,7 @@ import type {
   McpAuthMode,
   McpDetectResponse,
   McpHeaderInput,
+  McpOAuthStatusResponse,
   McpServerSummary,
   McpServersResponse,
 } from '../types'
@@ -19,11 +21,14 @@ import SecretInput from '../components/SecretInput.vue'
 import {
   canSaveServer as canSaveServerState,
   createDetectionRequest,
+  isOAuthTerminalStatus,
   nonEmptyHeaders,
   openOAuthUrl,
+  oauthStatusMessage,
   resetAddFlowState,
   seedHeaderRows,
   shouldApplyDetectionResult,
+  shouldApplyOAuthPollResult,
 } from './mcpViewModel'
 
 const servers = ref<McpServersResponse | null>(null)
@@ -38,6 +43,9 @@ const addHeaderRows = ref<McpHeaderInput[]>([{ name: 'Authorization', value: '' 
 const editingServer = ref<string | null>(null)
 const serverHeaderRows = ref<Record<string, McpHeaderInput[]>>({})
 const busyAction = ref<string | null>(null)
+const oauthFlows = ref<Record<string, string>>({})
+const oauthStatuses = ref<Record<string, McpOAuthStatusResponse>>({})
+const oauthPollTimers = new Map<string, ReturnType<typeof window.setTimeout>>()
 const detectingAddAuth = ref(false)
 let addFormGeneration = 0
 let latestDetectionRequestId = 0
@@ -53,6 +61,13 @@ const canSaveServer = computed(() => canSaveServerState({
 
 onMounted(() => {
   void refresh()
+})
+
+onBeforeUnmount(() => {
+  for (const timer of oauthPollTimers.values()) {
+    window.clearTimeout(timer)
+  }
+  oauthPollTimers.clear()
 })
 
 watch(url, () => {
@@ -195,6 +210,18 @@ async function startOAuth(server: McpServerSummary): Promise<void> {
   error.value = null
   try {
     const response = await mcpStartOAuth(server.name)
+    oauthFlows.value = { ...oauthFlows.value, [server.name]: response.flow_id }
+    oauthStatuses.value = {
+      ...oauthStatuses.value,
+      [server.name]: {
+        flow_id: response.flow_id,
+        server_name: server.name,
+        status: 'pending',
+        message: null,
+        updated_at: new Date().toISOString(),
+      },
+    }
+    scheduleOAuthPoll(server.name, response.flow_id)
     openOAuthUrl(response.auth_url, {
       openTelegramLink: window.Telegram?.WebApp?.openLink?.bind(window.Telegram.WebApp),
       assignLocation: (authUrl) => {
@@ -205,6 +232,54 @@ async function startOAuth(server: McpServerSummary): Promise<void> {
     error.value = err instanceof Error ? err.message : 'Failed to start OAuth'
   } finally {
     busyAction.value = null
+  }
+}
+
+function scheduleOAuthPoll(serverName: string, flowId: string): void {
+  clearOAuthPoll(serverName)
+  const timer = window.setTimeout(() => {
+    void pollOAuthStatus(serverName, flowId)
+  }, 1500)
+  oauthPollTimers.set(serverName, timer)
+}
+
+function clearOAuthPoll(serverName: string): void {
+  const timer = oauthPollTimers.get(serverName)
+  if (timer !== undefined) {
+    window.clearTimeout(timer)
+    oauthPollTimers.delete(serverName)
+  }
+}
+
+async function pollOAuthStatus(serverName: string, flowId: string): Promise<void> {
+  try {
+    const response = await mcpOAuthStatus(flowId)
+    if (!shouldApplyOAuthPollResult(response.flow_id, oauthFlows.value[serverName])) {
+      return
+    }
+    oauthStatuses.value = { ...oauthStatuses.value, [serverName]: response }
+    if (isOAuthTerminalStatus(response.status)) {
+      clearOAuthPoll(serverName)
+      await refresh()
+      return
+    }
+    scheduleOAuthPoll(serverName, flowId)
+  } catch (err) {
+    if (!shouldApplyOAuthPollResult(flowId, oauthFlows.value[serverName])) {
+      return
+    }
+    oauthStatuses.value = {
+      ...oauthStatuses.value,
+      [serverName]: {
+        flow_id: flowId,
+        server_name: serverName,
+        status: 'failed',
+        message: err instanceof Error ? err.message : 'OAuth status unavailable',
+        updated_at: new Date().toISOString(),
+      },
+    }
+    clearOAuthPoll(serverName)
+    await refresh()
   }
 }
 
@@ -374,6 +449,13 @@ function resetAdd(): void {
             {{ busyAction === `remove:${server.name}` ? 'Removing' : 'Remove' }}
           </button>
         </div>
+        <p
+          v-if="oauthStatuses[server.name]"
+          class="notice inline oauth-status"
+          :class="`oauth-status-${oauthStatuses[server.name].status}`"
+        >
+          {{ oauthStatusMessage(oauthStatuses[server.name]) }}
+        </p>
 
         <div v-if="editingServer === server.name" class="server-header-editor">
           <div v-for="(header, index) in rowsForServer(server.name)" :key="index" class="header-row">
@@ -486,6 +568,20 @@ function resetAdd(): void {
 .row-actions,
 .server-header-editor {
   grid-column: 1 / -1;
+}
+
+.oauth-status {
+  grid-column: 1 / -1;
+}
+
+.oauth-status-succeeded {
+  border-color: rgba(25, 135, 84, 0.35);
+}
+
+.oauth-status-failed,
+.oauth-status-expired,
+.oauth-status-unknown {
+  border-color: rgba(176, 42, 55, 0.35);
 }
 
 .server-header-editor {
