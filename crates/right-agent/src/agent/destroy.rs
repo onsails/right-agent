@@ -264,6 +264,35 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         result.backup_path = Some(backup_path);
     }
 
+    // Cascade-delete provider entries from the gateway (best-effort).
+    // Failure is logged but non-fatal — destroy proceeds regardless.
+    if let Some(sandbox) = config.as_ref().and_then(|c| c.sandbox.as_ref()) {
+        if matches!(sandbox.mode, right_agent_config::SandboxMode::Openshell)
+            && !sandbox.providers.is_empty()
+        {
+            match right_openshell::openshell::resolve_gateway_endpoint().await {
+                Ok(endpoint) => {
+                    for entry in &sandbox.providers {
+                        if let Err(e) =
+                            right_openshell::providers::delete_provider(&endpoint, &entry.name)
+                                .await
+                        {
+                            tracing::warn!(
+                                name = %entry.name,
+                                error = %format!("{e:#}"),
+                                "failed to delete provider during destroy; continuing"
+                            );
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    error = %format!("{e:#}"),
+                    "could not resolve gateway endpoint for provider cleanup; continuing destroy"
+                ),
+            }
+        }
+    }
+
     if is_sandboxed {
         let explicit_sandbox_name = config
             .as_ref()
