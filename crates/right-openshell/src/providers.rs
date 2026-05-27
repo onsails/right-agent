@@ -1,14 +1,11 @@
-//! OpenShell Provider gRPC + CLI wrappers.
+//! OpenShell Provider gRPC wrappers.
 //!
 //! This module is the SOLE owner of the OpenShell Provider client.
-//! All Provider RPCs and `openshell provider` / `openshell sandbox provider`
-//! CLI invocations go through here (see ARCHITECTURE.md).
+//! All Provider RPCs go through here (see ARCHITECTURE.md).
 
 use std::collections::HashMap;
-use std::process::Stdio;
 
 use thiserror::Error;
-use tokio::process::Command;
 use tonic::transport::Channel;
 
 use crate::openshell_proto::openshell::datamodel::v1 as datamodel;
@@ -22,16 +19,8 @@ pub enum ProviderError {
     GatewayUnreachable(miette::ErrReport),
     #[error("openshell gRPC: {0:#}")]
     Grpc(String),
-    #[error("openshell CLI {cmd:?} exited {status}: {stderr}")]
-    Cli {
-        cmd: String,
-        status: i32,
-        stderr: String,
-    },
     #[error("provider \"{0}\" not found")]
     NotFound(String),
-    #[error("providers_v2_enabled is not on; run `right up` to enable")]
-    V2NotEnabled,
     #[error("invalid provider: {0}")]
     Invalid(String),
 }
@@ -208,60 +197,6 @@ fn proto_provider_from_spec(spec: &ProviderSpec) -> datamodel::Provider {
     }
 }
 
-/// Return value of [`ensure_v2_enabled`].
-pub struct V2EnableResult {
-    pub was_already_on: bool,
-}
-
-/// Ensure `providers_v2_enabled=true` on the gateway. Idempotent.
-///
-/// Reads the current flag first; if already `true`, returns without running
-/// `settings set`.  A second call on the same gateway will always see
-/// `was_already_on = true`.
-pub async fn ensure_v2_enabled(
-    endpoint: &crate::openshell::GatewayEndpoint,
-) -> Result<V2EnableResult, ProviderError> {
-    let current = get_v2_flag(endpoint).await?;
-    if current {
-        return Ok(V2EnableResult {
-            was_already_on: true,
-        });
-    }
-    let mut cmd = Command::new("openshell");
-    cmd.args([
-        "settings",
-        "set",
-        "--global",
-        "--key",
-        "providers_v2_enabled",
-        "--value",
-        "true",
-        "--yes",
-    ]);
-    endpoint.apply_to_cli(&mut cmd);
-    let output = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| ProviderError::Cli {
-            cmd: "openshell settings set".into(),
-            status: -1,
-            stderr: e.to_string(),
-        })?;
-    if !output.status.success() {
-        return Err(ProviderError::Cli {
-            cmd: "openshell settings set".into(),
-            status: output.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
-    Ok(V2EnableResult {
-        was_already_on: false,
-    })
-}
-
 // ────────────────────────────────────────────────────────────────────────────
 // CRUD wrappers
 // ────────────────────────────────────────────────────────────────────────────
@@ -336,27 +271,31 @@ pub async fn delete_provider(
 }
 
 pub async fn list_providers_by_prefix(
-    endpoint: &crate::openshell::GatewayEndpoint,
+    client: &mut OpenShellClient<Channel>,
     prefix: &str,
 ) -> Result<Vec<Provider>, ProviderError> {
-    let mut cmd = Command::new("openshell");
-    cmd.args(["provider", "list", "--output", "json"]);
-    endpoint.apply_to_cli(&mut cmd);
-    let out = run_cli(cmd, "openshell provider list").await?;
-    let arr: Vec<serde_json::Value> = serde_json::from_slice(&out)
-        .map_err(|e| ProviderError::Grpc(format!("parse provider list: {e:#}")))?;
-    let mut providers = Vec::new();
-    for v in arr {
-        if let Some(name) = v
-            .get("metadata")
-            .and_then(|m| m.get("name"))
-            .and_then(|n| n.as_str())
-            && name.starts_with(prefix)
-        {
-            providers.push(provider_from_json(&v)?);
+    let resp = client
+        .list_providers(proto_v1::ListProvidersRequest {
+            // 0 = server default (full list); explicit pagination is not
+            // required for typical per-agent fan-out (< few dozen).
+            limit: 0,
+            offset: 0,
+        })
+        .await
+        .map_err(|s| classify_status(s, "<list>"))?
+        .into_inner();
+    let mut out = Vec::with_capacity(resp.providers.len());
+    for p in resp.providers {
+        let name = p
+            .metadata
+            .as_ref()
+            .map(|m| m.name.as_str())
+            .unwrap_or_default();
+        if name.starts_with(prefix) {
+            out.push(provider_from_proto(p));
         }
     }
-    Ok(providers)
+    Ok(out)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -364,158 +303,59 @@ pub async fn list_providers_by_prefix(
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Attach a provider to a sandbox so the sandbox can use its credentials.
-///
-/// Note: the JSON shape of `openshell sandbox provider list` has not been
-/// confirmed against a live gateway. JSON parsing in `list_attached` will need
-/// CI verification (Task 10b).
 pub async fn attach_to_sandbox(
-    endpoint: &crate::openshell::GatewayEndpoint,
+    client: &mut OpenShellClient<Channel>,
     sandbox_name: &str,
     provider_name: &str,
 ) -> Result<(), ProviderError> {
-    let mut cmd = Command::new("openshell");
-    cmd.args(["sandbox", "provider", "attach", sandbox_name, provider_name]);
-    endpoint.apply_to_cli(&mut cmd);
-    let _ = run_cli(cmd, "openshell sandbox provider attach").await?;
+    let req = proto_v1::AttachSandboxProviderRequest {
+        sandbox_name: sandbox_name.to_string(),
+        provider_name: provider_name.to_string(),
+        expected_resource_version: 0,
+    };
+    client
+        .attach_sandbox_provider(req)
+        .await
+        .map_err(|s| classify_status(s, provider_name))?;
     Ok(())
 }
 
 /// Detach a provider from a sandbox.
 pub async fn detach_from_sandbox(
-    endpoint: &crate::openshell::GatewayEndpoint,
+    client: &mut OpenShellClient<Channel>,
     sandbox_name: &str,
     provider_name: &str,
 ) -> Result<(), ProviderError> {
-    let mut cmd = Command::new("openshell");
-    cmd.args(["sandbox", "provider", "detach", sandbox_name, provider_name]);
-    endpoint.apply_to_cli(&mut cmd);
-    let out = cmd
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
-        .output()
+    let req = proto_v1::DetachSandboxProviderRequest {
+        sandbox_name: sandbox_name.to_string(),
+        provider_name: provider_name.to_string(),
+        expected_resource_version: 0,
+    };
+    client
+        .detach_sandbox_provider(req)
         .await
-        .map_err(|e| ProviderError::Cli {
-            cmd: "openshell sandbox provider detach".into(),
-            status: -1,
-            stderr: e.to_string(),
-        })?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr_is_not_found(&stderr) {
-            return Err(ProviderError::NotFound(provider_name.to_string()));
-        }
-        return Err(ProviderError::Cli {
-            cmd: "openshell sandbox provider detach".into(),
-            status: out.status.code().unwrap_or(-1),
-            stderr: stderr.into_owned(),
-        });
-    }
+        .map_err(|s| classify_status(s, provider_name))?;
     Ok(())
 }
 
 /// List provider names currently attached to a sandbox.
-///
-/// Note: JSON field path (`name`) assumed from `openshell sandbox provider list
-/// --output json`. CI verification required (Task 10b).
 pub async fn list_attached(
-    endpoint: &crate::openshell::GatewayEndpoint,
+    client: &mut OpenShellClient<Channel>,
     sandbox_name: &str,
 ) -> Result<Vec<String>, ProviderError> {
-    let mut cmd = Command::new("openshell");
-    cmd.args([
-        "sandbox",
-        "provider",
-        "list",
-        sandbox_name,
-        "--output",
-        "json",
-    ]);
-    endpoint.apply_to_cli(&mut cmd);
-    let out = run_cli(cmd, "openshell sandbox provider list").await?;
-    let arr: Vec<serde_json::Value> = serde_json::from_slice(&out)
-        .map_err(|e| ProviderError::Grpc(format!("parse attached: {e:#}")))?;
-    let mut names = Vec::new();
-    for v in arr {
-        // OpenShell exposes provider name under `metadata.name` (matches
-        // `list_providers_by_prefix` and `provider_from_json`); fall back to
-        // a flat `name` for older CLI shapes the CI suite hasn't pinned yet.
-        let name = v
-            .get("metadata")
-            .and_then(|m| m.get("name"))
-            .and_then(|n| n.as_str())
-            .or_else(|| v.get("name").and_then(|s| s.as_str()));
-        if let Some(n) = name {
-            names.push(n.to_string());
-        }
-    }
-    Ok(names)
-}
-
-/// Return `true` if a CLI failure stderr indicates the resource was not found /
-/// not attached. Used by `get_provider`, `delete_provider`, and
-/// `detach_from_sandbox` to map "already absent" exits to `NotFound`.
-fn stderr_is_not_found(stderr: &str) -> bool {
-    stderr.contains("not found") || stderr.contains("NotFound") || stderr.contains("not attached")
-}
-
-async fn run_cli(mut cmd: Command, label: &str) -> Result<Vec<u8>, ProviderError> {
-    let out = cmd
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
-        .output()
+    let req = proto_v1::ListSandboxProvidersRequest {
+        sandbox_name: sandbox_name.to_string(),
+    };
+    let resp = client
+        .list_sandbox_providers(req)
         .await
-        .map_err(|e| ProviderError::Cli {
-            cmd: label.into(),
-            status: -1,
-            stderr: e.to_string(),
-        })?;
-    if !out.status.success() {
-        return Err(ProviderError::Cli {
-            cmd: label.into(),
-            status: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        });
-    }
-    Ok(out.stdout)
-}
-
-#[allow(dead_code)] // removed in Task 8 when list_providers_by_prefix is migrated
-fn parse_provider_json(bytes: &[u8]) -> Result<Provider, ProviderError> {
-    let v: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|e| ProviderError::Grpc(format!("parse provider: {e:#}")))?;
-    provider_from_json(&v)
-}
-
-fn provider_from_json(v: &serde_json::Value) -> Result<Provider, ProviderError> {
-    let name = v
-        .get("metadata")
-        .and_then(|m| m.get("name"))
-        .and_then(|n| n.as_str())
-        .ok_or_else(|| ProviderError::Grpc("missing metadata.name".into()))?;
-    let type_ = v
-        .get("type")
-        .and_then(|t| t.as_str())
-        .ok_or_else(|| ProviderError::Grpc("missing type".into()))?;
-    let mut config = HashMap::new();
-    if let Some(obj) = v.get("config").and_then(|c| c.as_object()) {
-        for (k, val) in obj {
-            if let Some(s) = val.as_str() {
-                config.insert(k.clone(), s.to_string());
-            }
-        }
-    }
-    let updated_at = v
-        .get("metadata")
-        .and_then(|m| m.get("updated_at"))
-        .and_then(|u| u.as_str())
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&chrono::Utc));
-    Ok(Provider {
-        name: name.to_string(),
-        type_: type_.to_string(),
-        config,
-        updated_at,
-    })
+        .map_err(|s| classify_status(s, sandbox_name))?
+        .into_inner();
+    Ok(resp
+        .providers
+        .into_iter()
+        .filter_map(|p| p.metadata.map(|m| m.name))
+        .collect())
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -528,20 +368,16 @@ fn provider_from_json(v: &serde_json::Value) -> Result<Provider, ProviderError> 
 /// `openshell:resolve:env:v<digits>_<NAME>`) — never log them. They look
 /// secret-shaped to operators and create false alarms in audits.
 pub async fn get_sandbox_provider_environment(
+    client: &mut OpenShellClient<Channel>,
     sandbox_id: &str,
 ) -> Result<HashMap<String, String>, ProviderError> {
-    let mtls_dir = crate::openshell::default_mtls_dir();
-    let mut client = crate::openshell::connect_grpc(&mtls_dir)
-        .await
-        .map_err(ProviderError::GatewayUnreachable)?;
+    let req = proto_v1::GetSandboxProviderEnvironmentRequest {
+        sandbox_id: sandbox_id.to_string(),
+    };
     let resp = client
-        .get_sandbox_provider_environment(
-            crate::openshell_proto::openshell::v1::GetSandboxProviderEnvironmentRequest {
-                sandbox_id: sandbox_id.to_owned(),
-            },
-        )
+        .get_sandbox_provider_environment(req)
         .await
-        .map_err(|s| ProviderError::Grpc(format!("{s:#}")))?
+        .map_err(|s| classify_status(s, sandbox_id))?
         .into_inner();
     Ok(resp.environment)
 }
@@ -585,12 +421,11 @@ pub struct ReconcileReport {
 /// reconcile tick.
 pub async fn reconcile_for_sandbox(
     client: &mut OpenShellClient<Channel>,
-    endpoint: &crate::openshell::GatewayEndpoint,
     sandbox_name: &str,
     agent_prefix: &str,
     declared: &[String],
 ) -> Result<ReconcileReport, ProviderError> {
-    let attached = list_attached(endpoint, sandbox_name).await?;
+    let attached = list_attached(client, sandbox_name).await?;
     let declared_set: std::collections::HashSet<&String> = declared.iter().collect();
     let attached_set: std::collections::HashSet<&String> = attached.iter().collect();
     let mut report = ReconcileReport {
@@ -604,7 +439,7 @@ pub async fn reconcile_for_sandbox(
         match get_provider(client, name).await {
             Ok(_) => {
                 if !attached_set.contains(name) {
-                    match attach_to_sandbox(endpoint, sandbox_name, name).await {
+                    match attach_to_sandbox(client, sandbox_name, name).await {
                         Ok(()) => report.attached.push(name.clone()),
                         Err(e) => report.errors.push((name.clone(), format!("attach: {e:#}"))),
                     }
@@ -618,93 +453,13 @@ pub async fn reconcile_for_sandbox(
     let prefix = format!("{agent_prefix}-");
     for name in &attached {
         if name.starts_with(&prefix) && !declared_set.contains(name) {
-            match detach_from_sandbox(endpoint, sandbox_name, name).await {
+            match detach_from_sandbox(client, sandbox_name, name).await {
                 Ok(()) => report.detached.push(name.clone()),
                 Err(e) => report.errors.push((name.clone(), format!("detach: {e:#}"))),
             }
         }
     }
     Ok(report)
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Internal helpers
-// ────────────────────────────────────────────────────────────────────────────
-
-/// Pure classification helper — separated for unit testing.
-///
-/// `settings get --global --json` returns an object like:
-/// ```json
-/// { "scope": "global", "settings": { "providers_v2_enabled": "true" }, ... }
-/// ```
-/// The value is a string: `"true"`, `"false"`, or `"<unset>"`.
-fn classify_v2_get_output(
-    status_success: bool,
-    stdout: &[u8],
-    stderr: &[u8],
-) -> Result<bool, ProviderError> {
-    if status_success {
-        // Parse the JSON output.
-        let parsed: serde_json::Value =
-            serde_json::from_slice(stdout).map_err(|_| ProviderError::Cli {
-                cmd: "openshell settings get".into(),
-                status: 0,
-                stderr: format!("unexpected output: {:?}", String::from_utf8_lossy(stdout)),
-            })?;
-        let value = parsed
-            .get("settings")
-            .and_then(|s| s.get("providers_v2_enabled"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ProviderError::Cli {
-                cmd: "openshell settings get".into(),
-                status: 0,
-                stderr: format!("unexpected output: {:?}", String::from_utf8_lossy(stdout)),
-            })?;
-        // "<unset>" means the flag has never been set — treat as false.
-        Ok(value == "true")
-    } else {
-        // Distinguish "key not set / not found" from a genuine gateway error.
-        let stderr_str = String::from_utf8_lossy(stderr);
-        if stderr_str.contains("not found") || stderr_str.contains("not set") {
-            return Ok(false);
-        }
-        let status = -1i32; // non-zero; exact code unavailable in this helper
-        Err(ProviderError::Cli {
-            cmd: "openshell settings get".into(),
-            status,
-            stderr: stderr_str.into_owned(),
-        })
-    }
-}
-
-async fn get_v2_flag(endpoint: &crate::openshell::GatewayEndpoint) -> Result<bool, ProviderError> {
-    let mut cmd = Command::new("openshell");
-    cmd.args(["settings", "get", "--global", "--json"]);
-    endpoint.apply_to_cli(&mut cmd);
-    let out = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| ProviderError::Cli {
-            cmd: "openshell settings get".into(),
-            status: -1,
-            stderr: e.to_string(),
-        })?;
-    let status_code = out.status.code().unwrap_or(-1);
-    classify_v2_get_output(out.status.success(), &out.stdout, &out.stderr).map_err(|e| {
-        // Re-attach the real exit code when we have it.
-        if let ProviderError::Cli { cmd, stderr, .. } = e {
-            ProviderError::Cli {
-                cmd,
-                status: status_code,
-                stderr,
-            }
-        } else {
-            e
-        }
-    })
 }
 
 #[cfg(test)]
@@ -755,70 +510,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_v2_get_output_success_true() {
-        let stdout = br#"{"scope":"global","settings":{"providers_v2_enabled":"true"},"settings_revision":1}"#;
-        assert_eq!(
-            classify_v2_get_output(true, stdout, b"").unwrap(),
-            true,
-            "success + true JSON should return Ok(true)"
-        );
-    }
-
-    #[test]
-    fn classify_v2_get_output_success_false() {
-        let stdout = br#"{"scope":"global","settings":{"providers_v2_enabled":"false"},"settings_revision":1}"#;
-        assert_eq!(
-            classify_v2_get_output(true, stdout, b"").unwrap(),
-            false,
-            "success + false JSON should return Ok(false)"
-        );
-    }
-
-    #[test]
-    fn classify_v2_get_output_success_unset() {
-        let stdout = br#"{"scope":"global","settings":{"providers_v2_enabled":"<unset>"},"settings_revision":1}"#;
-        assert_eq!(
-            classify_v2_get_output(true, stdout, b"").unwrap(),
-            false,
-            "success + '<unset>' should return Ok(false)"
-        );
-    }
-
-    #[test]
-    fn classify_v2_get_output_not_found_returns_false() {
-        let stderr = b"Error: key not found\n";
-        assert_eq!(
-            classify_v2_get_output(false, b"", stderr).unwrap(),
-            false,
-            "non-success stderr 'not found' should return Ok(false)"
-        );
-    }
-
-    #[test]
-    fn classify_v2_get_output_gateway_error_returns_err() {
-        let stderr = b"Error: transport error\n  connection refused (os error 61)\n";
-        assert!(
-            matches!(
-                classify_v2_get_output(false, b"", stderr),
-                Err(ProviderError::Cli { .. })
-            ),
-            "non-success stderr 'connection refused' should return Err(Cli)"
-        );
-    }
-
-    #[test]
-    fn classify_v2_get_output_bad_json_returns_err() {
-        let stdout = b"not json at all";
-        assert!(
-            matches!(
-                classify_v2_get_output(true, stdout, b""),
-                Err(ProviderError::Cli { .. })
-            ),
-            "success + invalid JSON should return Err(Cli)"
-        );
-    }
-
-    #[test]
     fn provider_spec_debug_redacts_credentials() {
         let mut credentials = HashMap::new();
         credentials.insert(
@@ -859,40 +550,5 @@ mod tests {
             debug_output.contains("upstream_host"),
             "Debug output should show config keys/values; got: {debug_output}"
         );
-    }
-
-    // ── stderr_is_not_found classifier ───────────────────────────────────────
-
-    #[test]
-    fn stderr_is_not_found_matches_lowercase_not_found() {
-        assert!(stderr_is_not_found("Error: provider \"foo\" not found"));
-    }
-
-    #[test]
-    fn stderr_is_not_found_matches_grpc_not_found() {
-        assert!(stderr_is_not_found(
-            "status: NotFound, message: provider does not exist"
-        ));
-    }
-
-    #[test]
-    fn stderr_is_not_found_matches_not_attached() {
-        assert!(stderr_is_not_found(
-            "Error: provider \"foo\" is not attached to sandbox \"bar\""
-        ));
-    }
-
-    #[test]
-    fn stderr_is_not_found_does_not_match_unrelated_error() {
-        assert!(!stderr_is_not_found(
-            "Error: connection refused (os error 61)"
-        ));
-        assert!(!stderr_is_not_found("Error: transport timeout"));
-        assert!(!stderr_is_not_found("Error: invalid argument"));
-    }
-
-    #[test]
-    fn stderr_is_not_found_empty_string_is_false() {
-        assert!(!stderr_is_not_found(""));
     }
 }
