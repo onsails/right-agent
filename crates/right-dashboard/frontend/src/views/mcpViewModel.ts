@@ -1,4 +1,4 @@
-import type { McpHeaderInput, McpServerSummary } from '../types'
+import type { McpHeaderInput, McpOAuthFlowStatus, McpOAuthStatusResponse, McpServerSummary } from '../types'
 
 export interface SaveServerState {
   name: string
@@ -90,4 +90,31 @@ export function openOAuthUrl(authUrl: string, target: OAuthOpenTarget): void {
     return
   }
   target.assignLocation(authUrl)
+}
+
+export function isOAuthTerminalStatus(status: McpOAuthFlowStatus): boolean {
+  return status !== 'pending'
+}
+
+export function shouldApplyOAuthPollResult(responseFlowId: string, currentFlowId: string | undefined): boolean {
+  return currentFlowId !== undefined && responseFlowId === currentFlowId
+}
+
+export function oauthStatusMessage(status: McpOAuthStatusResponse): string {
+  if (status.message) {
+    return status.message
+  }
+  if (status.status === 'pending') {
+    return 'OAuth pending'
+  }
+  if (status.status === 'succeeded') {
+    return 'OAuth connected'
+  }
+  if (status.status === 'expired') {
+    return 'OAuth flow expired'
+  }
+  if (status.status === 'unknown') {
+    return 'OAuth flow is no longer active'
+  }
+  return 'OAuth failed'
 }

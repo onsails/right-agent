@@ -4,9 +4,12 @@ import type { McpDetectResponse, McpServerSummary } from '../types'
 import {
   canSaveServer,
   createDetectionRequest,
+  isOAuthTerminalStatus,
+  oauthStatusMessage,
   openOAuthUrl,
   resetAddFlowState,
   seedHeaderRows,
+  shouldApplyOAuthPollResult,
   shouldApplyDetectionResult,
 } from './mcpViewModel'
 
@@ -149,6 +152,26 @@ describe('McpView model behavior', () => {
       latestRequestId: request!.requestId,
       url: response.bare_url,
     })).toBe(true)
+  })
+
+  it('treats only non-pending OAuth statuses as terminal', () => {
+    expect(isOAuthTerminalStatus('pending')).toBe(false)
+    expect(isOAuthTerminalStatus('succeeded')).toBe(true)
+    expect(isOAuthTerminalStatus('failed')).toBe(true)
+    expect(isOAuthTerminalStatus('expired')).toBe(true)
+    expect(isOAuthTerminalStatus('unknown')).toBe(true)
+  })
+
+  it('ignores stale OAuth poll results after a newer flow starts', () => {
+    expect(shouldApplyOAuthPollResult('flow-new', 'flow-new')).toBe(true)
+    expect(shouldApplyOAuthPollResult('flow-old', 'flow-new')).toBe(false)
+    expect(shouldApplyOAuthPollResult('flow-old', undefined)).toBe(false)
+  })
+
+  it('formats OAuth status messages without relying on Telegram', () => {
+    expect(oauthStatusMessage({ flow_id: 'f1', server_name: 'composio', status: 'pending', message: null, updated_at: 'now' })).toBe('OAuth pending')
+    expect(oauthStatusMessage({ flow_id: 'f1', server_name: 'composio', status: 'succeeded', message: null, updated_at: 'now' })).toBe('OAuth connected')
+    expect(oauthStatusMessage({ flow_id: 'f1', server_name: 'composio', status: 'failed', message: 'MCP readiness failed', updated_at: 'now' })).toBe('MCP readiness failed')
   })
 })
 

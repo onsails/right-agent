@@ -13,6 +13,7 @@ import type {
   McpHeadersRequest,
   McpMutationResponse,
   McpOAuthStartResponse,
+  McpOAuthStatusResponse,
   McpServersResponse,
   OverviewResponse,
   PinSkillRequest,
@@ -80,6 +81,10 @@ export function mcpStartOAuth(serverName: string): Promise<McpOAuthStartResponse
     method: 'POST',
     body: JSON.stringify({}),
   })
+}
+
+export function mcpOAuthStatus(flowId: string): Promise<McpOAuthStatusResponse> {
+  return requestJson<McpOAuthStatusResponse>(`api/v1/mcp/oauth/${encodeURIComponent(flowId)}/status`)
 }
 
 export function mcpRemove(serverName: string): Promise<McpMutationResponse> {
