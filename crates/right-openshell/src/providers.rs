@@ -359,6 +359,37 @@ fn provider_from_json(v: &serde_json::Value) -> Result<Provider, ProviderError> 
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// gRPC wrappers
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Fetch the env-var map that will be injected into the sandbox.
+///
+/// SAFETY: the returned values are opaque placeholders (e.g.
+/// `openshell:resolve:env:v<digits>_<NAME>`) — never log them. They look
+/// secret-shaped to operators and create false alarms in audits.
+pub async fn get_sandbox_provider_environment(
+    _endpoint: &crate::openshell::GatewayEndpoint,
+    sandbox_id: &str,
+) -> Result<HashMap<String, String>, ProviderError> {
+    // TODO: thread GatewayEndpoint override into connect_grpc when needed.
+    // For now, connect_grpc reads OPENSHELL_GATEWAY_ENDPOINT itself.
+    let mtls_dir = crate::openshell::default_mtls_dir();
+    let mut client = crate::openshell::connect_grpc(&mtls_dir)
+        .await
+        .map_err(ProviderError::GatewayUnreachable)?;
+    let resp = client
+        .get_sandbox_provider_environment(
+            crate::openshell_proto::openshell::v1::GetSandboxProviderEnvironmentRequest {
+                sandbox_id: sandbox_id.to_owned(),
+            },
+        )
+        .await
+        .map_err(|s| ProviderError::Grpc(format!("{s:#}")))?
+        .into_inner();
+    Ok(resp.environment)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ────────────────────────────────────────────────────────────────────────────
 
