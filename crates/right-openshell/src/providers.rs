@@ -9,6 +9,11 @@ use std::process::Stdio;
 
 use thiserror::Error;
 use tokio::process::Command;
+use tonic::transport::Channel;
+
+use crate::openshell_proto::openshell::datamodel::v1 as datamodel;
+use crate::openshell_proto::openshell::v1 as proto_v1;
+use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
 
 /// All provider operation errors. Each is FAIL FAST — never swallowed.
 #[derive(Debug, Error)]
@@ -147,6 +152,62 @@ pub fn profile_catalog() -> Vec<ProviderProfile> {
     ]
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// gRPC conversion helpers
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Map a `tonic::Status` to a `ProviderError`, preserving NotFound
+/// semantics. `name_for_not_found` is the resource identifier used in
+/// the `ProviderError::NotFound(name)` variant.
+fn classify_status(status: tonic::Status, name_for_not_found: &str) -> ProviderError {
+    if status.code() == tonic::Code::NotFound {
+        ProviderError::NotFound(name_for_not_found.to_string())
+    } else {
+        ProviderError::Grpc(format!("{}: {}", status.code(), status.message()))
+    }
+}
+
+/// Convert a wire-level [`datamodel::Provider`] into the host-facing
+/// [`Provider`] struct. Credentials and `credential_expires_at_ms` are
+/// intentionally dropped — Right never persists them on host.
+fn provider_from_proto(p: datamodel::Provider) -> Provider {
+    let metadata = p.metadata.unwrap_or_default();
+    let updated_at = parse_object_meta_updated_at(&metadata);
+    Provider {
+        name: metadata.name,
+        type_: p.r#type,
+        config: p.config,
+        updated_at,
+    }
+}
+
+/// Derive a `DateTime<Utc>` from `ObjectMeta.created_at_ms` (int64
+/// milliseconds since Unix epoch). v0.0.50 `ObjectMeta` does NOT have
+/// an `updated_at` field — there is no last-modified timestamp on the
+/// gateway. `Provider.updated_at` therefore holds the creation time.
+fn parse_object_meta_updated_at(
+    meta: &datamodel::ObjectMeta,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if meta.created_at_ms <= 0 {
+        return None;
+    }
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(meta.created_at_ms)
+}
+
+/// Build a `datamodel::Provider` payload from a host-facing `ProviderSpec`.
+fn proto_provider_from_spec(spec: &ProviderSpec) -> datamodel::Provider {
+    datamodel::Provider {
+        metadata: Some(datamodel::ObjectMeta {
+            name: spec.name.clone(),
+            ..Default::default()
+        }),
+        r#type: spec.type_.clone(),
+        credentials: spec.credentials.clone(),
+        config: spec.config.clone(),
+        credential_expires_at_ms: HashMap::new(),
+    }
+}
+
 /// Return value of [`ensure_v2_enabled`].
 pub struct V2EnableResult {
     pub was_already_on: bool,
@@ -206,117 +267,71 @@ pub async fn ensure_v2_enabled(
 // ────────────────────────────────────────────────────────────────────────────
 
 pub async fn create_provider(
-    endpoint: &crate::openshell::GatewayEndpoint,
+    client: &mut OpenShellClient<Channel>,
     spec: &ProviderSpec,
 ) -> Result<Provider, ProviderError> {
-    let mut cmd = Command::new("openshell");
-    cmd.args([
-        "provider",
-        "create",
-        "--name",
-        &spec.name,
-        "--type",
-        &spec.type_,
-    ]);
-    for (k, v) in &spec.credentials {
-        // Pass only the key name — the CLI resolves the value from the
-        // child's environment. This keeps the credential out of argv
-        // (/proc/<pid>/cmdline), visible only via /proc/<pid>/environ
-        // (mode 0500, same-UID access required).
-        cmd.arg("--credential").arg(k.as_str());
-        cmd.env(k.as_str(), v.as_str());
-    }
-    for (k, v) in &spec.config {
-        cmd.arg("--config").arg(format!("{k}={v}"));
-    }
-    cmd.arg("--output").arg("json");
-    endpoint.apply_to_cli(&mut cmd);
-    let out = run_cli(cmd, "openshell provider create").await?;
-    parse_provider_json(&out)
+    let req = proto_v1::CreateProviderRequest {
+        provider: Some(proto_provider_from_spec(spec)),
+    };
+    let resp = client
+        .create_provider(req)
+        .await
+        .map_err(|s| classify_status(s, &spec.name))?
+        .into_inner();
+    let p = resp.provider.ok_or_else(|| {
+        ProviderError::Grpc("CreateProvider: missing provider in response".into())
+    })?;
+    Ok(provider_from_proto(p))
 }
 
 pub async fn get_provider(
-    endpoint: &crate::openshell::GatewayEndpoint,
+    client: &mut OpenShellClient<Channel>,
     name: &str,
 ) -> Result<Provider, ProviderError> {
-    let mut cmd = Command::new("openshell");
-    cmd.args(["provider", "get", "--name", name, "--output", "json"]);
-    endpoint.apply_to_cli(&mut cmd);
-    let out = cmd
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
-        .output()
+    let req = proto_v1::GetProviderRequest {
+        name: name.to_string(),
+    };
+    let resp = client
+        .get_provider(req)
         .await
-        .map_err(|e| ProviderError::Cli {
-            cmd: "openshell provider get".into(),
-            status: -1,
-            stderr: e.to_string(),
-        })?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr_is_not_found(&stderr) {
-            return Err(ProviderError::NotFound(name.to_string()));
-        }
-        return Err(ProviderError::Cli {
-            cmd: "openshell provider get".into(),
-            status: out.status.code().unwrap_or(-1),
-            stderr: stderr.into_owned(),
-        });
-    }
-    parse_provider_json(&out.stdout)
+        .map_err(|s| classify_status(s, name))?
+        .into_inner();
+    let p = resp
+        .provider
+        .ok_or_else(|| ProviderError::Grpc("GetProvider: missing provider in response".into()))?;
+    Ok(provider_from_proto(p))
 }
 
 pub async fn update_provider(
-    endpoint: &crate::openshell::GatewayEndpoint,
+    client: &mut OpenShellClient<Channel>,
     spec: &ProviderSpec,
 ) -> Result<Provider, ProviderError> {
-    let mut cmd = Command::new("openshell");
-    cmd.args(["provider", "update", "--name", &spec.name]);
-    for (k, v) in &spec.credentials {
-        // Pass only the key name — the CLI resolves the value from the
-        // child's environment. This keeps the credential out of argv
-        // (/proc/<pid>/cmdline), visible only via /proc/<pid>/environ
-        // (mode 0500, same-UID access required).
-        cmd.arg("--credential").arg(k.as_str());
-        cmd.env(k.as_str(), v.as_str());
-    }
-    for (k, v) in &spec.config {
-        cmd.arg("--config").arg(format!("{k}={v}"));
-    }
-    cmd.arg("--output").arg("json");
-    endpoint.apply_to_cli(&mut cmd);
-    let out = run_cli(cmd, "openshell provider update").await?;
-    parse_provider_json(&out)
+    let req = proto_v1::UpdateProviderRequest {
+        provider: Some(proto_provider_from_spec(spec)),
+        credential_expires_at_ms: HashMap::new(),
+    };
+    let resp = client
+        .update_provider(req)
+        .await
+        .map_err(|s| classify_status(s, &spec.name))?
+        .into_inner();
+    let p = resp.provider.ok_or_else(|| {
+        ProviderError::Grpc("UpdateProvider: missing provider in response".into())
+    })?;
+    Ok(provider_from_proto(p))
 }
 
 pub async fn delete_provider(
-    endpoint: &crate::openshell::GatewayEndpoint,
+    client: &mut OpenShellClient<Channel>,
     name: &str,
 ) -> Result<(), ProviderError> {
-    let mut cmd = Command::new("openshell");
-    cmd.args(["provider", "delete", "--name", name, "--yes"]);
-    endpoint.apply_to_cli(&mut cmd);
-    let out = cmd
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
-        .output()
+    let req = proto_v1::DeleteProviderRequest {
+        name: name.to_string(),
+    };
+    client
+        .delete_provider(req)
         .await
-        .map_err(|e| ProviderError::Cli {
-            cmd: "openshell provider delete".into(),
-            status: -1,
-            stderr: e.to_string(),
-        })?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr_is_not_found(&stderr) {
-            return Err(ProviderError::NotFound(name.to_string()));
-        }
-        return Err(ProviderError::Cli {
-            cmd: "openshell provider delete".into(),
-            status: out.status.code().unwrap_or(-1),
-            stderr: stderr.into_owned(),
-        });
-    }
+        .map_err(|s| classify_status(s, name))?;
     Ok(())
 }
 
@@ -464,6 +479,7 @@ async fn run_cli(mut cmd: Command, label: &str) -> Result<Vec<u8>, ProviderError
     Ok(out.stdout)
 }
 
+#[allow(dead_code)] // removed in Task 8 when list_providers_by_prefix is migrated
 fn parse_provider_json(bytes: &[u8]) -> Result<Provider, ProviderError> {
     let v: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|e| ProviderError::Grpc(format!("parse provider: {e:#}")))?;
@@ -568,6 +584,7 @@ pub struct ReconcileReport {
 /// `report.errors` and schedule a retry so the bot converges on the next
 /// reconcile tick.
 pub async fn reconcile_for_sandbox(
+    client: &mut OpenShellClient<Channel>,
     endpoint: &crate::openshell::GatewayEndpoint,
     sandbox_name: &str,
     agent_prefix: &str,
@@ -584,7 +601,7 @@ pub async fn reconcile_for_sandbox(
     };
     // Attach declared providers that exist on the gateway but are not yet attached.
     for name in declared {
-        match get_provider(endpoint, name).await {
+        match get_provider(client, name).await {
             Ok(_) => {
                 if !attached_set.contains(name) {
                     match attach_to_sandbox(endpoint, sandbox_name, name).await {
@@ -689,6 +706,10 @@ async fn get_v2_flag(endpoint: &crate::openshell::GatewayEndpoint) -> Result<boo
         }
     })
 }
+
+#[cfg(test)]
+#[path = "providers_tests.rs"]
+mod providers_tests;
 
 #[cfg(test)]
 mod tests {
