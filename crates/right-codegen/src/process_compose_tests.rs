@@ -30,6 +30,7 @@ fn make_bot_agent(name: &str, token: &str) -> AgentDef {
             mode: SandboxMode::None,
             policy_file: None,
             name: None,
+            providers: vec![],
         }),
         telegram_token: Some(token.to_string()),
 
@@ -67,6 +68,7 @@ fn make_agent_no_token(name: &str) -> AgentDef {
             mode: SandboxMode::None,
             policy_file: None,
             name: None,
+            providers: vec![],
         }),
         telegram_token: None,
 
@@ -118,6 +120,7 @@ fn make_agent_with_restart(name: &str, token: &str, restart: RestartPolicy) -> A
             mode: SandboxMode::None,
             policy_file: None,
             name: None,
+            providers: vec![],
         }),
         telegram_token: Some(token.to_string()),
 
@@ -413,6 +416,7 @@ fn make_agent_with_sandbox(
             mode,
             policy_file: policy_file.map(std::path::PathBuf::from),
             name: None,
+            providers: vec![],
         }),
         telegram_token: Some(token.to_string()),
         allowed_chat_ids: vec![],
