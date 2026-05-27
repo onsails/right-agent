@@ -281,6 +281,401 @@ pub(crate) async fn handle_provider_list(
     Ok(axum::Json(views))
 }
 
+// ── Tasks 17 + 18: /provider-create ──────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProviderCreateReq {
+    pub agent: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub label: Option<String>,
+    pub credential: secrecy::SecretString,
+    pub generic: Option<ProviderCreateGeneric>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ProviderCreateGeneric {
+    pub env_var: String,
+    pub header_name: Option<String>,
+    pub upstream_host: String,
+    pub upstream_path_prefix: Option<String>,
+}
+
+pub(crate) async fn handle_provider_create(
+    axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
+    axum::Json(req): axum::Json<ProviderCreateReq>,
+) -> Result<axum::Json<ProviderView>, ProviderApiError> {
+    use secrecy::ExposeSecret;
+    validate_type_slug(&req.type_)?;
+    let label_slug = req.label.clone().unwrap_or_else(|| req.type_.clone());
+    let name = format!("{}-{}", req.agent, label_slug);
+    validate_name(&req.agent, &name)?;
+
+    let cfg = load_agent_config(&state.agents_dir, &req.agent)
+        .map_err(ProviderApiError::AgentYamlWrite)?;
+    let sandbox = cfg
+        .sandbox
+        .as_ref()
+        .ok_or(ProviderApiError::SandboxModeNone)?;
+    if sandbox.mode != right_agent_config::SandboxMode::Openshell {
+        return Err(ProviderApiError::SandboxModeNone);
+    }
+    if sandbox.providers.iter().any(|p| p.name == name) {
+        return Err(ProviderApiError::NameCollision { name });
+    }
+    let env_var = if req.type_ == "generic" {
+        req.generic
+            .as_ref()
+            .map(|g| g.env_var.clone())
+            .ok_or_else(|| ProviderApiError::InvalidEnvVar { env_var: "".into() })?
+    } else {
+        right_openshell::providers::profile_catalog()
+            .into_iter()
+            .find(|p| p.type_slug == req.type_)
+            .map(|p| p.env_var)
+            .unwrap_or_default()
+    };
+    validate_env_var(&env_var)?;
+    if sandbox
+        .providers
+        .iter()
+        .any(|p| extract_env_var(p) == env_var)
+    {
+        return Err(ProviderApiError::EnvVarCollision { env_var });
+    }
+
+    if req.type_ == "generic" {
+        return create_generic_provider(state, req, name, env_var).await;
+    }
+
+    // Built-in flow: OpenShell manages endpoints; no policy mutation needed.
+    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
+
+    let mut creds = std::collections::HashMap::new();
+    creds.insert(env_var.clone(), req.credential.expose_secret().to_string());
+    let spec = right_openshell::providers::ProviderSpec {
+        name: name.clone(),
+        type_: req.type_.clone(),
+        credentials: creds,
+        config: Default::default(),
+    };
+    right_openshell::providers::create_provider(&endpoint, &spec)
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    if let Err(attach_err) =
+        right_openshell::providers::attach_to_sandbox(&endpoint, &sandbox_name, &name).await
+    {
+        let _ = right_openshell::providers::delete_provider(&endpoint, &name).await;
+        return Err(ProviderApiError::Gateway(format!("{attach_err:#}")));
+    }
+
+    let entry = right_agent_config::ProviderEntry {
+        name: name.clone(),
+        type_: right_agent_config::ProviderType::BuiltIn(req.type_.clone()),
+        label: req.label.clone(),
+        generic: None,
+    };
+    if let Err(e) = append_provider_to_yaml(&state.agents_dir, &req.agent, &entry) {
+        let _ =
+            right_openshell::providers::detach_from_sandbox(&endpoint, &sandbox_name, &name).await;
+        let _ = right_openshell::providers::delete_provider(&endpoint, &name).await;
+        return Err(ProviderApiError::AgentYamlWrite(format!("{e:#}")));
+    }
+
+    Ok(axum::Json(ProviderView {
+        name,
+        type_: req.type_,
+        label: req.label,
+        env_var,
+        generic: None,
+        updated_at: None,
+        status: ProviderStatus::Healthy,
+    }))
+}
+
+fn extract_env_var(entry: &right_agent_config::ProviderEntry) -> String {
+    match &entry.type_ {
+        right_agent_config::ProviderType::Generic => entry
+            .generic
+            .as_ref()
+            .map(|g| g.env_var.clone())
+            .unwrap_or_default(),
+        right_agent_config::ProviderType::BuiltIn(slug) => {
+            right_openshell::providers::profile_catalog()
+                .into_iter()
+                .find(|p| &p.type_slug == slug)
+                .map(|p| p.env_var)
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// Append a provider entry to `sandbox.providers:` in agent.yaml,
+/// preserving comments and unknown fields via line-walking on the raw YAML.
+fn append_provider_to_yaml(
+    agents_dir: &std::path::Path,
+    agent: &str,
+    entry: &right_agent_config::ProviderEntry,
+) -> miette::Result<()> {
+    let path = agents_dir.join(agent).join("agent.yaml");
+    let serialized_entry = serialize_provider_entry(entry);
+    right_codegen::contract::write_merged_rmw(&path, |existing| {
+        let original = existing.unwrap_or("");
+        let updated = insert_provider_entry(original, &serialized_entry)?;
+        Ok(updated)
+    })
+}
+
+/// Render the provider entry as YAML lines at 4-space indentation (nested
+/// under `sandbox.providers:` which is at column 2).
+fn serialize_provider_entry(entry: &right_agent_config::ProviderEntry) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("    - name: {}\n", entry.name));
+    let type_str = match &entry.type_ {
+        right_agent_config::ProviderType::Generic => "generic".to_string(),
+        right_agent_config::ProviderType::BuiltIn(s) => s.clone(),
+    };
+    out.push_str(&format!("      type: {type_str}\n"));
+    if let Some(label) = &entry.label {
+        out.push_str(&format!("      label: {label}\n"));
+    }
+    if let Some(g) = &entry.generic {
+        out.push_str("      generic:\n");
+        out.push_str(&format!("        env_var: {}\n", g.env_var));
+        out.push_str(&format!("        header_name: {}\n", g.header_name));
+        out.push_str(&format!("        upstream_host: {}\n", g.upstream_host));
+        if let Some(prefix) = &g.upstream_path_prefix {
+            out.push_str(&format!("        upstream_path_prefix: {prefix}\n"));
+        }
+    }
+    out
+}
+
+/// Locate (or create) `sandbox.providers:` and insert the serialized entry
+/// at the end of that list. Comments and unknown fields are preserved.
+fn insert_provider_entry(original: &str, entry_yaml: &str) -> miette::Result<String> {
+    let lines: Vec<&str> = original.split_inclusive('\n').collect();
+
+    // Find `sandbox:` at column 0.
+    let sandbox_start = lines
+        .iter()
+        .position(|l| {
+            l.trim_end() == "sandbox:" || (l.starts_with("sandbox:") && !l.starts_with("sandbox: "))
+        })
+        .ok_or_else(|| miette::miette!("agent.yaml: sandbox: section missing"))?;
+
+    // Find the end of the sandbox block (next top-level non-blank key OR end of file).
+    let mut sandbox_end = lines.len();
+    for (i, line) in lines.iter().enumerate().skip(sandbox_start + 1) {
+        let ch = line.chars().next();
+        if let Some(c) = ch {
+            if c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '#' {
+                sandbox_end = i;
+                break;
+            }
+        }
+    }
+
+    // Within the sandbox block, find `  providers:` at exactly column 2.
+    let providers_idx = lines
+        .iter()
+        .enumerate()
+        .skip(sandbox_start + 1)
+        .take(sandbox_end - sandbox_start - 1)
+        .find(|(_, l)| {
+            l.starts_with("  ")
+                && !l.starts_with("   ")
+                && l.trim_start_matches(' ').starts_with("providers:")
+        })
+        .map(|(i, _)| i);
+
+    let mut out = String::with_capacity(original.len() + entry_yaml.len() + 32);
+
+    if let Some(p_idx) = providers_idx {
+        // Find end of the providers list — next column-2 non-blank key OR end of sandbox block.
+        let mut list_end = sandbox_end;
+        for (i, line) in lines
+            .iter()
+            .enumerate()
+            .skip(p_idx + 1)
+            .take(sandbox_end - p_idx - 1)
+        {
+            let is_col2_key =
+                line.starts_with("  ") && !line.starts_with("   ") && !line.trim().is_empty();
+            if is_col2_key {
+                list_end = i;
+                break;
+            }
+        }
+        // Insert entry BEFORE list_end.
+        for line in &lines[..list_end] {
+            out.push_str(line);
+        }
+        out.push_str(entry_yaml);
+        for line in &lines[list_end..] {
+            out.push_str(line);
+        }
+    } else {
+        // No `providers:` key yet — insert at end of sandbox block.
+        for line in &lines[..sandbox_end] {
+            out.push_str(line);
+        }
+        // Ensure the last sandbox line ends with newline before inserting.
+        if sandbox_end > sandbox_start && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("  providers:\n");
+        out.push_str(entry_yaml);
+        for line in &lines[sandbox_end..] {
+            out.push_str(line);
+        }
+    }
+    Ok(out)
+}
+
+async fn create_generic_provider(
+    state: crate::internal_api::InternalState,
+    req: ProviderCreateReq,
+    name: String,
+    env_var: String,
+) -> Result<axum::Json<ProviderView>, ProviderApiError> {
+    use secrecy::ExposeSecret;
+    let g = req
+        .generic
+        .clone()
+        .ok_or_else(|| ProviderApiError::InvalidEnvVar { env_var: "".into() })?;
+    let header_name = g
+        .header_name
+        .clone()
+        .unwrap_or_else(|| "Authorization".into());
+
+    let cfg = load_agent_config(&state.agents_dir, &req.agent)
+        .map_err(ProviderApiError::AgentYamlWrite)?;
+    let sandbox = cfg.sandbox.as_ref().unwrap();
+    let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
+    let policy_path = state.agents_dir.join(&req.agent).join(
+        sandbox
+            .policy_file
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("policy.yaml")),
+    );
+
+    let prior = std::fs::read_to_string(&policy_path)
+        .map_err(|e| ProviderApiError::AgentYamlWrite(format!("read policy: {e:#}")))?;
+    let new_policy = right_codegen::policy::providers_append_checked(
+        &prior,
+        &name,
+        &g.upstream_host,
+        g.upstream_path_prefix.as_deref(),
+    )
+    .map_err(|e| match e {
+        right_codegen::policy::PolicyConflict::RawTunnel { host } => {
+            ProviderApiError::PolicyConflict {
+                host,
+                kind: "raw-tunnel".into(),
+            }
+        }
+    })?;
+    let snapshot =
+        right_codegen::contract::write_apply_with_snapshot(&sandbox_name, &policy_path, new_policy)
+            .await
+            .map_err(|e| ProviderApiError::Gateway(format!("policy apply: {e:#}")))?;
+
+    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let mut creds = std::collections::HashMap::new();
+    creds.insert(env_var.clone(), req.credential.expose_secret().to_string());
+    let mut config = std::collections::HashMap::new();
+    config.insert("header_name".into(), header_name.clone());
+    if let Some(prefix) = &g.upstream_path_prefix {
+        config.insert("upstream_path_prefix".into(), prefix.clone());
+    }
+    config.insert("upstream_host".into(), g.upstream_host.clone());
+    let spec = right_openshell::providers::ProviderSpec {
+        name: name.clone(),
+        type_: "generic".into(),
+        credentials: creds,
+        config,
+    };
+    if let Err(e) = right_openshell::providers::create_provider(&endpoint, &spec).await {
+        let _ = snapshot.restore().await;
+        return Err(ProviderApiError::Gateway(format!("{e:#}")));
+    }
+
+    if let Err(attach_err) =
+        right_openshell::providers::attach_to_sandbox(&endpoint, &sandbox_name, &name).await
+    {
+        let _ = right_openshell::providers::delete_provider(&endpoint, &name).await;
+        let _ = snapshot.restore().await;
+        return Err(ProviderApiError::Gateway(format!("{attach_err:#}")));
+    }
+
+    let generic_entry = right_agent_config::GenericProvider {
+        env_var: env_var.clone(),
+        header_name: header_name.clone(),
+        upstream_host: g.upstream_host.clone(),
+        upstream_path_prefix: g.upstream_path_prefix.clone(),
+    };
+    let entry = right_agent_config::ProviderEntry {
+        name: name.clone(),
+        type_: right_agent_config::ProviderType::Generic,
+        label: req.label.clone(),
+        generic: Some(generic_entry.clone()),
+    };
+    if let Err(e) = append_provider_to_yaml(&state.agents_dir, &req.agent, &entry) {
+        let _ =
+            right_openshell::providers::detach_from_sandbox(&endpoint, &sandbox_name, &name).await;
+        let _ = right_openshell::providers::delete_provider(&endpoint, &name).await;
+        let _ = snapshot.restore().await;
+        return Err(ProviderApiError::AgentYamlWrite(format!("{e:#}")));
+    }
+
+    Ok(axum::Json(ProviderView {
+        name,
+        type_: "generic".to_string(),
+        label: req.label,
+        env_var,
+        generic: Some(generic_entry),
+        updated_at: None,
+        status: ProviderStatus::Healthy,
+    }))
+}
+
+#[cfg(test)]
+mod insert_tests {
+    use super::*;
+
+    #[test]
+    fn insert_into_empty_sandbox() {
+        let original = "name: foo\nsandbox:\n  mode: openshell\n";
+        let entry = "    - name: foo-bar\n      type: anthropic\n";
+        let out = insert_provider_entry(original, entry).unwrap();
+        assert!(
+            out.contains("providers:\n    - name: foo-bar"),
+            "expected providers key followed by entry, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn insert_into_existing_providers() {
+        let original = "sandbox:\n  mode: openshell\n  providers:\n    - name: x\n      type: y\n";
+        let entry = "    - name: foo-bar\n      type: anthropic\n";
+        let out = insert_provider_entry(original, entry).unwrap();
+        assert!(
+            out.contains("- name: foo-bar"),
+            "new entry missing from:\n{out}"
+        );
+        assert!(
+            out.contains("- name: x"),
+            "existing entry missing from:\n{out}"
+        );
+    }
+}
+
 // ── Task 16: /provider-types ──────────────────────────────────────────────────
 
 #[derive(Debug, serde::Serialize)]

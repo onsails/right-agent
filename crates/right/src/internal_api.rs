@@ -182,6 +182,10 @@ pub(crate) fn internal_router(
             "/provider-types",
             post(crate::internal_api_providers::handle_provider_types),
         )
+        .route(
+            "/provider-create",
+            post(crate::internal_api_providers::handle_provider_create),
+        )
         .with_state(state)
 }
 
