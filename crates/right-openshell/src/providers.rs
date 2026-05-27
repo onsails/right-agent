@@ -122,6 +122,182 @@ pub async fn ensure_v2_enabled(
     })
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// CRUD wrappers
+// ────────────────────────────────────────────────────────────────────────────
+
+pub async fn create_provider(
+    endpoint: &crate::openshell::GatewayEndpoint,
+    spec: &ProviderSpec,
+) -> Result<Provider, ProviderError> {
+    let mut cmd = Command::new("openshell");
+    cmd.args([
+        "provider",
+        "create",
+        "--name",
+        &spec.name,
+        "--type",
+        &spec.type_,
+    ]);
+    for (k, v) in &spec.credentials {
+        cmd.arg("--credential").arg(format!("{k}={v}"));
+    }
+    for (k, v) in &spec.config {
+        cmd.arg("--config").arg(format!("{k}={v}"));
+    }
+    cmd.arg("--output").arg("json");
+    endpoint.apply_to_cli(&mut cmd);
+    let out = run_cli(cmd, "openshell provider create").await?;
+    parse_provider_json(&out)
+}
+
+pub async fn get_provider(
+    endpoint: &crate::openshell::GatewayEndpoint,
+    name: &str,
+) -> Result<Provider, ProviderError> {
+    let mut cmd = Command::new("openshell");
+    cmd.args(["provider", "get", "--name", name, "--output", "json"]);
+    endpoint.apply_to_cli(&mut cmd);
+    let out = cmd
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| ProviderError::Cli {
+            cmd: "openshell provider get".into(),
+            status: -1,
+            stderr: e.to_string(),
+        })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("not found") || stderr.contains("NotFound") {
+            return Err(ProviderError::NotFound(name.to_string()));
+        }
+        return Err(ProviderError::Cli {
+            cmd: "openshell provider get".into(),
+            status: out.status.code().unwrap_or(-1),
+            stderr: stderr.into_owned(),
+        });
+    }
+    parse_provider_json(&out.stdout)
+}
+
+pub async fn update_provider(
+    endpoint: &crate::openshell::GatewayEndpoint,
+    spec: &ProviderSpec,
+) -> Result<Provider, ProviderError> {
+    let mut cmd = Command::new("openshell");
+    cmd.args(["provider", "update", "--name", &spec.name]);
+    for (k, v) in &spec.credentials {
+        cmd.arg("--credential").arg(format!("{k}={v}"));
+    }
+    for (k, v) in &spec.config {
+        cmd.arg("--config").arg(format!("{k}={v}"));
+    }
+    cmd.arg("--output").arg("json");
+    endpoint.apply_to_cli(&mut cmd);
+    let out = run_cli(cmd, "openshell provider update").await?;
+    parse_provider_json(&out)
+}
+
+pub async fn delete_provider(
+    endpoint: &crate::openshell::GatewayEndpoint,
+    name: &str,
+) -> Result<(), ProviderError> {
+    let mut cmd = Command::new("openshell");
+    cmd.args(["provider", "delete", "--name", name, "--yes"]);
+    endpoint.apply_to_cli(&mut cmd);
+    let _ = run_cli(cmd, "openshell provider delete").await?;
+    Ok(())
+}
+
+pub async fn list_providers_by_prefix(
+    endpoint: &crate::openshell::GatewayEndpoint,
+    prefix: &str,
+) -> Result<Vec<Provider>, ProviderError> {
+    let mut cmd = Command::new("openshell");
+    cmd.args(["provider", "list", "--output", "json"]);
+    endpoint.apply_to_cli(&mut cmd);
+    let out = run_cli(cmd, "openshell provider list").await?;
+    let arr: Vec<serde_json::Value> = serde_json::from_slice(&out)
+        .map_err(|e| ProviderError::Grpc(format!("parse provider list: {e:#}")))?;
+    let mut providers = Vec::new();
+    for v in arr {
+        if let Some(name) = v
+            .get("metadata")
+            .and_then(|m| m.get("name"))
+            .and_then(|n| n.as_str())
+            && name.starts_with(prefix)
+        {
+            providers.push(provider_from_json(&v)?);
+        }
+    }
+    Ok(providers)
+}
+
+async fn run_cli(mut cmd: Command, label: &str) -> Result<Vec<u8>, ProviderError> {
+    let out = cmd
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| ProviderError::Cli {
+            cmd: label.into(),
+            status: -1,
+            stderr: e.to_string(),
+        })?;
+    if !out.status.success() {
+        return Err(ProviderError::Cli {
+            cmd: label.into(),
+            status: out.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
+    }
+    Ok(out.stdout)
+}
+
+fn parse_provider_json(bytes: &[u8]) -> Result<Provider, ProviderError> {
+    let v: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| ProviderError::Grpc(format!("parse provider: {e:#}")))?;
+    provider_from_json(&v)
+}
+
+fn provider_from_json(v: &serde_json::Value) -> Result<Provider, ProviderError> {
+    let name = v
+        .get("metadata")
+        .and_then(|m| m.get("name"))
+        .and_then(|n| n.as_str())
+        .ok_or_else(|| ProviderError::Grpc("missing metadata.name".into()))?;
+    let type_ = v
+        .get("type")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| ProviderError::Grpc("missing type".into()))?;
+    let mut config = HashMap::new();
+    if let Some(obj) = v.get("config").and_then(|c| c.as_object()) {
+        for (k, val) in obj {
+            if let Some(s) = val.as_str() {
+                config.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    let updated_at = v
+        .get("metadata")
+        .and_then(|m| m.get("updated_at"))
+        .and_then(|u| u.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    Ok(Provider {
+        name: name.to_string(),
+        type_: type_.to_string(),
+        config,
+        updated_at,
+    })
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Internal helpers
+// ────────────────────────────────────────────────────────────────────────────
+
 async fn get_v2_flag(endpoint: &crate::openshell::GatewayEndpoint) -> Result<bool, ProviderError> {
     let mut cmd = Command::new("openshell");
     cmd.args([
