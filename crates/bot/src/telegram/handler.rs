@@ -728,6 +728,83 @@ pub async fn handle_mcp(
 }
 
 // ---------------------------------------------------------------------------
+// /providers command handler
+// ---------------------------------------------------------------------------
+
+/// Handle the /providers command by opening the dashboard providers view.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_providers(
+    bot: BotType,
+    msg: Message,
+    _args: String,
+    agent_dir: Arc<AgentDir>,
+    _pending_auth: PendingAuthMap,
+    home: Arc<RightHome>,
+    _internal: Arc<InternalApi>,
+    _pending_token_slot: Arc<PendingTokenSlot>,
+    _pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
+    _ssh_config: Arc<SshConfigPath>,
+    _settings: Arc<AgentSettings>,
+) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(
+            cmd = "providers",
+            "ignoring command in group chat (DM-only)"
+        );
+        return Ok(());
+    }
+    // Sandbox-mode guard: providers are only valid for openshell-sandboxed agents.
+    let agent_name = agent_dir
+        .0
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            to_request_err(format!(
+                "providers dashboard: invalid agent directory name: {}",
+                agent_dir.0.display()
+            ))
+        })?;
+    let cfg = right_agent::agent::discovery::parse_agent_config(&agent_dir.0)
+        .map_err(|e| to_request_err(format!("providers dashboard: load agent.yaml: {e:#}")))?;
+    let mode = cfg
+        .as_ref()
+        .map(|c| c.sandbox_mode().clone())
+        .unwrap_or(right_agent_config::SandboxMode::Openshell);
+    if mode != right_agent_config::SandboxMode::Openshell {
+        let _ = bot
+            .send_message(
+                msg.chat.id,
+                "Providers are only available for sandboxed agents. This agent runs in host mode.",
+            )
+            .await;
+        return Ok(());
+    }
+    tracing::info!(agent_dir = %agent_dir.0.display(), "providers: opening dashboard");
+    let global_config = right_config::read_global_config(&home.0)
+        .map_err(|e| to_request_err(format!("providers dashboard: read config.yaml: {e:#}")))?;
+    let mut url = super::dashboard::dashboard_url(&global_config.tunnel.hostname, agent_name)
+        .map_err(|e| to_request_err(format!("providers dashboard: invalid URL: {e:#}")))?;
+    url.set_query(Some("view=providers"));
+
+    let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::web_app(
+        "Open providers dashboard",
+        teloxide::types::WebAppInfo { url },
+    )]]);
+
+    let mut send = bot
+        .send_message(msg.chat.id, "Providers")
+        .reply_markup(keyboard);
+    let eff_thread_id = effective_thread_id(&msg);
+    if eff_thread_id != 0 {
+        send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+            eff_thread_id as i32,
+        )));
+    }
+    send.await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // /cron command handler
 // ---------------------------------------------------------------------------
 
