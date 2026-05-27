@@ -5,6 +5,7 @@ import {
   canSaveServer,
   createDetectionRequest,
   isOAuthTerminalStatus,
+  oauthPollUnavailableStatus,
   oauthStatusMessage,
   openOAuthUrl,
   resetAddFlowState,
@@ -172,6 +173,18 @@ describe('McpView model behavior', () => {
     expect(oauthStatusMessage({ flow_id: 'f1', server_name: 'composio', status: 'pending', message: null, updated_at: 'now' })).toBe('OAuth pending')
     expect(oauthStatusMessage({ flow_id: 'f1', server_name: 'composio', status: 'succeeded', message: null, updated_at: 'now' })).toBe('OAuth connected')
     expect(oauthStatusMessage({ flow_id: 'f1', server_name: 'composio', status: 'failed', message: 'MCP readiness failed', updated_at: 'now' })).toBe('MCP readiness failed')
+  })
+
+  it('keeps transient OAuth status poll failures non-terminal', () => {
+    const status = oauthPollUnavailableStatus('f1', 'composio', new Error('Network unavailable'))
+
+    expect(status).toMatchObject({
+      flow_id: 'f1',
+      server_name: 'composio',
+      status: 'pending',
+      message: 'OAuth status unavailable; retrying: Network unavailable',
+    })
+    expect(isOAuthTerminalStatus(status.status)).toBe(false)
   })
 })
 

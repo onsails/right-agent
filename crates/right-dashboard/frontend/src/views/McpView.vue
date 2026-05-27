@@ -8,6 +8,7 @@ import {
   mcpServers,
   mcpSetHeaders,
   mcpStartOAuth,
+  DashboardApiError,
 } from '../api'
 import type {
   McpAuthMode,
@@ -24,6 +25,7 @@ import {
   isOAuthTerminalStatus,
   nonEmptyHeaders,
   openOAuthUrl,
+  oauthPollUnavailableStatus,
   oauthStatusMessage,
   resetAddFlowState,
   seedHeaderRows,
@@ -307,6 +309,14 @@ async function pollOAuthStatus(serverName: string, flowId: string): Promise<void
       return
     }
     if (!shouldApplyOAuthPollResult(flowId, oauthFlows.value[serverName])) {
+      return
+    }
+    if (!(err instanceof DashboardApiError && err.isLocked)) {
+      oauthStatuses.value = {
+        ...oauthStatuses.value,
+        [serverName]: oauthPollUnavailableStatus(flowId, serverName, err),
+      }
+      scheduleOAuthPoll(serverName, flowId)
       return
     }
     oauthStatuses.value = {

@@ -100,6 +100,17 @@ export function shouldApplyOAuthPollResult(responseFlowId: string, currentFlowId
   return currentFlowId !== undefined && responseFlowId === currentFlowId
 }
 
+export function oauthPollUnavailableStatus(flowId: string, serverName: string, err: unknown): McpOAuthStatusResponse {
+  const detail = err instanceof Error ? err.message : 'OAuth status unavailable'
+  return {
+    flow_id: flowId,
+    server_name: serverName,
+    status: 'pending',
+    message: `OAuth status unavailable; retrying: ${detail}`,
+    updated_at: new Date().toISOString(),
+  }
+}
+
 export function oauthStatusMessage(status: McpOAuthStatusResponse): string {
   if (status.message) {
     return status.message

@@ -133,12 +133,20 @@ async fn handle_oauth_callback(
             "OAuth callback error from provider"
         );
         if let Some(state_param) = params.state.as_deref() {
-            let provider_detail = format!("{err} -- {desc}");
-            let safe_detail = super::oauth_status::compact_dashboard_error(&provider_detail);
-            state
-                .oauth_status
-                .mark_failed_if_pending(state_param, format!("OAuth provider error: {safe_detail}"))
-                .await;
+            if consume_pending_auth(&state.pending_auth, state_param)
+                .await
+                .is_some()
+            {
+                let provider_detail = format!("{err} -- {desc}");
+                let safe_detail = super::oauth_status::compact_dashboard_error(&provider_detail);
+                state
+                    .oauth_status
+                    .mark_failed_if_pending(
+                        state_param,
+                        format!("OAuth provider error: {safe_detail}"),
+                    )
+                    .await;
+            }
         }
         return (
             axum::http::StatusCode::BAD_REQUEST,
@@ -172,17 +180,7 @@ async fn handle_oauth_callback(
     };
 
     // Look up pending auth by state (constant-time comparison via verify_state, D-05)
-    let pending = {
-        let mut map = state.pending_auth.lock().await;
-        let matched_key = map
-            .keys()
-            .find(|k| verify_state(k.as_str(), &received_state))
-            .cloned();
-        match matched_key {
-            Some(key) => map.remove(&key),
-            None => None,
-        }
-    };
+    let pending = consume_pending_auth(&state.pending_auth, &received_state).await;
 
     let pending = match pending {
         Some(p) => p,
@@ -425,6 +423,21 @@ pub(crate) async fn run_pending_auth_cleanup(
     }
 }
 
+async fn consume_pending_auth(
+    pending_auth: &PendingAuthMap,
+    received_state: &str,
+) -> Option<PendingAuth> {
+    let mut map = pending_auth.lock().await;
+    let matched_key = map
+        .keys()
+        .find(|k| verify_state(k.as_str(), received_state))
+        .cloned();
+    match matched_key {
+        Some(key) => map.remove(&key),
+        None => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -597,7 +610,11 @@ mod tests {
     #[tokio::test]
     async fn provider_error_status_message_redacts_secret_like_detail() {
         let state_val = "provider-error-flow";
-        let cb_state = dummy_state(Arc::new(Mutex::new(HashMap::new())));
+        let map: PendingAuthMap = Arc::new(Mutex::new(HashMap::new()));
+        map.lock()
+            .await
+            .insert(state_val.to_string(), make_pending(state_val));
+        let cb_state = dummy_state(map);
         cb_state
             .oauth_status
             .insert_pending(state_val.to_string(), "test-server".to_string())
@@ -626,6 +643,66 @@ mod tests {
         assert!(!message.contains("access_token_secret"));
         assert!(!message.contains("client_secret"));
         assert!(!message.contains("abc"));
+    }
+
+    #[tokio::test]
+    async fn provider_error_consumes_pending_auth_and_blocks_code_replay() {
+        let state_val = "provider-error-consumes-flow";
+        let map: PendingAuthMap = Arc::new(Mutex::new(HashMap::new()));
+        map.lock()
+            .await
+            .insert(state_val.to_string(), make_pending(state_val));
+        let cb_state = dummy_state(map.clone());
+        cb_state
+            .oauth_status
+            .insert_pending(state_val.to_string(), "test-server".to_string())
+            .await;
+
+        let provider_response = handle_oauth_callback(
+            AxumPath("test-agent".to_string()),
+            Query(CallbackParams {
+                code: None,
+                state: Some(state_val.to_string()),
+                error: Some("access_denied".to_string()),
+                error_description: Some("denied".to_string()),
+            }),
+            State(cb_state.clone()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(
+            provider_response.status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(map.lock().await.len(), 0);
+
+        let replay_response = handle_oauth_callback(
+            AxumPath("test-agent".to_string()),
+            Query(CallbackParams {
+                code: Some("code-123".to_string()),
+                state: Some(state_val.to_string()),
+                error: None,
+                error_description: None,
+            }),
+            State(cb_state.clone()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(
+            replay_response.status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        let status = cb_state.oauth_status.status(state_val).await;
+        assert_eq!(
+            status.status,
+            super::super::oauth_status::OAuthFlowStatus::Failed
+        );
+        assert_eq!(
+            status.message.as_deref(),
+            Some("OAuth provider error: access_denied -- denied")
+        );
     }
 
     #[tokio::test]
