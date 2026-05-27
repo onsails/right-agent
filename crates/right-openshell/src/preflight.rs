@@ -58,6 +58,45 @@ pub fn parse_openshell_cli_version(output: &str) -> Result<Version, String> {
     Version::parse(rest.trim()).map_err(|e| format!("could not parse semver from {rest:?}: {e}"))
 }
 
+/// Pure helper used by [`cli_version_check`] and tests. Takes the raw
+/// `openshell --version` stdout and returns Ok on `>= MIN_OPENSHELL_VERSION`,
+/// `PreflightError::CliTooOld` if older, `CliVersionUnparseable` on garbage.
+pub fn cli_version_check_str(output: &str) -> Result<(), PreflightError> {
+    let found =
+        parse_openshell_cli_version(output).map_err(PreflightError::CliVersionUnparseable)?;
+    if found < MIN_OPENSHELL_VERSION {
+        return Err(PreflightError::CliTooOld {
+            found,
+            required: MIN_OPENSHELL_VERSION,
+        });
+    }
+    Ok(())
+}
+
+/// Spawn `openshell --version` and check against [`MIN_OPENSHELL_VERSION`].
+/// Returns `CliMissing` if the binary isn't on PATH.
+pub async fn cli_version_check() -> Result<(), PreflightError> {
+    let out = tokio::process::Command::new("openshell")
+        .arg("--version")
+        .output()
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                PreflightError::CliMissing
+            } else {
+                PreflightError::CliVersionUnparseable(format!("spawn failed: {e:#}"))
+            }
+        })?;
+    if !out.status.success() {
+        return Err(PreflightError::CliVersionUnparseable(format!(
+            "openshell --version exited {} stderr={:?}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr),
+        )));
+    }
+    cli_version_check_str(&String::from_utf8_lossy(&out.stdout))
+}
+
 #[cfg(test)]
 #[path = "preflight_tests.rs"]
 mod tests;
