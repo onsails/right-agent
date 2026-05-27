@@ -1121,6 +1121,110 @@ fn remove_provider_entry(original: &str, name: &str) -> String {
     out
 }
 
+// ── Task 26: sandbox_mode_none rejection test ─────────────────────────────────
+
+#[cfg(test)]
+mod sandbox_mode_tests {
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    /// Build a minimal internal router pointed at `agents_dir`, enough to
+    /// exercise /provider-list. Mirrors `make_test_router` from internal_api.rs.
+    async fn make_provider_test_router(tmp: &std::path::Path) -> axum::Router {
+        use crate::aggregator::{AgentInfo, BackendRegistry};
+        use crate::right_backend::RightBackend;
+        use dashmap::DashMap;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let agents_dir = tmp.join("agents");
+        // Ensure the dispatcher has a known agent so token auth passes,
+        // but the test agent ("hostagent") only needs the agent.yaml on disk.
+        let placeholder_dir = agents_dir.join("hostagent");
+        std::fs::create_dir_all(&placeholder_dir).unwrap();
+        right_db::open_db(&placeholder_dir, true).await.unwrap();
+
+        let right = RightBackend::new(agents_dir.clone(), None);
+        let registry = BackendRegistry {
+            right,
+            proxies: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            agent_dir: placeholder_dir.clone(),
+            hindsight: None,
+        };
+        let agents = DashMap::new();
+        agents.insert("hostagent".into(), registry);
+        let dispatcher = Arc::new(crate::aggregator::ToolDispatcher { agents });
+
+        let refresh_senders: crate::aggregator::RefreshSenders =
+            Arc::new(std::collections::HashMap::new());
+        let reconnect_managers: crate::aggregator::ReconnectManagers =
+            Arc::new(std::collections::HashMap::new());
+
+        let token_map_path = tmp.join("agent-tokens.json");
+        std::fs::write(
+            &token_map_path,
+            serde_json::json!({"hostagent": "tok-test"}).to_string(),
+        )
+        .unwrap();
+        let token_map: crate::aggregator::AgentTokenMap = {
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "tok-test".into(),
+                AgentInfo {
+                    name: "hostagent".into(),
+                    dir: placeholder_dir,
+                },
+            );
+            Arc::new(tokio::sync::RwLock::new(map))
+        };
+
+        crate::internal_api::internal_router(
+            dispatcher,
+            refresh_senders,
+            reconnect_managers,
+            token_map,
+            token_map_path,
+            agents_dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn provider_list_rejects_sandbox_mode_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let agent_dir = tmp.path().join("agents").join("hostagent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        // Write agent.yaml with mode: none — sandbox-mode guard should fire.
+        std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+
+        let app = make_provider_test_router(tmp.path()).await;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/provider-list")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({"agent": "hostagent"})).unwrap(),
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(
+            json["code"], "sandbox_mode_none",
+            "expected code=sandbox_mode_none, got: {json}"
+        );
+    }
+}
+
 // ── Task 16: /provider-types ──────────────────────────────────────────────────
 
 #[derive(Debug, serde::Serialize)]
