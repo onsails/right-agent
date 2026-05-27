@@ -536,13 +536,16 @@ or `Failed:` when a clear user-facing sentence is available.
 
 ## OpenShell Integration Conventions
 
-- **Prefer gRPC over CLI**: Use the OpenShell gRPC API (mTLS on the
-  active gateway endpoint) for sandbox operations wherever possible.
-  Resolve the endpoint from `OPENSHELL_GATEWAY_ENDPOINT` or
-  `openshell status`; do not hardcode a gateway port. The CLI is only
-  used for file transfer — no gRPC file transfer API yet.
+- **Use gRPC for everything except file transfer and `policy set --wait`**:
+  every provider control-plane operation (Create/Get/Update/Delete/List/
+  Attach/Detach/ListAttached/GetSandboxProviderEnvironment) goes through
+  tonic-generated client stubs from the vendored `openshell.v1` proto.
+  CLI remains only for: SSH+tar-backed file upload/download, and
+  `openshell policy set --wait` (the policy hot-apply path). Adding a
+  new provider operation by CLI is a review-blocking defect.
 - **gRPC for**: sandbox create/get/delete, readiness polling, in-sandbox
-  command execution, policy status, SSH session management.
+  command execution, policy status, SSH session management, provider
+  CRUD + sandbox attach/detach, Health (version preflight).
 - **Readiness polling diagnostics**: `wait_for_ready` must preserve the
   last `GetSandbox` phase/status in timeout errors and treat
   `SANDBOX_PHASE_ERROR` as terminal. Do not collapse OpenShell status
@@ -558,12 +561,19 @@ or `Failed:` when a clear user-facing sentence is available.
   host.
 - **CLI for**: file upload/download (SSH+tar under the hood), policy
   apply (`openshell policy set`).
-- **Vendored proto compatibility is load-bearing**: OpenShell v0.0.42
-  returns sandbox IDs as `Sandbox.metadata.id`; older protos decoded
-  field 1 as top-level `Sandbox.id` and failed with `invalid string
-  value: data is not UTF-8 encoded`. `resolve_sandbox_id` must read
-  `metadata.id`; `ci_openshell_policy_validates_against_openshell` is
-  the live regression gate.
+- **Vendored proto compatibility is load-bearing**: OpenShell `v0.0.50`
+  is the minimum supported version (CLI and gateway).
+  `crates/right-openshell/proto/UPSTREAM.md` records the pinned tag and
+  fetch date. To bump: run `scripts/vendor-openshell-proto.sh <tag>` and
+  `cargo check -p right-openshell` to regenerate stubs. Older protos
+  lacked `AttachSandboxProvider` / `DetachSandboxProvider` /
+  `ListSandboxProviders` RPCs — the providers feature depends on them.
+  `right_openshell::preflight::openshell_preflight` enforces this at
+  bot startup; both CLI (`openshell --version`) and gateway (Health
+  RPC) must report `>= MIN_OPENSHELL_VERSION`.
+  `resolve_sandbox_id` must read `metadata.id`;
+  `ci_openshell_policy_validates_against_openshell` is the live
+  regression gate.
 - **NEVER use the CLI for in-sandbox command execution**: `openshell
   sandbox exec` CLI has unreliable argument parsing. Always use gRPC
   `exec_in_sandbox`.
