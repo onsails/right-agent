@@ -119,6 +119,29 @@ impl OAuthFlowStatusStore {
         expired
     }
 
+    /// Drop entries in a terminal state (`Succeeded`, `Failed`, `Expired`) whose
+    /// `started_at` is older than `grace`. Pending entries are never removed by
+    /// this method -- expiry is handled separately by
+    /// `expire_pending_older_than`.
+    ///
+    /// After purge, `status(flow_id)` returns the synthetic `Unknown` response,
+    /// which the dashboard treats as terminal.
+    pub(crate) async fn purge_terminal_older_than(&self, grace: Duration) -> usize {
+        let mut inner = self.inner.lock().await;
+        let now = Instant::now();
+        let before = inner.len();
+
+        inner.retain(|_, entry| {
+            let is_terminal = matches!(
+                entry.status,
+                OAuthFlowStatus::Succeeded | OAuthFlowStatus::Failed | OAuthFlowStatus::Expired
+            );
+            !(is_terminal && now.duration_since(entry.started_at) > grace)
+        });
+
+        before - inner.len()
+    }
+
     async fn update(&self, flow_id: &str, status: OAuthFlowStatus, message: Option<String>) {
         if let Some(entry) = self.inner.lock().await.get_mut(flow_id) {
             entry.status = status;
@@ -136,16 +159,14 @@ impl OAuthFlowStatusStore {
 }
 
 pub(crate) fn compact_dashboard_error(detail: &str) -> String {
-    const SERVER_ERROR_PREFIX: &str = "Server error (502): ";
-
-    if let Some(body) = detail.strip_prefix(SERVER_ERROR_PREFIX)
+    if let Some((status, body)) = parse_server_error_body(detail)
         && let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
         && let Some(error) = value.get("error").and_then(|error| error.as_str())
     {
         if contains_secret_like_word(error) {
             return "OAuth error details were redacted.".to_string();
         }
-        return format!("{SERVER_ERROR_PREFIX}{error}");
+        return format!("Server error ({status}): {error}");
     }
 
     if contains_secret_like_word(detail) {
@@ -153,6 +174,22 @@ pub(crate) fn compact_dashboard_error(detail: &str) -> String {
     }
 
     detail.chars().take(240).collect()
+}
+
+/// Parse a `right-mcp` internal-client error string of the form
+/// `Server error ({status}): {body}` (see
+/// `crates/right-mcp/src/internal_client.rs`). Returns the numeric status
+/// digits and the body slice when the input matches; otherwise `None`.
+fn parse_server_error_body(detail: &str) -> Option<(&str, &str)> {
+    let rest = detail.strip_prefix("Server error (")?;
+    let close = rest.find(')')?;
+    let status = &rest[..close];
+    if status.is_empty() || !status.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let after = &rest[close + 1..];
+    let body = after.strip_prefix(": ")?;
+    Some((status, body))
 }
 
 fn contains_secret_like_word(detail: &str) -> bool {
@@ -272,6 +309,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn purge_drops_old_terminal_flows_but_keeps_pending() {
+        let store = OAuthFlowStatusStore::default();
+        store
+            .insert_pending("done".to_string(), "composio".to_string())
+            .await;
+        store.mark_succeeded("done").await;
+        store
+            .force_started_at_for_test("done", Instant::now() - Duration::from_secs(120))
+            .await;
+
+        store
+            .insert_pending("still-pending".to_string(), "composio".to_string())
+            .await;
+        store
+            .force_started_at_for_test("still-pending", Instant::now() - Duration::from_secs(120))
+            .await;
+
+        let purged = store
+            .purge_terminal_older_than(Duration::from_secs(60))
+            .await;
+
+        assert_eq!(purged, 1);
+        let done_status = store.status("done").await;
+        assert_eq!(done_status.status, OAuthFlowStatus::Unknown);
+        assert_eq!(done_status.server_name, None);
+        let pending_status = store.status("still-pending").await;
+        assert_eq!(pending_status.status, OAuthFlowStatus::Pending);
+        assert_eq!(pending_status.server_name.as_deref(), Some("composio"));
+    }
+
+    #[tokio::test]
     async fn cleanup_marks_old_pending_flows_expired() {
         let store = OAuthFlowStatusStore::default();
         store
@@ -323,5 +391,26 @@ mod tests {
         assert_eq!(message, "OAuth error details were redacted.");
         assert!(!message.contains("code_verifier"));
         assert!(!message.contains("abc123"));
+    }
+
+    #[test]
+    fn compact_dashboard_error_extracts_error_field_for_non_502_status() {
+        let message = compact_dashboard_error(
+            r#"Server error (401): {"error":"upstream_auth_required","detail":"reauth needed","access_token":"secret"}"#,
+        );
+
+        assert_eq!(message, "Server error (401): upstream_auth_required");
+        assert!(!message.contains("secret"));
+        assert!(!message.contains("reauth needed"));
+    }
+
+    #[test]
+    fn compact_dashboard_error_extracts_error_field_for_500_status() {
+        let message = compact_dashboard_error(
+            r#"Server error (500): {"error":"internal_failure","detail":"db down"}"#,
+        );
+
+        assert_eq!(message, "Server error (500): internal_failure");
+        assert!(!message.contains("db down"));
     }
 }

@@ -402,6 +402,9 @@ pub(crate) async fn run_pending_auth_cleanup(
 ) {
     const CHECK_INTERVAL: Duration = Duration::from_secs(60);
     const EXPIRY: Duration = Duration::from_secs(600);
+    // Keep terminal statuses around for a while after completion so the
+    // dashboard can read the final state before it disappears.
+    const TERMINAL_GRACE: Duration = Duration::from_secs(1800);
 
     loop {
         tokio::time::sleep(CHECK_INTERVAL).await;
@@ -412,10 +415,12 @@ pub(crate) async fn run_pending_auth_cleanup(
         drop(map);
 
         let expired_statuses = oauth_status.expire_pending_older_than(EXPIRY).await;
-        if before != after || expired_statuses > 0 {
+        let purged_terminal_statuses = oauth_status.purge_terminal_older_than(TERMINAL_GRACE).await;
+        if before != after || expired_statuses > 0 || purged_terminal_statuses > 0 {
             tracing::debug!(
                 removed_pending_auth = before - after,
                 expired_statuses,
+                purged_terminal_statuses,
                 remaining_pending_auth = after,
                 "pending auth cleanup completed"
             );
