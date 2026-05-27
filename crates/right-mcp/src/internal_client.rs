@@ -243,6 +243,96 @@ impl InternalClient {
     ) -> Result<ProgressSendResponse, InternalClientError> {
         self.post("/progress/send", request).await
     }
+
+    /// List providers for the given agent.
+    pub async fn provider_list(
+        &self,
+        agent: &str,
+    ) -> Result<Vec<serde_json::Value>, InternalClientError> {
+        self.post("/provider-list", &ProviderListRequest { agent })
+            .await
+    }
+
+    /// List available provider types.
+    pub async fn provider_types(&self) -> Result<Vec<serde_json::Value>, InternalClientError> {
+        self.post("/provider-types", &serde_json::json!({})).await
+    }
+
+    /// Create a provider for the given agent.
+    pub async fn provider_create(
+        &self,
+        req: &ProviderCreateRequest<'_>,
+    ) -> Result<serde_json::Value, InternalClientError> {
+        self.post("/provider-create", req).await
+    }
+
+    /// Rotate credentials for an existing provider.
+    pub async fn provider_rotate(
+        &self,
+        req: &ProviderRotateRequest<'_>,
+    ) -> Result<serde_json::Value, InternalClientError> {
+        self.post("/provider-rotate", req).await
+    }
+
+    /// Remove a provider from an agent.
+    pub async fn provider_remove(
+        &self,
+        req: &ProviderRemoveRequest<'_>,
+    ) -> Result<serde_json::Value, InternalClientError> {
+        self.post("/provider-remove", req).await
+    }
+
+    /// Update provider config for an agent.
+    pub async fn provider_config_update(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, InternalClientError> {
+        self.post("/provider-config-update", body).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Provider request types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProviderListRequest<'a> {
+    pub agent: &'a str,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProviderCreateRequest<'a> {
+    pub agent: &'a str,
+    #[serde(rename = "type")]
+    pub type_: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<&'a str>,
+    pub credential: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generic: Option<ProviderCreateGenericArg<'a>>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProviderCreateGenericArg<'a> {
+    pub env_var: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_name: Option<&'a str>,
+    pub upstream_host: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_path_prefix: Option<&'a str>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProviderRotateRequest<'a> {
+    pub agent: &'a str,
+    pub name: &'a str,
+    pub credential: &'a str,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProviderRemoveRequest<'a> {
+    pub agent: &'a str,
+    pub name: &'a str,
 }
 
 // ---------------------------------------------------------------------------
