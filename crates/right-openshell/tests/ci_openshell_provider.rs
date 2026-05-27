@@ -84,3 +84,46 @@ async fn ci_openshell_provider_attach_detach() {
 
     delete_provider(&endpoint, &prov_name).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "ci-openshell: requires a live OpenShell gateway"]
+async fn ci_openshell_provider_create_attach_env_visible() {
+    use right_openshell::providers::*;
+    use right_openshell::test_support::TestSandbox;
+    let endpoint = right_openshell::openshell::resolve_gateway_endpoint()
+        .await
+        .unwrap();
+    let _ = ensure_v2_enabled(&endpoint).await.unwrap();
+
+    let pid = std::process::id();
+    let prov = format!("rightprobe-{pid}-envvisible");
+    let mut creds = std::collections::HashMap::new();
+    creds.insert("RIGHTPROBE_ENVVISIBLE".into(), "secret".into());
+    create_provider(
+        &endpoint,
+        &ProviderSpec {
+            name: prov.clone(),
+            type_: "generic".into(),
+            credentials: creds,
+            config: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let sandbox = TestSandbox::create("ci-openshell-provider-env-visible").await;
+    attach_to_sandbox(&endpoint, sandbox.name(), &prov)
+        .await
+        .unwrap();
+
+    let (output, status) = sandbox.exec(&["printenv", "RIGHTPROBE_ENVVISIBLE"]).await;
+    assert_eq!(status, 0, "printenv failed: {output}");
+    assert!(
+        output.starts_with("openshell:resolve:env:"),
+        "expected placeholder, got: {output}"
+    );
+
+    detach_from_sandbox(&endpoint, sandbox.name(), &prov)
+        .await
+        .unwrap();
+    delete_provider(&endpoint, &prov).await.unwrap();
+}
