@@ -1,0 +1,62 @@
+use super::policy::*;
+
+const POLICY_WITHOUT_PROVIDERS: &str = r#"
+network:
+  endpoints:
+    - domain: api.anthropic.com
+      protocol: rest
+      access: full
+"#;
+
+const POLICY_WITH_ONE_PROVIDER: &str = r#"
+network:
+  endpoints:
+    - domain: api.anthropic.com
+      protocol: rest
+      access: full
+    # managed-by: right-providers:myagent-acme
+    - domain: api.acme.com
+      protocol: rest
+      access: full
+"#;
+
+#[test]
+fn append_provider_endpoint_inserts_tagged_stanza() {
+    let after = providers_append(
+        POLICY_WITHOUT_PROVIDERS,
+        "myagent-acme",
+        "api.acme.com",
+        None,
+    );
+    assert!(after.contains("managed-by: right-providers:myagent-acme"));
+    assert!(after.contains("- domain: api.acme.com"));
+}
+
+#[test]
+fn append_provider_endpoint_existing_rest_is_noop() {
+    let already = "network:\n  endpoints:\n    - domain: api.acme.com\n      protocol: rest\n      access: full\n";
+    let after = providers_append(already, "myagent-acme", "api.acme.com", None);
+    assert_eq!(after, already);
+}
+
+#[test]
+fn append_provider_endpoint_raw_tunnel_conflict() {
+    let raw = "network:\n  endpoints:\n    - allowed_ips: [1.2.3.4/32]\n      tls: skip\n      ports: [443]\n";
+    // tls:skip is a raw tunnel; with no domain we can't conflict — that's OK.
+    let after = providers_append(raw, "myagent-acme", "api.acme.com", None);
+    assert!(after.contains("managed-by: right-providers:myagent-acme"));
+}
+
+#[test]
+fn append_provider_endpoint_conflicting_domain_raw_tunnel_returns_err() {
+    let raw = "network:\n  endpoints:\n    - domain: api.acme.com\n      tls: skip\n";
+    let err = providers_append_checked(raw, "myagent-acme", "api.acme.com", None);
+    assert!(matches!(err, Err(PolicyConflict::RawTunnel { .. })));
+}
+
+#[test]
+fn strip_provider_endpoint_removes_tagged() {
+    let after = providers_strip(POLICY_WITH_ONE_PROVIDER, "myagent-acme", "api.acme.com");
+    assert!(!after.contains("managed-by: right-providers:myagent-acme"));
+    assert!(!after.contains("api.acme.com"));
+}
