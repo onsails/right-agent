@@ -43,6 +43,8 @@ pub struct CallbackParams {
 #[derive(Clone)]
 pub struct OAuthCallbackState {
     pub pending_auth: PendingAuthMap,
+    #[allow(dead_code)]
+    pub(crate) oauth_status: super::oauth_status::OAuthFlowStatusStore,
     /// Agent name (for logging and notifications)
     pub agent_name: String,
     /// Telegram Bot for sending notifications
@@ -398,9 +400,12 @@ pub(crate) async fn run_bot_uds_server(
 }
 
 /// Background task: every 60 seconds, remove PendingAuth entries older than 10 minutes.
-pub async fn run_pending_auth_cleanup(pending_auth: PendingAuthMap) {
+pub(crate) async fn run_pending_auth_cleanup(
+    pending_auth: PendingAuthMap,
+    oauth_status: super::oauth_status::OAuthFlowStatusStore,
+) {
     const CHECK_INTERVAL: Duration = Duration::from_secs(60);
-    const EXPIRY: Duration = Duration::from_secs(600); // 10 minutes
+    const EXPIRY: Duration = Duration::from_secs(600);
 
     loop {
         tokio::time::sleep(CHECK_INTERVAL).await;
@@ -408,11 +413,15 @@ pub async fn run_pending_auth_cleanup(pending_auth: PendingAuthMap) {
         let before = map.len();
         map.retain(|_state, auth| auth.created_at.elapsed() < EXPIRY);
         let after = map.len();
-        if before != after {
+        drop(map);
+
+        let expired_statuses = oauth_status.expire_pending_older_than(EXPIRY).await;
+        if before != after || expired_statuses > 0 {
             tracing::debug!(
-                removed = before - after,
-                remaining = after,
-                "pending auth cleanup: removed expired entries"
+                removed_pending_auth = before - after,
+                expired_statuses,
+                remaining_pending_auth = after,
+                "pending auth cleanup completed"
             );
         }
     }
@@ -432,6 +441,7 @@ mod tests {
         use right_agent::agent::allowlist::{AllowlistHandle, AllowlistState};
         OAuthCallbackState {
             pending_auth: map,
+            oauth_status: super::super::oauth_status::OAuthFlowStatusStore::default(),
             agent_name: "test-agent".to_string(),
             bot: teloxide::Bot::new("0:fake_token_for_tests"),
             allowlist: AllowlistHandle::new(AllowlistState::default()),
@@ -571,6 +581,7 @@ mod tests {
         let handle = AllowlistHandle::new(state);
         let cb_state = OAuthCallbackState {
             pending_auth: Arc::new(Mutex::new(Default::default())),
+            oauth_status: super::super::oauth_status::OAuthFlowStatusStore::default(),
             agent_name: "test".into(),
             bot: teloxide::Bot::new("123:abc"),
             allowlist: handle.clone(),

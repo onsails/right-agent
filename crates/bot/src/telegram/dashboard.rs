@@ -70,6 +70,7 @@ pub(crate) struct DashboardState {
     pub foreground: super::StopTokens,
     pub internal_client: std::sync::Arc<right_mcp::internal_client::InternalClient>,
     pub pending_auth: super::oauth_callback::PendingAuthMap,
+    pub oauth_status: super::oauth_status::OAuthFlowStatusStore,
     #[cfg(test)]
     pub mcp_oauth_allow_private_urls: bool,
     #[cfg(test)]
@@ -152,6 +153,10 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
         .route(
             "/dashboard/{agent}/api/v1/mcp/servers/{server_name}/oauth/start",
             post(mcp::handle_mcp_oauth_start),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/mcp/oauth/{flow_id}/status",
+            get(mcp::handle_mcp_oauth_status),
         )
         .route(
             "/dashboard/{agent}/api/v1/mcp/servers/{server_name}",
@@ -824,6 +829,7 @@ mod tests {
                 agent_dir.join("missing-internal.sock"),
             )),
             pending_auth: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            oauth_status: super::super::oauth_status::OAuthFlowStatusStore::default(),
             mcp_oauth_allow_private_urls: false,
             doctor_checks: Some(vec![
                 right_agent::doctor::DoctorCheck {
@@ -926,6 +932,28 @@ mod tests {
         } else {
             serde_json::from_slice(&bytes).expect("json response")
         };
+        (status, value)
+    }
+
+    async fn get_json_with_state(
+        path: &str,
+        auth: Option<String>,
+        state: super::DashboardState,
+    ) -> (StatusCode, serde_json::Value) {
+        let router = super::build_dashboard_router(state);
+        let mut builder = Request::builder().uri(path).method("GET");
+        if let Some(auth) = auth {
+            builder = builder.header(header::AUTHORIZATION, format!("tma {auth}"));
+        }
+        let response = router
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, value)
     }
 
@@ -1529,6 +1557,50 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn dashboard_mcp_oauth_status_requires_auth() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let status = get(
+            "/dashboard/alpha/api/v1/mcp/oauth/flow-1/status",
+            None,
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn dashboard_mcp_oauth_status_returns_pending_and_unknown() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let store = super::super::oauth_status::OAuthFlowStatusStore::default();
+        store
+            .insert_pending("flow-1".to_string(), "composio".to_string())
+            .await;
+        state.oauth_status = store;
+
+        let (status, body) = get_json_with_state(
+            "/dashboard/alpha/api/v1/mcp/oauth/flow-1/status",
+            Some(signed_init_data(42)),
+            state.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "pending");
+        assert_eq!(body["server_name"], "composio");
+
+        let (status, body) = get_json_with_state(
+            "/dashboard/alpha/api/v1/mcp/oauth/missing/status",
+            Some(signed_init_data(42)),
+            state,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "unknown");
+        assert_eq!(body["message"], "OAuth flow is no longer active.");
     }
 
     #[tokio::test]

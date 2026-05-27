@@ -401,6 +401,18 @@ pub(crate) async fn handle_mcp_oauth_start(
     Json(DashboardMcpOAuthStartResponse { auth_url }).into_response()
 }
 
+pub(crate) async fn handle_mcp_oauth_status(
+    AxumPath((agent, flow_id)): AxumPath<(String, String)>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    Json(state.oauth_status.status(&flow_id).await).into_response()
+}
+
 pub(crate) async fn handle_mcp_remove(
     AxumPath((agent, server_name)): AxumPath<(String, String)>,
     State(state): State<DashboardState>,
