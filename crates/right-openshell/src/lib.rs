@@ -26,5 +26,7 @@ pub mod preflight;
 pub mod sandbox_exec;
 #[cfg(unix)]
 pub mod test_cleanup;
+#[cfg(test)]
+mod test_mock_server;
 #[cfg(all(unix, any(test, feature = "test-support")))]
 pub mod test_support;
