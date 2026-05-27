@@ -19,96 +19,52 @@ use os_proto::v1::open_shell_server::{OpenShell, OpenShellServer};
 
 type ReceiverStream<T> = tokio_stream::wrappers::ReceiverStream<T>;
 
+/// Unary RPC mock: takes a request, returns a response or `tonic::Status`.
+type UnaryMockFn<Req, Resp> = Box<dyn Fn(Req) -> Result<Resp, tonic::Status> + Send + Sync>;
+
+/// Zero-arg mock for RPCs with empty/ignored request bodies (e.g. `health`).
+type EmptyArgMockFn<Resp> = Box<dyn Fn() -> Result<Resp, tonic::Status> + Send + Sync>;
+
 #[derive(Default)]
 pub(crate) struct MockOpenShell {
     pub(crate) get_sandbox_phase: Arc<AtomicI32>,
     pub(crate) get_sandbox_status: Option<os_proto::v1::SandboxStatus>,
 
-    pub(crate) mock_health:
-        Option<Box<dyn Fn() -> Result<os_proto::v1::HealthResponse, tonic::Status> + Send + Sync>>,
-    pub(crate) mock_create_provider: Option<
-        Box<
-            dyn Fn(
-                    os_proto::v1::CreateProviderRequest,
-                ) -> Result<os_proto::v1::ProviderResponse, tonic::Status>
-                + Send
-                + Sync,
-        >,
-    >,
-    pub(crate) mock_get_provider: Option<
-        Box<
-            dyn Fn(
-                    os_proto::v1::GetProviderRequest,
-                ) -> Result<os_proto::v1::ProviderResponse, tonic::Status>
-                + Send
-                + Sync,
-        >,
-    >,
-    pub(crate) mock_update_provider: Option<
-        Box<
-            dyn Fn(
-                    os_proto::v1::UpdateProviderRequest,
-                ) -> Result<os_proto::v1::ProviderResponse, tonic::Status>
-                + Send
-                + Sync,
-        >,
-    >,
+    pub(crate) mock_health: Option<EmptyArgMockFn<os_proto::v1::HealthResponse>>,
+    pub(crate) mock_create_provider:
+        Option<UnaryMockFn<os_proto::v1::CreateProviderRequest, os_proto::v1::ProviderResponse>>,
+    pub(crate) mock_get_provider:
+        Option<UnaryMockFn<os_proto::v1::GetProviderRequest, os_proto::v1::ProviderResponse>>,
+    pub(crate) mock_update_provider:
+        Option<UnaryMockFn<os_proto::v1::UpdateProviderRequest, os_proto::v1::ProviderResponse>>,
     pub(crate) mock_delete_provider: Option<
-        Box<
-            dyn Fn(
-                    os_proto::v1::DeleteProviderRequest,
-                ) -> Result<os_proto::v1::DeleteProviderResponse, tonic::Status>
-                + Send
-                + Sync,
-        >,
+        UnaryMockFn<os_proto::v1::DeleteProviderRequest, os_proto::v1::DeleteProviderResponse>,
     >,
     pub(crate) mock_list_providers: Option<
-        Box<
-            dyn Fn(
-                    os_proto::v1::ListProvidersRequest,
-                ) -> Result<os_proto::v1::ListProvidersResponse, tonic::Status>
-                + Send
-                + Sync,
-        >,
+        UnaryMockFn<os_proto::v1::ListProvidersRequest, os_proto::v1::ListProvidersResponse>,
     >,
     pub(crate) mock_attach_sandbox_provider: Option<
-        Box<
-            dyn Fn(
-                    os_proto::v1::AttachSandboxProviderRequest,
-                )
-                    -> Result<os_proto::v1::AttachSandboxProviderResponse, tonic::Status>
-                + Send
-                + Sync,
+        UnaryMockFn<
+            os_proto::v1::AttachSandboxProviderRequest,
+            os_proto::v1::AttachSandboxProviderResponse,
         >,
     >,
     pub(crate) mock_detach_sandbox_provider: Option<
-        Box<
-            dyn Fn(
-                    os_proto::v1::DetachSandboxProviderRequest,
-                )
-                    -> Result<os_proto::v1::DetachSandboxProviderResponse, tonic::Status>
-                + Send
-                + Sync,
+        UnaryMockFn<
+            os_proto::v1::DetachSandboxProviderRequest,
+            os_proto::v1::DetachSandboxProviderResponse,
         >,
     >,
     pub(crate) mock_list_sandbox_providers: Option<
-        Box<
-            dyn Fn(
-                    os_proto::v1::ListSandboxProvidersRequest,
-                )
-                    -> Result<os_proto::v1::ListSandboxProvidersResponse, tonic::Status>
-                + Send
-                + Sync,
+        UnaryMockFn<
+            os_proto::v1::ListSandboxProvidersRequest,
+            os_proto::v1::ListSandboxProvidersResponse,
         >,
     >,
     pub(crate) mock_get_sandbox_provider_environment: Option<
-        Box<
-            dyn Fn(
-                    os_proto::v1::GetSandboxProviderEnvironmentRequest,
-                )
-                    -> Result<os_proto::v1::GetSandboxProviderEnvironmentResponse, tonic::Status>
-                + Send
-                + Sync,
+        UnaryMockFn<
+            os_proto::v1::GetSandboxProviderEnvironmentRequest,
+            os_proto::v1::GetSandboxProviderEnvironmentResponse,
         >,
     >,
 }
