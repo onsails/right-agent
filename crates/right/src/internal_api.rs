@@ -145,7 +145,7 @@ pub(crate) struct InternalState {
     reconnect_managers: ReconnectManagers,
     token_map: AgentTokenMap,
     token_map_path: PathBuf,
-    agents_dir: PathBuf,
+    pub(crate) agents_dir: PathBuf,
 }
 
 pub(crate) fn internal_router(
@@ -174,6 +174,14 @@ pub(crate) fn internal_router(
         .route("/reload", post(handle_reload))
         .route("/progress/register", post(handle_progress_register))
         .route("/progress/unregister", post(handle_progress_unregister))
+        .route(
+            "/provider-list",
+            post(crate::internal_api_providers::handle_provider_list),
+        )
+        .route(
+            "/provider-types",
+            post(crate::internal_api_providers::handle_provider_types),
+        )
         .with_state(state)
 }
 
