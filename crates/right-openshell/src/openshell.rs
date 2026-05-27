@@ -564,6 +564,7 @@ pub fn spawn_sandbox(
     name: &str,
     policy_path: &Path,
     upload_dir: Option<&Path>,
+    providers: &[String],
 ) -> miette::Result<right_process::ProcessGroupChild> {
     let mut cmd = Command::new("openshell");
     cmd.args(["sandbox", "create", "--name", name, "--policy"]);
@@ -573,6 +574,10 @@ pub fn spawn_sandbox(
     if let Some(dir) = upload_dir {
         cmd.arg("--upload");
         cmd.arg(dir);
+    }
+
+    for prov in providers {
+        cmd.arg("--provider").arg(prov);
     }
 
     // `openshell sandbox create` is long-running; callers wait for READY via
@@ -1613,7 +1618,7 @@ pub async fn ensure_sandbox(
     }
 
     tracing::info!(sandbox = %sandbox, "creating sandbox");
-    let mut child = spawn_sandbox(sandbox, policy_path, staging_dir)?;
+    let mut child = spawn_sandbox(sandbox, policy_path, staging_dir, &[])?;
 
     tokio::select! {
         result = wait_for_ready(&mut grpc_client, sandbox, 120, 2) => {
