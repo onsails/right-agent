@@ -97,11 +97,28 @@ pub async fn cli_version_check() -> Result<(), PreflightError> {
     cli_version_check_str(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// Issue a `Health` RPC and verify the returned version is
+/// `>= MIN_OPENSHELL_VERSION`.
+pub async fn gateway_version_check(
+    client: &mut OpenShellClient<Channel>,
+) -> Result<(), PreflightError> {
+    use crate::openshell_proto::openshell::v1::HealthRequest;
+    let resp = client
+        .health(HealthRequest {})
+        .await
+        .map_err(PreflightError::GatewayUnreachable)?
+        .into_inner();
+    let found = Version::parse(resp.version.trim())
+        .map_err(|e| PreflightError::GatewayVersionUnparseable(format!("{}: {e}", resp.version)))?;
+    if found < MIN_OPENSHELL_VERSION {
+        return Err(PreflightError::GatewayTooOld {
+            found,
+            required: MIN_OPENSHELL_VERSION,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "preflight_tests.rs"]
 mod tests;
-
-// Note: `openshell_preflight` and the gateway Health probe are added
-// in later tasks.
-#[allow(dead_code)]
-async fn _client_handle_for_grpc_module_export(_: OpenShellClient<Channel>) {}
