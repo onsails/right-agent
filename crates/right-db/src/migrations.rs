@@ -31,7 +31,7 @@ const V34_SCHEMA: &str = include_str!("sql/v34_turso_fts_indexes.sql");
 const V35_SCHEMA: &str = include_str!("sql/v35_legacy_learning_cleanup.sql");
 const V36_SCHEMA: &str = include_str!("sql/v36_mcp_http_headers.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 36;
+pub const LATEST_SCHEMA_VERSION: u32 = 37;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -703,6 +703,34 @@ fn v34_turso_fts_indexes(
     })
 }
 
+/// v37: Delete usage rows from the retired learning pipeline.
+///
+/// `learning_reviewer` and `learning_selector` are dead sources from a
+/// removed pipeline; they surface as "unknown usage source" warnings in the
+/// dashboard. The hook guards against databases that pre-date `usage_events`
+/// (v15) — such databases exist in tests that build a synthetic legacy schema
+/// without going through every intermediate migration. The DELETE is idempotent
+/// on a re-run: it removes zero rows when no matching source values remain.
+fn v37_drop_legacy_usage_sources(
+    conn: &dyn MigrationConnection,
+) -> BoxFuture<'_, Result<(), crate::DbError>> {
+    Box::pin(async move {
+        let table_exists = conn
+            .query_i64(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='usage_events'",
+                MigrationParams::Empty,
+            )
+            .await?;
+        if table_exists > 0 {
+            conn.execute_batch(
+                "DELETE FROM usage_events WHERE source IN ('learning_reviewer', 'learning_selector')",
+            )
+            .await?;
+        }
+        Ok(())
+    })
+}
+
 pub static MIGRATIONS: Migrations = Migrations {
     migrations: &[
         Migration {
@@ -884,6 +912,11 @@ pub static MIGRATIONS: Migrations = Migrations {
             version: 36,
             sql: V36_SCHEMA,
             hook: None,
+        },
+        Migration {
+            version: 37,
+            sql: "",
+            hook: Some(v37_drop_legacy_usage_sources),
         },
     ],
 };
@@ -3725,5 +3758,49 @@ continue background work',
             invalid_created_by.is_err(),
             "invalid created_by must be rejected"
         );
+    }
+
+    #[tokio::test]
+    async fn v37_deletes_legacy_learning_usage_sources() {
+        let mut conn = Connection::open_in_memory().await.unwrap();
+        // Bring schema up to v36 so usage_events exists (created at v15,
+        // extended by v16/v28). Stops just before v37.
+        MIGRATIONS.to_version(&mut conn, 36).await.unwrap();
+
+        conn.execute_batch(
+            "INSERT INTO usage_events (session_uuid, source, ts, total_cost_usd, num_turns, \
+             input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
+             web_search_requests, web_fetch_requests, model_usage_json) VALUES \
+             ('s1','learning_reviewer','2026-01-01T00:00:00Z',0.10,1,0,0,0,0,0,0,'{}'), \
+             ('s2','learning_selector','2026-01-01T00:00:00Z',0.20,1,0,0,0,0,0,0,'{}'), \
+             ('s3','interactive','2026-01-01T00:00:00Z',0.30,1,0,0,0,0,0,0,'{}');",
+        )
+        .await
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+
+        let legacy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE source IN ('learning_reviewer','learning_selector')",
+                [],
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy, 0, "legacy learning usage rows must be deleted");
+
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE source = 'interactive'",
+                [],
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(kept, 1, "non-legacy rows must be preserved");
+
+        // Idempotent: re-running to_latest is a no-op and does not error.
+        MIGRATIONS.to_latest(&mut conn).await.unwrap();
     }
 }
