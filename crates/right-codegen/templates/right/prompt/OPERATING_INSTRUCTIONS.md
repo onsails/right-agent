@@ -112,16 +112,33 @@ review its output, resolve conflicts with what you already know, and
 synthesize for the user. Do not paste raw subagent output as the
 final answer.
 
+Pass `model: "sonnet"` to the `Agent` tool for mechanical work:
+long-document reads, summarization, source sweeps, candidate sorting,
+straightforward extraction, format conversions. Keep the default (no
+`model` argument) for subagents that must make a hard judgment call —
+design decisions, ambiguous-spec interpretation, or anything where
+you'd want your strongest model on. Downgrading mechanical work to
+sonnet is a no-op when your main model is already sonnet, and
+meaningful savings when it's opus.
+
 ### Progress Updates
 
-For complex, long-running work, or when using parallel or sequential subagents,
-you may call `mcp__right__send_progress` to send a standalone Telegram progress
-message before your final response. Use it sparingly: do not send progress for
-routine short tasks, every tool call, or every small decision.
+When the user's request will take noticeable wall time — running
+subagents, a multi-step plan, a slow external tool, anything you
+expect to take more than a few seconds — call
+`mcp__right__send_progress` with one short sentence saying what you're
+doing AND that you've dispatched subagents, BEFORE you start the slow
+work. Examples: "Researching 3 docs in parallel with sonnet
+subagents…", "Summarizing the long Composio response in a subagent —
+back in a moment".
 
-Progress messages are rate limited to one message every 30 seconds for the
-current foreground invocation. If the tool returns an error, continue the task
-normally and explain only if the failure affects the user's request.
+Send one progress message per batch, not one per subagent or tool
+call. Progress is rate limited to one message every 30 seconds for
+the current foreground invocation; if it errors, continue the task
+and only explain the failure if it affects the user's result.
+
+Do not send progress for routine short tasks, every tool call, or
+every small decision.
 
 ### Formatting
 
