@@ -264,7 +264,7 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         result.backup_path = Some(backup_path);
     }
 
-    if is_sandboxed {
+    let sandbox_name_for_cascade = if is_sandboxed {
         let explicit_sandbox_name = config
             .as_ref()
             .and_then(|c| c.sandbox.as_ref())
@@ -274,7 +274,75 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
             explicit_sandbox_name,
         );
         right_openshell::openshell::delete_sandbox(&sb_name).await;
+        // `delete_sandbox` is best-effort and returns `()` — it only logs on
+        // CLI failure. We cannot observe success here, so report
+        // `sandbox_deleted = true` as a "delete attempted" signal and rely on
+        // the explicit detach in the provider cascade below to guard against
+        // a silent CLI failure leaving providers attached.
         result.sandbox_deleted = true;
+        Some(sb_name)
+    } else {
+        None
+    };
+
+    // Cascade-delete provider entries from the gateway (best-effort).
+    // `delete_sandbox` above SHOULD have removed attachments implicitly, but
+    // it is fire-and-forget (returns `()`, logs on failure). If the CLI
+    // silently failed (network blip, OpenShell down, exit code != 0), the
+    // sandbox — and therefore the attachments — would still exist, and the
+    // gateway would reject `DeleteProvider` with FailedPrecondition. To stay
+    // self-healing per AGENTS.md, we explicitly detach each provider first
+    // (NotFound = already detached, treat as success), mirroring
+    // `handle_provider_remove`. Failure is logged but non-fatal — the agent
+    // directory removal proceeds regardless.
+    if let Some(sandbox) = config.as_ref().and_then(|c| c.sandbox.as_ref())
+        && matches!(sandbox.mode, right_agent_config::SandboxMode::Openshell)
+        && !sandbox.providers.is_empty()
+    {
+        let mtls_dir = right_openshell::openshell::default_mtls_dir();
+        match right_openshell::openshell::connect_grpc(&mtls_dir).await {
+            Ok(mut client) => {
+                for entry in &sandbox.providers {
+                    if let Some(sb_name) = sandbox_name_for_cascade.as_deref() {
+                        match right_openshell::providers::detach_from_sandbox(
+                            &mut client,
+                            sb_name,
+                            &entry.name,
+                        )
+                        .await
+                        {
+                            Ok(()) => {}
+                            Err(right_openshell::providers::ProviderError::NotFound(_)) => {
+                                // Already detached — expected when delete_sandbox succeeded.
+                            }
+                            Err(e) => tracing::warn!(
+                                name = %entry.name,
+                                sandbox = %sb_name,
+                                error = %format!("{e:#}"),
+                                "failed to detach provider during destroy; continuing to delete"
+                            ),
+                        }
+                    }
+                    match right_openshell::providers::delete_provider(&mut client, &entry.name)
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(right_openshell::providers::ProviderError::NotFound(_)) => {
+                            // Already gone — nothing to clean up.
+                        }
+                        Err(e) => tracing::warn!(
+                            name = %entry.name,
+                            error = %format!("{e:#}"),
+                            "failed to delete provider during destroy; continuing"
+                        ),
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %format!("{e:#}"),
+                "could not connect to openshell gateway for provider cleanup; continuing destroy"
+            ),
+        }
     }
 
     std::fs::remove_dir_all(&agent_dir).map_err(|e| {
@@ -568,5 +636,60 @@ groups:
             allowlist,
             "pre-destroy backup must preserve allowlist.yaml outside sandbox.tar.gz"
         );
+    }
+
+    /// Guards that `sandbox.providers` in `agent.yaml` parses correctly for
+    /// both built-in and generic entries. This is the property a backup/restore
+    /// cycle depends on: the field must not be silently dropped when the YAML
+    /// is written to a backup tarball and re-read on restore.
+    #[test]
+    fn sandbox_providers_round_trip_parse() {
+        let yaml = r#"
+sandbox:
+  mode: none
+  providers:
+    - name: foo-anthropic
+      type: anthropic
+      label: anthropic
+    - name: foo-acme
+      type: generic
+      label: acme
+      generic:
+        env_var: ACME_TOKEN
+        header_name: X-Acme-Token
+        upstream_host: api.acme.com
+        upstream_path_prefix: /v1
+"#;
+        // Parse once — both entries must be present.
+        let cfg: right_agent_config::AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let sandbox = cfg.sandbox.as_ref().expect("sandbox must be present");
+        assert_eq!(
+            sandbox.providers.len(),
+            2,
+            "expected 2 providers after parse"
+        );
+        assert_eq!(sandbox.providers[0].name, "foo-anthropic");
+        assert_eq!(sandbox.providers[1].name, "foo-acme");
+
+        // Parse again from the same source — simulates reading the backed-up agent.yaml.
+        // AgentConfig does not derive Serialize so we re-parse the original YAML string;
+        // this is identical to what backup/restore does (copy the file, re-read it).
+        let reparsed: right_agent_config::AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let reparsed_sandbox = reparsed.sandbox.expect("sandbox must survive re-parse");
+        assert_eq!(
+            reparsed_sandbox.providers.len(),
+            2,
+            "providers must survive backup/restore re-parse"
+        );
+        assert_eq!(reparsed_sandbox.providers[0].name, "foo-anthropic");
+        assert_eq!(reparsed_sandbox.providers[1].name, "foo-acme");
+
+        // Verify generic entry fields survived.
+        let generic = reparsed_sandbox.providers[1]
+            .generic
+            .as_ref()
+            .expect("second provider must have generic config");
+        assert_eq!(generic.env_var, "ACME_TOKEN");
+        assert_eq!(generic.upstream_host, "api.acme.com");
     }
 }

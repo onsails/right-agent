@@ -1,0 +1,554 @@
+//! OpenShell Provider gRPC wrappers.
+//!
+//! This module is the SOLE owner of the OpenShell Provider client.
+//! All Provider RPCs go through here (see ARCHITECTURE.md).
+
+use std::collections::HashMap;
+
+use thiserror::Error;
+use tonic::transport::Channel;
+
+use crate::openshell_proto::openshell::datamodel::v1 as datamodel;
+use crate::openshell_proto::openshell::v1 as proto_v1;
+use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
+
+/// All provider operation errors. Each is FAIL FAST — never swallowed.
+#[derive(Debug, Error)]
+pub enum ProviderError {
+    #[error("provider gateway unreachable: {0:#}")]
+    GatewayUnreachable(miette::ErrReport),
+    #[error("openshell gRPC: {0:#}")]
+    Grpc(String),
+    #[error("provider \"{0}\" not found")]
+    NotFound(String),
+    #[error("invalid provider: {0}")]
+    Invalid(String),
+}
+
+/// Input for create/update.
+#[derive(Clone)]
+pub struct ProviderSpec {
+    pub name: String,
+    pub type_: String, // raw slug
+    pub credentials: HashMap<String, String>,
+    pub config: HashMap<String, String>,
+}
+
+impl std::fmt::Debug for ProviderSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ProviderSpec {{ name: {:?}, type_: {:?}, credentials: <{} redacted>, config: {:?} }}",
+            self.name,
+            self.type_,
+            self.credentials.len(),
+            self.config,
+        )
+    }
+}
+
+/// Output of get/list. Credentials field is INTENTIONALLY OMITTED — the
+/// gateway returns them, but Right never reads or stores them on host.
+#[derive(Debug, Clone)]
+pub struct Provider {
+    pub name: String,
+    pub type_: String,
+    pub config: HashMap<String, String>,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Profile entry surfaced by `/provider-types` to the dashboard.
+#[derive(Debug, Clone)]
+pub struct ProviderProfile {
+    pub type_slug: String,
+    pub env_var: String,
+    pub display_name: String,
+    pub category: ProviderCategory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderCategory {
+    Inference,
+    Agent,
+    SourceControl,
+    Messaging,
+    Other,
+}
+
+/// Return the hardcoded catalog of known provider profiles.
+///
+/// `claude` and `outlook` are intentionally excluded:
+/// - `claude` is the built-in Claude Code identity — not user-configurable.
+/// - `outlook` was found on the gateway but is out of scope for Right.
+///
+/// `generic` is included as an escape hatch for any provider not in the list.
+pub fn profile_catalog() -> Vec<ProviderProfile> {
+    vec![
+        ProviderProfile {
+            type_slug: "anthropic".into(),
+            display_name: "Anthropic API".into(),
+            category: ProviderCategory::Inference,
+            env_var: "ANTHROPIC_API_KEY".into(),
+        },
+        ProviderProfile {
+            type_slug: "openai".into(),
+            display_name: "OpenAI".into(),
+            category: ProviderCategory::Inference,
+            env_var: "OPENAI_API_KEY".into(),
+        },
+        ProviderProfile {
+            type_slug: "nvidia".into(),
+            display_name: "NVIDIA".into(),
+            category: ProviderCategory::Inference,
+            env_var: "NVIDIA_API_KEY".into(),
+        },
+        ProviderProfile {
+            type_slug: "codex".into(),
+            display_name: "Codex".into(),
+            category: ProviderCategory::Agent,
+            env_var: "OPENAI_API_KEY".into(),
+        },
+        ProviderProfile {
+            type_slug: "copilot".into(),
+            display_name: "GitHub Copilot".into(),
+            category: ProviderCategory::Agent,
+            env_var: "COPILOT_GITHUB_TOKEN".into(),
+        },
+        ProviderProfile {
+            type_slug: "opencode".into(),
+            display_name: "OpenCode".into(),
+            category: ProviderCategory::Agent,
+            env_var: "OPENCODE_API_KEY".into(),
+        },
+        ProviderProfile {
+            type_slug: "github".into(),
+            display_name: "GitHub".into(),
+            category: ProviderCategory::SourceControl,
+            env_var: "GITHUB_TOKEN".into(),
+        },
+        ProviderProfile {
+            type_slug: "gitlab".into(),
+            display_name: "GitLab".into(),
+            category: ProviderCategory::SourceControl,
+            env_var: "GITLAB_TOKEN".into(),
+        },
+        ProviderProfile {
+            type_slug: "generic".into(),
+            display_name: "Generic".into(),
+            category: ProviderCategory::Other,
+            env_var: String::new(),
+        },
+    ]
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// gRPC conversion helpers
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Map a `tonic::Status` to a `ProviderError`, preserving NotFound
+/// semantics. `name_for_not_found` is the resource identifier used in
+/// the `ProviderError::NotFound(name)` variant.
+fn classify_status(status: tonic::Status, name_for_not_found: &str) -> ProviderError {
+    if status.code() == tonic::Code::NotFound {
+        ProviderError::NotFound(name_for_not_found.to_string())
+    } else {
+        ProviderError::Grpc(format!("{}: {}", status.code(), status.message()))
+    }
+}
+
+/// Convert a wire-level [`datamodel::Provider`] into the host-facing
+/// [`Provider`] struct. Credentials and `credential_expires_at_ms` are
+/// intentionally dropped — Right never persists them on host.
+fn provider_from_proto(p: datamodel::Provider) -> Provider {
+    let metadata = p.metadata.unwrap_or_default();
+    let updated_at = parse_object_meta_updated_at(&metadata);
+    Provider {
+        name: metadata.name,
+        type_: p.r#type,
+        config: p.config,
+        updated_at,
+    }
+}
+
+/// Derive a `DateTime<Utc>` from `ObjectMeta.created_at_ms` (int64
+/// milliseconds since Unix epoch). v0.0.50 `ObjectMeta` does NOT have
+/// an `updated_at` field — there is no last-modified timestamp on the
+/// gateway. `Provider.updated_at` therefore holds the creation time.
+fn parse_object_meta_updated_at(
+    meta: &datamodel::ObjectMeta,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if meta.created_at_ms <= 0 {
+        return None;
+    }
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(meta.created_at_ms)
+}
+
+/// Build a `datamodel::Provider` payload from a host-facing `ProviderSpec`.
+fn proto_provider_from_spec(spec: &ProviderSpec) -> datamodel::Provider {
+    datamodel::Provider {
+        metadata: Some(datamodel::ObjectMeta {
+            name: spec.name.clone(),
+            ..Default::default()
+        }),
+        r#type: spec.type_.clone(),
+        credentials: spec.credentials.clone(),
+        config: spec.config.clone(),
+        credential_expires_at_ms: HashMap::new(),
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// CRUD wrappers
+// ────────────────────────────────────────────────────────────────────────────
+
+pub async fn create_provider(
+    client: &mut OpenShellClient<Channel>,
+    spec: &ProviderSpec,
+) -> Result<Provider, ProviderError> {
+    let req = proto_v1::CreateProviderRequest {
+        provider: Some(proto_provider_from_spec(spec)),
+    };
+    let resp = client
+        .create_provider(req)
+        .await
+        .map_err(|s| classify_status(s, &spec.name))?
+        .into_inner();
+    let p = resp.provider.ok_or_else(|| {
+        ProviderError::Grpc("CreateProvider: missing provider in response".into())
+    })?;
+    Ok(provider_from_proto(p))
+}
+
+pub async fn get_provider(
+    client: &mut OpenShellClient<Channel>,
+    name: &str,
+) -> Result<Provider, ProviderError> {
+    let req = proto_v1::GetProviderRequest {
+        name: name.to_string(),
+    };
+    let resp = client
+        .get_provider(req)
+        .await
+        .map_err(|s| classify_status(s, name))?
+        .into_inner();
+    let p = resp
+        .provider
+        .ok_or_else(|| ProviderError::Grpc("GetProvider: missing provider in response".into()))?;
+    Ok(provider_from_proto(p))
+}
+
+pub async fn update_provider(
+    client: &mut OpenShellClient<Channel>,
+    spec: &ProviderSpec,
+) -> Result<Provider, ProviderError> {
+    let req = proto_v1::UpdateProviderRequest {
+        provider: Some(proto_provider_from_spec(spec)),
+        credential_expires_at_ms: HashMap::new(),
+    };
+    let resp = client
+        .update_provider(req)
+        .await
+        .map_err(|s| classify_status(s, &spec.name))?
+        .into_inner();
+    let p = resp.provider.ok_or_else(|| {
+        ProviderError::Grpc("UpdateProvider: missing provider in response".into())
+    })?;
+    Ok(provider_from_proto(p))
+}
+
+pub async fn delete_provider(
+    client: &mut OpenShellClient<Channel>,
+    name: &str,
+) -> Result<(), ProviderError> {
+    let req = proto_v1::DeleteProviderRequest {
+        name: name.to_string(),
+    };
+    client
+        .delete_provider(req)
+        .await
+        .map_err(|s| classify_status(s, name))?;
+    Ok(())
+}
+
+pub async fn list_providers_by_prefix(
+    client: &mut OpenShellClient<Channel>,
+    prefix: &str,
+) -> Result<Vec<Provider>, ProviderError> {
+    let resp = client
+        .list_providers(proto_v1::ListProvidersRequest {
+            // 0 = server default (full list); explicit pagination is not
+            // required for typical per-agent fan-out (< few dozen).
+            limit: 0,
+            offset: 0,
+        })
+        .await
+        .map_err(|s| classify_status(s, "<list>"))?
+        .into_inner();
+    let mut out = Vec::with_capacity(resp.providers.len());
+    for p in resp.providers {
+        let name = p
+            .metadata
+            .as_ref()
+            .map(|m| m.name.as_str())
+            .unwrap_or_default();
+        if name.starts_with(prefix) {
+            out.push(provider_from_proto(p));
+        }
+    }
+    Ok(out)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Sandbox ↔ Provider attachment
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Attach a provider to a sandbox so the sandbox can use its credentials.
+pub async fn attach_to_sandbox(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+    provider_name: &str,
+) -> Result<(), ProviderError> {
+    let req = proto_v1::AttachSandboxProviderRequest {
+        sandbox_name: sandbox_name.to_string(),
+        provider_name: provider_name.to_string(),
+        expected_resource_version: 0,
+    };
+    client
+        .attach_sandbox_provider(req)
+        .await
+        .map_err(|s| classify_status(s, provider_name))?;
+    Ok(())
+}
+
+/// Detach a provider from a sandbox.
+pub async fn detach_from_sandbox(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+    provider_name: &str,
+) -> Result<(), ProviderError> {
+    let req = proto_v1::DetachSandboxProviderRequest {
+        sandbox_name: sandbox_name.to_string(),
+        provider_name: provider_name.to_string(),
+        expected_resource_version: 0,
+    };
+    client
+        .detach_sandbox_provider(req)
+        .await
+        .map_err(|s| classify_status(s, provider_name))?;
+    Ok(())
+}
+
+/// List provider names currently attached to a sandbox.
+pub async fn list_attached(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+) -> Result<Vec<String>, ProviderError> {
+    let req = proto_v1::ListSandboxProvidersRequest {
+        sandbox_name: sandbox_name.to_string(),
+    };
+    let resp = client
+        .list_sandbox_providers(req)
+        .await
+        .map_err(|s| classify_status(s, sandbox_name))?
+        .into_inner();
+    Ok(resp
+        .providers
+        .into_iter()
+        .filter_map(|p| p.metadata.map(|m| m.name))
+        .collect())
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// gRPC wrappers
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Fetch the env-var map that will be injected into the sandbox.
+///
+/// SAFETY: the returned values are opaque placeholders (e.g.
+/// `openshell:resolve:env:v<digits>_<NAME>`) — never log them. They look
+/// secret-shaped to operators and create false alarms in audits.
+pub async fn get_sandbox_provider_environment(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_id: &str,
+) -> Result<HashMap<String, String>, ProviderError> {
+    let req = proto_v1::GetSandboxProviderEnvironmentRequest {
+        sandbox_id: sandbox_id.to_string(),
+    };
+    let resp = client
+        .get_sandbox_provider_environment(req)
+        .await
+        .map_err(|s| classify_status(s, sandbox_id))?
+        .into_inner();
+    Ok(resp.environment)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Startup reconciler
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Report from a provider reconcile pass.
+pub struct ReconcileReport {
+    /// Providers that were attached during this pass (were missing from sandbox).
+    pub attached: Vec<String>,
+    /// Providers that were detached during this pass (were attached but not declared).
+    pub detached: Vec<String>,
+    /// Declared providers that do not exist on the gateway (not yet created).
+    pub missing: Vec<String>,
+    /// Per-provider errors encountered during attach/detach. Each entry is
+    /// `(provider_name, formatted_error)`. Reconcile continues past these so
+    /// a single transient failure does not sink the whole pass.
+    pub errors: Vec<(String, String)>,
+}
+
+/// Reconcile the set of providers attached to `sandbox_name` with the
+/// `declared` list from `agent.yaml`.
+///
+/// - Attaches any declared provider that exists on the gateway but is not yet
+///   attached to the sandbox.
+/// - Detaches any provider whose name starts with `<agent_prefix>-` that is
+///   currently attached but is not in `declared` (stale after a config change).
+/// - Records providers that are declared but not yet created on the gateway
+///   in `missing` (not an error — they may be created later by the user).
+///
+/// The function is idempotent: calling it when everything is already in sync
+/// produces an empty report with no gateway calls beyond `list_attached`.
+///
+/// **Partial-failure semantics**: transient attach/detach/get errors for
+/// individual providers are collected into `ReconcileReport::errors` and the
+/// loop continues. Only `list_attached` failure returns `Err` — without the
+/// attached set we cannot make any safe decisions. Callers should log
+/// `report.errors` and schedule a retry so the bot converges on the next
+/// reconcile tick.
+pub async fn reconcile_for_sandbox(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+    agent_prefix: &str,
+    declared: &[String],
+) -> Result<ReconcileReport, ProviderError> {
+    let attached = list_attached(client, sandbox_name).await?;
+    let declared_set: std::collections::HashSet<&String> = declared.iter().collect();
+    let attached_set: std::collections::HashSet<&String> = attached.iter().collect();
+    let mut report = ReconcileReport {
+        attached: vec![],
+        detached: vec![],
+        missing: vec![],
+        errors: vec![],
+    };
+    // Attach declared providers that exist on the gateway but are not yet attached.
+    for name in declared {
+        match get_provider(client, name).await {
+            Ok(_) => {
+                if !attached_set.contains(name) {
+                    match attach_to_sandbox(client, sandbox_name, name).await {
+                        Ok(()) => report.attached.push(name.clone()),
+                        Err(e) => report.errors.push((name.clone(), format!("attach: {e:#}"))),
+                    }
+                }
+            }
+            Err(ProviderError::NotFound(_)) => report.missing.push(name.clone()),
+            Err(e) => report.errors.push((name.clone(), format!("get: {e:#}"))),
+        }
+    }
+    // Detach prefixed providers that are no longer declared.
+    let prefix = format!("{agent_prefix}-");
+    for name in &attached {
+        if name.starts_with(&prefix) && !declared_set.contains(name) {
+            match detach_from_sandbox(client, sandbox_name, name).await {
+                Ok(()) => report.detached.push(name.clone()),
+                Err(e) => report.errors.push((name.clone(), format!("detach: {e:#}"))),
+            }
+        }
+    }
+    Ok(report)
+}
+
+#[cfg(test)]
+#[path = "providers_tests.rs"]
+mod providers_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_excludes_claude() {
+        let catalog = profile_catalog();
+        assert!(!catalog.iter().any(|p| p.type_slug == "claude"));
+    }
+
+    #[test]
+    fn catalog_has_8_built_in_plus_generic() {
+        let catalog = profile_catalog();
+        let built_in: Vec<&str> = catalog
+            .iter()
+            .filter(|p| p.type_slug != "generic")
+            .map(|p| p.type_slug.as_str())
+            .collect();
+        assert_eq!(built_in.len(), 8);
+        for expected in [
+            "anthropic",
+            "codex",
+            "copilot",
+            "github",
+            "gitlab",
+            "nvidia",
+            "openai",
+            "opencode",
+        ] {
+            assert!(built_in.contains(&expected), "missing {expected}");
+        }
+        assert!(catalog.iter().any(|p| p.type_slug == "generic"));
+    }
+
+    #[test]
+    fn catalog_anthropic_uses_anthropic_api_key() {
+        let entry = profile_catalog()
+            .into_iter()
+            .find(|p| p.type_slug == "anthropic")
+            .unwrap();
+        assert_eq!(entry.env_var, "ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn provider_spec_debug_redacts_credentials() {
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "ANTHROPIC_API_KEY".to_string(),
+            "super-secret-key".to_string(),
+        );
+        credentials.insert("ANOTHER_KEY".to_string(), "another-secret".to_string());
+        let mut config = HashMap::new();
+        config.insert("upstream_host".to_string(), "api.example.com".to_string());
+        let spec = ProviderSpec {
+            name: "my-provider".to_string(),
+            type_: "anthropic".to_string(),
+            credentials,
+            config,
+        };
+        let debug_output = format!("{spec:?}");
+        assert!(
+            !debug_output.contains("super-secret-key"),
+            "Debug output must not contain credential value; got: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("another-secret"),
+            "Debug output must not contain credential value; got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("2 redacted"),
+            "Debug output should show credential count; got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("my-provider"),
+            "Debug output should show name; got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("anthropic"),
+            "Debug output should show type_; got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("upstream_host"),
+            "Debug output should show config keys/values; got: {debug_output}"
+        );
+    }
+}

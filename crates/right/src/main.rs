@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 pub(crate) mod aggregator;
 pub(crate) mod internal_api;
+pub(crate) mod internal_api_providers;
 pub(crate) mod learning;
 mod memory_server;
 pub(crate) mod progress;
@@ -3303,6 +3304,7 @@ async fn cmd_agent_restore(
                 &new_sandbox_name,
                 &policy_path,
                 Some(&staging),
+                &[],
             )?;
 
             let mut grpc = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
@@ -6114,7 +6116,7 @@ async fn perform_migration(
         .unwrap_or_else(|| agent_dir.join("policy.yaml"));
 
     let mut child =
-        right_openshell::openshell::spawn_sandbox(&new_sandbox, &policy_path, Some(&staging))?;
+        right_openshell::openshell::spawn_sandbox(&new_sandbox, &policy_path, Some(&staging), &[])?;
 
     let mut grpc = right_openshell::openshell::connect_grpc(mtls_dir).await?;
 

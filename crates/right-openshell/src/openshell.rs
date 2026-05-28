@@ -9,11 +9,10 @@ use std::time::Duration;
 use tokio::process::Command;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
-use crate::openshell_proto::openshell::datamodel::v1::{
-    Sandbox, SandboxCondition, SandboxPhase, SandboxStatus,
+use crate::openshell_proto::openshell::v1::{
+    ExecSandboxRequest, GetSandboxRequest, Sandbox, SandboxCondition, SandboxPhase, SandboxStatus,
+    open_shell_client::OpenShellClient,
 };
-use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
-use crate::openshell_proto::openshell::v1::{ExecSandboxRequest, GetSandboxRequest};
 
 /// SANDBOX_PHASE_READY value from openshell.datamodel.v1.SandboxPhase.
 const SANDBOX_PHASE_READY: i32 = SandboxPhase::Ready as i32;
@@ -161,6 +160,34 @@ pub fn preflight_check() -> OpenShellStatus {
     } else {
         OpenShellStatus::NoGateway(mtls_dir)
     }
+}
+
+/// A resolved OpenShell gateway endpoint URL (or absence thereof).
+///
+/// Pass to CLI helpers via [`GatewayEndpoint::apply_to_cli`].  When the
+/// inner value is `None`, `apply_to_cli` is a no-op and the CLI uses its
+/// own default.
+#[derive(Debug, Clone)]
+pub struct GatewayEndpoint(pub Option<String>);
+
+impl GatewayEndpoint {
+    /// Append `--gateway-endpoint <url>` to `cmd` when a URL is present.
+    pub fn apply_to_cli(&self, cmd: &mut tokio::process::Command) {
+        if let Some(url) = &self.0 {
+            cmd.args(["--gateway-endpoint", url]);
+        }
+    }
+}
+
+/// Resolve the gateway endpoint for CLI provider commands.
+///
+/// Reads `OPENSHELL_GATEWAY_ENDPOINT` from the environment.  If the variable
+/// is unset or empty, returns `GatewayEndpoint(None)` and CLI calls will use
+/// the OpenShell CLI's own default.
+pub async fn resolve_gateway_endpoint() -> miette::Result<GatewayEndpoint> {
+    Ok(GatewayEndpoint(
+        std::env::var("OPENSHELL_GATEWAY_ENDPOINT").ok(),
+    ))
 }
 
 fn gateway_endpoint() -> String {
@@ -536,6 +563,7 @@ pub fn spawn_sandbox(
     name: &str,
     policy_path: &Path,
     upload_dir: Option<&Path>,
+    providers: &[String],
 ) -> miette::Result<right_process::ProcessGroupChild> {
     let mut cmd = Command::new("openshell");
     cmd.args(["sandbox", "create", "--name", name, "--policy"]);
@@ -545,6 +573,10 @@ pub fn spawn_sandbox(
     if let Some(dir) = upload_dir {
         cmd.arg("--upload");
         cmd.arg(dir);
+    }
+
+    for prov in providers {
+        cmd.arg("--provider").arg(prov);
     }
 
     // `openshell sandbox create` is long-running; callers wait for READY via
@@ -1585,7 +1617,7 @@ pub async fn ensure_sandbox(
     }
 
     tracing::info!(sandbox = %sandbox, "creating sandbox");
-    let mut child = spawn_sandbox(sandbox, policy_path, staging_dir)?;
+    let mut child = spawn_sandbox(sandbox, policy_path, staging_dir, &[])?;
 
     tokio::select! {
         result = wait_for_ready(&mut grpc_client, sandbox, 120, 2) => {

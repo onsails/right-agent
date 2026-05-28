@@ -146,8 +146,8 @@ network_policies:
 ";
         std::fs::write(&policy_path, policy).unwrap();
 
-        let mut child =
-            openshell::spawn_sandbox(&name, &policy_path, None).expect("failed to spawn sandbox");
+        let mut child = openshell::spawn_sandbox(&name, &policy_path, None, &[])
+            .expect("failed to spawn sandbox");
         openshell::wait_for_ready(&mut client, &name, sandbox_ready_timeout_secs(120), 2)
             .await
             .expect("sandbox did not become READY");

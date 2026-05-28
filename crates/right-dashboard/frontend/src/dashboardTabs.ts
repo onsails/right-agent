@@ -1,6 +1,6 @@
 import type { DashboardFeatures } from './types'
 
-export const dashboardTabs = ['overview', 'activity', 'knowledge', 'usage', 'identity', 'health', 'mcp'] as const
+export const dashboardTabs = ['overview', 'activity', 'knowledge', 'usage', 'identity', 'health', 'mcp', 'providers'] as const
 
 export type DashboardTab = typeof dashboardTabs[number]
 
@@ -19,6 +19,7 @@ export function dashboardTabItems(features?: Partial<DashboardFeatures>): Dashbo
     { key: 'identity', label: 'Identity', enabled: features?.identity ?? true },
     { key: 'health', label: 'Health', enabled: (features?.doctor ?? true) || (features?.sandbox_stats ?? true) },
     { key: 'mcp', label: 'MCP', enabled: true },
+    { key: 'providers', label: 'Providers', enabled: true },
   ]
 }
 

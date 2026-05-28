@@ -455,7 +455,7 @@ fn detection_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
-fn parse_json_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, Response> {
+pub(super) fn parse_json_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, Response> {
     serde_json::from_slice(body).map_err(|error| {
         tracing::warn!("dashboard MCP request rejected malformed body: {error:#}");
         json_error(
@@ -466,7 +466,7 @@ fn parse_json_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, Response> {
     })
 }
 
-fn internal_api_error_response(
+pub(super) fn internal_api_error_response(
     error: right_mcp::internal_client::InternalClientError,
     fallback_error: &'static str,
 ) -> Response {

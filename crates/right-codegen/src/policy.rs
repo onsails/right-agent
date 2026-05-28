@@ -153,6 +153,12 @@ fn public_web_allowed_ips_yaml(indent: usize) -> String {
 
 fn permissive_endpoints() -> String {
     let allowed_ips = public_web_allowed_ips_yaml(10);
+    // The trailing `# right-providers: insert-above` line is the anchor used
+    // by `providers_append_checked` to locate the correct insertion point.
+    // Without it, the heuristic "find first endpoints:" picks whichever
+    // network_policies sub-section is rendered first (`outbound` in
+    // permissive mode, `anthropic` in restrictive mode) — and the latter
+    // smuggles generic provider stanzas into the Anthropic-gated allowlist.
     format!(
         r#"      - port: 443
         allowed_ips:
@@ -161,7 +167,8 @@ fn permissive_endpoints() -> String {
       - port: 80
         allowed_ips:
 {allowed_ips}
-        tls: skip"#
+        tls: skip
+      # right-providers: insert-above"#
     )
 }
 
@@ -910,4 +917,268 @@ network_policies:
         let _parsed: serde_json::Value =
             serde_saphyr::from_str(&policy).expect("policy with dynamic IP must be valid YAML");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Provider-managed endpoint append/strip
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum PolicyConflict {
+    #[error(
+        "host {host} is configured as raw tunnel (tls: skip) — cannot terminate for substitution"
+    )]
+    RawTunnel { host: String },
+}
+
+/// Returns `true` when `line` opens a YAML key at the same indentation as
+/// `endpoints:` (4 spaces) or a shallower outer level (2 spaces, 0 spaces),
+/// i.e. the line marks the end of the current endpoints list.
+///
+/// Examples that match:
+///   `    binaries:`        — 4-space sibling of `endpoints:`
+///   `  right:`             — 2-space sibling of `outbound:`
+///   `network_policies:`    — top-level key
+///
+/// Examples that do NOT match:
+///   `      - port: 443`    — list item (leading dash)
+///   `        tls: skip`    — 8-space sub-key inside a list item
+///   `      # comment`      — comment line (not a YAML key)
+///   `    - domain: ...`    — list item at 4-space indent (legacy stanza form)
+///
+/// This is the load-bearing stop condition for legacy policies that pre-date
+/// the `# right-providers: insert-above` anchor. Without it, both
+/// `providers_append`'s fallback (looking for end-of-list) and
+/// `providers_strip`'s walker (consuming the stanza) would treat sibling
+/// keys like `    binaries:` as continuation of the endpoints list and
+/// corrupt the surrounding YAML structure.
+fn is_endpoints_sibling_or_shallower_key(line: &str) -> bool {
+    let body = line.trim_end_matches(['\r', '\n']);
+    if body.is_empty() {
+        return false;
+    }
+    let indent = body.bytes().take_while(|b| *b == b' ').count();
+    // endpoints: itself sits at 4-space indent in generate_policy output.
+    // A "sibling or shallower" line has indent ≤ 4.
+    if indent > 4 {
+        return false;
+    }
+    let rest = &body[indent..];
+    // Reject list items, comments, document separators, anything that is
+    // clearly not an identifier-keyed map entry.
+    let first = match rest.chars().next() {
+        Some(c) => c,
+        None => return false,
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    // Identifier ends at the first non-[A-Za-z0-9_-] char; require ':' to
+    // follow immediately after.
+    let id_end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(rest.len());
+    if id_end == 0 {
+        return false;
+    }
+    rest[id_end..].starts_with(':')
+}
+
+/// Append a TLS-terminated endpoint for `host` tagged with the provider name,
+/// unless an entry for the same domain already exists.
+///
+/// Panics on conflict — use [`providers_append_checked`] when you need to
+/// handle conflicts explicitly.
+pub fn providers_append(
+    policy: &str,
+    provider_name: &str,
+    host: &str,
+    path_prefix: Option<&str>,
+) -> String {
+    providers_append_checked(policy, provider_name, host, path_prefix)
+        .unwrap_or_else(|e| panic!("policy conflict: {e:#}"))
+}
+
+/// Like [`providers_append`] but returns `Err(PolicyConflict)` instead of
+/// panicking when the host is already configured as a raw tunnel.
+pub fn providers_append_checked(
+    policy: &str,
+    provider_name: &str,
+    host: &str,
+    path_prefix: Option<&str>,
+) -> Result<String, PolicyConflict> {
+    // Line-anchored match so a prefix-collision host (e.g. existing
+    // "api.openai.com.evil.tld") doesn't satisfy the idempotency check
+    // for "api.openai.com" and cause us to silently skip the real add.
+    let host_marker = format!("- domain: {host}");
+    let found_match = policy.match_indices(&host_marker).find(|(idx, marker)| {
+        let after = idx + marker.len();
+        after == policy.len() || matches!(policy.as_bytes().get(after), Some(b'\n' | b'\r'))
+    });
+    if let Some((idx, _)) = found_match {
+        let window_end = (idx + 400).min(policy.len());
+        let window = &policy[idx..window_end];
+        if window.contains("tls: skip") {
+            return Err(PolicyConflict::RawTunnel {
+                host: host.to_string(),
+            });
+        }
+        // Domain already present as a TLS-terminated endpoint — idempotent.
+        return Ok(policy.to_string());
+    }
+
+    let path_line = path_prefix
+        .map(|p| format!("      path: {p}\n"))
+        .unwrap_or_default();
+    let stanza = format!(
+        "    # managed-by: right-providers:{provider_name}\n    - domain: {host}\n      protocol: rest\n      access: full\n{path_line}"
+    );
+
+    // Preferred path: insert immediately above the sentinel anchor emitted
+    // by `generate_policy` inside `network_policies.outbound.endpoints`.
+    // This pins generic provider stanzas to the correct sub-section in real
+    // policies (where the first `endpoints:` is `anthropic.endpoints` in
+    // restrictive mode, not a valid home for generic providers). The anchor
+    // line's leading whitespace defines the marker column; YAML list items
+    // ("- domain: ...") share that column, value lines sit two columns
+    // deeper, matching the real policy's 6-space-indented list-item style.
+    const PROVIDERS_ANCHOR: &str = "# right-providers: insert-above";
+    if let Some(anchor_idx) = policy.find(PROVIDERS_ANCHOR) {
+        let line_start = policy[..anchor_idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let marker_indent_len = anchor_idx - line_start;
+        let marker_indent = " ".repeat(marker_indent_len);
+        let value_indent = " ".repeat(marker_indent_len + 2);
+        let path_line_anchored = path_prefix
+            .map(|p| format!("{value_indent}path: {p}\n"))
+            .unwrap_or_default();
+        let stanza_anchored = format!(
+            "{marker_indent}# managed-by: right-providers:{provider_name}\n\
+             {marker_indent}- domain: {host}\n\
+             {value_indent}protocol: rest\n\
+             {value_indent}access: full\n\
+             {path_line_anchored}"
+        );
+        let mut out = String::with_capacity(policy.len() + stanza_anchored.len());
+        out.push_str(&policy[..line_start]);
+        out.push_str(&stanza_anchored);
+        out.push_str(&policy[line_start..]);
+        return Ok(out);
+    }
+
+    let Some(endpoints_idx) = policy.find("endpoints:") else {
+        // No endpoints section at all — synthesise a minimal network block.
+        return Ok(format!("{policy}\nnetwork:\n  endpoints:\n{stanza}"));
+    };
+
+    // Find the byte offset of the end of the endpoints list so we can append
+    // inside it rather than after the whole section. For legacy policies on
+    // disk that pre-date the `# right-providers: insert-above` anchor, we
+    // must stop at a sibling key (e.g. `    binaries:`) or any shallower
+    // top-level key — otherwise the stanza is appended at end-of-file (or
+    // worse, the end-of-list marker is conflated with non-endpoint content).
+    // Use split_inclusive('\n') so each chunk includes its actual terminator
+    // ('\n' or '\r\n'), giving correct byte lengths for both LF and CRLF files.
+    let after_endpoints = &policy[endpoints_idx..];
+    let list_end_line = after_endpoints
+        .split_inclusive('\n')
+        .enumerate()
+        .skip(1) // skip the "endpoints:" line itself
+        .find(|(_, l)| {
+            let body = l.trim_end_matches(['\r', '\n']);
+            if body.is_empty() {
+                return false;
+            }
+            if !body.starts_with(' ') {
+                // Un-indented line — left the network section entirely.
+                return true;
+            }
+            // A line that opens a sibling/shallower YAML key (e.g.
+            // `    binaries:` next to `    endpoints:`, or `  right:` next
+            // to `  outbound:`) marks the end of the endpoints list.
+            is_endpoints_sibling_or_shallower_key(body)
+        })
+        .map(|(i, _)| i)
+        .unwrap_or_else(|| after_endpoints.split_inclusive('\n').count());
+
+    let mut byte_offset = endpoints_idx;
+    let mut i = 0;
+    for line in after_endpoints.split_inclusive('\n') {
+        if i == list_end_line {
+            break;
+        }
+        byte_offset += line.len();
+        i += 1;
+    }
+
+    let mut out = String::with_capacity(policy.len() + stanza.len());
+    out.push_str(&policy[..byte_offset]);
+    out.push_str(&stanza);
+    out.push_str(&policy[byte_offset..]);
+    Ok(out)
+}
+
+/// Remove the managed-by tag comment and its associated endpoint stanza for
+/// `provider_name` from the policy YAML string.
+pub fn providers_strip(policy: &str, provider_name: &str, _host: &str) -> String {
+    let tag = format!("# managed-by: right-providers:{provider_name}");
+    let Some(tag_idx) = policy.find(&tag) else {
+        return policy.to_string();
+    };
+
+    // Start of the comment line (include leading indentation).
+    let line_start = policy[..tag_idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
+
+    // Walk forward past the comment line and all indented continuation lines
+    // that belong to this stanza (lines that start with spaces, i.e. deeper
+    // indented YAML content following the `- domain:` entry).
+    let mut end_byte = tag_idx + tag.len();
+    // Consume the rest of the tag line.
+    if let Some(nl) = policy[end_byte..].find('\n') {
+        end_byte += nl + 1;
+    }
+
+    // Consume subsequent lines that are part of this stanza (indented ≥ 4 spaces
+    // or blank), but stop as soon as we see another `# managed-by:` marker so
+    // that adjacent provider stanzas are not consumed as collateral.
+    loop {
+        let remaining = &policy[end_byte..];
+        let next_line = remaining.lines().next().unwrap_or("");
+        if next_line.is_empty() {
+            // Blank line — stop here to avoid eating unrelated blank separators.
+            break;
+        }
+        if !next_line.starts_with("    ") {
+            // Un-indented line — left the network/sandbox block entirely.
+            break;
+        }
+        // Another managed-by marker means the next provider's stanza starts here.
+        if next_line.trim_start().starts_with("# managed-by:") {
+            break;
+        }
+        // The sentinel anchor emitted by `generate_policy` must not be
+        // consumed as part of a provider stanza, otherwise future appends
+        // lose their insertion point.
+        if next_line.trim_start().starts_with("# right-providers:") {
+            break;
+        }
+        // A line that opens a sibling/shallower YAML key (e.g.
+        // `    binaries:` next to `    endpoints:`) is NOT part of the
+        // endpoints list, even if it is 4-space indented. Without this
+        // stop, legacy policies (generated before the anchor existed) lose
+        // their `outbound.binaries` block on strip, which OpenShell then
+        // rejects or treats as zero-egress. See AGENTS.md →
+        // "Upgrade-friendly design".
+        if is_endpoints_sibling_or_shallower_key(next_line) {
+            break;
+        }
+        end_byte += next_line.len() + 1;
+    }
+
+    // `host` is available for caller context; the strip boundary is determined
+    // by the next managed-by marker rather than by matching the domain value.
+
+    let mut out = String::with_capacity(policy.len());
+    out.push_str(&policy[..line_start]);
+    out.push_str(&policy[end_byte..]);
+    out
 }

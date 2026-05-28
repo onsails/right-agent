@@ -60,6 +60,9 @@ jobs:
           chmod +x "$RUNNER_TEMP/bin/cloudflared" "$RUNNER_TEMP/bin/claude"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
+      - name: Dashboard bundle freshness
+        run: devenv shell -- cargo test -p right-dashboard dashboard_bundle_contains_providers_view
+
       - name: Test workspace
         run: |
           devenv shell -- bash -lc "export PATH=\"\$RUNNER_TEMP/bin:\$PATH\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked"

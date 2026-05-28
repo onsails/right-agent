@@ -270,6 +270,17 @@ Per-agent `data.db` schema lives in `right-db` migrations
 (`right_db::migrations::MIGRATIONS`). Run `sqlite3 data.db .schema` for
 column-level definitions.
 
+### Providers
+
+Provider credential management is owned by `right_openshell::providers`.
+Credentials never enter `agent.yaml`, backups, or host logs. Per-agent
+provider list lives in `agent.yaml::sandbox::providers: [...]`. Gateway
+holds the credential bytes. Sandbox sees opaque placeholder env vars
+substituted at the proxy on outbound HTTPS.
+
+See: `docs/architecture/providers.md` for the placeholder mechanism,
+substitution flow, reconciler walkthrough, and policy interaction.
+
 ## External Integrations
 
 See: `docs/architecture/integrations.md` for the protocol inventory.
@@ -503,6 +514,10 @@ Rules:
   view routed through the internal Unix socket API. Prevents sandbox
   escape via data exfiltration to attacker-controlled MCP endpoints.
 - **OAuth CSRF**: Token matching in callback server.
+- **Provider credential isolation**: Provider credential values and
+  gateway placeholder values (`openshell:resolve:env:v…_<NAME>`) are
+  never logged on the host. Use `secrecy::SecretString` for in-memory
+  transport; do not pass credential fields to tracing macros.
 
 ## Brand-conformant CLI output
 
@@ -521,13 +536,16 @@ or `Failed:` when a clear user-facing sentence is available.
 
 ## OpenShell Integration Conventions
 
-- **Prefer gRPC over CLI**: Use the OpenShell gRPC API (mTLS on the
-  active gateway endpoint) for sandbox operations wherever possible.
-  Resolve the endpoint from `OPENSHELL_GATEWAY_ENDPOINT` or
-  `openshell status`; do not hardcode a gateway port. The CLI is only
-  used for file transfer — no gRPC file transfer API yet.
+- **Use gRPC for everything except file transfer and `policy set --wait`**:
+  every provider control-plane operation (Create/Get/Update/Delete/List/
+  Attach/Detach/ListAttached/GetSandboxProviderEnvironment) goes through
+  tonic-generated client stubs from the vendored `openshell.v1` proto.
+  CLI remains only for: SSH+tar-backed file upload/download, and
+  `openshell policy set --wait` (the policy hot-apply path). Adding a
+  new provider operation by CLI is a review-blocking defect.
 - **gRPC for**: sandbox create/get/delete, readiness polling, in-sandbox
-  command execution, policy status, SSH session management.
+  command execution, policy status, SSH session management, provider
+  CRUD + sandbox attach/detach, Health (version preflight).
 - **Readiness polling diagnostics**: `wait_for_ready` must preserve the
   last `GetSandbox` phase/status in timeout errors and treat
   `SANDBOX_PHASE_ERROR` as terminal. Do not collapse OpenShell status
@@ -543,18 +561,30 @@ or `Failed:` when a clear user-facing sentence is available.
   host.
 - **CLI for**: file upload/download (SSH+tar under the hood), policy
   apply (`openshell policy set`).
-- **Vendored proto compatibility is load-bearing**: OpenShell v0.0.42
-  returns sandbox IDs as `Sandbox.metadata.id`; older protos decoded
-  field 1 as top-level `Sandbox.id` and failed with `invalid string
-  value: data is not UTF-8 encoded`. `resolve_sandbox_id` must read
-  `metadata.id`; `ci_openshell_policy_validates_against_openshell` is
-  the live regression gate.
+- **Vendored proto compatibility is load-bearing**: OpenShell `v0.0.50`
+  is the minimum supported version (CLI and gateway).
+  `crates/right-openshell/proto/UPSTREAM.md` records the pinned tag and
+  fetch date. To bump: run `scripts/vendor-openshell-proto.sh <tag>` and
+  `cargo check -p right-openshell` to regenerate stubs. Older protos
+  lacked `AttachSandboxProvider` / `DetachSandboxProvider` /
+  `ListSandboxProviders` RPCs — the providers feature depends on them.
+  `right_openshell::preflight::openshell_preflight` enforces this at
+  bot startup; both CLI (`openshell --version`) and gateway (Health
+  RPC) must report `>= MIN_OPENSHELL_VERSION`.
+  `resolve_sandbox_id` must read `metadata.id`;
+  `ci_openshell_policy_validates_against_openshell` is the live
+  regression gate.
 - **NEVER use the CLI for in-sandbox command execution**: `openshell
   sandbox exec` CLI has unreliable argument parsing. Always use gRPC
   `exec_in_sandbox`.
 - **Known CLI bug**: Directory uploads may silently drop small files.
   Always verify critical files after directory upload, and re-upload
   individually if missing.
+- **All Provider operations** (Create/Get/Update/Delete/ListProviders,
+  sandbox attach/detach, GetSandboxProviderEnvironment,
+  ensure_v2_enabled) MUST go through `right_openshell::providers`. Direct
+  gRPC or `openshell provider` CLI invocations from other crates are a
+  review-blocking defect.
 
 ## OpenShell Policy Gotchas
 

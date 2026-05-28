@@ -701,6 +701,16 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
         // Check if sandbox already exists and is READY.
         let mut grpc_client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
+
+        // OpenShell version preflight — hard-fail on too-old CLI or
+        // gateway before any further interaction. Both must be
+        // >= MIN_OPENSHELL_VERSION.
+        if let Err(e) = right_openshell::preflight::openshell_preflight(&mut grpc_client).await {
+            tracing::error!(error = %e, "OpenShell version preflight failed; refusing to start");
+            return Err(miette::miette!("{e}"));
+        }
+        tracing::info!("OpenShell version preflight passed");
+
         let sandbox_exists =
             right_openshell::openshell::is_sandbox_ready(&mut grpc_client, &sandbox).await?;
 
@@ -814,6 +824,56 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             .await?;
 
         tracing::info!(agent = %args.agent, "OpenShell sandbox ready");
+
+        // Reconcile attached providers with the `sandbox.providers` list in agent.yaml.
+        // Attaches declared providers that exist on the gateway but are not yet attached,
+        // and detaches stale `<agent>-*` entries that were removed from the config.
+        // Non-fatal: a reconcile failure is logged but never prevents the bot from starting.
+        if let Some(sandbox_cfg) = config.sandbox.as_ref() {
+            let mtls_dir = right_openshell::openshell::default_mtls_dir();
+            match right_openshell::openshell::connect_grpc(&mtls_dir).await {
+                Ok(mut client) => {
+                    let declared: Vec<String> = sandbox_cfg
+                        .providers
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect();
+                    match right_openshell::providers::reconcile_for_sandbox(
+                        &mut client,
+                        &sandbox,
+                        &args.agent,
+                        &declared,
+                    )
+                    .await
+                    {
+                        Ok(report) => {
+                            tracing::info!(
+                                agent = %args.agent,
+                                attached = ?report.attached,
+                                detached = ?report.detached,
+                                missing = ?report.missing,
+                                "provider reconcile complete"
+                            );
+                            if !report.errors.is_empty() {
+                                tracing::warn!(
+                                    agent = %args.agent,
+                                    errors = ?report.errors,
+                                    "provider reconcile had per-provider errors; will retry on next pass"
+                                );
+                            }
+                        }
+                        Err(e) => tracing::warn!(
+                            agent = %args.agent,
+                            "provider reconcile failed: {e:#}"
+                        ),
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    agent = %args.agent,
+                    "could not connect to openshell gateway for provider reconcile: {e:#}"
+                ),
+            }
+        }
 
         (Some(config_path), Some((mtls_dir, sandbox_id)))
     } else {

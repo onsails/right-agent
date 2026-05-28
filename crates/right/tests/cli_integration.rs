@@ -740,8 +740,9 @@ async fn ci_openshell_policy_validates_against_openshell() {
     fs::write(&policy_path, &policy_yaml).unwrap();
 
     // Create sandbox with the generated policy — this validates the YAML is accepted.
-    let mut child = right_openshell::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
-        .expect("failed to spawn sandbox");
+    let mut child =
+        right_openshell::openshell::spawn_sandbox(sandbox_name, &policy_path, None, &[])
+            .expect("failed to spawn sandbox");
     let ready = right_openshell::openshell::wait_for_ready(
         &mut client,
         sandbox_name,
