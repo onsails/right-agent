@@ -1,84 +1,13 @@
 # Changelog
 ## [3.0.0] - 2026-05-28
 
-- Operators can now manage gateway credentials via `/providers` in the Telegram Mini App — create, rotate, update, and remove providers using 8 built-in profiles or a generic entry. Credentials are injected as sandbox env vars and never written to agent config. Destroying an agent cascade-deletes its providers. `right up` now checks OpenShell ≥ 0.0.50 (CLI and gateway) at startup and refuses to start against older versions.
-- The per-turn skill learning pipeline is rewritten: a Haiku prefilter screens each turn for learning potential, a probe-writer fires on positive signals, and a periodic curator synthesizes skills from accumulated episodes. A multi-signal gate (cost spikes, skill-change count, time elapsed), daily budget cap, and circuit breaker (pauses on repeated failure, resets on success) keep the pipeline from running away. Skill lifecycle state is persisted in the database and visible in the dashboard.
-- The Telegram Mini App (`/mcp`) now includes usage analytics, an activity feed, skill inventory with lifecycle state, identity summary, agent health, and a web UI to start MCP OAuth flows.
+- **Breaking:** `right up` now requires OpenShell ≥ 0.0.50 (CLI and gateway) and refuses to start against older versions.
+- Operators can now manage gateway credentials via `/providers` in the Telegram Mini App — create, rotate, update, and remove providers using 8 built-in profiles or a custom generic entry. Credentials live on the OpenShell gateway, are injected as sandbox env vars, and are never written to agent config or logs. Destroying an agent cascade-deletes its providers.
+- The per-turn skill learning pipeline is rebuilt: a Haiku prefilter screens each turn for learning potential, a probe-writer fires on positive signals, and a periodic curator synthesizes reusable skills from accumulated episodes. A multi-signal gate, daily budget cap, and circuit breaker prevent runaway invocations. Skill lifecycle state is persisted in the database and visible in the dashboard.
+- The Telegram Mini App now includes MCP server management (add, remove, configure, start OAuth flows from the web UI), usage analytics, an activity feed, skill inventory with lifecycle state, identity summary, and agent health.
 - Background agent tasks survive bot restarts: in-flight turns are backgrounded gracefully on shutdown, failed background runs are reported to the originating chat, and interrupted handoffs from a prior shutdown are recovered automatically on next start.
-- Agents can now search past Telegram conversations using `mcp__right__thread_search` (current topic) and `mcp__right__chat_search` (current chat), backed by local full-text indexes over archived message history.
-- Cron step schedules (e.g. `*/30 * * * *`) now fire at exact boundary minutes (:00, :30); the step evaluator previously skipped those positions.
-- Clean up clippy issues introduced on this branch
-- **agent**: Stub init.rs default YAML emitter for deprecated learning fields
-- Drop NudgeSignalSource enum and source field from NudgeSignalRecord
-- **model**: Point curated Opus choice at 4.8
-- **bot**: Stub deprecated learning fields to unblock build through Task 18
-- **right**: Remove unused lifecycle deps
-- **lifecycle**: Remove usage json runtime references
-
-### Refactor
-
-- **prompt**: Drop four duplications already covered by base prompt
-- **prompt**: Compress six sections and tighten grammar
-- **db**: Add local libsql connection wrapper
-- **db**: Run migrations through right-db
-- **db**: Move conversation queries to libsql wrapper
-- **db**: Migrate shared storage crates to right-db
-- **db**: Port core wrappers to turso
-- **db**: Remove libsql compatibility gate
-- **cron**: Persist runs as async runs
-- **bot**: Generalize async delivery
-- **bot**: Consolidate sandbox user-local env contract
-- **bot**: Inline one-line telegram quote helper
-- **bot**: Parse cron delivery decisions
-- **bot**: Record skill receipt usage in lifecycle db
-- **bot**: Read curator lifecycle from db
-- **bot**: Remove legacy stage two learning runtime
-- **bot**: Remove legacy learning alert cleanup
-- **dashboard**: Remove legacy learning history APIs
-- **mcp**: Remove oauth telegram notification leftovers
-- **bot**: Remove cron-backed background runtime
-- Review addressing
-- **async-runs**: Rename delivery result storage
-- Simplify circuit-breaker review gate plumbing
-- **agent**: Remove legacy learning review domain
-- **learning**: Remove stale legacy references
-- **cron**: Read run history from async runs
-- **async-runs**: Update delivery decision consumers
-- **right**: Write skill learning lifecycle to db
-- **cli**: Remove skill pin commands
-- **lifecycle**: Address review issues across 2 iterations
-- **db**: Migrate callers to right-db connection
-- **db**: Switch fresh schema to turso fts
-- **internal_api_providers**: Pass gRPC client to provider fns
-
-### Testing
-
-- **memory**: Require identity ownership routing
-- **codegen**: Cover right-composio in all_source_skill_files_are_installed
-- **codegen**: Update Subagents-section guard needles to match rewrite
-- **codegen**: Re-pin operating-instructions needles to compressed prompt
-- **db**: Assert libsql connection path
-- **db**: Prove local libsql sqlite features
-- **db**: Assert transaction body runs before rollback
-- **db**: Add turso fts compatibility gate
-- **db**: Cover legacy routed upsert
-- **db**: Capture bootstrap lock invariants
-- **db**: Make concurrent bootstrap lock regression red
-- **db**: Detect legacy scrubber overlap
-- **bot**: Cover learned-skill review notice success
-- **bot**: Define sandbox user-local env contract
-- **bot**: Assert sandbox env precedes prompt assembly
-- **cron**: Cover missing result stream parsing
-- **dashboard**: Cover visual analytics responses
-- **internal-api**: Sandbox_mode_none rejection for /provider-list
-
-### Build
-
-- **db**: Remove rusqlite dependencies
-
-### Merge
-
-- Background async runs
+- Agents can search past Telegram conversations via `mcp__right__thread_search` (current topic) and `mcp__right__chat_search` (current chat), backed by local full-text indexes over archived message history.
+- When agents hit transient upstream failures (gateway timeouts, 5xx errors), they now schedule a one-shot retry cron rather than promising to retry manually.
 
 ## [0.2.15] - 2026-05-18
 
