@@ -249,6 +249,64 @@ impl std::str::FromStr for SandboxMode {
     }
 }
 
+/// Provider type slug. Built-in slugs are validated against the OpenShell
+/// profile catalog at API boundaries; `claude` is rejected by Right (see
+/// `crates/right/src/internal_api.rs`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ProviderType {
+    /// `"generic"` — custom user-defined provider.
+    #[serde(deserialize_with = "deserialize_generic_marker")]
+    Generic,
+    /// Built-in slug like `"anthropic"`, `"github"`, etc.
+    BuiltIn(String),
+}
+
+fn deserialize_generic_marker<'de, D: serde::Deserializer<'de>>(d: D) -> Result<(), D::Error> {
+    let s: String = serde::Deserialize::deserialize(d)?;
+    if s == "generic" {
+        Ok(())
+    } else {
+        Err(serde::de::Error::custom("expected \"generic\""))
+    }
+}
+
+impl serde::Serialize for ProviderType {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ProviderType::Generic => s.serialize_str("generic"),
+            ProviderType::BuiltIn(slug) => s.serialize_str(slug),
+        }
+    }
+}
+
+/// Generic-only fields.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct GenericProvider {
+    pub env_var: String,
+    #[serde(default = "default_header_name")]
+    pub header_name: String,
+    pub upstream_host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_path_prefix: Option<String>,
+}
+
+fn default_header_name() -> String {
+    "Authorization".to_string()
+}
+
+/// One provider attached to an agent's sandbox.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProviderEntry {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_: ProviderType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generic: Option<GenericProvider>,
+}
+
 /// Per-agent sandbox configuration in agent.yaml.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -266,6 +324,9 @@ pub struct SandboxConfig {
     /// here explicitly.
     #[serde(default)]
     pub name: Option<String>,
+    /// Providers attached to this sandbox. Empty by default. Per-agent source of truth.
+    #[serde(default)]
+    pub providers: Vec<ProviderEntry>,
 }
 
 impl Default for SandboxConfig {
@@ -274,6 +335,7 @@ impl Default for SandboxConfig {
             mode: SandboxMode::Openshell,
             policy_file: Some(PathBuf::from("policy.yaml")),
             name: None,
+            providers: Vec::new(),
         }
     }
 }
@@ -835,5 +897,39 @@ prefilter_enabled: false
             cfg.probe_writer_enabled,
             "probe_writer_enabled defaults to true"
         );
+    }
+
+    #[test]
+    fn sandbox_providers_parses_built_in_entry() {
+        let yaml = "sandbox:\n  mode: openshell\n  providers:\n    - name: foo-anthropic\n      type: anthropic\n";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let sandbox = cfg.sandbox.unwrap();
+        assert_eq!(sandbox.providers.len(), 1);
+        let entry = &sandbox.providers[0];
+        assert_eq!(entry.name, "foo-anthropic");
+        assert_eq!(entry.type_, ProviderType::BuiltIn("anthropic".into()));
+        assert!(entry.label.is_none());
+        assert!(entry.generic.is_none());
+    }
+
+    #[test]
+    fn sandbox_providers_parses_generic_entry() {
+        let yaml = "sandbox:\n  mode: openshell\n  providers:\n    - name: foo-acme\n      type: generic\n      label: acme\n      generic:\n        env_var: ACME_TOKEN\n        header_name: X-Acme-Token\n        upstream_host: api.acme.com\n        upstream_path_prefix: /v1\n";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let entry = &cfg.sandbox.unwrap().providers[0];
+        assert_eq!(entry.type_, ProviderType::Generic);
+        assert_eq!(entry.label.as_deref(), Some("acme"));
+        let g = entry.generic.as_ref().unwrap();
+        assert_eq!(g.env_var, "ACME_TOKEN");
+        assert_eq!(g.header_name, "X-Acme-Token");
+        assert_eq!(g.upstream_host, "api.acme.com");
+        assert_eq!(g.upstream_path_prefix.as_deref(), Some("/v1"));
+    }
+
+    #[test]
+    fn sandbox_providers_defaults_to_empty() {
+        let yaml = "sandbox: { mode: openshell }";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(cfg.sandbox.unwrap().providers.is_empty());
     }
 }

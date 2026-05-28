@@ -1406,8 +1406,9 @@ network_policies:
     )
     .unwrap();
 
-    let mut child = right_openshell::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
-        .expect("failed to spawn sandbox");
+    let mut child =
+        right_openshell::openshell::spawn_sandbox(sandbox_name, &policy_path, None, &[])
+            .expect("failed to spawn sandbox");
     right_openshell::openshell::wait_for_ready(
         &mut grpc_client,
         sandbox_name,

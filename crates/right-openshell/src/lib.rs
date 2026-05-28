@@ -3,6 +3,7 @@
 #![warn(unreachable_pub)]
 
 pub mod openshell;
+pub mod providers;
 #[allow(clippy::large_enum_variant)]
 pub mod openshell_proto {
     pub mod openshell {
@@ -21,8 +22,11 @@ pub mod openshell_proto {
         }
     }
 }
+pub mod preflight;
 pub mod sandbox_exec;
 #[cfg(unix)]
 pub mod test_cleanup;
+#[cfg(test)]
+mod test_mock_server;
 #[cfg(all(unix, any(test, feature = "test-support")))]
 pub mod test_support;

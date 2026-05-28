@@ -23,6 +23,7 @@ use right_db::Connection;
 mod health;
 mod identity;
 mod mcp;
+mod providers;
 mod skills;
 
 const REFRESH_INTERVAL_SECS: u64 = 5;
@@ -161,6 +162,26 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
         .route(
             "/dashboard/{agent}/api/v1/mcp/servers/{server_name}",
             delete(mcp::handle_mcp_remove),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/providers",
+            get(providers::handle_list).post(providers::handle_create),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/providers/types",
+            get(providers::handle_types),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/providers/{provider_name}",
+            delete(providers::handle_remove),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/providers/{provider_name}/rotate",
+            post(providers::handle_rotate),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/providers/{provider_name}/config",
+            patch(providers::handle_config_update),
         )
         .route("/dashboard/{agent}/{*asset}", get(handle_static_asset))
         .with_state(state)

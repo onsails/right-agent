@@ -11,6 +11,9 @@ Sandboxes are **persistent** — never deleted automatically. They live as long 
 ```
 Bot startup:
   ├─ Resolve OpenShell gateway endpoint (OPENSHELL_GATEWAY_ENDPOINT or openshell status)
+  ├─ openshell_preflight (right_openshell::preflight::openshell_preflight)
+  │   ├─ Spawn `openshell --version` — fail with CliTooOld if < MIN_OPENSHELL_VERSION
+  │   └─ gRPC Health → fail with GatewayTooOld if reported version is too old
   ├─ gRPC GetSandbox → READY?
   │   ├─ YES: resolve sandbox id + all sandbox-visible host IPs
   │   └─ NO: startup exits; creating a missing sandbox is an init/migration job
@@ -93,6 +96,12 @@ Mini App health, identity, or knowledge-skill views. These probes reuse the
 bot-owned `SandboxExec` handle, are bounded by short per-request timeouts, and
 read only the requested dashboard material: sandbox stats, identity files, or
 skill inventory/details. Overview rendering does not run these probes.
+
+Sandbox supervisors inject provider env-var placeholders at boot from the gateway's
+attached-providers list (see `docs/architecture/providers.md`). The gateway proxy
+substitutes the real credential on outbound HTTPS for TLS-terminated endpoints; raw
+tunnels (tls: skip) cannot substitute and Right refuses to attach generic providers
+against those hosts.
 
 ### User-Local CLI Environment
 
