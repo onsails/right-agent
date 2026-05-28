@@ -25,11 +25,9 @@ fn main() {
     require_tool("node");
     require_tool("npm");
 
-    if !frontend.join("node_modules").exists() {
-        let mut npm = Command::new("npm");
-        npm.args(["install"]).current_dir(&frontend);
-        run(&mut npm);
-    }
+    let mut npm = Command::new("npm");
+    npm.args(["install"]).current_dir(&frontend);
+    run(&mut npm);
 
     let mut vite = Command::new("npx");
     vite.args(["vite", "build"])
