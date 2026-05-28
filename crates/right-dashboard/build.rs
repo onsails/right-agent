@@ -16,21 +16,21 @@ fn main() {
         "frontend/vite.config.ts",
         "frontend/tsconfig.json",
         "frontend/package.json",
-        "frontend/package-lock.json",
+        "frontend/pnpm-lock.yaml",
         "build.rs",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
 
     require_tool("node");
-    require_tool("npm");
+    require_tool("pnpm");
 
-    let mut npm = Command::new("npm");
-    npm.args(["install"]).current_dir(&frontend);
-    run(&mut npm);
+    let mut install = Command::new("pnpm");
+    install.args(["install"]).current_dir(&frontend);
+    run(&mut install);
 
-    let mut vite = Command::new("npx");
-    vite.args(["vite", "build"])
+    let mut vite = Command::new("pnpm");
+    vite.args(["exec", "vite", "build"])
         .current_dir(&frontend)
         .env("VITE_OUT_DIR", &dashboard_out);
     run(&mut vite);
@@ -46,7 +46,7 @@ fn main() {
 fn require_tool(name: &str) {
     if which(name).is_none() {
         eprintln!(
-            "error: '{name}' not found on PATH. Enter the devenv shell ('devenv shell') or install Node.js (>= 20).",
+            "error: '{name}' not found on PATH. Enter the devenv shell ('devenv shell') or install Node.js (>= 20) and pnpm.",
         );
         std::process::exit(1);
     }
