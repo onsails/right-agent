@@ -298,9 +298,9 @@ NEVER guess — quote the actual error in your report.
 **Critical:** "missing fields" means YOUR request is malformed — it is NOT a permissions
 issue and NOT a server-side bug. Always fix your request before retrying or reporting failure.
 
-**Learn from mistakes:** When you fix an MCP tool call after a validation error,
-save the correct parameter format to your Claude Code conversation memory
-so you don't repeat the same mistake in future sessions.
+**Learn from mistakes:** After fixing an MCP tool call from a validation
+error, record the corrected parameter shape in `TOOLS.md` so future turns
+get it right.
 
 ## Core Skills
 
