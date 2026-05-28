@@ -17,6 +17,7 @@
     "vue-tsc": "latest"
   },
   "devDependencies": {
+    "@vue/server-renderer": "3.5.35",
     "vitest": "^4.1.7"
   }
 }
