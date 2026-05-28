@@ -2,12 +2,12 @@
 ## [3.0.0] - 2026-05-28
 
 - **Breaking:** `right up` now requires OpenShell ≥ 0.0.50 (CLI and gateway) and refuses to start against older versions.
-- Operators can now manage gateway credentials via `/providers` in the Telegram Mini App — create, rotate, update, and remove providers using 8 built-in profiles or a custom generic entry. Credentials live on the OpenShell gateway, are injected as sandbox env vars, and are never written to agent config or logs. Destroying an agent cascade-deletes its providers.
-- The per-turn skill learning pipeline is rebuilt: a Haiku prefilter screens each turn for learning potential, a probe-writer fires on positive signals, and a periodic curator synthesizes reusable skills from accumulated episodes. A multi-signal gate, daily budget cap, and circuit breaker prevent runaway invocations. Skill lifecycle state is persisted in the database and visible in the dashboard.
-- The Telegram Mini App now includes MCP server management (add, remove, configure, start OAuth flows from the web UI), usage analytics, an activity feed, skill inventory with lifecycle state, identity summary, and agent health.
-- Background agent tasks survive bot restarts: in-flight turns are backgrounded gracefully on shutdown, failed background runs are reported to the originating chat, and interrupted handoffs from a prior shutdown are recovered automatically on next start.
+- Manage gateway credentials via `/providers` in the Telegram Mini App — create, rotate, update, and remove providers using 8 built-in profiles or a custom generic entry. Credentials live on the OpenShell gateway and inject as sandbox environment variables; they are never written to agent config, backups, or logs. Destroying an agent cascade-deletes its providers.
+- The per-turn skill learning pipeline is rebuilt: a Haiku prefilter screens each turn, a probe-writer fires on positive signals, and a periodic curator synthesizes reusable skills from accumulated episodes. A budget cap and circuit breaker prevent runaway invocations. Skill lifecycle state is visible in the dashboard. Agents can also save skill packages from observed work with `/right-learn-skill`.
+- The Telegram Mini App now covers MCP server management (add, remove, configure, start OAuth flows with live authorization status), a Providers tab for gateway credential management, usage analytics, an activity feed, skill inventory with lifecycle state, identity summary, and agent health.
+- In-flight agent turns are backgrounded gracefully on shutdown; interrupted handoffs from a prior shutdown are recovered on next start, and failed background runs are reported to the originating chat.
 - Agents can search past Telegram conversations via `mcp__right__thread_search` (current topic) and `mcp__right__chat_search` (current chat), backed by local full-text indexes over archived message history.
-- When agents hit transient upstream failures (gateway timeouts, 5xx errors), they now schedule a one-shot retry cron rather than promising to retry manually.
+- Cron step expressions that land on :00 or :30 minutes (e.g. `*/30`, `*/15`) are now rejected at creation time. When agents hit transient upstream failures they self-schedule a one-shot retry cron. The hourly keepalive detects and repairs broken Right MCP auth inside running sessions. Cloudflared restarts automatically when the agent list changes. The `/model` Opus 1M option now uses claude-opus-4-8.
 
 ## [0.2.15] - 2026-05-18
 
