@@ -133,8 +133,29 @@ These are unit-tested with Vitest (render states for `AsyncState`, toggle for
 
 ### D. Identity (`dashboard/identity.rs` + `IdentityView.vue`)
 
+**Root cause of the user's report (confirmed by live investigation).** Both
+agents' identity files are present and healthy in their sandboxes (byte-matching
+the host mirrors); no recreate/migration occurred. The "MIXED / unavailable in
+sandbox" the user saw came from a **transient sandbox-exec timeout**, not missing
+files: `read_sandbox_identity_files` (`identity.rs:97-134`) issues **three
+sequential `exec_in_sandbox` calls**, one per file, each with a **4s timeout**
+(`DASHBOARD_SANDBOX_TIMEOUT_SECS = 4`, `dashboard.rs:30`). On a cold/slow
+sandbox these time out, and the timeout branch (`identity.rs:111-117`) emits the
+*same* "unavailable in sandbox" warning as the genuine file-missing branch
+(`:121-126`) — a slow read mislabeled as absent. Hence two backend fixes below in
+addition to the relabeling.
+
 Backend (`crates/bot/src/telegram/dashboard/identity.rs`):
 
+- **Coalesce the three sequential reads into one `exec_in_sandbox`.** Run a
+  single `sh -c` that emits all three files with unambiguous delimiters (and a
+  per-file present/absent marker), then parse the combined output. One 4s-budget
+  round-trip instead of three — ~3× faster and removes the dominant cause of the
+  spurious timeout. Keep `read_sandbox_identity_file` (single-file path used by
+  `identity_file_response`) consistent with the new state mapping.
+- **Distinguish timeout from absence.** A timeout / gRPC error maps to
+  `sandbox_unreachable`; only a real per-file "absent" marker maps to
+  `not_authored` / `host_mirror`. The two must no longer share a warning string.
 - Replace the collapsed `mixed` + "unavailable in sandbox" outcome with a
   per-file state machine:
   - sandbox read ok → **`sandbox`** (Live).
@@ -157,6 +178,8 @@ Frontend (`views/IdentityView.vue`):
   `host`→`Host`, `missing`→`Missing`.
 - Drop the `MIXED` overall pill and the semicolon-joined warning string; derive
   a single clear banner from the worst per-file state.
+- For `sandbox_unreachable`, show a **retry** affordance (re-fetch identity)
+  rather than presenting the host mirror as if it were the agent's live state.
 - Use `AsyncState` for the detail panel loading/empty/error.
 
 ### E. Skills (`views/SkillsView.vue`)
@@ -190,19 +213,26 @@ path.
 
 ## Out of scope
 
-- Diagnosing the user's specific live agent (whether its `/sandbox` identity
-  was lost vs never authored). The dashboard fix makes the state legible; a
-  live investigation is a separate task if the differentiated UI later shows
-  `sandbox_unreachable`.
+- The user's live agents were investigated (read-only) and are healthy:
+  `him` and `right` both have all three identity files present in-sandbox,
+  byte-matching the host mirrors, with no recreate/migration in the logs. The
+  "missing" report was a transient exec timeout (addressed by §D), not data
+  loss — so no platform/data-recovery work is needed.
 - Any change to identity deployment, the prompt system, or sandbox staging.
+- Tuning `DASHBOARD_SANDBOX_TIMEOUT_SECS` itself — the coalesced single-read in
+  §D is the fix; raising the constant is a fallback only if the coalesced read
+  still times out in practice (revisit then, not now).
 - Restyling charts or the broader visual theme.
 
 ## Verification cadence
 
 - During build (targeted): `cargo test -p right-db <migration filter>`,
-  `cargo test -p right-dashboard`, and in `frontend/`: `pnpm test` +
+  `cargo test -p right-dashboard`, `cargo test -p bot identity` (the coalesced
+  sandbox-read parser + state mapping), and in `frontend/`: `pnpm test` +
   `pnpm typecheck`. TDD red/green for the migration (assert the two sources are
-  gone and the migration is idempotent) and for `AsyncState` /
+  gone and the migration is idempotent), for the identity read parser (a
+  single combined-output read yields correct per-file present/absent +
+  timeout→`sandbox_unreachable` mapping), and for `AsyncState` /
   `CollapsibleSection`.
 - Final (mandatory): `devenv shell -- cargo test --workspace` plus a frontend
   `pnpm build`.
