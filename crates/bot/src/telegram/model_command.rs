@@ -33,8 +33,8 @@ pub(crate) const MODEL_CHOICES: &[ModelChoice] = &[
     ModelChoice {
         alias: "opus1m",
         label: "Opus 1M",
-        model_id: Some("claude-opus-4-7[1m]"),
-        description: "Opus 4.7 (1M context) · Most capable",
+        model_id: Some("claude-opus-4-8[1m]"),
+        description: "Opus 4.8 (1M context) · Most capable",
     },
     ModelChoice {
         alias: "sonnet",
@@ -289,7 +289,7 @@ mod tests {
     #[tokio::test]
     async fn opus_1m_choice_is_explicit_model() {
         let c = lookup("opus1m").unwrap();
-        assert_eq!(c.model_id, Some("claude-opus-4-7[1m]"));
+        assert_eq!(c.model_id, Some("claude-opus-4-8[1m]"));
     }
 
     #[tokio::test]

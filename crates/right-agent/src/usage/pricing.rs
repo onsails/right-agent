@@ -20,7 +20,7 @@ pub fn lookup(model: &str) -> Option<ModelPricing> {
             output_per_mtok: 15.0,
         });
     }
-    if model.starts_with("claude-opus-4-7") {
+    if model.starts_with("claude-opus-4-7") || model.starts_with("claude-opus-4-8") {
         return Some(ModelPricing {
             input_per_mtok: 15.0,
             output_per_mtok: 75.0,
@@ -49,6 +49,20 @@ mod tests {
     #[test]
     fn opus_4_7_known() {
         let p = lookup("claude-opus-4-7").expect("must be known");
+        assert!((p.input_per_mtok - 15.0).abs() < 1e-9);
+        assert!((p.output_per_mtok - 75.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn opus_4_8_known() {
+        let p = lookup("claude-opus-4-8").expect("must be known");
+        assert!((p.input_per_mtok - 15.0).abs() < 1e-9);
+        assert!((p.output_per_mtok - 75.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn opus_4_8_one_m_variant_matches() {
+        let p = lookup("claude-opus-4-8[1m]").expect("1m variant must match");
         assert!((p.input_per_mtok - 15.0).abs() < 1e-9);
         assert!((p.output_per_mtok - 75.0).abs() < 1e-9);
     }

@@ -1847,7 +1847,7 @@ mod tests {
         let args = build_delivery_invocation_args(
             "/sandbox/mcp.json".into(),
             r#"{"type":"object"}"#.into(),
-            Some("claude-opus-4-7[1m]".into()),
+            Some("claude-opus-4-8[1m]".into()),
             Some("session-1".into()),
             None,
         );
@@ -1856,7 +1856,7 @@ mod tests {
             .iter()
             .position(|arg| arg == "--model")
             .expect("configured model must be passed to Claude");
-        assert_eq!(args[model_pos + 1], "claude-opus-4-7[1m]");
+        assert_eq!(args[model_pos + 1], "claude-opus-4-8[1m]");
         assert!(
             !args.iter().any(|arg| arg == "claude-haiku-4-5-20251001"),
             "delivery must not override the configured agent model with Haiku"
