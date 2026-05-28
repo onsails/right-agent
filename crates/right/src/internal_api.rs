@@ -146,11 +146,44 @@ pub(crate) struct InternalState {
     token_map: AgentTokenMap,
     token_map_path: PathBuf,
     pub(crate) agents_dir: PathBuf,
+    /// Per-agent serialization for provider mutations. Keyed on agent name
+    /// alone — every provider operation eventually does an RMW on the same
+    /// `agents/<agent>/agent.yaml`, so a finer (agent, name) key would let
+    /// two concurrent creates for distinct providers on the same agent race
+    /// the file and silently drop one entry (gateway/policy mutated, but
+    /// agent.yaml only retains the last writer's content). Different agents
+    /// remain independent.
     pub(crate) provider_locks: std::sync::Arc<
         tokio::sync::Mutex<
-            std::collections::HashMap<(String, String), std::sync::Arc<tokio::sync::Mutex<()>>>,
+            std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
         >,
     >,
+}
+
+#[cfg(test)]
+impl InternalState {
+    /// Test-only constructor: builds the same `InternalState` that
+    /// `internal_router` constructs, but returns it directly so tests can
+    /// invoke per-handler helpers (e.g. `provider_lock`) without going
+    /// through the axum router.
+    pub(crate) fn new_for_test(
+        dispatcher: Arc<ToolDispatcher>,
+        refresh_senders: RefreshSenders,
+        reconnect_managers: ReconnectManagers,
+        token_map: AgentTokenMap,
+        token_map_path: PathBuf,
+        agents_dir: PathBuf,
+    ) -> Self {
+        Self {
+            dispatcher,
+            refresh_senders,
+            reconnect_managers,
+            token_map,
+            token_map_path,
+            agents_dir,
+            provider_locks: Default::default(),
+        }
+    }
 }
 
 pub(crate) fn internal_router(
