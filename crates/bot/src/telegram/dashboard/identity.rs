@@ -9,32 +9,42 @@ use right_openshell::sandbox_exec::SandboxExec;
 
 use super::DashboardState;
 
+mod identity_parse;
+
+use identity_parse::{identity_state, parse_combined_identity_read};
+
 const IDENTITY_PREVIEW_LIMIT_BYTES: usize = 64 * 1024;
-const SANDBOX_READ_IDENTITY_SCRIPT: &str = r#"file="$1"
-[ -e "$file" ] || exit 3
-[ -L "$file" ] && exit 3
-[ -f "$file" ] || exit 3
-head -c "$2" "$file""#;
+
+/// Combined read of every identity file in a single round trip. `$1` is the
+/// byte limit per file (the caller passes `IDENTITY_PREVIEW_LIMIT_BYTES + 1`
+/// so the parser can detect truncation). Each file emits a header line
+/// `RIGHT_IDENTITY <name> <PRESENT|ABSENT> <byte_count>\n`; present files are
+/// followed by exactly `byte_count` content bytes and a trailing `\n`. The
+/// file list is hardcoded here to mirror `IDENTITY_FILE_NAMES` — keep both in
+/// sync.
+const SANDBOX_READ_IDENTITY_SCRIPT: &str = r#"limit="$1"
+for f in IDENTITY.md SOUL.md USER.md; do
+  p="/sandbox/$f"
+  if [ -e "$p" ] && [ ! -L "$p" ] && [ -f "$p" ]; then
+    n=$(head -c "$limit" "$p" | wc -c | tr -d ' ')
+    printf 'RIGHT_IDENTITY %s PRESENT %s\n' "$f" "$n"
+    head -c "$limit" "$p"
+    printf '\n'
+  else
+    printf 'RIGHT_IDENTITY %s ABSENT 0\n' "$f"
+  fi
+done"#;
 
 pub(super) async fn identity_response(
     state: &DashboardState,
 ) -> Result<IdentityResponse, IdentityFilesError> {
     if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
-        match read_sandbox_identity_files(state, sandbox_exec).await {
-            Ok(response) => return Ok(response),
-            Err(error) => {
-                let warning = Some(format!(
-                    "sandbox identity read failed; showing host mirror: {error:#}"
-                ));
-                return read_host_identity_files(
-                    &state.agent_name,
-                    &state.agent_dir,
-                    "host_mirror",
-                    warning,
-                    IDENTITY_PREVIEW_LIMIT_BYTES,
-                );
-            }
-        }
+        // The combined read maps its own failure to a `sandbox_unreachable`
+        // response, so any `Err` here is a host-mirror read failure that must
+        // propagate rather than masquerade as unreachable.
+        return read_sandbox_identity_files(&state.agent_name, &state.agent_dir, sandbox_exec)
+            .await
+            .map_err(|error| IdentityFilesError::Io(std::io::Error::other(format!("{error:#}"))));
     }
 
     read_host_identity_files(
@@ -54,16 +64,29 @@ pub(super) async fn identity_file_response(
     if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
         let (file, warning) = match read_sandbox_identity_file(sandbox_exec, file_name).await {
             Ok(Some(file)) => (file, None),
+            // Absent in the sandbox: show the host mirror when present
+            // (host_mirror) otherwise mark it not_authored.
             Ok(None) => (
-                host_mirror_or_unavailable(&state.agent_dir, file_name)?,
-                Some(format!(
-                    "sandbox identity file {file_name} unavailable; showing host mirror when present"
-                )),
+                read_host_identity_file(
+                    &state.agent_dir,
+                    identity_state(false, true),
+                    identity_state(false, false),
+                    file_name,
+                    IDENTITY_PREVIEW_LIMIT_BYTES,
+                )?,
+                None,
             ),
+            // Sandbox unreachable: show the host mirror but label it as such.
             Err(error) => (
-                host_mirror_or_unavailable(&state.agent_dir, file_name)?,
+                read_host_identity_file(
+                    &state.agent_dir,
+                    "sandbox_unreachable",
+                    "sandbox_unreachable",
+                    file_name,
+                    IDENTITY_PREVIEW_LIMIT_BYTES,
+                )?,
                 Some(format!(
-                    "sandbox identity file read failed; showing host mirror when present: {error:#}"
+                    "sandbox unreachable; showing host mirror when present: {error:#}"
                 )),
             ),
         };
@@ -87,142 +110,167 @@ pub(super) async fn identity_file_response(
     })
 }
 
+/// Read every identity file from the sandbox in a single round trip.
+///
+/// On success each file is mapped to one of `sandbox` (live, present in the
+/// sandbox), `host_mirror` (absent in sandbox but a host debug mirror exists),
+/// or `not_authored` (absent everywhere). When the single combined read fails
+/// — timeout, exec error, or non-zero exit — the sandbox is unreachable as a
+/// whole: every file is labelled `sandbox_unreachable` and host-mirror content
+/// is shown (clearly the mirror, never claimed live).
 async fn read_sandbox_identity_files(
-    state: &DashboardState,
+    agent_name: &str,
+    agent_dir: &std::path::Path,
     sandbox_exec: &SandboxExec,
 ) -> miette::Result<IdentityResponse> {
+    let stdout = match run_combined_identity_read(sandbox_exec).await {
+        Ok(stdout) => stdout,
+        Err(error) => return host_mirror_unreachable_response(agent_name, agent_dir, &error),
+    };
+
+    let parsed = parse_combined_identity_read(&stdout, IDENTITY_PREVIEW_LIMIT_BYTES);
     let mut files = Vec::with_capacity(IDENTITY_FILE_NAMES.len());
-    let mut warning_parts = Vec::new();
+    let mut all_live = true;
 
     for name in IDENTITY_FILE_NAMES {
-        let sandbox_path = format!("/sandbox/{name}");
-        let limit = (IDENTITY_PREVIEW_LIMIT_BYTES + 1).to_string();
-        let command = [
-            "sh",
-            "-c",
-            SANDBOX_READ_IDENTITY_SCRIPT,
-            "dashboard-identity-read",
-            sandbox_path.as_str(),
-            limit.as_str(),
-        ];
-        let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
-        let result = match tokio::time::timeout(timeout, sandbox_exec.exec(&command)).await {
-            Ok(result) => result,
-            Err(_) => {
-                files.push(host_mirror_or_unavailable(&state.agent_dir, name).map_err(
-                    |error| miette::miette!("host mirror read failed for {name}: {error:#}"),
-                )?);
-                warning_parts.push(format!("{name} unavailable in sandbox"));
-                continue;
+        match parsed.iter().find(|file| file.name == name) {
+            Some(file) if file.present => {
+                files.push(IdentityFileSummary {
+                    name: name.to_owned(),
+                    source: identity_state(true, false).to_owned(),
+                    path: format!("/sandbox/{name}"),
+                    exists: true,
+                    content_preview: Some(file.content.clone()),
+                    truncated: file.truncated,
+                });
             }
-        };
-        match summarize_sandbox_read(name, &sandbox_path, result) {
-            Ok(Some(file)) => files.push(file),
-            Ok(None) => {
-                files.push(host_mirror_or_unavailable(&state.agent_dir, name).map_err(
-                    |error| miette::miette!("host mirror read failed for {name}: {error:#}"),
-                )?);
-                warning_parts.push(format!("{name} unavailable in sandbox"));
-            }
-            Err(error) => {
-                files.push(host_mirror_or_unavailable(&state.agent_dir, name).map_err(
-                    |error| miette::miette!("host mirror read failed for {name}: {error:#}"),
-                )?);
-                warning_parts.push(format!("{name} sandbox read failed: {error:#}"));
+            // Absent in the sandbox (or omitted from the framing): fall back to
+            // the host mirror. `read_host_identity_file` probes presence and
+            // labels host_mirror when present, not_authored when missing.
+            _ => {
+                files.push(
+                    read_host_identity_file(
+                        agent_dir,
+                        identity_state(false, true),
+                        identity_state(false, false),
+                        name,
+                        IDENTITY_PREVIEW_LIMIT_BYTES,
+                    )
+                    .map_err(|error| {
+                        miette::miette!("host mirror read failed for {name}: {error:#}")
+                    })?,
+                );
+                all_live = false;
             }
         }
     }
 
     Ok(IdentityResponse {
-        agent: state.agent_name.clone(),
-        source: if warning_parts.is_empty() {
+        agent: agent_name.to_owned(),
+        source: if all_live {
             "sandbox".to_owned()
         } else {
             "mixed".to_owned()
         },
-        warning: if warning_parts.is_empty() {
-            None
-        } else {
-            Some(warning_parts.join("; "))
-        },
+        warning: None,
         files,
     })
 }
 
-async fn read_sandbox_identity_file(
-    sandbox_exec: &SandboxExec,
-    name: &str,
-) -> miette::Result<Option<IdentityFileSummary>> {
-    validate_identity_file_name(name).map_err(|error| miette::miette!("{error:#}"))?;
-    let sandbox_path = format!("/sandbox/{name}");
+/// Run the combined identity read with the dashboard sandbox timeout, mapping
+/// timeout and non-zero exit into an error so the caller drops to the
+/// `sandbox_unreachable` branch.
+async fn run_combined_identity_read(sandbox_exec: &SandboxExec) -> miette::Result<String> {
     let limit = (IDENTITY_PREVIEW_LIMIT_BYTES + 1).to_string();
     let command = [
         "sh",
         "-c",
         SANDBOX_READ_IDENTITY_SCRIPT,
         "dashboard-identity-read",
-        sandbox_path.as_str(),
         limit.as_str(),
     ];
     let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
-    let result = match tokio::time::timeout(timeout, sandbox_exec.exec(&command)).await {
-        Ok(result) => result,
-        Err(_) => {
-            return Err(miette::miette!(
-                "sandbox identity read for {name} timed out"
-            ));
-        }
+    let run = sandbox_exec.exec(&command);
+    let (stdout, exit_code) = match tokio::time::timeout(timeout, run).await {
+        Ok(result) => result?,
+        Err(_) => return Err(miette::miette!("sandbox identity read timed out")),
     };
-    summarize_sandbox_read(name, &sandbox_path, result)
-}
-
-fn summarize_sandbox_read(
-    name: &str,
-    sandbox_path: &str,
-    result: miette::Result<(String, i32)>,
-) -> miette::Result<Option<IdentityFileSummary>> {
-    let (mut content_preview, exit_code) = result?;
-    if exit_code == 3 {
-        return Ok(None);
-    }
     if exit_code != 0 {
         return Err(miette::miette!(
-            "sandbox identity read for {name} exited with code {exit_code}"
+            "sandbox identity read exited with code {exit_code}"
         ));
     }
-    let truncated = content_preview.len() > IDENTITY_PREVIEW_LIMIT_BYTES;
-    if truncated {
-        right_dashboard::fs_safety::truncate_to_char_boundary(
-            &mut content_preview,
-            IDENTITY_PREVIEW_LIMIT_BYTES,
-        );
-    }
-    Ok(Some(IdentityFileSummary {
-        name: name.to_owned(),
-        source: "sandbox".to_owned(),
-        path: sandbox_path.to_owned(),
-        exists: true,
-        content_preview: Some(content_preview),
-        truncated,
-    }))
+    Ok(stdout)
 }
 
-fn host_mirror_or_unavailable(
+/// Build the whole-panel response when the sandbox could not be read at all.
+/// Every file is labelled `sandbox_unreachable`; host-mirror content is shown
+/// when present but is never presented as live.
+fn host_mirror_unreachable_response(
+    agent_name: &str,
     agent_dir: &std::path::Path,
+    error: &miette::Report,
+) -> miette::Result<IdentityResponse> {
+    let mut files = Vec::with_capacity(IDENTITY_FILE_NAMES.len());
+    for name in IDENTITY_FILE_NAMES {
+        files.push(
+            read_host_identity_file(
+                agent_dir,
+                "sandbox_unreachable",
+                "sandbox_unreachable",
+                name,
+                IDENTITY_PREVIEW_LIMIT_BYTES,
+            )
+            .map_err(|error| miette::miette!("host mirror read failed for {name}: {error:#}"))?,
+        );
+    }
+    Ok(IdentityResponse {
+        agent: agent_name.to_owned(),
+        source: "sandbox_unreachable".to_owned(),
+        warning: Some(format!(
+            "sandbox unreachable; showing host mirror: {error:#}"
+        )),
+        files,
+    })
+}
+
+/// Read a single identity file from the sandbox via the combined read.
+/// `Ok(Some(_))` = present in the sandbox; `Ok(None)` = absent (caller maps to
+/// host_mirror/not_authored); `Err(_)` = sandbox unreachable.
+async fn read_sandbox_identity_file(
+    sandbox_exec: &SandboxExec,
     name: &str,
-) -> Result<IdentityFileSummary, IdentityFilesError> {
-    read_host_identity_file(
-        agent_dir,
-        "host_mirror",
-        "unavailable",
-        name,
-        IDENTITY_PREVIEW_LIMIT_BYTES,
-    )
+) -> miette::Result<Option<IdentityFileSummary>> {
+    validate_identity_file_name(name).map_err(|error| miette::miette!("{error:#}"))?;
+    let stdout = run_combined_identity_read(sandbox_exec).await?;
+    let parsed = parse_combined_identity_read(&stdout, IDENTITY_PREVIEW_LIMIT_BYTES);
+    match parsed.iter().find(|file| file.name == name) {
+        Some(file) if file.present => Ok(Some(IdentityFileSummary {
+            name: name.to_owned(),
+            source: identity_state(true, false).to_owned(),
+            path: format!("/sandbox/{name}"),
+            exists: true,
+            content_preview: Some(file.content.clone()),
+            truncated: file.truncated,
+        })),
+        _ => Ok(None),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combined_read_script_covers_every_identity_file_name() {
+        for name in IDENTITY_FILE_NAMES {
+            assert!(
+                SANDBOX_READ_IDENTITY_SCRIPT.contains(name),
+                "combined-read script is missing identity file `{name}`; \
+                 keep the script's hardcoded list in sync with IDENTITY_FILE_NAMES",
+            );
+        }
+    }
 
     #[tokio::test]
     async fn truncate_to_char_boundary_handles_split_multibyte_suffix() {
@@ -238,16 +286,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_mirror_or_unavailable_labels_missing_files() {
+    async fn unreachable_response_labels_every_file_sandbox_unreachable() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("IDENTITY.md"), "# Identity\n").unwrap();
 
-        let existing = host_mirror_or_unavailable(temp.path(), "IDENTITY.md").unwrap();
-        let missing = host_mirror_or_unavailable(temp.path(), "SOUL.md").unwrap();
+        let response =
+            host_mirror_unreachable_response("alpha", temp.path(), &miette::miette!("boom"))
+                .unwrap();
 
-        assert_eq!(existing.source, "host_mirror");
-        assert_eq!(existing.content_preview.as_deref(), Some("# Identity\n"));
-        assert_eq!(missing.source, "unavailable");
-        assert!(!missing.exists);
+        assert_eq!(response.source, "sandbox_unreachable");
+        assert!(response.warning.is_some());
+        assert!(
+            response
+                .files
+                .iter()
+                .all(|file| file.source == "sandbox_unreachable")
+        );
+        // Host-mirror content is still shown for files that exist on the host.
+        let identity = response
+            .files
+            .iter()
+            .find(|file| file.name == "IDENTITY.md")
+            .unwrap();
+        assert_eq!(identity.content_preview.as_deref(), Some("# Identity\n"));
+        assert!(identity.exists);
+        // Missing files are present-but-empty in the list, still unreachable.
+        let soul = response
+            .files
+            .iter()
+            .find(|file| file.name == "SOUL.md")
+            .unwrap();
+        assert!(!soul.exists);
+        assert_eq!(soul.source, "sandbox_unreachable");
     }
 }
