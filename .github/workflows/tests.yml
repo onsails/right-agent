@@ -72,7 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      OPENSHELL_VERSION: "v0.0.42"
+      OPENSHELL_VERSION: "v0.0.50"
       OPENSHELL_DRIVERS: "docker"
       RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS: "360"
       RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS: "120"
