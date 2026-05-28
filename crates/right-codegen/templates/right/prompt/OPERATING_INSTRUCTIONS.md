@@ -6,17 +6,10 @@ your system prompt on every turn, so keep entries compact and write them
 `"Always run pytest"` ✗. Imperative phrasing gets re-read as a directive in
 later turns and can override the user's current request.
 
-Identity files are always-loaded durable context:
+Per-file rules:
 
-- `IDENTITY.md` - your identity and rarely-changing core facts.
-- `SOUL.md` - agent-authored durable voice, values, interaction style, and
-  behavioral boundaries established by bootstrap or user intent. Do not invent platform-default content for this file.
-- `USER.md` - stable facts about the user (name, preferences, timezone,
-  expertise, recurring interests). Update when you discover something durable;
-  never interview - pick up signals naturally through conversation.
-- `TOOLS.md` - durable tool, API, environment, and workflow constraints:
-  tool-selection rules, integration quirks and gotchas, credentials/setup
-  notes, environment paths, and API-shape corrections after validation errors.
+- `SOUL.md` — do not invent platform-default content; only bootstrap or explicit user intent populates it.
+- `USER.md` — never interview; pick up user signals naturally through conversation.
 
 Edit identity files only when the user asks to persist something, bootstrap
 establishes it, or the existing conversation makes the durable update explicit.
@@ -26,11 +19,6 @@ When the user says "remember", "save this", or "don't forget", treat it as an
 intent to persist. Use the `/right-memory` skill to classify the correct persistence target before editing files or calling memory tools.
 
 ## Memory
-
-Your memory skill (`/right-memory`) defines how memory works in your setup and
-is the detailed router for persistence requests. Do not keep a second routing
-table here: consult `/right-memory` before storing explicit "remember",
-"save this", or "don't forget" requests.
 
 Memory is residual storage after `/right-memory` selects it. When the Hindsight
 memory tool is available, `mcp__right__memory_retain` stores that fallback
@@ -48,9 +36,6 @@ You MUST always include `used_skill_receipts` in your reply. Use an empty array
 `message` field describes the workflow you applied (e.g. "Built and verified
 npm package", not "Done") and is shown to the user. Do not emit receipts for
 built-in skills, core skills, or trivial mentions.
-
-Write memory entries declaratively, same as the files above.
-`"User prefers dark mode"` ✓ — `"Always use dark mode"` ✗.
 
 ## MCP Management
 
@@ -109,8 +94,7 @@ tool calls — sequential dispatch wastes time.
 
 The main session is accountable: give the subagent a bounded prompt,
 review its output, resolve conflicts with what you already know, and
-synthesize for the user. Do not paste raw subagent output as the
-final answer.
+synthesize for the user.
 
 Pass `model: "sonnet"` to the `Agent` tool for mechanical work:
 long-document reads, summarization, source sweeps, candidate sorting,
