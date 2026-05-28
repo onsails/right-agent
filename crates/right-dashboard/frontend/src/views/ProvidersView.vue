@@ -280,6 +280,9 @@ function statusLabel(provider: ProviderView): string {
   const s = provider.status
   if (s.kind === 'healthy') return 'Healthy'
   if (s.kind === 'missing') return 'Missing'
+  if (s.kind === 'unknown_builtin') {
+    return `Unknown built-in: ${s.slug} (config migration required)`
+  }
   return `Error: ${s.message}`
 }
 

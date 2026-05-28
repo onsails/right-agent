@@ -517,7 +517,11 @@ export interface ProviderView {
   env_var: string
   generic: ProviderGenericBody | null
   updated_at: string | null
-  status: { kind: 'healthy' } | { kind: 'missing' } | { kind: 'gateway_error'; message: string }
+  status:
+    | { kind: 'healthy' }
+    | { kind: 'missing' }
+    | { kind: 'gateway_error'; message: string }
+    | { kind: 'unknown_builtin'; slug: string }
 }
 
 export interface ProviderProfileView {

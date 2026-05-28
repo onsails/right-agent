@@ -18,6 +18,15 @@ backups, or logs on the host.
 The feature is sandbox-only. `sandbox.mode = none` agents cannot
 receive provider env vars; the bot rejects `/providers` for them.
 
+Generic providers additionally require `network_policy: permissive`.
+Restrictive mode renders only `network_policies.anthropic.endpoints`
+(the Anthropic/Claude allowlist) and has no outbound section to extend
+with `- domain: <upstream_host>` stanzas for placeholder substitution.
+`handle_provider_create` and `handle_provider_config_update` reject
+generic operations with `network_policy_forbids_generic` when the agent
+is in restrictive mode. Built-in providers are unaffected — they do not
+mutate `policy.yaml`.
+
 ## Placeholder substitution
 
 At sandbox boot, the OpenShell supervisor calls
@@ -87,6 +96,14 @@ Right's `policy.yaml` stays unchanged.
 On create or upstream-host change:
 
 1. Load current `policy.yaml`.
+
+The new stanza is inserted at the sentinel anchor
+`# right-providers: insert-above` emitted inside
+`network_policies.outbound.endpoints` by `generate_policy(Permissive)`.
+This anchor pins generic provider stanzas to the outbound (permissive)
+section; without it, a naive "find first `endpoints:`" heuristic would
+land in whichever sub-section appears first under `network_policies:`.
+
 2. Look for an existing `endpoints[]` entry matching `upstream_host`.
    - Absent → append a new stanza: `domain: <host>`, `protocol: rest`,
      `access: full`, optional `path: <prefix>`. Tag with a YAML comment
