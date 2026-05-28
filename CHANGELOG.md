@@ -1,5 +1,5 @@
 # Changelog
-## [0.2.16] - 2026-05-28
+## [3.0.0] - 2026-05-28
 
 - Operators can now manage gateway credentials via `/providers` in the Telegram Mini App — create, rotate, update, and remove providers using 8 built-in profiles or a generic entry. Credentials are injected as sandbox env vars and never written to agent config. Destroying an agent cascade-deletes its providers. `right up` now checks OpenShell ≥ 0.0.50 (CLI and gateway) at startup and refuses to start against older versions.
 - The per-turn skill learning pipeline is rewritten: a Haiku prefilter screens each turn for learning potential, a probe-writer fires on positive signals, and a periodic curator synthesizes skills from accumulated episodes. A multi-signal gate (cost spikes, skill-change count, time elapsed), daily budget cap, and circuit breaker (pauses on repeated failure, resets on success) keep the pipeline from running away. Skill lifecycle state is persisted in the database and visible in the dashboard.
