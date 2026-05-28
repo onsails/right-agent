@@ -16,6 +16,7 @@
     nodejs
     pnpm
     git-lfs
+    curl             # libcurl required to link release-plz (installed in enterShell)
   ] ++ lib.optionals pkgs.stdenv.isLinux [
     pkgs.bubblewrap
   ];
@@ -41,6 +42,16 @@
       fi
     else
       export SCCACHE_BASEDIRS="$current_root"
+    fi
+
+    # release-plz is marked broken in current nixpkgs on Darwin (libcurl
+    # link failure). Install it once into a devenv-local cargo root so it
+    # is on PATH for `release-plz set-version`, changelog/version work.
+    release_plz_root="$current_root/.devenv/cargo-tools"
+    export PATH="$release_plz_root/bin:$PATH"
+    if ! command -v release-plz >/dev/null 2>&1; then
+      echo "Installing release-plz into $release_plz_root (one-time)..."
+      cargo install --locked --root "$release_plz_root" release-plz
     fi
 
     case "$-" in
