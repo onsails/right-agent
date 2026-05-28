@@ -40,7 +40,7 @@ axum = { workspace = true }
 dashmap = { workspace = true }
 tokio-util = { workspace = true }
 anyhow = { workspace = true }
-http = "1.0"
+http = "1.4"
 subtle = { workspace = true }
 inquire = { workspace = true }
 chrono = { workspace = true }
