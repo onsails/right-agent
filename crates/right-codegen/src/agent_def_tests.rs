@@ -228,10 +228,10 @@ fn operating_instructions_constant_is_non_empty() {
 fn operating_instructions_document_inbound_reply_metadata() {
     let ops = crate::OPERATING_INSTRUCTIONS;
     for needle in [
-        "reply_to_id: <telegram message id being replied to, optional>",
-        "quoted_text: <selected Telegram partial reply quote text, optional>",
-        "reply_to:",
-        "author: <full author block for replied-to non-bot message>",
+        "`reply_to_id` / `reply_to`",
+        "`quoted_text`",
+        "user-selected partial-quote substring",
+        "full block of replied-to message: author, text, attachments",
     ] {
         assert!(
             ops.contains(needle),
@@ -245,8 +245,8 @@ fn operating_instructions_keep_soul_agent_authored_and_delegate_remember_routing
     let ops = crate::OPERATING_INSTRUCTIONS;
     for needle in [
         "`SOUL.md`",
-        "agent-authored durable voice",
-        "Do not invent platform-default content for this file",
+        "do not invent platform-default content",
+        "only bootstrap or explicit user intent populates it",
         "Use the `/right-memory` skill to classify the correct persistence target",
         "smallest accurate edit",
     ] {
@@ -499,8 +499,8 @@ fn operating_instructions_teach_sparse_progress_updates() {
     for needle in [
         "mcp__right__send_progress",
         "30 seconds",
-        "complex, long-running",
-        "parallel or sequential subagents",
+        "slow work or subagent dispatch",
+        "Dispatch independent subagents in one message",
     ] {
         assert!(
             ops.contains(needle),
@@ -515,7 +515,7 @@ fn operating_instructions_teach_agent_tool_delegation() {
 
     for needle in [
         "`Agent` tool",
-        "intermediate results",
+        "intermediate output",
         "main session is accountable",
         "synthesize for the user",
     ] {
