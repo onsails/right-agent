@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import StatusPill from '../components/StatusPill.vue'
+import { computed } from 'vue'
+import AsyncState from '../components/AsyncState.vue'
+import { identityLabel, identityTone } from '../components/identityLabels'
 import type { IdentityFileSummary, IdentityResponse } from '../types'
 
-defineProps<{
+const props = defineProps<{
   identity: IdentityResponse | null
   selectedFile: IdentityFileSummary | null
   loading: boolean
@@ -11,7 +13,11 @@ defineProps<{
 
 const emit = defineEmits<{
   selectFile: [name: string]
+  refresh: []
 }>()
+
+const files = computed(() => props.identity?.files ?? [])
+const unreachable = computed(() => files.value.some((f) => f.source === 'sandbox_unreachable'))
 </script>
 
 <template>
@@ -22,27 +28,29 @@ const emit = defineEmits<{
           <p class="eyebrow">Identity</p>
           <h2>{{ identity?.agent ?? 'Agent' }}</h2>
         </div>
-        <StatusPill :status="identity?.source ?? 'unavailable'" />
+        <button v-if="unreachable" type="button" class="tool-button" @click="emit('refresh')">
+          Retry
+        </button>
       </header>
       <p v-if="identity?.warning" class="notice inline">{{ identity.warning }}</p>
-      <div class="segmented">
+      <div class="row-list">
         <button
-          v-for="file in identity?.files ?? []"
+          v-for="file in files"
           :key="file.name"
           type="button"
-          class="segment-button"
-          :class="{ active: selectedFile?.name === file.name }"
+          class="data-row"
+          :class="{ selected: selectedFile?.name === file.name }"
           @click="emit('selectFile', file.name)"
         >
-          {{ file.name }}
+          <span class="row-main"><strong>{{ file.name }}</strong></span>
+          <span class="row-side">
+            <span class="status-pill" :class="identityTone(file.source)">
+              {{ identityLabel(file.source) }}
+            </span>
+          </span>
         </button>
+        <p v-if="files.length === 0 && !loading" class="muted-line">No identity files</p>
       </div>
-      <dl class="meta-grid compact">
-        <div v-for="file in identity?.files ?? []" :key="file.name">
-          <dt>{{ file.name }}</dt>
-          <dd><StatusPill :status="file.source" :label="file.exists ? file.source : 'missing'" /></dd>
-        </div>
-      </dl>
     </section>
 
     <aside class="panel detail-panel">
@@ -51,18 +59,21 @@ const emit = defineEmits<{
           <p class="eyebrow">File</p>
           <h2>{{ selectedFile?.name ?? 'None selected' }}</h2>
         </div>
-        <StatusPill v-if="selectedFile" :status="selectedFile.source" />
+        <span
+          v-if="selectedFile"
+          class="status-pill"
+          :class="identityTone(selectedFile.source)"
+        >{{ identityLabel(selectedFile.source) }}</span>
       </header>
-      <p v-if="loading" class="muted-line">Loading</p>
-      <p v-else-if="error" class="notice inline">{{ error }}</p>
-      <p v-else-if="!selectedFile" class="muted-line">No file selected</p>
-      <template v-if="selectedFile">
-        <p class="muted-line">{{ selectedFile.path }}</p>
-        <pre v-if="selectedFile.exists">{{ selectedFile.content_preview }}<template v-if="selectedFile.truncated">
+      <AsyncState :loading="loading" :error="error" :empty="!selectedFile" empty-text="No file selected">
+        <template v-if="selectedFile">
+          <p class="muted-line">{{ selectedFile.path }}</p>
+          <pre v-if="selectedFile.exists && selectedFile.content_preview !== null">{{ selectedFile.content_preview }}<template v-if="selectedFile.truncated">
 ... truncated
 </template></pre>
-        <p v-else class="muted-line">Missing</p>
-      </template>
+          <p v-else class="muted-line">{{ identityLabel(selectedFile.source) }}</p>
+        </template>
+      </AsyncState>
     </aside>
   </section>
 </template>

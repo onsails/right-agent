@@ -222,6 +222,7 @@ async function refreshSkills(): Promise<void> {
 }
 
 async function refreshIdentity(): Promise<void> {
+  identityError.value = null
   await guarded(async () => {
     identityData.value = await identityFiles()
     if (selectedIdentityFile.value === null) {
@@ -403,6 +404,7 @@ async function selectIdentityFile(name: string): Promise<void> {
       :loading="loadingIdentity"
       :error="identityError"
       @select-file="selectIdentityFile"
+      @refresh="refreshIdentity"
     />
     <McpView v-else-if="activeTab === 'mcp'" />
     <ProvidersView v-else-if="activeTab === 'providers'" />
@@ -527,6 +529,11 @@ h3 {
 .status-pill.bad {
   color: #a42323;
   background: #ffe1de;
+}
+
+.status-pill.muted {
+  color: var(--tg-theme-hint-color, #546675);
+  background: var(--tg-theme-secondary-bg-color, #e8edf1);
 }
 
 .notice {
