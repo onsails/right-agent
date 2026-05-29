@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import CostLearningRiver from '../components/charts/CostLearningRiver.vue'
 import SignalTimeline from '../components/charts/SignalTimeline.vue'
+import AsyncState from '../components/AsyncState.vue'
 import MetricCard from '../components/MetricCard.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { money, shortDate } from '../format'
@@ -10,6 +11,8 @@ import type { DashboardOverviewResponse, DashboardSignal, LearningMarker, Overvi
 const props = defineProps<{
   overview: DashboardOverviewResponse | null
   activity: OverviewResponse | null
+  loading: boolean
+  error: string | null
 }>()
 
 const selectedId = ref<string | null>(null)
@@ -40,43 +43,45 @@ function selectMarker(marker: LearningMarker): void {
 </script>
 
 <template>
-  <CostLearningRiver :river="overview?.cost_learning_river ?? null" @select-marker="selectMarker" />
+  <AsyncState :loading="loading" :error="error" :empty="overview === null && !loading" empty-text="No overview data">
+    <CostLearningRiver :river="overview?.cost_learning_river ?? null" @select-marker="selectMarker" />
 
-  <template v-if="selectedMarker">
-    <div class="marker-detail-header">
-      <span class="marker-detail-label">{{ selectedMarker.label }}</span>
-      <StatusPill :status="selectedMarker.severity" />
-    </div>
-    <dl class="meta-grid compact marker-detail">
-      <div><dt>When</dt><dd>{{ shortDate(selectedMarker.occurred_at) }}</dd></div>
-      <div><dt>Source</dt><dd>{{ selectedMarker.source ?? 'none' }}</dd></div>
-      <div><dt>Skill</dt><dd>{{ selectedMarker.skill_name ?? 'none' }}</dd></div>
-      <div><dt>Cost</dt><dd>{{ markerCostLabel }}</dd></div>
-      <div><dt>Kind</dt><dd>{{ selectedMarker.kind }}</dd></div>
-    </dl>
-  </template>
+    <template v-if="selectedMarker">
+      <div class="marker-detail-header">
+        <span class="marker-detail-label">{{ selectedMarker.label }}</span>
+        <StatusPill :status="selectedMarker.severity" />
+      </div>
+      <dl class="meta-grid compact marker-detail">
+        <div><dt>When</dt><dd>{{ shortDate(selectedMarker.occurred_at) }}</dd></div>
+        <div><dt>Source</dt><dd>{{ selectedMarker.source ?? 'none' }}</dd></div>
+        <div><dt>Skill</dt><dd>{{ selectedMarker.skill_name ?? 'none' }}</dd></div>
+        <div><dt>Cost</dt><dd>{{ markerCostLabel }}</dd></div>
+        <div><dt>Kind</dt><dd>{{ selectedMarker.kind }}</dd></div>
+      </dl>
+    </template>
 
-  <section class="metric-grid">
-    <MetricCard label="Active" :value="overview?.active_runs ?? 0" tone="active" />
-    <MetricCard label="Failures" :value="overview?.recent_failures ?? 0" :tone="(overview?.recent_failures ?? 0) > 0 ? 'bad' : 'ok'" />
-    <MetricCard label="Today" :value="money(overview?.today_cost_usd)" />
-    <MetricCard label="Candidates" :value="overview?.learning_candidates_24h ?? 0" />
-    <MetricCard label="Jobs" :value="activity?.summary.cron_count ?? 0" />
-    <MetricCard label="Running cron" :value="activity?.summary.active_cron_count ?? 0" tone="active" />
-  </section>
+    <section class="metric-grid">
+      <MetricCard label="Active" :value="overview?.active_runs ?? 0" tone="active" />
+      <MetricCard label="Failures" :value="overview?.recent_failures ?? 0" :tone="(overview?.recent_failures ?? 0) > 0 ? 'bad' : 'ok'" />
+      <MetricCard label="Today" :value="money(overview?.today_cost_usd)" />
+      <MetricCard label="Candidates" :value="overview?.learning_candidates_24h ?? 0" />
+      <MetricCard label="Jobs" :value="activity?.summary.cron_count ?? 0" />
+      <MetricCard label="Running cron" :value="activity?.summary.active_cron_count ?? 0" tone="active" />
+    </section>
 
-  <section v-if="overview?.warnings.length" class="notice">
-    <strong>Partial data</strong>
-    <span v-for="warning in overview.warnings" :key="`${warning.source}:${warning.kind}:${warning.message}`">
-      {{ warning.message }}
-    </span>
-  </section>
+    <section v-if="overview?.warnings.length" class="notice">
+      <strong>Partial data</strong>
+      <span v-for="warning in overview.warnings" :key="`${warning.source}:${warning.kind}:${warning.message}`">
+        {{ warning.message }}
+      </span>
+    </section>
 
-  <SignalTimeline
-    :signals="overview?.signals ?? []"
-    :selected-id="selectedId"
-    @select="selectSignal"
-  />
+    <SignalTimeline
+      :signals="overview?.signals ?? []"
+      :selected-id="selectedId"
+      @select="selectSignal"
+    />
+  </AsyncState>
 </template>
 
 <style scoped>

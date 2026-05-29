@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Spinner from '../components/Spinner.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { bytes, shortDate } from '../format'
 import type { DoctorCheckResponse, DoctorResponse, SandboxStatsResponse } from '../types'
@@ -28,7 +29,8 @@ function checkRows(doctor: DoctorResponse | null): DoctorCheckResponse[] {
       <header class="panel-head">
         <div>
           <p class="eyebrow">Doctor</p>
-          <h2>{{ doctor ? `${doctor.pass_count}/${doctor.pass_count + doctor.warn_count + doctor.fail_count}` : 'not loaded' }}</h2>
+          <h2 v-if="loadingDoctor && !doctor"><Spinner /></h2>
+          <h2 v-else>{{ doctor ? `${doctor.pass_count}/${doctor.pass_count + doctor.warn_count + doctor.fail_count}` : 'not loaded' }}</h2>
         </div>
         <button type="button" class="tool-button" @click="emit('refreshDoctor')">
           {{ loadingDoctor ? 'Running' : 'Refresh' }}
@@ -68,7 +70,8 @@ function checkRows(doctor: DoctorResponse | null): DoctorCheckResponse[] {
       <header class="panel-head">
         <div>
           <p class="eyebrow">Sandbox</p>
-          <h2>{{ sandbox?.source ?? 'not loaded' }}</h2>
+          <h2 v-if="loadingSandbox && !sandbox"><Spinner /></h2>
+          <h2 v-else>{{ sandbox?.source ?? 'not loaded' }}</h2>
         </div>
         <button type="button" class="tool-button" @click="emit('refreshSandbox')">
           {{ loadingSandbox ? 'Reading' : 'Refresh' }}
