@@ -534,6 +534,19 @@ setting `ParseMode::Html`. Shared send helpers should preserve effective
 topic thread ids. Do not send raw CLI-style prefixes such as `Warning:`
 or `Failed:` when a clear user-facing sentence is available.
 
+## Dashboard frontend primitives
+
+`right-dashboard` Vue views MUST render loading/empty/error through
+`components/AsyncState.vue` (backed by the pure `components/asyncState.ts`
+resolver, priority error > loading > empty > content) and MUST render
+collapsible grouped lists through `components/CollapsibleSection.vue`. Raw
+placeholder text (`'not loaded'`, `'unavailable'`, ad-hoc `v-if="loading"`
+Loading lines) in a view is a review-blocking defect — it reintroduces the
+loading-flash these primitives exist to prevent. Identity per-file state
+labels go through `components/identityLabels.ts`, never raw enum codes.
+Component tests use Vue SSR (`@vue/server-renderer` `renderToString`); pure
+decision logic is extracted to a `*.ts` helper and unit-tested directly.
+
 ## OpenShell Integration Conventions
 
 - **Use gRPC for everything except file transfer and `policy set --wait`**:
