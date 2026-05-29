@@ -2,11 +2,14 @@
 import { computed, ref, watchEffect } from 'vue'
 import UsageBreakdown from '../components/charts/UsageBreakdown.vue'
 import UsageSpendChart from '../components/charts/UsageSpendChart.vue'
+import AsyncState from '../components/AsyncState.vue'
 import { money } from '../format'
 import type { UsageOverviewResponse, UsageWindow } from '../types'
 
 const props = defineProps<{
   usage: UsageOverviewResponse | null
+  loading: boolean
+  error: string | null
 }>()
 
 const selectedDate = ref<string | null>(null)
@@ -33,40 +36,42 @@ function windowRows(window: UsageWindow | null | undefined) {
 </script>
 
 <template>
-  <section v-if="usage?.warnings.length" class="notice">
-    <strong>Partial data</strong>
-    <span v-for="warning in usage.warnings" :key="`${warning.source}:${warning.kind}:${warning.message}`">
-      {{ warning.message }}
-    </span>
-  </section>
+  <AsyncState :loading="loading" :error="error" :empty="usage === null && !loading" empty-text="No usage data">
+    <section v-if="usage?.warnings.length" class="notice">
+      <strong>Partial data</strong>
+      <span v-for="warning in usage.warnings" :key="`${warning.source}:${warning.kind}:${warning.message}`">
+        {{ warning.message }}
+      </span>
+    </section>
 
-  <section class="two-column wide-main">
-    <UsageSpendChart
-      :points="usage?.daily_series ?? []"
-      :selected-date="selectedDate"
-      @select-date="selectedDate = $event"
-    />
-    <UsageBreakdown :point="selectedPoint" />
-  </section>
+    <section class="two-column wide-main">
+      <UsageSpendChart
+        :points="usage?.daily_series ?? []"
+        :selected-date="selectedDate"
+        @select-date="selectedDate = $event"
+      />
+      <UsageBreakdown :point="selectedPoint" />
+    </section>
 
-  <section class="list-stack">
-    <article v-for="window in usage?.windows ?? []" :key="window.key" class="panel">
-      <header class="panel-head">
-        <div>
-          <p class="eyebrow">{{ window.key }}</p>
-          <h2>{{ window.label }}</h2>
+    <section class="list-stack">
+      <article v-for="window in usage?.windows ?? []" :key="window.key" class="panel">
+        <header class="panel-head">
+          <div>
+            <p class="eyebrow">{{ window.key }}</p>
+            <h2>{{ window.label }}</h2>
+          </div>
+          <strong>{{ money(window.total_cost_usd) }}</strong>
+        </header>
+
+        <div class="model-grid">
+          <div v-for="source in windowRows(window)" :key="source.source" class="model-row">
+            <span>{{ source.source }}</span>
+            <strong>{{ money(source.cost_usd) }}</strong>
+          </div>
         </div>
-        <strong>{{ money(window.total_cost_usd) }}</strong>
-      </header>
+      </article>
 
-      <div class="model-grid">
-        <div v-for="source in windowRows(window)" :key="source.source" class="model-row">
-          <span>{{ source.source }}</span>
-          <strong>{{ money(source.cost_usd) }}</strong>
-        </div>
-      </div>
-    </article>
-
-    <article v-if="!usage" class="empty-panel">No usage snapshot</article>
-  </section>
+      <article v-if="(usage?.windows ?? []).length === 0" class="empty-panel">No usage data for period</article>
+    </section>
+  </AsyncState>
 </template>

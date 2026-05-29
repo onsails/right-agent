@@ -93,6 +93,24 @@ const tabs = computed(() => {
   return dashboardTabItems(bootstrapData.value?.features)
 })
 
+// `'stale'` is set only when at least one data source has already loaded
+// (see applyErrorState: `dashboardData !== null || activityData !== null`), so a
+// source whose own data is still null with `'stale'` falls through to the AsyncState
+// empty/spinner path — the `data === null` guard on the error branch never masks a
+// real failure for a not-yet-loaded source.
+const overviewLoading = computed(() => dashboardData.value === null && connectionState.value === 'loading')
+const overviewError = computed(() =>
+  dashboardData.value === null && (connectionState.value === 'offline' || connectionState.value === 'locked')
+    ? 'Dashboard unavailable'
+    : null,
+)
+const usageLoading = computed(() => usageData.value === null && connectionState.value === 'loading')
+const usageError = computed(() =>
+  usageData.value === null && (connectionState.value === 'offline' || connectionState.value === 'locked')
+    ? 'Usage unavailable'
+    : null,
+)
+
 onMounted(() => {
   const webApp = window.Telegram?.WebApp
   displayMode.value = initializeTelegramWebApp(webApp, preferredDisplayMode.value)
@@ -373,7 +391,13 @@ async function selectIdentityFile(name: string): Promise<void> {
     @select="setActiveTab"
     @toggle-display-mode="toggleDisplayMode"
   >
-    <OverviewView v-if="activeTab === 'overview'" :overview="dashboardData" :activity="activityData" />
+    <OverviewView
+      v-if="activeTab === 'overview'"
+      :overview="dashboardData"
+      :activity="activityData"
+      :loading="overviewLoading"
+      :error="overviewError"
+    />
     <ActivityView
       v-else-if="activeTab === 'activity'"
       :overview="activityData"
@@ -396,7 +420,12 @@ async function selectIdentityFile(name: string): Promise<void> {
       @select-skill="selectSkill"
       @skill-pinned="applySkillPinned"
     />
-    <UsageView v-else-if="activeTab === 'usage'" :usage="usageData" />
+    <UsageView
+      v-else-if="activeTab === 'usage'"
+      :usage="usageData"
+      :loading="usageLoading"
+      :error="usageError"
+    />
     <IdentityView
       v-else-if="activeTab === 'identity'"
       :identity="identityData"

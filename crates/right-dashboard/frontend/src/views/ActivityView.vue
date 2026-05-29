@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AsyncState from '../components/AsyncState.vue'
 import MetricCard from '../components/MetricCard.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { deliveryLabel, deliveryTone, money, notifyText, shortDate, shortId, statusTone } from '../format'
@@ -85,62 +86,63 @@ function cronStatus(cron: CronCard): string {
             </button>
 
             <section v-if="selectedRunId === run.id" class="run-inline-detail">
-              <p v-if="loadingDetail" class="muted-line">Loading</p>
-              <p v-else-if="detailError" class="notice inline">{{ detailError }}</p>
-              <p v-else-if="!selectedRun || selectedRun.run.id !== run.id" class="muted-line">No run detail</p>
-
-              <template v-else>
+              <AsyncState
+                :loading="loadingDetail"
+                :error="detailError"
+                :empty="!selectedRun || selectedRun.run.id !== run.id"
+                empty-text="No run detail"
+              >
                 <dl class="meta-grid compact">
                   <div>
                     <dt>Kind</dt>
-                    <dd>{{ selectedRun.run.kind }}</dd>
+                    <dd>{{ selectedRun!.run.kind }}</dd>
                   </div>
                   <div>
                     <dt>Delivery</dt>
-                    <dd>{{ deliveryLabel(selectedRun.run) }}</dd>
+                    <dd>{{ deliveryLabel(selectedRun!.run) }}</dd>
                   </div>
                   <div>
                     <dt>Exit</dt>
-                    <dd>{{ selectedRun.run.exit_code ?? 'none' }}</dd>
+                    <dd>{{ selectedRun!.run.exit_code ?? 'none' }}</dd>
                   </div>
                   <div>
                     <dt>Cost</dt>
-                    <dd>{{ money(selectedRun.run.cost_usd) }}</dd>
+                    <dd>{{ money(selectedRun!.run.cost_usd) }}</dd>
                   </div>
                   <div>
                     <dt>Started</dt>
-                    <dd>{{ shortDate(selectedRun.run.started_at) }}</dd>
+                    <dd>{{ shortDate(selectedRun!.run.started_at) }}</dd>
                   </div>
                   <div>
                     <dt>Finished</dt>
-                    <dd>{{ shortDate(selectedRun.run.finished_at) }}</dd>
+                    <dd>{{ shortDate(selectedRun!.run.finished_at) }}</dd>
                   </div>
                 </dl>
 
                 <section class="text-block">
                   <h3>Run note</h3>
-                  <p>{{ selectedRun.run_note || 'No run note' }}</p>
+                  <p>{{ selectedRun!.run_note || 'No run note' }}</p>
                 </section>
-                <section v-if="notifyText(selectedRun.delivery)" class="text-block">
+                <section v-if="notifyText(selectedRun!.delivery)" class="text-block">
                   <h3>Delivery</h3>
-                  <pre>{{ notifyText(selectedRun.delivery) }}</pre>
+                  <pre>{{ notifyText(selectedRun!.delivery) }}</pre>
                 </section>
-                <section v-if="selectedRun.delivery_error" class="text-block">
+                <section v-if="selectedRun!.delivery_error" class="text-block">
                   <h3>Delivery error</h3>
-                  <p>{{ selectedRun.delivery_error }}</p>
+                  <p>{{ selectedRun!.delivery_error }}</p>
                 </section>
-                <section v-if="selectedRun.error_message" class="text-block">
+                <section v-if="selectedRun!.error_message" class="text-block">
                   <h3>Error</h3>
-                  <p>{{ selectedRun.error_message }}</p>
+                  <p>{{ selectedRun!.error_message }}</p>
                 </section>
                 <section class="text-block">
                   <h3>Log</h3>
-                  <p v-if="!selectedRun.log.available" class="muted-line">Log unavailable</p>
-                  <pre v-else>{{ selectedRun.log.lines.join('\n') }}<template v-if="selectedRun.log.truncated">
+                  <p v-if="!selectedRun!.log.available" class="muted-line">Log unavailable</p>
+                  <pre v-else>{{ selectedRun!.log.lines.join('\n') }}<template v-if="selectedRun!.log.truncated">
 ... truncated
 </template></pre>
                 </section>
-              </template>
+              </AsyncState>
             </section>
           </template>
           <p v-if="cron.recent_runs.length === 0" class="muted-line">No recent runs</p>
@@ -157,62 +159,65 @@ function cronStatus(cron: CronCard): string {
         <StatusPill v-if="selectedRun" :status="selectedRun.run.status" />
       </header>
 
-      <p v-if="loadingDetail" class="muted-line">Loading</p>
-      <p v-else-if="detailError" class="notice inline">{{ detailError }}</p>
-      <p v-else-if="!selectedRun" class="muted-line">No run selected</p>
-
-      <template v-if="selectedRun">
+      <!-- AsyncState renders its default slot only when :empty is false, i.e. only when
+           selectedRun is non-null, so the selectedRun! assertions in the slot below are safe. -->
+      <AsyncState
+        :loading="loadingDetail"
+        :error="detailError"
+        :empty="!selectedRun"
+        empty-text="No run selected"
+      >
         <dl class="meta-grid compact">
           <div>
             <dt>Kind</dt>
-            <dd>{{ selectedRun.run.kind }}</dd>
+            <dd>{{ selectedRun!.run.kind }}</dd>
           </div>
           <div>
             <dt>Delivery</dt>
-            <dd>{{ deliveryLabel(selectedRun.run) }}</dd>
+            <dd>{{ deliveryLabel(selectedRun!.run) }}</dd>
           </div>
           <div>
             <dt>Exit</dt>
-            <dd>{{ selectedRun.run.exit_code ?? 'none' }}</dd>
+            <dd>{{ selectedRun!.run.exit_code ?? 'none' }}</dd>
           </div>
           <div>
             <dt>Cost</dt>
-            <dd>{{ money(selectedRun.run.cost_usd) }}</dd>
+            <dd>{{ money(selectedRun!.run.cost_usd) }}</dd>
           </div>
           <div>
             <dt>Started</dt>
-            <dd>{{ shortDate(selectedRun.run.started_at) }}</dd>
+            <dd>{{ shortDate(selectedRun!.run.started_at) }}</dd>
           </div>
           <div>
             <dt>Finished</dt>
-            <dd>{{ shortDate(selectedRun.run.finished_at) }}</dd>
+            <dd>{{ shortDate(selectedRun!.run.finished_at) }}</dd>
           </div>
         </dl>
 
         <section class="text-block">
           <h3>Run note</h3>
-          <p>{{ selectedRun.run_note || 'No run note' }}</p>
+          <p>{{ selectedRun!.run_note || 'No run note' }}</p>
         </section>
-        <section v-if="notifyText(selectedRun.delivery)" class="text-block">
+        <section v-if="notifyText(selectedRun!.delivery)" class="text-block">
           <h3>Delivery</h3>
-          <pre>{{ notifyText(selectedRun.delivery) }}</pre>
+          <pre>{{ notifyText(selectedRun!.delivery) }}</pre>
         </section>
-        <section v-if="selectedRun.delivery_error" class="text-block">
+        <section v-if="selectedRun!.delivery_error" class="text-block">
           <h3>Delivery error</h3>
-          <p>{{ selectedRun.delivery_error }}</p>
+          <p>{{ selectedRun!.delivery_error }}</p>
         </section>
-        <section v-if="selectedRun.error_message" class="text-block">
+        <section v-if="selectedRun!.error_message" class="text-block">
           <h3>Error</h3>
-          <p>{{ selectedRun.error_message }}</p>
+          <p>{{ selectedRun!.error_message }}</p>
         </section>
         <section class="text-block">
           <h3>Log</h3>
-          <p v-if="!selectedRun.log.available" class="muted-line">Log unavailable</p>
-          <pre v-else>{{ selectedRun.log.lines.join('\n') }}<template v-if="selectedRun.log.truncated">
+          <p v-if="!selectedRun!.log.available" class="muted-line">Log unavailable</p>
+          <pre v-else>{{ selectedRun!.log.lines.join('\n') }}<template v-if="selectedRun!.log.truncated">
 ... truncated
 </template></pre>
         </section>
-      </template>
+      </AsyncState>
     </aside>
   </section>
 </template>
