@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { setSkillPinned } from '../api'
+import AsyncState from '../components/AsyncState.vue'
+import CollapsibleSection from '../components/CollapsibleSection.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { shortDate } from '../format'
 import type { SkillDetailResponse, SkillSummary, SkillsResponse } from '../types'
@@ -23,6 +25,10 @@ const emit = defineEmits<{
 
 const pinningSkillName = ref<string | null>(null)
 const pinError = ref<{ skillName: string, message: string } | null>(null)
+
+const groupedSkills = computed(() =>
+  Object.fromEntries(skillGroups.map((g) => [g, skillsFor(props.skills, g)])) as Record<typeof skillGroups[number], ReturnType<typeof skillsFor>>
+)
 
 const selectedCanPin = computed(() => props.selectedSkill !== null && canPinSkill(props.selectedSkill.skill))
 const pinRequestInFlight = computed(() => pinningSkillName.value !== null)
@@ -85,17 +91,16 @@ async function togglePinned(): Promise<void> {
   <section class="two-column wide-main">
     <section class="list-stack">
       <p v-if="skills?.warning" class="notice inline">{{ skills.warning }}</p>
-      <article v-for="group in skillGroups" :key="group" class="panel">
-        <header class="panel-head">
-          <div>
-            <p class="eyebrow">Skills</p>
-            <h2>{{ group }}</h2>
-          </div>
-          <StatusPill :status="skills?.source ?? 'unavailable'" />
-        </header>
+      <CollapsibleSection
+        v-for="group in skillGroups"
+        :key="group"
+        :title="group"
+        :count="groupedSkills[group].length"
+        :default-open="groupedSkills[group].some((s) => s.name === selectedSkillName)"
+      >
         <div class="row-list">
           <button
-            v-for="skill in skillsFor(skills, group)"
+            v-for="skill in groupedSkills[group]"
             :key="skill.name"
             type="button"
             class="data-row"
@@ -111,9 +116,9 @@ async function togglePinned(): Promise<void> {
               <small>{{ lifecycleLabel(skill.state) }}</small>
             </span>
           </button>
-          <p v-if="skillsFor(skills, group).length === 0" class="muted-line">None</p>
+          <p v-if="groupedSkills[group].length === 0" class="muted-line">None</p>
         </div>
-      </article>
+      </CollapsibleSection>
     </section>
 
     <aside class="panel detail-panel">
@@ -127,9 +132,12 @@ async function togglePinned(): Promise<void> {
           <StatusPill :status="selectedSkill.skill.pinned ? 'active' : 'muted'" :label="pinLabel(selectedSkill.skill)" />
         </div>
       </header>
-      <p v-if="loading" class="muted-line">Loading</p>
-      <p v-else-if="error || selectedPinError" class="notice inline">{{ error ?? selectedPinError }}</p>
-      <p v-else-if="!selectedSkill" class="muted-line">No skill selected</p>
+      <AsyncState
+        :loading="loading"
+        :error="error ?? selectedPinError"
+        :empty="!selectedSkill"
+        empty-text="No skill selected"
+      >
       <template v-if="selectedSkill">
         <p class="muted-line">{{ selectedSkill.skill.path }}</p>
         <div v-if="selectedCanPin" class="detail-toolbar">
@@ -180,6 +188,7 @@ async function togglePinned(): Promise<void> {
 ... truncated
 </template></pre>
       </template>
+      </AsyncState>
     </aside>
   </section>
 </template>
