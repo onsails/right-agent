@@ -537,6 +537,29 @@ impl ProxyBackend {
         *self.status.read().await
     }
 
+    /// Lightweight liveness probe against the live session.
+    ///
+    /// Lists tools on the existing rmcp session; on success refreshes
+    /// `cached_tools`. Returns the outcome and does NOT mutate `status` — the
+    /// health reconciler's debounce owns the flip decision.
+    pub async fn probe_live(&self) -> ProbeOutcome {
+        let client_guard = self.client.read().await;
+        let Some(client) = client_guard.as_ref() else {
+            return ProbeOutcome::Dead("no active session".into());
+        };
+        match client.peer().list_all_tools().await {
+            Ok(tools) => {
+                let filtered: Vec<Tool> = tools
+                    .into_iter()
+                    .filter(|t| !t.name.contains("__"))
+                    .collect();
+                *self.cached_tools.write().await = filtered;
+                ProbeOutcome::Alive
+            }
+            Err(e) => classify_probe_error(&format!("{e:#}")),
+        }
+    }
+
     /// Set the connection status (e.g., after an auth failure or reconnect).
     pub async fn set_status(&self, status: BackendStatus) {
         *self.status.write().await = status;
@@ -900,6 +923,30 @@ mod tests {
         assert_eq!(headers["authorization"], "Bearer env-secret");
         assert_eq!(headers["connection-id"], "conn_123");
         assert_eq!(headers["provider-config-key"], "github");
+    }
+
+    #[tokio::test]
+    async fn probe_live_no_session_is_dead_and_keeps_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let token = Arc::new(RwLock::new(None));
+        let backend = ProxyBackend::new(
+            "composio".into(),
+            tmp.path().to_path_buf(),
+            "http://localhost:9999/mcp".into(),
+            token,
+            AuthMethod::default(),
+        );
+        // Pretend it was Connected but the session is actually absent.
+        backend.set_status(BackendStatus::Connected).await;
+
+        let outcome = backend.probe_live().await;
+
+        assert!(
+            matches!(outcome, ProbeOutcome::Dead(_)),
+            "no session must be Dead"
+        );
+        // probe_live must NOT mutate status — the reconciler owns that decision.
+        assert_eq!(backend.status().await, BackendStatus::Connected);
     }
 
     #[tokio::test]
