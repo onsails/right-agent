@@ -1236,9 +1236,10 @@ async fn main() -> miette::Result<()> {
                     _ => None,
                 };
 
+                let proxies_arc = std::sync::Arc::new(tokio::sync::RwLock::new(proxies));
                 let registry = aggregator::BackendRegistry {
                     right,
-                    proxies: std::sync::Arc::new(tokio::sync::RwLock::new(proxies)),
+                    proxies: proxies_arc.clone(),
                     agent_dir: agent_dir.clone(),
                     hindsight,
                 };
@@ -1250,6 +1251,14 @@ async fn main() -> miette::Result<()> {
                 tokio::spawn(right_mcp::refresh::run_refresh_scheduler(
                     agent_dir.clone(),
                     refresh_rx,
+                ));
+
+                // Spawn per-agent MCP health reconciler — keeps BackendStatus
+                // honest on the Connected↔Unreachable axis so the dashboard and
+                // the agent see accurate status without waiting for a tool call.
+                tokio::spawn(right_mcp::health::run_health_reconciler(
+                    proxies_arc,
+                    http_client.clone(),
                 ));
 
                 // Build oauth_map for reconnect loop.
