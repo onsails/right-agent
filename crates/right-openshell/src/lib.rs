@@ -2,6 +2,7 @@
 
 #![warn(unreachable_pub)]
 
+pub mod diagnosis;
 pub mod openshell;
 pub mod providers;
 #[allow(clippy::large_enum_variant)]
