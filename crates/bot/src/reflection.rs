@@ -237,6 +237,12 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     let base_prompt =
         right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
 
+    crate::cc::invocation::guard_no_sandboxed_host_exec(
+        ctx.resolved_sandbox.as_deref(),
+        ctx.ssh_config_path.as_deref(),
+    )
+    .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
+
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         let sandbox_name = ctx.resolved_sandbox.as_deref().ok_or_else(|| {
             ReflectionError::Spawn("ssh_config_path set but resolved_sandbox is None".into())

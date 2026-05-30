@@ -2938,6 +2938,12 @@ async fn invoke_cc(
         entry.lock_owned().await
     };
 
+    crate::cc::invocation::guard_no_sandboxed_host_exec(
+        ctx.resolved_sandbox.as_deref(),
+        ctx.ssh_config_path.as_deref(),
+    )
+    .map_err(|e| format!("{e:#}"))?;
+
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         // OpenShell sandbox: composite system prompt assembled IN the sandbox
         // from fresh files — single SSH command, no extra roundtrips.

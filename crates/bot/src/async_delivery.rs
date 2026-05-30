@@ -986,6 +986,9 @@ async fn deliver_through_session(
     // Delivery sessions skip memory injection — same rationale as cron jobs.
     let memory_mode: Option<crate::cc::prompt::MemoryMode> = None;
 
+    crate::cc::invocation::guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)
+        .map_err(|e| format!("{e:#}"))?;
+
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
         let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,

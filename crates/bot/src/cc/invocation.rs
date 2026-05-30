@@ -580,6 +580,33 @@ pub(crate) fn mcp_config_path(ssh_config_path: Option<&Path>, agent_dir: &Path) 
     }
 }
 
+/// Error returned when a sandboxed agent would otherwise run Claude Code on the
+/// host. Fail-closed: a sandboxed agent (`resolved_sandbox` Some) whose sandbox
+/// backend is unavailable (`ssh_config_path` None) must NOT fall back to host
+/// execution — that would run `--dangerously-skip-permissions` outside the
+/// sandbox (sandbox escape).
+#[derive(Debug, thiserror::Error)]
+#[error("refusing to run sandboxed agent '{sandbox}' on the host: sandbox backend is unavailable")]
+pub(crate) struct SandboxedHostExecRefused {
+    pub sandbox: String,
+}
+
+/// Fail-closed guard. Call BEFORE constructing any Claude command. Returns
+/// `Err` exactly when a sandboxed agent has no sandbox connection (would
+/// otherwise host-exec); `Ok(())` for non-sandboxed (host is legitimate) and
+/// for sandboxed-with-connection.
+pub(crate) fn guard_no_sandboxed_host_exec(
+    resolved_sandbox: Option<&str>,
+    ssh_config_path: Option<&std::path::Path>,
+) -> Result<(), SandboxedHostExecRefused> {
+    match (resolved_sandbox, ssh_config_path) {
+        (Some(sandbox), None) => Err(SandboxedHostExecRefused {
+            sandbox: sandbox.to_owned(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// Build a `tokio::process::Command` from `ClaudeInvocation` args, with auth
 /// token injected, either inside an OpenShell sandbox (via SSH) or locally.
 ///
@@ -595,7 +622,8 @@ pub(crate) async fn build_claude_command(
     agent_dir: &Path,
     ssh_config_path: Option<&Path>,
     resolved_sandbox: Option<&str>,
-) -> tokio::process::Command {
+) -> Result<tokio::process::Command, SandboxedHostExecRefused> {
+    guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)?;
     if let Some(ssh_config) = ssh_config_path {
         let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut script = String::new();
@@ -612,7 +640,7 @@ pub(crate) async fn build_claude_command(
         c.arg(&ssh_host);
         c.arg("--");
         c.arg(script);
-        c
+        Ok(c)
     } else {
         let mut c = tokio::process::Command::new(&args[0]);
         c.args(&args[1..]);
@@ -622,7 +650,7 @@ pub(crate) async fn build_claude_command(
             c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
         }
         c.current_dir(agent_dir);
-        c
+        Ok(c)
     }
 }
 
@@ -631,6 +659,39 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[test]
+    fn guard_refuses_sandboxed_agent_with_no_ssh_config() {
+        // The fail-closed case: sandboxed + backend down → MUST refuse (never host-exec).
+        assert!(guard_no_sandboxed_host_exec(Some("agent-x"), None).is_err());
+    }
+
+    #[test]
+    fn guard_allows_non_sandboxed_host_exec() {
+        assert!(guard_no_sandboxed_host_exec(None, None).is_ok());
+    }
+
+    #[test]
+    fn guard_allows_sandboxed_with_ssh_config() {
+        assert!(guard_no_sandboxed_host_exec(Some("agent-x"), Some(Path::new("/x/ssh"))).is_ok());
+    }
+
+    #[test]
+    fn guard_allows_non_sandboxed_even_with_stray_config() {
+        assert!(guard_no_sandboxed_host_exec(None, Some(Path::new("/x/ssh"))).is_ok());
+    }
+
+    #[tokio::test]
+    async fn build_claude_command_refuses_sandboxed_host_exec() {
+        let dir = std::env::temp_dir();
+        let args = vec!["claude".to_string(), "-p".to_string()];
+        // Sandboxed agent (resolved_sandbox Some) with no ssh config → must refuse.
+        assert!(
+            build_claude_command(&args, &dir, None, Some("agent"))
+                .await
+                .is_err()
+        );
+    }
 
     fn minimal() -> ClaudeInvocation {
         ClaudeInvocation {
@@ -784,7 +845,8 @@ mod tests {
             Some(Path::new("config")),
             Some("example"),
         )
-        .await;
+        .await
+        .expect("sandboxed-with-ssh should build a command");
         let std_cmd = cmd.as_std();
         let ssh_args: Vec<String> = std_cmd
             .get_args()

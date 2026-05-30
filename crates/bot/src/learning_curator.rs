@@ -378,13 +378,27 @@ pub(crate) async fn run_if_due(
     );
     let args = invocation.into_args();
 
-    let mut cmd = crate::cc::invocation::build_claude_command(
+    let mut cmd = match crate::cc::invocation::build_claude_command(
         &args,
         &ctx.agent_dir,
         ctx.ssh_config_path.as_deref(),
         ctx.resolved_sandbox.as_deref(),
     )
-    .await;
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "skipping curator: {e:#}");
+            active_invocation.cleanup().await;
+            state.last_run_at = Some(now.to_rfc3339());
+            state.last_run_status = Some("failed".to_owned());
+            state.consecutive_failures += 1;
+            if let Err(e) = save_state_db(&conn, &state).await {
+                tracing::warn!(agent = %ctx.agent_name, "curator save state failed: {e:#}");
+            }
+            return;
+        }
+    };
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());

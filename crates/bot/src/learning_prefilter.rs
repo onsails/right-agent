@@ -531,13 +531,22 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
         debug_flag: None,
     };
     let args = invocation.into_args();
-    let mut cmd = build_claude_command(
+    let mut cmd = match build_claude_command(
         &args,
         &ctx.agent_dir,
         ctx.ssh_config_path.as_deref(),
         ctx.resolved_sandbox.as_deref(),
     )
-    .await;
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "skipping prefilter: {e:#}");
+            return PrefilterDecision::Skip {
+                reason: "sandboxed host-exec refused".into(),
+            };
+        }
+    };
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());

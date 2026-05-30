@@ -329,7 +329,8 @@ async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, S
         health.ssh_config_path.as_deref(),
         health.resolved_sandbox.as_deref(),
     )
-    .await;
+    .await
+    .map_err(|e| format!("{e:#}"))?;
 
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
