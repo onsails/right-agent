@@ -11,6 +11,9 @@ pub mod refresh;
 pub mod ssrf;
 pub mod tool_error;
 
+#[cfg(test)]
+mod test_server;
+
 /// Name of the built-in MCP server that right-agent manages.
 /// Protected from dashboard removal - required for core functionality.
 pub const PROTECTED_MCP_SERVER: &str = "right";
