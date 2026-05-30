@@ -90,6 +90,25 @@ impl SandboxRuntimeHandle {
     }
 }
 
+/// Outcome of the pre-invocation sandbox gate.
+#[derive(Debug, PartialEq, Eq)]
+pub enum GateDecision {
+    Proceed,
+    Reply { diagnosis: Arc<GatewayDiagnosis> },
+}
+
+/// Decide whether a turn may invoke CC. **Fail-closed:** a sandboxed agent
+/// with an unavailable backend MUST NOT run (it would otherwise execute on the
+/// host with `--dangerously-skip-permissions`).
+pub fn sandbox_gate(is_sandboxed: bool, health: &SandboxHealth) -> GateDecision {
+    match (is_sandboxed, health) {
+        (false, _) | (true, SandboxHealth::Ready) => GateDecision::Proceed,
+        (true, SandboxHealth::Unavailable { diagnosis }) => GateDecision::Reply {
+            diagnosis: Arc::clone(diagnosis),
+        },
+    }
+}
+
 #[cfg(test)]
 #[path = "sandbox_runtime_tests.rs"]
 mod tests;

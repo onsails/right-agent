@@ -1,4 +1,4 @@
-use super::{SandboxHealth, SandboxRuntimeHandle};
+use super::{GateDecision, SandboxHealth, SandboxRuntimeHandle, sandbox_gate};
 use right_openshell::diagnosis::GatewayCause;
 use std::sync::Arc;
 
@@ -44,4 +44,31 @@ async fn report_suspected_failure_wakes_supervisor() {
     h.report_suspected_failure();
     // Non-blocking: a signal is queued.
     assert!(rx.try_recv().is_ok());
+}
+
+#[test]
+fn non_sandboxed_always_proceeds() {
+    assert_eq!(
+        sandbox_gate(false, &SandboxHealth::Ready),
+        GateDecision::Proceed
+    );
+    assert_eq!(sandbox_gate(false, &unavailable()), GateDecision::Proceed);
+}
+
+#[test]
+fn sandboxed_and_ready_proceeds() {
+    assert_eq!(
+        sandbox_gate(true, &SandboxHealth::Ready),
+        GateDecision::Proceed
+    );
+}
+
+#[test]
+fn sandboxed_and_unavailable_replies_never_proceeds() {
+    match sandbox_gate(true, &unavailable()) {
+        GateDecision::Reply { diagnosis } => assert_eq!(diagnosis.cause, GatewayCause::DockerDown),
+        GateDecision::Proceed => {
+            panic!("FAIL-CLOSED VIOLATION: sandboxed agent must not run on host")
+        }
+    }
 }
