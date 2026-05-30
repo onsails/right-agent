@@ -73,6 +73,26 @@ pub fn is_upstream_auth_error(msg: &str) -> bool {
     msg.contains("Auth required")
 }
 
+/// Outcome of a lightweight liveness probe against a backend's live session.
+#[derive(Debug)]
+pub enum ProbeOutcome {
+    /// Session responded; tools listed successfully.
+    Alive,
+    /// Upstream reported auth-required (`"Auth required"`).
+    AuthRequired,
+    /// Any other failure (transport, 5xx, timeout, no session). Carries detail.
+    Dead(String),
+}
+
+/// Classify a probe error string into an outcome. Pure — no I/O.
+pub fn classify_probe_error(msg: &str) -> ProbeOutcome {
+    if is_upstream_auth_error(msg) {
+        ProbeOutcome::AuthRequired
+    } else {
+        ProbeOutcome::Dead(msg.to_owned())
+    }
+}
+
 /// Status of a ProxyBackend connection to an upstream MCP server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendStatus {
@@ -577,6 +597,35 @@ mod tests {
             "Transport send error: Transport [foo] error: timeout"
         ));
         assert!(!is_upstream_auth_error("Mcp error: invalid_params"));
+    }
+
+    #[test]
+    fn classify_probe_error_maps_auth_required_to_authrequired() {
+        let msg = "Transport send error: ... error: Auth required";
+        assert!(matches!(
+            classify_probe_error(msg),
+            ProbeOutcome::AuthRequired
+        ));
+    }
+
+    #[test]
+    fn classify_probe_error_maps_other_to_dead() {
+        assert!(matches!(
+            classify_probe_error("connection refused"),
+            ProbeOutcome::Dead(_)
+        ));
+        assert!(matches!(
+            classify_probe_error("HTTP 502 Bad Gateway"),
+            ProbeOutcome::Dead(_)
+        ));
+    }
+
+    #[test]
+    fn probe_outcome_dead_preserves_detail() {
+        match classify_probe_error("HTTP 502 Bad Gateway") {
+            ProbeOutcome::Dead(d) => assert!(d.contains("502")),
+            other => panic!("expected Dead, got {other:?}"),
+        }
     }
 
     #[test]
