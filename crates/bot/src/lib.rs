@@ -12,6 +12,7 @@ pub(crate) mod learning_probe_writer;
 pub(crate) mod lifecycle;
 pub(crate) mod login;
 pub(crate) mod reflection;
+pub mod sandbox_runtime;
 mod stt;
 pub(crate) mod sync;
 pub mod telegram;
