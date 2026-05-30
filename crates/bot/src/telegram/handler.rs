@@ -98,6 +98,9 @@ pub struct AgentSettings {
     pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
     /// Process shutdown token used to cancel detached user-turn repair work.
     pub(crate) shutdown: tokio_util::sync::CancellationToken,
+    /// Shared sandbox-backend health. Read before every sandboxed turn by the
+    /// pre-invocation health gate (Task 9) to fail-closed when Unavailable.
+    pub sandbox_runtime: std::sync::Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
 }
 
 /// Convert an arbitrary error into `RequestError::Io` so it propagates through `ResponseResult`.

@@ -664,16 +664,31 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // --- OpenShell sandbox lifecycle (when sandbox mode is active) ---
     //
-    // Bring-up is relocated into `sandbox_supervisor::bring_up_sandbox`
-    // (Task 6). For now the shim preserves the prior hard-fail semantics: a
-    // backend-availability diagnosis is turned back into a crash. Tasks 7/8
-    // replace this with graceful degrade and move `run_sync_task` ownership
-    // into the supervisor. `initial_sync` + `reverse_sync_md` run inside
-    // `bring_up_sandbox`; the spawn of `run_sync_task` stays here, derived
-    // from the returned `SandboxExec`.
-    let (ssh_config_path, health_sandbox_exec, sync_handle) = if is_sandboxed {
+    // Bring-up runs once here via `sandbox_supervisor::bring_up_sandbox`. On a
+    // backend-availability diagnosis the bot starts DEGRADED (logged at ERROR)
+    // rather than crashing — the supervisor then auto-recovers. Hard config
+    // errors still propagate via `?` and crash startup (they can't self-heal).
+    //
+    // The supervisor (monitor + recovery) owns the long-lived sync task from
+    // here on; on the happy path it is seeded with the startup sync task.
+    //
+    // `sandbox_runtime` is always present (sandboxed or not). For non-sandboxed
+    // agents the gate treats health as irrelevant (always Proceed), so Ready is
+    // the correct initial value.
+    let sandbox_runtime: Arc<sandbox_runtime::SandboxRuntimeHandle>;
+    let (ssh_config_path, health_sandbox_exec, supervisor_handle) = if is_sandboxed {
         // SAFETY: resolved_sandbox is always Some when is_sandboxed is true.
         let resolved = resolved_sandbox.clone().unwrap();
+
+        // Stable, deterministic ssh-config path. Valid whether or not bring-up
+        // succeeds: bring-up regenerates the file at exactly this path (same
+        // formula), so threaded snapshots keep working across degrade/recovery.
+        // Nothing invokes CC while the backend is Unavailable (Task 9 health
+        // gate + the structural host-exec backstop), so holding the path while
+        // degraded is safe.
+        let ssh_config_dir = home.join("run").join("ssh");
+        let stable_ssh_config = ssh_config_dir.join(format!("{resolved}.ssh-config"));
+
         let bring_up_ctx = sandbox_supervisor::BringUpCtx {
             agent: &args.agent,
             home: &home,
@@ -681,32 +696,80 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             resolved_sandbox: &resolved,
             config: &config,
         };
-        let bring_up = match sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await? {
-            Ok(b) => b,
-            Err(diag) => {
-                // TEMPORARY (Task 8 turns this into graceful degrade). Preserve
-                // crash semantics for now.
-                return Err(miette::miette!(
-                    "sandbox backend unavailable: {}",
-                    diag.summary
-                ));
-            }
-        };
-        let sandbox_supervisor::SandboxBringUp {
-            sandbox: sbox,
-            ssh_config_path: config_path,
-        } = bring_up;
+        let (initial_health, sbox_opt, sync_seed) =
+            match sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await? {
+                Ok(sandbox_supervisor::SandboxBringUp {
+                    sandbox: sbox,
+                    ssh_config_path: generated_ssh_config,
+                }) => {
+                    // The path bring-up generated MUST equal the stable path
+                    // (same formula). We thread `stable_ssh_config` below so
+                    // degrade/recovery share one snapshot; assert they agree.
+                    debug_assert_eq!(
+                        generated_ssh_config, stable_ssh_config,
+                        "bring-up ssh-config path diverged from the stable path formula"
+                    );
+                    let sync_seed = tokio::spawn(sync::run_sync_task(
+                        agent_dir.clone(),
+                        sbox.clone(),
+                        shutdown.clone(),
+                    ));
+                    (
+                        sandbox_runtime::SandboxHealth::Ready,
+                        Some(sbox),
+                        Some(sync_seed),
+                    )
+                }
+                Err(diag) => {
+                    tracing::error!(
+                        agent = %args.agent,
+                        cause = ?diag.cause,
+                        fixes = ?diag.fixes,
+                        "sandbox backend unavailable — starting DEGRADED (auto-recovers): {}",
+                        diag.summary
+                    );
+                    (
+                        sandbox_runtime::SandboxHealth::Unavailable {
+                            diagnosis: std::sync::Arc::new(diag),
+                        },
+                        None,
+                        None,
+                    )
+                }
+            };
 
-        let health_sandbox_exec = Some(sbox.clone());
-        let sync_agent_dir = agent_dir.clone();
-        let sync_shutdown = shutdown.clone();
-        let sync_handle = Some(tokio::spawn(sync::run_sync_task(
-            sync_agent_dir,
-            sbox,
-            sync_shutdown,
-        )));
-        (Some(config_path), health_sandbox_exec, sync_handle)
+        let (handle, failure_rx) = sandbox_runtime::SandboxRuntimeHandle::new(initial_health);
+        if let Some(ref sbox) = sbox_opt {
+            // Populate handle.current_sandbox() on the Ready path. (new() seeds
+            // health from initial_health but leaves the sandbox slot empty.)
+            handle.set_ready(sbox.clone());
+        }
+        sandbox_runtime = handle;
+
+        // Spawn the supervisor (monitor + recovery), seeded with the startup
+        // sync task it now owns.
+        let deps = sandbox_supervisor::SupervisorDeps::new(
+            args.agent.clone(),
+            home.clone(),
+            agent_dir.clone(),
+            resolved.clone(),
+            config.clone(),
+            shutdown.clone(),
+        );
+        let supervisor_bot = telegram::bot::build_bot(token.clone());
+        let sup = sandbox_supervisor::spawn_supervisor(
+            std::sync::Arc::clone(&sandbox_runtime),
+            failure_rx,
+            supervisor_bot,
+            deps,
+            sync_seed,
+        );
+
+        (Some(stable_ssh_config), sbox_opt, Some(sup))
     } else {
+        let (handle, _failure_rx) =
+            sandbox_runtime::SandboxRuntimeHandle::new(sandbox_runtime::SandboxHealth::Ready);
+        sandbox_runtime = handle;
         (None, None, None)
     };
 
@@ -727,6 +790,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             agent_dir: agent_dir.clone(),
             resolved_sandbox: resolved_sandbox.clone(),
             sandbox_exec: dashboard_sandbox_exec,
+            sandbox_runtime: std::sync::Arc::clone(&sandbox_runtime),
             allowlist: allowlist.clone(),
             foreground: Arc::clone(&dashboard_foreground),
             internal_client: Arc::clone(&internal_client),
@@ -1017,6 +1081,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             upgrade_lock,
             stt,
             Arc::clone(&claude_health),
+            std::sync::Arc::clone(&sandbox_runtime),
             Arc::clone(&session_locks),
             Arc::clone(&bg_requests),
             Arc::clone(&dashboard_foreground),
@@ -1076,8 +1141,11 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         )
         .await;
     }
-    if let Some(handle) = sync_handle {
-        tracing::info!("waiting for sync to finish");
+    // Await the supervisor so its in-flight bring-up/monitor work and the sync
+    // task it owns resolve before the runtime drops (same rationale as the
+    // keepalive_handle await below).
+    if let Some(handle) = supervisor_handle {
+        tracing::info!("waiting for sandbox supervisor to finish");
         let _ = handle.await;
     }
     // Await keepalive/upgrade so their in-flight Interval::tick() futures

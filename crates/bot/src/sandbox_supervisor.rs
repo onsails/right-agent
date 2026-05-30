@@ -488,8 +488,12 @@ async fn run_supervisor(
     mut failure_rx: mpsc::Receiver<()>,
     bot: crate::telegram::BotType,
     deps: SupervisorDeps,
+    initial_sync_task: Option<tokio::task::JoinHandle<()>>,
 ) {
-    let mut sync_task: Option<tokio::task::JoinHandle<()>> = None;
+    // Seed with the startup sync task so the supervisor owns it: a degrade
+    // aborts it (see monitor_step) and recovery replaces it, preventing a
+    // duplicate sync task from running after the first recovery.
+    let mut sync_task: Option<tokio::task::JoinHandle<()>> = initial_sync_task;
     loop {
         let step = if handle.is_ready() {
             monitor_step(&handle, &mut failure_rx, &mut sync_task, &deps).await
@@ -497,6 +501,11 @@ async fn run_supervisor(
             recovery_step(&handle, &bot, &mut sync_task, &deps).await
         };
         if let LoopStep::Break = step {
+            // Abort the owned sync task on shutdown so its JoinHandle is not
+            // detached-leaked when the supervisor exits.
+            if let Some(t) = sync_task.take() {
+                t.abort();
+            }
             break;
         }
     }
@@ -516,11 +525,18 @@ pub(crate) fn spawn_supervisor(
     failure_rx: mpsc::Receiver<()>,
     bot: crate::telegram::BotType,
     deps: SupervisorDeps,
+    initial_sync_task: Option<tokio::task::JoinHandle<()>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Handle::current();
         let local = tokio::task::LocalSet::new();
-        rt.block_on(local.run_until(run_supervisor(handle, failure_rx, bot, deps)));
+        rt.block_on(local.run_until(run_supervisor(
+            handle,
+            failure_rx,
+            bot,
+            deps,
+            initial_sync_task,
+        )));
     })
 }
 
