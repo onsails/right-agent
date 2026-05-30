@@ -608,12 +608,34 @@ async fn handle_health_doctor(
         .into_response();
     }
 
-    let checks = right_agent::doctor::run_doctor(&state.home).await;
+    let mut checks = right_agent::doctor::run_doctor(&state.home).await;
+    apply_sandbox_diagnosis(&mut checks, &state.sandbox_runtime.health());
     Json(health::doctor_response_from_checks(
         &state.agent_name,
         checks,
     ))
     .into_response()
+}
+
+/// When the bot's live sandbox-backend health is `Unavailable`, override the
+/// `openshell-gateway` doctor check with the bot's cause-specific diagnosis so
+/// the dashboard surfaces the same actionable fix the Telegram user receives.
+/// No-op when health is `Ready` (the independent gateway probe stands).
+fn apply_sandbox_diagnosis(
+    checks: &mut [right_agent::doctor::DoctorCheck],
+    health: &crate::sandbox_runtime::SandboxHealth,
+) {
+    if let crate::sandbox_runtime::SandboxHealth::Unavailable { diagnosis } = health {
+        if let Some(check) = checks.iter_mut().find(|c| c.name == "openshell-gateway") {
+            check.status = right_agent::doctor::CheckStatus::Fail;
+            check.detail = diagnosis.summary.clone();
+            check.fix = if diagnosis.fixes.is_empty() {
+                None
+            } else {
+                Some(diagnosis.fixes.join("; "))
+            };
+        }
+    }
 }
 
 async fn handle_health_sandbox(
@@ -2759,5 +2781,73 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"], "not_found");
         assert_eq!(body["detail"], "run not found");
+    }
+
+    #[test]
+    fn apply_sandbox_diagnosis_overrides_gateway_check_when_unavailable() {
+        use right_agent::doctor::{CheckStatus, DoctorCheck};
+        let mut checks = vec![
+            DoctorCheck {
+                name: "openshell-gateway".into(),
+                status: CheckStatus::Pass,
+                detail: "gateway healthy".into(),
+                fix: None,
+            },
+            DoctorCheck {
+                name: "tunnel".into(),
+                status: CheckStatus::Pass,
+                detail: "ok".into(),
+                fix: None,
+            },
+        ];
+        let health = crate::sandbox_runtime::SandboxHealth::Unavailable {
+            diagnosis: std::sync::Arc::new(
+                right_openshell::diagnosis::GatewayCause::DockerDown.diagnose(),
+            ),
+        };
+        super::apply_sandbox_diagnosis(&mut checks, &health);
+        let gw = checks
+            .iter()
+            .find(|c| c.name == "openshell-gateway")
+            .unwrap();
+        assert!(
+            matches!(gw.status, CheckStatus::Fail),
+            "expected Fail, got {:?}",
+            gw.status
+        );
+        assert!(
+            gw.detail.to_lowercase().contains("docker"),
+            "detail should mention docker: {}",
+            gw.detail
+        );
+        assert!(
+            gw.fix.as_deref().unwrap().to_lowercase().contains("docker"),
+            "fix should mention docker: {:?}",
+            gw.fix
+        );
+        // Unrelated check is untouched.
+        assert!(
+            matches!(
+                checks.iter().find(|c| c.name == "tunnel").unwrap().status,
+                CheckStatus::Pass
+            ),
+            "tunnel check should be untouched"
+        );
+    }
+
+    #[test]
+    fn apply_sandbox_diagnosis_noop_when_ready() {
+        use right_agent::doctor::{CheckStatus, DoctorCheck};
+        let mut checks = vec![DoctorCheck {
+            name: "openshell-gateway".into(),
+            status: CheckStatus::Pass,
+            detail: "gateway healthy".into(),
+            fix: None,
+        }];
+        super::apply_sandbox_diagnosis(&mut checks, &crate::sandbox_runtime::SandboxHealth::Ready);
+        assert!(
+            matches!(checks[0].status, CheckStatus::Pass),
+            "Ready health should not modify checks"
+        );
     }
 }
