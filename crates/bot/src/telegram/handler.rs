@@ -369,6 +369,7 @@ pub async fn handle_message(
                     learning: settings.learning.clone(),
                     claude_health: Arc::clone(&settings.claude_health),
                     shutdown: settings.shutdown.clone(),
+                    sandbox_runtime: Arc::clone(&settings.sandbox_runtime),
                 };
                 let tx = spawn_worker(key, ctx, Arc::clone(&worker_map));
                 worker_map.insert(key, tx.clone());

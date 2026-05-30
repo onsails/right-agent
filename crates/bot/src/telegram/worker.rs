@@ -324,6 +324,8 @@ pub struct WorkerContext {
     pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
     /// Process shutdown token used to cancel detached user-turn repair work.
     pub(crate) shutdown: CancellationToken,
+    /// Live sandbox-backend health; read by the fail-closed gate before each CC turn.
+    pub sandbox_runtime: std::sync::Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
 }
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
@@ -1428,6 +1430,33 @@ pub fn spawn_worker(
                 break;
             }
 
+            // Fail-closed sandbox gate: a sandboxed agent must not run CC while
+            // its backend is unavailable (would otherwise execute on the host).
+            {
+                use crate::sandbox_runtime::{GateDecision, sandbox_gate};
+                let is_sandboxed = ctx.resolved_sandbox.is_some();
+                if let GateDecision::Reply { diagnosis } =
+                    sandbox_gate(is_sandboxed, &ctx.sandbox_runtime.health())
+                {
+                    ctx.sandbox_runtime.note_affected(tg_chat_id, eff_thread_id);
+                    if let Err(e) = send_tg_html(
+                        &ctx.bot,
+                        tg_chat_id,
+                        eff_thread_id,
+                        &crate::sandbox_copy::unavailable_message(&diagnosis),
+                    )
+                    .await
+                    {
+                        tracing::warn!(?key, "failed to send sandbox-unavailable reply: {e:#}");
+                    }
+                    // Stop the typing indicator for this skipped batch (the
+                    // task loops until cancelled, so cancel before awaiting).
+                    cancel_token.cancel();
+                    typing_task.await.ok();
+                    continue; // skip CC entirely for this batch
+                }
+            }
+
             // Invoke claude -p (D-13, D-14)
             // Pass first message text for session label (truncated 60 chars).
             let first_text = batch.first().and_then(|m| m.text.as_deref());
@@ -1469,6 +1498,11 @@ pub fn spawn_worker(
                     wall_elapsed_ms,
                 ),
                 Err(failure) => {
+                    if ctx.resolved_sandbox.is_some() {
+                        // A sandboxed turn failed. Ask the supervisor to verify the
+                        // backend (it probes once before degrading; safe to over-report).
+                        ctx.sandbox_runtime.report_suspected_failure();
+                    }
                     let uuid = match &failure {
                         InvokeCcFailure::Reflectable { session_uuid, .. } => session_uuid.clone(),
                         InvokeCcFailure::NonReflectable { .. } => String::new(),
@@ -2239,6 +2273,24 @@ pub(crate) async fn send_tg(
     text: &str,
 ) -> Result<(), teloxide::RequestError> {
     let mut send = bot.send_message(chat_id, text);
+    if eff_thread_id != 0 {
+        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
+    }
+    send.await?;
+    Ok(())
+}
+
+/// Like `send_tg` but renders HTML (`ParseMode::Html`). Use for bot-authored
+/// messages that contain HTML-escaped dynamic text. Preserves the topic thread id.
+pub(crate) async fn send_tg_html(
+    bot: &super::BotType,
+    chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    text: &str,
+) -> Result<(), teloxide::RequestError> {
+    let mut send = bot
+        .send_message(chat_id, text)
+        .parse_mode(teloxide::types::ParseMode::Html);
     if eff_thread_id != 0 {
         send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
     }
