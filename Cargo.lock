@@ -3961,6 +3961,7 @@ dependencies = [
 name = "right-mcp"
 version = "0.2.15"
 dependencies = [
+ "axum",
  "base64",
  "chrono",
  "futures",
