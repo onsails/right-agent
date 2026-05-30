@@ -26,10 +26,6 @@ const emit = defineEmits<{
 const pinningSkillName = ref<string | null>(null)
 const pinError = ref<{ skillName: string, message: string } | null>(null)
 
-const groupedSkills = computed(() =>
-  Object.fromEntries(skillGroups.map((g) => [g, skillsFor(props.skills, g)])) as Record<typeof skillGroups[number], ReturnType<typeof skillsFor>>
-)
-
 const selectedCanPin = computed(() => props.selectedSkill !== null && canPinSkill(props.selectedSkill.skill))
 const pinRequestInFlight = computed(() => pinningSkillName.value !== null)
 const selectedPinError = computed(() => {
@@ -95,12 +91,12 @@ async function togglePinned(): Promise<void> {
         v-for="group in skillGroups"
         :key="group"
         :title="group"
-        :count="groupedSkills[group].length"
-        :default-open="groupedSkills[group].some((s) => s.name === selectedSkillName)"
+        :count="skillsFor(skills, group).length"
+        :default-open="skillsFor(skills, group).some((s) => s.name === selectedSkillName)"
       >
         <div class="row-list">
           <button
-            v-for="skill in groupedSkills[group]"
+            v-for="skill in skillsFor(skills, group)"
             :key="skill.name"
             type="button"
             class="data-row"
@@ -116,7 +112,7 @@ async function togglePinned(): Promise<void> {
               <small>{{ lifecycleLabel(skill.state) }}</small>
             </span>
           </button>
-          <p v-if="groupedSkills[group].length === 0" class="muted-line">None</p>
+          <p v-if="skillsFor(skills, group).length === 0" class="muted-line">None</p>
         </div>
       </CollapsibleSection>
     </section>

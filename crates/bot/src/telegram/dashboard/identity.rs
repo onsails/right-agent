@@ -11,19 +11,23 @@ use super::DashboardState;
 
 mod identity_parse;
 
-use identity_parse::{identity_state, parse_combined_identity_read};
+use identity_parse::{STATE_SANDBOX_UNREACHABLE, identity_state, parse_combined_identity_read};
 
 const IDENTITY_PREVIEW_LIMIT_BYTES: usize = 64 * 1024;
 
-/// Combined read of every identity file in a single round trip. `$1` is the
-/// byte limit per file (the caller passes `IDENTITY_PREVIEW_LIMIT_BYTES + 1`
-/// so the parser can detect truncation). Each file emits a header line
+/// Combined read of identity files in a single round trip. `$1` is the byte
+/// limit per file (the caller passes `IDENTITY_PREVIEW_LIMIT_BYTES + 1` so the
+/// parser can detect truncation). `$2` is an optional single-file filter: when
+/// non-empty, only that file is read (the per-file detail route needs one file,
+/// not all three). Each emitted file is a header line
 /// `RIGHT_IDENTITY <name> <PRESENT|ABSENT> <byte_count>\n`; present files are
 /// followed by exactly `byte_count` content bytes and a trailing `\n`. The
 /// file list is hardcoded here to mirror `IDENTITY_FILE_NAMES` — keep both in
 /// sync.
 const SANDBOX_READ_IDENTITY_SCRIPT: &str = r#"limit="$1"
+only="$2"
 for f in IDENTITY.md SOUL.md USER.md; do
+  if [ -n "$only" ] && [ "$f" != "$only" ]; then continue; fi
   p="/sandbox/$f"
   if [ -e "$p" ] && [ ! -L "$p" ] && [ -f "$p" ]; then
     n=$(head -c "$limit" "$p" | wc -c | tr -d ' ')
@@ -80,8 +84,8 @@ pub(super) async fn identity_file_response(
             Err(error) => (
                 read_host_identity_file(
                     &state.agent_dir,
-                    "sandbox_unreachable",
-                    "sandbox_unreachable",
+                    STATE_SANDBOX_UNREACHABLE,
+                    STATE_SANDBOX_UNREACHABLE,
                     file_name,
                     IDENTITY_PREVIEW_LIMIT_BYTES,
                 )?,
@@ -123,7 +127,7 @@ async fn read_sandbox_identity_files(
     agent_dir: &std::path::Path,
     sandbox_exec: &SandboxExec,
 ) -> miette::Result<IdentityResponse> {
-    let stdout = match run_combined_identity_read(sandbox_exec).await {
+    let stdout = match run_combined_identity_read(sandbox_exec, None).await {
         Ok(stdout) => stdout,
         Err(error) => return host_mirror_unreachable_response(agent_name, agent_dir, &error),
     };
@@ -179,8 +183,12 @@ async fn read_sandbox_identity_files(
 
 /// Run the combined identity read with the dashboard sandbox timeout, mapping
 /// timeout and non-zero exit into an error so the caller drops to the
-/// `sandbox_unreachable` branch.
-async fn run_combined_identity_read(sandbox_exec: &SandboxExec) -> miette::Result<String> {
+/// `sandbox_unreachable` branch. `name_filter` reads only that one file when
+/// `Some` (the per-file detail route), all files when `None`.
+async fn run_combined_identity_read(
+    sandbox_exec: &SandboxExec,
+    name_filter: Option<&str>,
+) -> miette::Result<String> {
     let limit = (IDENTITY_PREVIEW_LIMIT_BYTES + 1).to_string();
     let command = [
         "sh",
@@ -188,6 +196,7 @@ async fn run_combined_identity_read(sandbox_exec: &SandboxExec) -> miette::Resul
         SANDBOX_READ_IDENTITY_SCRIPT,
         "dashboard-identity-read",
         limit.as_str(),
+        name_filter.unwrap_or(""),
     ];
     let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
     let run = sandbox_exec.exec(&command);
@@ -216,8 +225,8 @@ fn host_mirror_unreachable_response(
         files.push(
             read_host_identity_file(
                 agent_dir,
-                "sandbox_unreachable",
-                "sandbox_unreachable",
+                STATE_SANDBOX_UNREACHABLE,
+                STATE_SANDBOX_UNREACHABLE,
                 name,
                 IDENTITY_PREVIEW_LIMIT_BYTES,
             )
@@ -226,7 +235,7 @@ fn host_mirror_unreachable_response(
     }
     Ok(IdentityResponse {
         agent: agent_name.to_owned(),
-        source: "sandbox_unreachable".to_owned(),
+        source: STATE_SANDBOX_UNREACHABLE.to_owned(),
         warning: Some(format!(
             "sandbox unreachable; showing host mirror: {error:#}"
         )),
@@ -242,7 +251,7 @@ async fn read_sandbox_identity_file(
     name: &str,
 ) -> miette::Result<Option<IdentityFileSummary>> {
     validate_identity_file_name(name).map_err(|error| miette::miette!("{error:#}"))?;
-    let stdout = run_combined_identity_read(sandbox_exec).await?;
+    let stdout = run_combined_identity_read(sandbox_exec, Some(name)).await?;
     let parsed = parse_combined_identity_read(&stdout, IDENTITY_PREVIEW_LIMIT_BYTES);
     match parsed.iter().find(|file| file.name == name) {
         Some(file) if file.present => Ok(Some(IdentityFileSummary {

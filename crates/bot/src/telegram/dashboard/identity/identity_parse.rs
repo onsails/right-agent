@@ -79,14 +79,24 @@ pub(super) fn parse_combined_identity_read(
     out
 }
 
+/// Per-file identity state strings. These are the single source of truth for
+/// the codes the dashboard frontend mirrors in `components/identityLabels.ts`.
+/// `STATE_SANDBOX_UNREACHABLE` is a whole-sandbox failure handled by the caller
+/// (no per-file presence combination produces it), so it lives outside
+/// `identity_state` but alongside the rest of the set.
+pub(super) const STATE_SANDBOX: &str = "sandbox";
+pub(super) const STATE_HOST_MIRROR: &str = "host_mirror";
+pub(super) const STATE_NOT_AUTHORED: &str = "not_authored";
+pub(super) const STATE_SANDBOX_UNREACHABLE: &str = "sandbox_unreachable";
+
 /// Per-file state for a sandboxed agent given sandbox + host-mirror presence.
 /// Timeout/exec errors are handled by the caller (mapped to
 /// `sandbox_unreachable`); this only covers a successful combined read.
 pub(super) fn identity_state(sandbox_present: bool, host_present: bool) -> &'static str {
     match (sandbox_present, host_present) {
-        (true, _) => "sandbox",
-        (false, true) => "host_mirror",
-        (false, false) => "not_authored",
+        (true, _) => STATE_SANDBOX,
+        (false, true) => STATE_HOST_MIRROR,
+        (false, false) => STATE_NOT_AUTHORED,
     }
 }
 
