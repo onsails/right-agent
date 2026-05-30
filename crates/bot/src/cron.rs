@@ -596,6 +596,15 @@ async fn execute_job(
     // tools explicitly from within cron prompts.
     let memory_mode: Option<crate::cc::prompt::MemoryMode> = None;
 
+    if let Err(e) =
+        crate::cc::invocation::guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)
+    {
+        tracing::error!(job = %job_name, "{e:#}");
+        update_failed_run_record(&conn, &run_id, None).await;
+        std::fs::remove_file(&lock_path).ok();
+        return;
+    }
+
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
         // Sandbox mode: assemble system prompt via shell script (same as worker).
         let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(

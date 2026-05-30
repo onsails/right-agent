@@ -177,13 +177,22 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
         .clone();
     let _guard = lock.lock().await;
 
-    let mut cmd = crate::cc::invocation::build_claude_command(
+    let mut cmd = match crate::cc::invocation::build_claude_command(
         &args,
         &ctx.agent_dir,
         ctx.ssh_config_path.as_deref(),
         ctx.resolved_sandbox.as_deref(),
     )
-    .await;
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "skipping probe-writer: {e:#}");
+            drop(_guard);
+            active_invocation.cleanup().await;
+            return;
+        }
+    };
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

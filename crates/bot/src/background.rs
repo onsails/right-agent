@@ -249,6 +249,9 @@ async fn build_background_command(
     let base_prompt = right_codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
     let memory_mode: Option<crate::cc::prompt::MemoryMode> = None;
 
+    crate::cc::invocation::guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)
+        .map_err(|e| format!("{e:#}"))?;
+
     if let Some(ssh_config) = ssh_config_path {
         let Some(sandbox_name) = resolved_sandbox else {
             return Err("resolved sandbox missing for sandboxed background run".to_string());
@@ -861,6 +864,16 @@ async fn persist_completion_failed_at_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn build_background_command_refuses_sandboxed_host_exec() {
+        // Sandboxed agent (resolved_sandbox Some) with no sandbox connection
+        // (ssh_config_path None) must refuse — never build a host command.
+        let tmp = tempfile::tempdir().unwrap();
+        let result =
+            build_background_command(tmp.path(), "agent", None, Some("sbx"), &[], None).await;
+        assert!(result.is_err());
+    }
 
     #[tokio::test]
     async fn bg_log_path_uses_background_logs_dir() {
