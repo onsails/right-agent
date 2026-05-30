@@ -2,6 +2,7 @@
 
 pub mod credentials;
 pub mod detect;
+pub mod health;
 pub mod internal_client;
 pub mod oauth;
 pub mod proxy;
