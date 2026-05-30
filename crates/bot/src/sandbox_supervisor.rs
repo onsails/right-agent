@@ -14,7 +14,12 @@ use right_openshell::diagnosis::{GatewayCause, GatewayDiagnosis, diagnose_gatewa
 use right_openshell::preflight::PreflightError;
 use right_openshell::sandbox_exec::SandboxExec;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
+use crate::sandbox_runtime::SandboxRuntimeHandle;
 use crate::{RESOLVE_HOST_IPS_BACKOFFS_MS, run_with_backoff, sync};
 
 /// Borrowed inputs the sandbox bring-up sequence reads. All fields are
@@ -304,4 +309,231 @@ pub(crate) async fn bring_up_sandbox(
         sandbox: sbox,
         ssh_config_path: config_path,
     }))
+}
+
+/// Recovery backoff schedule, in seconds. Consecutive failed bring-up attempts
+/// advance through this table; the last value repeats indefinitely. A success
+/// resets the counter to 0.
+const RECOVERY_BACKOFF: &[u64] = &[5, 10, 15, 15, 30];
+
+/// Owned inputs the supervisor needs to rebuild a [`BringUpCtx`] on every
+/// recovery attempt, plus the sync inputs and the shutdown token.
+///
+/// `BringUpCtx` borrows from `run_async`'s locals; the supervisor outlives that
+/// scope, so it owns the data here and hands out fresh borrows via
+/// [`SupervisorDeps::bring_up_ctx`].
+pub(crate) struct SupervisorDeps {
+    /// Agent name (logging + operator-facing help text).
+    pub agent: String,
+    /// Resolved `~/.right` home dir (ssh config dir derivation).
+    pub home: PathBuf,
+    /// Per-agent directory (policy path resolution + sync source).
+    pub agent_dir: PathBuf,
+    /// Resolved sandbox name.
+    pub resolved_sandbox: String,
+    /// Full parsed agent config.
+    pub config: AgentConfig,
+    /// Shutdown token shared with the rest of the bot.
+    pub shutdown: CancellationToken,
+    /// Consecutive-failure counter driving the backoff schedule. Shared by `&`
+    /// inside the async task, so it is atomic rather than a plain `usize`.
+    attempt: AtomicUsize,
+}
+
+impl SupervisorDeps {
+    /// Construct deps from owned values. `attempt` starts at 0.
+    pub(crate) fn new(
+        agent: String,
+        home: PathBuf,
+        agent_dir: PathBuf,
+        resolved_sandbox: String,
+        config: AgentConfig,
+        shutdown: CancellationToken,
+    ) -> Self {
+        Self {
+            agent,
+            home,
+            agent_dir,
+            resolved_sandbox,
+            config,
+            shutdown,
+            attempt: AtomicUsize::new(0),
+        }
+    }
+
+    /// Borrow self's fields into a fresh `BringUpCtx` for one recovery attempt.
+    fn bring_up_ctx(&self) -> BringUpCtx<'_> {
+        BringUpCtx {
+            agent: &self.agent,
+            home: &self.home,
+            agent_dir: &self.agent_dir,
+            resolved_sandbox: &self.resolved_sandbox,
+            config: &self.config,
+        }
+    }
+
+    /// Return the current backoff index, then increment for the next failure.
+    fn attempt_and_increment(&self) -> usize {
+        self.attempt.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Reset the backoff counter after a successful bring-up.
+    fn reset_attempts(&self) {
+        self.attempt.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Spawn the long-lived sync task for a freshly-Ready sandbox. Relocated from
+/// the former inline `tokio::spawn(sync::run_sync_task(...))` in `lib.rs`.
+fn spawn_sync_task(deps: &SupervisorDeps, sandbox: SandboxExec) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(sync::run_sync_task(
+        deps.agent_dir.clone(),
+        sandbox,
+        deps.shutdown.clone(),
+    ))
+}
+
+/// Direct reachability probe: a successful gRPC channel connect to the OpenShell
+/// gateway. Used to verify a failure report before degrading — transient worker
+/// errors should not flip a healthy backend to Unavailable.
+async fn probe_reachable() -> bool {
+    right_openshell::openshell::connect_grpc(&right_openshell::openshell::default_mtls_dir())
+        .await
+        .is_ok()
+}
+
+/// Control-flow signal returned by a single supervisor loop iteration.
+enum LoopStep {
+    /// Keep looping.
+    Continue,
+    /// Exit the supervisor (shutdown, channel closed, or hard config error).
+    Break,
+}
+
+/// One iteration of the monitor branch (handle is Ready). Waits for a failure
+/// report or shutdown; on a *verified* failure, degrades the handle.
+async fn monitor_step(
+    handle: &Arc<SandboxRuntimeHandle>,
+    failure_rx: &mut mpsc::Receiver<()>,
+    sync_task: &mut Option<tokio::task::JoinHandle<()>>,
+    deps: &SupervisorDeps,
+) -> LoopStep {
+    tokio::select! {
+        _ = deps.shutdown.cancelled() => LoopStep::Break,
+        msg = failure_rx.recv() => {
+            if msg.is_none() {
+                return LoopStep::Break;
+            }
+            // Verify with a single direct probe before degrading.
+            if probe_reachable().await {
+                return LoopStep::Continue;
+            }
+            let diag = diagnose_gateway().await;
+            tracing::error!(agent = %deps.agent, cause = ?diag.cause, "{}", diag.summary);
+            handle.set_unavailable(Arc::new(diag));
+            if let Some(t) = sync_task.take() {
+                t.abort();
+            }
+            LoopStep::Continue
+        }
+    }
+}
+
+/// One iteration of the recovery branch (handle is Unavailable). Attempts
+/// bring-up; on success spawns the sync task, notifies affected chats, and
+/// re-enters monitor mode. On a recoverable diagnosis it sleeps with backoff;
+/// on a hard error it breaks (stay degraded).
+async fn recovery_step(
+    handle: &Arc<SandboxRuntimeHandle>,
+    bot: &crate::telegram::BotType,
+    sync_task: &mut Option<tokio::task::JoinHandle<()>>,
+    deps: &SupervisorDeps,
+) -> LoopStep {
+    let ctx = deps.bring_up_ctx();
+    match bring_up_sandbox(&ctx).await {
+        Ok(Ok(bring_up)) => {
+            handle.set_ready(bring_up.sandbox.clone());
+            *sync_task = Some(spawn_sync_task(deps, bring_up.sandbox));
+            notify_back_online(handle, bot).await;
+            deps.reset_attempts();
+            tracing::info!(agent = %deps.agent, "sandbox backend recovered");
+            // Skip the backoff sleep: re-enter the monitor branch immediately
+            // now that the handle is Ready.
+            return LoopStep::Continue;
+        }
+        Ok(Err(diag)) => {
+            handle.set_unavailable(Arc::new(diag));
+        }
+        Err(e) => {
+            // A hard config error during recovery cannot self-heal: stay
+            // degraded and stop retrying.
+            tracing::error!(agent = %deps.agent, "unrecoverable sandbox error: {e:#}");
+            return LoopStep::Break;
+        }
+    }
+    let attempt = deps.attempt_and_increment();
+    let secs = RECOVERY_BACKOFF[attempt.min(RECOVERY_BACKOFF.len() - 1)];
+    tokio::select! {
+        _ = deps.shutdown.cancelled() => LoopStep::Break,
+        _ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => LoopStep::Continue,
+    }
+}
+
+/// Drive the supervisor loop to completion. `!Send` because `bring_up_sandbox`
+/// holds an `AsyncFnMut` retry closure (over `&mut grpc_client`) across awaits,
+/// which makes its future non-`Send`-general. Runs on a `LocalSet` (see
+/// [`spawn_supervisor`]).
+async fn run_supervisor(
+    handle: Arc<SandboxRuntimeHandle>,
+    mut failure_rx: mpsc::Receiver<()>,
+    bot: crate::telegram::BotType,
+    deps: SupervisorDeps,
+) {
+    let mut sync_task: Option<tokio::task::JoinHandle<()>> = None;
+    loop {
+        let step = if handle.is_ready() {
+            monitor_step(&handle, &mut failure_rx, &mut sync_task, &deps).await
+        } else {
+            recovery_step(&handle, &bot, &mut sync_task, &deps).await
+        };
+        if let LoopStep::Break = step {
+            break;
+        }
+    }
+}
+
+/// Owns sandbox lifecycle. Runs for the bot's life. When `Unavailable`, retries
+/// `bring_up_sandbox` with backoff. When `Ready`, sleeps until a verified
+/// failure report flips it back. On every Unavailable→Ready transition, spawns
+/// the sync task and notifies affected chats.
+///
+/// The loop future is `!Send` (see [`run_supervisor`]), so it is driven via a
+/// `LocalSet` on a dedicated `spawn_blocking` thread — the same pattern
+/// `run_async` uses for the `!Send` Hindsight drain loop. Async upstream calls
+/// (gRPC, sync) still run on the shared runtime through the captured `Handle`.
+pub(crate) fn spawn_supervisor(
+    handle: Arc<SandboxRuntimeHandle>,
+    failure_rx: mpsc::Receiver<()>,
+    bot: crate::telegram::BotType,
+    deps: SupervisorDeps,
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Handle::current();
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(run_supervisor(handle, failure_rx, bot, deps)));
+    })
+}
+
+/// Send the back-online notice to every chat that hit the degraded backend.
+/// Best-effort per chat: a failed send is logged but does not abort the loop.
+async fn notify_back_online(handle: &Arc<SandboxRuntimeHandle>, bot: &crate::telegram::BotType) {
+    let message = crate::sandbox_copy::back_online_message();
+    for (chat, thread) in handle.take_affected() {
+        if let Err(e) = crate::telegram::worker::send_tg(bot, chat, thread, &message).await {
+            tracing::warn!(
+                chat = %chat,
+                "back-online notice send failed: {e:#}"
+            );
+        }
+    }
 }
