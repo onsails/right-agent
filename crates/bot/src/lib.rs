@@ -14,6 +14,7 @@ pub(crate) mod login;
 pub(crate) mod reflection;
 pub(crate) mod sandbox_copy;
 pub mod sandbox_runtime;
+pub(crate) mod sandbox_supervisor;
 mod stt;
 pub(crate) mod sync;
 pub mod telegram;
@@ -160,7 +161,7 @@ pub async fn run(args: BotArgs) -> miette::Result<bool> {
 /// `resolve_host_ips` call. The first attempt is immediate; failures
 /// sleep `BACKOFFS_MS[attempt - 1]` before the next attempt. Length of
 /// the slice is `attempts - 1`.
-const RESOLVE_HOST_IPS_BACKOFFS_MS: &[u64] = &[200, 500, 1000];
+pub(crate) const RESOLVE_HOST_IPS_BACKOFFS_MS: &[u64] = &[200, 500, 1000];
 
 /// Drive `attempt_fn` until it succeeds or `backoffs_ms.len() + 1` attempts
 /// have failed. Logs a `warn` per failed attempt and a final `error` if all
@@ -171,7 +172,7 @@ const RESOLVE_HOST_IPS_BACKOFFS_MS: &[u64] = &[200, 500, 1000];
 /// DNS hiccup, sandbox NSS warmup race, or OpenShell-alias rename should
 /// not brick the bot. Init/restore/migration callsites in `right` are
 /// interactive and intentionally fail fast.
-async fn run_with_backoff<T>(
+pub(crate) async fn run_with_backoff<T>(
     op_name: &str,
     agent: &str,
     backoffs_ms: &[u64],
@@ -662,280 +663,56 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     migrate_oauth_state_to_db(&agent_dir).await;
 
     // --- OpenShell sandbox lifecycle (when sandbox mode is active) ---
-    let (ssh_config_path, sandbox_ctx): (
-        Option<std::path::PathBuf>,
-        Option<(std::path::PathBuf, String)>,
-    ) = if is_sandboxed {
-        // Resolve policy path from agent.yaml sandbox config.
-        let policy_path = config.resolve_policy_path(&agent_dir)?
-            .ok_or_else(|| miette::miette!(
-                "sandbox mode is openshell but no policy path resolved — check sandbox.policy_file in agent.yaml"
-            ))?;
-
+    //
+    // Bring-up is relocated into `sandbox_supervisor::bring_up_sandbox`
+    // (Task 6). For now the shim preserves the prior hard-fail semantics: a
+    // backend-availability diagnosis is turned back into a crash. Tasks 7/8
+    // replace this with graceful degrade and move `run_sync_task` ownership
+    // into the supervisor. `initial_sync` + `reverse_sync_md` run inside
+    // `bring_up_sandbox`; the spawn of `run_sync_task` stays here, derived
+    // from the returned `SandboxExec`.
+    let (ssh_config_path, health_sandbox_exec, sync_handle) = if is_sandboxed {
         // SAFETY: resolved_sandbox is always Some when is_sandboxed is true.
-        let sandbox = resolved_sandbox.clone().unwrap();
-
-        // Verify OpenShell is ready before attempting gRPC connection.
-        let mtls_dir = match right_openshell::openshell::preflight_check() {
-            right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-            right_openshell::openshell::OpenShellStatus::NotInstalled => {
+        let resolved = resolved_sandbox.clone().unwrap();
+        let bring_up_ctx = sandbox_supervisor::BringUpCtx {
+            agent: &args.agent,
+            home: &home,
+            agent_dir: &agent_dir,
+            resolved_sandbox: &resolved,
+            config: &config,
+        };
+        let bring_up = match sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await? {
+            Ok(b) => b,
+            Err(diag) => {
+                // TEMPORARY (Task 8 turns this into graceful degrade). Preserve
+                // crash semantics for now.
                 return Err(miette::miette!(
-                    help = "Install from https://github.com/NVIDIA/OpenShell, or set `sandbox: mode: none` in agent.yaml",
-                    "OpenShell is not installed"
-                ));
-            }
-            right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
-                return Err(miette::miette!(
-                    help =
-                        "Run `openshell gateway start`, or set `sandbox: mode: none` in agent.yaml",
-                    "OpenShell gateway is not running"
-                ));
-            }
-            right_openshell::openshell::OpenShellStatus::BrokenGateway(dir) => {
-                return Err(miette::miette!(
-                    help = "Try `openshell gateway destroy && openshell gateway start`,\n  \
-                            or set `sandbox: mode: none` in agent.yaml",
-                    "OpenShell gateway exists but mTLS certificates are missing at {}",
-                    dir.display()
+                    "sandbox backend unavailable: {}",
+                    diag.summary
                 ));
             }
         };
+        let sandbox_supervisor::SandboxBringUp {
+            sandbox: sbox,
+            ssh_config_path: config_path,
+        } = bring_up;
 
-        // Check if sandbox already exists and is READY.
-        let mut grpc_client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-
-        // OpenShell version preflight — hard-fail on too-old CLI or
-        // gateway before any further interaction. Both must be
-        // >= MIN_OPENSHELL_VERSION.
-        if let Err(e) = right_openshell::preflight::openshell_preflight(&mut grpc_client).await {
-            tracing::error!(error = %e, "OpenShell version preflight failed; refusing to start");
-            return Err(miette::miette!("{e}"));
-        }
-        tracing::info!("OpenShell version preflight passed");
-
-        let sandbox_exists =
-            right_openshell::openshell::is_sandbox_ready(&mut grpc_client, &sandbox).await?;
-
-        if !sandbox_exists {
-            return Err(miette::miette!(
-                help = format!(
-                    "Run `right init` or `right agent init {}` to create the sandbox",
-                    args.agent
-                ),
-                "Sandbox '{}' not found",
-                sandbox
-            ));
-        }
-
-        // Resolve host IPs from inside sandbox for policy allowed_ips.
-        // Retry transient failures (DNS hiccup, NSS warmup race, OpenShell
-        // alias rename) — startup is non-interactive and must self-heal.
-        let sandbox_id =
-            right_openshell::openshell::resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
-        let host_ips = run_with_backoff(
-            "resolve_host_ips",
-            &args.agent,
-            RESOLVE_HOST_IPS_BACKOFFS_MS,
-            async || {
-                right_openshell::openshell::resolve_host_ips(&mut grpc_client, &sandbox_id).await
-            },
-        )
-        .await?;
-
-        // Regenerate policy with resolved host IPs and apply.
-        let network_policy = config.network_policy;
-        let policy_content = right_codegen::policy::generate_policy(
-            right_runtime_state::MCP_HTTP_PORT,
-            &network_policy,
-            right_codegen::policy::HostMcpAccess::Resolved(host_ips.clone()),
-        );
-        // Drift check BEFORE write+apply: `openshell policy set --wait` rejects
-        // landlock changes on a live sandbox with InvalidArgument, so applying
-        // a drifted filesystem policy cannot safely repair the sandbox. Fail
-        // startup instead of running with stale network policy and hidden MCP
-        // reachability failures.
-        let desired_filesystem = match right_openshell::openshell::parse_policy_yaml_filesystem(
-            &policy_content,
-        ) {
-            Ok(d) => Some(d),
-            Err(e) => {
-                tracing::warn!(agent = %args.agent, "could not parse generated policy.yaml for drift check: {e:#}");
-                None
-            }
-        };
-        let active_filesystem = match right_openshell::openshell::get_active_policy(
-            &mut grpc_client,
-            &sandbox,
-        )
-        .await
-        {
-            Ok(Some(a)) => Some(a),
-            Ok(None) => {
-                tracing::warn!(agent = %args.agent, "active policy has no payload; skipping drift check");
-                None
-            }
-            Err(e) => {
-                tracing::warn!(agent = %args.agent, "could not fetch active policy for drift check: {e:#}");
-                None
-            }
-        };
-        let drifted = match (active_filesystem, desired_filesystem) {
-            (Some(active), Some(desired)) => {
-                right_openshell::openshell::filesystem_policy_changed(&active, &desired)
-            }
-            _ => true,
-        };
-
-        if drifted {
-            // Still write so a later `right agent config`-triggered
-            // migration sees the fresh policy, then fail startup. Running with
-            // stale network policy would make MCP availability nondeterministic.
-            right_codegen::contract::write_regenerated(&policy_path, &policy_content)?;
-            return Err(miette::miette!(
-                help = format!(
-                    "Run `right agent config {}` (accept defaults) to trigger sandbox migration, or `right agent backup {} --sandbox-only` first if you want a recovery point.",
-                    args.agent, args.agent
-                ),
-                "Filesystem policy drift detected for '{}'. Refusing to start with stale OpenShell policy.",
-                args.agent,
-            ));
-        } else {
-            tracing::info!(agent = %args.agent, ?host_ips, "reusing existing sandbox, applying policy with resolved host IPs");
-            right_codegen::contract::write_and_apply_sandbox_policy(
-                &sandbox,
-                &policy_path,
-                &policy_content,
-            )
-            .await?;
-        }
-
-        // Generate SSH config.
-        let ssh_config_dir = home.join("run").join("ssh");
-        std::fs::create_dir_all(&ssh_config_dir)
-            .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
-        let config_path =
-            right_openshell::openshell::generate_ssh_config(&sandbox, &ssh_config_dir).await?;
-
-        // Clean up stale ControlMaster socket from a SIGKILL'd previous bot.
-        // The next ssh call (inbox/outbox mkdir below) implicitly establishes
-        // a fresh master via ControlMaster=auto in the config we just wrote.
-        let cm_socket =
-            right_openshell::openshell::control_master_socket_path(&ssh_config_dir, &sandbox);
-        let cm_host = right_openshell::openshell::ssh_host_for_sandbox(&sandbox);
-        right_openshell::openshell::clean_stale_control_master(&config_path, &cm_host, &cm_socket)
-            .await?;
-
-        tracing::info!(agent = %args.agent, "OpenShell sandbox ready");
-
-        // Reconcile attached providers with the `sandbox.providers` list in agent.yaml.
-        // Attaches declared providers that exist on the gateway but are not yet attached,
-        // and detaches stale `<agent>-*` entries that were removed from the config.
-        // Non-fatal: a reconcile failure is logged but never prevents the bot from starting.
-        if let Some(sandbox_cfg) = config.sandbox.as_ref() {
-            let mtls_dir = right_openshell::openshell::default_mtls_dir();
-            match right_openshell::openshell::connect_grpc(&mtls_dir).await {
-                Ok(mut client) => {
-                    let declared: Vec<String> = sandbox_cfg
-                        .providers
-                        .iter()
-                        .map(|p| p.name.clone())
-                        .collect();
-                    match right_openshell::providers::reconcile_for_sandbox(
-                        &mut client,
-                        &sandbox,
-                        &args.agent,
-                        &declared,
-                    )
-                    .await
-                    {
-                        Ok(report) => {
-                            tracing::info!(
-                                agent = %args.agent,
-                                attached = ?report.attached,
-                                detached = ?report.detached,
-                                missing = ?report.missing,
-                                "provider reconcile complete"
-                            );
-                            if !report.errors.is_empty() {
-                                tracing::warn!(
-                                    agent = %args.agent,
-                                    errors = ?report.errors,
-                                    "provider reconcile had per-provider errors; will retry on next pass"
-                                );
-                            }
-                        }
-                        Err(e) => tracing::warn!(
-                            agent = %args.agent,
-                            "provider reconcile failed: {e:#}"
-                        ),
-                    }
-                }
-                Err(e) => tracing::warn!(
-                    agent = %args.agent,
-                    "could not connect to openshell gateway for provider reconcile: {e:#}"
-                ),
-            }
-        }
-
-        (Some(config_path), Some((mtls_dir, sandbox_id)))
+        let health_sandbox_exec = Some(sbox.clone());
+        let sync_agent_dir = agent_dir.clone();
+        let sync_shutdown = shutdown.clone();
+        let sync_handle = Some(tokio::spawn(sync::run_sync_task(
+            sync_agent_dir,
+            sbox,
+            sync_shutdown,
+        )));
+        (Some(config_path), health_sandbox_exec, sync_handle)
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     // Snapshot for shutdown teardown — the originals are moved into run_telegram below.
     let shutdown_ssh_config = ssh_config_path.clone();
     let shutdown_sandbox = resolved_sandbox.clone();
-
-    // Create inbox/outbox inside sandbox for attachment handling.
-    // This is also the first ssh -F <config> call, which establishes the
-    // ControlMaster (see clean_stale_control_master above + SSH config
-    // appended directives in generate_ssh_config).
-    if is_sandboxed && let Some(ref cfg_path) = ssh_config_path {
-        let ssh_host =
-            right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.as_deref().unwrap());
-        right_openshell::openshell::ssh_exec(
-            cfg_path,
-            &ssh_host,
-            &["mkdir", "-p", "/sandbox/inbox", "/sandbox/outbox"],
-            10,
-        )
-        .await
-        .map_err(|e| miette::miette!("failed to create sandbox attachment dirs: {e:#}"))?;
-    }
-
-    // Sync config files to sandbox before starting teloxide.
-    // Blocks until first sync completes — ensures sandbox has correct .claude.json,
-    // settings.json, etc. before any claude -p invocations.
-    let (sync_handle, health_sandbox_exec) =
-        if let Some((ref mtls_dir, ref sandbox_id)) = sandbox_ctx {
-            let sandbox = resolved_sandbox.clone().unwrap();
-            let sbox = right_openshell::sandbox_exec::SandboxExec::new(
-                mtls_dir.clone(),
-                sandbox,
-                sandbox_id.clone(),
-            );
-            let health_sandbox_exec = Some(sbox.clone());
-            sync::initial_sync(&agent_dir, &sbox).await?;
-            if let Err(e) = sync::reverse_sync_md(&agent_dir, sbox.sandbox_name()).await {
-                tracing::warn!(
-                    agent = %args.agent,
-                    sandbox = %sbox.sandbox_name(),
-                    "startup identity mirror sync failed: {e:#}"
-                );
-            }
-            let sync_agent_dir = agent_dir.clone();
-            let sync_shutdown = shutdown.clone();
-            (
-                Some(tokio::spawn(sync::run_sync_task(
-                    sync_agent_dir,
-                    sbox,
-                    sync_shutdown,
-                ))),
-                health_sandbox_exec,
-            )
-        } else {
-            (None, None)
-        };
 
     // Build the dashboard router AFTER health_sandbox_exec exists so the
     // dashboard can reuse the long-lived SandboxExec instead of opening a
