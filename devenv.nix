@@ -21,7 +21,13 @@
     pkgs.bubblewrap
   ];
 
-  languages.rust.enable = true;
+  languages.rust = {
+    enable = true;
+    # cfg_select! (used by libsqlite3-sys >=0.38 build.rs) stabilized in
+    # Rust 1.95.0; nixpkgs' pinned rustc (1.94.1) predates it. Use the
+    # rust-overlay stable channel to track latest stable.
+    channel = "stable";
+  };
 
   git-hooks.hooks.rustfmt.enable = true;
 
