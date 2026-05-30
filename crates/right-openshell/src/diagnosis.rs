@@ -105,6 +105,41 @@ pub fn classify_doctor_output(doctor: &str, status: &str) -> GatewayCause {
     GatewayCause::Unreachable
 }
 
+/// Diagnose a *connect* failure by probing the backend with
+/// `openshell doctor check` and `openshell status`. Falls back to
+/// `Unreachable` if the CLI cannot be run. Never returns an error — a
+/// diagnosis is always producible.
+///
+/// # Error-swallowing exception
+///
+/// This function deliberately degrades CLI-spawn failures to empty output
+/// (which classifies as `Unreachable`) rather than propagating an error.
+/// It runs precisely when the sandbox backend is already broken, so a
+/// secondary spawn failure must not prevent a diagnosis from reaching the
+/// operator. This is the only sanctioned `Err(_) => String::new()` pattern
+/// in the codebase.
+pub async fn diagnose_gateway() -> GatewayDiagnosis {
+    async fn run(args: &[&str]) -> String {
+        match tokio::process::Command::new("openshell")
+            .args(args)
+            .env("NO_COLOR", "1")
+            .output()
+            .await
+        {
+            Ok(o) => {
+                let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                s.push('\n');
+                s.push_str(&String::from_utf8_lossy(&o.stderr));
+                s
+            }
+            Err(_) => String::new(),
+        }
+    }
+    let doctor = run(&["doctor", "check"]).await;
+    let status = run(&["status"]).await;
+    classify_doctor_output(&doctor, &status).diagnose()
+}
+
 #[cfg(test)]
 #[path = "diagnosis_tests.rs"]
 mod tests;
