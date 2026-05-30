@@ -67,6 +67,9 @@ pub(crate) struct DashboardState {
     pub agent_dir: PathBuf,
     pub resolved_sandbox: Option<String>,
     pub sandbox_exec: Option<right_openshell::sandbox_exec::SandboxExec>,
+    /// Shared sandbox-backend health. Reserved for Task 10's health card; the
+    /// existing `sandbox_exec` snapshot is kept as-is for now.
+    pub sandbox_runtime: std::sync::Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     pub allowlist: right_agent::agent::allowlist::AllowlistHandle,
     pub foreground: super::StopTokens,
     pub internal_client: std::sync::Arc<right_mcp::internal_client::InternalClient>,
@@ -852,6 +855,12 @@ mod tests {
             agent_dir: agent_dir.clone(),
             resolved_sandbox: None,
             sandbox_exec: None,
+            sandbox_runtime: {
+                let (h, _rx) = crate::sandbox_runtime::SandboxRuntimeHandle::new(
+                    crate::sandbox_runtime::SandboxHealth::Ready,
+                );
+                h
+            },
             allowlist,
             foreground: Arc::new(DashMap::new()),
             internal_client: Arc::new(right_mcp::internal_client::InternalClient::new(

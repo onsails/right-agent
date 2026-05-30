@@ -160,6 +160,7 @@ pub(crate) async fn run_telegram<L>(
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     stt: Option<std::sync::Arc<crate::stt::SttContext>>,
     claude_health: Arc<crate::keepalive::ClaudeHealth>,
+    sandbox_runtime: std::sync::Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     session_locks: super::SessionLocks,
     bg_requests: super::BgRequests,
     stop_tokens: super::StopTokens,
@@ -218,6 +219,7 @@ where
         learning,
         claude_health,
         shutdown: worker_shutdown.clone(),
+        sandbox_runtime,
     });
     let thinking_visibility: super::ThinkingVisibility = Arc::new(DashMap::new());
     let bg_handoff_gates: super::BgHandoffGates = Arc::new(DashMap::new());
@@ -696,6 +698,12 @@ mod tests {
                 None,
             ),
             shutdown: CancellationToken::new(),
+            sandbox_runtime: {
+                let (h, _rx) = crate::sandbox_runtime::SandboxRuntimeHandle::new(
+                    crate::sandbox_runtime::SandboxHealth::Ready,
+                );
+                h
+            },
         });
         let stop_tokens: super::super::StopTokens = Arc::new(DashMap::new());
         let thinking_visibility: super::super::ThinkingVisibility = Arc::new(DashMap::new());
