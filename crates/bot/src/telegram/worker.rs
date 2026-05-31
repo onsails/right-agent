@@ -392,12 +392,14 @@ async fn record_used_skill_receipts(
     // in one transaction (Transaction Rule). Overlaps across skills when a turn
     // used several — intentional; the dashboard labels it attributed, not exact.
     // Failure here is non-fatal.
-    if let Err(e) = right_agent::usage::insert::insert_usage_skill_spend_many(
+    if let Err(e) = right_agent::usage::insert::insert_skill_spend_many(
         &conn,
         &used_skill_names,
+        "usage",
         turn_cost_usd,
         turn_cache_read as i64,
         turn_cache_creation as i64,
+        None,
     )
     .await
     {

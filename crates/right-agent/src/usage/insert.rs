@@ -128,34 +128,40 @@ pub async fn insert_skill_spend(
     Ok(())
 }
 
-/// Insert one `usage` spend row per skill for a single turn, in one immediate
-/// transaction (Transaction Rule: 2+ writes go through one transaction). Every
-/// row carries the same turn cost/cache — attributed, not exact, when a turn
-/// used several skills. `invocation_id` is NULL because foreground usage has no
-/// learning invocation.
-pub async fn insert_usage_skill_spend_many<I, S>(
+/// Insert one `skill_spend` row per skill, all sharing the same
+/// `kind`/`cost`/`cache`/`invocation_id`, in one immediate transaction
+/// (Transaction Rule: 2+ writes go through one transaction). Empty input
+/// writes nothing and opens no transaction. Callers that want even-split
+/// attribution must divide before calling.
+pub async fn insert_skill_spend_many<I, S>(
     conn: &Connection,
     skill_names: I,
+    kind: &str,
     cost_usd: f64,
     cache_read: i64,
     cache_creation: i64,
+    invocation_id: Option<&str>,
 ) -> Result<(), UsageError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    let names: Vec<S> = skill_names.into_iter().collect();
+    if names.is_empty() {
+        return Ok(());
+    }
     let ts = Utc::now().to_rfc3339();
     let tx = conn.transaction().await?;
-    for name in skill_names {
+    for name in names {
         tx.execute(
             SKILL_SPEND_INSERT_SQL,
             params![
                 name.as_ref(),
-                "usage",
+                kind,
                 cost_usd,
                 cache_read,
                 cache_creation,
-                None::<&str>,
+                invocation_id,
                 ts.as_str()
             ],
         )
@@ -529,12 +535,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_usage_skill_spend_many_writes_one_usage_row_per_skill() {
+    async fn insert_skill_spend_many_writes_one_usage_row_per_skill() {
         let dir = tempdir().unwrap();
         let conn = open_connection(dir.path(), true).await.unwrap();
-        insert_usage_skill_spend_many(&conn, ["rightx-alpha", "rightx-beta"], 0.12, 10, 20)
-            .await
-            .unwrap();
+        insert_skill_spend_many(
+            &conn,
+            ["rightx-alpha", "rightx-beta"],
+            "usage",
+            0.12,
+            10,
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         let rows: Vec<(String, String, f64, i64, i64, Option<String>)> = conn
             .query_all(
@@ -566,10 +580,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_usage_skill_spend_many_empty_writes_nothing() {
+    async fn insert_skill_spend_many_writes_maintain_rows_with_invocation_id() {
         let dir = tempdir().unwrap();
         let conn = open_connection(dir.path(), true).await.unwrap();
-        insert_usage_skill_spend_many(&conn, Vec::<String>::new(), 0.5, 1, 2)
+        insert_skill_spend_many(
+            &conn,
+            ["rightx-alpha", "rightx-beta"],
+            "maintain",
+            0.06,
+            5,
+            7,
+            Some("inv-x"),
+        )
+        .await
+        .unwrap();
+
+        let rows: Vec<(String, String, Option<String>)> = conn
+            .query_all(
+                "SELECT skill_name, kind, invocation_id FROM skill_spend ORDER BY skill_name",
+                (),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        for (skill, kind, inv) in &rows {
+            assert!(skill.starts_with("rightx-"));
+            assert_eq!(kind, "maintain");
+            assert_eq!(inv.as_deref(), Some("inv-x"));
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_skill_spend_many_empty_writes_nothing() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_skill_spend_many(&conn, Vec::<String>::new(), "usage", 0.5, 1, 2, None)
             .await
             .unwrap();
         let count: i64 = conn
