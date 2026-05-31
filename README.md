@@ -30,6 +30,8 @@ it remembers what matters, and it can act on your behalf without you handing it 
 
 **every agent in its own sandbox.** each agent gets a persistent OpenShell (k3s container) sandbox with its own filesystem (landlock), network (scoped wildcard domain allowlists or hostless public endpoints), and tls-terminating proxy. a misbehaving or compromised agent can't reach the host, the other agents, or arbitrary networks. agents that genuinely need host access (computer-use, browser automation) opt out explicitly, per agent.
 
+**memory the agent holds is treated as untrusted data, not instructions.** anything passing into memory is sanitized on the way in, and recalled memory is wrapped in explicit framing that tells the model to treat it as information to weigh – not commands to obey. a poisoned or malicious memory can't hijack the agent's behavior.
+
 **skills it learns on its own.** the agent gets better at your work without anyone writing skills by hand. when it works something out during real use – an api quirk, a workflow pattern, a multi-step sequence – a per-turn learning pipeline captures that into a reusable skill package, no manual authoring step, and loads it in later sessions so the next time is faster. the platform records what each skill costs and how often it's used, a curator prunes the ones that don't earn their keep, and you stay in control by pinning or unpinning skills from the Telegram dashboard.
 
 **identity that writes itself.** the first session with a fresh agent is a bootstrap, not a chat: the agent writes its own `IDENTITY.md`, `SOUL.md`, and `USER.md`, and the platform never overwrites them – on restart, model swap, or upgrade the agent stays itself.
