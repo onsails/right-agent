@@ -650,33 +650,7 @@ async fn handle_mcp_set_headers(
         Arc::clone(existing)
     };
 
-    let replacement = Arc::new(ProxyBackend::new(
-        req.name.clone(),
-        existing.agent_dir().to_path_buf(),
-        existing.url().to_string(),
-        Arc::new(tokio::sync::RwLock::new(None)),
-        AuthMethod::Headers(header_secrets.clone()),
-    ));
-    let connect_client = match right_mcp::ssrf::hardened_client_builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(client) => client,
-        Err(e) => {
-            return internal_error(format!("reqwest client build: {e:#}")).into_response();
-        }
-    };
-    if let Err(e) = replacement.connect(connect_client).await {
-        let detail = format!("{e:#}");
-        let status = if right_mcp::proxy::is_upstream_auth_error(&detail) {
-            StatusCode::UNAUTHORIZED
-        } else {
-            StatusCode::BAD_GATEWAY
-        };
-        return error_response(status, "mcp_set_headers_reconnect_failed", Some(detail))
-            .into_response();
-    }
+    // Persist first — a credential write does not depend on upstream reachability.
     {
         let conn = conn_arc.lock().await;
         if let Err(e) = credentials::db_set_http_headers(&conn, &req.name, &header_secrets).await {
@@ -688,10 +662,34 @@ async fn handle_mcp_set_headers(
             };
         }
     }
+
+    // Swap in a fresh backend carrying the new headers. It starts Unreachable;
+    // the reconciler re-probes it (with the new headers) until it connects.
+    let replacement = Arc::new(ProxyBackend::new(
+        req.name.clone(),
+        existing.agent_dir().to_path_buf(),
+        existing.url().to_string(),
+        Arc::new(tokio::sync::RwLock::new(None)),
+        AuthMethod::Headers(header_secrets),
+    ));
     {
         let mut proxies = proxies_lock.write().await;
-        proxies.insert(req.name, replacement);
+        proxies.insert(req.name.clone(), Arc::clone(&replacement));
     }
+
+    // Best-effort connect in the background: connect() self-logs and records the
+    // outcome, so the live status reflects reality without blocking this request.
+    let connect_client = match right_mcp::ssrf::hardened_client_builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => return internal_error(format!("reqwest client build: {e:#}")).into_response(),
+    };
+    tokio::spawn(async move {
+        let _ = replacement.connect(connect_client).await;
+    });
 
     (StatusCode::OK, Json(McpSetHeadersResponse { ok: true })).into_response()
 }
@@ -1743,21 +1741,40 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "body={body}");
 
-        let (status, body) = send_json(
+        // The reconnect now happens in the background; poll until it lands.
+        let mut nango = serde_json::Value::Null;
+        for _ in 0..50 {
+            let (status, body) = send_json(
+                app.clone(),
+                "/mcp-list",
+                serde_json::json!({ "agent": "test-agent" }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "body={body}");
+            nango = body["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|server| server["name"] == "nango")
+                .cloned()
+                .unwrap();
+            if nango["status"] == "connected" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            nango["status"], "connected",
+            "background reconnect should land: {nango}"
+        );
+        assert_eq!(nango["header_names"], serde_json::json!(["connection-id"]));
+
+        let (_, body) = send_json(
             app,
             "/mcp-list",
             serde_json::json!({ "agent": "test-agent" }),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "body={body}");
-        let nango = body["servers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|server| server["name"] == "nango")
-            .unwrap();
-        assert_eq!(nango["status"], "connected");
-        assert_eq!(nango["header_names"], serde_json::json!(["connection-id"]));
         assert!(
             !body.to_string().contains("new_conn"),
             "list response must not expose header values: {body}"
@@ -2435,5 +2452,87 @@ mod tests {
 
         let map = token_map.read().await;
         assert!(map.contains_key("tok-new"));
+    }
+
+    #[tokio::test]
+    async fn mcp_set_headers_persists_against_unreachable_server() {
+        setup_crypto();
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
+
+        // Seed a DB row + an unreachable proxy backend directly: /mcp-add would
+        // itself fail to connect to a dead upstream, so we bypass it.
+        let conn_arc = {
+            let registry = dispatcher
+                .agents
+                .get("test-agent")
+                .expect("test-agent registered");
+            registry
+                .right
+                .get_conn("test-agent")
+                .await
+                .expect("test db connection")
+        };
+        let dead_url = "http://127.0.0.1:1/mcp".to_string();
+        {
+            let conn = conn_arc.lock().await;
+            credentials::db_add_server(&conn, "obsidian", &dead_url)
+                .await
+                .unwrap();
+        }
+        {
+            // Clone the Arc out and drop the DashMap ref before awaiting the lock.
+            let proxies = Arc::clone(&dispatcher.agents.get("test-agent").unwrap().proxies);
+            let backend = Arc::new(ProxyBackend::new(
+                "obsidian".into(),
+                tmp.path().join("agents/test-agent"),
+                dead_url.clone(),
+                Arc::new(tokio::sync::RwLock::new(None)),
+                AuthMethod::default(),
+            ));
+            proxies.write().await.insert("obsidian".into(), backend);
+        }
+
+        // Set headers while the upstream is unreachable.
+        let (status, body) = send_json(
+            app.clone(),
+            "/mcp-set-headers",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "obsidian",
+                "headers": [{ "name": "X-Api-Key", "value": "secret-key" }]
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "headers must persist even when unreachable: body={body}"
+        );
+
+        // The credential was persisted and the server is still retryable.
+        let (status, body) = send_json(
+            app,
+            "/mcp-list",
+            serde_json::json!({ "agent": "test-agent" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body={body}");
+        let obsidian = body["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|server| server["name"] == "obsidian")
+            .unwrap();
+        assert_eq!(obsidian["auth_type"], "headers");
+        assert_eq!(obsidian["header_names"], serde_json::json!(["x-api-key"]));
+        assert_eq!(
+            obsidian["status"], "unreachable",
+            "stays retryable, not parked: {obsidian}"
+        );
+        assert!(
+            !body.to_string().contains("secret-key"),
+            "header values must never be exposed: {body}"
+        );
     }
 }
