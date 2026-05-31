@@ -13,6 +13,8 @@ pub mod dashboard_overview;
 pub mod learning;
 #[path = "read_model/learning_outcomes.rs"]
 mod learning_outcomes;
+#[path = "read_model/run_summary.rs"]
+mod run_summary;
 #[path = "read_model/usage.rs"]
 pub mod usage;
 
