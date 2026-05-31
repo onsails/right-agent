@@ -446,6 +446,12 @@ pub struct McpServerStatus {
     pub auth_type: Option<String>,
     #[serde(default)]
     pub header_names: Vec<String>,
+    #[serde(default)]
+    pub last_connect_error: Option<String>,
+    #[serde(default)]
+    pub last_attempt_at: Option<String>,
+    #[serde(default)]
+    pub last_success_at: Option<String>,
 }
 
 #[derive(Serialize)]
