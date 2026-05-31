@@ -94,6 +94,24 @@ pub(crate) fn build_compact_invocation(
     }
 }
 
+/// Removes this session's timer entry from `compact_timers` when the fire
+/// task exits, so completed/timed-out compactions don't leak their token.
+/// Skips removal if the token was cancelled — that means a turn-start
+/// `cancel()` or a re-`arm()` already took over the entry (possibly with a
+/// fresh token), which we must not clobber.
+struct ReclaimTimer {
+    timers: crate::telegram::CompactTimers,
+    key: (i64, i64),
+    token: CancellationToken,
+}
+impl Drop for ReclaimTimer {
+    fn drop(&mut self) {
+        if !self.token.is_cancelled() {
+            self.timers.remove(&self.key);
+        }
+    }
+}
+
 /// Everything a fire task needs. Cloned from `WorkerContext` at the turn-end
 /// hook (Task 7).
 #[derive(Clone)]
@@ -139,6 +157,12 @@ async fn open_and_read_fullness(ctx: &IdleCompactionCtx) -> Option<(right_db::Co
 /// `token`, which drops the wait future and SIGKILLs the `/compact` process
 /// group cleanly (no orphan), releasing the session lock promptly.
 async fn run_compaction(ctx: IdleCompactionCtx, token: CancellationToken) {
+    let _reclaim = ReclaimTimer {
+        timers: ctx.compact_timers.clone(),
+        key: (ctx.chat_id, ctx.thread_id),
+        token: token.clone(),
+    };
+
     let Some((conn, used)) = open_and_read_fullness(&ctx).await else {
         return;
     };
@@ -476,5 +500,19 @@ mod tests {
         );
         cancel(&timers, 2, 0);
         tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    async fn run_compaction_reclaims_timer_entry_on_exit() {
+        let timers: crate::telegram::CompactTimers = std::sync::Arc::new(dashmap::DashMap::new());
+        let token = CancellationToken::new();
+        timers.insert((5, 0), token.clone());
+        // /nonexistent agent_db_dir makes run_compaction early-return; the
+        // reclaim guard must still remove the entry on the way out.
+        run_compaction(dummy_ctx(timers.clone(), 5, 0), token).await;
+        assert!(
+            timers.get(&(5, 0)).is_none(),
+            "run_compaction must reclaim its timer entry on exit"
+        );
     }
 }
