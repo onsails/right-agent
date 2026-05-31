@@ -46,15 +46,16 @@ fn delivery_kind_from_json(json: Option<&str>) -> Option<String> {
 
 /// Failed `async_runs` whose window timestamp falls in `[since, now]`, newest
 /// first. `kind` optionally restricts to a single run kind (e.g. `"cron"`);
-/// `None` matches all kinds. Shared by the dashboard overview (24h, all kinds)
-/// and activity overview (7d, cron-only) so both stay aligned with
-/// `RUN_SUMMARY_COLUMNS`.
+/// `None` matches all kinds. Returns the exact count of matching rows and the
+/// newest `FAILURE_SAMPLE_LIMIT` of them — the count may exceed the list
+/// length. Shared by the dashboard overview (24h, all kinds) and activity
+/// overview (7d, cron-only) so both stay aligned with `RUN_SUMMARY_COLUMNS`.
 pub(super) async fn failed_runs_in_window(
     conn: &Connection,
     now: &DateTime<Utc>,
     since: &DateTime<Utc>,
     kind: Option<&str>,
-) -> Result<Vec<RunSummary>, ReadModelError> {
+) -> Result<(usize, Vec<RunSummary>), ReadModelError> {
     let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
     // win_ts is appended immediately after the RUN_SUMMARY_COLUMNS list.
     let sql = format!(
@@ -81,5 +82,7 @@ pub(super) async fn failed_runs_in_window(
             out.push(run);
         }
     }
-    Ok(out)
+    let total = out.len();
+    out.truncate(super::FAILURE_SAMPLE_LIMIT);
+    Ok((total, out))
 }

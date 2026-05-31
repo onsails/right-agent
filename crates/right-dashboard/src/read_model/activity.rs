@@ -74,8 +74,8 @@ pub async fn activity_overview(
                 .any(|run| is_active_status(&run.status))
         })
         .count();
-    let failed_runs = failed_cron_runs(conn, &input.generated_at).await?;
-    let failed_recent_cron_count = failed_runs.len();
+    let (failed_recent_cron_count, failed_runs) =
+        failed_cron_runs(conn, &input.generated_at).await?;
 
     Ok(OverviewResponse {
         agent: input.agent,
@@ -282,7 +282,7 @@ fn read_log_excerpt(path: Option<String>, max_lines: usize) -> Result<LogExcerpt
 async fn failed_cron_runs(
     conn: &Connection,
     generated_at: &str,
-) -> Result<Vec<RunSummary>, ReadModelError> {
+) -> Result<(usize, Vec<RunSummary>), ReadModelError> {
     let now = parse_utc(generated_at)?;
     let since = now - Duration::days(7);
     super::run_summary::failed_runs_in_window(conn, &now, &since, Some("cron")).await
@@ -712,5 +712,40 @@ mod tests {
         );
         // newest first
         assert_eq!(response.failed_runs[0].id, "run-f2");
+    }
+
+    #[tokio::test]
+    async fn failed_cron_runs_caps_at_sample_limit_with_true_count() {
+        let (_dir, conn) = fixture().await;
+        // 51 failed cron runs in the 7d window (> FAILURE_SAMPLE_LIMIT = 50).
+        for i in 0..51 {
+            conn.execute(
+                "INSERT INTO async_runs (
+                    id, kind, producer_ref, run_session_id, target_chat_id,
+                    status, finished_at, delivery_required, delivery_status,
+                    created_at, updated_at
+                 ) VALUES (?1, 'cron', 'job-a', ?2, 123,
+                    'failed', '2026-05-31T11:00:00Z', 0, 'none',
+                    '2026-05-31T11:00:00Z', '2026-05-31T11:00:00Z')",
+                right_db::params![format!("run-{i:03}"), format!("session-{i:03}")],
+            )
+            .await
+            .unwrap();
+        }
+
+        let response = activity_overview(
+            &conn,
+            ActivityOverviewInput {
+                agent: "agent-a".to_owned(),
+                generated_at: "2026-05-31T12:00:00Z".to_owned(),
+                refresh_interval_secs: 30,
+                foreground: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.summary.failed_recent_cron_count, 51);
+        assert_eq!(response.failed_runs.len(), 50);
     }
 }

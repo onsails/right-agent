@@ -31,11 +31,11 @@ pub async fn dashboard_overview(
 ) -> Result<DashboardOverviewResponse, ReadModelError> {
     let active_runs =
         active_async_run_count(conn, &input.generated_at).await? + input.foreground_active_count;
-    let recent_failed_runs = recent_failed_runs(conn, &input.generated_at).await?;
-    // Same predicate and 24h window as the list, so the count is exactly the
-    // number of rows — derive it instead of issuing a second identical query.
-    // Keeps the card count and the revealed list structurally consistent.
-    let recent_failures = recent_failed_runs.len() as i64;
+    // The list is capped at FAILURE_SAMPLE_LIMIT; the count is the exact 24h
+    // windowed total and may exceed the list length.
+    let (recent_failures_count, recent_failed_runs) =
+        recent_failed_runs(conn, &input.generated_at).await?;
+    let recent_failures = recent_failures_count as i64;
     let today_cost_usd = today_cost_usd(conn, &input.generated_at).await?;
     let learning_candidates_24h =
         learning_candidate_count(conn, &input.agent, &input.generated_at).await?;
@@ -848,7 +848,7 @@ fn curator_status_title(status: &str) -> &'static str {
 async fn recent_failed_runs(
     conn: &Connection,
     generated_at: &str,
-) -> Result<Vec<RunSummary>, ReadModelError> {
+) -> Result<(usize, Vec<RunSummary>), ReadModelError> {
     let now = parse_utc(generated_at)?;
     let since = now - Duration::hours(24);
     super::run_summary::failed_runs_in_window(conn, &now, &since, None).await
@@ -1654,5 +1654,43 @@ mod tests {
                 message: "curator state row is absent".to_string(),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn recent_failed_runs_caps_at_sample_limit_with_true_count() {
+        let (_dir, conn) = fixture().await;
+        // 51 failed runs in the 24h window (> FAILURE_SAMPLE_LIMIT = 50).
+        for i in 0..51 {
+            conn.execute(
+                "INSERT INTO async_runs (
+                    id, kind, producer_ref, run_session_id, target_chat_id,
+                    status, finished_at, exit_code, delivery_required, delivery_status,
+                    created_at, updated_at
+                 ) VALUES (?1, 'cron', 'daily', ?2, 123,
+                    'failed', '2026-05-31T11:00:00Z', 1, 1, 'pending',
+                    '2026-05-31T11:00:00Z', '2026-05-31T11:00:00Z')",
+                right_db::params![format!("run-{i:03}"), format!("session-{i:03}")],
+            )
+            .await
+            .unwrap();
+        }
+
+        let response = dashboard_overview(
+            &conn,
+            DashboardOverviewInput {
+                agent: "alpha".to_string(),
+                generated_at: "2026-05-31T12:00:00Z".to_string(),
+                foreground_active_count: 0,
+                sandbox: crate::api_types::OverviewSandboxStatus {
+                    state: "configured".to_string(),
+                    detail: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.recent_failures, 51);
+        assert_eq!(response.recent_failed_runs.len(), 50);
     }
 }
