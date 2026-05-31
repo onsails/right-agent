@@ -1,5 +1,8 @@
 //! Idle-compaction debounce: after 2h of inactivity, run CC's native
-//! `/compact` on an opus[1m] session that is >=40% full. See
+//! `/compact` on an opus[1m] session that is >=40% full. Compaction is
+//! abortable: it skips a busy session (`try_lock`) and, once running, a turn's
+//! activity cancels it — the `/compact` process group is SIGKILLed (no orphan)
+//! and the session lock releases promptly. See
 //! docs/superpowers/specs/2026-05-31-idle-compaction-design.md
 
 use std::path::PathBuf;
@@ -15,8 +18,8 @@ const IDLE_AFTER: Duration = Duration::from_secs(2 * 60 * 60);
 /// Compact only when the last turn's context footprint reached this many
 /// tokens (40% of the opus[1m] 1,000,000-token window).
 const MIN_USED_TOKENS: u64 = 400_000;
-/// Wall-clock cap on a single `/compact` call. Bounds how long a returning
-/// user waits on the session lock if they arrive mid-compaction.
+/// Wall-clock cap on a single `/compact` call. On timeout the `/compact`
+/// process group is killed (no orphaned child); the next idle window retries.
 const COMPACT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Steers CC's summary toward the active discussion. Static — CC already has
 /// the full conversation at compaction time.
@@ -130,10 +133,12 @@ async fn open_and_read_fullness(ctx: &IdleCompactionCtx) -> Option<(right_db::Co
 }
 
 /// Fire path. Re-checks eligibility, resolves the active session, takes the
-/// per-session mutex, runs `/compact`, records usage. Best-effort: every
-/// failure logs and returns (the next idle cycle retries). Never aborted
-/// mid-flight (see `arm`), so the session lock is always released cleanly.
-async fn run_compaction(ctx: IdleCompactionCtx) {
+/// per-session mutex (skipping if the session is busy), runs `/compact`,
+/// records usage. Best-effort: every failure logs and returns (the next idle
+/// cycle retries). Abortable: a turn that starts during compaction cancels
+/// `token`, which drops the wait future and SIGKILLs the `/compact` process
+/// group cleanly (no orphan), releasing the session lock promptly.
+async fn run_compaction(ctx: IdleCompactionCtx, token: CancellationToken) {
     let Some((conn, used)) = open_and_read_fullness(&ctx).await else {
         return;
     };
@@ -163,14 +168,20 @@ async fn run_compaction(ctx: IdleCompactionCtx) {
         }
     };
 
-    // Serialize against live worker/delivery turns on the same session.
-    let _guard: tokio::sync::OwnedMutexGuard<()> = {
-        let entry = ctx
-            .session_locks
-            .entry(root_session_id.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        entry.lock_owned().await
+    // Serialize against live worker/delivery turns on the same session. Skip
+    // (rather than queue) if the session is busy: compaction must never start
+    // on an active session, and a returning user must never wait behind it.
+    let lock = ctx
+        .session_locks
+        .entry(root_session_id.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _guard = match lock.try_lock_owned() {
+        Ok(g) => g,
+        Err(_) => {
+            tracing::debug!(agent = %ctx.agent_name, "idle-compaction: session busy, skipping");
+            return;
+        }
     };
 
     let args =
@@ -193,18 +204,38 @@ async fn run_compaction(ctx: IdleCompactionCtx) {
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let output = match tokio::time::timeout(COMPACT_TIMEOUT, cmd.output()).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
+    let child = match right_process::ProcessGroupChild::spawn(cmd) {
+        Ok(c) => c,
+        Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "idle-compaction: spawn failed: {e:#}");
             return;
         }
-        Err(_) => {
-            tracing::warn!(
-                agent = %ctx.agent_name,
-                "idle-compaction: timed out after {}s",
-                COMPACT_TIMEOUT.as_secs()
-            );
+    };
+
+    // Race the wait against the session cancellation token. On timeout or
+    // abort, dropping the wait future drops the `ProcessGroupChild`, which
+    // SIGKILLs the whole `/compact` process group (the in-sandbox grandchild
+    // too) — nothing is orphaned and the session lock releases immediately.
+    let output = tokio::select! {
+        res = crate::cc::invocation::wait_with_output_or_kill(child, COMPACT_TIMEOUT) => match res {
+            Ok(crate::cc::invocation::ChildOutput::Completed(o)) => o,
+            Ok(crate::cc::invocation::ChildOutput::TimedOut) => {
+                tracing::warn!(
+                    agent = %ctx.agent_name,
+                    "idle-compaction: timed out after {}s; killed process group",
+                    COMPACT_TIMEOUT.as_secs()
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(agent = %ctx.agent_name, "idle-compaction: wait failed: {e:#}");
+                return;
+            }
+        },
+        _ = token.cancelled() => {
+            // A turn started (activity). Dropping the wait future drops the
+            // ProcessGroupChild, killing the /compact process group cleanly.
+            tracing::debug!(agent = %ctx.agent_name, "idle-compaction: aborted by activity");
             return;
         }
     };
@@ -252,9 +283,12 @@ pub(crate) fn cancel(timers: &crate::telegram::CompactTimers, chat_id: i64, thre
 
 /// (Re)arm the 2h debounce. Replaces any existing timer. The spawned task
 /// waits on `sleep` racing the token: a cancel during the wait returns without
-/// compacting; once `sleep` wins, the token is no longer awaited, so a late
-/// cancel cannot tear down the in-flight compaction (which would orphan the
-/// `claude` child and drop the session lock mid-write).
+/// compacting. Once `sleep` wins, the task runs an ABORTABLE compaction with
+/// the same token still in the map — a turn during it calls `cancel()`, which
+/// SIGKILLs the `/compact` process group cleanly (no orphaned `claude` child)
+/// and releases the session lock promptly. The map entry is left in place; the
+/// next `arm`/`cancel` on this session cleans it up (a late `cancel()` on a
+/// finished task is a harmless no-op).
 fn arm(ctx: IdleCompactionCtx) {
     let key = (ctx.chat_id, ctx.thread_id);
     if let Some((_, prev)) = ctx.compact_timers.remove(&key) {
@@ -268,10 +302,9 @@ fn arm(ctx: IdleCompactionCtx) {
             _ = tokio::time::sleep(IDLE_AFTER) => {}
             _ = token.cancelled() => return,
         }
-        // Survived the debounce. Drop our map entry first so a concurrent
-        // cancel finds nothing to cancel, then run to completion uncancelled.
-        ctx.compact_timers.remove(&key);
-        run_compaction(ctx).await;
+        // Survived the debounce. Keep the token in the map so a turn-start
+        // cancel can abort the in-flight compaction.
+        run_compaction(ctx, token).await;
     });
 }
 
