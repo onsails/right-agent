@@ -113,9 +113,10 @@ line ~76):
 
 ```rust
 /// Per-(chat_id, thread_id) idle-compaction debounce timers.
-/// Aborting the handle cancels a queued compaction. In-memory only.
+/// Cancelling the token aborts a still-sleeping timer; once the 2h sleep
+/// wins the compaction runs to completion (commit-to-sleep). In-memory only.
 pub(crate) type CompactTimers =
-    Arc<DashMap<(i64, i64), tokio::task::AbortHandle>>;
+    Arc<DashMap<(i64, i64), tokio_util::sync::CancellationToken>>;
 ```
 
 **Construction — `crates/bot/src/lib.rs`** next to `session_locks`
@@ -143,9 +144,11 @@ foreground turns** (never cron / delivery / reflection / background):
    post-turn learning block (~line 2110), **not nested inside it** (that
    block is gated on `learning.prefilter_enabled`; the debounce must run
    regardless). It evaluates the gate and:
-   - **passes** → abort any existing handle for the key, then spawn the
-     fire task (sleeps `IDLE_AFTER`, then compacts) and store its
-     `AbortHandle`. This *resets* the debounce on every qualifying turn.
+   - **passes** → cancel any existing token for the key, then spawn the
+     fire task (sleeps `IDLE_AFTER`, then compacts) and store a new
+     `CancellationToken`. This *resets* the debounce on every qualifying
+     turn. Once the sleep wins, the compaction runs to completion and the
+     token cannot interrupt it (commit-to-sleep).
    - **fails** → `cancel(...)` the key (ensures no stale timer survives,
      e.g. right after CC auto-compacted the context below threshold).
 
@@ -356,8 +359,8 @@ TDD, narrowest-first, per `AGENTS.rust.md` cadence.
   - `eligible`: opus[1m] + ≥400k → true; opus[1m] + 399,999 → false;
     `sonnet[1m]` → false; non-`[1m]` opus → false; `None` model → false;
     a future `claude-opus-4-9[1m]` → true (suffix match).
-  - `arm` then `arm` again replaces the handle (old aborted); `cancel`
-    removes and aborts; `cancel` on absent key is a no-op.
+  - `arm` then `arm` again replaces the token (old cancelled); `cancel`
+    removes and cancels; `cancel` on absent key is a no-op.
   - The recency `/compact` prompt is assembled correctly
     (`prompt == "/compact " + RECENCY_INSTRUCTION`).
   - `latest_interactive_context_tokens`: in-memory DB seeded with rows of
