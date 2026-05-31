@@ -150,7 +150,6 @@ pub(crate) struct RegisteredNonForegroundInvocation {
 }
 
 impl RegisteredNonForegroundInvocation {
-    #[cfg(test)]
     pub(crate) fn invocation_id(&self) -> &str {
         &self.invocation_id
     }

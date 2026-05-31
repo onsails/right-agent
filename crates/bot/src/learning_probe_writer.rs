@@ -131,6 +131,33 @@ pub(crate) fn build_invocation(
     }
 }
 
+/// Map a `skill_learning_events.status` (finish phase) to a `skill_spend.kind`.
+/// Only successful create/update are spend-worthy; aborted/failed are not.
+fn finish_status_to_spend_kind(status: &str) -> Option<&'static str> {
+    match status {
+        "created" => Some("create"),
+        "updated" => Some("patch"),
+        _ => None,
+    }
+}
+
+/// Return the last `{"type":"result",...}` line from a stream-json stdout dump.
+fn last_result_line(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .rfind(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| {
+                    v.get("type")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t == "result")
+                })
+                .unwrap_or(false)
+        })
+        .map(ToOwned::to_owned)
+}
+
 /// Spawn the probe-writer fork. Holds session mutex during fork init only.
 /// Returns when fork is established (system/init received); detached task drains
 /// the remainder.
@@ -221,10 +248,17 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
             return;
         }
     };
+    let mut lines = BufReader::new(stdout).lines();
 
-    // Wait for system/init event, then release mutex by exiting this scope.
-    let init_observed =
-        wait_for_system_init(stdout, &probe_session_id, PROBE_WRITER_INIT_TIMEOUT).await;
+    // Phase 1: read until system/init (bounded), holding the session mutex.
+    // ONE reader drains the whole stream — `read_until_init` borrows `lines`
+    // and leaves it positioned just past the init event for Phase 2.
+    let init_observed = tokio::time::timeout(
+        PROBE_WRITER_INIT_TIMEOUT,
+        read_until_init(&mut lines, &probe_session_id),
+    )
+    .await
+    .unwrap_or(false);
     drop(_guard);
 
     if !init_observed {
@@ -238,67 +272,73 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
         return;
     }
 
-    // Detach: probe-writer continues running independently. Drain remaining
-    // stdout for usage tracking + final log emit.
+    // Phase 2: detached — drain the REST of the same reader to EOF (prevents
+    // pipe-fill hang) while awaiting the process, capturing the final result.
     let agent_name = ctx.agent_name.clone();
     let agent_db_dir = ctx.agent_db_dir.clone();
     let chat_id = ctx.chat_id;
     let thread_id = ctx.thread_id;
+    let invocation_id = active_invocation.invocation_id().to_owned();
     tokio::spawn(async move {
-        match crate::cc::invocation::wait_with_output_or_kill(child, PROBE_WRITER_TIMEOUT).await {
-            Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
-                let stdout_str = String::from_utf8_lossy(&output.stdout).into_owned();
-                if let Some(b) = crate::cc::stream::parse_usage_full(&stdout_str)
-                    && let Ok(conn) = right_db::open_connection(&agent_db_dir, false).await
-                    && let Err(e) = right_agent::usage::insert::insert_learning_probe_writer(
-                        &conn, &b, chat_id, thread_id,
-                    )
-                    .await
-                {
-                    tracing::warn!(agent = %agent_name, "probe-writer usage insert failed: {e:#}");
-                }
-                if !output.status.success() {
-                    tracing::warn!(
-                        agent = %agent_name,
-                        status = ?output.status,
-                        "probe-writer exited non-zero"
-                    );
+        let mut tail = String::new();
+        let drain = async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.len() < 1_000_000 {
+                    tail.push_str(&line);
+                    tail.push('\n');
                 }
             }
-            Ok(crate::cc::invocation::ChildOutput::TimedOut) => {
+        };
+        // Drain + wait for exit, bounded by PROBE_WRITER_TIMEOUT.
+        let completed = tokio::time::timeout(PROBE_WRITER_TIMEOUT, async {
+            tokio::join!(drain, child.wait())
+        })
+        .await;
+        match completed {
+            Ok((_, Ok(status))) => {
+                if !status.success() {
+                    tracing::warn!(agent = %agent_name, ?status, "probe-writer exited non-zero");
+                }
+            }
+            Ok((_, Err(e))) => {
+                tracing::warn!(agent = %agent_name, "probe-writer wait failed: {e:#}");
+            }
+            Err(_) => {
                 tracing::warn!(
                     agent = %agent_name,
                     "probe-writer timed out after {}s",
                     PROBE_WRITER_TIMEOUT.as_secs()
                 );
-            }
-            Err(e) => {
-                tracing::warn!(agent = %agent_name, "probe-writer wait failed: {e:#}");
+                let _ = child.kill().await;
             }
         }
+
+        // Record usage + per-skill create/patch spend from the captured result.
+        if let Some(result_line) = last_result_line(&tail)
+            && let Some(b) = crate::cc::stream::parse_usage_full(&result_line)
+            && let Ok(conn) = right_db::open_connection(&agent_db_dir, false).await
+        {
+            if let Err(e) = right_agent::usage::insert::insert_learning_probe_writer(
+                &conn, &b, chat_id, thread_id,
+            )
+            .await
+            {
+                tracing::warn!(agent = %agent_name, "probe-writer usage insert failed: {e:#}");
+            }
+            record_probe_writer_spend(&conn, &agent_name, &invocation_id, &b).await;
+        }
+
         active_invocation.cleanup().await;
     });
 }
 
-async fn wait_for_system_init<R: AsyncRead + Unpin>(
-    stdout: R,
-    expected_session_id: &str,
-    timeout: Duration,
-) -> bool {
-    tokio::time::timeout(
-        timeout,
-        wait_for_system_init_unbounded(stdout, expected_session_id),
-    )
-    .await
-    .unwrap_or(false)
-}
-
-async fn wait_for_system_init_unbounded<R: AsyncRead + Unpin>(
-    stdout: R,
+/// Read lines until a `system/init` for `expected_session_id` is seen. Returns
+/// `true` on init, `false` on EOF. Does NOT consume the reader (borrows it) so
+/// the same reader can be drained afterwards.
+async fn read_until_init<R: AsyncRead + Unpin>(
+    lines: &mut tokio::io::Lines<BufReader<R>>,
     expected_session_id: &str,
 ) -> bool {
-    let reader = BufReader::new(stdout);
-    let mut lines = reader.lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
@@ -313,9 +353,58 @@ async fn wait_for_system_init_unbounded<R: AsyncRead + Unpin>(
     false
 }
 
+/// Look up the skill created/patched in this invocation and write a skill_spend
+/// row. No finish row (aborted/failed/timeout) → no spend row.
+async fn record_probe_writer_spend(
+    conn: &right_db::Connection,
+    agent_name: &str,
+    invocation_id: &str,
+    b: &right_agent::usage::UsageBreakdown,
+) {
+    match right_agent::learned_skills::finish_event_for_invocation(conn, invocation_id).await {
+        Ok(Some((skill_name, status))) => {
+            if let Some(kind) = finish_status_to_spend_kind(&status)
+                && let Err(e) = right_agent::usage::insert::insert_skill_spend(
+                    conn,
+                    &skill_name,
+                    kind,
+                    b.total_cost_usd,
+                    b.cache_read_tokens as i64,
+                    b.cache_creation_tokens as i64,
+                    Some(invocation_id),
+                )
+                .await
+            {
+                tracing::warn!(agent = %agent_name, "probe-writer skill_spend insert failed: {e:#}");
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(agent = %agent_name, "probe-writer finish lookup failed: {e:#}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finish_status_to_spend_kind_maps_created_and_updated() {
+        assert_eq!(finish_status_to_spend_kind("created"), Some("create"));
+        assert_eq!(finish_status_to_spend_kind("updated"), Some("patch"));
+        assert_eq!(finish_status_to_spend_kind("aborted"), None);
+        assert_eq!(finish_status_to_spend_kind("failed"), None);
+    }
+
+    #[test]
+    fn last_result_line_picks_final_result_event() {
+        let stream = "\
+{\"type\":\"system\",\"subtype\":\"init\"}\n\
+{\"type\":\"assistant\"}\n\
+{\"type\":\"result\",\"num_turns\":3,\"total_cost_usd\":0.2,\"session_id\":\"s\"}\n";
+        let line = last_result_line(stream).unwrap();
+        assert!(line.contains("\"type\":\"result\""));
+        assert!(line.contains("\"total_cost_usd\":0.2"));
+    }
 
     fn anchor(user: &str, asst: &str) -> ProbeAnchor {
         ProbeAnchor {
@@ -439,8 +528,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn background_invocation_probe_writer_init_wait_times_out_when_child_is_silent() {
         let (_writer, reader) = tokio::io::duplex(64);
+        let mut lines = BufReader::new(reader).lines();
 
-        let observed = wait_for_system_init(reader, "probe-sid", Duration::from_secs(30)).await;
+        let observed = tokio::time::timeout(
+            PROBE_WRITER_INIT_TIMEOUT,
+            read_until_init(&mut lines, "probe-sid"),
+        )
+        .await
+        .unwrap_or(false);
 
         assert!(
             !observed,
