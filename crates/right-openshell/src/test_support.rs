@@ -81,8 +81,45 @@ pub struct TestSandbox {
 
 impl TestSandbox {
     /// Create an ephemeral sandbox for testing. Cleans up any leftover from
-    /// previous runs. The sandbox name is `right-test-<test_name>`.
+    /// previous runs. The sandbox name is `right-test-<test_name>`. Uses a
+    /// minimal fast-startup policy; use [`create_with_policy`] when a test
+    /// needs the sandbox to boot with a specific policy (e.g. so a later
+    /// `policy set` only changes the network section and OpenShell does not
+    /// reject a landlock mismatch).
+    ///
+    /// [`create_with_policy`]: Self::create_with_policy
     pub async fn create(test_name: &str) -> Self {
+        // Minimal policy — fast startup, public allowed_ips endpoint on 443.
+        const MINIMAL_POLICY: &str = "\
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_write:
+    - /tmp
+    - /sandbox
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+network_policies:
+  outbound:
+    endpoints:
+      - port: 443
+        allowed_ips:
+          - \"1.1.1.1/32\"
+        protocol: rest
+        access: full
+    binaries:
+      - path: \"**\"
+";
+        Self::create_with_policy(test_name, MINIMAL_POLICY).await
+    }
+
+    /// Like [`create`](Self::create) but boots the sandbox with the given
+    /// policy YAML. Landlock/filesystem rules are applied at startup and
+    /// cannot be changed on a live sandbox, so a test that hot-applies a
+    /// `policy set` afterward must create with a policy whose
+    /// filesystem/landlock matches what it will later apply.
+    pub async fn create_with_policy(test_name: &str, policy: &str) -> Self {
         let name = format!("right-test-{test_name}");
 
         // Hold one global sandbox slot for the sandbox lifetime. CI can set the
@@ -120,30 +157,8 @@ impl TestSandbox {
                 .expect("cleanup of leftover sandbox failed");
         }
 
-        // Minimal policy — fast startup, public allowed_ips endpoint on 443.
         let tmp = tempfile::tempdir().unwrap();
         let policy_path = tmp.path().join("policy.yaml");
-        let policy = "\
-version: 1
-filesystem_policy:
-  include_workdir: true
-  read_write:
-    - /tmp
-    - /sandbox
-process:
-  run_as_user: sandbox
-  run_as_group: sandbox
-network_policies:
-  outbound:
-    endpoints:
-      - port: 443
-        allowed_ips:
-          - \"1.1.1.1/32\"
-        protocol: rest
-        access: full
-    binaries:
-      - path: \"**\"
-";
         std::fs::write(&policy_path, policy).unwrap();
 
         let mut child = openshell::spawn_sandbox(&name, &policy_path, None, &[])

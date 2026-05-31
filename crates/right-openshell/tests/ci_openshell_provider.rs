@@ -191,9 +191,15 @@ async fn ci_openshell_provider_policy_hot_apply() {
     use right_codegen::policy::providers_append;
     use right_openshell::test_support::TestSandbox;
 
+    // Generic providers are only ever appended to permissive policies: the
+    // provider API rejects generic + restrictive (`NetworkPolicyForbidsGeneric`,
+    // enforced by `provider_create_generic_rejected_in_restrictive_mode`), and
+    // restrictive mode renders no `# right-providers: insert-above` anchor. Use
+    // the permissive base — the real production shape — so this exercises the
+    // live `policy set` apply of an appended provider endpoint.
     let base = right_codegen::policy::generate_policy(
         8100,
-        &right_agent_config::NetworkPolicy::Restrictive,
+        &right_agent_config::NetworkPolicy::Permissive,
         right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
     );
 
@@ -207,7 +213,13 @@ async fn ci_openshell_provider_policy_hot_apply() {
         "appended policy must contain new domain"
     );
 
-    let sandbox = TestSandbox::create("ci-openshell-provider-policy-hot-apply").await;
+    // Boot the sandbox WITH `base` so its startup landlock/filesystem policy
+    // matches what we hot-apply next. `providers_append` touches only the
+    // network section, so `policy set` of `appended` is a network-only change —
+    // OpenShell rejects landlock changes on a live sandbox, exactly as the
+    // production provider-add path relies on.
+    let sandbox =
+        TestSandbox::create_with_policy("ci-openshell-provider-policy-hot-apply", &base).await;
 
     let tmp = tempfile::TempDir::new().unwrap();
     let policy_path = tmp.path().join("policy.yaml");
