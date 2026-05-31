@@ -26,4 +26,12 @@ describe('CollapsibleSection', () => {
     const html = await render({ title: 'core', count: 3, defaultOpen: true })
     expect(html).toContain('BODY')
   })
+  it('uses the controlled open prop when provided', async () => {
+    const html = await render({ title: 'core', count: 3, open: true })
+    expect(html).toContain('BODY')
+  })
+  it('controlled open=false overrides defaultOpen', async () => {
+    const html = await render({ title: 'core', count: 3, defaultOpen: true, open: false })
+    expect(html).not.toContain('BODY')
+  })
 })
