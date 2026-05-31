@@ -373,6 +373,9 @@ async fn record_used_skill_receipts(
     agent_db_dir: &Path,
     receipts: &[UsedSkillReceipt],
     now_utc: DateTime<Utc>,
+    turn_cost_usd: f64,
+    turn_cache_read: u64,
+    turn_cache_creation: u64,
 ) -> anyhow::Result<std::collections::BTreeSet<String>> {
     let used_skill_names = used_skill_names_from_receipts(receipts);
     if used_skill_names.is_empty() {
@@ -385,6 +388,25 @@ async fn record_used_skill_receipts(
     right_lifecycle::bump_use_many(&conn, &used_skill_names, now_utc)
         .await
         .context("bump lifecycle usage")?;
+
+    // Attribute this turn's cost/cache to each used rightx skill (kind='usage').
+    // Overlaps across skills when a turn used several — intentional; the
+    // dashboard labels it attributed, not exact. Failure here is non-fatal.
+    for name in &used_skill_names {
+        if let Err(e) = right_agent::usage::insert::insert_skill_spend(
+            &conn,
+            name,
+            "usage",
+            turn_cost_usd,
+            turn_cache_read as i64,
+            turn_cache_creation as i64,
+            None,
+        )
+        .await
+        {
+            tracing::warn!(skill = %name, "usage skill_spend insert failed: {e:#}");
+        }
+    }
 
     Ok(used_skill_names)
 }
@@ -1608,6 +1630,9 @@ pub fn spawn_worker(
                                 &ctx.agent_dir,
                                 receipts,
                                 chrono::Utc::now(),
+                                cc_usage.cost_usd,
+                                cc_usage.cache_read_tokens,
+                                cc_usage.cache_creation_tokens,
                             )
                             .await
                             {
@@ -4153,10 +4178,16 @@ mod tests {
             used_skill_receipt("not-rightx"),
         ];
 
-        let used_names =
-            record_used_skill_receipts(temp.path(), &receipts, used_skill_receipts_now())
-                .await
-                .unwrap();
+        let used_names = record_used_skill_receipts(
+            temp.path(),
+            &receipts,
+            used_skill_receipts_now(),
+            0.0,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             used_names.into_iter().collect::<Vec<_>>(),
@@ -4177,7 +4208,7 @@ mod tests {
                 .is_none()
         );
 
-        record_used_skill_receipts(temp.path(), &receipts, used_skill_receipts_now())
+        record_used_skill_receipts(temp.path(), &receipts, used_skill_receipts_now(), 0.0, 0, 0)
             .await
             .unwrap();
         let row = right_lifecycle::get(&conn, "rightx-demo")
@@ -4193,15 +4224,51 @@ mod tests {
         let missing_agent_dir = temp.path().join("missing-agent");
         let receipts = vec![used_skill_receipt("rightx-demo")];
 
-        let err =
-            record_used_skill_receipts(&missing_agent_dir, &receipts, used_skill_receipts_now())
-                .await
-                .expect_err("missing DB directory should return an error");
+        let err = record_used_skill_receipts(
+            &missing_agent_dir,
+            &receipts,
+            used_skill_receipts_now(),
+            0.0,
+            0,
+            0,
+        )
+        .await
+        .expect_err("missing DB directory should return an error");
 
         assert!(
             format!("{err:#}").contains("database"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn record_used_skill_receipts_writes_usage_spend_per_rightx() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        drop(conn);
+        let receipts = vec![
+            UsedSkillReceipt {
+                package_name: "rightx-a".into(),
+                message: "Used rightx-a".into(),
+            },
+            UsedSkillReceipt {
+                package_name: "core-skill".into(), // non-rightx, must be ignored
+                message: "Used core-skill".into(),
+            },
+        ];
+        record_used_skill_receipts(dir.path(), &receipts, chrono::Utc::now(), 0.30, 10, 20)
+            .await
+            .unwrap();
+        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
+        let (n, name, cost): (i64, String, f64) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(skill_name), MAX(cost_usd) FROM skill_spend WHERE kind='usage'",
+                (),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .await
+            .unwrap();
+        assert_eq!((n, name.as_str(), cost), (1, "rightx-a", 0.30));
     }
 
     #[tokio::test]
