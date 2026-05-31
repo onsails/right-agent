@@ -47,6 +47,7 @@ pub struct DashboardOverviewResponse {
     pub generated_at: String,
     pub active_runs: i64,
     pub recent_failures: i64,
+    pub recent_failed_runs: Vec<RunSummary>,
     pub today_cost_usd: f64,
     pub learning_candidates_24h: i64,
     pub doctor: OverviewDoctorStatus,
@@ -704,6 +705,7 @@ mod dashboard_v2_tests {
             generated_at: "2026-05-20T12:00:00Z".to_owned(),
             active_runs: 2,
             recent_failures: 1,
+            recent_failed_runs: vec![],
             today_cost_usd: 0.42,
             learning_candidates_24h: 3,
             doctor: OverviewDoctorStatus {
@@ -735,6 +737,7 @@ mod dashboard_v2_tests {
                 "generated_at": "2026-05-20T12:00:00Z",
                 "active_runs": 2,
                 "recent_failures": 1,
+                "recent_failed_runs": [],
                 "today_cost_usd": 0.42,
                 "learning_candidates_24h": 3,
                 "doctor": {
@@ -767,6 +770,7 @@ mod dashboard_v2_tests {
             generated_at: "2026-05-23T10:00:00Z".to_owned(),
             active_runs: 1,
             recent_failures: 1,
+            recent_failed_runs: vec![],
             today_cost_usd: 1.25,
             learning_candidates_24h: 2,
             doctor: OverviewDoctorStatus {
