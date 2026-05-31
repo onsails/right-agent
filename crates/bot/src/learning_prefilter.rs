@@ -253,9 +253,9 @@ const SKILL_EXCERPT_MAX_CHARS: usize = 4_096;
 const SKILL_EXCERPT_MAX_LINES: usize = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LearnedSkillSummary {
-    name: String,
-    excerpt: String,
+pub(crate) struct LearnedSkillSummary {
+    pub(crate) name: String,
+    pub(crate) excerpt: String,
 }
 
 fn unwrap_structured_output_payload(
@@ -317,6 +317,86 @@ fn collect_host_rightx_skill_index(agent_dir: &Path) -> std::io::Result<Vec<Lear
 
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(skills)
+}
+
+/// Shell command run inside the sandbox to dump `rightx-*` skill frontmatter.
+/// The `[ -f ... ]` guard makes a no-match glob emit nothing (no error), and
+/// each skill is delimited by a `@@@SKILL <name>` marker on its own line.
+const SANDBOX_SKILL_DUMP_CMD: &str = "for d in /sandbox/.claude/skills/rightx-*/; do \
+       [ -f \"$d/SKILL.md\" ] || continue; \
+       printf '\\n@@@SKILL %s\\n' \"$(basename \"$d\")\"; \
+       head -c 4096 \"$d/SKILL.md\"; \
+     done";
+
+/// Parse the delimited dump from [`SANDBOX_SKILL_DUMP_CMD`] into per-skill
+/// summaries. Non-`rightx-` chunks are dropped, and excerpts are bounded the
+/// same way as the host path.
+fn parse_sandbox_skill_dump(dump: &str) -> Vec<LearnedSkillSummary> {
+    let mut out = Vec::new();
+    for chunk in dump.split("\n@@@SKILL ") {
+        let chunk = chunk.trim_start_matches("@@@SKILL ");
+        let Some((name_line, body)) = chunk.split_once('\n') else {
+            continue;
+        };
+        let name = name_line.trim();
+        if !is_rightx_skill(name) {
+            continue;
+        }
+        out.push(LearnedSkillSummary {
+            name: name.to_owned(),
+            excerpt: bounded_skill_excerpt(body),
+        });
+    }
+    // `SANDBOX_SKILL_DUMP_CMD`'s shell glob (`rightx-*/`) already yields
+    // lexicographic order, but sort explicitly so the guarantee matches the
+    // host path and survives any future change to the dump command.
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Read the `rightx-*` skill index from inside the sandbox via gRPC exec.
+///
+/// Learned skills live on the sandbox filesystem (`/sandbox/.claude/skills`),
+/// never on the host, so the host directory walk in
+/// [`collect_host_rightx_skill_index`] only applies to `sandbox: mode: none`
+/// agents.
+async fn collect_sandbox_rightx_skill_index(
+    sandbox_name: &str,
+) -> anyhow::Result<Vec<LearnedSkillSummary>> {
+    use anyhow::Context as _;
+
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+        status => anyhow::bail!("openshell preflight not ready: {status:?}"),
+    };
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!("connect_grpc: {e:?}"))?;
+    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox_name)
+        .await
+        .map_err(|e| anyhow::anyhow!("resolve_sandbox_id: {e:?}"))?;
+    let (out, _exit) = right_openshell::openshell::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["sh", "-c", SANDBOX_SKILL_DUMP_CMD],
+        right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("exec_in_sandbox: {e:?}"))
+    .context("read sandbox skill index")?;
+    Ok(parse_sandbox_skill_dump(&out))
+}
+
+/// Shared skill-index reader: from the sandbox via gRPC when a sandbox is
+/// resolved, or the host directory walk for `sandbox: mode: none` agents.
+pub(crate) async fn collect_rightx_skill_index(
+    resolved_sandbox: Option<&str>,
+    agent_dir: &Path,
+) -> anyhow::Result<Vec<LearnedSkillSummary>> {
+    match resolved_sandbox {
+        Some(name) => collect_sandbox_rightx_skill_index(name).await,
+        None => Ok(collect_host_rightx_skill_index(agent_dir)?),
+    }
 }
 
 fn read_bounded_skill_excerpt(path: &Path) -> std::io::Result<Option<String>> {
@@ -502,15 +582,16 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
         }
     };
 
-    let skills = match collect_host_rightx_skill_index(&ctx.agent_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "prefilter skill index failed: {e:#}");
-            return PrefilterDecision::Skip {
-                reason: "skill index failed".into(),
-            };
-        }
-    };
+    let skills =
+        match collect_rightx_skill_index(ctx.resolved_sandbox.as_deref(), &ctx.agent_dir).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(agent = %ctx.agent_name, "prefilter skill index failed: {e:#}");
+                return PrefilterDecision::Skip {
+                    reason: "skill index failed".into(),
+                };
+            }
+        };
     let summary = render_skill_index_summary(&skills);
 
     let prompt = build_prompt(&anchor, &baselines, &summary);
@@ -640,6 +721,42 @@ pub(crate) async fn run(ctx: PrefilterContext, anchor: ProbeAnchor) -> Prefilter
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_sandbox_skill_dump_extracts_name_and_excerpt() {
+        let dump = "\n@@@SKILL rightx-foo\n---\nname: rightx-foo\ndescription: does foo\n---\n# body\n\
+                    \n@@@SKILL rightx-bar\n---\nname: rightx-bar\ndescription: does bar\n---\n";
+        let got = parse_sandbox_skill_dump(dump);
+        // Dump order is foo-then-bar; output is sorted by name, so bar leads.
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name, "rightx-bar");
+        assert!(got[0].excerpt.contains("does bar"));
+        assert_eq!(got[1].name, "rightx-foo");
+        assert!(got[1].excerpt.contains("does foo"));
+    }
+
+    #[tokio::test]
+    #[ignore = "ci-openshell: creates a live sandbox, writes a SKILL.md, reads the index"]
+    async fn ci_openshell_sandbox_skill_index_reads_rightx() {
+        let sb = right_openshell::test_support::TestSandbox::create("skill-index").await;
+        // `printf -- ...` stops option parsing so the `---` frontmatter fence
+        // isn't misread as printf flags (which would exit 2 and write nothing).
+        let (_o, code) = sb
+            .exec(&[
+                "sh",
+                "-c",
+                "mkdir -p /sandbox/.claude/skills/rightx-demo && \
+                 printf -- '---\\nname: rightx-demo\\ndescription: demo skill\\n---\\n' \
+                 > /sandbox/.claude/skills/rightx-demo/SKILL.md",
+            ])
+            .await;
+        assert_eq!(code, 0, "skill-file setup command failed");
+        let idx = collect_sandbox_rightx_skill_index(sb.name()).await.unwrap();
+        assert!(
+            idx.iter()
+                .any(|s| s.name == "rightx-demo" && s.excerpt.contains("demo skill"))
+        );
+    }
 
     fn anchor(user: &str, assistant: &str) -> ProbeAnchor {
         ProbeAnchor {

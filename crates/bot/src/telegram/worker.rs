@@ -4,7 +4,6 @@
 //! live infrastructure and are covered by code review pattern only.
 
 use std::collections::VecDeque;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -1024,98 +1023,6 @@ fn summary_first_line(excerpt: &str) -> String {
         .find(|l| !l.is_empty())
         .map(|l| l.chars().take(200).collect())
         .unwrap_or_default()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HostLearnedSkillSummary {
-    name: String,
-    excerpt: String,
-}
-
-const HOST_SKILL_EXCERPT_MAX_BYTES: usize = 4_096;
-const HOST_SKILL_EXCERPT_MAX_CHARS: usize = 4_096;
-const HOST_SKILL_EXCERPT_MAX_LINES: usize = 120;
-
-fn collect_host_rightx_skill_index(
-    agent_dir: &Path,
-) -> std::io::Result<Vec<HostLearnedSkillSummary>> {
-    let skills_dir = agent_dir.join(".claude/skills");
-    let entries = match std::fs::read_dir(&skills_dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
-    };
-    let mut skills = Vec::new();
-
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !is_rightx_skill(&name) {
-            continue;
-        }
-
-        let skill_path = entry.path().join("SKILL.md");
-        let excerpt = match read_bounded_skill_excerpt(&skill_path) {
-            Ok(Some(excerpt)) => excerpt,
-            Ok(None) => continue,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err),
-        };
-        skills.push(HostLearnedSkillSummary { name, excerpt });
-    }
-
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(skills)
-}
-
-fn read_bounded_skill_excerpt(path: &Path) -> std::io::Result<Option<String>> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() {
-        return Ok(None);
-    }
-
-    let file = std::fs::File::open(path)?;
-    let mut reader = std::io::BufReader::new(file).take(HOST_SKILL_EXCERPT_MAX_BYTES as u64);
-    let mut bytes = Vec::with_capacity(HOST_SKILL_EXCERPT_MAX_BYTES);
-    reader.read_to_end(&mut bytes)?;
-    let content = String::from_utf8_lossy(&bytes);
-    Ok(Some(bounded_skill_excerpt(&content)))
-}
-
-fn bounded_skill_excerpt(content: &str) -> String {
-    let mut out = String::new();
-    let mut chars = 0;
-    let mut first = true;
-
-    for line in content.lines().take(HOST_SKILL_EXCERPT_MAX_LINES) {
-        if !first && !push_bounded_skill_char(&mut out, '\n', &mut chars) {
-            break;
-        }
-        first = false;
-
-        for ch in line.chars() {
-            if !push_bounded_skill_char(&mut out, ch, &mut chars) {
-                return out.trim().to_owned();
-            }
-        }
-    }
-
-    out.trim().to_owned()
-}
-
-fn push_bounded_skill_char(out: &mut String, ch: char, chars: &mut usize) -> bool {
-    if *chars >= HOST_SKILL_EXCERPT_MAX_CHARS
-        || out.len() + ch.len_utf8() > HOST_SKILL_EXCERPT_MAX_BYTES
-    {
-        return false;
-    }
-    out.push(ch);
-    *chars += 1;
-    true
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2209,7 +2116,12 @@ pub fn spawn_worker(
                         }
                     };
 
-                    let skill_index = match collect_host_rightx_skill_index(&agent_dir) {
+                    let skill_index = match crate::learning_prefilter::collect_rightx_skill_index(
+                        resolved.as_deref(),
+                        &agent_dir,
+                    )
+                    .await
+                    {
                         Ok(entries) => entries
                             .into_iter()
                             .map(|s| format!("- {}: {}", s.name, summary_first_line(&s.excerpt)))
@@ -2218,7 +2130,7 @@ pub fn spawn_worker(
                         Err(e) => {
                             tracing::warn!(
                                 agent = %agent_name,
-                                "collect_host_rightx_skill_index failed: {e:#}"
+                                "collect_rightx_skill_index failed: {e:#}"
                             );
                             String::new()
                         }
