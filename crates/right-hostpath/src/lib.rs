@@ -43,3 +43,50 @@ pub enum HostPathError {
     #[error("no shell rc file could be determined")]
     NoRcTarget,
 }
+
+/// Directory portion of the running binary (e.g. `/root/.local/bin`).
+pub fn bin_dir(current_exe: &Path) -> PathBuf {
+    current_exe
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// rc files to consider for `shell`, most-specific first.
+fn rc_targets(shell: Option<&str>, home: &Path) -> Vec<PathBuf> {
+    let name = shell
+        .and_then(|s| Path::new(s).file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if name.contains("zsh") {
+        vec![home.join(".zshrc")]
+    } else if name.contains("fish") {
+        vec![home.join(".config/fish/config.fish")]
+    } else if name.contains("bash") {
+        vec![home.join(".bashrc"), home.join(".profile")]
+    } else {
+        vec![home.join(".profile")]
+    }
+}
+
+/// Whether a fresh interactive shell will have `bindir` on its PATH.
+///
+/// True iff `bindir` is a standard system dir, or a candidate rc file for
+/// `shell` already mentions `bindir`. **Deliberately ignores the live
+/// `$PATH`** — the installer's own process has the install dir exported
+/// (install.sh), so a live-PATH check would be a false "ok".
+pub fn is_persistently_on_path(bindir: &Path, home: &Path, shell: Option<&str>) -> bool {
+    if STANDARD_DIRS.iter().any(|d| Path::new(d) == bindir) {
+        return true;
+    }
+    let needle = bindir.to_string_lossy();
+    rc_targets(shell, home).iter().any(|rc| {
+        std::fs::read_to_string(rc)
+            .map(|c| c.contains(needle.as_ref()))
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;
