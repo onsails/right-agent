@@ -65,3 +65,74 @@ fn rc_mentioning_bindir_is_on_path() {
         Some("/bin/bash")
     ));
 }
+
+#[test]
+fn ensure_writes_block_then_is_idempotent() {
+    let home = tempdir().unwrap();
+    let bindir = home.path().join(".local/bin");
+    let rc = home.path().join(".bashrc");
+
+    let first = ensure_on_path(&bindir, home.path(), Some("/bin/bash")).unwrap();
+    assert_eq!(first, EnsureOutcome::Wrote { file: rc.clone() });
+    let content = std::fs::read_to_string(&rc).unwrap();
+    assert_eq!(content.matches(BLOCK_START).count(), 1);
+    assert_eq!(content.matches(BLOCK_END).count(), 1);
+    assert!(content.contains(&*bindir.to_string_lossy()));
+
+    let second = ensure_on_path(&bindir, home.path(), Some("/bin/bash")).unwrap();
+    assert_eq!(second, EnsureOutcome::AlreadyOnPath);
+    assert_eq!(std::fs::read_to_string(&rc).unwrap(), content);
+}
+
+#[test]
+fn apply_block_normalizes_orphan_and_duplicate_markers() {
+    let bindir = Path::new("/opt/bin");
+    let messy =
+        format!("line1\n{BLOCK_START}\nold\n{BLOCK_END}\nline2\n{BLOCK_START}\norphan-no-end\n");
+    let once = apply_block(&messy, bindir, Some("/bin/bash"));
+    assert_eq!(once.matches(BLOCK_START).count(), 1);
+    assert_eq!(once.matches(BLOCK_END).count(), 1);
+    assert!(once.contains("line1") && once.contains("line2"));
+    assert!(!once.contains("old") && !once.contains("orphan-no-end"));
+    assert_eq!(apply_block(&once, bindir, Some("/bin/bash")), once);
+}
+
+#[test]
+fn ensure_returns_could_not_write_when_target_is_a_dir() {
+    let home = tempdir().unwrap();
+    let bindir = home.path().join(".local/bin");
+    std::fs::create_dir(home.path().join(".bashrc")).unwrap(); // .bashrc is a dir
+    match ensure_on_path(&bindir, home.path(), Some("/bin/bash")).unwrap() {
+        EnsureOutcome::CouldNotWrite { file, .. } => {
+            assert_eq!(file, home.path().join(".bashrc"))
+        }
+        other => panic!("expected CouldNotWrite, got {other:?}"),
+    }
+}
+
+#[test]
+fn ensure_writes_fish_config_with_fish_syntax() {
+    let home = tempdir().unwrap();
+    let bindir = home.path().join(".local/bin");
+    let rc = home.path().join(".config/fish/config.fish");
+    let outcome = ensure_on_path(&bindir, home.path(), Some("/usr/bin/fish")).unwrap();
+    assert_eq!(outcome, EnsureOutcome::Wrote { file: rc.clone() });
+    let content = std::fs::read_to_string(&rc).unwrap();
+    assert!(content.contains("fish_add_path"));
+    assert!(content.contains(&*bindir.to_string_lossy()));
+}
+
+#[test]
+fn ensure_skips_when_profile_already_mentions_bindir() {
+    let home = tempdir().unwrap();
+    let bindir = home.path().join(".local/bin");
+    std::fs::write(
+        home.path().join(".profile"),
+        format!("export PATH={}:$PATH\n", bindir.display()),
+    )
+    .unwrap();
+    assert_eq!(
+        ensure_on_path(&bindir, home.path(), Some("/bin/bash")).unwrap(),
+        EnsureOutcome::AlreadyOnPath
+    );
+}
