@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { money } from '../../format'
+import { money, percent } from '../../format'
+import { cacheHitRate } from './usageCache'
+import CacheSubline from './CacheSubline.vue'
 import type { UsageDailyPoint } from '../../types'
 
 defineProps<{
@@ -39,7 +41,9 @@ function count(value: number): string {
           </div>
           <div class="model-row">
             <span>Cache</span>
-            <strong>{{ count(point.cache_creation_tokens) }} create / {{ count(point.cache_read_tokens) }} read</strong>
+            <strong>
+              {{ count(point.cache_creation_tokens) }} create / {{ count(point.cache_read_tokens) }} read<template v-if="point.cache_read_tokens > 0"> · {{ percent(cacheHitRate(point)) }} hit</template>
+            </strong>
           </div>
           <div class="model-row">
             <span>Web</span>
@@ -50,9 +54,12 @@ function count(value: number): string {
       <section class="text-block">
         <h3>Sources</h3>
         <div class="row-list">
-          <div v-for="source in (point.sources ?? [])" :key="source.source" class="model-row">
-            <span>{{ source.source }}</span>
-            <strong>{{ money(source.cost_usd) }}</strong>
+          <div v-for="source in (point.sources ?? [])" :key="source.source" class="usage-source">
+            <div class="model-row">
+              <span>{{ source.source }}</span>
+              <strong>{{ money(source.cost_usd) }}</strong>
+            </div>
+            <CacheSubline :tokens="source" />
           </div>
           <p v-if="(point.sources ?? []).length === 0" class="muted-line">No source spend</p>
         </div>

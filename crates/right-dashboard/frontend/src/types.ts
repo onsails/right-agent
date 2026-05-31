@@ -263,6 +263,9 @@ export interface UsageSourcePoint {
   api_cost_usd: number
   turns: number
   invocations: number
+  input_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
 }
 
 export interface UsageSourceSeries {
