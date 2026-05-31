@@ -105,6 +105,13 @@ export function runDetail(runId: string): Promise<RunDetailResponse> {
   return requestJson<RunDetailResponse>(`api/v1/runs/${encodeURIComponent(runId)}`)
 }
 
+export function deleteCron(jobName: string): Promise<{ deleted: boolean; job_name: string }> {
+  return requestJson<{ deleted: boolean; job_name: string }>(
+    `api/v1/crons/${encodeURIComponent(jobName)}`,
+    { method: 'DELETE' },
+  )
+}
+
 export function learningOverview(): Promise<LearningOverviewResponse> {
   return requestJson<LearningOverviewResponse>('api/v1/knowledge/learning/overview')
 }
