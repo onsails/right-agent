@@ -380,6 +380,7 @@ async fn cost_learning_river(
                 // Token fields intentionally zero: the cost-learning river query
                 // selects no token columns and does not render cache.
                 input_tokens: 0,
+                output_tokens: 0,
                 cache_creation_tokens: 0,
                 cache_read_tokens: 0,
             });
