@@ -27,11 +27,30 @@ Replaces the prior fork-probe classifier.
    and `wall_elapsed_ms`, plus a one-line-per-skill index summary. Baselines
    are computed on demand by `right_agent::usage::turn_baseline::compute`.
 
+   The skill index is built by `learning_prefilter::collect_rightx_skill_index`.
+   For sandboxed agents it reads `/sandbox/.claude/skills/rightx-*/SKILL.md`
+   from inside the agent's sandbox via gRPC `exec_in_sandbox` (a `sh -c`
+   frontmatter dump, parsed into name + excerpt). For `sandbox: mode: none`
+   agents it reads the host filesystem. Each mode has exactly one source —
+   there is no fallback path. A sandbox read error returns
+   `PrefilterDecision::Skip` rather than an empty index; an empty index would
+   allow the classifier to recommend creating a skill that already exists.
+
 3. **Probe-writer** (`bot::learning_probe_writer`): when the prefilter
    returns non-Skip, the worker forks the main CC session with the decision
-   as a directed hint. The writer verifies and may patch, create, or refuse.
-   It reports `hint_outcome` (`applied_as_hinted` / `applied_differently` /
-   `refused`) back via `mcp__right__skill_learning_finish`.
+   as a directed hint. The writer receives the same skill index (built the
+   same way by `collect_rightx_skill_index`; tolerates an empty index). It
+   verifies and may patch, create, or refuse. It reports `hint_outcome`
+   (`applied_as_hinted` / `applied_differently` / `refused`) back via
+   `mcp__right__skill_learning_finish`.
+
+   **Stdout drain:** the probe-writer's stdout is consumed in a single pass.
+   A reader reads until `system/init` under the per-session mutex (bounded
+   handshake), then a detached task drains the same reader to EOF while
+   awaiting the child, capturing the final `result` line. The finish-row
+   `invocation_id` links that line to `skill_learning_events` for spend
+   attribution. (Prior bug: init-detection consumed stdout, leaving the
+   later output read empty → usage and spend rows never recorded.)
 
 4. **Curator** (`bot::learning_curator`): per-agent 60s ticker reads state
    from the `curator_state` singleton row in `data.db`. The gate is
@@ -65,11 +84,15 @@ Two independent gates run today.
    the prefilter is enabled, the foreground turn was a Normal prompt mode,
    and today's spend across `right_agent::usage::LEARNING_SOURCES`
    (`learning_prefilter`, `learning_probe_writer`, `learning_curator`) is
-   below `LearningConfig.max_daily_budget_usd` (default $1.00). A non-`skip`
-   prefilter decision gates and directs the probe-writer fork. The session
-   mutex on the main session UUID prevents concurrent `--resume` against the
-   same transcript; the writer holds it only until its `system/init`
-   handshake.
+   below `LearningConfig.max_daily_budget_usd` (default $1.00). When the
+   daily budget is exhausted a `learning_skip` row is written
+   (`reason='budget'`, `intended_kind=NULL`) **before** the prefilter runs —
+   the skip is recorded even though create-vs-patch intent is unknowable at
+   that point (the column is kept nullable for a possible future headroom
+   design). A non-`skip` prefilter decision gates and directs the
+   probe-writer fork. The session mutex on the main session UUID prevents
+   concurrent `--resume` against the same transcript; the writer holds it
+   only until its `system/init` handshake.
 
 2. **Curator gate** (periodic, agent ticker, pure logic in
    `bot::learning_curator::should_run_now`): order is `enabled` → `!paused`
@@ -94,6 +117,41 @@ usage is recorded only from `used_skill_receipts`.
 usage/patch counters, and the operator pin flag. The dashboard reads this
 table for lifecycle overview and is the only operator pin/unpin surface.
 Curator transitions read/write DB rows and skip pinned rows.
+
+## Spend ledger & skip accounting
+
+`data.db.skill_spend(skill_name, kind, cost_usd, cache_read, cache_creation,
+invocation_id, ts)` records per-skill learning cost and cache tokens,
+separate from the `usage_events` billing source-of-truth.
+
+Four writers, four `kind` values:
+
+| kind | Writer | What it records |
+|------|--------|-----------------|
+| `create` | probe-writer | exact cost of a create invocation, via `skill_learning_events` finish-row joined by `invocation_id` |
+| `patch` | probe-writer | same, for a patch invocation |
+| `maintain` | curator | pass cost attributed to each skill the pass archived (`archived_at == this run's ts`); no archived skill → no row |
+| `usage` | worker (post-turn) | one row per rightx skill in the turn's `ProbeAnchor.used_skill_receipts`, each carrying the turn's cost/cache — attributed (overlaps when multiple skills used) |
+
+The prefilter's own cost is NOT attributed to any skill (agent-level
+learning overhead; stays only in `usage_events`).
+
+`usage` rows are labeled "attributed, not exact" and must never be summed
+as an exact agent total. `create`/`patch` rows are exact per invocation.
+`maintain` rows reflect attributed overlap when multiple skills are archived
+in one curator pass.
+
+Dashboard bucketing: `create` → learn, `patch`+`maintain` → fix,
+`usage` → usage. Cache columns sum `cache_read` + `cache_creation`.
+The Knowledge view surfaces per-skill spend; the Usage tab shows the
+budget-skip count and per-source cache columns. (Agent-level
+learn/fix/usage rollup totals on the Usage tab are not yet implemented.)
+
+`data.db.learning_skip(reason, intended_kind, chat_id, thread_id, ts)` counts
+learning attempts suppressed before running. Today only `reason='budget'`
+is written. `reason` is free-form TEXT (no enum constraint). `intended_kind`
+is always NULL for `budget` skips because the classifier does not run when
+the budget is exhausted.
 
 ## Removed paths
 

@@ -246,8 +246,21 @@ Skill lifecycle state lives in `data.db.skill_lifecycle`. Curator
 transitions skip pinned rows. The dashboard is the only operator
 pin/unpin surface — do not add CLI pinning.
 
+The prefilter and probe-writer skill index is read from inside the sandbox
+(`/sandbox/.claude/skills/rightx-*`) via gRPC `exec_in_sandbox`; the host
+path is used only for `sandbox: mode: none` agents. A prefilter
+skill-index read error returns `Skip`, never an empty index (an empty
+index would allow the classifier to recommend creating a skill that
+already exists).
+
+Per-skill learning cost and cache are recorded in `data.db.skill_spend`
+(kinds `create`/`patch`/`maintain`/`usage`), separate from `usage_events`;
+budget-blocked attempts are counted in `data.db.learning_skip`
+(`reason='budget'`, `intended_kind` always NULL because the classifier
+does not run when budget is exhausted).
+
 See: `docs/architecture/learning.md` for the full pipeline, gate
-ordering, and removed Stage 2 paths.
+ordering, spend ledger details, and removed Stage 2 paths.
 
 ### Memory
 
