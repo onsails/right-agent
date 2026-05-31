@@ -44,6 +44,8 @@ pub(crate) struct PersistedStreamEvent {
 pub(crate) struct StreamUsage {
     pub num_turns: u32,
     pub cost_usd: f64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,12 +258,15 @@ pub(crate) fn parse_usage(result_json: &str) -> StreamUsage {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(result_json) else {
         return StreamUsage::default();
     };
+    let get_u64 = |ptr: &str| -> u64 { v.pointer(ptr).and_then(|n| n.as_u64()).unwrap_or(0) };
     StreamUsage {
         num_turns: v.get("num_turns").and_then(|n| n.as_u64()).unwrap_or(0) as u32,
         cost_usd: v
             .get("total_cost_usd")
             .and_then(|n| n.as_f64())
             .unwrap_or(0.0),
+        cache_creation_tokens: get_u64("/usage/cache_creation_input_tokens"),
+        cache_read_tokens: get_u64("/usage/cache_read_input_tokens"),
     }
 }
 
@@ -780,6 +785,8 @@ mod tests {
         let usage = StreamUsage {
             num_turns: 2,
             cost_usd: 0.05,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
         };
         let msg = format_thinking_message(&events, &usage);
         assert!(msg.contains("Turn 2"));
@@ -812,6 +819,8 @@ mod tests {
         let usage = StreamUsage {
             num_turns: 3,
             cost_usd: 0.10,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
         };
         let msg = format_thinking_message(buf.events(), &usage);
         assert!(!msg.contains("StructuredOutput"));
@@ -1179,5 +1188,14 @@ mod tests {
         assert!(!has_cache_diagnostic_key(
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#
         ));
+    }
+
+    #[test]
+    fn parse_usage_captures_cache_tokens() {
+        let json = r#"{"type":"result","num_turns":2,"total_cost_usd":0.1,
+            "usage":{"cache_creation_input_tokens":30,"cache_read_input_tokens":40}}"#;
+        let u = parse_usage(json);
+        assert_eq!(u.cache_creation_tokens, 30);
+        assert_eq!(u.cache_read_tokens, 40);
     }
 }

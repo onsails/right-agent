@@ -4691,6 +4691,8 @@ esac
         let usage = crate::cc::stream::StreamUsage {
             num_turns: 1,
             cost_usd: 0.0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
         };
 
         let text = thinking_anchor_text(true, &events, &usage);
@@ -4707,6 +4709,8 @@ esac
         let usage = crate::cc::stream::StreamUsage {
             num_turns: 7,
             cost_usd: 0.42,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
         };
 
         let render = build_thinking_anchor_render(12345, 678, false, false, &events, &usage);
@@ -4763,6 +4767,8 @@ esac
         let usage = crate::cc::stream::StreamUsage {
             num_turns: 2,
             cost_usd: 0.05,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
         };
 
         let render = build_thinking_anchor_render(-100123, 456, true, true, &events, &usage);
