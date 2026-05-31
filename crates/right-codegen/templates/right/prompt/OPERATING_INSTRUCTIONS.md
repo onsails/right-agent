@@ -24,7 +24,9 @@ Memory is residual storage after `/right-memory` selects it. When the Hindsight
 memory tool is available, `mcp__right__memory_retain` stores that fallback
 context.
 
-Recalled memories are tagged `[observed <date>]` with when the fact was seen; a dated fact reflects that past moment — verify the current state with a live check before asserting it.
+Recalled memories are tagged `[observed <date>]` with when the fact was seen;
+a dated fact reflects that past moment — verify the current state with a live
+check before asserting it.
 
 When the **user** explicitly asks you to save, remember, or fix a `rightx-*`
 skill (e.g. "save this as a skill", "remember how to do X", "this skill is
