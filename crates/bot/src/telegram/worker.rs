@@ -2235,7 +2235,8 @@ pub fn spawn_worker(
                         .await
                     {
                         Ok(results) if !results.is_empty() => {
-                            let content = right_memory::hindsight::join_recall_texts(&results);
+                            let content =
+                                right_memory::hindsight::render_recall_with_dates(&results);
                             if let Some(ref c) = cache {
                                 c.put(&cache_key, content).await;
                             }
@@ -2910,7 +2911,7 @@ async fn invoke_cc(
                 .await
             {
                 Ok(results) if !results.is_empty() => {
-                    let content = right_memory::hindsight::join_recall_texts(&results);
+                    let content = right_memory::hindsight::render_recall_with_dates(&results);
                     if let Some(ref cache) = ctx.prefetch_cache {
                         cache.put(&cache_key, content.clone()).await;
                     }
