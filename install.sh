@@ -178,6 +178,19 @@ install_openshell() {
   fi
 }
 
+# ── Step 3.5: Ensure PATH ──────────────────────────────────────────
+
+run_path_setup() {
+  info "Ensuring $INSTALL_DIR is on your PATH..."
+
+  # setup-path never aborts the installer; capture its exit code so the
+  # closing summary can re-surface a write failure (rc 10).
+  set +e
+  "$INSTALL_DIR/right" setup-path
+  PATH_SETUP_RC=$?
+  set -e
+}
+
 # ── Step 4: Run right init ─────────────────────────────────────────
 
 run_init() {
@@ -218,6 +231,9 @@ main() {
   install_openshell
 
   echo ""
+  run_path_setup
+
+  echo ""
   run_init
 
   echo ""
@@ -227,13 +243,17 @@ main() {
   echo "${GREEN}${BOLD}  Installation complete!${RESET}"
   echo ""
   echo "  Next steps:"
-  echo "    1. Start your agents:  ${CYAN}right up${RESET}"
-  echo "    2. View the TUI:       ${CYAN}right attach${RESET}"
-  echo "    3. Check status:       ${CYAN}right status${RESET}"
-  echo ""
-  echo "  Make sure ${CYAN}$INSTALL_DIR${RESET} is in your PATH."
-  echo "  Add this to your shell profile if needed:"
-  echo "    ${CYAN}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}"
+  echo "    1. Open a new shell    (so ${CYAN}right${RESET} is on your PATH)"
+  echo "    2. Start your agents:  ${CYAN}right up${RESET}"
+  echo "    3. View the TUI:       ${CYAN}right attach${RESET}"
+  echo "    4. Check status:       ${CYAN}right status${RESET}"
+
+  if [ "${PATH_SETUP_RC:-0}" -eq 10 ]; then
+    echo ""
+    warn "couldn't add $INSTALL_DIR to your shell profile automatically"
+    echo "  add this line to your shell profile, then open a new shell:"
+    echo "    ${CYAN}export PATH=\"$INSTALL_DIR:\$PATH\"${RESET}"
+  fi
   echo ""
 }
 
