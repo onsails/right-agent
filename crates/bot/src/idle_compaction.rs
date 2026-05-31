@@ -33,6 +33,29 @@ pub(crate) fn should_compact(model: Option<&str>, used_tokens: u64) -> bool {
     is_opus_1m(model) && used_tokens >= MIN_USED_TOKENS
 }
 
+/// Context footprint of the most recent interactive turn for this session:
+/// `input + cache_read + cache_creation` tokens. `None` when no turn exists.
+/// This is the prompt size going into the last API call — i.e. how full the
+/// context is, regardless of how much was cache-served.
+pub(crate) async fn latest_interactive_context_tokens(
+    conn: &right_db::Connection,
+    chat_id: i64,
+    thread_id: i64,
+) -> Result<Option<u64>, right_db::DbError> {
+    use right_db::OptionalExtension as _;
+    conn.query_row(
+        "SELECT input_tokens + cache_read_tokens + cache_creation_tokens \
+         FROM usage_events \
+         WHERE chat_id = ?1 AND thread_id = ?2 AND source = 'interactive' \
+         ORDER BY ts DESC LIMIT 1",
+        right_db::params![chat_id, thread_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .await
+    .optional()
+    .map(|opt| opt.map(|v| v.max(0) as u64))
+}
+
 /// Build the specialized maintenance invocation: `claude -p --resume <id>
 /// "/compact <recency instruction>"`, no schema, no MCP, tools disabled.
 /// Deliberate exception to the standard session-bearing contract (see
@@ -100,5 +123,49 @@ mod tests {
         // maintenance contract: no schema, no MCP
         assert!(!joined.contains("--json-schema"));
         assert!(!joined.contains("--mcp-config"));
+    }
+
+    #[tokio::test]
+    async fn fullness_reads_latest_interactive_sum() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+
+        let mk =
+            |input: u64, cache_read: u64, cache_create: u64| right_agent::usage::UsageBreakdown {
+                session_uuid: "s".into(),
+                total_cost_usd: 0.0,
+                num_turns: 1,
+                input_tokens: input,
+                output_tokens: 0,
+                cache_creation_tokens: cache_create,
+                cache_read_tokens: cache_read,
+                web_search_requests: 0,
+                web_fetch_requests: 0,
+                model_usage_json: "{}".into(),
+                api_key_source: "none".into(),
+                wall_elapsed_ms: None,
+            };
+
+        // Older smaller turn, then a newer larger turn, for the same (chat, thread).
+        right_agent::usage::insert::insert_interactive(&conn, &mk(1, 1, 1), 42, 0)
+            .await
+            .unwrap();
+        right_agent::usage::insert::insert_interactive(&conn, &mk(100, 200, 50), 42, 0)
+            .await
+            .unwrap();
+        // A different source must be ignored.
+        right_agent::usage::insert::insert_learning_prefilter(&conn, &mk(9_999, 0, 0), 42, 0)
+            .await
+            .unwrap();
+
+        let used = latest_interactive_context_tokens(&conn, 42, 0)
+            .await
+            .unwrap();
+        assert_eq!(used, Some(350)); // 100 + 200 + 50
+
+        let absent = latest_interactive_context_tokens(&conn, 999, 0)
+            .await
+            .unwrap();
+        assert_eq!(absent, None);
     }
 }
