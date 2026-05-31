@@ -103,6 +103,49 @@ substitutes the real credential on outbound HTTPS for TLS-terminated endpoints; 
 tunnels (tls: skip) cannot substitute and Right refuses to attach generic providers
 against those hosts.
 
+### Graceful degrade
+
+When the OpenShell gateway is unreachable at bot startup, `bring_up_sandbox` (in
+`crates/bot/src/sandbox_supervisor.rs`) classifies the failure into a
+cause-specific `GatewayDiagnosis` (summary + ordered fixes) via
+`right_openshell::diagnosis::diagnose_gateway()`, which probes `openshell doctor
+check` and `openshell status`. Operator-fixable failures — Docker down, gateway not
+started, broken certs, version too old, sandbox not found, or an inconclusive
+connect failure — return `Ok(Err(diagnosis))` instead of crashing. Genuine
+non-self-healing config errors (e.g. filesystem-policy drift that requires sandbox
+migration) still propagate as hard failures.
+
+On a degraded start, `lib.rs` logs the diagnosis at ERROR, constructs the
+`SandboxRuntimeHandle` with health `Unavailable`, and continues booting Telegram —
+so incoming messages are handled immediately rather than cycling through process-compose
+restarts.
+
+The `SandboxSupervisor` task (spawned once per sandboxed agent, outlasting any
+single bring-up attempt) is the sole owner of sandbox lifecycle after startup:
+
+- **Recovery loop:** retries `bring_up_sandbox` with a fixed backoff schedule of
+  5 → 10 → 15 → 15 → 30 s (last value repeats). On success it calls
+  `handle.set_ready(sandbox)`, spawns the background sync task, and sends a
+  "✅ Sandbox back online" notice to every chat that received an unavailability
+  message during the outage.
+- **Monitor mode:** when `Ready`, the supervisor waits for a failure report or
+  shutdown. A suspected failure from the worker triggers one verification probe
+  before degrading — avoiding false alarms from transient SSH hiccups.
+- **Sync task ownership:** the supervisor seeds the startup sync task (when bring-up
+  succeeded) or skips it (degraded). On degrade-from-ready it aborts the sync task;
+  on recovery it re-spawns it.
+
+Mid-session failures are reported via `SandboxRuntimeHandle::report_suspected_failure()`
+at the worker's `invoke_cc` error site. The supervisor coalesces rapid bursts
+(channel capacity 1 with `try_send`) and performs one probe before switching
+`SandboxHealth` to `Unavailable`.
+
+The `ssh_config_path` for sandboxed agents is computed as a deterministic stable
+path (`<home>/run/ssh/<sandbox>.ssh-config`) on both the Ready and degraded
+branches. Bring-up always writes to this exact path, so a snapshot threaded into
+worker/cron/delivery tasks remains correct across degrade and recovery without any
+restart.
+
 ### User-Local CLI Environment
 
 For OpenShell agents, Right Agent treats `/sandbox/.local/bin` as the canonical

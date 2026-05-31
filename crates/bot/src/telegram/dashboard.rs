@@ -625,16 +625,16 @@ fn apply_sandbox_diagnosis(
     checks: &mut [right_agent::doctor::DoctorCheck],
     health: &crate::sandbox_runtime::SandboxHealth,
 ) {
-    if let crate::sandbox_runtime::SandboxHealth::Unavailable { diagnosis } = health {
-        if let Some(check) = checks.iter_mut().find(|c| c.name == "openshell-gateway") {
-            check.status = right_agent::doctor::CheckStatus::Fail;
-            check.detail = diagnosis.summary.clone();
-            check.fix = if diagnosis.fixes.is_empty() {
-                None
-            } else {
-                Some(diagnosis.fixes.join("; "))
-            };
-        }
+    if let crate::sandbox_runtime::SandboxHealth::Unavailable { diagnosis } = health
+        && let Some(check) = checks.iter_mut().find(|c| c.name == "openshell-gateway")
+    {
+        check.status = right_agent::doctor::CheckStatus::Fail;
+        check.detail = diagnosis.summary.clone();
+        check.fix = if diagnosis.fixes.is_empty() {
+            None
+        } else {
+            Some(diagnosis.fixes.join("; "))
+        };
     }
 }
 
