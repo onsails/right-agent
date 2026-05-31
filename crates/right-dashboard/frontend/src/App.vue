@@ -113,6 +113,13 @@ function toggleDisplayMode(): void {
 </template>
 
 <style>
+:root {
+  --token-input: #6b7b88;
+  --token-output: #2481cc;
+  --token-create: #b87900;
+  --token-read: #0d7a45;
+}
+
 * {
   box-sizing: border-box;
 }
