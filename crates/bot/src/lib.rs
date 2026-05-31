@@ -886,6 +886,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Per-main-session mutex map and per-(chat,thread) bg-request flags.
     // Shared across worker, delivery, and callback handlers.
     let session_locks: crate::telegram::SessionLocks = Arc::new(dashmap::DashMap::new());
+    let compact_timers: crate::telegram::CompactTimers = Arc::new(dashmap::DashMap::new());
     let bg_requests: crate::telegram::BgRequests = Arc::new(dashmap::DashMap::new());
 
     // Periodic sweeper: drop orphan mutex entries (entries whose only Arc holder
@@ -1088,6 +1089,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             Arc::clone(&bg_requests),
             Arc::clone(&dashboard_foreground),
             progress_state,
+            Arc::clone(&compact_timers),
             update_listener,
         ) => result,
         result = axum_handle => result

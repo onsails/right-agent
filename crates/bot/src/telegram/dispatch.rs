@@ -165,6 +165,7 @@ pub(crate) async fn run_telegram<L>(
     bg_requests: super::BgRequests,
     stop_tokens: super::StopTokens,
     progress_state: super::progress::ProgressState,
+    compact_timers: super::CompactTimers,
     update_listener: L,
 ) -> miette::Result<()>
 where
@@ -257,6 +258,7 @@ where
         Arc::clone(&bg_requests),
         Arc::clone(&bg_handoff_gates),
         progress_state,
+        compact_timers,
     );
 
     let shutdown_token = dispatcher.shutdown_token();
@@ -504,6 +506,7 @@ fn build_dispatcher(
     bg_requests: super::BgRequests,
     bg_handoff_gates: super::BgHandoffGates,
     progress_state: super::progress::ProgressState,
+    compact_timers: super::CompactTimers,
 ) -> teloxide::dispatching::Dispatcher<BotType, RequestError, DefaultKey> {
     let worker_ctl = super::WorkerControlDeps {
         stop_tokens,
@@ -512,6 +515,7 @@ fn build_dispatcher(
         bg_handoff_gates,
         thinking_visibility,
         progress: progress_state,
+        compact_timers,
     };
     let filter = make_routing_filter(allowlist.clone(), (*identity_arc).clone());
     let archive_agent_dir = Arc::clone(&agent_dir_arc);
@@ -712,6 +716,7 @@ mod tests {
         let bg_requests: super::super::BgRequests = Arc::new(DashMap::new());
         let bg_handoff_gates: super::super::BgHandoffGates = Arc::new(DashMap::new());
         let progress_state = super::super::progress::ProgressState::default();
+        let compact_timers: super::super::CompactTimers = Arc::new(DashMap::new());
         let idle_ts = Arc::new(IdleTimestamp(Arc::new(AtomicI64::new(0))));
 
         // The call under test. If dptree type_check fails, this aborts the
@@ -737,6 +742,7 @@ mod tests {
             bg_requests,
             bg_handoff_gates,
             progress_state,
+            compact_timers,
         );
     }
 

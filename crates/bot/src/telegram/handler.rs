@@ -356,6 +356,7 @@ pub async fn handle_message(
                     model: settings.model.clone(),
                     stop_tokens: Arc::clone(&worker_ctl.stop_tokens),
                     session_locks: Arc::clone(&worker_ctl.session_locks),
+                    compact_timers: Arc::clone(&worker_ctl.compact_timers),
                     bg_requests: Arc::clone(&worker_ctl.bg_requests),
                     bg_handoff_gates: Arc::clone(&worker_ctl.bg_handoff_gates),
                     thinking_visibility: Arc::clone(&worker_ctl.thinking_visibility),

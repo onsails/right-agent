@@ -234,6 +234,7 @@ pub(crate) fn set_thinking_visibility(
 /// - `bg_handoff_gates`: per-(chat, thread) foreground gate during background fork handoff.
 /// - `thinking_visibility`: per-(chat, thread) Show/Hide thinking state for active runs.
 /// - `progress`: per-foreground-invocation Telegram progress targets.
+/// - `compact_timers`: per-(chat, thread) idle-compaction debounce timers.
 #[derive(Clone)]
 pub struct WorkerControlDeps {
     pub(crate) stop_tokens: StopTokens,
@@ -242,6 +243,7 @@ pub struct WorkerControlDeps {
     pub(crate) bg_handoff_gates: BgHandoffGates,
     pub(crate) thinking_visibility: ThinkingVisibility,
     pub(crate) progress: progress::ProgressState,
+    pub(crate) compact_timers: CompactTimers,
 }
 
 use right_agent::agent::types::AgentConfig;
