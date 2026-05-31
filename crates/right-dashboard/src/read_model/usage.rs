@@ -280,6 +280,9 @@ async fn build_daily_series(
                 api_cost_usd: 0.0,
                 turns: 0,
                 invocations: 0,
+                input_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
             });
         source_entry.cost_usd += cost;
         if api_key_source == "none" {
@@ -289,6 +292,9 @@ async fn build_daily_series(
         }
         source_entry.turns += turns.max(0) as u64;
         source_entry.invocations += 1;
+        source_entry.input_tokens += input_tokens.max(0) as u64;
+        source_entry.cache_creation_tokens += cache_creation_tokens.max(0) as u64;
+        source_entry.cache_read_tokens += cache_read_tokens.max(0) as u64;
 
         match parse_model_usage_for_daily(&model_usage_json) {
             Ok(models) => {
@@ -1127,6 +1133,39 @@ mod tests {
             .find(|window| window.key == "today")
             .unwrap();
         assert!((today_window.total_cost_usd - 0.60).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn usage_overview_aggregates_cache_tokens_per_source_in_daily_series() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_usage(&conn, "2026-05-20T08:00:00Z", "interactive", 0.10, "sonnet").await;
+        insert_usage(&conn, "2026-05-20T09:00:00Z", "interactive", 0.10, "sonnet").await;
+
+        let response = usage_overview(
+            &conn,
+            UsageOverviewInput {
+                agent: "alpha".to_owned(),
+                generated_at: "2026-05-20T12:00:00Z".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let day = response
+            .daily_series
+            .iter()
+            .find(|point| point.date == "2026-05-20")
+            .unwrap();
+        let interactive = day
+            .sources
+            .iter()
+            .find(|source| source.source == "interactive")
+            .unwrap();
+        // Two events × (input 10, cache_creation 5, cache_read 40).
+        assert_eq!(interactive.input_tokens, 20);
+        assert_eq!(interactive.cache_creation_tokens, 10);
+        assert_eq!(interactive.cache_read_tokens, 80);
     }
 
     #[tokio::test]
