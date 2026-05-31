@@ -16,13 +16,29 @@ const RECALL_TIMEOUT: Duration = Duration::from_secs(5);
 const REFLECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A single recall result from Hindsight.
+///
+/// Hindsight returns more fields than we consume; only the ones used by the
+/// recall renderer and the agent-facing `memory_recall` tool are modeled.
+/// `serde` ignores the rest. Note: the live API does NOT return a `score`
+/// field, so it is intentionally absent.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RecallResult {
     pub text: String,
-    #[serde(default)]
-    pub score: Option<f64>,
     #[serde(rename = "type", default)]
     pub fact_type: Option<String>,
+    /// Stable memory id (UUID). Present on every result.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// When the fact was retained (ISO 8601, inconsistent format). Present on
+    /// every result; the de-facto record-creation timestamp.
+    #[serde(default)]
+    pub mentioned_at: Option<String>,
+    /// Event-time start for datable facts (ISO 8601). Often null.
+    #[serde(default)]
+    pub occurred_start: Option<String>,
+    /// Event-time end for datable facts (ISO 8601). Often null.
+    #[serde(default)]
+    pub occurred_end: Option<String>,
 }
 
 /// Response from the recall endpoint.
@@ -539,6 +555,40 @@ mod tests {
     // --- recall tests ---
 
     #[tokio::test]
+    async fn recall_parses_date_fields() {
+        let (_handle, url) = mock_hindsight_server(
+            r#"{"results": [{
+                "id": "11111111-1111-1111-1111-111111111111",
+                "text": "Notion via Composio is unauthorized",
+                "type": "experience",
+                "mentioned_at": "2026-05-27T08:57:00+00:00",
+                "occurred_start": "2026-05-27T08:00:00.12345",
+                "occurred_end": null,
+                "document_id": "22222222-2222-2222-2222-222222222222"
+            }]}"#,
+            200,
+        )
+        .await;
+
+        let client = test_client(&url);
+        let results = client.recall("notion", None, None).await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(
+            r.id.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert_eq!(r.mentioned_at.as_deref(), Some("2026-05-27T08:57:00+00:00"));
+        assert_eq!(
+            r.occurred_start.as_deref(),
+            Some("2026-05-27T08:00:00.12345")
+        );
+        assert_eq!(r.occurred_end, None);
+        assert_eq!(r.fact_type.as_deref(), Some("experience"));
+    }
+
+    #[tokio::test]
     async fn recall_sends_correct_request() {
         let (handle, url) = mock_hindsight_server(
             r#"{"results": [{"text": "user likes dark mode", "score": 0.95, "type": "world"}]}"#,
@@ -554,7 +604,6 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].text, "user likes dark mode");
-        assert_eq!(results[0].score, Some(0.95));
         assert_eq!(results[0].fact_type.as_deref(), Some("world"));
 
         let (method_line, auth, body) = handle.await.unwrap();
