@@ -95,6 +95,53 @@ pub async fn insert_learning_curator(
     insert_row(conn, b, "learning_curator", None, None, None).await
 }
 
+/// Insert one per-skill spend ledger row (create/patch/maintain/usage).
+pub async fn insert_skill_spend(
+    conn: &Connection,
+    skill_name: &str,
+    kind: &str,
+    cost_usd: f64,
+    cache_read: i64,
+    cache_creation: i64,
+    invocation_id: Option<&str>,
+) -> Result<(), UsageError> {
+    let ts = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO skill_spend \
+         (skill_name, kind, cost_usd, cache_read, cache_creation, invocation_id, ts) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            skill_name,
+            kind,
+            cost_usd,
+            cache_read,
+            cache_creation,
+            invocation_id,
+            ts
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Record one learning attempt suppressed before it could run (e.g. budget).
+pub async fn insert_learning_skip(
+    conn: &Connection,
+    reason: &str,
+    intended_kind: Option<&str>,
+    chat_id: Option<i64>,
+    thread_id: Option<i64>,
+) -> Result<(), UsageError> {
+    let ts = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO learning_skip (reason, intended_kind, chat_id, thread_id, ts) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![reason, intended_kind, chat_id, thread_id, ts],
+    )
+    .await?;
+    Ok(())
+}
+
 async fn insert_row(
     conn: &Connection,
     b: &UsageBreakdown,
@@ -407,5 +454,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(elapsed, None);
+    }
+
+    #[tokio::test]
+    async fn insert_skill_spend_writes_row() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_skill_spend(&conn, "rightx-foo", "create", 0.25, 100, 200, Some("inv-1"))
+            .await
+            .unwrap();
+        let (name, kind, cost, cr, cc, inv): (String, String, f64, i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT skill_name, kind, cost_usd, cache_read, cache_creation, invocation_id \
+                 FROM skill_spend LIMIT 1",
+                (),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (name.as_str(), kind.as_str(), cost, cr, cc, inv.as_deref()),
+            ("rightx-foo", "create", 0.25, 100, 200, Some("inv-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_learning_skip_writes_budget_row_with_null_kind() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_learning_skip(&conn, "budget", None, Some(42), Some(0))
+            .await
+            .unwrap();
+        let (reason, kind, chat): (String, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT reason, intended_kind, chat_id FROM learning_skip LIMIT 1",
+                (),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .await
+            .unwrap();
+        assert_eq!((reason.as_str(), kind, chat), ("budget", None, Some(42)));
     }
 }
