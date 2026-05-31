@@ -155,6 +155,65 @@ Sweep: a periodic task in `lib.rs` (every hour) drops entries whose Arc has no
 external strong references — protects against unbounded growth on long-lived
 agents.
 
+## Idle compaction
+
+Source of truth: `crates/bot/src/idle_compaction.rs`.
+
+After a foreground chat session goes idle, the context window may be large but
+cold — the prompt cache (≈5-minute TTL) has long expired, so the user's next
+turn pays full-price input on the entire accumulated history. Idle compaction
+drives CC's native `/compact` automatically to shrink the session before the
+user returns.
+
+**Debounce lifecycle.** A `CompactTimers` map (`Arc<DashMap<(i64, i64),
+CancellationToken>>`, keyed by `(chat_id, thread_id)`) holds one timer per
+active chat. The map is in-memory only — it is lost on bot restart and
+re-armed on the next message. For **Normal-mode foreground turns only** (never
+cron, delivery, reflection, or background), the worker cancels any existing
+timer at turn start and arms a fresh one at turn end. Arming spawns a task
+that `tokio::select!`s between a 2h sleep and the cancellation token: if the
+token fires first (a new turn arrived), the task exits cleanly. If the sleep
+wins first, the compaction runs to completion — the token cannot tear it down
+mid-flight, which would orphan the `claude` child process or drop the session
+lock mid-write. This is the commit-to-sleep property: cancellation aborts only
+a still-pending timer, not an in-flight compaction.
+
+**Gate.** Two conditions, both evaluated at arm time and re-checked at fire
+time. First, the model must match `claude-opus*[1m]` (the `[1m]` suffix
+selects 1M-context opus across version bumps, excluding sonnet[1m] and non-1M
+opus). Second, the context footprint must be ≥ 400,000 tokens (40% of the 1M
+window), read from the newest `interactive` row in `usage_events` for the
+chat: `input_tokens + cache_read_tokens + cache_creation_tokens`. The model
+check is evaluated first (in-memory `ArcSwap` load) so non-opus[1m] agents
+never touch the DB on a turn.
+
+**Self-limiting behavior.** Per-turn re-evaluation makes persistence
+unnecessary. If CC auto-compacted mid-conversation, the next turn reports a
+much smaller footprint and the gate fails, so no timer is armed. If our own
+compaction ran, the session stays idle (no turn to re-arm) until the user
+returns, regrows the context past 400k, and idles again. There is no
+`compacted_at` marker and nothing to store.
+
+**Fire-time re-check** covers the case where the agent was switched away from
+opus[1m] via `/model` during the 2h idle window — the model is hot-reloadable,
+so the arm-time model may not match the fire-time model. The fullness is also
+re-queried at fire time for safety, though context cannot change without a turn
+(which would have reset or cancelled the timer).
+
+**Invocation.** When the gate passes, the fire task acquires the per-session
+`SessionLocks` mutex (keyed by `root_session_id`, the same lock the worker
+holds during every `--resume` turn) and runs a specialized maintenance
+invocation: `claude -p --resume <root_session_id> "/compact <recency
+instruction>"` with no `--mcp-config` and no `--json-schema` — `/compact`
+uses no tools and its `result` field is empty. A `ProcessGroupChild` +
+`wait_with_output_or_kill` pair enforces the 120s `COMPACT_TIMEOUT` by
+killing the whole process group on expiry. Success is `output.status.success()`.
+Token usage is recorded via `insert_idle_compaction` (source `'idle_compaction'`).
+
+**Edge cases.** A user returning mid-compaction blocks on the session lock for
+at most `COMPACT_TIMEOUT`. The 2h idle precondition makes this window rare and
+the bounded wait is accepted for v1.
+
 ## Reflection Primitive
 
 `crates/bot/src/reflection.rs` exposes `reflect_on_failure(ctx) -> Result<String, ReflectionError>`.

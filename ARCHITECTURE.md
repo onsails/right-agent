@@ -167,6 +167,12 @@ here.
 Learning callsites (probe-writer fork, Haiku prefilter, curator) have
 specialized contracts — see `docs/architecture/learning.md`.
 
+Idle compaction (`crates/bot/src/idle_compaction.rs`) is another specialized
+maintenance callsite: it resumes a session to run `/compact` with **no
+`--json-schema` and no `--mcp-config`**, judging success by exit status (the
+`/compact` `result` is empty). It runs under the per-session `SessionLocks`
+mutex and is never a normal deliverable turn.
+
 ### Reflection Primitive
 
 `crates/bot/src/reflection.rs` exposes
