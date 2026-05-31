@@ -157,22 +157,28 @@ prop-drill it. `App.vue` calls `provideLiveConfig({ intervalMs })` from
 `inject(LiveConfigKey, DEFAULT_INTERVAL_MS)`. A per-call `intervalMs`
 option overrides (identity uses a long interval; health uses 0).
 
-### `useRunDetail` — `composables/useRunDetail.ts`
+### Run detail — no shared composable
 
-Shared run-selection + detail used by both the Overview and Activity
-containers (both render `RunFailureList` with inline detail). Owns
-`selectedRunId`, `selectedRun`, `loadingDetail`, `detailError`,
-`selectRun(run)` (fetches `runDetail`, race-guarded), and
-`reconcileSelection(list)` to clear the selection when the polled list no
-longer contains it. Extracted because two containers need identical logic;
-`reconcileSelection` is pure and unit-tested.
+`RunFailureList.vue` already self-contains failure-run detail: it imports
+`runDetail`, owns `selectedId`/`detail`/`loading`/`error`, and is
+race-guarded. Both Overview and Activity render it for their failure cards,
+and it needs no container involvement — **left unchanged**.
+
+The only App-driven run selection is ActivityView's **main** cron run list
+(`crons[].recent_runs`), wired today through `App.vue`'s `selectedRun` /
+`selectRun` / `runDetail`. That has exactly one consumer, so it moves
+**inline into `ActivityContainer`** (no shared composable — YAGNI). The
+reconcile-on-poll check is extracted as a pure helper
+`activityContainsRun(activity, runId)` in `views/activitySelection.ts` and
+unit-tested; the container calls it in a `watch(activity.data, …)` to clear
+the selection when the polled list drops the selected run.
 
 ### Container / dumb-view split
 
 | Tab | Container (new, smart) | Dumb view (unchanged) | Container owns |
 |---|---|---|---|
-| Overview | `OverviewContainer.vue` | `OverviewView.vue` | `useLiveResource(dashboardOverview)` + `useLiveResource(activityOverview)`, `useRunDetail` |
-| Activity | `ActivityContainer.vue` | `ActivityView.vue` | `useLiveResource(activityOverview)`, `useRunDetail` |
+| Overview | `OverviewContainer.vue` | `OverviewView.vue` | `useLiveResource(dashboardOverview)` + `useLiveResource(activityOverview)` (no run selection — failures use self-contained `RunFailureList`) |
+| Activity | `ActivityContainer.vue` | `ActivityView.vue` | `useLiveResource(activityOverview)`; main-list run selection + `runDetail` inline; `activityContainsRun` reconcile in a `watch` |
 | Usage | `UsageContainer.vue` | `UsageView.vue` | `useLiveResource(usageOverview)` |
 | Knowledge | `KnowledgeContainer.vue` (replaces dumb `KnowledgeView.vue`) | `ReportsView.vue`, `SkillsView.vue` | subtab nav + routes to the two sub-containers below |
 | · Learning | `ReportsContainer.vue` | `ReportsView.vue` | `useLiveResource(learningOverview)` |
@@ -215,8 +221,8 @@ Follows the project convention (`McpView`): pure logic in `.ts`, unit-
 tested directly; SSR `renderToString` for dumb views; thin glue untested.
 
 - **Unit (pure):** `reduceConnectionState` + outcome→state classifier
-  (`liveStatus.test.ts`); `reconcileSelection` (`useRunDetail.test.ts`);
-  any extracted tick/visibility predicate.
+  (`liveStatus.test.ts`); `activityContainsRun`
+  (`activitySelection.test.ts`); any extracted tick/visibility predicate.
 - **SSR (unchanged):** existing `*View.test.ts` keep passing — the dumb
   views' prop contracts are untouched.
 - **Glue (untested):** the `useLiveResource` wiring (timers, listeners,
@@ -229,8 +235,8 @@ tested directly; SSR `renderToString` for dumb views; thin glue untested.
 - `composables/useLiveResource.ts`
 - `composables/liveStatus.ts` (+ `ConnectionState`, `reduceConnectionState`)
 - `composables/liveConfig.ts`
-- `composables/useRunDetail.ts`
-- `composables/liveStatus.test.ts`, `composables/useRunDetail.test.ts`
+- `views/activitySelection.ts` (pure `activityContainsRun`)
+- `composables/liveStatus.test.ts`, `views/activitySelection.test.ts`
 - `views/OverviewContainer.vue`, `views/ActivityContainer.vue`,
   `views/UsageContainer.vue`, `views/IdentityContainer.vue`,
   `views/HealthContainer.vue`, `views/KnowledgeContainer.vue`,
@@ -247,7 +253,8 @@ tested directly; SSR `renderToString` for dumb views; thin glue untested.
 
 **Unchanged**
 
-- `components/AppShell.vue` and all dumb `*View.vue` + their tests.
+- `components/AppShell.vue`, `components/RunFailureList.vue` (already
+  self-contained), and all dumb `*View.vue` + their tests.
 
 ## Verification cadence
 
