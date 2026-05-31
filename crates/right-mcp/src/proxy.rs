@@ -84,6 +84,25 @@ pub(crate) enum ProbeOutcome {
     Dead(String),
 }
 
+/// Strip query strings from any URL-like substrings in an error message.
+/// `query_string`-auth embeds the credential in the URL, and rmcp transport
+/// errors can quote the URL verbatim — this keeps that token out of logs and
+/// out of the `last_connect_error` surfaced to the dashboard.
+pub(crate) fn redact_query_strings(msg: &str) -> String {
+    msg.split(' ')
+        .map(|tok| {
+            if tok.contains("://") {
+                if let Some(idx) = tok.find('?') {
+                    let trailing = if tok.ends_with(')') { ")" } else { "" };
+                    return format!("{}?<redacted>{trailing}", &tok[..idx]);
+                }
+            }
+            tok.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Classify a probe error string into an outcome. Pure — no I/O.
 pub(crate) fn classify_probe_error(msg: &str) -> ProbeOutcome {
     if is_upstream_auth_error(msg) {
@@ -1024,5 +1043,15 @@ mod tests {
         let (auth, extra) = client.build_auth().await.unwrap();
         assert_eq!(auth, None, "QueryString should not set auth_token");
         assert!(extra.is_empty(), "QueryString should not inject headers");
+    }
+
+    #[test]
+    fn redact_query_strings_strips_url_query() {
+        assert_eq!(
+            redact_query_strings("error sending request for url (http://h:1/mcp?token=abc)"),
+            "error sending request for url (http://h:1/mcp?<redacted>)"
+        );
+        assert_eq!(redact_query_strings("plain message"), "plain message");
+        assert_eq!(redact_query_strings("http://h:1/mcp"), "http://h:1/mcp");
     }
 }
