@@ -286,11 +286,15 @@ export interface OverviewSummary {
 export interface CronCard {
   job_name: string
   schedule: string
+  schedule_human: string
   recurring: boolean
   run_at: string | null
+  next_run_at: string | null
   target_chat_id: number | null
   target_thread_id: number | null
   max_budget_usd: number
+  spend_24h_usd: number
+  spend_7d_usd: number
   last_run: RunSummary | null
   recent_runs: RunSummary[]
 }
