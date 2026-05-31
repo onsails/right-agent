@@ -48,6 +48,11 @@ impl SandboxRuntimeHandle {
         matches!(**self.health.load(), SandboxHealth::Ready)
     }
 
+    /// Live sandbox handle, `Some` iff health is `Ready` (see the store-order
+    /// invariant on `set_ready`/`set_unavailable`). Reserved for the deferred
+    /// follow-up letting the dashboard/keepalive read the sandbox from the
+    /// handle instead of their startup snapshots; currently exercised only by
+    /// tests.
     pub fn current_sandbox(&self) -> Option<SandboxExec> {
         Option::clone(&self.sandbox.load())
     }
