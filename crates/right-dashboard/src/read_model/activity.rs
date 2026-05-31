@@ -9,8 +9,10 @@ use crate::api_types::{
 use chrono::{DateTime, TimeZone, Utc};
 use right_db::{Connection, OptionalExtension, params};
 
-use super::ReadModelError;
+use chrono::Duration;
+
 use super::run_summary::{RUN_SUMMARY_COLUMNS, RUN_SUMMARY_FROM, run_summary_from_row};
+use super::{ReadModelError, coarse_timestamp_bounds, parse_utc};
 
 pub struct ActivityOverviewInput {
     pub agent: String,
@@ -74,10 +76,8 @@ pub async fn activity_overview(
                 .any(|run| is_active_status(&run.status))
         })
         .count();
-    let failed_recent_cron_count = crons
-        .iter()
-        .filter(|cron| cron.recent_runs.iter().any(|run| run.status == "failed"))
-        .count();
+    let failed_runs = failed_cron_runs(conn, &input.generated_at).await?;
+    let failed_recent_cron_count = failed_runs.len();
 
     Ok(OverviewResponse {
         agent: input.agent,
@@ -90,6 +90,7 @@ pub async fn activity_overview(
             today_cost_usd,
         },
         crons,
+        failed_runs,
         active: ActiveActivity {
             foreground: input.foreground,
             background: active_background,
@@ -278,6 +279,39 @@ fn read_log_excerpt(path: Option<String>, max_lines: usize) -> Result<LogExcerpt
         lines: tail.into_iter().collect(),
         truncated: line_count > max_lines,
     })
+}
+
+async fn failed_cron_runs(
+    conn: &Connection,
+    generated_at: &str,
+) -> Result<Vec<RunSummary>, ReadModelError> {
+    let now = parse_utc(generated_at)?;
+    let since = now - Duration::days(7);
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(&since, &now);
+    let sql = format!(
+        "SELECT {RUN_SUMMARY_COLUMNS},
+                COALESCE(ar.finished_at, ar.updated_at, ar.created_at) AS win_ts
+         {RUN_SUMMARY_FROM}
+         WHERE ar.kind = 'cron' AND ar.status = 'failed'
+           AND COALESCE(ar.finished_at, ar.updated_at, ar.created_at) >= ?1
+           AND COALESCE(ar.finished_at, ar.updated_at, ar.created_at) <= ?2
+         ORDER BY COALESCE(ar.finished_at, ar.updated_at, ar.created_at) DESC, ar.created_at DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![coarse_since, coarse_until], |row| {
+            Ok((run_summary_from_row(row)?, row.get::<_, String>(12)?))
+        })
+        .await?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (run, win_ts) = row?;
+        let ts = parse_utc(&win_ts)?;
+        if ts >= since && ts <= now {
+            out.push(run);
+        }
+    }
+    Ok(out)
 }
 
 fn is_active_status(status: &str) -> bool {
@@ -632,5 +666,77 @@ mod tests {
             vec!["three".to_owned(), "four".to_owned()]
         );
         assert!(detail.log.truncated);
+    }
+
+    #[tokio::test]
+    async fn failed_runs_lists_failed_cron_runs_in_window_and_matches_count() {
+        let (_dir, conn) = fixture().await;
+
+        // Two failed cron runs within the 7d window
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id,
+                status, finished_at, delivery_required, delivery_status,
+                created_at, updated_at
+             ) VALUES (
+                'run-f1', 'cron', 'job-a', 'run-f1', 123,
+                'failed', '2026-05-31T10:00:00Z', 0, 'none',
+                '2026-05-31T10:00:00Z', '2026-05-31T10:00:00Z'
+             )",
+            [],
+        )
+        .await
+        .expect("insert failed cron run 1");
+
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id,
+                status, finished_at, delivery_required, delivery_status,
+                created_at, updated_at
+             ) VALUES (
+                'run-f2', 'cron', 'job-a', 'run-f2', 123,
+                'failed', '2026-05-31T11:00:00Z', 0, 'none',
+                '2026-05-31T11:00:00Z', '2026-05-31T11:00:00Z'
+             )",
+            [],
+        )
+        .await
+        .expect("insert failed cron run 2");
+
+        // A completed cron run — must not appear
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id,
+                status, finished_at, delivery_required, delivery_status,
+                created_at, updated_at
+             ) VALUES (
+                'run-c1', 'cron', 'job-b', 'run-c1', 123,
+                'completed', '2026-05-31T11:30:00Z', 0, 'none',
+                '2026-05-31T11:30:00Z', '2026-05-31T11:30:00Z'
+             )",
+            [],
+        )
+        .await
+        .expect("insert completed cron run");
+
+        let response = activity_overview(
+            &conn,
+            ActivityOverviewInput {
+                agent: "agent-a".to_owned(),
+                generated_at: "2026-05-31T12:00:00Z".to_owned(),
+                refresh_interval_secs: 30,
+                foreground: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.failed_runs.len(), 2);
+        assert_eq!(
+            response.summary.failed_recent_cron_count,
+            response.failed_runs.len()
+        );
+        // newest first
+        assert_eq!(response.failed_runs[0].id, "run-f2");
     }
 }

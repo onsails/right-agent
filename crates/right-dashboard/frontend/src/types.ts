@@ -101,6 +101,7 @@ export interface OverviewResponse {
   refresh_interval_secs: number
   summary: OverviewSummary
   crons: CronCard[]
+  failed_runs: RunSummary[]
   active: ActiveActivity
 }
 
