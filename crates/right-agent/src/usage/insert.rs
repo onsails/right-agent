@@ -95,6 +95,28 @@ pub async fn insert_learning_curator(
     insert_row(conn, b, "learning_curator", None, None, None).await
 }
 
+/// Insert a row for an idle-compaction maintenance invocation (CC `/compact`
+/// driven after a session goes idle). Not a learning source.
+///
+/// `chat_id` and `thread_id` carry the session the compaction targeted so the
+/// dashboard can group compaction spend by chat.
+pub async fn insert_idle_compaction(
+    conn: &Connection,
+    b: &UsageBreakdown,
+    chat_id: i64,
+    thread_id: i64,
+) -> Result<(), UsageError> {
+    insert_row(
+        conn,
+        b,
+        "idle_compaction",
+        Some(chat_id),
+        Some(thread_id),
+        None,
+    )
+    .await
+}
+
 /// Shared INSERT for the `skill_spend` ledger. Bind order:
 /// skill_name, kind, cost_usd, cache_read, cache_creation, invocation_id, ts.
 const SKILL_SPEND_INSERT_SQL: &str = "INSERT INTO skill_spend \
@@ -641,5 +663,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((reason.as_str(), kind, chat), ("budget", None, Some(42)));
+    }
+
+    #[tokio::test]
+    async fn insert_idle_compaction_writes_row_with_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+        let b = super::super::UsageBreakdown {
+            session_uuid: "sess-1".into(),
+            total_cost_usd: 1.23,
+            num_turns: 1,
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_creation_tokens: 30,
+            cache_read_tokens: 40,
+            web_search_requests: 0,
+            web_fetch_requests: 0,
+            model_usage_json: "{}".into(),
+            api_key_source: "none".into(),
+            wall_elapsed_ms: Some(50),
+        };
+        super::insert_idle_compaction(&conn, &b, -100, 7)
+            .await
+            .unwrap();
+        let (source, chat_id, thread_id): (String, i64, i64) = conn
+            .query_row(
+                "SELECT source, chat_id, thread_id FROM usage_events LIMIT 1",
+                right_db::params![],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(source, "idle_compaction");
+        assert_eq!(chat_id, -100);
+        assert_eq!(thread_id, 7);
+    }
+
+    #[test]
+    fn idle_compaction_is_not_a_learning_source() {
+        assert!(!crate::usage::LEARNING_SOURCES.contains(&"idle_compaction"));
     }
 }
