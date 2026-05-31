@@ -62,11 +62,15 @@ function windowRows(window: UsageWindow | null | undefined) {
           </div>
           <strong>{{ money(window.total_cost_usd) }}</strong>
         </header>
+        <p v-if="window.budget_skip_count > 0" class="muted-line">
+          Budget-blocked learning attempts: {{ window.budget_skip_count }}
+        </p>
 
         <div class="model-grid">
           <div v-for="source in windowRows(window)" :key="source.source" class="model-row">
             <span>{{ source.source }}</span>
             <strong>{{ money(source.cost_usd) }}</strong>
+            <span>{{ source.cache_read_tokens }} / {{ source.cache_creation_tokens }}</span>
           </div>
         </div>
       </article>
