@@ -197,8 +197,23 @@ mod tests {
 
     type Proxies = Arc<RwLock<HashMap<String, Arc<ProxyBackend>>>>;
 
-    async fn set_status(b: &Arc<ProxyBackend>, s: BackendStatus) {
-        b.set_status(s).await;
+    /// A backend pointed at a dead loopback port (no session, so every probe is
+    /// `Dead`), registered under "composio" in a fresh proxies map. The returned
+    /// `TempDir` must be kept alive for the duration of the test.
+    fn dead_backend() -> (tempfile::TempDir, Arc<ProxyBackend>, Proxies) {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(ProxyBackend::new(
+            "composio".into(),
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:1/mcp".into(),
+            Arc::new(RwLock::new(None)),
+            AuthMethod::default(),
+        ));
+        let proxies: Proxies = Arc::new(RwLock::new(HashMap::from([(
+            "composio".into(),
+            backend.clone(),
+        )])));
+        (tmp, backend, proxies)
     }
 
     #[test]
@@ -282,7 +297,7 @@ mod tests {
             Arc::new(RwLock::new(None)),
             AuthMethod::default(),
         ));
-        set_status(&backend, BackendStatus::Unreachable).await;
+        backend.set_status(BackendStatus::Unreachable).await;
         let proxies: Proxies = Arc::new(RwLock::new(HashMap::from([(
             "composio".into(),
             backend.clone(),
@@ -308,19 +323,8 @@ mod tests {
 
     #[tokio::test]
     async fn connected_flips_unreachable_after_three_dead_probes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let backend = Arc::new(ProxyBackend::new(
-            "composio".into(),
-            tmp.path().to_path_buf(),
-            "http://127.0.0.1:1/mcp".into(),
-            Arc::new(RwLock::new(None)),
-            AuthMethod::default(),
-        ));
-        set_status(&backend, BackendStatus::Connected).await;
-        let proxies: Proxies = Arc::new(RwLock::new(HashMap::from([(
-            "composio".into(),
-            backend.clone(),
-        )])));
+        let (_tmp, backend, proxies) = dead_backend();
+        backend.set_status(BackendStatus::Connected).await;
 
         // Connected backend with no session → `probe_live` returns Dead
         // immediately (no network), so paused virtual time is reliable here.
@@ -341,19 +345,8 @@ mod tests {
 
     #[tokio::test]
     async fn needs_auth_is_never_probed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let backend = Arc::new(ProxyBackend::new(
-            "composio".into(),
-            tmp.path().to_path_buf(),
-            "http://127.0.0.1:1/mcp".into(),
-            Arc::new(RwLock::new(None)),
-            AuthMethod::default(),
-        ));
-        set_status(&backend, BackendStatus::NeedsAuth).await;
-        let proxies: Proxies = Arc::new(RwLock::new(HashMap::from([(
-            "composio".into(),
-            backend.clone(),
-        )])));
+        let (_tmp, backend, proxies) = dead_backend();
+        backend.set_status(BackendStatus::NeedsAuth).await;
 
         tokio::time::pause();
         let h = tokio::spawn(run_health_reconciler(proxies, reqwest::Client::new()));
