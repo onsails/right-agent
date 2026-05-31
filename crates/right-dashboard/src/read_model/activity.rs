@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 
@@ -10,7 +10,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use right_db::{Connection, OptionalExtension, params};
 
 use super::run_summary::{RUN_SUMMARY_COLUMNS, RUN_SUMMARY_FROM, run_summary_from_row};
-use super::{ReadModelError, parse_utc};
+use super::{ReadModelError, parse_utc, schedule};
 
 pub struct ActivityOverviewInput {
     pub agent: String,
@@ -25,6 +25,9 @@ pub async fn activity_overview(
     conn: &Connection,
     input: ActivityOverviewInput,
 ) -> Result<OverviewResponse, ReadModelError> {
+    let now = parse_utc(&input.generated_at)?;
+    let spend = cron_spend_windows(conn, &now).await?;
+
     let mut crons_stmt = conn.prepare(
         "SELECT job_name, schedule, recurring, run_at, target_chat_id, target_thread_id,
                 max_budget_usd
@@ -50,15 +53,23 @@ pub async fn activity_overview(
     for (job_name, schedule, recurring, run_at, target_chat_id, target_thread_id, max_budget_usd) in
         cron_rows
     {
+        let (spend_24h_usd, spend_7d_usd) = spend.get(&job_name).copied().unwrap_or((0.0, 0.0));
+        let schedule_human = schedule::describe(&schedule, run_at.as_deref());
+        let next_fire =
+            schedule::next_run_at(&schedule, run_at.as_deref(), now).map(|dt| dt.to_rfc3339());
         let recent_runs = cron_runs(conn, &job_name).await?;
         crons.push(CronCard {
             job_name,
             schedule,
+            schedule_human,
             recurring,
             run_at,
+            next_run_at: next_fire,
             target_chat_id,
             target_thread_id,
             max_budget_usd,
+            spend_24h_usd,
+            spend_7d_usd,
             last_run: recent_runs.first().cloned(),
             recent_runs,
         });
@@ -194,6 +205,39 @@ pub(super) async fn today_cost_usd(
         )
         .await?;
     Ok(cost)
+}
+
+/// Per-job cron spend for the last 24h and last 7d, keyed by `job_name`.
+/// One grouped pass over `usage_events`; jobs with no events are simply absent
+/// from the map and default to `0.0` at the call site.
+async fn cron_spend_windows(
+    conn: &Connection,
+    now: &DateTime<Utc>,
+) -> Result<HashMap<String, (f64, f64)>, ReadModelError> {
+    let since_24h = (*now - Duration::days(1)).to_rfc3339();
+    let since_7d = (*now - Duration::days(7)).to_rfc3339();
+    let mut stmt = conn.prepare(
+        "SELECT job_name,
+                COALESCE(SUM(CASE WHEN ts >= ?1 THEN total_cost_usd ELSE 0.0 END), 0.0),
+                COALESCE(SUM(total_cost_usd), 0.0)
+         FROM usage_events
+         WHERE ts >= ?2 AND job_name IS NOT NULL
+         GROUP BY job_name",
+    )?;
+    let rows = stmt
+        .query_map(params![since_24h, since_7d], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })
+        .await?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .into_iter()
+        .map(|(job, spend_24h, spend_7d)| (job, (spend_24h, spend_7d)))
+        .collect())
 }
 
 fn parse_delivery_json(json: Option<String>) -> (Option<serde_json::Value>, Option<String>) {
@@ -712,6 +756,74 @@ mod tests {
         );
         // newest first
         assert_eq!(response.failed_runs[0].id, "run-f2");
+    }
+
+    #[tokio::test]
+    async fn activity_overview_populates_schedule_human_next_run_and_spend() {
+        let (_dir, conn) = fixture().await;
+        let response = activity_overview(
+            &conn,
+            ActivityOverviewInput {
+                agent: "agent-a".to_owned(),
+                generated_at: "2026-05-20T09:00:00Z".to_owned(),
+                refresh_interval_secs: 30,
+                foreground: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        let card = &response.crons[0];
+        assert_ne!(card.schedule_human, card.schedule);
+        assert!(!card.schedule_human.is_empty());
+        assert_eq!(
+            card.next_run_at.as_deref(),
+            Some("2026-05-21T08:00:00+00:00")
+        );
+        assert!((card.spend_24h_usd - 0.25).abs() < 1e-9);
+        assert!((card.spend_7d_usd - 0.25).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn activity_overview_spend_excludes_events_outside_windows() {
+        let (_dir, conn) = fixture().await;
+        let response = activity_overview(
+            &conn,
+            ActivityOverviewInput {
+                agent: "agent-a".to_owned(),
+                generated_at: "2026-05-30T09:00:00Z".to_owned(),
+                refresh_interval_secs: 30,
+                foreground: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let card = &response.crons[0];
+        assert_eq!(card.spend_24h_usd, 0.0);
+        assert_eq!(card.spend_7d_usd, 0.0);
+    }
+
+    #[tokio::test]
+    async fn activity_overview_spend_splits_24h_and_7d_windows() {
+        // Fixture event is at 2026-05-20T08:01:00Z. With generated_at one day
+        // later (09:00), the 24h bound (05-20T09:00) excludes it but the 7d
+        // bound (05-14T09:00) includes it — proving the CASE WHEN split, which a
+        // bug that reused the 7d bound for both columns would not.
+        let (_dir, conn) = fixture().await;
+        let response = activity_overview(
+            &conn,
+            ActivityOverviewInput {
+                agent: "agent-a".to_owned(),
+                generated_at: "2026-05-21T09:00:00Z".to_owned(),
+                refresh_interval_secs: 30,
+                foreground: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let card = &response.crons[0];
+        assert_eq!(card.spend_24h_usd, 0.0);
+        assert!((card.spend_7d_usd - 0.25).abs() < 1e-9);
     }
 
     #[tokio::test]
