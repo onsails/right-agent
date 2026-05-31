@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::cc::invocation::{ClaudeInvocation, OutputFormat};
+use tokio_util::sync::CancellationToken;
 
 /// Idle window before compaction fires. A turn resets this debounce.
 const IDLE_AFTER: Duration = Duration::from_secs(2 * 60 * 60);
@@ -225,6 +226,68 @@ async fn run_compaction(ctx: IdleCompactionCtx) {
     );
 }
 
+/// Cancel and remove any pending compaction for this session. Called at turn
+/// start (activity) and when a turn ends ineligible. No-op if none armed.
+pub(crate) fn cancel(timers: &crate::telegram::CompactTimers, chat_id: i64, thread_id: i64) {
+    if let Some((_, token)) = timers.remove(&(chat_id, thread_id)) {
+        token.cancel();
+    }
+}
+
+/// (Re)arm the 2h debounce. Replaces any existing timer. The spawned task
+/// waits on `sleep` racing the token: a cancel during the wait returns without
+/// compacting; once `sleep` wins, the token is no longer awaited, so a late
+/// cancel cannot tear down the in-flight compaction (which would orphan the
+/// `claude` child and drop the session lock mid-write).
+fn arm(ctx: IdleCompactionCtx) {
+    let key = (ctx.chat_id, ctx.thread_id);
+    if let Some((_, prev)) = ctx.compact_timers.remove(&key) {
+        prev.cancel();
+    }
+    let token = CancellationToken::new();
+    ctx.compact_timers.insert(key, token.clone());
+
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep(IDLE_AFTER) => {}
+            _ = token.cancelled() => return,
+        }
+        // Survived the debounce. Drop our map entry first so a concurrent
+        // cancel finds nothing to cancel, then run to completion uncancelled.
+        ctx.compact_timers.remove(&key);
+        run_compaction(ctx).await;
+    });
+}
+
+/// Turn-end hook for Normal foreground turns. Model-checks first (no DB for
+/// non-opus[1m] agents); on opus[1m], reads fullness and arms or cancels.
+pub(crate) async fn on_turn_end(ctx: IdleCompactionCtx) {
+    let model = crate::snapshot_model(&ctx.model);
+    if !is_opus_1m(model.as_deref()) {
+        cancel(&ctx.compact_timers, ctx.chat_id, ctx.thread_id);
+        return;
+    }
+    let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: open_connection failed: {e:#}");
+            return;
+        }
+    };
+    let used = match latest_interactive_context_tokens(&conn, ctx.chat_id, ctx.thread_id).await {
+        Ok(v) => v.unwrap_or(0),
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: fullness query failed: {e:#}");
+            return;
+        }
+    };
+    if should_compact(model.as_deref(), used) {
+        arm(ctx);
+    } else {
+        cancel(&ctx.compact_timers, ctx.chat_id, ctx.thread_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +373,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(absent, None);
+    }
+
+    fn dummy_ctx(
+        timers: crate::telegram::CompactTimers,
+        chat: i64,
+        thread: i64,
+    ) -> IdleCompactionCtx {
+        IdleCompactionCtx {
+            compact_timers: timers,
+            model: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Some(
+                "claude-opus-4-8[1m]".to_string(),
+            ))),
+            agent_dir: std::path::PathBuf::from("/nonexistent"),
+            agent_db_dir: std::path::PathBuf::from("/nonexistent"),
+            agent_name: "test".into(),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+            session_locks: std::sync::Arc::new(dashmap::DashMap::new()),
+            debug: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            chat_id: chat,
+            thread_id: thread,
+        }
+    }
+
+    #[tokio::test]
+    async fn arm_then_cancel_removes_and_cancels() {
+        let timers: crate::telegram::CompactTimers = std::sync::Arc::new(dashmap::DashMap::new());
+        arm(dummy_ctx(timers.clone(), 1, 0));
+        let token = timers.get(&(1, 0)).map(|e| e.value().clone());
+        assert!(token.is_some(), "arm must register a timer");
+        cancel(&timers, 1, 0);
+        assert!(
+            timers.get(&(1, 0)).is_none(),
+            "cancel must remove the entry"
+        );
+        assert!(
+            token.unwrap().is_cancelled(),
+            "cancel must cancel the token"
+        );
+        // The spawned task takes the cancelled branch and never runs run_compaction
+        // (the /nonexistent paths would otherwise error), so a short yield is safe.
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    async fn arm_twice_replaces_previous_timer() {
+        let timers: crate::telegram::CompactTimers = std::sync::Arc::new(dashmap::DashMap::new());
+        arm(dummy_ctx(timers.clone(), 2, 0));
+        let first = timers.get(&(2, 0)).unwrap().value().clone();
+        arm(dummy_ctx(timers.clone(), 2, 0));
+        assert!(
+            first.is_cancelled(),
+            "re-arming must cancel the prior timer"
+        );
+        assert!(
+            timers.get(&(2, 0)).is_some(),
+            "a fresh timer must be present"
+        );
+        cancel(&timers, 2, 0);
+        tokio::task::yield_now().await;
     }
 }
