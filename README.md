@@ -211,7 +211,7 @@ we polish what ships before adding more.
 - multi-agent orchestration, sandboxed by default.
 - live Telegram Mini App dashboard – health, activity, identity, skills, and usage with cost.
 - mcp aggregator with auto-detected oauth, bearer, header, and query-string auth.
-- credential providers – third-party api keys held by the gateway and injected at the outbound proxy; the sandbox sees only opaque placeholders. built-in profiles cover anthropic, openai, nvidia, codex, copilot, github, and gitlab, plus a generic profile for any token-in-a-header api. managed from the Telegram dashboard with `/providers`.
+- credential providers – third-party api keys held by the gateway and injected at the outbound proxy; the sandbox sees only opaque placeholders. built-in profiles cover anthropic, openai, nvidia, codex, copilot, github, and gitlab, plus a generic profile for any token-in-a-header api. `gh` runs today without a token in the sandbox – the github profile injects `GITHUB_TOKEN` as an opaque placeholder and the proxy substitutes the real value before reaching `api.github.com`. managed from the Telegram dashboard with `/providers`.
 - automatic skill learning – reusable skills captured from real use, with cost and usage tracking, curator pruning, and dashboard pin/unpin.
 - fail-closed sandbox with a self-healing supervisor.
 - idle session compaction – long sessions stay healthy on their own.
