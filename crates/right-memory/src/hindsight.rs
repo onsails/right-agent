@@ -111,15 +111,6 @@ struct QueryRequest {
     tags_match: Option<String>,
 }
 
-/// Join recall results into a single string separated by double newlines.
-pub fn join_recall_texts(results: &[RecallResult]) -> String {
-    results
-        .iter()
-        .map(|r| r.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
 /// Extract a `YYYY-MM-DD` date prefix from an ISO-8601-ish timestamp.
 ///
 /// Hindsight timestamp formats are inconsistent (`2026-05-03T20:37:15.80514`
@@ -146,10 +137,9 @@ fn date_prefix(ts: &str) -> Option<&str> {
 /// (`[observed YYYY-MM-DD]`) when one is available.
 ///
 /// Date source preference: `occurred_start` (event time) else `mentioned_at`
-/// (retain time). Memories with no parseable date render as a bare bullet,
-/// preserving the prior `join_recall_texts` behavior. The date lets the agent
-/// judge whether a point-in-time fact is stale; we deliberately do not
-/// classify or filter — see
+/// (retain time). Memories with no parseable date render as a bare bullet.
+/// The date lets the agent judge whether a point-in-time fact is stale; we
+/// deliberately do not classify or filter — see
 /// `docs/superpowers/specs/2026-05-31-hindsight-memory-staleness-design.md`.
 pub fn render_recall_with_dates(results: &[RecallResult]) -> String {
     results
