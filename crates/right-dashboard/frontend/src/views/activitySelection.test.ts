@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { OverviewResponse } from '../types'
-import { activityContainsRun } from './activitySelection'
+import { activityContainsRun, isSameRunSelected } from './activitySelection'
 
 function activity(runIds: string[]): OverviewResponse {
   return {
@@ -21,5 +21,13 @@ describe('activityContainsRun', () => {
   it('returns false for null activity or null id', () => {
     expect(activityContainsRun(null, 'r1')).toBe(false)
     expect(activityContainsRun(activity(['r1']), null)).toBe(false)
+  })
+})
+
+describe('isSameRunSelected', () => {
+  it('is true only when the clicked run equals the currently selected run', () => {
+    expect(isSameRunSelected('r1', 'r1')).toBe(true)
+    expect(isSameRunSelected('r1', 'r2')).toBe(false)
+    expect(isSameRunSelected(null, 'r1')).toBe(false)
   })
 })
