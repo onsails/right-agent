@@ -2,6 +2,9 @@
 //! `/compact` on an opus[1m] session that is >=40% full. See
 //! docs/superpowers/specs/2026-05-31-idle-compaction-design.md
 
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::cc::invocation::{ClaudeInvocation, OutputFormat};
@@ -80,6 +83,146 @@ pub(crate) fn build_compact_invocation(
         prompt: Some(format!("/compact {RECENCY_INSTRUCTION}")),
         debug_flag: Some(debug),
     }
+}
+
+/// Everything a fire task needs. Cloned from `WorkerContext` at the turn-end
+/// hook (Task 7).
+#[derive(Clone)]
+pub(crate) struct IdleCompactionCtx {
+    pub compact_timers: crate::telegram::CompactTimers,
+    pub model: Arc<arc_swap::ArcSwap<Option<String>>>,
+    pub agent_dir: PathBuf,
+    pub agent_db_dir: PathBuf,
+    pub agent_name: String,
+    pub ssh_config_path: Option<PathBuf>,
+    pub resolved_sandbox: Option<String>,
+    pub session_locks: crate::telegram::SessionLocks,
+    pub debug: Arc<AtomicBool>,
+    pub chat_id: i64,
+    pub thread_id: i64,
+}
+
+/// Fire path. Re-checks eligibility, resolves the active session, takes the
+/// per-session mutex, runs `/compact`, records usage. Best-effort: every
+/// failure logs and returns (the next idle cycle retries). Never aborted
+/// mid-flight (see `arm`), so the session lock is always released cleanly.
+async fn run_compaction(ctx: IdleCompactionCtx) {
+    let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: open_connection failed: {e:#}");
+            return;
+        }
+    };
+
+    // Fire-time re-checks: model (hot-reloadable via /model) and fullness.
+    let model = crate::snapshot_model(&ctx.model);
+    let used = match latest_interactive_context_tokens(&conn, ctx.chat_id, ctx.thread_id).await {
+        Ok(v) => v.unwrap_or(0),
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: fullness query failed: {e:#}");
+            return;
+        }
+    };
+    if !should_compact(model.as_deref(), used) {
+        tracing::debug!(agent = %ctx.agent_name, "idle-compaction: no longer eligible at fire time, skipping");
+        return;
+    }
+
+    let root_session_id = match crate::telegram::session::get_active_session(
+        &conn,
+        ctx.chat_id,
+        ctx.thread_id,
+    )
+    .await
+    {
+        Ok(Some(s)) => s.root_session_id,
+        Ok(None) => {
+            tracing::debug!(agent = %ctx.agent_name, "idle-compaction: no active session, skipping");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: get_active_session failed: {e:#}");
+            return;
+        }
+    };
+
+    // Serialize against live worker/delivery turns on the same session.
+    let _guard: tokio::sync::OwnedMutexGuard<()> = {
+        let entry = ctx
+            .session_locks
+            .entry(root_session_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        entry.lock_owned().await
+    };
+
+    let args = build_compact_invocation(&root_session_id, Arc::clone(&ctx.debug)).into_args();
+    let mut cmd = match crate::cc::invocation::build_claude_command(
+        &args,
+        &ctx.agent_dir,
+        ctx.ssh_config_path.as_deref(),
+        ctx.resolved_sandbox.as_deref(),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: build_claude_command refused: {e:#}");
+            return;
+        }
+    };
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let output = match tokio::time::timeout(COMPACT_TIMEOUT, cmd.output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: spawn failed: {e:#}");
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                "idle-compaction: timed out after {}s",
+                COMPACT_TIMEOUT.as_secs()
+            );
+            return;
+        }
+    };
+
+    if !output.status.success() {
+        // `/compact` returns an empty `result`; success is exit status only.
+        tracing::warn!(
+            agent = %ctx.agent_name,
+            status = ?output.status,
+            stderr_bytes = output.stderr.len(),
+            "idle-compaction: /compact non-zero exit"
+        );
+        return;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(b) = crate::cc::stream::parse_usage_full(&stdout)
+        && let Err(e) = right_agent::usage::insert::insert_idle_compaction(
+            &conn,
+            &b,
+            ctx.chat_id,
+            ctx.thread_id,
+        )
+        .await
+    {
+        tracing::warn!(agent = %ctx.agent_name, "idle-compaction: usage insert failed: {e:#}");
+    }
+
+    tracing::info!(
+        agent = %ctx.agent_name,
+        chat_id = ctx.chat_id,
+        thread_id = ctx.thread_id,
+        used_tokens = used,
+        "idle-compaction complete"
+    );
 }
 
 #[cfg(test)]
