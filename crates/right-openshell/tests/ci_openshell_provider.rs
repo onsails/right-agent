@@ -99,11 +99,29 @@ async fn ci_openshell_provider_create_attach_env_visible() {
         .await
         .unwrap();
 
-    let (output, status) = sandbox.exec(&["printenv", "RIGHTPROBE_ENVVISIBLE"]).await;
-    assert_eq!(status, 0, "printenv failed: {output}");
+    // Right's contract: attaching a generic provider wires its env var into the
+    // sandbox's provider environment, observable at the gateway via
+    // GetSandboxProviderEnvironment (which the supervisor reads at startup).
+    // We assert at the gateway, NOT via in-sandbox `printenv`: the env is
+    // injected at supervisor boot, not into ad-hoc gRPC-exec'd processes, so a
+    // post-attach `printenv` legitimately sees nothing. We assert the var is
+    // present (not its value): on OpenShell v0.0.50 this RPC returns the
+    // resolved credential to the trusted supervisor — the
+    // `openshell:resolve:env:` placeholder is what the proxy substitutes on
+    // egress, not what this RPC returns. (`get_sandbox_provider_environment` is
+    // otherwise an unused wrapper; this is its only live coverage.)
+    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox.name())
+        .await
+        .unwrap();
+    let env = get_sandbox_provider_environment(&mut client, &sandbox_id)
+        .await
+        .unwrap();
+    let value = env
+        .get("RIGHTPROBE_ENVVISIBLE")
+        .expect("provider env var must be present at the gateway after attach");
     assert!(
-        output.starts_with("openshell:resolve:env:"),
-        "expected placeholder, got: {output}"
+        !value.is_empty(),
+        "provider env var must resolve to a non-empty value"
     );
 
     detach_from_sandbox(&mut client, sandbox.name(), &prov)
@@ -143,13 +161,19 @@ async fn ci_openshell_provider_rotate_no_restart() {
         .await
         .unwrap();
 
-    let (output_first, status) = sandbox.exec(&["printenv", "ROT_TOKEN"]).await;
-    assert_eq!(status, 0, "printenv failed before rotate: {output_first}");
-    let placeholder_first = output_first.trim().to_string();
-    assert!(
-        placeholder_first.starts_with("openshell:resolve:env:"),
-        "expected placeholder before rotate, got: {placeholder_first}"
-    );
+    // Assert at the gateway (see ci_openshell_provider_create_attach_env_visible
+    // for why not via in-sandbox `printenv`). The point of this test is that a
+    // credential rotation propagates WITHOUT recreating/restarting the sandbox:
+    // the attachment stays live and the resolved env value changes.
+    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox.name())
+        .await
+        .unwrap();
+    let value_first = get_sandbox_provider_environment(&mut client, &sandbox_id)
+        .await
+        .unwrap()
+        .get("ROT_TOKEN")
+        .cloned()
+        .expect("ROT_TOKEN must be present at the gateway before rotate");
 
     let mut creds2 = std::collections::HashMap::new();
     creds2.insert("ROT_TOKEN".into(), "second".into());
@@ -165,17 +189,16 @@ async fn ci_openshell_provider_rotate_no_restart() {
     .await
     .unwrap();
 
-    let (output_second, status) = sandbox.exec(&["printenv", "ROT_TOKEN"]).await;
-    assert_eq!(status, 0, "printenv failed after rotate: {output_second}");
-    let placeholder_second = output_second.trim().to_string();
-    assert!(
-        placeholder_second.starts_with("openshell:resolve:env:"),
-        "expected placeholder after rotate, got: {placeholder_second}"
-    );
+    let value_second = get_sandbox_provider_environment(&mut client, &sandbox_id)
+        .await
+        .unwrap()
+        .get("ROT_TOKEN")
+        .cloned()
+        .expect("ROT_TOKEN must still be present at the gateway after rotate");
 
     assert_ne!(
-        placeholder_first, placeholder_second,
-        "placeholder must change after credential rotation (version suffix differs)"
+        value_first, value_second,
+        "resolved env value must change after credential rotation (no restart)"
     );
 
     detach_from_sandbox(&mut client, sandbox.name(), &prov)
