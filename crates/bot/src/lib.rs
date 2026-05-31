@@ -1038,6 +1038,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         ssh_config_path.clone(),
         resolved_sandbox.clone(),
         health_sandbox_exec,
+        Some(std::sync::Arc::clone(&sandbox_runtime)),
     );
     let keepalive_handle = keepalive::spawn_keepalive(Arc::clone(&claude_health), shutdown.clone());
 

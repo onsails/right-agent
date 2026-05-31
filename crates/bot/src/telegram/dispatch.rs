@@ -696,6 +696,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             ),
             shutdown: CancellationToken::new(),
             sandbox_runtime: {
