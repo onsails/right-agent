@@ -67,8 +67,10 @@ pub(crate) struct DashboardState {
     pub agent_dir: PathBuf,
     pub resolved_sandbox: Option<String>,
     pub sandbox_exec: Option<right_openshell::sandbox_exec::SandboxExec>,
-    /// Shared sandbox-backend health. Reserved for Task 10's health card; the
-    /// existing `sandbox_exec` snapshot is kept as-is for now.
+    /// Live sandbox-backend health. Read by `apply_sandbox_diagnosis` to
+    /// override the `openshell-gateway` doctor check with the bot's
+    /// cause-specific diagnosis when the backend is unavailable. The
+    /// `sandbox_exec` snapshot above is a separate, startup-captured value.
     pub sandbox_runtime: std::sync::Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
     pub allowlist: right_agent::agent::allowlist::AllowlistHandle,
     pub foreground: super::StopTokens,
