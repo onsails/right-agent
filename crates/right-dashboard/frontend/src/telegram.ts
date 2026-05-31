@@ -37,6 +37,14 @@ function defaultWebApp(): TelegramWebApp | undefined {
   return window.Telegram?.WebApp
 }
 
+function defaultConfirmFn(): ((message?: string) => boolean) | undefined {
+  return typeof window === 'undefined' ? undefined : window.confirm.bind(window)
+}
+
+function defaultAlertFn(): ((message?: string) => void) | undefined {
+  return typeof window === 'undefined' ? undefined : window.alert.bind(window)
+}
+
 function defaultStorage(): DashboardDisplayModeStorage | undefined {
   try {
     if (typeof localStorage === 'undefined') {
@@ -154,8 +162,7 @@ export function subscribeTelegramFullscreenChanges(
 export function confirmAction(
   message: string,
   webApp: TelegramWebApp | undefined = defaultWebApp(),
-  confirmFn: ((message?: string) => boolean) | undefined =
-    typeof window === 'undefined' ? undefined : window.confirm.bind(window),
+  confirmFn: ((message?: string) => boolean) | undefined = defaultConfirmFn(),
 ): Promise<boolean> {
   if (typeof webApp?.showConfirm === 'function') {
     return new Promise((resolve) => webApp.showConfirm!(message, resolve))
@@ -167,8 +174,7 @@ export function confirmAction(
 export function alertMessage(
   message: string,
   webApp: TelegramWebApp | undefined = defaultWebApp(),
-  alertFn: ((message?: string) => void) | undefined =
-    typeof window === 'undefined' ? undefined : window.alert.bind(window),
+  alertFn: ((message?: string) => void) | undefined = defaultAlertFn(),
 ): Promise<void> {
   if (typeof webApp?.showAlert === 'function') {
     return new Promise((resolve) => webApp.showAlert!(message, resolve))
