@@ -388,23 +388,20 @@ async fn record_used_skill_receipts(
         .await
         .context("bump lifecycle usage")?;
 
-    // Attribute this turn's cost/cache to each used rightx skill (kind='usage').
-    // Overlaps across skills when a turn used several — intentional; the
-    // dashboard labels it attributed, not exact. Failure here is non-fatal.
-    for name in &used_skill_names {
-        if let Err(e) = right_agent::usage::insert::insert_skill_spend(
-            &conn,
-            name,
-            "usage",
-            turn_cost_usd,
-            turn_cache_read as i64,
-            turn_cache_creation as i64,
-            None,
-        )
-        .await
-        {
-            tracing::warn!(skill = %name, "usage skill_spend insert failed: {e:#}");
-        }
+    // Attribute this turn's cost/cache to each used rightx skill (kind='usage')
+    // in one transaction (Transaction Rule). Overlaps across skills when a turn
+    // used several — intentional; the dashboard labels it attributed, not exact.
+    // Failure here is non-fatal.
+    if let Err(e) = right_agent::usage::insert::insert_usage_skill_spend_many(
+        &conn,
+        &used_skill_names,
+        turn_cost_usd,
+        turn_cache_read as i64,
+        turn_cache_creation as i64,
+    )
+    .await
+    {
+        tracing::warn!("usage skill_spend batch insert failed: {e:#}");
     }
 
     Ok(used_skill_names)
