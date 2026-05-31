@@ -130,7 +130,33 @@ async fn build_window(
         web_fetch_requests: sources.iter().map(|source| source.web_fetch_requests).sum(),
         per_model,
         sources,
+        budget_skip_count: budget_skip_count(conn, since, until).await?,
     })
+}
+
+async fn budget_skip_count(
+    conn: &Connection,
+    since: Option<&DateTime<Utc>>,
+    until: &DateTime<Utc>,
+) -> Result<i64, ReadModelError> {
+    let until_str = until.to_rfc3339();
+    let count = if let Some(since) = since {
+        let since_str = since.to_rfc3339();
+        conn.query_row(
+            "SELECT COUNT(*) FROM learning_skip WHERE reason='budget' AND ts >= ?1 AND ts <= ?2",
+            right_db::params![since_str, until_str],
+            |r| r.get(0),
+        )
+        .await?
+    } else {
+        conn.query_row(
+            "SELECT COUNT(*) FROM learning_skip WHERE reason='budget' AND ts <= ?1",
+            right_db::params![until_str],
+            |r| r.get(0),
+        )
+        .await?
+    };
+    Ok(count)
 }
 
 async fn build_daily_series(
@@ -1101,5 +1127,44 @@ mod tests {
             .find(|window| window.key == "today")
             .unwrap();
         assert!((today_window.total_cost_usd - 0.60).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn budget_skip_count_appears_in_window() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        // Two rows inside the today window, one outside (old)
+        for ts in [
+            "2026-05-21T01:00:00Z",
+            "2026-05-21T02:00:00Z",
+            "2026-05-19T00:00:00Z", // outside today
+        ] {
+            conn.execute(
+                "INSERT INTO learning_skip (reason, ts) VALUES ('budget', ?1)",
+                right_db::params![ts],
+            )
+            .await
+            .unwrap();
+        }
+
+        let response = usage_overview(
+            &conn,
+            UsageOverviewInput {
+                agent: "agent-b".to_owned(),
+                generated_at: "2026-05-21T05:00:00Z".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let today = response.windows.iter().find(|w| w.key == "today").unwrap();
+        assert_eq!(today.budget_skip_count, 2);
+
+        let all_time = response
+            .windows
+            .iter()
+            .find(|w| w.key == "all_time")
+            .unwrap();
+        assert_eq!(all_time.budget_skip_count, 3);
     }
 }

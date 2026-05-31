@@ -99,6 +99,8 @@ pub struct UsageWindow {
     pub web_search_requests: u64,
     pub web_fetch_requests: u64,
     pub per_model: Vec<UsageModelSummary>,
+    #[serde(default)]
+    pub budget_skip_count: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -357,7 +359,7 @@ pub struct LearningEventSummary {
     pub created_at: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SkillsResponse {
     pub agent: String,
     pub source: String,
@@ -365,14 +367,14 @@ pub struct SkillsResponse {
     pub groups: SkillGroups,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SkillGroups {
     pub core: Vec<SkillSummary>,
     pub learned: Vec<SkillSummary>,
     pub other: Vec<SkillSummary>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SkillSummary {
     pub name: String,
     pub group: String,
@@ -394,6 +396,16 @@ pub struct SkillSummary {
     pub last_used_at: Option<String>,
     #[serde(default)]
     pub last_patched_at: Option<String>,
+    #[serde(default)]
+    pub learn_cost_usd: f64,
+    #[serde(default)]
+    pub fix_cost_usd: f64,
+    #[serde(default)]
+    pub usage_cost_usd: f64,
+    #[serde(default)]
+    pub cache_read_tokens: i64,
+    #[serde(default)]
+    pub cache_creation_tokens: i64,
 }
 
 impl SkillSummary {
@@ -411,6 +423,11 @@ impl SkillSummary {
             created_at: None,
             last_used_at: None,
             last_patched_at: None,
+            learn_cost_usd: 0.0,
+            fix_cost_usd: 0.0,
+            usage_cost_usd: 0.0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
         }
     }
 
@@ -433,6 +450,23 @@ impl SkillSummary {
             .as_ref()
             .map(|timestamp| timestamp.to_rfc3339());
     }
+
+    pub fn apply_spend(&mut self, s: &SkillSpendAgg) {
+        self.learn_cost_usd = s.learn_cost_usd;
+        self.fix_cost_usd = s.fix_cost_usd;
+        self.usage_cost_usd = s.usage_cost_usd;
+        self.cache_read_tokens = s.cache_read_tokens;
+        self.cache_creation_tokens = s.cache_creation_tokens;
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SkillSpendAgg {
+    pub learn_cost_usd: f64,
+    pub fix_cost_usd: f64,
+    pub usage_cost_usd: f64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -473,7 +507,7 @@ impl From<right_lifecycle::CreatedBy> for SkillCreatedBy {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SkillDetailResponse {
     pub agent: String,
     pub skill: SkillSummary,
