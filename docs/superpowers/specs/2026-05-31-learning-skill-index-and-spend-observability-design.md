@@ -46,6 +46,8 @@ but is made observable by part 3.
 - Probe-writer (and curator) usage rows are written reliably, with cache fields.
 - A per-skill spend ledger answering **learning vs fixing vs usage** cost, surfaced
   in the dashboard **Knowledge** view and **Usage** tab, including cache usage.
+- The dashboard shows how many learning attempts were **blocked by the daily
+  budget**, split into create (learn) vs patch (fix) where known.
 
 ## Non-goals
 
@@ -61,10 +63,16 @@ but is made observable by part 3.
 
 Replace the host-filesystem read with a sandbox read via gRPC
 `right_openshell::openshell::exec_in_sandbox(client, sandbox_id, command, timeout)`
-(the sanctioned in-sandbox exec; never the `openshell` CLI). The prefilter lists
+(the sanctioned in-sandbox exec; never the `openshell` CLI). The reader lists
 `/sandbox/.claude/skills/rightx-*/SKILL.md` and reads each file's YAML frontmatter
-(`name`, `description`) to build the abbreviated index string already consumed by
-`build_prompt`.
+(`name`, `description`) to build the abbreviated index string.
+
+**Both call sites must move**, or the probe-writer stays blind:
+- `learning_prefilter::run` → `collect_host_rightx_skill_index` (classifier's
+  "EXISTING SKILLS" list).
+- `worker.rs:~2130` → a second `collect_host_rightx_skill_index` builds the
+  `skill_index` handed to the **probe-writer** (so it knows what to patch vs create).
+Extract one shared sandbox reader used by both.
 
 - The sandbox is the single source of truth for skill content; no DB duplication,
   no drift, no migration.
@@ -114,8 +122,23 @@ CREATE INDEX IF NOT EXISTS idx_skill_spend_skill_kind ON skill_spend(skill_name,
 CREATE INDEX IF NOT EXISTS idx_skill_spend_ts ON skill_spend(ts);
 ```
 
-Migration **v38** (next free version), idempotent (`CREATE TABLE/INDEX IF NOT
-EXISTS`), registered in `right_db::migrations::MIGRATIONS`.
+The same migration **v38** also creates the budget-skip table (part 6):
+
+```sql
+CREATE TABLE IF NOT EXISTS learning_skip (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  reason        TEXT NOT NULL,                 -- free-form; 'budget' today
+  intended_kind TEXT,                          -- NULL | 'create' | 'patch'
+  chat_id       INTEGER,
+  thread_id     INTEGER,
+  ts            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_learning_skip_reason_ts ON learning_skip(reason, ts);
+```
+
+Migration **v38** (next free version) creates both `skill_spend` and `learning_skip`,
+idempotent (`CREATE TABLE/INDEX IF NOT EXISTS`), registered in
+`right_db::migrations::MIGRATIONS`.
 
 Writers:
 
@@ -167,20 +190,47 @@ existing row populates. Add to the Usage tab: the three `skill_spend` buckets
 (learn/fix/usage totals for the agent) and `cache_read`/`cache_creation` columns so
 a future cold-cache probe-writer run is visible at a glance.
 
+### Part 6 — Budget-blocked attempts, split by intent (two-gate restructure)
+
+Today the only budget gate is **pre-prefilter** (`worker.rs:2071`): it returns
+before the classifier runs, so a suppressed attempt's intent (create vs patch) is
+unknown, and the expensive probe-writer has **no** budget check at all (one
+probe-writer can overshoot the whole daily budget). Restructure into two gates:
+
+- **Prefilter gate (loosened):** the prefilter is cheap (~$0.003) and we want it to
+  keep classifying slightly past the budget to capture intent. Run it while
+  `today_spend < max_daily_budget_usd + PREFILTER_BUDGET_HEADROOM_USD` (a single named
+  const, e.g. a small fixed margin). When even the headroom is exceeded, record a
+  `learning_skip(reason='budget', intended_kind=NULL)` and return — intent unknown.
+- **Probe-writer gate (new, primary):** after the prefilter returns
+  `CreateNew`/`PatchExisting`, check `today_spend >= max_daily_budget_usd`. If
+  exhausted, record `learning_skip(reason='budget', intended_kind='create'|'patch')`
+  (derived from the decision) and return without spawning the probe-writer. This both
+  yields the learn/fix split and closes the overshoot hole.
+
+`reason` is free-form `TEXT` (no central enum — only `'budget'` today; extensible
+later without a CHECK constraint, per project convention against growing enums).
+
+Dashboard surfaces, over today / 7d: count of `learning_skip` where `reason='budget'`,
+split into **learn** (`intended_kind='create'`), **fix** (`intended_kind='patch'`),
+and **unknown** (`NULL`). Shown in the learning/Knowledge area and echoed on the Usage
+tab next to the spend buckets.
+
 ## Components & files
 
 | Area | File(s) | Change |
 |---|---|---|
-| Prefilter index | `crates/bot/src/learning_prefilter.rs` | replace `collect_host_rightx_skill_index` with sandbox gRPC read; host fallback for no-sandbox |
-| Prefilter ctx | `crates/bot/src/telegram/worker.rs` | pass OpenShell client/handle into `PrefilterContext` |
+| Skill index (shared) | `crates/bot/src/learning_prefilter.rs` | replace `collect_host_rightx_skill_index` with one shared sandbox gRPC reader; host fallback for no-sandbox; used by both call sites |
+| Two-gate + skips | `crates/bot/src/telegram/worker.rs` | pass OpenShell client into `PrefilterContext`; loosen prefilter gate (`+ PREFILTER_BUDGET_HEADROOM_USD`), add probe-writer budget gate; write `learning_skip` rows; update the `worker.rs:~2130` probe-writer skill_index call site |
+| Skip insert | `crates/right-agent/src/usage/insert.rs` | `insert_learning_skip(reason, intended_kind, chat, thread)` |
 | Probe-writer usage | `crates/bot/src/learning_probe_writer.rs` | unify stdout drain (init + result capture); write `skill_spend` create/patch |
 | Curator usage | `crates/bot/src/learning_curator.rs` | write `skill_spend` maintain (when skill known) |
 | Usage rows | `crates/right-agent/src/usage/insert.rs` | `insert_skill_spend(...)` helper |
 | Worker usage spend | `crates/bot/src/telegram/worker.rs` | post-turn `kind='usage'` rows per rightx receipt |
 | Schema | `crates/right-db/src/sql/v38_skill_spend.sql`, `migrations.rs` | new table + indexes (idempotent) |
-| Knowledge read | `crates/right-dashboard/src/read_model/learning.rs`, `api_types.rs` | per-skill spend aggregate |
-| Usage read | `crates/right-dashboard/src/read_model/usage.rs`, `api_types.rs` | buckets + cache columns |
-| Frontend | `right-dashboard` Vue Knowledge + Usage views | render buckets/cache via `AsyncState` |
+| Knowledge read | `crates/right-dashboard/src/read_model/learning.rs`, `api_types.rs` | per-skill spend aggregate; budget-skip counts (learn/fix/unknown) |
+| Usage read | `crates/right-dashboard/src/read_model/usage.rs`, `api_types.rs` | buckets + cache columns; budget-skip counts |
+| Frontend | `right-dashboard` Vue Knowledge + Usage views | render buckets/cache + budget-skip counts via `AsyncState` |
 | Docs | `ARCHITECTURE.md`/`docs/architecture/learning.md`, `PROMPT_SYSTEM.md` | skill-index-from-sandbox rule; `skill_spend` ledger |
 
 ## Error handling
@@ -201,23 +251,28 @@ a future cold-cache probe-writer run is visible at a glance.
   (`-p right-bot`)
 - Worker usage spend: a turn with two rightx receipts writes two `skill_spend`
   `usage` rows. (`-p right-bot`)
-- Migration: v38 idempotency test alongside existing `vNN_*` tests. (`-p right-db`)
+- Budget skips: probe-writer blocked by exhausted budget writes a `learning_skip`
+  with `intended_kind` matching the prefilter decision; prefilter blocked past
+  headroom writes `intended_kind=NULL`. (`-p right-bot`)
+- Migration: v38 idempotency test (both tables) alongside existing `vNN_*` tests.
+  (`-p right-db`)
 - Dashboard: SSR tests for Knowledge per-skill buckets/cache and Usage buckets/cache;
   keep `usage_overview_sources_match_learning_sources_constant` green. (`-p right-dashboard`)
 - **Final (mandatory):** `devenv shell -- cargo test --workspace`.
 
 ## Build sequence
 
-1. v38 migration + `skill_spend` table (+ idempotency test).
-2. `insert_skill_spend` helper in `right-agent`.
+1. v38 migration + `skill_spend` and `learning_skip` tables (+ idempotency test).
+2. `insert_skill_spend` + `insert_learning_skip` helpers in `right-agent`.
 3. Probe-writer stdout unification + usage/`skill_spend` write (part 2 + create/patch).
 4. Worker post-turn `usage` spend rows.
 5. Curator `maintain` spend.
-6. Prefilter sandbox skill index (part 1) + worker client wiring.
-7. Dashboard Knowledge + Usage read models + api_types.
-8. Frontend Knowledge + Usage rendering.
-9. Docs (`ARCHITECTURE.md`/satellite, `PROMPT_SYSTEM.md`).
-10. Final full workspace test.
+6. Two-gate restructure + `learning_skip` writes (part 6).
+7. Shared sandbox skill-index reader (part 1), both call sites + worker client wiring.
+8. Dashboard Knowledge + Usage read models + api_types (spend buckets, cache, skips).
+9. Frontend Knowledge + Usage rendering.
+10. Docs (`ARCHITECTURE.md`/satellite, `PROMPT_SYSTEM.md`).
+11. Final full workspace test.
 
 ## Risks / open questions
 
@@ -240,3 +295,9 @@ a future cold-cache probe-writer run is visible at a glance.
   of the pipeline) counts toward the `max_daily_budget_usd` default of $1/day, so the
   gate will trip sooner and more honestly. No code change required, but the $1 default
   may warrant revisiting once true spend is visible.
+- **Prefilter headroom spend:** the loosened prefilter gate (part 6) lets the cheap
+  classifier run a little past the budget to capture create/patch intent for skip
+  accounting. This spends ~$0.003/turn beyond the budget up to
+  `PREFILTER_BUDGET_HEADROOM_USD`. Bound it with a small named const; past the headroom
+  the prefilter also stops (recording `intended_kind=NULL`). Net extra spend is small
+  and is itself visible in the `learning_prefilter` usage source.
