@@ -28,6 +28,52 @@ function failuresCard(html: string): { tag: string; attrs: string } {
   return { tag: m[1], attrs: m[2] }
 }
 
+function cronCard(overrides: Record<string, unknown> = {}) {
+  return {
+    job_name: 'daily', schedule: '0 8 * * *', schedule_human: 'At 08:00, every day',
+    recurring: true, run_at: null, next_run_at: '2026-06-02T08:00:00Z',
+    target_chat_id: 123, target_thread_id: null, max_budget_usd: 2,
+    spend_24h_usd: 0.25, spend_7d_usd: 1.5, last_run: null, recent_runs: [], ...overrides,
+  }
+}
+
+function overviewWithCron(cron: Record<string, unknown>) {
+  return {
+    agent: 'a', generated_at: '2026-06-01T12:00:00Z', refresh_interval_secs: 5,
+    summary: { cron_count: 1, active_cron_count: 0, failed_recent_cron_count: 0, today_cost_usd: 0 },
+    crons: [cron], failed_runs: [], active: { foreground: [], background: [] },
+  }
+}
+
+describe('ActivityView cron card', () => {
+  it('renders human schedule and spend figures, not the raw cron expression as the primary line', async () => {
+    const html = await render({
+      overview: overviewWithCron(cronCard()), selectedRun: null, selectedRunId: null,
+      loadingDetail: false, detailError: null,
+    })
+    expect(html).toContain('At 08:00, every day')
+    expect(html).toContain('$0.25')
+    expect(html).toContain('$1.50')
+  })
+
+  it('renders a delete button for the cron', async () => {
+    const html = await render({
+      overview: overviewWithCron(cronCard()), selectedRun: null, selectedRunId: null,
+      loadingDetail: false, detailError: null,
+    })
+    expect(html).toMatch(/cron-delete/)
+  })
+
+  it('renders the sort control', async () => {
+    const html = await render({
+      overview: overviewWithCron(cronCard()), selectedRun: null, selectedRunId: null,
+      loadingDetail: false, detailError: null,
+    })
+    expect(html).toContain('Spend 24h')
+    expect(html).toContain('Spend 7d')
+  })
+})
+
 describe('ActivityView failures card', () => {
   it('renders the zero failures card gray + non-interactive (not green ok, not red bad)', async () => {
     const html = await render({ overview: activity(0, []), selectedRun: null, selectedRunId: null, loadingDetail: false, detailError: null })
