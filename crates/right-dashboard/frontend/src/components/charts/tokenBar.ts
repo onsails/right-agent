@@ -1,10 +1,10 @@
+import { inputBearing, type CacheTokens } from './usageCache'
+
 // Token counts for one row of usage (a daily point, a source, or a window).
-// `cacheHitRate` in usageCache.ts consumes the input-bearing subset of this.
-export interface TokenCounts {
-  input_tokens: number
+// Extends the input-bearing trio (CacheTokens) with generation output;
+// `cacheHitRate`/`inputBearing` consume the inherited subset.
+export interface TokenCounts extends CacheTokens {
   output_tokens: number
-  cache_creation_tokens: number
-  cache_read_tokens: number
 }
 
 // Stacked widths (fractions summing to 1) for the input-bearing trio.
@@ -20,21 +20,16 @@ const DEFAULT_MIN_WIDTH = 0.04
 
 // Returns null when there are no input-bearing tokens (caller hides the bar).
 export function hitSegments(t: TokenCounts, minWidth: number = DEFAULT_MIN_WIDTH): HitSegments | null {
-  const raw = {
-    miss: Math.max(0, t.input_tokens),
-    create: Math.max(0, t.cache_creation_tokens),
-    read: Math.max(0, t.cache_read_tokens),
-  }
-  const bearing = raw.miss + raw.create + raw.read
+  const bearing = inputBearing(t)
   if (bearing === 0) {
     return null
   }
 
   const keys = ['miss', 'create', 'read'] as const
   const result: HitSegments = {
-    miss: raw.miss / bearing,
-    create: raw.create / bearing,
-    read: raw.read / bearing,
+    miss: t.input_tokens / bearing,
+    create: t.cache_creation_tokens / bearing,
+    read: t.cache_read_tokens / bearing,
   }
 
   // Bump nonzero segments below the floor up to minWidth; remove the overflow
