@@ -35,10 +35,17 @@ describe('UsageBreakdown tokens', () => {
     expect(html).toContain('interactive')
   })
 
-  it('no longer renders the Web counters or the old cache subline', async () => {
+  it('renders the new TokenLine cache segments in place of the old subline and Web row', async () => {
     const html = await render(point())
-    expect(html).not.toContain('Web')
-    expect(html).not.toContain('created') // CacheSubline removed (note: 'seg-create' has no 'd')
+    // New intended markup: cache create/read live as TokenLine segments.
+    expect(html).toContain('tok-create')
+    expect(html).toContain('tok-read')
+    expect(html).toContain('seg-create')
+    expect(html).toContain('seg-read')
+    // Old CacheSubline component (class `cache-subline`) is gone.
+    expect(html).not.toContain('cache-subline')
+    // Old `<span>Web</span>` counters row is gone.
+    expect(html).not.toContain('<span>Web</span>')
   })
 
   it('omits a source hit bar when that source has no input-bearing tokens but keeps the per-day bar', async () => {

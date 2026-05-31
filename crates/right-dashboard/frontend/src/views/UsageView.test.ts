@@ -102,6 +102,10 @@ describe('UsageView token legend and per-source TokenLine', () => {
     expect(html).toContain('token-legend')
     expect(html).toContain('token-line')
     expect(html).toContain('interactive')
-    expect(html).not.toContain('created') // CacheSubline removed
+    // New legend exposes cache via stable marker classes.
+    expect(html).toContain('lg-create')
+    expect(html).toContain('lg-read')
+    // Old CacheSubline component (class `cache-subline`) is gone.
+    expect(html).not.toContain('cache-subline')
   })
 })
