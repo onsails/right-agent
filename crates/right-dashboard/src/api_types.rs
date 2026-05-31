@@ -220,6 +220,7 @@ pub struct UsageSourcePoint {
     pub turns: u64,
     pub invocations: u64,
     pub input_tokens: u64,
+    pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
 }
@@ -812,6 +813,7 @@ mod dashboard_v2_tests {
                         turns: 1,
                         invocations: 1,
                         input_tokens: 10,
+                        output_tokens: 0,
                         cache_creation_tokens: 5,
                         cache_read_tokens: 40,
                     }],
@@ -878,6 +880,7 @@ mod dashboard_v2_tests {
                     turns: 2,
                     invocations: 2,
                     input_tokens: 10,
+                    output_tokens: 0,
                     cache_creation_tokens: 5,
                     cache_read_tokens: 40,
                 }],
