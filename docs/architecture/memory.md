@@ -23,6 +23,17 @@ Auto-recall before each `claude -p`: query truncated to 800 chars, tags
 `["chat:<chat_id>"]` with `tags_match: "any"` (returns per-chat + global untagged
 memories). Prefetch uses same parameters.
 
+**Recall response shape.** Hindsight returns ~13 fields per result; the client
+models `text`, `type`, `id`, `mentioned_at`, `occurred_start`, `occurred_end`
+(`right_memory::hindsight::RecallResult`) and ignores the rest. The API does
+**not** return a `score`. Host auto-recall renders each memory as
+`- [observed <date>] <text>` via `render_recall_with_dates` (date =
+`occurred_start` else `mentioned_at`, sliced to `YYYY-MM-DD`); memories with no
+parseable date render as a bare bullet. The agent-facing `memory_recall` MCP
+tool serializes the structured results directly, so it exposes the date fields
+as JSON. There is no staleness filtering or TTL — the date is surfaced and the
+agent judges currency.
+
 Explicit retain is residual storage, not the default destination for every
 "remember" request. Agent-facing prompt text directs explicit persistence
 requests to the `/right-memory` skill, which owns the detailed routing between

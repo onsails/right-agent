@@ -101,7 +101,10 @@ Missing agent-owned files are silently skipped. Operating instructions and boots
 content are compiled into the binary — no file sync needed. MCP instructions are
 fetched from the aggregator's internal API (non-fatal if unavailable). Memory section
 is appended last: file mode inlines MEMORY.md contents, Hindsight mode inlines
-prefetched recall results.
+prefetched recall results. Each recalled memory is rendered as
+`- [observed <date>] <text>` (date = `occurred_start` else `mentioned_at`,
+`YYYY-MM-DD`; no date → bare bullet). Operating instructions direct the agent
+to re-verify any dated fact with a live check before asserting it as current.
 
 Operating instructions include a `### Subagents` section that teaches use of the
 built-in Claude Code `Agent` tool for bounded independent workstreams. This is
