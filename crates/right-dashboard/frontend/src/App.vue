@@ -371,6 +371,32 @@ dt,
   margin-bottom: 10px;
 }
 
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.cron-delete {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.4rem;
+  border: 1px solid var(--danger, #c0392b);
+  color: var(--danger, #c0392b);
+  background: transparent;
+  cursor: pointer;
+}
+
+.cron-sort {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.5rem;
+}
+
+.cron-sort-select {
+  margin-left: 0.4rem;
+}
+
 .list-stack,
 .row-list,
 .text-block,

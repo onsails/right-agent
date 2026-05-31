@@ -9,6 +9,7 @@ import StatusPill from '../components/StatusPill.vue'
 import { failureMetric } from '../components/failureMetric'
 import { deliveryLabel, deliveryTone, money, notifyText, shortDate, shortId, statusTone } from '../format'
 import type { CronCard, OverviewResponse, RunDetailResponse, RunSummary } from '../types'
+import { CRON_SORT_MODES, sortCrons, type CronSortMode } from './cronSort'
 
 const props = defineProps<{
   overview: OverviewResponse | null
@@ -21,8 +22,12 @@ const props = defineProps<{
 const failuresOpen = ref(false)
 const failures = computed(() => failureMetric(props.overview?.summary.failed_recent_cron_count ?? 0))
 
+const sortMode = ref<CronSortMode>('name')
+const sortedCrons = computed(() => sortCrons(props.overview?.crons ?? [], sortMode.value))
+
 const emit = defineEmits<{
   selectRun: [run: RunSummary]
+  deleteCron: [cron: CronCard]
 }>()
 
 function cronStatus(cron: CronCard): string {
@@ -56,34 +61,48 @@ function cronStatus(cron: CronCard): string {
 
   <section class="two-column wide-main">
     <section class="list-stack">
+      <div class="cron-sort">
+        <label>Sort
+          <select v-model="sortMode" class="cron-sort-select">
+            <option v-for="opt in CRON_SORT_MODES" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+          </select>
+        </label>
+      </div>
+
       <article v-if="(overview?.crons.length ?? 0) === 0" class="empty-panel">No cron jobs</article>
 
-      <article v-for="cron in overview?.crons ?? []" :key="cron.job_name" class="panel">
+      <article v-for="cron in sortedCrons" :key="cron.job_name" class="panel">
         <header class="panel-head">
           <div>
             <p class="eyebrow">{{ cron.recurring ? 'Recurring' : 'One shot' }}</p>
             <h2>{{ cron.job_name }}</h2>
-            <p class="muted-line">{{ cron.schedule }}</p>
+            <p class="muted-line" :title="cron.schedule">{{ cron.schedule_human }}</p>
+            <p v-if="cron.target_chat_id" class="muted-line">
+              → {{ cron.target_chat_id }}<span v-if="cron.target_thread_id">/{{ cron.target_thread_id }}</span>
+            </p>
           </div>
-          <StatusPill :status="cronStatus(cron)" />
+          <div class="panel-head-actions">
+            <StatusPill :status="cronStatus(cron)" />
+            <button class="cron-delete" type="button" @click="emit('deleteCron', cron)">Delete</button>
+          </div>
         </header>
 
         <dl class="meta-grid">
           <div>
             <dt>Next</dt>
-            <dd>{{ shortDate(cron.run_at) }}</dd>
+            <dd>{{ cron.next_run_at ? shortDate(cron.next_run_at) : '—' }}</dd>
           </div>
           <div>
-            <dt>Target</dt>
-            <dd>{{ cron.target_chat_id ?? 'default' }}<span v-if="cron.target_thread_id">/{{ cron.target_thread_id }}</span></dd>
+            <dt>24h</dt>
+            <dd>{{ money(cron.spend_24h_usd) }}</dd>
           </div>
           <div>
-            <dt>Budget</dt>
+            <dt>7d</dt>
+            <dd>{{ money(cron.spend_7d_usd) }}</dd>
+          </div>
+          <div>
+            <dt>Cap</dt>
             <dd>{{ money(cron.max_budget_usd) }}</dd>
-          </div>
-          <div>
-            <dt>Recent</dt>
-            <dd>{{ cron.recent_runs.length }}</dd>
           </div>
         </dl>
 
