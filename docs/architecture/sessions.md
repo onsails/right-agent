@@ -173,10 +173,13 @@ cron, delivery, reflection, or background), the worker cancels any existing
 timer at turn start and arms a fresh one at turn end. Arming spawns a task
 that `tokio::select!`s between a 2h sleep and the cancellation token: if the
 token fires first (a new turn arrived), the task exits cleanly. If the sleep
-wins first, the compaction runs to completion — the token cannot tear it down
-mid-flight, which would orphan the `claude` child process or drop the session
-lock mid-write. This is the commit-to-sleep property: cancellation aborts only
-a still-pending timer, not an in-flight compaction.
+wins first, the task keeps the same token in the map and runs an **abortable**
+compaction. A turn that arrives during compaction cancels the token, which
+drops the `wait_with_output_or_kill` future and SIGKILLs the `/compact`
+process group (the in-sandbox grandchild too) — nothing is orphaned and the
+session lock releases promptly. The map entry is left in place after the task
+finishes; the next `arm`/`cancel` on that session cleans it up (a late
+`cancel()` on a finished task is a harmless no-op).
 
 **Gate.** Two conditions, both evaluated at arm time and re-checked at fire
 time. First, the model must match `claude-opus*[1m]` (the `[1m]` suffix
@@ -200,19 +203,24 @@ so the arm-time model may not match the fire-time model. The fullness is also
 re-queried at fire time for safety, though context cannot change without a turn
 (which would have reset or cancelled the timer).
 
-**Invocation.** When the gate passes, the fire task acquires the per-session
+**Invocation.** When the gate passes, the fire task `try_lock`s the per-session
 `SessionLocks` mutex (keyed by `root_session_id`, the same lock the worker
-holds during every `--resume` turn) and runs a specialized maintenance
-invocation: `claude -p --resume <root_session_id> "/compact <recency
-instruction>"` with no `--mcp-config` and no `--json-schema` — `/compact`
-uses no tools and its `result` field is empty. A `ProcessGroupChild` +
-`wait_with_output_or_kill` pair enforces the 120s `COMPACT_TIMEOUT` by
-killing the whole process group on expiry. Success is `output.status.success()`.
+holds during every `--resume` turn) — **skipping** compaction entirely if the
+session is busy, so it never starts on an active session and never queues
+behind a live turn. It then runs a specialized maintenance invocation:
+`claude -p --resume <root_session_id> "/compact <recency instruction>"` with no
+`--mcp-config` and no `--json-schema` — `/compact` uses no tools and its
+`result` field is empty. The wait races `wait_with_output_or_kill` (120s
+`COMPACT_TIMEOUT`) against the session cancellation token; both timeout and
+turn-activity abort drop the `ProcessGroupChild`, SIGKILLing the whole process
+group, so the child is never orphaned. Success is `output.status.success()`.
 Token usage is recorded via `insert_idle_compaction` (source `'idle_compaction'`).
 
-**Edge cases.** A user returning mid-compaction blocks on the session lock for
-at most `COMPACT_TIMEOUT`. The 2h idle precondition makes this window rare and
-the bounded wait is accepted for v1.
+**Edge cases.** A user returning mid-compaction is never stalled: a turn at
+session-start cancels the timer (aborting the in-flight `/compact` and
+releasing the lock at once), and `try_lock` means a turn already holding the
+lock simply causes compaction to skip. Neither direction of lock contention
+makes the user wait.
 
 ## Reflection Primitive
 
