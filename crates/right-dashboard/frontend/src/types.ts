@@ -381,6 +381,7 @@ export interface LearningLifecycle {
   updated_7d: number
   failed_or_aborted_7d: number
   recent_successful_events: LearningEventSummary[]
+  recent_failed_events: LearningEventSummary[]
   candidate_skill_names_7d: string[]
 }
 
