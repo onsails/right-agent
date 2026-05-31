@@ -1,6 +1,6 @@
 import { inject, provide, ref, type InjectionKey, type Ref } from 'vue'
 
-export const DEFAULT_INTERVAL_MS = 5000
+const DEFAULT_INTERVAL_MS = 5000
 
 export interface LiveConfig {
   intervalMs: number
