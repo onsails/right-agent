@@ -650,7 +650,19 @@ async fn handle_mcp_set_headers(
         Arc::clone(existing)
     };
 
-    // Persist first — a credential write does not depend on upstream reachability.
+    // Build the background-connect client before any mutation: it needs no
+    // inputs from persistence, and a build failure must return 500 with zero
+    // state changes — never after the credential is already persisted.
+    let connect_client = match right_mcp::ssrf::hardened_client_builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => return internal_error(format!("reqwest client build: {e:#}")).into_response(),
+    };
+
+    // Persist next — a credential write does not depend on upstream reachability.
     {
         let conn = conn_arc.lock().await;
         if let Err(e) = credentials::db_set_http_headers(&conn, &req.name, &header_secrets).await {
@@ -679,14 +691,6 @@ async fn handle_mcp_set_headers(
 
     // Best-effort connect in the background: connect() self-logs and records the
     // outcome, so the live status reflects reality without blocking this request.
-    let connect_client = match right_mcp::ssrf::hardened_client_builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(client) => client,
-        Err(e) => return internal_error(format!("reqwest client build: {e:#}")).into_response(),
-    };
     tokio::spawn(async move {
         let _ = replacement.connect(connect_client).await;
     });
@@ -1769,12 +1773,13 @@ mod tests {
         );
         assert_eq!(nango["header_names"], serde_json::json!(["connection-id"]));
 
-        let (_, body) = send_json(
+        let (status, body) = send_json(
             app,
             "/mcp-list",
             serde_json::json!({ "agent": "test-agent" }),
         )
         .await;
+        assert_eq!(status, StatusCode::OK, "body={body}");
         assert!(
             !body.to_string().contains("new_conn"),
             "list response must not expose header values: {body}"
