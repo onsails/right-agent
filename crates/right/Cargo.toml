@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 right-agent = { path = "../right-agent", version = "*" }
+right-hostpath = { path = "../right-hostpath", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-bot = { path = "../bot", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }

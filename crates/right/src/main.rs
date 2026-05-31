@@ -451,6 +451,8 @@ pub enum Commands {
     List,
     /// Validate dependencies and agent configuration
     Doctor,
+    /// Ensure the install directory is on your shell PATH
+    SetupPath,
     /// Launch agents with process-compose
     Up {
         /// Only launch specific agents (comma-separated)
@@ -714,6 +716,7 @@ async fn main() -> miette::Result<()> {
         }
         Commands::List => cmd_list(&home),
         Commands::Doctor => cmd_doctor(&home).await,
+        Commands::SetupPath => cmd_setup_path(),
         Commands::Up {
             agents,
             detach,
@@ -2488,6 +2491,67 @@ fn prompt_sandbox_recreate_if_exists(
             _ => continue,
         }
     }
+}
+
+/// `right setup-path` — ensure the install dir is on the user's shell PATH.
+///
+/// Never fails the installer: exits `0` when PATH is ensured, `10` when the
+/// rc could not be written (after printing a warning the user can act on).
+fn cmd_setup_path() -> miette::Result<()> {
+    let theme = right_ui::detect();
+
+    let exe = std::env::current_exe()
+        .map_err(|e| miette::miette!("cannot resolve current executable: {e}"))?;
+    let bindir = right_hostpath::bin_dir(&exe);
+    let manual_fix = format!("add manually: export PATH=\"{}:$PATH\"", bindir.display());
+
+    let Some(home) = dirs::home_dir() else {
+        let line = right_ui::status(right_ui::Glyph::Warn)
+            .noun("PATH")
+            .verb("couldn't determine your home directory")
+            .fix(manual_fix);
+        println!("{}", line.render(theme));
+        std::process::exit(10);
+    };
+    let shell = std::env::var("SHELL").ok();
+
+    let (line, code) = match right_hostpath::ensure_on_path(&bindir, &home, shell.as_deref()) {
+        Ok(right_hostpath::EnsureOutcome::AlreadyOnPath) => (
+            right_ui::status(right_ui::Glyph::Ok)
+                .noun("PATH")
+                .verb("ready"),
+            0,
+        ),
+        Ok(right_hostpath::EnsureOutcome::Wrote { file }) => (
+            right_ui::status(right_ui::Glyph::Ok)
+                .noun("PATH")
+                .verb(format!("added to {}", file.display()))
+                .fix(format!(
+                    "open a new shell, or run: source {}",
+                    file.display()
+                )),
+            0,
+        ),
+        Ok(right_hostpath::EnsureOutcome::CouldNotWrite { file, reason }) => (
+            right_ui::status(right_ui::Glyph::Warn)
+                .noun("PATH")
+                .verb(format!("couldn't update {}", file.display()))
+                .detail(reason)
+                .fix(manual_fix),
+            10,
+        ),
+        Err(e) => (
+            right_ui::status(right_ui::Glyph::Warn)
+                .noun("PATH")
+                .verb("couldn't set up PATH")
+                .detail(format!("{e:#}"))
+                .fix(manual_fix),
+            10,
+        ),
+    };
+
+    println!("{}", line.render(theme));
+    std::process::exit(code);
 }
 
 async fn cmd_doctor(home: &Path) -> miette::Result<()> {
