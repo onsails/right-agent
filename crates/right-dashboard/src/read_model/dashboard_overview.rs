@@ -1,8 +1,9 @@
 use crate::api_types::{
     CostLearningPoint, CostLearningRiver, CostLearningSeries, CostSeriesPoint,
     DashboardDataWarning, DashboardOverviewResponse, DashboardSignal, LearningMarker,
-    OverviewDoctorStatus, OverviewSandboxStatus, UsageSourcePoint,
+    OverviewDoctorStatus, OverviewSandboxStatus, RunSummary, UsageSourcePoint,
 };
+
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use right_db::{Connection, OptionalExtension, params};
 use std::collections::BTreeMap;
@@ -11,6 +12,7 @@ use super::{
     ReadModelError, coarse_timestamp_bounds, count_parsed_window_rows,
     learning_outcomes::{learning_outcome_kind, learning_outcome_severity, learning_outcome_title},
     parse_utc,
+    run_summary::{RUN_SUMMARY_COLUMNS, RUN_SUMMARY_FROM, run_summary_from_row},
 };
 
 const SIGNAL_LIMIT: usize = 30;
@@ -31,6 +33,7 @@ pub async fn dashboard_overview(
     let active_runs =
         active_async_run_count(conn, &input.generated_at).await? + input.foreground_active_count;
     let recent_failures = recent_failure_count(conn, &input.generated_at).await?;
+    let recent_failed_runs = recent_failed_runs(conn, &input.generated_at).await?;
     let today_cost_usd = today_cost_usd(conn, &input.generated_at).await?;
     let learning_candidates_24h =
         learning_candidate_count(conn, &input.agent, &input.generated_at).await?;
@@ -58,6 +61,7 @@ pub async fn dashboard_overview(
         generated_at: input.generated_at,
         active_runs,
         recent_failures,
+        recent_failed_runs,
         today_cost_usd,
         learning_candidates_24h,
         doctor: OverviewDoctorStatus {
@@ -861,6 +865,40 @@ async fn recent_failure_count(
     count_parsed_window_rows(rows, &since, &now)
 }
 
+async fn recent_failed_runs(
+    conn: &Connection,
+    generated_at: &str,
+) -> Result<Vec<RunSummary>, ReadModelError> {
+    let now = parse_utc(generated_at)?;
+    let since = now - Duration::hours(24);
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(&since, &now);
+    let sql = format!(
+        "SELECT {RUN_SUMMARY_COLUMNS},
+                COALESCE(ar.finished_at, ar.updated_at, ar.created_at) AS win_ts
+         {RUN_SUMMARY_FROM}
+         WHERE ar.status = 'failed'
+           AND COALESCE(ar.finished_at, ar.updated_at, ar.created_at) >= ?1
+           AND COALESCE(ar.finished_at, ar.updated_at, ar.created_at) <= ?2
+         ORDER BY COALESCE(ar.finished_at, ar.updated_at, ar.created_at) DESC, ar.created_at DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![coarse_since, coarse_until], |row| {
+            Ok((run_summary_from_row(row)?, row.get::<_, String>(12)?))
+        })
+        .await?;
+    // Precise window filter mirrors recent_failure_count so list length == count.
+    let mut out = Vec::new();
+    for row in rows {
+        let (run, win_ts) = row?;
+        let ts = parse_utc(&win_ts)?;
+        if ts >= since && ts <= now {
+            out.push(run);
+        }
+    }
+    Ok(out)
+}
+
 async fn learning_candidate_count(
     conn: &Connection,
     agent: &str,
@@ -1572,6 +1610,64 @@ mod tests {
         fn enter(&self, _span: &tracing::span::Id) {}
 
         fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    #[tokio::test]
+    async fn recent_failed_runs_matches_failure_count_and_lists_each_run() {
+        let (_dir, conn) = fixture().await;
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id,
+                status, finished_at, exit_code, delivery_required, delivery_status,
+                created_at, updated_at
+             ) VALUES (
+                'run-f1', 'cron', 'daily', 'session-f1', 123,
+                'failed', '2026-05-31T11:00:00Z', 1, 1, 'pending',
+                '2026-05-31T11:00:00Z', '2026-05-31T11:00:00Z'
+             )",
+            [],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id,
+                status, finished_at, exit_code, delivery_required, delivery_status,
+                created_at, updated_at
+             ) VALUES (
+                'run-f2', 'background', 'handoff', 'session-f2', 123,
+                'failed', '2026-05-31T11:30:00Z', 1, 1, 'pending',
+                '2026-05-31T11:30:00Z', '2026-05-31T11:30:00Z'
+             )",
+            [],
+        )
+        .await
+        .unwrap();
+
+        let response = dashboard_overview(
+            &conn,
+            DashboardOverviewInput {
+                agent: "alpha".to_string(),
+                generated_at: "2026-05-31T12:00:00Z".to_string(),
+                foreground_active_count: 0,
+                sandbox: crate::api_types::OverviewSandboxStatus {
+                    state: "configured".to_string(),
+                    detail: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.recent_failures, 2);
+        assert_eq!(response.recent_failed_runs.len(), 2);
+        assert_eq!(
+            response.recent_failed_runs.len() as i64,
+            response.recent_failures
+        );
+        // newest first
+        assert_eq!(response.recent_failed_runs[0].id, "run-f2");
+        assert_eq!(response.recent_failed_runs[1].id, "run-f1");
     }
 
     #[tokio::test]

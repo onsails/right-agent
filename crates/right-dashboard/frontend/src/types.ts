@@ -109,6 +109,7 @@ export interface DashboardOverviewResponse {
   generated_at: string
   active_runs: number
   recent_failures: number
+  recent_failed_runs: RunSummary[]
   today_cost_usd: number
   learning_candidates_24h: number
   doctor: OverviewDoctorStatus
