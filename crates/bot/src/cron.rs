@@ -700,14 +700,15 @@ async fn execute_job(
         Ok(c) => c,
     };
 
-    // Stream stdout line-by-line; tee inside the subprocess writes the NDJSON log.
-    let stdout = child.stdout().expect("stdout piped");
-    let mut lines = tokio::io::BufReader::new(stdout).lines();
-
-    let mut collected_lines: Vec<String> = Vec::new();
-    while let Ok(Some(line)) = lines.next_line().await {
-        collected_lines.push(line);
-    }
+    // Stream stdout; break on the terminal result event (do not wait for EOF —
+    // the SSH stdout pipe can linger open after CC exits).
+    let outcome = consume_cron_stream(&mut child).await;
+    let collected_lines: Vec<String> = match &outcome {
+        CronStreamOutcome::Success {
+            collected_lines, ..
+        }
+        | CronStreamOutcome::Failed { collected_lines } => collected_lines.clone(),
+    };
 
     // Post-stream-loop cleanup. ProcessGroupChild::Drop kills the slave's
     // group on function return, so a hang here can never outlive `execute_job`.
@@ -1078,6 +1079,75 @@ fn find_last_result_line(lines: &[String]) -> Option<&str> {
         let v: serde_json::Value = serde_json::from_str(line).ok()?;
         (v.get("type").and_then(|t| t.as_str()) == Some("result")).then_some(line.as_str())
     })
+}
+
+/// Outcome of consuming the cron CC subprocess stdout stream.
+///
+/// `collected_lines` carries every NDJSON line read from stdout so the caller
+/// can run [`parse_cron_output`].
+#[derive(Debug)]
+pub(crate) enum CronStreamOutcome {
+    /// A terminal top-level `{"type":"result"}` event was observed (the loop
+    /// broke on it, or it was found at EOF). `result_line` is its raw JSON.
+    Success {
+        result_line: String,
+        collected_lines: Vec<String>,
+    },
+    /// Stdout reached EOF without a terminal `result` event.
+    Failed { collected_lines: Vec<String> },
+}
+
+/// Return the line iff it is the terminal top-level CC result event.
+///
+/// CC emits exactly one top-level `{"type":"result"}` summary at the end of a
+/// turn. Sub-agent (Task tool) results arrive as nested `assistant`/`user`
+/// messages carrying `parent_tool_use_id`, so `type == "result"` is already
+/// terminal; the `parent_tool_use_id` absent/null check is defense-in-depth.
+///
+/// This shares the `type == "result"` test with [`find_last_result_line`] but
+/// deliberately differs: this helper adds the top-level `parent_tool_use_id`
+/// guard and is forward/owning (it drives the live break-on-terminal loop),
+/// while `find_last_result_line` is reverse/borrowing for `parse_cron_output`'s
+/// fallback. A future change to "what counts as a result" likely touches both.
+fn terminal_result_line(line: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let is_result = v.get("type").and_then(|t| t.as_str()) == Some("result");
+    let top_level = v.get("parent_tool_use_id").is_none_or(|p| p.is_null());
+    (is_result && top_level).then(|| line.to_string())
+}
+
+/// Consume the cron CC subprocess stdout line-by-line and classify the outcome.
+///
+/// Breaks immediately on the terminal top-level `result` event (does NOT wait
+/// for EOF — the SSH stdout pipe can linger open after CC exits). On EOF,
+/// returns `Success` iff a terminal result was seen, else `Failed`. There is no
+/// wall-clock bound here; a turn that never emits a result is bounded by the
+/// shutdown-drain (`SHUTDOWN_JOB_TIMEOUT`).
+pub(crate) async fn consume_cron_stream(
+    child: &mut right_process::ProcessGroupChild,
+) -> CronStreamOutcome {
+    let stdout = child.stdout().expect("stdout piped");
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+    let mut collected_lines: Vec<String> = Vec::new();
+    let mut result_line: Option<String> = None;
+    while let Ok(Some(line)) = lines.next_line().await {
+        if result_line.is_none() {
+            result_line = terminal_result_line(&line);
+        }
+        collected_lines.push(line);
+        if result_line.is_some() {
+            break; // terminal result seen — do not wait for EOF
+        }
+    }
+
+    match result_line {
+        Some(result_line) => CronStreamOutcome::Success {
+            result_line,
+            collected_lines,
+        },
+        None => CronStreamOutcome::Failed { collected_lines },
+    }
 }
 
 /// Parse CC stream-json output (NDJSON lines) into `CronReplyOutput`.
@@ -2240,6 +2310,74 @@ mod target_snapshot_tests {
     use super::*;
     use right_agent::cron_spec::{CronSpec, ScheduleKind};
 
+    #[tokio::test]
+    async fn consume_cron_stream_breaks_on_terminal_result_without_eof() {
+        use std::time::Duration;
+        // Prints a terminal result line, then holds stdout open (no EOF) via sleep.
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg(
+            r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"UNIT-OK"}'; sleep 30"#,
+        );
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = right_process::ProcessGroupChild::spawn(cmd).expect("spawn bash");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), consume_cron_stream(&mut child))
+            .await
+            .expect("consume_cron_stream must return without waiting for EOF");
+
+        match outcome {
+            CronStreamOutcome::Success { result_line, .. } => {
+                assert!(result_line.contains("UNIT-OK"), "got: {result_line}");
+            }
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn consume_cron_stream_eof_without_result_is_failed() {
+        use std::time::Duration;
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c")
+            .arg(r#"printf '%s\n' '{"type":"assistant","message":{"content":[]}}'"#);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = right_process::ProcessGroupChild::spawn(cmd).expect("spawn bash");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), consume_cron_stream(&mut child))
+            .await
+            .expect("must return at EOF");
+        assert!(
+            matches!(outcome, CronStreamOutcome::Failed { .. }),
+            "EOF without a terminal result must be Failed, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn consume_cron_stream_nested_result_is_not_terminal() {
+        use std::time::Duration;
+        // A result-shaped line carrying parent_tool_use_id is a sub-agent result,
+        // NOT the terminal top-level result; EOF then yields Failed.
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg(
+            r#"printf '%s\n' '{"type":"result","parent_tool_use_id":"toolu_x","result":"NESTED"}'"#,
+        );
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = right_process::ProcessGroupChild::spawn(cmd).expect("spawn bash");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), consume_cron_stream(&mut child))
+            .await
+            .expect("must return at EOF");
+        assert!(
+            matches!(outcome, CronStreamOutcome::Failed { .. }),
+            "nested result must not be treated as terminal, got {outcome:?}"
+        );
+    }
+
     async fn migrated_conn() -> (tempfile::TempDir, right_db::Connection) {
         let dir = tempfile::tempdir().unwrap();
         let conn = right_db::open_connection(dir.path(), true).await.unwrap();
@@ -2394,5 +2532,89 @@ mod target_snapshot_tests {
             .await
             .unwrap();
         assert_eq!(row, ("failed".to_string(), 0, "none".to_string()));
+    }
+
+    /// Regression guard for the wedged-stdout hang (see `consume_cron_stream`).
+    ///
+    /// Builds the SSH command exactly like cron's sandbox branch
+    /// (`-F <cfg> -o ControlMaster=no -o ControlPath=none <host> -- <script>`)
+    /// and runs a remote script that prints one canonical CC `result` line and
+    /// then holds stdout open without closing it (`sleep`). The SSH stdout pipe
+    /// therefore never reaches EOF.
+    ///
+    /// The fix: `consume_cron_stream` breaks the read loop on the terminal
+    /// top-level `result` event (detected via `terminal_result_line`) instead
+    /// of waiting for EOF. There is intentionally NO wall-clock deadline — the
+    /// 60s shutdown-drain (`SHUTDOWN_JOB_TIMEOUT`) is the only backstop.
+    ///
+    /// So `consume_cron_stream` returns `Success` carrying `REPRO-OK` well
+    /// within the outer 25s timeout. If the break-on-terminal-result logic
+    /// regressed to an unbounded `next_line()` EOF loop, the inner call would
+    /// hang on the never-closing pipe, the outer 25s timeout would fire, and
+    /// the `.expect()` below would fail — that timeout IS the reproduction.
+    #[ignore = "ci-openshell: creates real sandbox"]
+    #[tokio::test]
+    async fn ci_openshell_cron_stream_survives_wedged_stdout() {
+        use std::time::Duration;
+
+        let sandbox =
+            right_openshell::test_support::TestSandbox::create("cron-wedged-stdout").await;
+
+        // Materialize the per-sandbox ssh-config the same way the bot does for
+        // cron's sandbox branch (`openshell sandbox ssh-config NAME`).
+        let cfg_dir = tempfile::tempdir().expect("tempdir");
+        let ssh_config =
+            right_openshell::openshell::generate_ssh_config(sandbox.name(), cfg_dir.path())
+                .await
+                .expect("generate ssh-config");
+        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sandbox.name());
+
+        // Deterministic "result emitted, then stdout never EOFs": print one
+        // canonical CC stream-json result line, then hold the remote shell
+        // (and thus the SSH stdout channel) open so `next_line()` never sees EOF.
+        let remote_script = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"REPRO-OK","session_id":"repro","terminal_reason":"completed"}'
+sleep 120"#;
+
+        let mut cmd = tokio::process::Command::new("ssh");
+        cmd.arg("-F").arg(&ssh_config);
+        cmd.arg("-o").arg("ControlMaster=no");
+        cmd.arg("-o").arg("ControlPath=none");
+        cmd.arg(&ssh_host);
+        cmd.arg("--");
+        cmd.arg(remote_script);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = right_process::ProcessGroupChild::spawn(cmd).expect("spawn ssh");
+
+        // Mirror cron's deadline plumbing; bound the whole test with an outer
+        // timeout so the RED fails fast instead of hanging CI. ProcessGroupChild
+        // Drop killpg's the lingering ssh/sleep when `child` drops on return.
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(25), consume_cron_stream(&mut child)).await;
+
+        let outcome = outcome.expect(
+            "consume_cron_stream did not return within 25s — wedged-stdout hang reproduced \
+             (the unbounded next_line() loop never sees EOF). This is the RED repro: it goes \
+             GREEN once consume_cron_stream enforces the deadline / breaks on the result event.",
+        );
+
+        match outcome {
+            CronStreamOutcome::Success {
+                result_line,
+                collected_lines,
+            } => {
+                assert!(
+                    result_line.contains("REPRO-OK"),
+                    "expected terminal result line carrying REPRO-OK, got: {result_line}"
+                );
+                assert!(
+                    collected_lines.iter().any(|l| l.contains("REPRO-OK")),
+                    "collected_lines should contain the REPRO-OK result line"
+                );
+            }
+            other => panic!("expected Success with REPRO-OK result, got: {other:?}"),
+        }
     }
 }
