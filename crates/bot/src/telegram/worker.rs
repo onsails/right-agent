@@ -421,6 +421,26 @@ fn used_skill_names_from_receipts(
         .collect()
 }
 
+/// Record a budget-blocked learning attempt. Best-effort; logs and swallows.
+async fn record_budget_skip(
+    conn: &right_db::Connection,
+    agent_name: &str,
+    chat_id: i64,
+    thread_id: i64,
+) {
+    if let Err(e) = right_agent::usage::insert::insert_learning_skip(
+        conn,
+        "budget",
+        None,
+        Some(chat_id),
+        Some(thread_id),
+    )
+    .await
+    {
+        tracing::warn!(agent = %agent_name, "learning_skip insert failed: {e:#}");
+    }
+}
+
 /// Format a CC subprocess error as a Telegram message (D-16).
 ///
 /// Returns HTML intended for `ParseMode::Html`. Callers must fall back to
@@ -2134,6 +2154,8 @@ pub fn spawn_worker(
                             budget = daily_budget,
                             "learning pipeline skipped: daily budget exhausted"
                         );
+                        record_budget_skip(&conn, &agent_name, anchor.chat_id, anchor.thread_id)
+                            .await;
                         return;
                     }
 
@@ -5152,6 +5174,29 @@ esac
         });
 
         assert!(batch_is_addressed(&[comment, forward]));
+    }
+
+    #[tokio::test]
+    async fn budget_skip_records_learning_skip_row() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut c = right_db::open_connection(dir.path(), true).await.unwrap();
+            right_db::migrations::MIGRATIONS
+                .to_latest(&mut c)
+                .await
+                .unwrap();
+        }
+        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
+        record_budget_skip(&conn, "agent-x", 99, 0).await;
+        let (n, reason, kind): (i64, String, Option<String>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(reason), MAX(intended_kind) FROM learning_skip",
+                (),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .await
+            .unwrap();
+        assert_eq!((n, reason.as_str(), kind), (1, "budget", None));
     }
 }
 
