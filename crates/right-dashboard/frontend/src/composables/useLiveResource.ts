@@ -1,4 +1,4 @@
-import { onBeforeUnmount, onMounted, ref, type Ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 
 import { classifyOutcome, registerLiveResource } from './liveStatus'
 import { useLiveConfig } from './liveConfig'
@@ -33,7 +33,7 @@ let keySeq = 0
 
 export function useLiveResource<T>(fetcher: () => Promise<T>, options: LiveResourceOptions = {}): LiveResource<T> {
   const config = useLiveConfig()
-  const intervalMs = options.intervalMs ?? config.intervalMs
+  const intervalMs = computed(() => options.intervalMs ?? config.value.intervalMs)
   const immediate = options.immediate ?? true
   const pauseWhenHidden = options.pauseWhenHidden ?? true
   const reportConnection = options.reportConnection ?? true
@@ -49,6 +49,7 @@ export function useLiveResource<T>(fetcher: () => Promise<T>, options: LiveResou
   let inFlight = false
   let generation = 0
   let timer: ReturnType<typeof window.setInterval> | undefined
+  let stopIntervalWatch: (() => void) | undefined
 
   async function refresh(): Promise<void> {
     if (disposed || inFlight) {
@@ -90,17 +91,26 @@ export function useLiveResource<T>(fetcher: () => Promise<T>, options: LiveResou
     }
   }
 
-  onMounted(() => {
-    if (immediate) {
-      void refresh()
+  function startTimer(): void {
+    if (timer !== undefined) {
+      window.clearInterval(timer)
+      timer = undefined
     }
-    if (intervalMs > 0) {
+    if (intervalMs.value > 0) {
       timer = window.setInterval(() => {
         if (shouldTick({ hidden: document.hidden, inFlight, pauseWhenHidden })) {
           void refresh()
         }
-      }, intervalMs)
+      }, intervalMs.value)
     }
+  }
+
+  onMounted(() => {
+    if (immediate) {
+      void refresh()
+    }
+    startTimer()
+    stopIntervalWatch = watch(intervalMs, startTimer)
     if (pauseWhenHidden) {
       document.addEventListener('visibilitychange', onVisibility)
     }
@@ -108,6 +118,7 @@ export function useLiveResource<T>(fetcher: () => Promise<T>, options: LiveResou
 
   onBeforeUnmount(() => {
     disposed = true
+    stopIntervalWatch?.()
     if (timer !== undefined) {
       window.clearInterval(timer)
     }
