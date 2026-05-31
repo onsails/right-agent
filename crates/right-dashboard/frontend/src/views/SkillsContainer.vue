@@ -1,12 +1,33 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import { DashboardApiError, skillDetail, skillsOverview } from '../api'
 import { useLiveResource } from '../composables/useLiveResource'
 import SkillsView from './SkillsView.vue'
-import type { SkillDetailResponse, SkillSummary } from '../types'
+import type { SkillDetailResponse, SkillSummary, SkillsResponse } from '../types'
 
 const { data: skills, refresh } = useLiveResource(skillsOverview, { key: 'skills' })
+
+const pinnedPatches = ref(new Map<string, boolean>())
+
+const patchedSkills = computed((): SkillsResponse | null => {
+  const base = skills.value
+  if (base === null) return null
+  if (pinnedPatches.value.size === 0) return base
+  const patchGroup = (group: SkillSummary[]): SkillSummary[] =>
+    group.map((skill) => {
+      const pinned = pinnedPatches.value.get(skill.name)
+      return pinned === undefined ? skill : { ...skill, pinned }
+    })
+  return {
+    ...base,
+    groups: {
+      core: patchGroup(base.groups.core),
+      learned: patchGroup(base.groups.learned),
+      other: patchGroup(base.groups.other),
+    },
+  }
+})
 
 const selectedSkill = ref<SkillDetailResponse | null>(null)
 const selectedSkillName = ref<string | null>(null)
@@ -44,26 +65,13 @@ function applySkillPinned({ skillName, pinned }: { skillName: string, pinned: bo
       skill: { ...selectedSkill.value.skill, pinned },
     }
   }
-  const current = skills.value
-  if (current === null) {
-    return
-  }
-  const updateGroup = (group: SkillSummary[]): SkillSummary[] =>
-    group.map((skill) => (skill.name === skillName ? { ...skill, pinned } : skill))
-  skills.value = {
-    ...current,
-    groups: {
-      core: updateGroup(current.groups.core),
-      learned: updateGroup(current.groups.learned),
-      other: updateGroup(current.groups.other),
-    },
-  }
+  pinnedPatches.value = new Map(pinnedPatches.value).set(skillName, pinned)
 }
 </script>
 
 <template>
   <SkillsView
-    :skills="skills"
+    :skills="patchedSkills"
     :selected-skill="selectedSkill"
     :selected-skill-name="selectedSkillName"
     :loading="loadingSkill"
