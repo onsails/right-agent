@@ -752,13 +752,14 @@ async fn learning_lifecycle(
     since_7d: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<LearningLifecycle, ReadModelError> {
-    let recent_failed_events = recent_failed_events(conn, agent, since_7d, now).await?;
+    let (failed_or_aborted_7d, recent_failed_events) =
+        recent_failed_events(conn, agent, since_7d, now).await?;
     Ok(LearningLifecycle {
         created_7d: writer_status_count_in_window(conn, agent, "created", since_7d, now).await?,
         updated_7d: writer_status_count_in_window(conn, agent, "updated", since_7d, now).await?,
-        // Same predicate and window as `recent_failed_events` (untruncated), so
-        // the count is exactly the list length — derive it, no second query.
-        failed_or_aborted_7d: recent_failed_events.len() as i64,
+        // Exact windowed total from the failed-events scan; the list it returns
+        // is capped at FAILURE_SAMPLE_LIMIT.
+        failed_or_aborted_7d: failed_or_aborted_7d as i64,
         recent_successful_events: recent_successful_events(conn, agent, since_7d, now).await?,
         recent_failed_events,
         candidate_skill_names_7d: candidate_skill_names(conn, agent, since_7d, now).await?,
@@ -776,7 +777,7 @@ async fn learning_events_in_window(
     now: &DateTime<Utc>,
     statuses: [&str; 2],
     limit: Option<usize>,
-) -> Result<Vec<LearningEventSummary>, ReadModelError> {
+) -> Result<(usize, Vec<LearningEventSummary>), ReadModelError> {
     let (coarse_since, coarse_until) = coarse_timestamp_bounds(since_7d, now);
     let mut stmt = conn.prepare(
         "SELECT id, skill_name, action, status, message, summary, created_at
@@ -825,10 +826,14 @@ async fn learning_events_in_window(
         ));
     }
     events.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    let total = events.len();
     if let Some(limit) = limit {
         events.truncate(limit);
     }
-    Ok(events.into_iter().map(|(_, _, event)| event).collect())
+    Ok((
+        total,
+        events.into_iter().map(|(_, _, event)| event).collect(),
+    ))
 }
 
 async fn recent_successful_events(
@@ -837,7 +842,7 @@ async fn recent_successful_events(
     since_7d: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<Vec<LearningEventSummary>, ReadModelError> {
-    learning_events_in_window(
+    let (_total, events) = learning_events_in_window(
         conn,
         agent,
         since_7d,
@@ -845,7 +850,8 @@ async fn recent_successful_events(
         ["created", "updated"],
         Some(RECENT_EVENT_LIMIT as usize),
     )
-    .await
+    .await?;
+    Ok(events)
 }
 
 async fn recent_failed_events(
@@ -853,10 +859,19 @@ async fn recent_failed_events(
     agent: &str,
     since_7d: &DateTime<Utc>,
     now: &DateTime<Utc>,
-) -> Result<Vec<LearningEventSummary>, ReadModelError> {
-    // Not truncated — the list must equal `failed_or_aborted_7d`, which is
-    // derived from this list's length in `learning_lifecycle`.
-    learning_events_in_window(conn, agent, since_7d, now, ["failed", "aborted"], None).await
+) -> Result<(usize, Vec<LearningEventSummary>), ReadModelError> {
+    // Capped at FAILURE_SAMPLE_LIMIT (newest-first); the returned total is the
+    // exact windowed count, which may exceed the list length and feeds
+    // `failed_or_aborted_7d`.
+    learning_events_in_window(
+        conn,
+        agent,
+        since_7d,
+        now,
+        ["failed", "aborted"],
+        Some(super::FAILURE_SAMPLE_LIMIT),
+    )
+    .await
 }
 
 async fn candidate_skill_names(
@@ -1081,10 +1096,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recent_failed_events_includes_failed_and_aborted_untruncated() {
+    async fn recent_failed_events_includes_failed_and_aborted() {
         let (_dir, conn) = fixture().await;
 
-        // Seed 12 "failed" + 1 "aborted" finish events — more than RECENT_EVENT_LIMIT (10).
+        // Seed 12 "failed" + 1 "aborted" finish events (13 total, below the
+        // FAILURE_SAMPLE_LIMIT of 50, so the full set is returned).
         // All timestamps are within the 7d window of 2026-05-31T12:00:00Z.
         for i in 0..12 {
             let day = if i % 2 == 0 { "30" } else { "31" };
@@ -1131,7 +1147,7 @@ mod tests {
         );
         assert!(
             response.lifecycle.recent_failed_events.len() >= 13,
-            "expected >= 13 (not truncated at 10), got {}",
+            "expected >= 13 (full set below the 50 cap), got {}",
             response.lifecycle.recent_failed_events.len()
         );
         assert!(
@@ -1177,5 +1193,37 @@ mod tests {
         assert!((a.usage_cost_usd - 0.9).abs() < 1e-9);
         assert_eq!(a.cache_read_tokens, 20); // 4 learning rows * 5 (usage excluded)
         assert_eq!(a.cache_creation_tokens, 28); // 4 learning rows * 7 (usage excluded)
+    }
+
+    #[tokio::test]
+    async fn recent_failed_events_caps_at_sample_limit_with_true_count() {
+        let (_dir, conn) = fixture().await;
+        // 51 failed finish events in the 7d window (> FAILURE_SAMPLE_LIMIT = 50).
+        for i in 0..51 {
+            conn.execute(
+                "INSERT INTO skill_learning_events (
+                    invocation_id, agent_name, action, skill_name, phase, status,
+                    message, summary, event_refs_json, hint_outcome, created_at
+                 ) VALUES (?1, 'agent', 'create', ?2, 'finish', 'failed',
+                    'fail msg', 'fail summary', '[]', NULL, '2026-05-31T10:00:00Z')",
+                right_db::params![format!("inv-{i:03}"), format!("rightx-skill-{i:03}")],
+            )
+            .await
+            .unwrap();
+        }
+
+        let response = learning_overview(
+            &conn,
+            LearningOverviewInput {
+                agent: "agent".to_owned(),
+                generated_at: "2026-05-31T12:00:00Z".to_owned(),
+                refresh_interval_secs: 5,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.lifecycle.failed_or_aborted_7d, 51);
+        assert_eq!(response.lifecycle.recent_failed_events.len(), 50);
     }
 }
