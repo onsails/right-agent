@@ -646,46 +646,23 @@ mod tests {
         }
     }
 
-    async fn advance_until_request_count(server: &wiremock::MockServer, expected: usize) {
-        for _ in 0..200 {
+    /// Real-time poll until `server` has received at least `expected`
+    /// requests. Companion to [`wait_for_token`] for tests that run on real
+    /// (non-paused) Tokio time.
+    async fn wait_for_request_count(server: &wiremock::MockServer, expected: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
             if request_count(server).await >= expected {
                 return;
             }
-            tokio::time::advance(Duration::from_secs(5)).await;
-            for _ in 0..5 {
-                tokio::task::yield_now().await;
-                if request_count(server).await >= expected {
-                    return;
-                }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "server received {} requests, expected at least {expected}",
+                    request_count(server).await
+                );
             }
+            tokio::task::yield_now().await;
         }
-        panic!(
-            "server received {} requests, expected at least {expected}",
-            request_count(server).await
-        );
-    }
-
-    async fn advance_until_token(
-        token: &Arc<tokio::sync::RwLock<Option<String>>>,
-        expected: &str,
-        server: &wiremock::MockServer,
-    ) {
-        for _ in 0..200 {
-            if token.read().await.as_deref() == Some(expected) {
-                return;
-            }
-            tokio::time::advance(Duration::from_secs(5)).await;
-            for _ in 0..5 {
-                tokio::task::yield_now().await;
-                if token.read().await.as_deref() == Some(expected) {
-                    return;
-                }
-            }
-        }
-        panic!(
-            "token did not update to {expected}; received_requests={}",
-            request_count(server).await
-        );
     }
 
     #[test]
@@ -971,12 +948,15 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        // Server "a" never finishes — every request to /a/token delays
-        // ~600s before returning 503. Without cancellation, the refresh
-        // task would block the scheduler for at least ~10 minutes
-        // (3 attempts × 600s per attempt). With cancellation, the task
-        // returns Err(Cancelled) as soon as the per-attempt request is
-        // dropped or, more importantly, before subsequent attempts run.
+        // Server "a" hangs: every request to /a/token holds the response
+        // open for several seconds before returning 503, so the "a" refresh
+        // is reliably still in flight when `RemoveServer` arrives. This test
+        // uses REAL time (no `tokio::time::pause()`): real reqwest/wiremock
+        // loopback I/O is a poor fit for paused Tokio time — auto-advance
+        // fast-forwards the virtual clock past real socket reads, starving
+        // the genuine response and manufacturing phantom retries. The delay
+        // is short enough never to gate the test (cancellation must beat it,
+        // which is exactly the property under test).
         //
         // Server "b" responds immediately with a successful token —
         // proving the scheduler processed a fresh NewEntry while the
@@ -986,7 +966,7 @@ mod tests {
             .and(path("/a/token"))
             .respond_with(
                 ResponseTemplate::new(503)
-                    .set_delay(std::time::Duration::from_secs(600))
+                    .set_delay(std::time::Duration::from_secs(5))
                     .set_body_string("slow"),
             )
             .mount(&server)
@@ -1052,13 +1032,11 @@ mod tests {
             crate::proxy::AuthMethod::Bearer,
         ));
 
-        tokio::time::pause();
-
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let scheduler = tokio::spawn(run_refresh_scheduler(tmp.path().to_path_buf(), rx));
 
         // Register server "a" — its refresh will be spawned and stuck on
-        // the slow 600s response.
+        // the slow response.
         tx.send(RefreshMessage::NewEntry {
             server_name: "a".into(),
             state: entry_a,
@@ -1069,12 +1047,13 @@ mod tests {
         .unwrap();
 
         wait_for_scheduler_entry(tmp.path(), "a").await;
-        advance_until_request_count(&server, 1).await;
+        wait_for_request_count(&server, 1).await;
 
         // Remove server "a" — must cancel the in-flight refresh. Then
         // immediately register server "b". If rx.recv were starved, this
-        // second NewEntry would be queued behind the (~10-minute)
-        // in-flight refresh and we'd never see the token update.
+        // second NewEntry would be queued behind the in-flight refresh
+        // (held open by the slow /a response) and we'd never see the token
+        // update.
         tx.send(RefreshMessage::RemoveServer {
             server_name: "a".into(),
         })
@@ -1090,7 +1069,7 @@ mod tests {
         .unwrap();
 
         wait_for_scheduler_entry(tmp.path(), "b").await;
-        advance_until_token(&token_b, "b-tok", &server).await;
+        wait_for_token(&token_b, "b-tok", &server).await;
 
         // Token "a" must NOT have been refreshed (the slow mock never
         // returns a real token; cancellation should drop the task).
