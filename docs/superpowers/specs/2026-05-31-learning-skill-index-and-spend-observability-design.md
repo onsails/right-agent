@@ -47,7 +47,7 @@ but is made observable by part 3.
 - A per-skill spend ledger answering **learning vs fixing vs usage** cost, surfaced
   in the dashboard **Knowledge** view and **Usage** tab, including cache usage.
 - The dashboard shows how many learning attempts were **blocked by the daily
-  budget**, split into create (learn) vs patch (fix) where known.
+  budget** (plain count).
 
 ## Non-goals
 
@@ -76,10 +76,10 @@ Extract one shared sandbox reader used by both.
 
 - The sandbox is the single source of truth for skill content; no DB duplication,
   no drift, no migration.
-- `PrefilterContext` already carries `resolved_sandbox: Option<String>`. It must
-  also receive an `OpenShellClient` handle (or a small accessor) from the worker —
-  integration point to resolve in the plan; the bot already holds sandbox clients
-  for exec/file transfer.
+- **Wiring is gRPC-only — no ssh-cat fallback.** The worker threads an
+  `OpenShellClient` into `PrefilterContext` (it already carries
+  `resolved_sandbox: Option<String>`) and into the probe-writer index path; the bot
+  already holds sandbox clients for exec/file transfer. One code path.
 - Bounding rules from the current host reader are preserved (`is_rightx_skill`
   filter, `SKILL_EXCERPT_MAX_*`, `SKILL_INDEX_DESC_MAX_CHARS`, sorted by name).
 - FAIL-FAST within the fire-and-forget task: a sandbox-read error logs a warn and
@@ -87,7 +87,9 @@ Extract one shared sandbox reader used by both.
   must not silently treat "read failed" as "no skills" — a failed read returning an
   empty index would re-introduce the duplicate-creation bug, so read failure →
   Skip, not empty-index.
-- `no-sandbox` agents (`sandbox: mode: none`): fall back to the existing host read.
+- `sandbox: mode: none` agents have no sandbox and their skills live on the host;
+  for them the reader uses the host path. This is a sandbox-mode branch, not a
+  fallback — each mode has exactly one source.
 
 ### Part 2 — Record probe-writer usage reliably
 
@@ -190,38 +192,38 @@ existing row populates. Add to the Usage tab: the three `skill_spend` buckets
 (learn/fix/usage totals for the agent) and `cache_read`/`cache_creation` columns so
 a future cold-cache probe-writer run is visible at a glance.
 
-### Part 6 — Budget-blocked attempts, split by intent (two-gate restructure)
+### Part 6 — Budget-blocked attempts (single-gate counter)
 
-Today the only budget gate is **pre-prefilter** (`worker.rs:2071`): it returns
-before the classifier runs, so a suppressed attempt's intent (create vs patch) is
-unknown, and the expensive probe-writer has **no** budget check at all (one
-probe-writer can overshoot the whole daily budget). Restructure into two gates:
+One daily budget `max_daily_budget_usd` ($1 default) covers **all** learning
+(prefilter + probe-writer; `today_spend` already sums `LEARNING_SOURCES`). The
+existing single gate stays where it is — **pre-prefilter** (`worker.rs:2071`). The
+only change: when it trips (`today_spend >= max_daily_budget_usd`), instead of a
+silent `debug` return, write one `learning_skip(reason='budget', intended_kind=NULL)`
+row and return.
 
-- **Prefilter gate (loosened):** the prefilter is cheap (~$0.003) and we want it to
-  keep classifying slightly past the budget to capture intent. Run it while
-  `today_spend < max_daily_budget_usd + PREFILTER_BUDGET_HEADROOM_USD` (a single named
-  const, e.g. a small fixed margin). When even the headroom is exceeded, record a
-  `learning_skip(reason='budget', intended_kind=NULL)` and return — intent unknown.
-- **Probe-writer gate (new, primary):** after the prefilter returns
-  `CreateNew`/`PatchExisting`, check `today_spend >= max_daily_budget_usd`. If
-  exhausted, record `learning_skip(reason='budget', intended_kind='create'|'patch')`
-  (derived from the decision) and return without spawning the probe-writer. This both
-  yields the learn/fix split and closes the overshoot hole.
+The learn/fix split is intentionally **not** attempted: capping the prefilter at the
+same $1 means once the budget is exhausted the classifier does not run, so a blocked
+attempt's intent (create vs patch) is unknowable without spending past budget. The
+`intended_kind` column is kept nullable for a possible future headroom design but is
+always `NULL` now.
 
 `reason` is free-form `TEXT` (no central enum — only `'budget'` today; extensible
 later without a CHECK constraint, per project convention against growing enums).
 
 Dashboard surfaces, over today / 7d: count of `learning_skip` where `reason='budget'`,
-split into **learn** (`intended_kind='create'`), **fix** (`intended_kind='patch'`),
-and **unknown** (`NULL`). Shown in the learning/Knowledge area and echoed on the Usage
-tab next to the spend buckets.
+shown in the learning/Knowledge area and echoed on the Usage tab next to the spend
+buckets.
+
+Out of scope (acknowledged): the single pre-prefilter gate checks "already
+exceeded?", so one probe-writer run can still overshoot $1 within a turn. Not fixed
+here — the user chose the simple single-gate model.
 
 ## Components & files
 
 | Area | File(s) | Change |
 |---|---|---|
-| Skill index (shared) | `crates/bot/src/learning_prefilter.rs` | replace `collect_host_rightx_skill_index` with one shared sandbox gRPC reader; host fallback for no-sandbox; used by both call sites |
-| Two-gate + skips | `crates/bot/src/telegram/worker.rs` | pass OpenShell client into `PrefilterContext`; loosen prefilter gate (`+ PREFILTER_BUDGET_HEADROOM_USD`), add probe-writer budget gate; write `learning_skip` rows; update the `worker.rs:~2130` probe-writer skill_index call site |
+| Skill index (shared) | `crates/bot/src/learning_prefilter.rs` | replace `collect_host_rightx_skill_index` with one shared sandbox gRPC reader (host path only for `mode: none`); used by both call sites |
+| Budget gate skip + client | `crates/bot/src/telegram/worker.rs` | pass OpenShell client into `PrefilterContext` and the `worker.rs:~2130` probe-writer index call site; at the existing budget gate write one `learning_skip` row instead of a silent return |
 | Skip insert | `crates/right-agent/src/usage/insert.rs` | `insert_learning_skip(reason, intended_kind, chat, thread)` |
 | Probe-writer usage | `crates/bot/src/learning_probe_writer.rs` | unify stdout drain (init + result capture); write `skill_spend` create/patch |
 | Curator usage | `crates/bot/src/learning_curator.rs` | write `skill_spend` maintain (when skill known) |
@@ -251,9 +253,9 @@ tab next to the spend buckets.
   (`-p right-bot`)
 - Worker usage spend: a turn with two rightx receipts writes two `skill_spend`
   `usage` rows. (`-p right-bot`)
-- Budget skips: probe-writer blocked by exhausted budget writes a `learning_skip`
-  with `intended_kind` matching the prefilter decision; prefilter blocked past
-  headroom writes `intended_kind=NULL`. (`-p right-bot`)
+- Budget skip: an attempt with `today_spend >= max_daily_budget_usd` writes one
+  `learning_skip(reason='budget', intended_kind=NULL)` row and does not run the
+  prefilter. (`-p right-bot`)
 - Migration: v38 idempotency test (both tables) alongside existing `vNN_*` tests.
   (`-p right-db`)
 - Dashboard: SSR tests for Knowledge per-skill buckets/cache and Usage buckets/cache;
@@ -267,8 +269,8 @@ tab next to the spend buckets.
 3. Probe-writer stdout unification + usage/`skill_spend` write (part 2 + create/patch).
 4. Worker post-turn `usage` spend rows.
 5. Curator `maintain` spend.
-6. Two-gate restructure + `learning_skip` writes (part 6).
-7. Shared sandbox skill-index reader (part 1), both call sites + worker client wiring.
+6. Budget-gate `learning_skip` write (part 6).
+7. Shared sandbox skill-index reader (part 1, gRPC-only), both call sites + worker client wiring.
 8. Dashboard Knowledge + Usage read models + api_types (spend buckets, cache, skips).
 9. Frontend Knowledge + Usage rendering.
 10. Docs (`ARCHITECTURE.md`/satellite, `PROMPT_SYSTEM.md`).
@@ -276,12 +278,11 @@ tab next to the spend buckets.
 
 ## Risks / open questions
 
-- **Prefilter client wiring:** the prefilter must obtain an `OpenShellClient` +
-  `sandbox_id`. If no client is readily threadable to the worker's post-turn task,
-  the plan may instead read the index over the same ssh path the prefilter already
-  uses for `build_claude_command` (still in-sandbox, not the `openshell` CLI). gRPC
-  is preferred per conventions; ssh-cat is the fallback if client threading is
-  costly.
+- **Prefilter client wiring (decided: gRPC-only):** the prefilter and the
+  probe-writer index path obtain an `OpenShellClient` + `sandbox_id` threaded from
+  the worker. No ssh-cat fallback — one path. The plan must confirm the worker can
+  thread the existing sandbox client into the post-turn task; if the client isn't
+  `Clone`/`Arc`-shareable, that wiring is the first task, not a reason to fall back.
 - **Usage attribution overlap:** `kind='usage'` rows double-count cost across skills
   when a turn uses several. This is intentional and must be labeled "attributed" in
   the UI; do not sum usage across skills and present it as an exact agent total.
@@ -295,9 +296,7 @@ tab next to the spend buckets.
   of the pipeline) counts toward the `max_daily_budget_usd` default of $1/day, so the
   gate will trip sooner and more honestly. No code change required, but the $1 default
   may warrant revisiting once true spend is visible.
-- **Prefilter headroom spend:** the loosened prefilter gate (part 6) lets the cheap
-  classifier run a little past the budget to capture create/patch intent for skip
-  accounting. This spends ~$0.003/turn beyond the budget up to
-  `PREFILTER_BUDGET_HEADROOM_USD`. Bound it with a small named const; past the headroom
-  the prefilter also stops (recording `intended_kind=NULL`). Net extra spend is small
-  and is itself visible in the `learning_prefilter` usage source.
+- **Single-gate overshoot:** the pre-prefilter gate checks "already exceeded?", so a
+  single probe-writer can push spend past $1 within one turn. Accepted (user chose the
+  simple single-gate model); revisit if probe-writer overshoot becomes material once
+  spend is visible.
