@@ -2265,6 +2265,26 @@ pub fn spawn_worker(
     tx_for_map
 }
 
+/// Send a Telegram message, optionally in a thread and with an optional parse
+/// mode. Preserves the topic thread id. Shared body for [`send_tg`]/[`send_tg_html`].
+async fn send_tg_inner(
+    bot: &super::BotType,
+    chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    text: &str,
+    parse_mode: Option<teloxide::types::ParseMode>,
+) -> Result<(), teloxide::RequestError> {
+    let mut send = bot.send_message(chat_id, text);
+    if let Some(mode) = parse_mode {
+        send = send.parse_mode(mode);
+    }
+    if eff_thread_id != 0 {
+        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
+    }
+    send.await?;
+    Ok(())
+}
+
 /// Send a Telegram message, optionally in a thread.
 pub(crate) async fn send_tg(
     bot: &super::BotType,
@@ -2272,12 +2292,7 @@ pub(crate) async fn send_tg(
     eff_thread_id: i64,
     text: &str,
 ) -> Result<(), teloxide::RequestError> {
-    let mut send = bot.send_message(chat_id, text);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-    }
-    send.await?;
-    Ok(())
+    send_tg_inner(bot, chat_id, eff_thread_id, text, None).await
 }
 
 /// Like `send_tg` but renders HTML (`ParseMode::Html`). Use for bot-authored
@@ -2288,14 +2303,14 @@ pub(crate) async fn send_tg_html(
     eff_thread_id: i64,
     text: &str,
 ) -> Result<(), teloxide::RequestError> {
-    let mut send = bot
-        .send_message(chat_id, text)
-        .parse_mode(teloxide::types::ParseMode::Html);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-    }
-    send.await?;
-    Ok(())
+    send_tg_inner(
+        bot,
+        chat_id,
+        eff_thread_id,
+        text,
+        Some(teloxide::types::ParseMode::Html),
+    )
+    .await
 }
 
 /// Spawn a background task that requests a setup-token from the user.
