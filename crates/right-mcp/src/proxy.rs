@@ -363,6 +363,12 @@ pub struct ProxyBackend {
     /// Serializes concurrent `connect()` calls so refresh-driven reconnects and
     /// dashboard OAuth reconnects can't race on `client`/`cached_tools`/`status`.
     connect_mutex: Mutex<()>,
+    /// Wall-clock of the most recent connect() attempt (any outcome).
+    last_attempt_at: RwLock<Option<chrono::DateTime<chrono::Utc>>>,
+    /// Wall-clock of the most recent successful connect().
+    last_success_at: RwLock<Option<chrono::DateTime<chrono::Utc>>>,
+    /// Redacted detail of the most recent connect() failure; cleared on success.
+    last_connect_error: RwLock<Option<String>>,
 }
 
 impl ProxyBackend {
@@ -383,6 +389,9 @@ impl ProxyBackend {
             token,
             client: RwLock::new(None),
             connect_mutex: Mutex::new(()),
+            last_attempt_at: RwLock::new(None),
+            last_success_at: RwLock::new(None),
+            last_connect_error: RwLock::new(None),
         }
     }
 
@@ -408,9 +417,17 @@ impl ProxyBackend {
             Ok(client) => client,
             Err(e) => {
                 let msg = format!("{e:#}");
+                let safe = redact_query_strings(&msg);
+                self.record_connect_failure(safe.clone()).await;
                 if let Some(err) = self.auth_required_connect_error(&msg, "initialize").await {
                     return Err(err);
                 }
+                tracing::debug!(
+                    server = %self.server_name,
+                    phase = "initialize",
+                    error = %safe,
+                    "upstream MCP connect failed"
+                );
                 return Err(ProxyError::InitFailed {
                     server: self.server_name.clone(),
                     source: e,
@@ -423,9 +440,17 @@ impl ProxyBackend {
             Ok(tools) => tools,
             Err(e) => {
                 let msg = format!("{e:#}");
+                let safe = redact_query_strings(&msg);
+                self.record_connect_failure(safe.clone()).await;
                 if let Some(err) = self.auth_required_connect_error(&msg, "list_tools").await {
                     return Err(err);
                 }
+                tracing::debug!(
+                    server = %self.server_name,
+                    phase = "list_tools",
+                    error = %safe,
+                    "upstream MCP connect failed"
+                );
                 return Err(ProxyError::ListToolsFailed {
                     server: self.server_name.clone(),
                     source: e,
@@ -461,6 +486,7 @@ impl ProxyBackend {
 
         *self.client.write().await = Some(client);
         *self.status.write().await = BackendStatus::Connected;
+        self.record_connect_success().await;
 
         tracing::info!(
             server = %self.server_name,
@@ -560,6 +586,33 @@ impl ProxyBackend {
     /// Current connection status.
     pub async fn status(&self) -> BackendStatus {
         *self.status.read().await
+    }
+
+    /// Wall-clock of the most recent connect() attempt, if any.
+    pub async fn last_attempt_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        *self.last_attempt_at.read().await
+    }
+
+    /// Wall-clock of the most recent successful connect(), if any.
+    pub async fn last_success_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        *self.last_success_at.read().await
+    }
+
+    /// Redacted detail of the most recent connect() failure, if any.
+    pub async fn last_connect_error(&self) -> Option<String> {
+        self.last_connect_error.read().await.clone()
+    }
+
+    async fn record_connect_success(&self) {
+        let now = chrono::Utc::now();
+        *self.last_attempt_at.write().await = Some(now);
+        *self.last_success_at.write().await = Some(now);
+        *self.last_connect_error.write().await = None;
+    }
+
+    async fn record_connect_failure(&self, detail: String) {
+        *self.last_attempt_at.write().await = Some(chrono::Utc::now());
+        *self.last_connect_error.write().await = Some(detail);
     }
 
     /// Lightweight liveness probe against the live session.
@@ -1053,5 +1106,44 @@ mod tests {
         );
         assert_eq!(redact_query_strings("plain message"), "plain message");
         assert_eq!(redact_query_strings("http://h:1/mcp"), "http://h:1/mcp");
+    }
+
+    #[tokio::test]
+    async fn connect_failure_records_error_and_attempt() {
+        setup_crypto();
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = ProxyBackend::new(
+            "dead".into(),
+            tmp.path().to_path_buf(),
+            "http://127.0.0.1:1/mcp".into(),
+            Arc::new(RwLock::new(None)),
+            AuthMethod::default(),
+        );
+        let result = backend.connect(reqwest::Client::new()).await;
+        assert!(result.is_err(), "connect to dead port must fail");
+        assert!(backend.last_attempt_at().await.is_some());
+        assert!(backend.last_connect_error().await.is_some());
+        assert!(backend.last_success_at().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_success_records_success() {
+        setup_crypto();
+        let (_srv, url) = crate::test_server::serve_two_tool_server().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).await.unwrap();
+        crate::credentials::db_add_server(&conn, "srv", &url)
+            .await
+            .unwrap();
+        let backend = ProxyBackend::new(
+            "srv".into(),
+            tmp.path().to_path_buf(),
+            url,
+            Arc::new(RwLock::new(None)),
+            AuthMethod::default(),
+        );
+        backend.connect(reqwest::Client::new()).await.unwrap();
+        assert!(backend.last_success_at().await.is_some());
+        assert!(backend.last_connect_error().await.is_none());
     }
 }
