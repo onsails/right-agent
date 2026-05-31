@@ -30,8 +30,9 @@ const V33_SCHEMA: &str = include_str!("sql/v33_mcp_oauth_resource.sql");
 const V34_SCHEMA: &str = include_str!("sql/v34_turso_fts_indexes.sql");
 const V35_SCHEMA: &str = include_str!("sql/v35_legacy_learning_cleanup.sql");
 const V36_SCHEMA: &str = include_str!("sql/v36_mcp_http_headers.sql");
+const V38_SCHEMA: &str = include_str!("sql/v38_skill_spend_and_learning_skip.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 37;
+pub const LATEST_SCHEMA_VERSION: u32 = 38;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -917,6 +918,11 @@ pub static MIGRATIONS: Migrations = Migrations {
             version: 37,
             sql: "",
             hook: Some(v37_drop_legacy_usage_sources),
+        },
+        Migration {
+            version: 38,
+            sql: V38_SCHEMA,
+            hook: None,
         },
     ],
 };
@@ -3799,6 +3805,42 @@ continue background work',
             .await
             .unwrap();
         assert_eq!(kept, 1, "non-legacy rows must be preserved");
+
+        // Idempotent: re-running to_latest is a no-op and does not error.
+        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v38_creates_skill_spend_and_learning_skip_idempotently() {
+        let mut conn = Connection::open_in_memory().await.unwrap();
+        MIGRATIONS.to_version(&mut conn, 37).await.unwrap();
+        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+
+        for table in ["skill_spend", "learning_skip"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .await
+                .unwrap();
+            assert_eq!(n, 1, "{table} must exist after v38");
+        }
+
+        // Insert + read back one row of each to confirm columns/CHECK.
+        conn.execute(
+            "INSERT INTO skill_spend (skill_name, kind, cost_usd, cache_read, cache_creation, invocation_id)              VALUES ('rightx-x','create',0.5,10,20,'inv1')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO learning_skip (reason, intended_kind, chat_id, thread_id)              VALUES ('budget', NULL, 7, 0)",
+            (),
+        )
+        .await
+        .unwrap();
 
         // Idempotent: re-running to_latest is a no-op and does not error.
         MIGRATIONS.to_latest(&mut conn).await.unwrap();
