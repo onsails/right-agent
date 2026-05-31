@@ -120,6 +120,55 @@ pub fn join_recall_texts(results: &[RecallResult]) -> String {
         .join("\n\n")
 }
 
+/// Extract a `YYYY-MM-DD` date prefix from an ISO-8601-ish timestamp.
+///
+/// Hindsight timestamp formats are inconsistent (`2026-05-03T20:37:15.80514`
+/// with no zone vs `2026-05-14T00:18:26+00:00`). We do not need a real
+/// datetime — only the calendar date — so we validate and slice the leading
+/// `YYYY-MM-DD`. Returns `None` if the head is not a plausible date.
+fn date_prefix(ts: &str) -> Option<&str> {
+    let head = ts.get(..10)?;
+    let b = head.as_bytes();
+    if b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[8..10].iter().all(u8::is_ascii_digit)
+    {
+        Some(head)
+    } else {
+        None
+    }
+}
+
+/// Render recalled memories as bullets, prefixing each with its observed date
+/// (`[observed YYYY-MM-DD]`) when one is available.
+///
+/// Date source preference: `occurred_start` (event time) else `mentioned_at`
+/// (retain time). Memories with no parseable date render as a bare bullet,
+/// preserving the prior `join_recall_texts` behavior. The date lets the agent
+/// judge whether a point-in-time fact is stale; we deliberately do not
+/// classify or filter — see
+/// `docs/superpowers/specs/2026-05-31-hindsight-memory-staleness-design.md`.
+pub fn render_recall_with_dates(results: &[RecallResult]) -> String {
+    results
+        .iter()
+        .map(|r| {
+            let date = r
+                .occurred_start
+                .as_deref()
+                .and_then(date_prefix)
+                .or_else(|| r.mentioned_at.as_deref().and_then(date_prefix));
+            match date {
+                Some(d) => format!("- [observed {d}] {}", r.text),
+                None => format!("- {}", r.text),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// Client for the Hindsight Cloud HTTP API.
 #[derive(Clone)]
 pub struct HindsightClient {
@@ -836,6 +885,58 @@ mod tests {
             matches!(err, MemoryError::HindsightConnect(_)),
             "expected HindsightConnect, got: {err:?}"
         );
+    }
+
+    fn rr(text: &str, occurred: Option<&str>, mentioned: Option<&str>) -> RecallResult {
+        RecallResult {
+            text: text.to_string(),
+            fact_type: None,
+            id: None,
+            mentioned_at: mentioned.map(|s| s.to_string()),
+            occurred_start: occurred.map(|s| s.to_string()),
+            occurred_end: None,
+        }
+    }
+
+    #[test]
+    fn render_prefers_occurred_start() {
+        let out = render_recall_with_dates(&[rr(
+            "Notion is down",
+            Some("2026-05-27T08:00:00.12345"),
+            Some("2026-05-31T00:00:00+00:00"),
+        )]);
+        assert_eq!(out, "- [observed 2026-05-27] Notion is down");
+    }
+
+    #[test]
+    fn render_falls_back_to_mentioned_at() {
+        let out = render_recall_with_dates(&[rr(
+            "User prefers Russian",
+            None,
+            Some("2026-05-21T10:00:00+00:00"),
+        )]);
+        assert_eq!(out, "- [observed 2026-05-21] User prefers Russian");
+    }
+
+    #[test]
+    fn render_no_date_is_bare_bullet() {
+        let out = render_recall_with_dates(&[rr("Timeless fact", None, None)]);
+        assert_eq!(out, "- Timeless fact");
+    }
+
+    #[test]
+    fn render_unparseable_date_is_bare_bullet() {
+        let out = render_recall_with_dates(&[rr("Weird", None, Some("not-a-date"))]);
+        assert_eq!(out, "- Weird");
+    }
+
+    #[test]
+    fn render_joins_multiple_preserving_order() {
+        let out = render_recall_with_dates(&[
+            rr("First", Some("2026-01-02T00:00:00Z"), None),
+            rr("Second", None, None),
+        ]);
+        assert_eq!(out, "- [observed 2026-01-02] First\n\n- Second");
     }
 
     #[tokio::test]
