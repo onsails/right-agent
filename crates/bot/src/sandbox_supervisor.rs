@@ -1,13 +1,12 @@
 //! Owns the sandbox-backend lifecycle: first bring-up, degrade, recovery.
 //!
-//! Task 6 extracts the bot-startup sandbox bring-up sequence (previously
-//! inline in `lib.rs::run_async`) into [`bring_up_sandbox`]. The function is
-//! behavior-preserving: hard errors still propagate as `miette::Err`, and the
-//! only new shape is that operator-fixable backend-availability problems are
-//! returned as `Ok(Err(GatewayDiagnosis))` instead of crashing. The temporary
-//! `lib.rs` shim turns every diagnosis back into a hard error for now; Tasks
-//! 7/8 will route diagnoses into graceful degrade and own `run_sync_task`
-//! spawning.
+//! [`bring_up_sandbox`] performs the bot-startup sandbox bring-up sequence
+//! (hard errors propagate as `miette::Err`; operator-fixable
+//! backend-availability problems return `Ok(Err(GatewayDiagnosis))` instead of
+//! crashing). [`spawn_supervisor`] then owns the long-lived monitor/recovery
+//! loop and the sandbox sync task: on a verified failure it degrades the shared
+//! [`SandboxRuntimeHandle`] and aborts the sync task; on recovery it re-runs
+//! bring-up with backoff, respawns the sync task, and notifies affected chats.
 
 use right_agent::agent::types::AgentConfig;
 use right_openshell::diagnosis::{GatewayCause, GatewayDiagnosis, diagnose_gateway};
@@ -15,7 +14,6 @@ use right_openshell::preflight::PreflightError;
 use right_openshell::sandbox_exec::SandboxExec;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -335,13 +333,10 @@ pub(crate) struct SupervisorDeps {
     pub config: AgentConfig,
     /// Shutdown token shared with the rest of the bot.
     pub shutdown: CancellationToken,
-    /// Consecutive-failure counter driving the backoff schedule. Shared by `&`
-    /// inside the async task, so it is atomic rather than a plain `usize`.
-    attempt: AtomicUsize,
 }
 
 impl SupervisorDeps {
-    /// Construct deps from owned values. `attempt` starts at 0.
+    /// Construct deps from owned values.
     pub(crate) fn new(
         agent: String,
         home: PathBuf,
@@ -357,7 +352,6 @@ impl SupervisorDeps {
             resolved_sandbox,
             config,
             shutdown,
-            attempt: AtomicUsize::new(0),
         }
     }
 
@@ -370,16 +364,6 @@ impl SupervisorDeps {
             resolved_sandbox: &self.resolved_sandbox,
             config: &self.config,
         }
-    }
-
-    /// Return the current backoff index, then increment for the next failure.
-    fn attempt_and_increment(&self) -> usize {
-        self.attempt.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Reset the backoff counter after a successful bring-up.
-    fn reset_attempts(&self) {
-        self.attempt.store(0, Ordering::Relaxed);
     }
 }
 
@@ -448,6 +432,7 @@ async fn recovery_step(
     bot: &crate::telegram::BotType,
     sync_task: &mut Option<tokio::task::JoinHandle<()>>,
     deps: &SupervisorDeps,
+    attempt: &mut usize,
 ) -> LoopStep {
     let ctx = deps.bring_up_ctx();
     match bring_up_sandbox(&ctx).await {
@@ -455,7 +440,7 @@ async fn recovery_step(
             handle.set_ready(bring_up.sandbox.clone());
             *sync_task = Some(spawn_sync_task(deps, bring_up.sandbox));
             notify_back_online(handle, bot).await;
-            deps.reset_attempts();
+            *attempt = 0;
             tracing::info!(agent = %deps.agent, "sandbox backend recovered");
             // Skip the backoff sleep: re-enter the monitor branch immediately
             // now that the handle is Ready.
@@ -471,8 +456,9 @@ async fn recovery_step(
             return LoopStep::Break;
         }
     }
-    let attempt = deps.attempt_and_increment();
-    let secs = RECOVERY_BACKOFF[attempt.min(RECOVERY_BACKOFF.len() - 1)];
+    // Current backoff index, then advance for the next consecutive failure.
+    let secs = RECOVERY_BACKOFF[(*attempt).min(RECOVERY_BACKOFF.len() - 1)];
+    *attempt += 1;
     tokio::select! {
         _ = deps.shutdown.cancelled() => LoopStep::Break,
         _ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => LoopStep::Continue,
@@ -494,11 +480,14 @@ async fn run_supervisor(
     // aborts it (see monitor_step) and recovery replaces it, preventing a
     // duplicate sync task from running after the first recovery.
     let mut sync_task: Option<tokio::task::JoinHandle<()>> = initial_sync_task;
+    // Consecutive-failure counter driving the backoff schedule. Loop-local:
+    // the supervisor runs as a single task, so no synchronization is needed.
+    let mut attempt: usize = 0;
     loop {
         let step = if handle.is_ready() {
             monitor_step(&handle, &mut failure_rx, &mut sync_task, &deps).await
         } else {
-            recovery_step(&handle, &bot, &mut sync_task, &deps).await
+            recovery_step(&handle, &bot, &mut sync_task, &deps, &mut attempt).await
         };
         if let LoopStep::Break = step {
             // Abort the owned sync task on shutdown so its JoinHandle is not
