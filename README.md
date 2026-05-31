@@ -36,7 +36,7 @@ it remembers what matters, and it can act on your behalf without you handing it 
 
 **identity that writes itself.** the first session with a fresh agent is a bootstrap, not a chat: the agent writes its own `IDENTITY.md`, `SOUL.md`, and `USER.md`, and the platform never overwrites them – on restart, model swap, or upgrade the agent stays itself.
 
-**memory that survives restarts, and explains itself.** memory persists across sessions and chats. it runs on Hindsight by default, with an agent-managed `MEMORY.md` file mode as fallback. recall surfaces when each memory was formed and lets the model judge relevance – no hidden staleness thresholds. conversation transcript search is separate and server-scoped: an agent can search its current thread or its current chat, and cannot widen that scope.
+**memory that survives restarts, and explains itself.** memory persists across sessions and chats. it runs on Hindsight by default, with an agent-managed `MEMORY.md` file mode as fallback. recall surfaces when each memory was formed and lets the model judge relevance – no hidden staleness thresholds. beyond extracted memory, the agent can search back through the raw conversation – its current thread, or the whole chat including every topic in a group – so you can ask it to find something you actually said weeks ago. that search is server-scoped: it can't widen past the chat you're in.
 
 **one Telegram bot per agent.** you message the agent like a person – dm, group, or topic. no host cli for day-to-day use. each chat is its own Claude Code session, and they share one chat-tagged memory so recall carries across them. attachments both ways, media groups, and voice notes all work.
 
