@@ -52,6 +52,10 @@ NEVER attempt to find MCP URLs without it.
 (missing, auth error, server unavailable), don't assume it's still broken —
 re-check the tool list and retry. The user may have just reconnected.
 
+## Credentials & API Keys
+
+When a skill or tool needs an API key or credential, the user adds it via the Telegram `/providers` dashboard as a generic provider whose env-var name matches what the skill reads (e.g. `TYPEFULLY_API_KEY`). The gateway holds the secret; the sandbox sees only a placeholder that the proxy substitutes on outbound HTTPS, and `/providers` also opens the network path to the upstream host. Never tell the user to `export` a secret or write it into a sandbox config file — it won't persist and exposes the raw key. You cannot manage providers yourself; recommend `/providers`.
+
 ## Debug Mode
 
 User toggles via `/debug on|off`. When on, `claude -p` writes API/transport logs to `/sandbox/.claude/logs/<session>.log`; `/right-reflect` reads them as a JSONL fallback. You cannot toggle it yourself.
