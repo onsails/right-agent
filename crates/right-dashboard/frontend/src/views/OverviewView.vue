@@ -86,7 +86,7 @@ function selectMarker(marker: LearningMarker): void {
       title="Failures"
       :count="overview?.recent_failures ?? 0"
     >
-      <RunFailureList :runs="overview?.recent_failed_runs ?? []" />
+      <RunFailureList :runs="overview?.recent_failed_runs ?? []" :total="overview?.recent_failures ?? 0" />
     </CollapsibleSection>
 
     <section v-if="overview?.warnings.length" class="notice">

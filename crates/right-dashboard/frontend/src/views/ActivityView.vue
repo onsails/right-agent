@@ -51,7 +51,7 @@ function cronStatus(cron: CronCard): string {
     title="Failures"
     :count="overview?.summary.failed_recent_cron_count ?? 0"
   >
-    <RunFailureList :runs="overview?.failed_runs ?? []" />
+    <RunFailureList :runs="overview?.failed_runs ?? []" :total="overview?.summary.failed_recent_cron_count ?? 0" />
   </CollapsibleSection>
 
   <section class="two-column wide-main">

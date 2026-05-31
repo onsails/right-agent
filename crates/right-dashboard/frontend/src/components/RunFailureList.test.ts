@@ -33,12 +33,21 @@ async function render(props: Record<string, unknown>) {
 
 describe('RunFailureList', () => {
   it('renders one row per failed run', async () => {
-    const html = await render({ runs: [failedRun('run-aaaaaaaa'), failedRun('run-bbbbbbbb')] })
+    const html = await render({ runs: [failedRun('run-aaaaaaaa'), failedRun('run-bbbbbbbb')], total: 2 })
     expect(html).toContain('cron')
     expect(html).toContain('job-x')
   })
   it('shows an empty hint when there are no runs', async () => {
-    const html = await render({ runs: [] })
+    const html = await render({ runs: [], total: 0 })
     expect(html).toContain('No failures')
+  })
+  it('shows a sample label when the total exceeds the shown rows', async () => {
+    const runs = Array.from({ length: 50 }, (_, i) => failedRun(`run-${i.toString().padStart(8, '0')}`))
+    const html = await render({ runs, total: 137 })
+    expect(html).toContain('latest 50 of 137')
+  })
+  it('omits the sample label when all failures are shown', async () => {
+    const html = await render({ runs: [failedRun('run-aaaaaaaa')], total: 1 })
+    expect(html).not.toContain('latest')
   })
 })

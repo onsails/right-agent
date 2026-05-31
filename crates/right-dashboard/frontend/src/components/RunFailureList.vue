@@ -1,14 +1,18 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import { runDetail } from '../api'
 import { money, shortDate, shortId, statusTone } from '../format'
 import type { RunDetailResponse, RunSummary } from '../types'
 import AsyncState from './AsyncState.vue'
+import { failureSampleLabel } from './failureSampleLabel'
 
-defineProps<{
+const props = defineProps<{
   runs: RunSummary[]
+  total: number
 }>()
+
+const sampleLabel = computed(() => failureSampleLabel(props.total, props.runs.length))
 
 const selectedId = ref<string | null>(null)
 const detail = ref<RunDetailResponse | null>(null)
@@ -45,7 +49,8 @@ async function select(run: RunSummary): Promise<void> {
 
 <template>
   <p v-if="runs.length === 0" class="muted-line">No failures</p>
-  <div v-else class="row-list">
+  <p v-if="sampleLabel" class="muted-line">{{ sampleLabel }}</p>
+  <div v-if="runs.length > 0" class="row-list">
     <template v-for="run in runs" :key="run.id">
       <button
         class="data-row"
