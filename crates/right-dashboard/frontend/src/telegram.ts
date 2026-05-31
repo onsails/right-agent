@@ -18,6 +18,8 @@ export interface TelegramWebApp {
   onEvent?: (eventType: FullscreenChangedEvent, eventHandler: TelegramFullscreenChangedHandler) => void
   offEvent?: (eventType: FullscreenChangedEvent, eventHandler: TelegramFullscreenChangedHandler) => void
   openLink?: (url: string) => void
+  showConfirm?: (message: string, callback: (confirmed: boolean) => void) => void
+  showAlert?: (message: string, callback?: () => void) => void
 }
 
 declare global {
@@ -146,4 +148,31 @@ export function subscribeTelegramFullscreenChanges(
       /* empty */
     }
   }
+}
+
+/** Native Mini-App confirmation; falls back to `window.confirm`, else `false`. */
+export function confirmAction(
+  message: string,
+  webApp: TelegramWebApp | undefined = defaultWebApp(),
+  confirmFn: ((message?: string) => boolean) | undefined =
+    typeof window === 'undefined' ? undefined : window.confirm.bind(window),
+): Promise<boolean> {
+  if (typeof webApp?.showConfirm === 'function') {
+    return new Promise((resolve) => webApp.showConfirm!(message, resolve))
+  }
+  return Promise.resolve(confirmFn ? confirmFn(message) : false)
+}
+
+/** Native Mini-App alert; falls back to `window.alert`, else no-op. */
+export function alertMessage(
+  message: string,
+  webApp: TelegramWebApp | undefined = defaultWebApp(),
+  alertFn: ((message?: string) => void) | undefined =
+    typeof window === 'undefined' ? undefined : window.alert.bind(window),
+): Promise<void> {
+  if (typeof webApp?.showAlert === 'function') {
+    return new Promise((resolve) => webApp.showAlert!(message, resolve))
+  }
+  alertFn?.(message)
+  return Promise.resolve()
 }

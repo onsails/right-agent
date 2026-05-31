@@ -3,7 +3,9 @@ import type { Mock } from 'vitest'
 
 import { initialDashboardTabFromLocation } from './format'
 import {
+  alertMessage,
   applyTelegramDisplayMode,
+  confirmAction,
   DASHBOARD_DISPLAY_MODE_STORAGE_KEY,
   initializeTelegramWebApp,
   nextDashboardDisplayModePreference,
@@ -272,5 +274,27 @@ describe('initialDashboardTabFromLocation', () => {
 
   it('defaults to overview', () => {
     expect(initialDashboardTabFromLocation('', '')).toBe('overview')
+  })
+})
+
+describe('confirmAction', () => {
+  it('resolves true/false from WebApp.showConfirm', async () => {
+    const showConfirm = vi.fn((_msg: string, cb: (ok: boolean) => void) => cb(true))
+    const webApp = { showConfirm } as unknown as TelegramWebApp
+    await expect(confirmAction('Delete?', webApp)).resolves.toBe(true)
+    expect(showConfirm).toHaveBeenCalledWith('Delete?', expect.any(Function))
+  })
+
+  it('falls back to false when no WebApp and no window.confirm', async () => {
+    await expect(confirmAction('Delete?', undefined, undefined)).resolves.toBe(false)
+  })
+})
+
+describe('alertMessage', () => {
+  it('uses WebApp.showAlert when present', async () => {
+    const showAlert = vi.fn((_msg: string, cb?: () => void) => cb?.())
+    const webApp = { showAlert } as unknown as TelegramWebApp
+    await alertMessage('Boom', webApp)
+    expect(showAlert).toHaveBeenCalledWith('Boom', expect.any(Function))
   })
 })
