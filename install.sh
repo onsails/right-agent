@@ -248,6 +248,7 @@ main() {
   echo "    3. View the TUI:       ${CYAN}right attach${RESET}"
   echo "    4. Check status:       ${CYAN}right status${RESET}"
 
+  # rc 10 == PATH_SETUP_RC_WRITE_FAILED in crates/right/src/main.rs
   if [ "${PATH_SETUP_RC:-0}" -eq 10 ]; then
     echo ""
     warn "couldn't add $INSTALL_DIR to your shell profile automatically"

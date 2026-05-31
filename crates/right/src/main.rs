@@ -2493,6 +2493,11 @@ fn prompt_sandbox_recreate_if_exists(
     }
 }
 
+/// Exit status from `right setup-path` when the shell rc file could not be
+/// written. `install.sh` checks for this exact code to re-surface the
+/// failure in its closing summary — keep the two in sync.
+const PATH_SETUP_RC_WRITE_FAILED: i32 = 10;
+
 /// `right setup-path` — ensure the install dir is on the user's shell PATH.
 ///
 /// Never fails the installer: exits `0` when PATH is ensured, `10` when the
@@ -2511,7 +2516,7 @@ fn cmd_setup_path() -> miette::Result<()> {
             .verb("couldn't determine your home directory")
             .fix(manual_fix);
         println!("{}", line.render(theme));
-        std::process::exit(10);
+        std::process::exit(PATH_SETUP_RC_WRITE_FAILED);
     };
     let shell = std::env::var("SHELL").ok();
 
@@ -2538,7 +2543,7 @@ fn cmd_setup_path() -> miette::Result<()> {
                 .verb(format!("couldn't update {}", file.display()))
                 .detail(reason)
                 .fix(manual_fix),
-            10,
+            PATH_SETUP_RC_WRITE_FAILED,
         ),
         Err(e) => (
             right_ui::status(right_ui::Glyph::Warn)
@@ -2546,7 +2551,7 @@ fn cmd_setup_path() -> miette::Result<()> {
                 .verb("couldn't set up PATH")
                 .detail(format!("{e:#}"))
                 .fix(manual_fix),
-            10,
+            PATH_SETUP_RC_WRITE_FAILED,
         ),
     };
 
