@@ -1407,6 +1407,10 @@ pub fn spawn_worker(
                 }
             }
 
+            // Idle-compaction: any foreground turn is activity — cancel a
+            // pending compaction so it cannot fire during this turn.
+            crate::idle_compaction::cancel(&ctx.compact_timers, chat_id, eff_thread_id);
+
             // Invoke claude -p (D-13, D-14)
             // Pass first message text for session label (truncated 60 chars).
             let first_text = batch.first().and_then(|m| m.text.as_deref());
@@ -2153,6 +2157,26 @@ pub fn spawn_worker(
                     };
                     crate::learning_probe_writer::run(writer_ctx, anchor, skill_index).await;
                 });
+            }
+
+            // Idle-compaction debounce (Normal foreground turns only).
+            // Independent of the learning gate above: arm a 2h timer when the
+            // session is opus[1m] and >=40% full; cancel otherwise.
+            if matches!(cc_prompt_mode, Some(crate::cc::prompt::PromptMode::Normal)) {
+                crate::idle_compaction::on_turn_end(crate::idle_compaction::IdleCompactionCtx {
+                    compact_timers: ctx.compact_timers.clone(),
+                    model: Arc::clone(&ctx.model),
+                    agent_dir: ctx.agent_dir.clone(),
+                    agent_db_dir: ctx.agent_db_dir.clone(),
+                    agent_name: ctx.agent_name.clone(),
+                    ssh_config_path: ctx.ssh_config_path.clone(),
+                    resolved_sandbox: ctx.resolved_sandbox.clone(),
+                    session_locks: ctx.session_locks.clone(),
+                    debug: Arc::clone(&ctx.debug),
+                    chat_id,
+                    thread_id: eff_thread_id,
+                })
+                .await;
             }
 
             // Auto-retain and prefetch (fire-and-forget).
