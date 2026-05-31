@@ -12,7 +12,6 @@ use super::{
     ReadModelError, coarse_timestamp_bounds, count_parsed_window_rows,
     learning_outcomes::{learning_outcome_kind, learning_outcome_severity, learning_outcome_title},
     parse_utc,
-    run_summary::{RUN_SUMMARY_COLUMNS, RUN_SUMMARY_FROM, run_summary_from_row},
 };
 
 const SIGNAL_LIMIT: usize = 30;
@@ -871,32 +870,7 @@ async fn recent_failed_runs(
 ) -> Result<Vec<RunSummary>, ReadModelError> {
     let now = parse_utc(generated_at)?;
     let since = now - Duration::hours(24);
-    let (coarse_since, coarse_until) = coarse_timestamp_bounds(&since, &now);
-    let sql = format!(
-        "SELECT {RUN_SUMMARY_COLUMNS},
-                COALESCE(ar.finished_at, ar.updated_at, ar.created_at) AS win_ts
-         {RUN_SUMMARY_FROM}
-         WHERE ar.status = 'failed'
-           AND COALESCE(ar.finished_at, ar.updated_at, ar.created_at) >= ?1
-           AND COALESCE(ar.finished_at, ar.updated_at, ar.created_at) <= ?2
-         ORDER BY COALESCE(ar.finished_at, ar.updated_at, ar.created_at) DESC, ar.created_at DESC"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map(params![coarse_since, coarse_until], |row| {
-            Ok((run_summary_from_row(row)?, row.get::<_, String>(12)?))
-        })
-        .await?;
-    // Precise window filter mirrors recent_failure_count so list length == count.
-    let mut out = Vec::new();
-    for row in rows {
-        let (run, win_ts) = row?;
-        let ts = parse_utc(&win_ts)?;
-        if ts >= since && ts <= now {
-            out.push(run);
-        }
-    }
-    Ok(out)
+    super::run_summary::failed_runs_in_window(conn, &now, &since, None).await
 }
 
 async fn learning_candidate_count(

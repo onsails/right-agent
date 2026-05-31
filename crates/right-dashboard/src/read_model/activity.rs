@@ -6,13 +6,11 @@ use crate::api_types::{
     ActiveActivity, CronCard, ForegroundActivity, LogExcerpt, OverviewResponse, OverviewSummary,
     RunDetailResponse, RunSummary,
 };
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use right_db::{Connection, OptionalExtension, params};
 
-use chrono::Duration;
-
 use super::run_summary::{RUN_SUMMARY_COLUMNS, RUN_SUMMARY_FROM, run_summary_from_row};
-use super::{ReadModelError, coarse_timestamp_bounds, parse_utc};
+use super::{ReadModelError, parse_utc};
 
 pub struct ActivityOverviewInput {
     pub agent: String,
@@ -287,31 +285,7 @@ async fn failed_cron_runs(
 ) -> Result<Vec<RunSummary>, ReadModelError> {
     let now = parse_utc(generated_at)?;
     let since = now - Duration::days(7);
-    let (coarse_since, coarse_until) = coarse_timestamp_bounds(&since, &now);
-    let sql = format!(
-        "SELECT {RUN_SUMMARY_COLUMNS},
-                COALESCE(ar.finished_at, ar.updated_at, ar.created_at) AS win_ts
-         {RUN_SUMMARY_FROM}
-         WHERE ar.kind = 'cron' AND ar.status = 'failed'
-           AND COALESCE(ar.finished_at, ar.updated_at, ar.created_at) >= ?1
-           AND COALESCE(ar.finished_at, ar.updated_at, ar.created_at) <= ?2
-         ORDER BY COALESCE(ar.finished_at, ar.updated_at, ar.created_at) DESC, ar.created_at DESC"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map(params![coarse_since, coarse_until], |row| {
-            Ok((run_summary_from_row(row)?, row.get::<_, String>(12)?))
-        })
-        .await?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (run, win_ts) = row?;
-        let ts = parse_utc(&win_ts)?;
-        if ts >= since && ts <= now {
-            out.push(run);
-        }
-    }
-    Ok(out)
+    super::run_summary::failed_runs_in_window(conn, &now, &since, Some("cron")).await
 }
 
 fn is_active_status(status: &str) -> bool {
