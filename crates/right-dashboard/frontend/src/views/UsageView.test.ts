@@ -88,35 +88,20 @@ describe('UsageView budget_skip_count', () => {
   })
 })
 
-describe('UsageView cache tokens per source', () => {
-  it('renders a labeled cache subline for a source with cache reads', async () => {
+describe('UsageView token legend and per-source TokenLine', () => {
+  it('renders the token legend and a per-source token line', async () => {
     const html = await render({
       usage: usageStub({
         windows: [windowStub({
-          sources: [sourceSummaryStub({ cache_read_tokens: 1234, cache_creation_tokens: 567 })],
+          sources: [sourceSummaryStub({ source: 'interactive', cache_read_tokens: 300, cache_creation_tokens: 50 })],
         })],
       }),
       loading: false,
       error: null,
     })
-    expect(html).toContain('created')
-    expect(html).toContain('read')
-    expect(html).toContain('hit')
-    expect(html).toContain('1.2k') // compactCount(1234) === '1.2k'
-  })
-
-  it('omits the cache subline for a source with no cache reads', async () => {
-    const html = await render({
-      usage: usageStub({
-        windows: [windowStub({
-          sources: [sourceSummaryStub({ cache_read_tokens: 0, cache_creation_tokens: 0 })],
-        })],
-      }),
-      loading: false,
-      error: null,
-    })
-    expect(html).not.toContain('created')
-    expect(html).not.toContain('hit')
-    expect(html).toContain('worker')
+    expect(html).toContain('token-legend')
+    expect(html).toContain('token-line')
+    expect(html).toContain('interactive')
+    expect(html).not.toContain('created') // CacheSubline removed
   })
 })
