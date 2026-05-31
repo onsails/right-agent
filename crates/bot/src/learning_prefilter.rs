@@ -322,11 +322,16 @@ fn collect_host_rightx_skill_index(agent_dir: &Path) -> std::io::Result<Vec<Lear
 /// Shell command run inside the sandbox to dump `rightx-*` skill frontmatter.
 /// The `[ -f ... ]` guard makes a no-match glob emit nothing (no error), and
 /// each skill is delimited by a `@@@SKILL <name>` marker on its own line.
+/// The trailing `true` forces exit 0 on a successful read regardless of the
+/// loop's last command, so a *failed* sandbox read (non-zero exit: 124 server
+/// timeout / -1 no-exit) is distinguishable from a skill-less agent (exit 0,
+/// empty stdout). Do not change the stdout format — `parse_sandbox_skill_dump`
+/// and the live test depend on it.
 const SANDBOX_SKILL_DUMP_CMD: &str = "for d in /sandbox/.claude/skills/rightx-*/; do \
        [ -f \"$d/SKILL.md\" ] || continue; \
        printf '\\n@@@SKILL %s\\n' \"$(basename \"$d\")\"; \
        head -c 4096 \"$d/SKILL.md\"; \
-     done";
+     done; true";
 
 /// Parse the delimited dump from [`SANDBOX_SKILL_DUMP_CMD`] into per-skill
 /// summaries. Non-`rightx-` chunks are dropped, and excerpts are bounded the
@@ -353,6 +358,18 @@ fn parse_sandbox_skill_dump(dump: &str) -> Vec<LearnedSkillSummary> {
     out
 }
 
+/// Map a sandbox skill-dump exec result to the parsed index. A non-zero exit
+/// (124 timeout / -1 no-exit / shell error) is a read failure → Err → the
+/// prefilter returns Skip, never a misleading empty index. A successful run
+/// (exit 0) with empty stdout is a legitimately skill-less agent and stays
+/// `Ok(vec![])`.
+fn dump_to_skill_index(out: &str, exit: i32) -> anyhow::Result<Vec<LearnedSkillSummary>> {
+    if exit != 0 {
+        anyhow::bail!("sandbox skill-index read failed: exit {exit}");
+    }
+    Ok(parse_sandbox_skill_dump(out))
+}
+
 /// Read the `rightx-*` skill index from inside the sandbox via gRPC exec.
 ///
 /// Learned skills live on the sandbox filesystem (`/sandbox/.claude/skills`),
@@ -374,7 +391,7 @@ async fn collect_sandbox_rightx_skill_index(
     let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox_name)
         .await
         .map_err(|e| anyhow::anyhow!("resolve_sandbox_id: {e:?}"))?;
-    let (out, _exit) = right_openshell::openshell::exec_in_sandbox(
+    let (out, exit) = right_openshell::openshell::exec_in_sandbox(
         &mut client,
         &sandbox_id,
         &["sh", "-c", SANDBOX_SKILL_DUMP_CMD],
@@ -383,7 +400,7 @@ async fn collect_sandbox_rightx_skill_index(
     .await
     .map_err(|e| anyhow::anyhow!("exec_in_sandbox: {e:?}"))
     .context("read sandbox skill index")?;
-    Ok(parse_sandbox_skill_dump(&out))
+    dump_to_skill_index(&out, exit).context("read sandbox skill index")
 }
 
 /// Shared skill-index reader: from the sandbox via gRPC when a sandbox is
@@ -732,6 +749,37 @@ mod tests {
         assert!(got[0].excerpt.contains("does bar"));
         assert_eq!(got[1].name, "rightx-foo");
         assert!(got[1].excerpt.contains("does foo"));
+    }
+
+    #[test]
+    fn dump_to_skill_index_exit_zero_parses_dump() {
+        let dump = "\n@@@SKILL rightx-foo\n---\nname: rightx-foo\ndescription: does foo\n---\n# body\n\
+                    \n@@@SKILL rightx-bar\n---\nname: rightx-bar\ndescription: does bar\n---\n";
+        let got = dump_to_skill_index(dump, 0).expect("exit 0 with a valid dump is Ok");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name, "rightx-bar");
+        assert_eq!(got[1].name, "rightx-foo");
+    }
+
+    #[test]
+    fn dump_to_skill_index_exit_zero_empty_stays_empty() {
+        // A legitimately skill-less agent exits 0 with no stdout — must be an
+        // empty index, NOT an error, or new agents could never create a skill.
+        let got = dump_to_skill_index("", 0).expect("exit 0 with empty stdout is Ok");
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn dump_to_skill_index_timeout_exit_is_error() {
+        // OpenShell server-side timeout returns exit 124 with empty/partial
+        // stdout — must be an error so the prefilter returns Skip.
+        assert!(dump_to_skill_index("", 124).is_err());
+    }
+
+    #[test]
+    fn dump_to_skill_index_no_exit_event_is_error() {
+        // gRPC stream closed with no Exit event yields exit -1 — also an error.
+        assert!(dump_to_skill_index("", -1).is_err());
     }
 
     #[tokio::test]
