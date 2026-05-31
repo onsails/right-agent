@@ -8,19 +8,19 @@ use right_db::{Connection, params};
 
 use super::{ReadModelError, coarse_timestamp_bounds, parse_utc};
 
-pub(crate) const RUN_SUMMARY_COLUMNS: &str =
+pub(super) const RUN_SUMMARY_COLUMNS: &str =
     "ar.id, ar.kind, ar.producer_ref, ar.status, ar.started_at, ar.finished_at,
         ar.exit_code, ar.delivery_status, ar.delivery_required, ar.delivery_json,
         ar.run_note, costs.cost_usd";
 
-pub(crate) const RUN_SUMMARY_FROM: &str = "FROM async_runs ar
+pub(super) const RUN_SUMMARY_FROM: &str = "FROM async_runs ar
  LEFT JOIN (
     SELECT session_uuid, SUM(total_cost_usd) AS cost_usd
     FROM usage_events
     GROUP BY session_uuid
  ) costs ON costs.session_uuid = ar.run_session_id";
 
-pub(crate) fn run_summary_from_row(
+pub(super) fn run_summary_from_row(
     row: &right_db::row::Row<'_>,
 ) -> Result<RunSummary, right_db::DbError> {
     Ok(RunSummary {
