@@ -4,10 +4,9 @@ import { computed, ref } from 'vue'
 import LearningFlowChart from '../../components/charts/LearningFlowChart.vue'
 import LearningSignalPanel from '../../components/charts/LearningSignalPanel.vue'
 import CollapsibleSection from '../../components/CollapsibleSection.vue'
+import FailedSkillList from '../../components/FailedSkillList.vue'
 import MetricCard from '../../components/MetricCard.vue'
-import StatusPill from '../../components/StatusPill.vue'
 import { failureMetric } from '../../components/failureMetric'
-import { shortDate } from '../../format'
 import type { LearningOverviewResponse } from '../../types'
 
 const props = defineProps<{
@@ -52,21 +51,9 @@ const failures = computed(() => failureMetric(props.learning?.lifecycle.failed_o
     title="Failed skills"
     :count="learning?.lifecycle.failed_or_aborted_7d ?? 0"
   >
-    <div class="row-list">
-      <div
-        v-for="event in learning?.lifecycle.recent_failed_events ?? []"
-        :key="`${event.skill_name}:${event.created_at}`"
-        class="data-row static"
-      >
-        <span class="row-main">
-          <strong>{{ event.skill_name }}</strong>
-          <small>{{ event.action }} / {{ shortDate(event.created_at) }}</small>
-          <small v-if="event.message" class="run-note-preview">{{ event.message }}</small>
-        </span>
-        <span class="row-side">
-          <StatusPill :status="event.status" />
-        </span>
-      </div>
-    </div>
+    <FailedSkillList
+      :events="learning?.lifecycle.recent_failed_events ?? []"
+      :total="learning?.lifecycle.failed_or_aborted_7d ?? 0"
+    />
   </CollapsibleSection>
 </template>
