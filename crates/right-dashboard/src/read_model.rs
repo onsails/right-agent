@@ -34,6 +34,13 @@ pub enum ReadModelError {
     InvalidLifecycle(String),
 }
 
+/// Upper bound on how many failure rows each dashboard surface ships in a
+/// single payload. The badge count stays the exact windowed total; this caps
+/// only the inline sample list (newest-first) so a chronically-failing agent
+/// cannot bloat the every-5s poll payload. See
+/// docs/superpowers/specs/2026-05-31-dashboard-failure-list-cap-design.md.
+pub(crate) const FAILURE_SAMPLE_LIMIT: usize = 50;
+
 pub type OverviewInput = activity::ActivityOverviewInput;
 
 pub async fn overview(
