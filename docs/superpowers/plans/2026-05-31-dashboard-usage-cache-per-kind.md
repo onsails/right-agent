@@ -271,9 +271,34 @@ git commit -m "feat(dashboard): add CacheSubline component"
 
 The window panels iterate `window.sources` (`UsageSourceSummary`), which already carries `input_tokens`/`cache_creation_tokens`/`cache_read_tokens` — no backend or `types.ts` change needed here.
 
+> **⚠️ DRIFT CORRECTION (discovered during execution, 2026-05-31).** Since this
+> plan was written, commit `28436a19` ("show per-skill spend + usage cache/skip
+> columns") landed two changes that make the steps below stale:
+>
+> 1. `UsageView.vue` already renders a **raw, unlabeled** per-source cache span:
+>    `<span>{{ source.cache_read_tokens }} / {{ source.cache_creation_tokens }}</span>`
+>    inside the `.model-row`. The labeled `CacheSubline` **replaces** this raw
+>    span (do not leave both — that would double-render cache).
+> 2. `UsageView.test.ts` **already exists** (it is NOT a new file). It has a
+>    `budget_skip_count` suite (leave untouched) and a "cache tokens per source"
+>    suite asserting the raw `1234` / `567` values. Replacing the raw span with
+>    `CacheSubline` turns `1234` into `1.2k` (via `compactCount`), so that
+>    existing assertion **will break** and must be rewritten to expect the
+>    labeled `created · read · hit` output. Reuse the existing
+>    `sourceSummaryStub`/`windowStub`/`usageStub`/`render` helpers — do not
+>    duplicate them.
+>
+> Revised TDD order: (1) rewrite the existing "cache tokens per source" suite to
+> expect the `CacheSubline` output and add an omit-when-no-reads case → run, it
+> fails (still raw span); (2) add the `CacheSubline` import and replace the raw
+> span with the `.usage-source` wrapper → run, it passes; (3) typecheck; (4)
+> commit. The verbatim `ts`/`html` snippets in the steps below describe the
+> intended component shape but predate the existing test file — follow the
+> revised order, not the literal "create new file" wording.
+
 **Files:**
 - Modify: `crates/right-dashboard/frontend/src/views/UsageView.vue`
-- Test: `crates/right-dashboard/frontend/src/views/UsageView.test.ts` *(new)*
+- Modify: `crates/right-dashboard/frontend/src/views/UsageView.test.ts` *(already exists — rewrite the cache suite, keep `budget_skip_count`)*
 
 - [ ] **Step 1: Write the failing test**
 
