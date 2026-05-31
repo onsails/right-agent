@@ -85,6 +85,13 @@ pub async fn run_health_reconciler(
         };
         let now = tokio::time::Instant::now();
 
+        // Reclaim strike/schedule state for backends removed from the map at
+        // runtime, so neither HashMap grows unbounded over process lifetime.
+        let live: std::collections::HashSet<&str> =
+            snapshot.iter().map(|(n, _)| n.as_str()).collect();
+        strikes.retain(|k, _| live.contains(k.as_str()));
+        next_due.retain(|k, _| live.contains(k.as_str()));
+
         // Build the due set; NeedsAuth backends are pruned from schedule/strikes.
         let mut due = Vec::new();
         for (name, backend) in &snapshot {
@@ -133,8 +140,8 @@ pub async fn run_health_reconciler(
                     match decide_connected(prev, &outcome) {
                         ConnectedDecision::Stay { strikes: s } => {
                             strikes.insert(name.clone(), s);
-                            if !matches!(outcome, ProbeOutcome::Alive) {
-                                tracing::debug!(server = %name, strikes = s, max = MAX_STRIKES, "health: dead probe");
+                            if let ProbeOutcome::Dead(detail) = &outcome {
+                                tracing::debug!(server = %name, strikes = s, max = MAX_STRIKES, %detail, "health: dead probe");
                             }
                             BackendStatus::Connected
                         }
@@ -169,11 +176,16 @@ pub async fn run_health_reconciler(
 
         // Sleep until the earliest next_due; if nothing scheduled, poll on the
         // shorter cadence so newly-added backends get picked up promptly.
+        // Cap the wake at UNREACHABLE_CADENCE so backends added to the map at
+        // runtime (dashboard mcp_add) are picked up within one short cadence,
+        // rather than waiting out a Connected backend's 120s schedule. A bare
+        // re-snapshot tick does no network probe — only due backends are probed.
         let wake = next_due
             .values()
             .min()
             .copied()
-            .unwrap_or_else(|| tokio::time::Instant::now() + UNREACHABLE_CADENCE);
+            .unwrap_or(now + UNREACHABLE_CADENCE)
+            .min(now + UNREACHABLE_CADENCE);
         tokio::time::sleep_until(wake).await;
     }
 }

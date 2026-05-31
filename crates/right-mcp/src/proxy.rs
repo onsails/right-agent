@@ -75,7 +75,7 @@ pub fn is_upstream_auth_error(msg: &str) -> bool {
 
 /// Outcome of a lightweight liveness probe against a backend's live session.
 #[derive(Debug)]
-pub enum ProbeOutcome {
+pub(crate) enum ProbeOutcome {
     /// Session responded; tools listed successfully.
     Alive,
     /// Upstream reported auth-required (`"Auth required"`).
@@ -85,7 +85,7 @@ pub enum ProbeOutcome {
 }
 
 /// Classify a probe error string into an outcome. Pure — no I/O.
-pub fn classify_probe_error(msg: &str) -> ProbeOutcome {
+pub(crate) fn classify_probe_error(msg: &str) -> ProbeOutcome {
     if is_upstream_auth_error(msg) {
         ProbeOutcome::AuthRequired
     } else {
@@ -542,7 +542,7 @@ impl ProxyBackend {
     /// Lists tools on the existing rmcp session; on success refreshes
     /// `cached_tools`. Returns the outcome and does NOT mutate `status` — the
     /// health reconciler's debounce owns the flip decision.
-    pub async fn probe_live(&self) -> ProbeOutcome {
+    pub(crate) async fn probe_live(&self) -> ProbeOutcome {
         let client_guard = self.client.read().await;
         let Some(client) = client_guard.as_ref() else {
             return ProbeOutcome::Dead("no active session".into());
