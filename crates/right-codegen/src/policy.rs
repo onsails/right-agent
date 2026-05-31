@@ -944,7 +944,7 @@ pub enum PolicyConflict {
 ///   `      - port: 443`    — list item (leading dash)
 ///   `        tls: skip`    — 8-space sub-key inside a list item
 ///   `      # comment`      — comment line (not a YAML key)
-///   `    - domain: ...`    — list item at 4-space indent (legacy stanza form)
+///   `    - host: ...`      — list item at 4-space indent (legacy stanza form)
 ///
 /// This is the load-bearing stop condition for legacy policies that pre-date
 /// the `# right-providers: insert-above` anchor. Without it, both
@@ -1010,7 +1010,7 @@ pub fn providers_append_checked(
     // Line-anchored match so a prefix-collision host (e.g. existing
     // "api.openai.com.evil.tld") doesn't satisfy the idempotency check
     // for "api.openai.com" and cause us to silently skip the real add.
-    let host_marker = format!("- domain: {host}");
+    let host_marker = format!("- host: {host}");
     let found_match = policy.match_indices(&host_marker).find(|(idx, marker)| {
         let after = idx + marker.len();
         after == policy.len() || matches!(policy.as_bytes().get(after), Some(b'\n' | b'\r'))
@@ -1031,17 +1031,19 @@ pub fn providers_append_checked(
         .map(|p| format!("      path: {p}\n"))
         .unwrap_or_default();
     let stanza = format!(
-        "    # managed-by: right-providers:{provider_name}\n    - domain: {host}\n      protocol: rest\n      access: full\n{path_line}"
+        "    # managed-by: right-providers:{provider_name}\n    - host: {host}\n      port: 443\n      protocol: rest\n      access: full\n{path_line}"
     );
 
     // Preferred path: insert immediately above the sentinel anchor emitted
     // by `generate_policy` inside `network_policies.outbound.endpoints`.
-    // This pins generic provider stanzas to the correct sub-section in real
-    // policies (where the first `endpoints:` is `anthropic.endpoints` in
-    // restrictive mode, not a valid home for generic providers). The anchor
-    // line's leading whitespace defines the marker column; YAML list items
-    // ("- domain: ...") share that column, value lines sit two columns
-    // deeper, matching the real policy's 6-space-indented list-item style.
+    // Generic providers are only ever appended to permissive policies — the
+    // provider API rejects generic + restrictive (`NetworkPolicyForbidsGeneric`),
+    // and restrictive mode renders no anchor, so this branch is the production
+    // path. The anchor line's leading whitespace defines the marker column;
+    // YAML list items ("- host: ...") share that column, value lines sit two
+    // columns deeper, matching the real policy's 6-space-indented list-item
+    // style. Endpoints use OpenShell's `host`/`port` keys (not `domain`, which
+    // v0.0.50 rejects as an unknown field).
     const PROVIDERS_ANCHOR: &str = "# right-providers: insert-above";
     if let Some(anchor_idx) = policy.find(PROVIDERS_ANCHOR) {
         let line_start = policy[..anchor_idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
@@ -1053,7 +1055,8 @@ pub fn providers_append_checked(
             .unwrap_or_default();
         let stanza_anchored = format!(
             "{marker_indent}# managed-by: right-providers:{provider_name}\n\
-             {marker_indent}- domain: {host}\n\
+             {marker_indent}- host: {host}\n\
+             {value_indent}port: 443\n\
              {value_indent}protocol: rest\n\
              {value_indent}access: full\n\
              {path_line_anchored}"
@@ -1130,7 +1133,7 @@ pub fn providers_strip(policy: &str, provider_name: &str, _host: &str) -> String
 
     // Walk forward past the comment line and all indented continuation lines
     // that belong to this stanza (lines that start with spaces, i.e. deeper
-    // indented YAML content following the `- domain:` entry).
+    // indented YAML content following the `- host:` entry).
     let mut end_byte = tag_idx + tag.len();
     // Consume the rest of the tag line.
     if let Some(nl) = policy[end_byte..].find('\n') {

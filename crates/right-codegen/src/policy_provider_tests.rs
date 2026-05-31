@@ -3,7 +3,7 @@ use super::policy::*;
 const POLICY_WITHOUT_PROVIDERS: &str = r#"
 network:
   endpoints:
-    - domain: api.anthropic.com
+    - host: api.anthropic.com
       protocol: rest
       access: full
 "#;
@@ -11,11 +11,12 @@ network:
 const POLICY_WITH_ONE_PROVIDER: &str = r#"
 network:
   endpoints:
-    - domain: api.anthropic.com
+    - host: api.anthropic.com
       protocol: rest
       access: full
     # managed-by: right-providers:myagent-acme
-    - domain: api.acme.com
+    - host: api.acme.com
+      port: 443
       protocol: rest
       access: full
 "#;
@@ -29,12 +30,12 @@ fn append_provider_endpoint_inserts_tagged_stanza() {
         None,
     );
     assert!(after.contains("managed-by: right-providers:myagent-acme"));
-    assert!(after.contains("- domain: api.acme.com"));
+    assert!(after.contains("- host: api.acme.com"));
 }
 
 #[test]
 fn append_provider_endpoint_existing_rest_is_noop() {
-    let already = "network:\n  endpoints:\n    - domain: api.acme.com\n      protocol: rest\n      access: full\n";
+    let already = "network:\n  endpoints:\n    - host: api.acme.com\n      protocol: rest\n      access: full\n";
     let after = providers_append(already, "myagent-acme", "api.acme.com", None);
     assert_eq!(after, already);
 }
@@ -49,7 +50,7 @@ fn append_provider_endpoint_raw_tunnel_conflict() {
 
 #[test]
 fn append_provider_endpoint_conflicting_domain_raw_tunnel_returns_err() {
-    let raw = "network:\n  endpoints:\n    - domain: api.acme.com\n      tls: skip\n";
+    let raw = "network:\n  endpoints:\n    - host: api.acme.com\n      tls: skip\n";
     let err = providers_append_checked(raw, "myagent-acme", "api.acme.com", None);
     assert!(matches!(err, Err(PolicyConflict::RawTunnel { .. })));
 }
@@ -59,9 +60,9 @@ fn append_provider_endpoint_prefix_collision_is_not_idempotent() {
     // Regression: a substring host-marker match used to treat
     // "api.acme.com.evil.tld" as collision-matching "api.acme.com",
     // causing the real endpoint to be silently skipped.
-    let policy = "network:\n  endpoints:\n    - domain: api.acme.com.evil.tld\n      protocol: rest\n      access: full\n";
+    let policy = "network:\n  endpoints:\n    - host: api.acme.com.evil.tld\n      protocol: rest\n      access: full\n";
     let after = providers_append(policy, "myagent-acme", "api.acme.com", None);
-    assert!(after.contains("- domain: api.acme.com\n"));
+    assert!(after.contains("- host: api.acme.com\n"));
     assert!(after.contains("managed-by: right-providers:myagent-acme"));
 }
 
@@ -77,7 +78,7 @@ fn append_provider_endpoint_handles_crlf_policy() {
     let policy = "network:\r\n  endpoints:\r\n    - host: api.anthropic.com\r\n      protocol: rest\r\n      access: full\r\n";
     let after = providers_append(policy, "myagent-acme", "api.acme.com", None);
     // The new stanza must be present.
-    assert!(after.contains("- domain: api.acme.com"));
+    assert!(after.contains("- host: api.acme.com"));
     assert!(after.contains("managed-by: right-providers:myagent-acme"));
     // The original CRLF content must not be mid-line corrupted: existing
     // endpoint still present.
@@ -110,7 +111,7 @@ fn append_targets_outbound_endpoints_in_permissive_real_policy() {
 
     let in_outbound = outbound_endpoints
         .iter()
-        .any(|e| e.get("domain").and_then(|d| d.as_str()) == Some("api.acme.invalid"));
+        .any(|e| e.get("host").and_then(|h| h.as_str()) == Some("api.acme.invalid"));
     assert!(
         in_outbound,
         "generic provider stanza must land in network_policies.outbound.endpoints, not elsewhere"
@@ -123,7 +124,7 @@ fn append_targets_outbound_endpoints_in_permissive_real_policy() {
         if let Some(arr) = endpoints.as_array() {
             assert!(
                 !arr.iter()
-                    .any(|e| e.get("domain").and_then(|d| d.as_str()) == Some("api.acme.invalid")),
+                    .any(|e| e.get("host").and_then(|h| h.as_str()) == Some("api.acme.invalid")),
                 "provider stanza leaked into network_policies.{section}.endpoints"
             );
         }
@@ -153,6 +154,41 @@ fn append_then_strip_round_trips_against_real_policy() {
     assert_eq!(
         stripped, base,
         "strip after append must restore the byte-for-byte original policy"
+    );
+}
+
+/// Bug regression: the appended provider endpoint must use OpenShell's real
+/// endpoint keys (`host` + `port`), not the legacy `domain` key that OpenShell
+/// v0.0.50 rejects as an unknown field. Generic providers are only ever
+/// appended to permissive policies (the API rejects generic + restrictive via
+/// `NetworkPolicyForbidsGeneric`), so this asserts the production path against
+/// the real permissive `generate_policy` output. Shipped broken because no live
+/// test ever applied a successfully-appended policy.
+#[test]
+fn appended_provider_endpoint_uses_host_and_port_not_domain() {
+    let base = generate_policy(
+        8100,
+        &right_agent_config::NetworkPolicy::Permissive,
+        HostMcpAccess::BootstrapUnresolved,
+    );
+
+    let appended = providers_append(&base, "myagent-acme", "api.acme.invalid", None);
+    let parsed: serde_json::Value =
+        serde_saphyr::from_str(&appended).expect("appended policy must be valid YAML");
+
+    let stanza = parsed["network_policies"]["outbound"]["endpoints"]
+        .as_array()
+        .expect("outbound endpoints must be a list")
+        .iter()
+        .find(|e| e.get("host").and_then(|h| h.as_str()) == Some("api.acme.invalid"))
+        .expect("provider stanza must carry a `host` key (OpenShell rejects `domain`)");
+    assert!(
+        stanza.get("port").is_some(),
+        "provider endpoint must carry a `port` (OpenShell expects it)"
+    );
+    assert!(
+        !appended.contains("- domain: api.acme.invalid"),
+        "the legacy `domain:` key must not be emitted"
     );
 }
 
@@ -312,9 +348,9 @@ fn strip_one_of_two_adjacent_providers_does_not_touch_neighbor() {
     let stripped = providers_strip(&policy, "myagent-a", "api.a.com");
     // A is gone
     assert!(!stripped.contains("right-providers:myagent-a"));
-    assert!(!stripped.contains("- domain: api.a.com"));
+    assert!(!stripped.contains("- host: api.a.com"));
     // B survives intact
     assert!(stripped.contains("right-providers:myagent-b"));
-    assert!(stripped.contains("- domain: api.b.com"));
+    assert!(stripped.contains("- host: api.b.com"));
     assert!(stripped.contains("protocol: rest"));
 }

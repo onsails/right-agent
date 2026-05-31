@@ -736,7 +736,7 @@ pub(crate) async fn handle_provider_create(
     }
 
     if req.type_ == "generic" {
-        // Generic providers append a `- domain: <upstream_host>` stanza to
+        // Generic providers append a `- host: <upstream_host>` stanza to
         // `network_policies.outbound.endpoints` for HTTPS interception +
         // placeholder substitution. Restrictive mode renders only
         // `network_policies.anthropic.endpoints` (Anthropic/Claude allowlist)
