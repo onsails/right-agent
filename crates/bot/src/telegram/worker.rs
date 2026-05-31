@@ -296,6 +296,8 @@ pub struct WorkerContext {
     /// Per-main-session async mutex map. Worker acquires before `claude -p --resume <main>`;
     /// delivery acquires before its own `--resume`. Closes the TOCTOU race on session JSONL.
     pub session_locks: super::SessionLocks,
+    /// Per-(chat, thread) idle-compaction debounce timers.
+    pub compact_timers: super::CompactTimers,
     /// Per-(chat, thread) flag set by the bg callback. Worker checks after kill+wait
     /// to distinguish UserRequested backgrounding from auto-timeout.
     pub(crate) bg_requests: super::BgRequests,
