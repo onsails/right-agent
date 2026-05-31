@@ -5,6 +5,7 @@ pub(crate) mod background;
 pub(crate) mod cc;
 mod config_watcher;
 pub(crate) mod cron;
+pub(crate) mod idle_compaction;
 mod keepalive;
 pub(crate) mod learning_curator;
 pub(crate) mod learning_prefilter;
