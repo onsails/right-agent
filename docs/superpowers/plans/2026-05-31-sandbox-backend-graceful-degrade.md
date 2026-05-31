@@ -1072,3 +1072,19 @@ git commit -m "docs(architecture): sandbox graceful-degrade + fail-closed gate i
 
 **Known follow-ups flagged inline (not blockers):** version-string threading for `VersionTooOld` (Task 6); precise gateway-class failure detection at the mid-session report site (Task 9 step 2).
 ```
+
+---
+
+## Implementation notes (divergences from plan)
+
+**(a) Task 8a — structural fail-closed backstop (`guard_no_sandboxed_host_exec`):** A security review after Tasks 1–9 found that all CC-construction sites would fall back to host when `ssh_config_path.is_none()`. Task 8a inserted a compile-time structural backstop: `guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)` is called at every CC-command-construction site (`build_claude_command`, `worker::invoke_cc`, `cron.rs`, `background.rs`, `async_delivery.rs`, `reflection.rs`). It returns an error when `resolved_sandbox.is_some() && ssh_config_path.is_none()`, refusing to construct a host command for a sandboxed agent under any circumstances.
+
+**(b) "Model B" — deterministic stable `ssh_config_path`:** Rather than refactoring the worker to derive `ssh_config_path` from the live handle on each turn (original "Model A"), the path is computed once at startup as `<home>/run/ssh/<sandbox>.ssh-config` and threaded as a stable snapshot. Bring-up always writes to this exact path (same formula), so snapshots held by cron/delivery/reflection tasks remain correct across degrade and recovery without a restart. A `debug_assert_eq!` in `lib.rs` confirms the generated path matches the stable formula.
+
+**(c) Supervisor uses `LocalSet` for `!Send` futures:** `bring_up_sandbox` is `!Send` (some held types are not `Send` across await points). The supervisor drives it via `tokio::task::spawn_local` inside a `LocalSet`, matching the pattern used at `lib.rs` for the Hindsight-drain.
+
+**(d) Supervisor owns the sync task:** The startup sync task (seeded when bring-up succeeds) is transferred to `spawn_supervisor` as an optional `JoinHandle`. On degrade-from-ready the supervisor aborts it; on recovery it re-spawns it via `sync::run_sync_task`. This gives one authoritative owner for the background sync lifecycle.
+
+**(e) Deferred follow-ups (safe, not blockers):**
+- Keepalive / cron graceful health-gating: cron and keepalive jobs are already SAFE against host-fallback via the structural backstop. The remaining work is UX-only (avoid error-spam and spurious cron failures during an outage). Deferred.
+- Dashboard live-`SandboxExec` read: dashboard probes resolve `current_sandbox()` from the live handle per request (implemented), but the finer-grained "surface sandbox unavailable in probe result" path was deferred as a follow-up.

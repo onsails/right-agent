@@ -94,6 +94,9 @@ Per message:
   ├─ Route to worker task via DashMap<(chat_id, thread_id), Sender>
   ├─ Worker: debounce 500ms → download attachments → upload to sandbox inbox
   ├─ Format input: single text → raw string, multi/attachments → YAML
+  ├─ Fail-closed sandbox gate: sandboxed agent + `SandboxHealth::Unavailable` →
+  │   send cause-specific HTML message to Telegram, record affected chat, skip CC.
+  │   Non-sandboxed agents pass through unconditionally.
   ├─ Pipe input to claude -p via stdin (SSH or direct)
   │   ├─ First message: --session-id <uuid> (new session)
   │   ├─ Subsequent: --resume <root_session_id> (persistent session)
