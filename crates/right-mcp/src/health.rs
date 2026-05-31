@@ -147,13 +147,38 @@ pub async fn run_health_reconciler(
                         }
                         ConnectedDecision::Unreachable => {
                             strikes.remove(&name);
-                            backend.set_status(BackendStatus::Unreachable).await;
-                            tracing::warn!(server = %name, "health: connected → unreachable (strike {MAX_STRIKES}/{MAX_STRIKES})");
-                            BackendStatus::Unreachable
+                            // Only flip to Unreachable if the backend is still
+                            // Connected. A concurrent tool-call 401 or refresh
+                            // failure may have set NeedsAuth during the probe
+                            // window; auth death is debounce-exempt, so never
+                            // clobber it back to Unreachable.
+                            if backend
+                                .compare_and_set_status(
+                                    BackendStatus::Connected,
+                                    BackendStatus::Unreachable,
+                                )
+                                .await
+                            {
+                                tracing::warn!(server = %name, "health: connected → unreachable (strike {MAX_STRIKES}/{MAX_STRIKES})");
+                                BackendStatus::Unreachable
+                            } else {
+                                let actual = backend.status().await;
+                                tracing::debug!(server = %name, ?actual, "health: unreachable flip skipped; status changed during probe");
+                                actual
+                            }
                         }
                         ConnectedDecision::NeedsAuth => {
                             strikes.remove(&name);
-                            backend.set_status(BackendStatus::NeedsAuth).await;
+                            // Idempotent w.r.t. a concurrent NeedsAuth set: if the
+                            // status already moved off Connected (to NeedsAuth via
+                            // a racing tool-call/refresh), the end state is still
+                            // NeedsAuth, which is what we want.
+                            backend
+                                .compare_and_set_status(
+                                    BackendStatus::Connected,
+                                    BackendStatus::NeedsAuth,
+                                )
+                                .await;
                             tracing::warn!(server = %name, "health: connected → needs_auth (auth probe)");
                             BackendStatus::NeedsAuth
                         }
@@ -273,6 +298,43 @@ mod tests {
             cadence_for(BackendStatus::Unreachable),
             Some(UNREACHABLE_CADENCE)
         );
+    }
+
+    // Regression: the reconciler's Unreachable flip must not clobber a
+    // NeedsAuth demotion set by a concurrent tool-call/refresh during the probe
+    // window (auth death is debounce-exempt). The flip arm now uses
+    // `compare_and_set_status(Connected, Unreachable)`, which only swaps while
+    // the backend is still Connected. We test that primitive directly for
+    // determinism.
+    #[tokio::test]
+    async fn compare_and_set_status_only_swaps_on_match() {
+        let (_tmp, backend, _proxies) = dead_backend();
+        backend.set_status(BackendStatus::Connected).await;
+
+        // Simulate a concurrent tool-call 401: a racing writer moved the backend
+        // off Connected to NeedsAuth before the reconciler's flip applies. The
+        // reconciler's Unreachable swap must be rejected and leave NeedsAuth.
+        backend.set_status(BackendStatus::NeedsAuth).await;
+        let swapped = backend
+            .compare_and_set_status(BackendStatus::Connected, BackendStatus::Unreachable)
+            .await;
+        assert!(
+            !swapped,
+            "CAS must not swap when current status != expected"
+        );
+        assert_eq!(
+            backend.status().await,
+            BackendStatus::NeedsAuth,
+            "NeedsAuth must survive a losing CAS to Unreachable"
+        );
+
+        // When the backend is still Connected, the swap succeeds.
+        backend.set_status(BackendStatus::Connected).await;
+        let swapped = backend
+            .compare_and_set_status(BackendStatus::Connected, BackendStatus::Unreachable)
+            .await;
+        assert!(swapped, "CAS must swap when current status == expected");
+        assert_eq!(backend.status().await, BackendStatus::Unreachable);
     }
 
     // The May-27 regression anchor: an Unreachable backend must reconnect to
