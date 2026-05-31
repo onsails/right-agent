@@ -69,6 +69,8 @@ pub(super) enum SkillLifecycleReadError {
     Lifecycle(#[from] right_lifecycle::LifecycleError),
     #[error("lifecycle read task panicked: {0}")]
     Join(#[from] tokio::task::JoinError),
+    #[error("read model error: {0}")]
+    ReadModel(#[from] right_dashboard::read_model::ReadModelError),
 }
 
 pub(super) async fn skills_response(
@@ -371,6 +373,19 @@ async fn try_enrich_skills_response(state: &DashboardState, response: &mut Skill
             );
         }
     }
+    match spend_by_skill(state.agent_dir.clone()).await {
+        Ok(spend) => {
+            enrich_group_spend(&mut response.groups.core, &spend);
+            enrich_group_spend(&mut response.groups.learned, &spend);
+            enrich_group_spend(&mut response.groups.other, &spend);
+        }
+        Err(error) => {
+            tracing::warn!(
+                agent = %state.agent_name,
+                "dashboard skill spend enrichment skipped: {error:#}",
+            );
+        }
+    }
 }
 
 async fn try_enrich_skill_summary(state: &DashboardState, skill: &mut SkillSummary) {
@@ -388,6 +403,20 @@ async fn try_enrich_skill_summary(state: &DashboardState, skill: &mut SkillSumma
             );
         }
     }
+    match spend_by_skill(state.agent_dir.clone()).await {
+        Ok(spend) => {
+            if let Some(agg) = spend.get(&skill.name) {
+                skill.apply_spend(agg);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                agent = %state.agent_name,
+                skill = %skill.name,
+                "dashboard skill spend enrichment skipped: {error:#}",
+            );
+        }
+    }
 }
 
 fn enrich_group(
@@ -401,6 +430,17 @@ fn enrich_group(
     }
 }
 
+fn enrich_group_spend(
+    skills: &mut [SkillSummary],
+    spend: &std::collections::HashMap<String, right_dashboard::api_types::SkillSpendAgg>,
+) {
+    for skill in skills {
+        if let Some(agg) = spend.get(&skill.name) {
+            skill.apply_spend(agg);
+        }
+    }
+}
+
 async fn lifecycle_rows_by_name(
     agent_dir: PathBuf,
 ) -> Result<BTreeMap<String, right_lifecycle::SkillLifecycleRow>, SkillLifecycleReadError> {
@@ -410,4 +450,14 @@ async fn lifecycle_rows_by_name(
         .into_iter()
         .map(|row| (row.skill_name.clone(), row))
         .collect())
+}
+
+async fn spend_by_skill(
+    agent_dir: PathBuf,
+) -> Result<
+    std::collections::HashMap<String, right_dashboard::api_types::SkillSpendAgg>,
+    SkillLifecycleReadError,
+> {
+    let conn = right_db::open_connection_readonly(agent_dir).await?;
+    Ok(right_dashboard::read_model::learning::skill_spend_by_skill(&conn).await?)
 }

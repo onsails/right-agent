@@ -647,6 +647,35 @@ async fn recent_learning_signals(
     Ok(signals.into_iter().map(|(_, _, signal)| signal).collect())
 }
 
+pub async fn skill_spend_by_skill(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<String, crate::api_types::SkillSpendAgg>, ReadModelError> {
+    let rows = conn
+        .query_all(
+            "SELECT skill_name, \
+               COALESCE(SUM(CASE WHEN kind='create' THEN cost_usd END),0), \
+               COALESCE(SUM(CASE WHEN kind IN ('patch','maintain') THEN cost_usd END),0), \
+               COALESCE(SUM(CASE WHEN kind='usage' THEN cost_usd END),0), \
+               COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_creation),0) \
+             FROM skill_spend GROUP BY skill_name",
+            (),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    crate::api_types::SkillSpendAgg {
+                        learn_cost_usd: r.get(1)?,
+                        fix_cost_usd: r.get(2)?,
+                        usage_cost_usd: r.get(3)?,
+                        cache_read_tokens: r.get(4)?,
+                        cache_creation_tokens: r.get(5)?,
+                    },
+                ))
+            },
+        )
+        .await?;
+    Ok(rows.into_iter().collect())
+}
+
 pub async fn skill_lifecycle_overview(
     conn: &Connection,
     agent: &str,
@@ -1029,5 +1058,32 @@ mod tests {
         assert_eq!(labels, vec!["rightx-offset", "rightx-normal"]);
         assert_eq!(response.recent_learning_signals[0].kind, "skill_updated");
         assert_eq!(response.recent_learning_signals[0].severity, "info");
+    }
+
+    #[tokio::test]
+    async fn skill_spend_agg_buckets_by_kind() {
+        let (_dir, conn) = fixture().await;
+        for (k, c) in [
+            ("create", 0.5),
+            ("patch", 0.1),
+            ("patch", 0.2),
+            ("maintain", 0.4),
+            ("usage", 0.9),
+        ] {
+            conn.execute(
+                "INSERT INTO skill_spend (skill_name, kind, cost_usd, cache_read, cache_creation) \
+                 VALUES ('rightx-a', ?1, ?2, 5, 7)",
+                right_db::params![k, c],
+            )
+            .await
+            .unwrap();
+        }
+        let map = skill_spend_by_skill(&conn).await.unwrap();
+        let a = map.get("rightx-a").unwrap();
+        assert!((a.learn_cost_usd - 0.5).abs() < 1e-9);
+        assert!((a.fix_cost_usd - 0.7).abs() < 1e-9); // patch + maintain summed
+        assert!((a.usage_cost_usd - 0.9).abs() < 1e-9);
+        assert_eq!(a.cache_read_tokens, 25); // 5 rows * 5
+        assert_eq!(a.cache_creation_tokens, 35); // 5 rows * 7
     }
 }
