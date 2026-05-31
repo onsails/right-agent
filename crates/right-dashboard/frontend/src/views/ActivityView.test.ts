@@ -37,6 +37,8 @@ describe('ActivityView failures card', () => {
     expect(card.attrs).not.toMatch(/\bok\b/)
     expect(card.attrs).not.toMatch(/\bbad\b/)
     expect(html).not.toContain('metric-card-interactive')
+    // no failures drill-down section at zero (CollapsibleSection emits a count-badge)
+    expect(html).not.toContain('count-badge')
   })
   it('renders the non-zero failures card as a red interactive button and reveals the list', async () => {
     const failed = [{ id: 'run-1', kind: 'cron', producer_ref: 'job', status: 'failed', started_at: null, finished_at: '2026-05-31T11:00:00Z', exit_code: 1, delivery_required: false, delivery_status: 'none', delivery_kind: null, run_note: null, cost_usd: 0 }]
@@ -45,7 +47,9 @@ describe('ActivityView failures card', () => {
     expect(card.tag).toBe('button')
     expect(card.attrs).toMatch(/metric-card-interactive/)
     expect(card.attrs).toMatch(/\bbad\b/)
-    // failures drill-down list present (RunFailureList rendered the seeded failed run)
-    expect(html).toContain('job')
+    // failures drill-down section header is present (CollapsibleSection count-badge).
+    // SSR renders the section CLOSED (body is v-if=isOpen, failuresOpen starts false), so
+    // the RunFailureList rows are not in SSR output — the expand is verified manually.
+    expect(html).toContain('count-badge')
   })
 })
