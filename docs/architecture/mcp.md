@@ -203,6 +203,27 @@ brief read lock, drops it, probes due backends concurrently, then applies
 decisions serially; strike/schedule state is pruned for backends removed
 from the map at runtime.
 
+### `set-headers` decoupling + connect observability
+
+`handle_mcp_set_headers` persists the header credential *before* it
+connects: it builds the background-connect client, writes the headers via
+`db_set_http_headers`, swaps a fresh `Unreachable` `ProxyBackend` (carrying
+`AuthMethod::Headers`) into the proxies map, returns `200` immediately, and
+only then `tokio::spawn`s a best-effort `connect()`. A temporarily-down
+upstream therefore still saves the credential; the health reconciler later
+re-probes with the new headers and self-heals to `Connected`. The old
+test-then-save gate (which returned `502` and discarded the credential on a
+failed connect) is gone.
+
+Every `ProxyBackend::connect()` outcome is recorded in memory:
+`last_attempt_at`, `last_success_at`, and `last_connect_error` (the error is
+passed through `redact_query_strings` so a `query_string`-auth token quoted
+in a transport error never reaches logs or the dashboard). The two
+non-auth failure arms also `tracing::debug!` the redacted detail. These
+fields are surfaced per server through `/mcp-list` (RFC3339 timestamps) and
+rendered by the dashboard `McpView` as the failure cause + "last tried"
+line; they are disposable runtime state, not persisted across restarts.
+
 ## MCP Aggregator
 
 The Aggregator replaces HttpMemoryServer as the MCP endpoint. One shared process
