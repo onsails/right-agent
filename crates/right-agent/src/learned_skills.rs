@@ -1,4 +1,4 @@
-use right_db::{Connection, DbError, params};
+use right_db::{Connection, DbError, OptionalExtension, params};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,6 +114,23 @@ pub async fn successful_finish_exists(
     Ok(count > 0)
 }
 
+/// The skill_name + finish status for an invocation, if it wrote a finish
+/// event. Returns the most recent finish row carrying a non-null status.
+pub async fn finish_event_for_invocation(
+    conn: &Connection,
+    invocation_id: &str,
+) -> Result<Option<(String, String)>, DbError> {
+    conn.query_row(
+        "SELECT skill_name, status FROM skill_learning_events \
+         WHERE invocation_id = ?1 AND phase = 'finish' AND status IS NOT NULL \
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+        [invocation_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+    .await
+    .optional()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +186,50 @@ mod tests {
         .await
         .unwrap();
         assert!(successful_finish_exists(&conn, "inv-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn finish_event_for_invocation_returns_latest_finish_skill_and_status() {
+        let (_dir, conn) = conn().await;
+        // A start row must be ignored (phase != 'finish').
+        insert_learning_event(
+            &conn,
+            &learning_event("inv-fin", LearningPhase::Start, None),
+        )
+        .await
+        .unwrap();
+        insert_learning_event(
+            &conn,
+            &LearningEvent {
+                skill_name: "rightx-target".to_owned(),
+                status: Some(LearningStatus::Updated),
+                ..learning_event("inv-fin", LearningPhase::Finish, None)
+            },
+        )
+        .await
+        .unwrap();
+
+        let found = finish_event_for_invocation(&conn, "inv-fin").await.unwrap();
+        assert_eq!(
+            found,
+            Some(("rightx-target".to_owned(), "updated".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_event_for_invocation_returns_none_without_finish_row() {
+        let (_dir, conn) = conn().await;
+        insert_learning_event(
+            &conn,
+            &learning_event("inv-none", LearningPhase::Start, None),
+        )
+        .await
+        .unwrap();
+
+        let found = finish_event_for_invocation(&conn, "inv-none")
+            .await
+            .unwrap();
+        assert_eq!(found, None);
     }
 
     #[tokio::test]
