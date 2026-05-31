@@ -1,6 +1,42 @@
 //! Live OpenShell gateway tests. Each test is `#[ignore]` (ci-openshell:)
 //! and runs only in CI; see AGENTS.md cadence rules.
 
+/// Poll a sandbox's environment for `var` until its value satisfies `accept`,
+/// or the timeout elapses (returns `None`).
+///
+/// Provider env propagates to a *running* sandbox a short time AFTER the
+/// attach/update gateway call returns — empirically ~0.6-0.9s for an attach
+/// and several seconds for a credential rotation. A single immediate
+/// `printenv` races that propagation and reads nothing (this is exactly why
+/// the pre-poll versions of these tests flaked as "printenv failed"). The
+/// sandbox always sees the opaque `openshell:resolve:env:v<fp>_<NAME>`
+/// placeholder, never the raw credential (the proxy substitutes the real value
+/// on outbound HTTPS); `GetSandboxProviderEnvironment` returns the raw value
+/// and is for the trusted supervisor, not the sandbox.
+async fn poll_sandbox_env(
+    sandbox: &right_openshell::test_support::TestSandbox,
+    var: &str,
+    timeout_secs: u64,
+    accept: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        let (out, rc) = sandbox.exec(&["printenv", var]).await;
+        let val = out.trim();
+        if rc == 0 && accept(val) {
+            return Some(val.to_string());
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+fn is_provider_placeholder(v: &str) -> bool {
+    v.starts_with("openshell:resolve:env:")
+}
+
 #[tokio::test]
 #[ignore = "ci-openshell: requires a live OpenShell gateway"]
 async fn ci_openshell_provider_create_get_delete_roundtrip() {
@@ -99,29 +135,23 @@ async fn ci_openshell_provider_create_attach_env_visible() {
         .await
         .unwrap();
 
-    // Right's contract: attaching a generic provider wires its env var into the
-    // sandbox's provider environment, observable at the gateway via
-    // GetSandboxProviderEnvironment (which the supervisor reads at startup).
-    // We assert at the gateway, NOT via in-sandbox `printenv`: the env is
-    // injected at supervisor boot, not into ad-hoc gRPC-exec'd processes, so a
-    // post-attach `printenv` legitimately sees nothing. We assert the var is
-    // present (not its value): on OpenShell v0.0.50 this RPC returns the
-    // resolved credential to the trusted supervisor — the
-    // `openshell:resolve:env:` placeholder is what the proxy substitutes on
-    // egress, not what this RPC returns. (`get_sandbox_provider_environment` is
-    // otherwise an unused wrapper; this is its only live coverage.)
-    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox.name())
-        .await
-        .unwrap();
-    let env = get_sandbox_provider_environment(&mut client, &sandbox_id)
-        .await
-        .unwrap();
-    let value = env
-        .get("RIGHTPROBE_ENVVISIBLE")
-        .expect("provider env var must be present at the gateway after attach");
+    // Right's contract: attaching a generic provider makes its env var visible
+    // inside the running sandbox (no restart) as an opaque
+    // `openshell:resolve:env:` placeholder. Propagation is not instantaneous —
+    // poll rather than read once (see `poll_sandbox_env`).
+    let placeholder = poll_sandbox_env(
+        &sandbox,
+        "RIGHTPROBE_ENVVISIBLE",
+        30,
+        is_provider_placeholder,
+    )
+    .await
+    .expect("provider env var must become a placeholder inside the sandbox after attach");
+    // Credential isolation: the sandbox must NEVER see the raw credential value
+    // ("secret"); only the proxy resolves the placeholder on egress.
     assert!(
-        !value.is_empty(),
-        "provider env var must resolve to a non-empty value"
+        !placeholder.contains("secret"),
+        "sandbox must see the placeholder, never the raw credential: {placeholder}"
     );
 
     detach_from_sandbox(&mut client, sandbox.name(), &prov)
@@ -161,19 +191,14 @@ async fn ci_openshell_provider_rotate_no_restart() {
         .await
         .unwrap();
 
-    // Assert at the gateway (see ci_openshell_provider_create_attach_env_visible
-    // for why not via in-sandbox `printenv`). The point of this test is that a
-    // credential rotation propagates WITHOUT recreating/restarting the sandbox:
-    // the attachment stays live and the resolved env value changes.
-    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox.name())
+    // Rotation must propagate to the live sandbox WITHOUT recreating/restarting
+    // it. The placeholder embeds a credential-input fingerprint
+    // (`openshell:resolve:env:v<fp>_NAME`); rotating the credential changes the
+    // fingerprint, so the in-sandbox placeholder changes. Poll both reads:
+    // attach and (especially) rotation propagate after a delay.
+    let placeholder_first = poll_sandbox_env(&sandbox, "ROT_TOKEN", 30, is_provider_placeholder)
         .await
-        .unwrap();
-    let value_first = get_sandbox_provider_environment(&mut client, &sandbox_id)
-        .await
-        .unwrap()
-        .get("ROT_TOKEN")
-        .cloned()
-        .expect("ROT_TOKEN must be present at the gateway before rotate");
+        .expect("ROT_TOKEN must become a placeholder in the sandbox before rotate");
 
     let mut creds2 = std::collections::HashMap::new();
     creds2.insert("ROT_TOKEN".into(), "second".into());
@@ -189,16 +214,15 @@ async fn ci_openshell_provider_rotate_no_restart() {
     .await
     .unwrap();
 
-    let value_second = get_sandbox_provider_environment(&mut client, &sandbox_id)
-        .await
-        .unwrap()
-        .get("ROT_TOKEN")
-        .cloned()
-        .expect("ROT_TOKEN must still be present at the gateway after rotate");
+    let placeholder_second = poll_sandbox_env(&sandbox, "ROT_TOKEN", 30, |v| {
+        is_provider_placeholder(v) && v != placeholder_first
+    })
+    .await
+    .expect("placeholder must change in the sandbox after credential rotation (no restart)");
 
     assert_ne!(
-        value_first, value_second,
-        "resolved env value must change after credential rotation (no restart)"
+        placeholder_first, placeholder_second,
+        "placeholder must change after credential rotation (no restart)"
     );
 
     detach_from_sandbox(&mut client, sandbox.name(), &prov)
