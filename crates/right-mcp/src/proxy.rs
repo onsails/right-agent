@@ -573,6 +573,24 @@ impl ProxyBackend {
         *self.status.write().await = status;
     }
 
+    /// Atomically set status to `new` only if it currently equals `expected`.
+    /// Returns `true` if the swap happened. The health reconciler uses this to
+    /// avoid clobbering a `NeedsAuth` demotion set by a concurrent tool-call or
+    /// refresh during its probe window (auth death is debounce-exempt).
+    pub(crate) async fn compare_and_set_status(
+        &self,
+        expected: BackendStatus,
+        new: BackendStatus,
+    ) -> bool {
+        let mut guard = self.status.write().await;
+        if *guard == expected {
+            *guard = new;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Server name this backend connects to.
     pub fn server_name(&self) -> &str {
         &self.server_name
