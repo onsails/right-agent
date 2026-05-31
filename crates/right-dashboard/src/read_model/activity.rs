@@ -10,6 +10,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use right_db::{Connection, OptionalExtension, params};
 
 use super::ReadModelError;
+use super::run_summary::{RUN_SUMMARY_COLUMNS, RUN_SUMMARY_FROM, run_summary_from_row};
 
 pub struct ActivityOverviewInput {
     pub agent: String,
@@ -19,18 +20,6 @@ pub struct ActivityOverviewInput {
 }
 
 const ACTIVE_BACKGROUND_RUN_LIMIT: usize = 50;
-
-const RUN_SUMMARY_COLUMNS: &str =
-    "ar.id, ar.kind, ar.producer_ref, ar.status, ar.started_at, ar.finished_at,
-        ar.exit_code, ar.delivery_status, ar.delivery_required, ar.delivery_json,
-        ar.run_note, costs.cost_usd";
-
-const RUN_SUMMARY_FROM: &str = "FROM async_runs ar
- LEFT JOIN (
-    SELECT session_uuid, SUM(total_cost_usd) AS cost_usd
-    FROM usage_events
-    GROUP BY session_uuid
- ) costs ON costs.session_uuid = ar.run_session_id";
 
 pub async fn activity_overview(
     conn: &Connection,
@@ -179,28 +168,6 @@ async fn active_background_runs(conn: &Connection) -> Result<Vec<RunSummary>, Re
         .await?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
-}
-
-fn run_summary_from_row(row: &right_db::row::Row<'_>) -> Result<RunSummary, right_db::DbError> {
-    Ok(RunSummary {
-        id: row.get(0)?,
-        kind: row.get(1)?,
-        producer_ref: row.get(2)?,
-        status: row.get(3)?,
-        started_at: row.get(4)?,
-        finished_at: row.get(5)?,
-        exit_code: row.get(6)?,
-        delivery_status: row.get(7)?,
-        delivery_required: row.get::<_, i64>(8)? != 0,
-        delivery_kind: delivery_kind_from_json(row.get::<_, Option<String>>(9)?.as_deref()),
-        run_note: row.get(10)?,
-        cost_usd: row.get(11)?,
-    })
-}
-
-fn delivery_kind_from_json(json: Option<&str>) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(json?).ok()?;
-    value.get("kind")?.as_str().map(ToOwned::to_owned)
 }
 
 pub(super) async fn today_cost_usd(
