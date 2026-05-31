@@ -243,11 +243,15 @@ pub struct OverviewSummary {
 pub struct CronCard {
     pub job_name: String,
     pub schedule: String,
+    pub schedule_human: String,
     pub recurring: bool,
     pub run_at: Option<String>,
+    pub next_run_at: Option<String>,
     pub target_chat_id: Option<i64>,
     pub target_thread_id: Option<i64>,
     pub max_budget_usd: f64,
+    pub spend_24h_usd: f64,
+    pub spend_7d_usd: f64,
     pub last_run: Option<RunSummary>,
     pub recent_runs: Vec<RunSummary>,
 }
