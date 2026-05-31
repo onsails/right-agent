@@ -123,11 +123,8 @@ fn strip_managed_blocks(existing: &str) -> String {
             out.push(line);
         }
     }
-    let mut s = out.join("\n");
-    if existing.ends_with('\n') && !s.is_empty() {
-        s.push('\n');
-    }
-    s
+    // No trailing newline: the sole caller (`apply_block`) trims it anyway.
+    out.join("\n")
 }
 
 /// Return `existing` with exactly one managed block for `bindir` appended.
