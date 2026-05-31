@@ -36,6 +36,9 @@ export interface McpServerSummary {
   auth_type: string | null
   header_names: string[]
   protected: boolean
+  last_connect_error?: string | null
+  last_attempt_at?: string | null
+  last_success_at?: string | null
 }
 
 export interface McpServersResponse {

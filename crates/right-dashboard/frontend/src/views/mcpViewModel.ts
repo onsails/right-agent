@@ -111,6 +111,46 @@ export function oauthPollUnavailableStatus(flowId: string, serverName: string, e
   }
 }
 
+export interface McpStatusDetailInput {
+  status: string
+  last_connect_error?: string | null
+  last_attempt_at?: string | null
+}
+
+export function relativeAgo(isoTimestamp: string, now: Date): string | null {
+  const then = Date.parse(isoTimestamp)
+  if (Number.isNaN(then)) {
+    return null
+  }
+  const seconds = Math.max(0, Math.round((now.getTime() - then) / 1000))
+  if (seconds < 60) {
+    return `${seconds}s ago`
+  }
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) {
+    return `${minutes}m ago`
+  }
+  const hours = Math.round(minutes / 60)
+  return `${hours}h ago`
+}
+
+export function mcpStatusDetail(server: McpStatusDetailInput, now: Date): string | null {
+  if (server.status.toLowerCase() === 'connected') {
+    return null
+  }
+  const parts: string[] = []
+  if (server.last_connect_error) {
+    parts.push(server.last_connect_error)
+  }
+  if (server.last_attempt_at) {
+    const ago = relativeAgo(server.last_attempt_at, now)
+    if (ago) {
+      parts.push(`last tried ${ago}`)
+    }
+  }
+  return parts.length > 0 ? parts.join(' · ') : null
+}
+
 export function oauthStatusMessage(status: McpOAuthStatusResponse): string {
   if (status.message) {
     return status.message
