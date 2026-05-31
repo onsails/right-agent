@@ -21,7 +21,7 @@ receive provider env vars; the bot rejects `/providers` for them.
 Generic providers additionally require `network_policy: permissive`.
 Restrictive mode renders only `network_policies.anthropic.endpoints`
 (the Anthropic/Claude allowlist) and has no outbound section to extend
-with `- domain: <upstream_host>` stanzas for placeholder substitution.
+with `- host: <upstream_host>` stanzas for placeholder substitution.
 `handle_provider_create` and `handle_provider_config_update` reject
 generic operations with `network_policy_forbids_generic` when the agent
 is in restrictive mode. Built-in providers are unaffected — they do not
@@ -105,8 +105,10 @@ section; without it, a naive "find first `endpoints:`" heuristic would
 land in whichever sub-section appears first under `network_policies:`.
 
 2. Look for an existing `endpoints[]` entry matching `upstream_host`.
-   - Absent → append a new stanza: `domain: <host>`, `protocol: rest`,
-     `access: full`, optional `path: <prefix>`. Tag with a YAML comment
+   - Absent → append a new stanza: `host: <host>`, `port: 443`,
+     `protocol: rest`, `access: full`, optional `path: <prefix>`
+     (OpenShell rejects `domain:` as an unknown endpoint field). Tag with
+     a YAML comment
      `# managed-by: right-providers:<provider-name>` so future strip
      operations can find it.
    - Present with `protocol: rest` → no-op.
