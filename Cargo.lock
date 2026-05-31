@@ -3913,6 +3913,8 @@ name = "right-dashboard"
 version = "0.2.15"
 dependencies = [
  "chrono",
+ "cron",
+ "cron-descriptor",
  "hmac",
  "include_dir",
  "right-agent",
