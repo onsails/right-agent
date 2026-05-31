@@ -1,13 +1,25 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 const props = withDefaults(defineProps<{
   title: string
   count: number
   defaultOpen?: boolean
-}>(), { defaultOpen: false })
+  open?: boolean
+}>(), { defaultOpen: false, open: undefined })
 
-const open = ref(props.defaultOpen)
+const emit = defineEmits<{
+  'update:open': [value: boolean]
+}>()
+
+const internalOpen = ref(props.defaultOpen)
+const isOpen = computed(() => props.open ?? internalOpen.value)
+
+function toggle(): void {
+  const next = !isOpen.value
+  internalOpen.value = next
+  emit('update:open', next)
+}
 </script>
 
 <template>
@@ -15,16 +27,16 @@ const open = ref(props.defaultOpen)
     <button
       type="button"
       class="panel-head collapsible-head"
-      :aria-expanded="open"
-      @click="open = !open"
+      :aria-expanded="isOpen"
+      @click="toggle"
     >
       <span class="collapsible-title">
-        <span class="chevron" :class="{ open }" aria-hidden="true">›</span>
+        <span class="chevron" :class="{ open: isOpen }" aria-hidden="true">›</span>
         <strong>{{ title }}</strong>
         <span class="count-badge">{{ count }}</span>
       </span>
     </button>
-    <div v-if="open" class="collapsible-body">
+    <div v-if="isOpen" class="collapsible-body">
       <slot />
     </div>
   </article>
