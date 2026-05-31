@@ -62,6 +62,7 @@ pub(crate) struct ClaudeHealth {
     ssh_config_path: Option<PathBuf>,
     resolved_sandbox: Option<String>,
     sandbox_exec: Option<right_openshell::sandbox_exec::SandboxExec>,
+    sandbox_runtime: Option<Arc<crate::sandbox_runtime::SandboxRuntimeHandle>>,
     repair_lock: tokio::sync::Mutex<()>,
     repair_notice_pending: AtomicBool,
 }
@@ -73,6 +74,7 @@ impl ClaudeHealth {
         ssh_config_path: Option<PathBuf>,
         resolved_sandbox: Option<String>,
         sandbox_exec: Option<right_openshell::sandbox_exec::SandboxExec>,
+        sandbox_runtime: Option<Arc<crate::sandbox_runtime::SandboxRuntimeHandle>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             agent_name,
@@ -80,9 +82,20 @@ impl ClaudeHealth {
             ssh_config_path,
             resolved_sandbox,
             sandbox_exec,
+            sandbox_runtime,
             repair_lock: tokio::sync::Mutex::new(()),
             repair_notice_pending: AtomicBool::new(false),
         })
+    }
+
+    fn report_backend_failure(&self) {
+        // Sandboxed agents only: the supervisor verifies with a real gateway
+        // probe before degrading, so reporting liberally is safe.
+        if self.resolved_sandbox.is_some()
+            && let Some(rt) = &self.sandbox_runtime
+        {
+            rt.report_suspected_failure();
+        }
     }
 
     // Used to inject a one-shot repair notice into the next agent turn.
@@ -289,6 +302,7 @@ async fn run_one_health_cycle(
                 timeout_secs = HEALTH_PROBE_TIMEOUT.as_secs(),
                 "claude_health: probe timed out"
             );
+            health.report_backend_failure();
             return;
         }
     };
@@ -309,7 +323,10 @@ async fn run_one_health_cycle(
         Ok(HealthProbeOutcome::NoInit) => {
             tracing::warn!(agent = %health.agent_name, reason, "claude_health: no system/init");
         }
-        Err(e) => tracing::warn!(agent = %health.agent_name, reason, "claude_health: failed: {e}"),
+        Err(e) => {
+            tracing::warn!(agent = %health.agent_name, reason, "claude_health: failed: {e}");
+            health.report_backend_failure();
+        }
     }
 }
 
@@ -440,6 +457,7 @@ mod tests {
             Some(PathBuf::from("/tmp/ssh_config")),
             None,
             None,
+            None,
         );
 
         assert_eq!(
@@ -453,6 +471,7 @@ mod tests {
         let health = ClaudeHealth::new(
             "him".to_owned(),
             PathBuf::from("/tmp/agent"),
+            None,
             None,
             None,
             None,
@@ -472,6 +491,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let first = health.try_begin_repair_for_test();
@@ -486,6 +506,7 @@ mod tests {
         let health = ClaudeHealth::new(
             "him".to_owned(),
             PathBuf::from("/tmp/agent"),
+            None,
             None,
             None,
             None,
