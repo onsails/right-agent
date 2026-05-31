@@ -1,18 +1,11 @@
 <script setup lang="ts">
-import { money, percent } from '../../format'
-import { cacheHitRate } from './usageCache'
-import CacheSubline from './CacheSubline.vue'
+import { money } from '../../format'
+import TokenLine from './TokenLine.vue'
 import type { UsageDailyPoint } from '../../types'
 
 defineProps<{
   point: UsageDailyPoint | null
 }>()
-
-const integer = new Intl.NumberFormat()
-
-function count(value: number): string {
-  return integer.format(value)
-}
 </script>
 
 <template>
@@ -33,23 +26,8 @@ function count(value: number): string {
         <div><dt>Calls</dt><dd>{{ point.invocations }}</dd></div>
       </dl>
       <section class="text-block">
-        <h3>Counters</h3>
-        <div class="row-list">
-          <div class="model-row">
-            <span>Tokens</span>
-            <strong>{{ count(point.input_tokens) }} in / {{ count(point.output_tokens) }} out</strong>
-          </div>
-          <div class="model-row">
-            <span>Cache</span>
-            <strong>
-              {{ count(point.cache_creation_tokens) }} create / {{ count(point.cache_read_tokens) }} read<template v-if="point.cache_read_tokens > 0"> · {{ percent(cacheHitRate(point)) }} hit</template>
-            </strong>
-          </div>
-          <div class="model-row">
-            <span>Web</span>
-            <strong>{{ count(point.web_search_requests) }} search / {{ count(point.web_fetch_requests) }} fetch</strong>
-          </div>
-        </div>
+        <h3>Tokens</h3>
+        <TokenLine :tokens="point" />
       </section>
       <section class="text-block">
         <h3>Sources</h3>
@@ -59,7 +37,7 @@ function count(value: number): string {
               <span>{{ source.source }}</span>
               <strong>{{ money(source.cost_usd) }}</strong>
             </div>
-            <CacheSubline :tokens="source" />
+            <TokenLine :tokens="source" compact />
           </div>
           <p v-if="(point.sources ?? []).length === 0" class="muted-line">No source spend</p>
         </div>
