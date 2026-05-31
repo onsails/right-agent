@@ -1,4 +1,4 @@
-import { inject, provide, type InjectionKey, type Ref } from 'vue'
+import { inject, provide, ref, type InjectionKey, type Ref } from 'vue'
 
 export const DEFAULT_INTERVAL_MS = 5000
 
@@ -12,7 +12,7 @@ export function provideLiveConfig(config: Ref<LiveConfig>): void {
   provide(LiveConfigKey, config)
 }
 
-export function useLiveConfig(): LiveConfig {
+export function useLiveConfig(): Ref<LiveConfig> {
   const injected = inject(LiveConfigKey, null)
-  return injected !== null ? injected.value : { intervalMs: DEFAULT_INTERVAL_MS }
+  return injected ?? ref({ intervalMs: DEFAULT_INTERVAL_MS })
 }
