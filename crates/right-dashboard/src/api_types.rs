@@ -38,6 +38,7 @@ pub struct OverviewResponse {
     pub refresh_interval_secs: u64,
     pub summary: OverviewSummary,
     pub crons: Vec<CronCard>,
+    pub failed_runs: Vec<RunSummary>,
     pub active: ActiveActivity,
 }
 
