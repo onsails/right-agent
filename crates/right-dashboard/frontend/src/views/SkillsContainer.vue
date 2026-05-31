@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
-import { skillDetail, skillsOverview } from '../api'
+import { DashboardApiError, skillDetail, skillsOverview } from '../api'
 import { useLiveResource } from '../composables/useLiveResource'
 import SkillsView from './SkillsView.vue'
 import type { SkillDetailResponse, SkillSummary } from '../types'
 
-const { data: skills } = useLiveResource(skillsOverview, { key: 'skills' })
+const { data: skills, refresh } = useLiveResource(skillsOverview, { key: 'skills' })
 
 const selectedSkill = ref<SkillDetailResponse | null>(null)
 const selectedSkillName = ref<string | null>(null)
@@ -24,6 +24,9 @@ async function selectSkill(skill: SkillSummary): Promise<void> {
       selectedSkill.value = detail
     }
   } catch (err) {
+    if (err instanceof DashboardApiError && err.isLocked) {
+      void refresh()
+    }
     if (selectedSkillName.value === skill.name) {
       skillError.value = err instanceof Error ? err.message : 'Skill unavailable'
     }

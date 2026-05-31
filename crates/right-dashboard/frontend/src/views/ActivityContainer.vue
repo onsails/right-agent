@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 
-import { overview as activityOverview, runDetail } from '../api'
+import { DashboardApiError, overview as activityOverview, runDetail } from '../api'
 import { useLiveResource } from '../composables/useLiveResource'
 import { activityContainsRun } from './activitySelection'
 import ActivityView from './ActivityView.vue'
 import type { RunDetailResponse, RunSummary } from '../types'
 
-const { data: activity } = useLiveResource(activityOverview, { key: 'activity' })
+const { data: activity, refresh } = useLiveResource(activityOverview, { key: 'activity' })
 
 const selectedRun = ref<RunDetailResponse | null>(null)
 const selectedRunId = ref<string | null>(null)
@@ -26,6 +26,9 @@ async function selectRun(run: RunSummary): Promise<void> {
       selectedRun.value = detail
     }
   } catch (err) {
+    if (err instanceof DashboardApiError && err.isLocked) {
+      void refresh()
+    }
     if (selectedRunId.value === runId) {
       detailError.value = err instanceof Error ? err.message : 'Run unavailable'
     }

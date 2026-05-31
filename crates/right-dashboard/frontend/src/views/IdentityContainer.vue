@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 
-import { identityFile, identityFiles } from '../api'
+import { DashboardApiError, identityFile, identityFiles } from '../api'
 import { useLiveResource } from '../composables/useLiveResource'
 import IdentityView from './IdentityView.vue'
 import type { IdentityFileSummary } from '../types'
@@ -29,6 +29,9 @@ async function selectFile(name: string): Promise<void> {
       identity.value.files = identity.value.files.map((file) => (file.name === name ? response.file : file))
     }
   } catch (err) {
+    if (err instanceof DashboardApiError && err.isLocked) {
+      void refresh()
+    }
     fileError.value = err instanceof Error ? err.message : 'Identity file unavailable'
   } finally {
     loadingFile.value = false
