@@ -188,6 +188,10 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
             "/dashboard/{agent}/api/v1/providers/{provider_name}/config",
             patch(providers::handle_config_update),
         )
+        .route(
+            "/dashboard/{agent}/api/v1/crons/{job_name}",
+            delete(handle_delete_cron),
+        )
         .route("/dashboard/{agent}/{*asset}", get(handle_static_asset))
         .with_state(state)
 }
@@ -538,6 +542,48 @@ async fn handle_pin_skill(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "skill_pin_failed",
                 Some("failed to update skill pin state"),
+            )
+        }
+    }
+}
+
+async fn handle_delete_cron(
+    AxumPath((agent, job_name)): AxumPath<(String, String)>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authenticate_api(&state, &agent, &headers) {
+        return error.into_response();
+    }
+
+    let conn = match right_db::open_connection(&state.agent_dir, false).await {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::error!(agent = %state.agent_name, job = %job_name, "dashboard cron delete: open db failed: {error:#}");
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_open_failed",
+                Some("failed to open database"),
+            );
+        }
+    };
+
+    match right_agent::cron_spec::delete_spec(&conn, &job_name, &state.agent_dir).await {
+        Ok(_) => Json(serde_json::json!({ "deleted": true, "job_name": job_name })).into_response(),
+        // `delete_spec` is bot-owned and signals an absent row as
+        // `Err("job '<name>' not found")`; match its sentinel substring to map
+        // the absence to 404 rather than 500. Keep this in sync if that wording changes.
+        Err(error) if error.contains("not found") => json_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            Some("cron job not found"),
+        ),
+        Err(error) => {
+            tracing::error!(agent = %state.agent_name, job = %job_name, "dashboard cron delete failed: {error:#}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cron_delete_failed",
+                Some("failed to delete cron job"),
             )
         }
     }
@@ -2850,6 +2896,88 @@ mod tests {
         assert!(
             matches!(checks[0].status, CheckStatus::Pass),
             "Ready health should not modify checks"
+        );
+    }
+
+    async fn delete_req(
+        path: &str,
+        auth: Option<String>,
+        agent_dir: std::path::PathBuf,
+    ) -> StatusCode {
+        let router = super::build_dashboard_router(test_state(agent_dir));
+        let mut builder = Request::builder().uri(path).method("DELETE");
+        if let Some(auth) = auth {
+            builder = builder.header(header::AUTHORIZATION, format!("tma {auth}"));
+        }
+        router
+            .oneshot(builder.body(Body::empty()).expect("valid request"))
+            .await
+            .expect("router response")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn delete_cron_removes_spec_and_is_idempotent_404() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(dir.path(), true)
+            .await
+            .expect("open db");
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
+             VALUES ('daily', '0 8 * * *', 'p', 1.0, '2026-05-20T00:00:00Z', '2026-05-20T00:00:00Z')",
+            [],
+        )
+        .await
+        .expect("insert cron spec");
+        drop(conn);
+
+        // Unauthenticated → 401 UNAUTHORIZED.
+        assert_eq!(
+            delete_req(
+                "/dashboard/alpha/api/v1/crons/daily",
+                None,
+                dir.path().to_path_buf()
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Authenticated delete → 200.
+        let auth = signed_init_data(42);
+        assert_eq!(
+            delete_req(
+                "/dashboard/alpha/api/v1/crons/daily",
+                Some(auth.clone()),
+                dir.path().to_path_buf()
+            )
+            .await,
+            StatusCode::OK
+        );
+
+        // Row is gone.
+        let conn = right_db::open_connection(dir.path(), false)
+            .await
+            .expect("reopen db");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cron_specs WHERE job_name = 'daily'",
+                [],
+                |row| row.get(0),
+            )
+            .await
+            .expect("count");
+        assert_eq!(count, 0);
+        drop(conn);
+
+        // Second delete → 404.
+        assert_eq!(
+            delete_req(
+                "/dashboard/alpha/api/v1/crons/daily",
+                Some(auth),
+                dir.path().to_path_buf()
+            )
+            .await,
+            StatusCode::NOT_FOUND
         );
     }
 }
