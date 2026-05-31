@@ -3947,6 +3947,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "right-hostpath"
+version = "0.2.15"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "right-lifecycle"
 version = "0.2.15"
 dependencies = [
