@@ -351,6 +351,7 @@ pub struct LearningLifecycle {
     pub updated_7d: i64,
     pub failed_or_aborted_7d: i64,
     pub recent_successful_events: Vec<LearningEventSummary>,
+    pub recent_failed_events: Vec<LearningEventSummary>,
     pub candidate_skill_names_7d: Vec<String>,
 }
 
@@ -935,6 +936,7 @@ mod learning_tests {
                     summary: Some("Reusable OAuth setup workflow.".to_owned()),
                     created_at: "2026-05-20T10:00:00Z".to_owned(),
                 }],
+                recent_failed_events: vec![],
                 candidate_skill_names_7d: vec!["rightx-oauth-debugging".to_owned()],
             },
             flow_nodes: vec![LearningFlowNode {

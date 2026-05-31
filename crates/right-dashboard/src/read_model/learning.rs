@@ -781,6 +781,7 @@ async fn learning_lifecycle(
         updated_7d: writer_status_count_in_window(conn, agent, "updated", since_7d, now).await?,
         failed_or_aborted_7d: failed_writer_count_in_window(conn, agent, since_7d, now).await?,
         recent_successful_events: recent_successful_events(conn, agent, since_7d, now).await?,
+        recent_failed_events: recent_failed_events(conn, agent, since_7d, now).await?,
         candidate_skill_names_7d: candidate_skill_names(conn, agent, since_7d, now).await?,
     })
 }
@@ -837,6 +838,61 @@ async fn recent_successful_events(
     }
     events.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
     events.truncate(RECENT_EVENT_LIMIT as usize);
+    Ok(events.into_iter().map(|(_, _, event)| event).collect())
+}
+
+async fn recent_failed_events(
+    conn: &Connection,
+    agent: &str,
+    since_7d: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<Vec<LearningEventSummary>, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since_7d, now);
+    let mut stmt = conn.prepare(
+        "SELECT id, skill_name, action, status, message, summary, created_at
+         FROM skill_learning_events
+         WHERE agent_name=?1
+           AND phase='finish'
+           AND status IN ('failed','aborted')
+           AND created_at >= ?2
+           AND created_at <= ?3
+         ORDER BY created_at DESC, id DESC",
+    )?;
+    let rows = stmt
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .await?;
+    let mut events = Vec::<(DateTime<Utc>, i64, LearningEventSummary)>::new();
+    for row in rows {
+        let (id, skill_name, action, status, message, summary, created_at) = row?;
+        let created_at_utc = parse_utc(&created_at)?;
+        if created_at_utc < *since_7d || created_at_utc > *now {
+            continue;
+        }
+        events.push((
+            created_at_utc,
+            id,
+            LearningEventSummary {
+                skill_name,
+                action,
+                status,
+                message,
+                summary,
+                created_at: created_at_utc.to_rfc3339(),
+            },
+        ));
+    }
+    events.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    // NOTE: intentionally not truncated — the list must equal failed_or_aborted_7d.
     Ok(events.into_iter().map(|(_, _, event)| event).collect())
 }
 
@@ -1059,6 +1115,78 @@ mod tests {
         assert_eq!(labels, vec!["rightx-offset", "rightx-normal"]);
         assert_eq!(response.recent_learning_signals[0].kind, "skill_updated");
         assert_eq!(response.recent_learning_signals[0].severity, "info");
+    }
+
+    #[tokio::test]
+    async fn recent_failed_events_includes_failed_and_aborted_untruncated() {
+        let (_dir, conn) = fixture().await;
+
+        // Seed 12 "failed" + 1 "aborted" finish events — more than RECENT_EVENT_LIMIT (10).
+        // All timestamps are within the 7d window of 2026-05-31T12:00:00Z.
+        for i in 0..12 {
+            let day = if i % 2 == 0 { "30" } else { "31" };
+            conn.execute(
+                "INSERT INTO skill_learning_events (
+                    invocation_id, agent_name, action, skill_name, phase, status,
+                    message, summary, event_refs_json, hint_outcome, created_at
+                 ) VALUES (?1, 'agent', 'create', ?2, 'finish', 'failed',
+                    'fail msg', 'fail summary', '[]', NULL, ?3)",
+                right_db::params![
+                    format!("inv-fail-{i}"),
+                    format!("rightx-skill-{i}"),
+                    format!("2026-05-{day}T10:00:00Z"),
+                ],
+            )
+            .await
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                message, summary, event_refs_json, hint_outcome, created_at
+             ) VALUES ('inv-abort', 'agent', 'create', 'rightx-skill-ab', 'finish', 'aborted',
+                'abort msg', 'abort summary', '[]', NULL, '2026-05-31T10:00:00Z')",
+            [],
+        )
+        .await
+        .unwrap();
+
+        let response = learning_overview(
+            &conn,
+            LearningOverviewInput {
+                agent: "agent".to_owned(),
+                generated_at: "2026-05-31T12:00:00Z".to_owned(),
+                refresh_interval_secs: 5,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.lifecycle.recent_failed_events.len() as i64,
+            response.lifecycle.failed_or_aborted_7d
+        );
+        assert!(
+            response.lifecycle.recent_failed_events.len() >= 13,
+            "expected >= 13 (not truncated at 10), got {}",
+            response.lifecycle.recent_failed_events.len()
+        );
+        assert!(
+            response
+                .lifecycle
+                .recent_failed_events
+                .iter()
+                .any(|e| e.status == "aborted"),
+            "expected at least one aborted event"
+        );
+        assert!(
+            response
+                .lifecycle
+                .recent_failed_events
+                .iter()
+                .all(|e| e.status == "failed" || e.status == "aborted"),
+            "all events must be failed or aborted"
+        );
     }
 
     #[tokio::test]
