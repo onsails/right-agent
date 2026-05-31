@@ -29,12 +29,11 @@ export function classifyOutcome(args: { ok: boolean, error?: unknown, hasData: b
 }
 
 const registry = reactive(new Map<string, ConnectionState>())
-const sticky = ref<ConnectionState>('loading')
 
 export const globalLastUpdatedAt = ref<string | null>(null)
 
 export const globalConnectionState = computed<ConnectionState>(() => {
-  return reduceConnectionState([...registry.values()]) ?? sticky.value
+  return reduceConnectionState([...registry.values()]) ?? 'loading'
 })
 
 export interface LiveStatusHandle {
@@ -47,7 +46,6 @@ export function registerLiveResource(key: string): LiveStatusHandle {
   return {
     report(state: ConnectionState, at?: string): void {
       registry.set(key, state)
-      sticky.value = reduceConnectionState([...registry.values()]) ?? state
       if (state === 'live' && at !== undefined) {
         globalLastUpdatedAt.value = at
       }
