@@ -161,8 +161,8 @@ Two correctness handles keep stale results from polluting state:
 
 ### `ProxyBackend` status transitions
 
-`BackendStatus` is `Connected | NeedsAuth | Unreachable`. Refresh- and
-tool-call-driven transitions:
+`BackendStatus` is `Connected | NeedsAuth | Unreachable`. Refresh-,
+tool-call-, and health-reconciler-driven transitions:
 
 | Trigger | From | To |
 |---------|------|----|
@@ -174,6 +174,34 @@ tool-call-driven transitions:
 | Tool-call upstream 401 (`Auth required`) | `Connected` | `NeedsAuth` |
 | Successful refresh | `NeedsAuth` | `NeedsAuth` → background `connect()` → `Connected` |
 | Successful refresh | `Connected` | `Connected` (no reconnect needed) |
+| Health reconciler: 3 consecutive Dead probes | `Connected` | `Unreachable` |
+| Health reconciler: probe returns `Auth required` | `Connected` | `NeedsAuth` |
+| Health reconciler: reconnect succeeds | `Unreachable` | `Connected` |
+
+### Health reconciler
+
+Refresh and tool-call transitions are event-driven: a backend that dies
+with a non-auth error (502/timeout) stays `Connected` until the next tool
+call, and a backend stuck `Unreachable` is never re-probed for recovery on
+its own. The per-agent background reconciler
+(`right_mcp::health::run_health_reconciler`, spawned per agent at bot
+startup beside the refresh scheduler) closes that gap by periodically
+probing each backend so the dashboard and the agent see honest status
+without waiting for a tool call.
+
+It probes on an adaptive cadence — `Connected` every 120s (light backstop),
+`Unreachable` every 20s (the only recovery path), `NeedsAuth` never (owned
+by refresh/reconnect). A `Connected` probe is a lightweight
+`ProxyBackend::probe_live()` (lists tools on the live session, refreshes the
+tool cache, 10s timeout, never writes status); an `Unreachable` probe is a
+full `connect()` attempt. Outage detection is debounced — three consecutive
+Dead probes flip `Connected → Unreachable`; a single `Alive` resets the
+strike count; an `Auth required` probe flips to `NeedsAuth` immediately. The
+status-transition policy is the pure `decide_connected` function so it is
+unit-tested without I/O. Each tick snapshots the shared proxies map under a
+brief read lock, drops it, probes due backends concurrently, then applies
+decisions serially; strike/schedule state is pruned for backends removed
+from the map at runtime.
 
 ## MCP Aggregator
 
