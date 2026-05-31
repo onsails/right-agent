@@ -16,6 +16,7 @@ members = [
     "crates/right-agent-config",
     "crates/right-stt",
     "crates/right-ui",
+    "crates/right-hostpath",
     "crates/right-process",
     "crates/right-openshell",
     "crates/right-platform-store",
