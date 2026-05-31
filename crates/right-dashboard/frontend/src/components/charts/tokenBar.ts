@@ -51,6 +51,10 @@ export function hitSegments(t: TokenCounts, minWidth: number = DEFAULT_MIN_WIDTH
   }
   const donors = keys.filter((k) => result[k] > minWidth)
   const slack = donors.reduce((sum, k) => sum + (result[k] - minWidth), 0)
+  // Precondition: minWidth < 1/3. With at most 3 segments summing to 1, total
+  // floor demand is < 1, so a donor with positive slack always exists here and
+  // the result sums to 1. Raising minWidth past 1/3 breaks that invariant —
+  // the slack guard would then silently under-fill the bar.
   if (slack > 0) {
     for (const k of donors) {
       result[k] -= deficit * ((result[k] - minWidth) / slack)
