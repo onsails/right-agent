@@ -89,7 +89,7 @@ describe('UsageView budget_skip_count', () => {
 })
 
 describe('UsageView cache tokens per source', () => {
-  it('renders cache read/creation tokens in source rows', async () => {
+  it('renders a labeled cache subline for a source with cache reads', async () => {
     const html = await render({
       usage: usageStub({
         windows: [windowStub({
@@ -99,7 +99,24 @@ describe('UsageView cache tokens per source', () => {
       loading: false,
       error: null,
     })
-    expect(html).toContain('1234')
-    expect(html).toContain('567')
+    expect(html).toContain('created')
+    expect(html).toContain('read')
+    expect(html).toContain('hit')
+    expect(html).toContain('1.2k') // compactCount(1234) === '1.2k'
+  })
+
+  it('omits the cache subline for a source with no cache reads', async () => {
+    const html = await render({
+      usage: usageStub({
+        windows: [windowStub({
+          sources: [sourceSummaryStub({ cache_read_tokens: 0, cache_creation_tokens: 0 })],
+        })],
+      }),
+      loading: false,
+      error: null,
+    })
+    expect(html).not.toContain('created')
+    expect(html).not.toContain('hit')
+    expect(html).toContain('worker')
   })
 })
