@@ -334,7 +334,6 @@ const SANDBOX_SKILL_DUMP_CMD: &str = "for d in /sandbox/.claude/skills/rightx-*/
 fn parse_sandbox_skill_dump(dump: &str) -> Vec<LearnedSkillSummary> {
     let mut out = Vec::new();
     for chunk in dump.split("\n@@@SKILL ") {
-        let chunk = chunk.trim_start_matches("@@@SKILL ");
         let Some((name_line, body)) = chunk.split_once('\n') else {
             continue;
         };

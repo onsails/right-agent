@@ -95,6 +95,12 @@ pub async fn insert_learning_curator(
     insert_row(conn, b, "learning_curator", None, None, None).await
 }
 
+/// Shared INSERT for the `skill_spend` ledger. Bind order:
+/// skill_name, kind, cost_usd, cache_read, cache_creation, invocation_id, ts.
+const SKILL_SPEND_INSERT_SQL: &str = "INSERT INTO skill_spend \
+     (skill_name, kind, cost_usd, cache_read, cache_creation, invocation_id, ts) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+
 /// Insert one per-skill spend ledger row (create/patch/maintain/usage).
 pub async fn insert_skill_spend(
     conn: &Connection,
@@ -107,9 +113,7 @@ pub async fn insert_skill_spend(
 ) -> Result<(), UsageError> {
     let ts = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO skill_spend \
-         (skill_name, kind, cost_usd, cache_read, cache_creation, invocation_id, ts) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        SKILL_SPEND_INSERT_SQL,
         params![
             skill_name,
             kind,
@@ -121,6 +125,43 @@ pub async fn insert_skill_spend(
         ],
     )
     .await?;
+    Ok(())
+}
+
+/// Insert one `usage` spend row per skill for a single turn, in one immediate
+/// transaction (Transaction Rule: 2+ writes go through one transaction). Every
+/// row carries the same turn cost/cache — attributed, not exact, when a turn
+/// used several skills. `invocation_id` is NULL because foreground usage has no
+/// learning invocation.
+pub async fn insert_usage_skill_spend_many<I, S>(
+    conn: &Connection,
+    skill_names: I,
+    cost_usd: f64,
+    cache_read: i64,
+    cache_creation: i64,
+) -> Result<(), UsageError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let ts = Utc::now().to_rfc3339();
+    let tx = conn.transaction().await?;
+    for name in skill_names {
+        tx.execute(
+            SKILL_SPEND_INSERT_SQL,
+            params![
+                name.as_ref(),
+                "usage",
+                cost_usd,
+                cache_read,
+                cache_creation,
+                None::<&str>,
+                ts.as_str()
+            ],
+        )
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -485,6 +526,57 @@ mod tests {
             (name.as_str(), kind.as_str(), cost, cr, cc, inv.as_deref()),
             ("rightx-foo", "create", 0.25, 100, 200, Some("inv-1"))
         );
+    }
+
+    #[tokio::test]
+    async fn insert_usage_skill_spend_many_writes_one_usage_row_per_skill() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_usage_skill_spend_many(&conn, ["rightx-alpha", "rightx-beta"], 0.12, 10, 20)
+            .await
+            .unwrap();
+
+        let rows: Vec<(String, String, f64, i64, i64, Option<String>)> = conn
+            .query_all(
+                "SELECT skill_name, kind, cost_usd, cache_read, cache_creation, invocation_id \
+                 FROM skill_spend ORDER BY skill_name",
+                (),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        for (i, name) in ["rightx-alpha", "rightx-beta"].iter().enumerate() {
+            let (skill, kind, cost, cr, cc, inv) = &rows[i];
+            assert_eq!(skill, name);
+            assert_eq!(kind, "usage");
+            assert!((cost - 0.12).abs() < 1e-9);
+            assert_eq!((*cr, *cc), (10, 20));
+            assert_eq!(inv.as_deref(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_usage_skill_spend_many_empty_writes_nothing() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_usage_skill_spend_many(&conn, Vec::<String>::new(), 0.5, 1, 2)
+            .await
+            .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM skill_spend", (), |r| r.get(0))
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
