@@ -93,6 +93,16 @@ pub(crate) fn classify_probe_error(msg: &str) -> ProbeOutcome {
     }
 }
 
+/// Keep only externally-callable upstream tools, dropping internal/aggregated
+/// ones (names contain `__`). Shared by `connect()` and `probe_live()` so the
+/// filtering rule cannot silently diverge between the two cache-write paths.
+fn filter_external_tools(tools: Vec<Tool>) -> Vec<Tool> {
+    tools
+        .into_iter()
+        .filter(|t| !t.name.contains("__"))
+        .collect()
+}
+
 /// Status of a ProxyBackend connection to an upstream MCP server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendStatus {
@@ -404,11 +414,7 @@ impl ProxyBackend {
             }
         };
 
-        let filtered: Vec<Tool> = tools
-            .into_iter()
-            .filter(|t| !t.name.contains("__"))
-            .collect();
-
+        let filtered = filter_external_tools(tools);
         let tool_count = filtered.len();
         *self.cached_tools.write().await = filtered;
 
@@ -543,17 +549,19 @@ impl ProxyBackend {
     /// `cached_tools`. Returns the outcome and does NOT mutate `status` — the
     /// health reconciler's debounce owns the flip decision.
     pub(crate) async fn probe_live(&self) -> ProbeOutcome {
-        let client_guard = self.client.read().await;
-        let Some(client) = client_guard.as_ref() else {
-            return ProbeOutcome::Dead("no active session".into());
+        // Clone the peer handle and drop the client lock before the network
+        // round-trip, so a concurrent `connect()` reconnect isn't blocked for up
+        // to PROBE_TIMEOUT waiting to swap `client`.
+        let peer = {
+            let client_guard = self.client.read().await;
+            match client_guard.as_ref() {
+                Some(client) => client.peer().clone(),
+                None => return ProbeOutcome::Dead("no active session".into()),
+            }
         };
-        match client.peer().list_all_tools().await {
+        match peer.list_all_tools().await {
             Ok(tools) => {
-                let filtered: Vec<Tool> = tools
-                    .into_iter()
-                    .filter(|t| !t.name.contains("__"))
-                    .collect();
-                *self.cached_tools.write().await = filtered;
+                *self.cached_tools.write().await = filter_external_tools(tools);
                 ProbeOutcome::Alive
             }
             Err(e) => classify_probe_error(&format!("{e:#}")),
