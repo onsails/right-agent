@@ -75,6 +75,12 @@ pub(crate) type StopTokens = Arc<DashMap<(i64, i64), (u64, CancellationToken)>>;
 /// Key: root_session_id UUID string. Value: shared mutex.
 pub(crate) type SessionLocks = Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
+/// Per-(chat_id, thread_id) idle-compaction debounce timers. Cancelling the
+/// token aborts a *pending* (still-sleeping) compaction; once the 2h sleep
+/// wins, the compaction runs to completion regardless. In-memory only —
+/// lost on restart, re-armed on the next turn.
+pub(crate) type CompactTimers = Arc<DashMap<(i64, i64), tokio_util::sync::CancellationToken>>;
+
 /// A foreground turn request to convert the active Claude invocation into a
 /// background continuation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
