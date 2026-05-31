@@ -3,8 +3,11 @@ import { computed, ref } from 'vue'
 import CostLearningRiver from '../components/charts/CostLearningRiver.vue'
 import SignalTimeline from '../components/charts/SignalTimeline.vue'
 import AsyncState from '../components/AsyncState.vue'
+import CollapsibleSection from '../components/CollapsibleSection.vue'
 import MetricCard from '../components/MetricCard.vue'
+import RunFailureList from '../components/RunFailureList.vue'
 import StatusPill from '../components/StatusPill.vue'
+import { failureMetric } from '../components/failureMetric'
 import { money, shortDate } from '../format'
 import type { DashboardOverviewResponse, DashboardSignal, LearningMarker, OverviewResponse } from '../types'
 
@@ -17,6 +20,8 @@ const props = defineProps<{
 
 const selectedId = ref<string | null>(null)
 const selectedMarkerId = ref<string | null>(null)
+const failuresOpen = ref(false)
+const failures = computed(() => failureMetric(props.overview?.recent_failures ?? 0))
 
 const selectedMarker = computed(() =>
   (props.overview?.cost_learning_river?.markers ?? []).find((m) => m.id === selectedMarkerId.value) ?? null,
@@ -62,12 +67,27 @@ function selectMarker(marker: LearningMarker): void {
 
     <section class="metric-grid">
       <MetricCard label="Active" :value="overview?.active_runs ?? 0" tone="active" />
-      <MetricCard label="Failures" :value="overview?.recent_failures ?? 0" :tone="(overview?.recent_failures ?? 0) > 0 ? 'bad' : 'ok'" />
+      <MetricCard
+        label="Failures"
+        :value="overview?.recent_failures ?? 0"
+        :tone="failures.tone"
+        :interactive="failures.interactive"
+        @select="failuresOpen = !failuresOpen"
+      />
       <MetricCard label="Today" :value="money(overview?.today_cost_usd)" />
       <MetricCard label="Candidates" :value="overview?.learning_candidates_24h ?? 0" />
       <MetricCard label="Jobs" :value="activity?.summary.cron_count ?? 0" />
       <MetricCard label="Running cron" :value="activity?.summary.active_cron_count ?? 0" tone="active" />
     </section>
+
+    <CollapsibleSection
+      v-if="(overview?.recent_failures ?? 0) > 0"
+      v-model:open="failuresOpen"
+      title="Failures"
+      :count="overview?.recent_failures ?? 0"
+    >
+      <RunFailureList :runs="overview?.recent_failed_runs ?? []" />
+    </CollapsibleSection>
 
     <section v-if="overview?.warnings.length" class="notice">
       <strong>Partial data</strong>
