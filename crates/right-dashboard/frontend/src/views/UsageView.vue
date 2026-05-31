@@ -3,7 +3,8 @@ import { computed, ref, watchEffect } from 'vue'
 import UsageBreakdown from '../components/charts/UsageBreakdown.vue'
 import UsageSpendChart from '../components/charts/UsageSpendChart.vue'
 import AsyncState from '../components/AsyncState.vue'
-import CacheSubline from '../components/charts/CacheSubline.vue'
+import TokenLine from '../components/charts/TokenLine.vue'
+import TokenLegend from '../components/charts/TokenLegend.vue'
 import { money } from '../format'
 import type { UsageOverviewResponse, UsageWindow } from '../types'
 
@@ -45,6 +46,8 @@ function windowRows(window: UsageWindow | null | undefined) {
       </span>
     </section>
 
+    <TokenLegend />
+
     <section class="two-column wide-main">
       <UsageSpendChart
         :points="usage?.daily_series ?? []"
@@ -73,7 +76,7 @@ function windowRows(window: UsageWindow | null | undefined) {
               <span>{{ source.source }}</span>
               <strong>{{ money(source.cost_usd) }}</strong>
             </div>
-            <CacheSubline :tokens="source" />
+            <TokenLine :tokens="source" compact />
           </div>
         </div>
       </article>
