@@ -767,9 +767,9 @@ async fn learning_lifecycle(
 }
 
 /// Learning-event rows for `agent` whose `created_at` falls in `[since_7d, now]`,
-/// newest first, restricted to the two given statuses. `limit` optionally caps
-/// the result (recent-successful preview); `None` returns the full window
-/// (the failed list, which must equal `failed_or_aborted_7d`).
+/// newest first, restricted to the two given statuses. Returns the exact count
+/// of precise-window matches and the list, optionally truncated to `limit`
+/// (applied AFTER counting, so the count is unaffected by the cap).
 async fn learning_events_in_window(
     conn: &Connection,
     agent: &str,
