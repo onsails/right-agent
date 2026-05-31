@@ -164,11 +164,15 @@ right agent runs on Linux and macOS – Windows is not supported. before you sta
 - [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) authenticated with a [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier works), for Telegram webhook ingress.
 - a [Hindsight Cloud](https://hindsight.vectorize.io) api key (optional – for semantic memory; otherwise the agent uses a local `MEMORY.md`).
 
-OpenShell and process-compose are external dependencies the installer sets up for you; `right doctor` verifies them. then:
+OpenShell and process-compose are external dependencies the installer sets up for you. it also adds `~/.local/bin` to your shell profile and, on a first install, runs `right init` and checks your setup with `right doctor`. then:
 
 ```sh
 curl -LsSf https://raw.githubusercontent.com/onsails/right-agent/master/install.sh | sh
-right init
+```
+
+open a new shell so `right` is on your `PATH`, then:
+
+```sh
 right up
 ```
 

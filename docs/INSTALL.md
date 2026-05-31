@@ -63,6 +63,8 @@ This path requires a Rust toolchain (edition 2024).
 
 ## After install
 
+`right` installs to `~/.local/bin`. The installer adds that directory to your shell profile; open a new shell (or `source` your profile) so `right` is found, then:
+
 ```sh
 right up
 ```
