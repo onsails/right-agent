@@ -15,6 +15,8 @@ pub mod learning;
 mod learning_outcomes;
 #[path = "read_model/run_summary.rs"]
 mod run_summary;
+#[path = "read_model/schedule.rs"]
+pub(crate) mod schedule;
 #[path = "read_model/usage.rs"]
 pub mod usage;
 
