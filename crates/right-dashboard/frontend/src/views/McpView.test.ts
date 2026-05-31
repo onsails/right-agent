@@ -5,9 +5,11 @@ import {
   canSaveServer,
   createDetectionRequest,
   isOAuthTerminalStatus,
+  mcpStatusDetail,
   oauthPollUnavailableStatus,
   oauthStatusMessage,
   openOAuthUrl,
+  relativeAgo,
   resetAddFlowState,
   seedHeaderRows,
   shouldApplyOAuthPollResult,
@@ -185,6 +187,43 @@ describe('McpView model behavior', () => {
       message: 'OAuth status unavailable; retrying: Network unavailable',
     })
     expect(isOAuthTerminalStatus(status.status)).toBe(false)
+  })
+})
+
+describe('mcpStatusDetail', () => {
+  const now = new Date('2026-06-01T12:00:30Z')
+
+  it('returns null for connected servers', () => {
+    expect(
+      mcpStatusDetail(
+        { status: 'connected', last_connect_error: 'x', last_attempt_at: '2026-06-01T12:00:00Z' },
+        now,
+      ),
+    ).toBeNull()
+  })
+
+  it('combines error and last-tried for unreachable', () => {
+    expect(
+      mcpStatusDetail(
+        { status: 'unreachable', last_connect_error: 'connection refused', last_attempt_at: '2026-06-01T12:00:18Z' },
+        now,
+      ),
+    ).toBe('connection refused · last tried 12s ago')
+  })
+
+  it('returns null when no cause recorded', () => {
+    expect(mcpStatusDetail({ status: 'unreachable' }, now)).toBeNull()
+  })
+})
+
+describe('relativeAgo', () => {
+  const now = new Date('2026-06-01T12:00:30Z')
+  it('formats seconds and minutes', () => {
+    expect(relativeAgo('2026-06-01T12:00:18Z', now)).toBe('12s ago')
+    expect(relativeAgo('2026-06-01T11:58:30Z', now)).toBe('2m ago')
+  })
+  it('returns null for unparseable input', () => {
+    expect(relativeAgo('not-a-date', now)).toBeNull()
   })
 })
 

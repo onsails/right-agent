@@ -23,6 +23,7 @@ import {
   canSaveServer as canSaveServerState,
   createDetectionRequest,
   isOAuthTerminalStatus,
+  mcpStatusDetail,
   nonEmptyHeaders,
   openOAuthUrl,
   oauthPollUnavailableStatus,
@@ -475,6 +476,9 @@ function resetAdd(): void {
           </span>
           <small>{{ server.tool_count }} tools</small>
           <small>{{ server.auth_type ?? 'built-in' }}</small>
+          <small v-if="mcpStatusDetail(server, new Date())" class="status-detail">
+            {{ mcpStatusDetail(server, new Date()) }}
+          </small>
         </div>
         <div class="button-row row-actions">
           <button
