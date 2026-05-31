@@ -141,28 +141,36 @@ const CURATOR_TIMEOUT: StdDuration = StdDuration::from_secs(900);
 const CURATOR_MAX_TURNS: u32 = 9999;
 
 /// Record per-skill `maintain` spend for the skills a curator pass archived.
-/// Best-effort observability at the fire-and-forget learning boundary: each
-/// insert logs and swallows on error. Empty `mutated` writes nothing.
+/// The pass cost/cache is split evenly across the archived skills (cost/N
+/// each, cache integer-divided), written in one transaction, so summing the
+/// `maintain` rows recovers the exact pass cost. Empty `mutated` writes
+/// nothing. Best-effort observability at the fire-and-forget learning
+/// boundary: a failure logs and swallows.
 async fn record_curator_maintain_spend(
     conn: &right_db::Connection,
     mutated: &[String],
     b: &right_agent::usage::UsageBreakdown,
     invocation_id: Option<&str>,
 ) {
-    for name in mutated {
-        if let Err(e) = right_agent::usage::insert::insert_skill_spend(
-            conn,
-            name,
-            "maintain",
-            b.total_cost_usd,
-            b.cache_read_tokens as i64,
-            b.cache_creation_tokens as i64,
-            invocation_id,
-        )
-        .await
-        {
-            tracing::warn!(skill = %name, "curator maintain spend insert failed: {e:#}");
-        }
+    if mutated.is_empty() {
+        return;
+    }
+    let n = mutated.len();
+    let per_cost = b.total_cost_usd / n as f64;
+    let per_cache_read = b.cache_read_tokens as i64 / n as i64;
+    let per_cache_creation = b.cache_creation_tokens as i64 / n as i64;
+    if let Err(e) = right_agent::usage::insert::insert_skill_spend_many(
+        conn,
+        mutated,
+        "maintain",
+        per_cost,
+        per_cache_read,
+        per_cache_creation,
+        invocation_id,
+    )
+    .await
+    {
+        tracing::warn!("curator maintain spend insert failed: {e:#}");
     }
 }
 

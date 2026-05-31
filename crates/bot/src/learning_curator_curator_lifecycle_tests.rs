@@ -248,18 +248,30 @@ async fn curator_lifecycle_candidate_rendering_includes_db_status_fields() {
 }
 
 #[tokio::test]
-async fn curator_maintain_spend_written_for_archived_skills() {
+async fn curator_maintain_spend_split_evenly_across_archived_skills() {
     let conn = open_test_conn().await;
     let now = dt("2026-05-24T00:00:00Z");
 
-    // Insert a stale row old enough to archive (last_used 140 days before now,
+    // Two stale rows old enough to archive (last_used 143 days before now,
     // archive_after=90 days) and an active row that will only become stale.
     insert_skill_lifecycle_row(
         &conn,
-        "rightx-will-archive",
+        "rightx-archive-a",
         right_lifecycle::LifecycleState::Stale,
         false,
         right_lifecycle::CreatedBy::ProbeWriter,
+        0,
+        0,
+        Some("2026-01-01T00:00:00Z"), // 143 days before now
+        None,
+    )
+    .await;
+    insert_skill_lifecycle_row(
+        &conn,
+        "rightx-archive-b",
+        right_lifecycle::LifecycleState::Stale,
+        false,
+        right_lifecycle::CreatedBy::Curator,
         0,
         0,
         Some("2026-01-01T00:00:00Z"), // 143 days before now
@@ -290,26 +302,29 @@ async fn curator_maintain_spend_written_for_archived_skills() {
     .await
     .unwrap();
 
-    // Sanity: confirm which skills archived at exactly `now`.
+    // Sanity: confirm exactly the two skills archived at `now`.
     let archived: Vec<String> = conn
         .query_all(
-            "SELECT skill_name FROM skill_lifecycle WHERE archived_at = ?1",
+            "SELECT skill_name FROM skill_lifecycle WHERE archived_at = ?1 ORDER BY skill_name",
             right_db::params![now.to_rfc3339()],
             |r| r.get::<_, String>(0),
         )
         .await
         .unwrap();
-    assert_eq!(archived, vec!["rightx-will-archive"]);
+    assert_eq!(archived, vec!["rightx-archive-a", "rightx-archive-b"]);
 
-    // Build a known-cost UsageBreakdown.
+    // Known pass cost C and cache, split evenly across N=2 archived skills.
+    let total_cost_usd = 0.042_f64;
+    let cache_creation_tokens = 11_u64; // 11/2 = 5 after integer division
+    let cache_read_tokens = 21_u64; // 21/2 = 10 after integer division
     let b = right_agent::usage::UsageBreakdown {
         session_uuid: "test-session".to_string(),
-        total_cost_usd: 0.042,
+        total_cost_usd,
         num_turns: 1,
         input_tokens: 100,
         output_tokens: 50,
-        cache_creation_tokens: 10,
-        cache_read_tokens: 20,
+        cache_creation_tokens,
+        cache_read_tokens,
         web_search_requests: 0,
         web_fetch_requests: 0,
         model_usage_json: "{}".to_string(),
@@ -317,28 +332,49 @@ async fn curator_maintain_spend_written_for_archived_skills() {
         wall_elapsed_ms: None,
     };
 
-    super::record_curator_maintain_spend(&conn, &archived, &b, None).await;
+    super::record_curator_maintain_spend(&conn, &archived, &b, Some("inv-curator")).await;
 
-    // Assert one skill_spend row with kind='maintain' and correct cost.
-    let count: i64 = conn
+    let n = archived.len() as f64;
+    let expected_cost = total_cost_usd / n; // C/N
+    let expected_cache_read = (cache_read_tokens / archived.len() as u64) as i64; // cache/N
+    let expected_cache_creation = (cache_creation_tokens / archived.len() as u64) as i64;
+
+    // Exactly N maintain rows, one per archived skill, each carrying C/N.
+    let rows: Vec<(String, f64, i64, i64, Option<String>)> = conn
+        .query_all(
+            "SELECT skill_name, cost_usd, cache_read, cache_creation, invocation_id \
+             FROM skill_spend WHERE kind='maintain' ORDER BY skill_name",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "expected exactly N=2 maintain rows");
+    for (i, name) in ["rightx-archive-a", "rightx-archive-b"].iter().enumerate() {
+        let (skill, cost, cr, cc, inv) = &rows[i];
+        assert_eq!(skill, name);
+        assert!(
+            (cost - expected_cost).abs() < 1e-9,
+            "cost_usd mismatch for {skill}: {cost} != {expected_cost}"
+        );
+        assert_eq!(*cr, expected_cache_read);
+        assert_eq!(*cc, expected_cache_creation);
+        assert_eq!(inv.as_deref(), Some("inv-curator"));
+    }
+
+    // Summing the maintain rows recovers the exact pass cost.
+    let summed: f64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM skill_spend WHERE kind='maintain' AND skill_name='rightx-will-archive'",
+            "SELECT COALESCE(SUM(cost_usd),0) FROM skill_spend WHERE kind='maintain'",
             [],
             |r| r.get(0),
         )
         .await
         .unwrap();
-    assert_eq!(count, 1);
-
-    let cost: f64 = conn
-        .query_row(
-            "SELECT cost_usd FROM skill_spend WHERE kind='maintain' AND skill_name='rightx-will-archive'",
-            [],
-            |r| r.get(0),
-        )
-        .await
-        .unwrap();
-    assert!((cost - 0.042).abs() < 1e-9, "cost_usd mismatch: {cost}");
+    assert!(
+        (summed - total_cost_usd).abs() < 1e-9,
+        "summed maintain cost {summed} != pass cost {total_cost_usd}"
+    );
 
     // The 'only-stale' skill must not have a maintain row.
     let count2: i64 = conn

@@ -130,7 +130,7 @@ Four writers, four `kind` values:
 |------|--------|-----------------|
 | `create` | probe-writer | exact cost of a create invocation, via `skill_learning_events` finish-row joined by `invocation_id` |
 | `patch` | probe-writer | same, for a patch invocation |
-| `maintain` | curator | pass cost attributed to each skill the pass archived (`archived_at == this run's ts`); no archived skill → no row |
+| `maintain` | curator | pass cost split evenly across the skills the pass archived (`archived_at == this run's ts`), cost/N each in one transaction; no archived skill → no row |
 | `usage` | worker (post-turn) | one row per rightx skill in the turn's `ProbeAnchor.used_skill_receipts`, each carrying the turn's cost/cache — attributed (overlaps when multiple skills used) |
 
 The prefilter's own cost is NOT attributed to any skill (agent-level
@@ -138,8 +138,9 @@ learning overhead; stays only in `usage_events`).
 
 `usage` rows are labeled "attributed, not exact" and must never be summed
 as an exact agent total. `create`/`patch` rows are exact per invocation.
-`maintain` rows reflect attributed overlap when multiple skills are archived
-in one curator pass.
+`maintain` rows split the pass cost evenly across the archived skills
+(cost/N each, cache integer-divided), written in one transaction, so summing
+`maintain` recovers the exact pass cost.
 
 Dashboard bucketing: `create` → learn, `patch`+`maintain` → fix,
 `usage` → usage. Cache columns sum `cache_read` + `cache_creation` over
