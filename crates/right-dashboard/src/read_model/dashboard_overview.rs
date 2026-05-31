@@ -371,6 +371,11 @@ async fn cost_learning_river(
                 api_cost_usd: 0.0,
                 turns: 0,
                 invocations: 0,
+                // Token fields intentionally zero: the cost-learning river query
+                // selects no token columns and does not render cache.
+                input_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
             });
         source_point.cost_usd += cost;
         if api_key_source == "none" {

@@ -217,6 +217,9 @@ pub struct UsageSourcePoint {
     pub api_cost_usd: f64,
     pub turns: u64,
     pub invocations: u64,
+    pub input_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -802,6 +805,9 @@ mod dashboard_v2_tests {
                         api_cost_usd: 0.0,
                         turns: 1,
                         invocations: 1,
+                        input_tokens: 10,
+                        cache_creation_tokens: 5,
+                        cache_read_tokens: 40,
                     }],
                 }],
                 series: vec![CostLearningSeries {
@@ -865,6 +871,9 @@ mod dashboard_v2_tests {
                     api_cost_usd: 0.25,
                     turns: 2,
                     invocations: 2,
+                    input_tokens: 10,
+                    cache_creation_tokens: 5,
+                    cache_read_tokens: 40,
                 }],
                 models: vec![UsageModelSummary {
                     model: "sonnet".to_owned(),
