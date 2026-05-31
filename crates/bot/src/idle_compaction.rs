@@ -61,18 +61,23 @@ pub(crate) async fn latest_interactive_context_tokens(
 }
 
 /// Build the specialized maintenance invocation: `claude -p --resume <id>
-/// "/compact <recency instruction>"`, no schema, no MCP, tools disabled.
-/// Deliberate exception to the standard session-bearing contract (see
-/// ARCHITECTURE.md → Claude Invocation Contract).
+/// --model <opus[1m]> "/compact <recency instruction>"`, no schema, no MCP,
+/// tools disabled. Deliberate exception to the standard session-bearing
+/// contract (see ARCHITECTURE.md → Claude Invocation Contract).
+///
+/// `model` is the gate-verified opus[1m] id (the caller only reaches here after
+/// `should_compact` confirmed it). Pinning it makes the compaction provably run
+/// on opus[1m] instead of relying on `--resume` to inherit the model.
 pub(crate) fn build_compact_invocation(
     root_session_id: &str,
+    model: Option<String>,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> ClaudeInvocation {
     ClaudeInvocation {
         mcp_config_path: None,
         json_schema: None,
         output_format: OutputFormat::Json,
-        model: None, // inherit the session's model (opus[1m])
+        model, // gate-verified opus[1m]; pinned so /compact runs on opus[1m]
         max_budget_usd: None,
         max_turns: None,
         resume_session_id: Some(root_session_id.to_owned()),
@@ -158,7 +163,9 @@ async fn run_compaction(ctx: IdleCompactionCtx) {
         entry.lock_owned().await
     };
 
-    let args = build_compact_invocation(&root_session_id, Arc::clone(&ctx.debug)).into_args();
+    // `model` is the opus[1m] id just verified by `should_compact` above; pin it.
+    let args =
+        build_compact_invocation(&root_session_id, model, Arc::clone(&ctx.debug)).into_args();
     let mut cmd = match crate::cc::invocation::build_claude_command(
         &args,
         &ctx.agent_dir,
@@ -317,11 +324,16 @@ mod tests {
     #[test]
     fn compact_invocation_argv_is_maintenance_shaped() {
         let debug = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let args = build_compact_invocation("root-uuid", debug).into_args();
+        let args =
+            build_compact_invocation("root-uuid", Some("claude-opus-4-8[1m]".to_string()), debug)
+                .into_args();
         let joined = args.join(" ");
         // resumes the real session
         let pos = args.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(args[pos + 1], "root-uuid");
+        // pins the gate-verified opus[1m] model rather than inheriting implicitly
+        let mpos = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[mpos + 1], "claude-opus-4-8[1m]");
         // prompt is the /compact command with the recency instruction
         let dash = args.iter().position(|a| a == "--").unwrap();
         assert!(args[dash + 1].starts_with("/compact "));
