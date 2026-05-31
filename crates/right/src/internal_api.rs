@@ -115,6 +115,12 @@ pub(crate) struct McpServerStatus {
     pub auth_type: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub header_names: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_connect_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_attempt_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_success_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -931,6 +937,9 @@ async fn handle_mcp_list(
         tool_count: right_tool_count,
         auth_type: None,
         header_names: Vec::new(),
+        last_connect_error: None,
+        last_attempt_at: None,
+        last_success_at: None,
     });
 
     // SQLite preserves "oauth" as auth_type; AuthMethod enum has no OAuth variant.
@@ -987,6 +996,9 @@ async fn handle_mcp_list(
             tool_count,
             auth_type,
             header_names: db_header_names.get(name).cloned().unwrap_or_default(),
+            last_connect_error: proxy.last_connect_error().await,
+            last_attempt_at: proxy.last_attempt_at().await.map(|t| t.to_rfc3339()),
+            last_success_at: proxy.last_success_at().await.map(|t| t.to_rfc3339()),
         });
     }
 
@@ -2538,6 +2550,71 @@ mod tests {
         assert!(
             !body.to_string().contains("secret-key"),
             "header values must never be exposed: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_list_exposes_last_connect_error_for_unreachable() {
+        setup_crypto();
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path()).await;
+
+        let dead_url = "http://127.0.0.1:1/mcp".to_string();
+        let conn_arc = {
+            let registry = dispatcher
+                .agents
+                .get("test-agent")
+                .expect("test-agent registered");
+            registry
+                .right
+                .get_conn("test-agent")
+                .await
+                .expect("test db connection")
+        };
+        {
+            let conn = conn_arc.lock().await;
+            credentials::db_add_server(&conn, "obsidian", &dead_url)
+                .await
+                .unwrap();
+        }
+        let backend = Arc::new(ProxyBackend::new(
+            "obsidian".into(),
+            tmp.path().join("agents/test-agent"),
+            dead_url,
+            Arc::new(tokio::sync::RwLock::new(None)),
+            AuthMethod::default(),
+        ));
+        // Run the failed connect synchronously so the recorded fields are present.
+        let _ = backend.connect(reqwest::Client::new()).await;
+        {
+            let proxies = Arc::clone(&dispatcher.agents.get("test-agent").unwrap().proxies);
+            proxies.write().await.insert("obsidian".into(), backend);
+        }
+
+        let (status, body) = send_json(
+            app,
+            "/mcp-list",
+            serde_json::json!({ "agent": "test-agent" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body={body}");
+        let obsidian = body["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|server| server["name"] == "obsidian")
+            .unwrap();
+        assert!(
+            obsidian["last_connect_error"].is_string(),
+            "expected last_connect_error to be a string: {obsidian}"
+        );
+        assert!(
+            obsidian["last_attempt_at"].is_string(),
+            "expected last_attempt_at to be a string: {obsidian}"
+        );
+        assert!(
+            obsidian["last_success_at"].is_null(),
+            "expected last_success_at to be null: {obsidian}"
         );
     }
 }
