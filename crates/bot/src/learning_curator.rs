@@ -140,6 +140,32 @@ use crate::telegram::SessionLocks;
 const CURATOR_TIMEOUT: StdDuration = StdDuration::from_secs(900);
 const CURATOR_MAX_TURNS: u32 = 9999;
 
+/// Record per-skill `maintain` spend for the skills a curator pass archived.
+/// Best-effort observability at the fire-and-forget learning boundary: each
+/// insert logs and swallows on error. Empty `mutated` writes nothing.
+async fn record_curator_maintain_spend(
+    conn: &right_db::Connection,
+    mutated: &[String],
+    b: &right_agent::usage::UsageBreakdown,
+    invocation_id: Option<&str>,
+) {
+    for name in mutated {
+        if let Err(e) = right_agent::usage::insert::insert_skill_spend(
+            conn,
+            name,
+            "maintain",
+            b.total_cost_usd,
+            b.cache_read_tokens as i64,
+            b.cache_creation_tokens as i64,
+            invocation_id,
+        )
+        .await
+        {
+            tracing::warn!(skill = %name, "curator maintain spend insert failed: {e:#}");
+        }
+    }
+}
+
 pub(crate) async fn load_state_db(
     conn: &right_db::Connection,
 ) -> Result<CuratorState, right_db::DbError> {
@@ -329,6 +355,24 @@ pub(crate) async fn run_if_due(
             return;
         }
     };
+    // Names of skills THIS pass archived (archived_at == this run's now), for
+    // per-skill `maintain` spend attribution after the fork. Stays in sync with
+    // apply_automatic_transitions, which stamps archived_at = now.to_rfc3339().
+    // Best-effort: a query error must not abort the curator (learning boundary).
+    let archived_skill_names: Vec<String> = match conn
+        .query_all(
+            "SELECT skill_name FROM skill_lifecycle WHERE archived_at = ?1",
+            right_db::params![now.to_rfc3339()],
+            |r| r.get::<_, String>(0),
+        )
+        .await
+    {
+        Ok(names) => names,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator archived-skill query failed: {e:#}");
+            Vec::new()
+        }
+    };
     let lifecycle_rows = match right_lifecycle::list_curator_candidates(&conn).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -408,11 +452,13 @@ pub(crate) async fn run_if_due(
             match crate::cc::invocation::wait_with_output_or_kill(child, CURATOR_TIMEOUT).await {
                 Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
                     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                    if let Some(b) = crate::cc::stream::parse_usage_full(&stdout)
-                        && let Err(e) =
+                    if let Some(b) = crate::cc::stream::parse_usage_full(&stdout) {
+                        if let Err(e) =
                             right_agent::usage::insert::insert_learning_curator(&conn, &b).await
-                    {
-                        tracing::warn!(agent = %ctx.agent_name, "curator usage insert failed: {e:#}");
+                        {
+                            tracing::warn!(agent = %ctx.agent_name, "curator usage insert failed: {e:#}");
+                        }
+                        record_curator_maintain_spend(&conn, &archived_skill_names, &b, None).await;
                     }
                     if output.status.success() {
                         "success".to_owned()

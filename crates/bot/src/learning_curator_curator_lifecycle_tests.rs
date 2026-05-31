@@ -246,3 +246,108 @@ async fn curator_lifecycle_candidate_rendering_includes_db_status_fields() {
         "- rightx-rendered: state=Stale pinned=false use_count=7 patch_count=3 latest_activity=2026-05-03T00:00:00Z"
     ));
 }
+
+#[tokio::test]
+async fn curator_maintain_spend_written_for_archived_skills() {
+    let conn = open_test_conn().await;
+    let now = dt("2026-05-24T00:00:00Z");
+
+    // Insert a stale row old enough to archive (last_used 140 days before now,
+    // archive_after=90 days) and an active row that will only become stale.
+    insert_skill_lifecycle_row(
+        &conn,
+        "rightx-will-archive",
+        right_lifecycle::LifecycleState::Stale,
+        false,
+        right_lifecycle::CreatedBy::ProbeWriter,
+        0,
+        0,
+        Some("2026-01-01T00:00:00Z"), // 143 days before now
+        None,
+    )
+    .await;
+    insert_skill_lifecycle_row(
+        &conn,
+        "rightx-only-stale",
+        right_lifecycle::LifecycleState::Active,
+        false,
+        right_lifecycle::CreatedBy::Curator,
+        0,
+        0,
+        Some("2026-05-01T00:00:00Z"), // 23 days before now — stales, not archives
+        None,
+    )
+    .await;
+
+    let _changed = crate::lifecycle::transitions::apply_automatic_transitions(
+        &conn,
+        now,
+        crate::lifecycle::transitions::TransitionConfig {
+            stale_after: Duration::days(14),
+            archive_after: Duration::days(90),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Sanity: confirm which skills archived at exactly `now`.
+    let archived: Vec<String> = conn
+        .query_all(
+            "SELECT skill_name FROM skill_lifecycle WHERE archived_at = ?1",
+            right_db::params![now.to_rfc3339()],
+            |r| r.get::<_, String>(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(archived, vec!["rightx-will-archive"]);
+
+    // Build a known-cost UsageBreakdown.
+    let b = right_agent::usage::UsageBreakdown {
+        session_uuid: "test-session".to_string(),
+        total_cost_usd: 0.042,
+        num_turns: 1,
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_creation_tokens: 10,
+        cache_read_tokens: 20,
+        web_search_requests: 0,
+        web_fetch_requests: 0,
+        model_usage_json: "{}".to_string(),
+        api_key_source: "none".to_string(),
+        wall_elapsed_ms: None,
+    };
+
+    super::record_curator_maintain_spend(&conn, &archived, &b, None).await;
+
+    // Assert one skill_spend row with kind='maintain' and correct cost.
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM skill_spend WHERE kind='maintain' AND skill_name='rightx-will-archive'",
+            [],
+            |r| r.get(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+
+    let cost: f64 = conn
+        .query_row(
+            "SELECT cost_usd FROM skill_spend WHERE kind='maintain' AND skill_name='rightx-will-archive'",
+            [],
+            |r| r.get(0),
+        )
+        .await
+        .unwrap();
+    assert!((cost - 0.042).abs() < 1e-9, "cost_usd mismatch: {cost}");
+
+    // The 'only-stale' skill must not have a maintain row.
+    let count2: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM skill_spend WHERE kind='maintain' AND skill_name='rightx-only-stale'",
+            [],
+            |r| r.get(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(count2, 0);
+}
