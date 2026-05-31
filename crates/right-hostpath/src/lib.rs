@@ -100,7 +100,7 @@ fn is_fish(shell: Option<&str>) -> bool {
 fn managed_block(bindir: &Path, shell: Option<&str>) -> String {
     let dir = bindir.to_string_lossy();
     if is_fish(shell) {
-        format!("{BLOCK_START}\nfish_add_path {dir}\n{BLOCK_END}\n")
+        format!("{BLOCK_START}\nfish_add_path \"{dir}\"\n{BLOCK_END}\n")
     } else {
         format!(
             "{BLOCK_START}\ncase \":$PATH:\" in *\":{dir}:\"*) ;; *) export PATH=\"{dir}:$PATH\" ;; esac\n{BLOCK_END}\n"
