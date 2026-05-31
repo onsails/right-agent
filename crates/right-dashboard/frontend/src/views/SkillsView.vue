@@ -4,7 +4,7 @@ import { setSkillPinned } from '../api'
 import AsyncState from '../components/AsyncState.vue'
 import CollapsibleSection from '../components/CollapsibleSection.vue'
 import StatusPill from '../components/StatusPill.vue'
-import { shortDate } from '../format'
+import { money, shortDate } from '../format'
 import type { SkillDetailResponse, SkillSummary, SkillsResponse } from '../types'
 
 const skillGroups = ['core', 'learned', 'other'] as const
@@ -178,6 +178,22 @@ async function togglePinned(): Promise<void> {
           <div>
             <dt>Last patched</dt>
             <dd>{{ shortDate(selectedSkill.skill.last_patched_at) }}</dd>
+          </div>
+          <div>
+            <dt>Learn</dt>
+            <dd>{{ money(selectedSkill.skill.learn_cost_usd) }}</dd>
+          </div>
+          <div>
+            <dt>Fix</dt>
+            <dd>{{ money(selectedSkill.skill.fix_cost_usd) }}</dd>
+          </div>
+          <div>
+            <dt>Usage</dt>
+            <dd>{{ money(selectedSkill.skill.usage_cost_usd) }}</dd>
+          </div>
+          <div>
+            <dt>Cache r/w</dt>
+            <dd>{{ selectedSkill.skill.cache_read_tokens }} / {{ selectedSkill.skill.cache_creation_tokens }}</dd>
           </div>
         </dl>
         <pre>{{ selectedSkill.content_preview }}<template v-if="selectedSkill.truncated">

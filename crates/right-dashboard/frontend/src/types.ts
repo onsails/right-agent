@@ -157,6 +157,7 @@ export interface UsageWindow {
   web_search_requests: number
   web_fetch_requests: number
   per_model: UsageModelSummary[]
+  budget_skip_count: number
 }
 
 export interface UsageSourceSummary {
@@ -417,6 +418,11 @@ export interface SkillSummary {
   created_at: string | null
   last_used_at: string | null
   last_patched_at: string | null
+  learn_cost_usd: number
+  fix_cost_usd: number
+  usage_cost_usd: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
 }
 
 export interface SkillDetailResponse {
