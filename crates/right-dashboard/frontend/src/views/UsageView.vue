@@ -3,6 +3,7 @@ import { computed, ref, watchEffect } from 'vue'
 import UsageBreakdown from '../components/charts/UsageBreakdown.vue'
 import UsageSpendChart from '../components/charts/UsageSpendChart.vue'
 import AsyncState from '../components/AsyncState.vue'
+import CacheSubline from '../components/charts/CacheSubline.vue'
 import { money } from '../format'
 import type { UsageOverviewResponse, UsageWindow } from '../types'
 
@@ -67,10 +68,12 @@ function windowRows(window: UsageWindow | null | undefined) {
         </p>
 
         <div class="model-grid">
-          <div v-for="source in windowRows(window)" :key="source.source" class="model-row">
-            <span>{{ source.source }}</span>
-            <strong>{{ money(source.cost_usd) }}</strong>
-            <span>{{ source.cache_read_tokens }} / {{ source.cache_creation_tokens }}</span>
+          <div v-for="source in windowRows(window)" :key="source.source" class="usage-source">
+            <div class="model-row">
+              <span>{{ source.source }}</span>
+              <strong>{{ money(source.cost_usd) }}</strong>
+            </div>
+            <CacheSubline :tokens="source" />
           </div>
         </div>
       </article>
