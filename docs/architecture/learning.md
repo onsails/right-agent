@@ -142,7 +142,9 @@ as an exact agent total. `create`/`patch` rows are exact per invocation.
 in one curator pass.
 
 Dashboard bucketing: `create` → learn, `patch`+`maintain` → fix,
-`usage` → usage. Cache columns sum `cache_read` + `cache_creation`.
+`usage` → usage. Cache columns sum `cache_read` + `cache_creation` over
+learning kinds only (`create`/`patch`/`maintain`); `usage` cache is
+excluded because those rows are attributed-not-exact.
 The Knowledge view surfaces per-skill spend; the Usage tab shows the
 budget-skip count and per-source cache columns. (Agent-level
 learn/fix/usage rollup totals on the Usage tab are not yet implemented.)
