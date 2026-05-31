@@ -510,30 +510,6 @@ async fn failed_writer_flow_count_in_window(
     count_parsed_window_rows(rows, since, now)
 }
 
-async fn failed_writer_count_in_window(
-    conn: &Connection,
-    agent: &str,
-    since: &DateTime<Utc>,
-    now: &DateTime<Utc>,
-) -> Result<i64, ReadModelError> {
-    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
-    let mut stmt = conn.prepare(
-        "SELECT created_at
-         FROM skill_learning_events
-         WHERE agent_name=?1
-           AND phase='finish'
-           AND status IN ('failed','aborted')
-           AND created_at >= ?2
-           AND created_at <= ?3",
-    )?;
-    let rows = stmt
-        .query_map(params![agent, coarse_since, coarse_until], |row| {
-            row.get::<_, String>(0)
-        })
-        .await?;
-    count_parsed_window_rows(rows, since, now)
-}
-
 async fn curator_trigger_count_in_window(
     conn: &Connection,
     since: &DateTime<Utc>,
@@ -776,14 +752,83 @@ async fn learning_lifecycle(
     since_7d: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<LearningLifecycle, ReadModelError> {
+    let recent_failed_events = recent_failed_events(conn, agent, since_7d, now).await?;
     Ok(LearningLifecycle {
         created_7d: writer_status_count_in_window(conn, agent, "created", since_7d, now).await?,
         updated_7d: writer_status_count_in_window(conn, agent, "updated", since_7d, now).await?,
-        failed_or_aborted_7d: failed_writer_count_in_window(conn, agent, since_7d, now).await?,
+        // Same predicate and window as `recent_failed_events` (untruncated), so
+        // the count is exactly the list length — derive it, no second query.
+        failed_or_aborted_7d: recent_failed_events.len() as i64,
         recent_successful_events: recent_successful_events(conn, agent, since_7d, now).await?,
-        recent_failed_events: recent_failed_events(conn, agent, since_7d, now).await?,
+        recent_failed_events,
         candidate_skill_names_7d: candidate_skill_names(conn, agent, since_7d, now).await?,
     })
+}
+
+/// Learning-event rows for `agent` whose `created_at` falls in `[since_7d, now]`,
+/// newest first, restricted to the two given statuses. `limit` optionally caps
+/// the result (recent-successful preview); `None` returns the full window
+/// (the failed list, which must equal `failed_or_aborted_7d`).
+async fn learning_events_in_window(
+    conn: &Connection,
+    agent: &str,
+    since_7d: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+    statuses: [&str; 2],
+    limit: Option<usize>,
+) -> Result<Vec<LearningEventSummary>, ReadModelError> {
+    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since_7d, now);
+    let mut stmt = conn.prepare(
+        "SELECT id, skill_name, action, status, message, summary, created_at
+         FROM skill_learning_events
+         WHERE agent_name=?1
+           AND phase='finish'
+           AND status IN (?4, ?5)
+           AND created_at >= ?2
+           AND created_at <= ?3
+         ORDER BY created_at DESC, id DESC",
+    )?;
+    let rows = stmt
+        .query_map(
+            params![agent, coarse_since, coarse_until, statuses[0], statuses[1]],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .await?;
+    let mut events = Vec::<(DateTime<Utc>, i64, LearningEventSummary)>::new();
+    for row in rows {
+        let (id, skill_name, action, status, message, summary, created_at) = row?;
+        let created_at_utc = parse_utc(&created_at)?;
+        if created_at_utc < *since_7d || created_at_utc > *now {
+            continue;
+        }
+        events.push((
+            created_at_utc,
+            id,
+            LearningEventSummary {
+                skill_name,
+                action,
+                status,
+                message,
+                summary,
+                created_at: created_at_utc.to_rfc3339(),
+            },
+        ));
+    }
+    events.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    if let Some(limit) = limit {
+        events.truncate(limit);
+    }
+    Ok(events.into_iter().map(|(_, _, event)| event).collect())
 }
 
 async fn recent_successful_events(
@@ -792,53 +837,15 @@ async fn recent_successful_events(
     since_7d: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<Vec<LearningEventSummary>, ReadModelError> {
-    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since_7d, now);
-    let mut stmt = conn.prepare(
-        "SELECT id, skill_name, action, status, message, summary, created_at
-         FROM skill_learning_events
-         WHERE agent_name=?1
-           AND phase='finish'
-           AND status IN ('created','updated')
-           AND created_at >= ?2
-           AND created_at <= ?3
-         ORDER BY created_at DESC, id DESC",
-    )?;
-    let rows = stmt
-        .query_map(params![agent, coarse_since, coarse_until], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, String>(6)?,
-            ))
-        })
-        .await?;
-    let mut events = Vec::<(DateTime<Utc>, i64, LearningEventSummary)>::new();
-    for row in rows {
-        let (id, skill_name, action, status, message, summary, created_at) = row?;
-        let created_at_utc = parse_utc(&created_at)?;
-        if created_at_utc < *since_7d || created_at_utc > *now {
-            continue;
-        }
-        events.push((
-            created_at_utc,
-            id,
-            LearningEventSummary {
-                skill_name,
-                action,
-                status,
-                message,
-                summary,
-                created_at: created_at_utc.to_rfc3339(),
-            },
-        ));
-    }
-    events.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
-    events.truncate(RECENT_EVENT_LIMIT as usize);
-    Ok(events.into_iter().map(|(_, _, event)| event).collect())
+    learning_events_in_window(
+        conn,
+        agent,
+        since_7d,
+        now,
+        ["created", "updated"],
+        Some(RECENT_EVENT_LIMIT as usize),
+    )
+    .await
 }
 
 async fn recent_failed_events(
@@ -847,53 +854,9 @@ async fn recent_failed_events(
     since_7d: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<Vec<LearningEventSummary>, ReadModelError> {
-    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since_7d, now);
-    let mut stmt = conn.prepare(
-        "SELECT id, skill_name, action, status, message, summary, created_at
-         FROM skill_learning_events
-         WHERE agent_name=?1
-           AND phase='finish'
-           AND status IN ('failed','aborted')
-           AND created_at >= ?2
-           AND created_at <= ?3
-         ORDER BY created_at DESC, id DESC",
-    )?;
-    let rows = stmt
-        .query_map(params![agent, coarse_since, coarse_until], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, String>(6)?,
-            ))
-        })
-        .await?;
-    let mut events = Vec::<(DateTime<Utc>, i64, LearningEventSummary)>::new();
-    for row in rows {
-        let (id, skill_name, action, status, message, summary, created_at) = row?;
-        let created_at_utc = parse_utc(&created_at)?;
-        if created_at_utc < *since_7d || created_at_utc > *now {
-            continue;
-        }
-        events.push((
-            created_at_utc,
-            id,
-            LearningEventSummary {
-                skill_name,
-                action,
-                status,
-                message,
-                summary,
-                created_at: created_at_utc.to_rfc3339(),
-            },
-        ));
-    }
-    events.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
-    // NOTE: intentionally not truncated — the list must equal failed_or_aborted_7d.
-    Ok(events.into_iter().map(|(_, _, event)| event).collect())
+    // Not truncated — the list must equal `failed_or_aborted_7d`, which is
+    // derived from this list's length in `learning_lifecycle`.
+    learning_events_in_window(conn, agent, since_7d, now, ["failed", "aborted"], None).await
 }
 
 async fn candidate_skill_names(
