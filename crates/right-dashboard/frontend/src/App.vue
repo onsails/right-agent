@@ -1,20 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import {
-  DashboardApiError,
-  bootstrap,
-  dashboardOverview,
-  doctorStatus,
-  identityFile,
-  identityFiles,
-  learningOverview,
-  overview as activityOverview,
-  runDetail,
-  sandboxStats,
-  skillDetail,
-  skillsOverview,
-  usageOverview,
-} from './api'
+
+import { bootstrap } from './api'
+import { useLiveResource } from './composables/useLiveResource'
+import { provideLiveConfig } from './composables/liveConfig'
+import { globalConnectionState, globalLastUpdatedAt } from './composables/liveStatus'
 import {
   dashboardTabItems,
   isDashboardTab,
@@ -31,85 +21,45 @@ import {
   type DashboardDisplayMode,
 } from './telegram'
 import AppShell from './components/AppShell.vue'
-import ActivityView from './views/ActivityView.vue'
-import HealthView from './views/HealthView.vue'
-import IdentityView from './views/IdentityView.vue'
-import KnowledgeView from './views/KnowledgeView.vue'
+import OverviewContainer from './views/OverviewContainer.vue'
+import ActivityContainer from './views/ActivityContainer.vue'
+import KnowledgeContainer from './views/KnowledgeContainer.vue'
+import UsageContainer from './views/UsageContainer.vue'
+import IdentityContainer from './views/IdentityContainer.vue'
+import HealthContainer from './views/HealthContainer.vue'
 import McpView from './views/McpView.vue'
-import OverviewView from './views/OverviewView.vue'
 import ProvidersView from './views/ProvidersView.vue'
-import UsageView from './views/UsageView.vue'
-import type {
-  BootstrapResponse, DashboardOverviewResponse, DoctorResponse, IdentityFileSummary, IdentityResponse,
-  LearningOverviewResponse, OverviewResponse, RunDetailResponse, RunSummary,
-  SandboxStatsResponse, SkillDetailResponse, SkillSummary, SkillsResponse, UsageOverviewResponse,
-} from './types'
 
-type ConnectionState = 'loading' | 'live' | 'stale' | 'offline' | 'locked'
-type KnowledgeTab = 'learning' | 'skills'
+const { data: bootstrapData } = useLiveResource(bootstrap, { intervalMs: 0, key: 'bootstrap' })
 
-const bootstrapData = ref<BootstrapResponse | null>(null)
-const dashboardData = ref<DashboardOverviewResponse | null>(null)
-const activityData = ref<OverviewResponse | null>(null)
-const usageData = ref<UsageOverviewResponse | null>(null)
-const learningData = ref<LearningOverviewResponse | null>(null)
-const skillsData = ref<SkillsResponse | null>(null)
-const identityData = ref<IdentityResponse | null>(null)
-const doctorData = ref<DoctorResponse | null>(null)
-const sandboxData = ref<SandboxStatsResponse | null>(null)
-
-const selectedRun = ref<RunDetailResponse | null>(null)
-const selectedRunId = ref<string | null>(null)
-const selectedSkill = ref<SkillDetailResponse | null>(null)
-const selectedSkillName = ref<string | null>(null)
-const selectedIdentityFile = ref<IdentityFileSummary | null>(null)
-
-const activeTab = ref<DashboardTab>(normalizeInitialTab(initialDashboardTabFromLocation(window.location.search, window.location.hash)))
-const activeKnowledgeTab = ref<KnowledgeTab>('learning')
+const activeTab = ref<DashboardTab>(
+  normalizeInitialTab(initialDashboardTabFromLocation(window.location.search, window.location.hash)),
+)
 const preferredDisplayMode = ref<DashboardDisplayMode>(readDashboardDisplayMode())
 const displayMode = ref<DashboardDisplayMode>('normal')
-const connectionState = ref<ConnectionState>('loading')
-const message = ref('Loading dashboard')
-const lastUpdatedAt = ref<string | null>(null)
 
-const detailError = ref<string | null>(null)
-const skillError = ref<string | null>(null)
-const identityError = ref<string | null>(null)
-const doctorError = ref<string | null>(null)
-const sandboxError = ref<string | null>(null)
-
-const loadingDetail = ref(false)
-const loadingSkill = ref(false)
-const loadingIdentity = ref(false)
-const loadingDoctor = ref(false)
-const loadingSandbox = ref(false)
-
-let pollTimer: number | undefined
-let unsubscribeTelegramFullscreen: (() => void) | undefined
-
-const shellTitle = computed(() => bootstrapData.value?.agent ?? dashboardData.value?.agent ?? 'Dashboard')
 const refreshIntervalMs = computed(() => Math.max(bootstrapData.value?.refresh_interval_secs ?? 5, 1) * 1000)
-const tabs = computed(() => {
-  return dashboardTabItems(bootstrapData.value?.features)
+provideLiveConfig(computed(() => ({ intervalMs: refreshIntervalMs.value })))
+
+const shellTitle = computed(() => bootstrapData.value?.agent ?? 'Dashboard')
+const tabs = computed(() => dashboardTabItems(bootstrapData.value?.features))
+
+const connectionMessage = computed(() => {
+  switch (globalConnectionState.value) {
+    case 'live':
+      return 'Live'
+    case 'stale':
+      return 'Reconnecting'
+    case 'offline':
+      return 'Dashboard unavailable'
+    case 'locked':
+      return 'Dashboard locked'
+    default:
+      return 'Loading dashboard'
+  }
 })
 
-// `'stale'` is set only when at least one data source has already loaded
-// (see applyErrorState: `dashboardData !== null || activityData !== null`), so a
-// source whose own data is still null with `'stale'` falls through to the AsyncState
-// empty/spinner path — the `data === null` guard on the error branch never masks a
-// real failure for a not-yet-loaded source.
-const overviewLoading = computed(() => dashboardData.value === null && connectionState.value === 'loading')
-const overviewError = computed(() =>
-  dashboardData.value === null && (connectionState.value === 'offline' || connectionState.value === 'locked')
-    ? 'Dashboard unavailable'
-    : null,
-)
-const usageLoading = computed(() => usageData.value === null && connectionState.value === 'loading')
-const usageError = computed(() =>
-  usageData.value === null && (connectionState.value === 'offline' || connectionState.value === 'locked')
-    ? 'Usage unavailable'
-    : null,
-)
+let unsubscribeTelegramFullscreen: (() => void) | undefined
 
 onMounted(() => {
   const webApp = window.Telegram?.WebApp
@@ -117,273 +67,32 @@ onMounted(() => {
   unsubscribeTelegramFullscreen = subscribeTelegramFullscreenChanges(webApp, (mode) => {
     displayMode.value = mode
   })
-  void loadInitial()
 })
 
 onBeforeUnmount(() => {
-  if (pollTimer !== undefined) {
-    window.clearInterval(pollTimer)
-  }
   unsubscribeTelegramFullscreen?.()
 })
-
-function toggleDisplayMode(): void {
-  const nextMode = nextDashboardDisplayModePreference(preferredDisplayMode.value)
-  preferredDisplayMode.value = nextMode
-  displayMode.value = applyTelegramDisplayMode(nextMode)
-}
-
-async function loadInitial(): Promise<void> {
-  try {
-    bootstrapData.value = await bootstrap()
-    await refreshOverview()
-    await refreshActivity()
-    schedulePolling()
-  } catch (error) {
-    applyErrorState(error)
-  }
-}
-
-function schedulePolling(): void {
-  if (pollTimer !== undefined) {
-    window.clearInterval(pollTimer)
-  }
-  pollTimer = window.setInterval(() => {
-    void refreshOverview()
-    if (activeTab.value === 'activity' || activeTab.value === 'overview') {
-      void refreshActivity()
-    }
-  }, refreshIntervalMs.value)
-}
 
 function setActiveTab(tab: string): void {
   if (!isDashboardTab(tab)) {
     return
   }
   activeTab.value = tab
-  void refreshActiveTab()
 }
 
-function setKnowledgeTab(tab: KnowledgeTab): void {
-  activeKnowledgeTab.value = tab
-  void refreshKnowledge()
-}
-
-async function refreshActiveTab(): Promise<void> {
-  if (activeTab.value === 'overview') {
-    await refreshOverview()
-    await refreshActivity()
-  } else if (activeTab.value === 'activity') {
-    await refreshActivity()
-  } else if (activeTab.value === 'knowledge') {
-    await refreshKnowledge()
-  } else if (activeTab.value === 'usage') {
-    await refreshUsage()
-  } else if (activeTab.value === 'identity') {
-    await refreshIdentity()
-  }
-}
-
-async function guarded(load: () => Promise<void>): Promise<void> {
-  try {
-    await load()
-    connectionState.value = 'live'
-    message.value = 'Live'
-    lastUpdatedAt.value = new Date().toISOString()
-  } catch (error) {
-    applyErrorState(error)
-  }
-}
-
-async function refreshOverview(): Promise<void> {
-  await guarded(async () => {
-    dashboardData.value = await dashboardOverview()
-  })
-}
-
-async function refreshActivity(): Promise<void> {
-  await guarded(async () => {
-    const data = await activityOverview()
-    activityData.value = data
-    if (selectedRunId.value !== null) {
-      const stillPresent = data.crons.some((cron) => cron.recent_runs.some((run) => run.id === selectedRunId.value))
-      if (!stillPresent) {
-        selectedRunId.value = null
-        selectedRun.value = null
-        detailError.value = null
-      }
-    }
-  })
-}
-
-async function refreshUsage(): Promise<void> {
-  await guarded(async () => {
-    usageData.value = await usageOverview()
-  })
-}
-
-async function refreshKnowledge(): Promise<void> {
-  if (activeKnowledgeTab.value === 'skills') {
-    await refreshSkills()
-    return
-  }
-
-  await guarded(async () => {
-    learningData.value = await learningOverview()
-  })
-}
-
-async function refreshSkills(): Promise<void> {
-  await guarded(async () => {
-    skillsData.value = await skillsOverview()
-  })
-}
-
-async function refreshIdentity(): Promise<void> {
-  identityError.value = null
-  await guarded(async () => {
-    identityData.value = await identityFiles()
-    if (selectedIdentityFile.value === null) {
-      selectedIdentityFile.value = identityData.value.files[0] ?? null
-    }
-  })
-}
-
-async function refreshDoctor(): Promise<void> {
-  loadingDoctor.value = true
-  doctorError.value = null
-  try {
-    doctorData.value = await doctorStatus()
-  } catch (error) {
-    doctorError.value = error instanceof Error ? error.message : 'Doctor unavailable'
-    applyErrorState(error)
-  } finally {
-    loadingDoctor.value = false
-  }
-}
-
-async function refreshSandbox(): Promise<void> {
-  loadingSandbox.value = true
-  sandboxError.value = null
-  try {
-    sandboxData.value = await sandboxStats()
-  } catch (error) {
-    sandboxError.value = error instanceof Error ? error.message : 'Sandbox unavailable'
-    applyErrorState(error)
-  } finally {
-    loadingSandbox.value = false
-  }
-}
-
-function applyErrorState(error: unknown): void {
-  if (error instanceof DashboardApiError && error.isLocked) {
-    connectionState.value = 'locked'
-    message.value = error.message
-    return
-  }
-  connectionState.value = dashboardData.value !== null || activityData.value !== null ? 'stale' : 'offline'
-  message.value = error instanceof Error ? error.message : 'Dashboard unavailable'
-}
-
-async function selectRun(run: RunSummary): Promise<void> {
-  const runId = run.id
-  selectedRunId.value = runId
-  selectedRun.value = null
-  loadingDetail.value = true
-  detailError.value = null
-  try {
-    const detail = await runDetail(runId)
-    if (selectedRunId.value === runId) {
-      selectedRun.value = detail
-    }
-  } catch (error) {
-    if (error instanceof DashboardApiError && error.isLocked) {
-      applyErrorState(error)
-    }
-    if (selectedRunId.value === runId) {
-      detailError.value = error instanceof Error ? error.message : 'Run unavailable'
-    }
-  } finally {
-    if (selectedRunId.value === runId) {
-      loadingDetail.value = false
-    }
-  }
-}
-
-async function selectSkill(skill: SkillSummary): Promise<void> {
-  selectedSkillName.value = skill.name
-  selectedSkill.value = null
-  loadingSkill.value = true
-  skillError.value = null
-  try {
-    const detail = await skillDetail(skill.name)
-    if (selectedSkillName.value === skill.name) {
-      selectedSkill.value = detail
-    }
-  } catch (error) {
-    if (error instanceof DashboardApiError && error.isLocked) {
-      applyErrorState(error)
-    }
-    if (selectedSkillName.value === skill.name) {
-      skillError.value = error instanceof Error ? error.message : 'Skill unavailable'
-    }
-  } finally {
-    if (selectedSkillName.value === skill.name) {
-      loadingSkill.value = false
-    }
-  }
-}
-
-function applySkillPinned({ skillName, pinned }: { skillName: string, pinned: boolean }): void {
-  if (selectedSkill.value && selectedSkill.value.skill.name === skillName) {
-    selectedSkill.value = {
-      ...selectedSkill.value,
-      skill: { ...selectedSkill.value.skill, pinned },
-    }
-  }
-  const current = skillsData.value
-  if (current === null) {
-    return
-  }
-  const updateGroup = (group: SkillSummary[]): SkillSummary[] =>
-    group.map((skill) => (skill.name === skillName ? { ...skill, pinned } : skill))
-  skillsData.value = {
-    ...current,
-    groups: {
-      core: updateGroup(current.groups.core),
-      learned: updateGroup(current.groups.learned),
-      other: updateGroup(current.groups.other),
-    },
-  }
-}
-
-async function selectIdentityFile(name: string): Promise<void> {
-  loadingIdentity.value = true
-  identityError.value = null
-  try {
-    const response = await identityFile(name)
-    selectedIdentityFile.value = response.file
-    if (identityData.value !== null) {
-      identityData.value.warning = response.warning ?? identityData.value.warning
-      identityData.value.files = identityData.value.files.map((file) => file.name === name ? response.file : file)
-    }
-  } catch (error) {
-    if (error instanceof DashboardApiError && error.isLocked) {
-      applyErrorState(error)
-    }
-    identityError.value = error instanceof Error ? error.message : 'Identity file unavailable'
-  } finally {
-    loadingIdentity.value = false
-  }
+function toggleDisplayMode(): void {
+  const nextMode = nextDashboardDisplayModePreference(preferredDisplayMode.value)
+  preferredDisplayMode.value = nextMode
+  displayMode.value = applyTelegramDisplayMode(nextMode)
 }
 </script>
 
 <template>
   <AppShell
     :agent="shellTitle"
-    :connection-state="connectionState"
-    :message="message"
-    :last-updated-at="lastUpdatedAt"
+    :connection-state="globalConnectionState"
+    :message="connectionMessage"
+    :last-updated-at="globalLastUpdatedAt"
     :tabs="tabs"
     :active-tab="activeTab"
     :display-mode="displayMode"
@@ -391,63 +100,14 @@ async function selectIdentityFile(name: string): Promise<void> {
     @select="setActiveTab"
     @toggle-display-mode="toggleDisplayMode"
   >
-    <OverviewView
-      v-if="activeTab === 'overview'"
-      :overview="dashboardData"
-      :activity="activityData"
-      :loading="overviewLoading"
-      :error="overviewError"
-    />
-    <ActivityView
-      v-else-if="activeTab === 'activity'"
-      :overview="activityData"
-      :selected-run="selectedRun"
-      :selected-run-id="selectedRunId"
-      :loading-detail="loadingDetail"
-      :detail-error="detailError"
-      @select-run="selectRun"
-    />
-    <KnowledgeView
-      v-else-if="activeTab === 'knowledge'"
-      :active-subtab="activeKnowledgeTab"
-      :learning="learningData"
-      :selected-skill="selectedSkill"
-      :selected-skill-name="selectedSkillName"
-      :skills="skillsData"
-      :loading-skill="loadingSkill"
-      :skill-error="skillError"
-      @set-subtab="setKnowledgeTab"
-      @select-skill="selectSkill"
-      @skill-pinned="applySkillPinned"
-    />
-    <UsageView
-      v-else-if="activeTab === 'usage'"
-      :usage="usageData"
-      :loading="usageLoading"
-      :error="usageError"
-    />
-    <IdentityView
-      v-else-if="activeTab === 'identity'"
-      :identity="identityData"
-      :selected-file="selectedIdentityFile"
-      :loading="loadingIdentity"
-      :error="identityError"
-      @select-file="selectIdentityFile"
-      @refresh="refreshIdentity"
-    />
+    <OverviewContainer v-if="activeTab === 'overview'" />
+    <ActivityContainer v-else-if="activeTab === 'activity'" />
+    <KnowledgeContainer v-else-if="activeTab === 'knowledge'" />
+    <UsageContainer v-else-if="activeTab === 'usage'" />
+    <IdentityContainer v-else-if="activeTab === 'identity'" />
     <McpView v-else-if="activeTab === 'mcp'" />
     <ProvidersView v-else-if="activeTab === 'providers'" />
-    <HealthView
-      v-else-if="activeTab === 'health'"
-      :doctor="doctorData"
-      :sandbox="sandboxData"
-      :loading-doctor="loadingDoctor"
-      :loading-sandbox="loadingSandbox"
-      :doctor-error="doctorError"
-      :sandbox-error="sandboxError"
-      @refresh-doctor="refreshDoctor"
-      @refresh-sandbox="refreshSandbox"
-    />
+    <HealthContainer v-else-if="activeTab === 'health'" />
     <section v-else class="empty-panel">Unknown dashboard view</section>
   </AppShell>
 </template>
