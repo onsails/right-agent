@@ -31,8 +31,11 @@ pub async fn dashboard_overview(
 ) -> Result<DashboardOverviewResponse, ReadModelError> {
     let active_runs =
         active_async_run_count(conn, &input.generated_at).await? + input.foreground_active_count;
-    let recent_failures = recent_failure_count(conn, &input.generated_at).await?;
     let recent_failed_runs = recent_failed_runs(conn, &input.generated_at).await?;
+    // Same predicate and 24h window as the list, so the count is exactly the
+    // number of rows — derive it instead of issuing a second identical query.
+    // Keeps the card count and the revealed list structurally consistent.
+    let recent_failures = recent_failed_runs.len() as i64;
     let today_cost_usd = today_cost_usd(conn, &input.generated_at).await?;
     let learning_candidates_24h =
         learning_candidate_count(conn, &input.agent, &input.generated_at).await?;
@@ -840,28 +843,6 @@ fn curator_status_title(status: &str) -> &'static str {
     } else {
         "Curator state updated"
     }
-}
-
-async fn recent_failure_count(
-    conn: &Connection,
-    generated_at: &str,
-) -> Result<i64, ReadModelError> {
-    let now = parse_utc(generated_at)?;
-    let since = now - Duration::hours(24);
-    let (coarse_since, coarse_until) = coarse_timestamp_bounds(&since, &now);
-    let mut stmt = conn.prepare(
-        "SELECT COALESCE(finished_at, updated_at, created_at)
-         FROM async_runs
-         WHERE status = 'failed'
-           AND COALESCE(finished_at, updated_at, created_at) >= ?1
-           AND COALESCE(finished_at, updated_at, created_at) <= ?2",
-    )?;
-    let rows = stmt
-        .query_map(params![coarse_since, coarse_until], |row| {
-            row.get::<_, String>(0)
-        })
-        .await?;
-    count_parsed_window_rows(rows, &since, &now)
 }
 
 async fn recent_failed_runs(

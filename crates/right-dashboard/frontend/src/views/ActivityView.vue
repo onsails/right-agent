@@ -46,7 +46,7 @@ function cronStatus(cron: CronCard): string {
   </section>
 
   <CollapsibleSection
-    v-if="(overview?.summary.failed_recent_cron_count ?? 0) > 0"
+    v-if="failures.interactive"
     v-model:open="failuresOpen"
     title="Failures"
     :count="overview?.summary.failed_recent_cron_count ?? 0"

@@ -47,7 +47,7 @@ const failures = computed(() => failureMetric(props.learning?.lifecycle.failed_o
   </section>
 
   <CollapsibleSection
-    v-if="(learning?.lifecycle.failed_or_aborted_7d ?? 0) > 0"
+    v-if="failures.interactive"
     v-model:open="failuresOpen"
     title="Failed skills"
     :count="learning?.lifecycle.failed_or_aborted_7d ?? 0"

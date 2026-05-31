@@ -81,7 +81,7 @@ function selectMarker(marker: LearningMarker): void {
     </section>
 
     <CollapsibleSection
-      v-if="(overview?.recent_failures ?? 0) > 0"
+      v-if="failures.interactive"
       v-model:open="failuresOpen"
       title="Failures"
       :count="overview?.recent_failures ?? 0"
