@@ -32,9 +32,21 @@ mutate `policy.yaml`.
 At sandbox boot, the OpenShell supervisor calls
 `GetSandboxProviderEnvironment` and injects the result as environment
 variables on the sandbox supervisor process. The values are opaque
-placeholders shaped like `openshell:resolve:env:v<digits>_<NAME>`. Every
-process spawned inside the sandbox — including `claude -p` over gRPC
-exec and SSH — inherits these env vars at the kernel level.
+placeholders shaped like `openshell:resolve:env:v<fingerprint>_<NAME>`,
+where `<fingerprint>` is derived from the provider credential inputs.
+Every process spawned inside the sandbox — including `claude -p` over
+gRPC exec and SSH — inherits these env vars at the kernel level. The
+sandbox only ever sees the placeholder, never the raw credential;
+`GetSandboxProviderEnvironment` returns the resolved value but is for the
+trusted host/supervisor, not the sandbox.
+
+Attaching or detaching a provider, and rotating a credential, all
+propagate to a **running** sandbox without a restart: the placeholder set
+(and, on rotation, the `<fingerprint>`) updates for newly-spawned
+processes. Propagation is eventually-consistent, not instantaneous —
+empirically sub-second for an attach and several seconds for a rotation —
+so code/tests that read the env immediately after the gateway call must
+poll, not read once (see `ci_openshell_provider.rs::poll_sandbox_env`).
 
 When the agent makes an HTTPS request through the gateway proxy
 (`HTTPS_PROXY=10.200.0.1:3128`, injected at sandbox boot), the proxy
