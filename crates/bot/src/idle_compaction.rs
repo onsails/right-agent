@@ -108,28 +108,38 @@ pub(crate) struct IdleCompactionCtx {
     pub thread_id: i64,
 }
 
+/// Open the per-agent DB and read this session's context footprint.
+/// Best-effort: logs and returns `None` on any DB error (the caller then
+/// skips this cycle).
+async fn open_and_read_fullness(ctx: &IdleCompactionCtx) -> Option<(right_db::Connection, u64)> {
+    let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: open_connection failed: {e:#}");
+            return None;
+        }
+    };
+    let used = match latest_interactive_context_tokens(&conn, ctx.chat_id, ctx.thread_id).await {
+        Ok(v) => v.unwrap_or(0),
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: fullness query failed: {e:#}");
+            return None;
+        }
+    };
+    Some((conn, used))
+}
+
 /// Fire path. Re-checks eligibility, resolves the active session, takes the
 /// per-session mutex, runs `/compact`, records usage. Best-effort: every
 /// failure logs and returns (the next idle cycle retries). Never aborted
 /// mid-flight (see `arm`), so the session lock is always released cleanly.
 async fn run_compaction(ctx: IdleCompactionCtx) {
-    let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: open_connection failed: {e:#}");
-            return;
-        }
+    let Some((conn, used)) = open_and_read_fullness(&ctx).await else {
+        return;
     };
 
     // Fire-time re-checks: model (hot-reloadable via /model) and fullness.
     let model = crate::snapshot_model(&ctx.model);
-    let used = match latest_interactive_context_tokens(&conn, ctx.chat_id, ctx.thread_id).await {
-        Ok(v) => v.unwrap_or(0),
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: fullness query failed: {e:#}");
-            return;
-        }
-    };
     if !should_compact(model.as_deref(), used) {
         tracing::debug!(agent = %ctx.agent_name, "idle-compaction: no longer eligible at fire time, skipping");
         return;
@@ -163,7 +173,6 @@ async fn run_compaction(ctx: IdleCompactionCtx) {
         entry.lock_owned().await
     };
 
-    // `model` is the opus[1m] id just verified by `should_compact` above; pin it.
     let args =
         build_compact_invocation(&root_session_id, model, Arc::clone(&ctx.debug)).into_args();
     let mut cmd = match crate::cc::invocation::build_claude_command(
@@ -274,19 +283,8 @@ pub(crate) async fn on_turn_end(ctx: IdleCompactionCtx) {
         cancel(&ctx.compact_timers, ctx.chat_id, ctx.thread_id);
         return;
     }
-    let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: open_connection failed: {e:#}");
-            return;
-        }
-    };
-    let used = match latest_interactive_context_tokens(&conn, ctx.chat_id, ctx.thread_id).await {
-        Ok(v) => v.unwrap_or(0),
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "idle-compaction: fullness query failed: {e:#}");
-            return;
-        }
+    let Some((_conn, used)) = open_and_read_fullness(&ctx).await else {
+        return;
     };
     if should_compact(model.as_deref(), used) {
         arm(ctx);
