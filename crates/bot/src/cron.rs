@@ -738,18 +738,16 @@ async fn execute_job(
             None
         }
     };
-    if exit_status.is_none() {
-        update_failed_run_record(&conn, &run_id, None).await;
-        std::fs::remove_file(&lock_path).ok();
-        return;
-    }
-    let exit_status = exit_status.unwrap();
+    // Best-effort only: the outcome (Task 1) decides success/failure, not the
+    // exit code. A wedged transport leaves `exit_status` None; we still deliver
+    // a Success outcome. ProcessGroupChild::Drop killpg's the group on return.
+    let exit_code: Option<i32> = exit_status.and_then(|s| s.code());
     tracing::debug!(
         job = %job_name,
         child_pid,
-        exit_code = ?exit_status.code(),
+        exit_code = ?exit_code,
         wait_ms = wait_started.elapsed().as_millis() as u64,
-        "post-break: child waited",
+        "post-break: child wait completed (best-effort)",
     );
 
     // stderr is still owned by child — bounded read so a wedged pipe doesn't
@@ -788,17 +786,13 @@ async fn execute_job(
     let stderr_str = String::from_utf8_lossy(&stderr_bytes);
 
     // Determine status (D-02)
-    let exit_code = exit_status.code();
-    let status = if exit_status.success() {
-        "success"
-    } else {
-        tracing::error!(
-            job = %job_name,
-            exit_code = ?exit_code,
-            "cron job subprocess failed"
-        );
-        "failed"
+    let status = match &outcome {
+        CronStreamOutcome::Success { .. } => "success",
+        CronStreamOutcome::Failed { .. } => "failed",
     };
+    if matches!(outcome, CronStreamOutcome::Failed { .. }) {
+        tracing::error!(job = %job_name, exit_code = ?exit_code, "cron job produced no terminal result");
+    }
 
     // The terminal `status='success'` transition is deferred to the success branch
     // below so it stays atomic with the output persist. The failure branch performs
@@ -828,11 +822,12 @@ async fn execute_job(
     tracing::info!(job = %job_name, run_id = %run_id, %status, "cron job completed");
 
     // Parse cron output and persist to DB
-    if exit_status.success() {
-        match parse_cron_output(&collected_lines) {
-            Ok(cron_output) => {
-                // Download attachments from sandbox to host outbox
-                let delivery_json = match &cron_output.delivery {
+    match outcome {
+        CronStreamOutcome::Success { collected_lines } => {
+            match parse_cron_output(&collected_lines) {
+                Ok(cron_output) => {
+                    // Download attachments from sandbox to host outbox
+                    let delivery_json = match &cron_output.delivery {
                     CronDeliveryDecision::Notify {
                         content,
                         attachments: Some(atts),
@@ -884,170 +879,174 @@ async fn execute_job(
                         .ok(),
                 };
 
-                // Persist output and flip status='success' atomically. If either
-                // write fails, roll back and mark the row 'failed' so the operator
-                // sees the run as broken instead of stuck at 'success' with no
-                // delivery payload.
-                if let Some(delivery_json) = delivery_json {
-                    let tx_result: Result<&'static str, right_db::DbError> = async {
+                    // Persist output and flip status='success' atomically. If either
+                    // write fails, roll back and mark the row 'failed' so the operator
+                    // sees the run as broken instead of stuck at 'success' with no
+                    // delivery payload.
+                    if let Some(delivery_json) = delivery_json {
+                        let tx_result: Result<&'static str, right_db::DbError> = async {
+                            let tx = conn.transaction().await?;
+                            let delivery_status = persist_successful_cron_output(
+                                &tx,
+                                &run_id,
+                                &cron_output,
+                                &delivery_json,
+                            )
+                            .await?;
+                            right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "success")
+                                .await?;
+                            tx.commit().await?;
+                            Ok(delivery_status)
+                        }
+                        .await;
+
+                        match tx_result {
+                            Ok(delivery_status) => {
+                                tracing::info!(
+                                    job = %job_name,
+                                    has_notify = matches!(cron_output.delivery, CronDeliveryDecision::Notify { .. }),
+                                    delivery_status,
+                                    silent_reason = cron_output.delivery.silent_reason().unwrap_or("-"),
+                                    "cron output persisted to DB"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    job = %job_name,
+                                    "failed to persist cron output atomically; marking run failed: {e:#}"
+                                );
+                                update_failed_run_record(&conn, &run_id, exit_code).await;
+                            }
+                        }
+                    } else {
+                        tracing::error!(
+                            job = %job_name,
+                            "failed to produce delivery_json; marking run failed"
+                        );
+                        update_failed_run_record(&conn, &run_id, exit_code).await;
+                    }
+                }
+                Err(reason) => {
+                    tracing::warn!(job = %job_name, reason, "failed to parse cron output");
+                    let error_json_str = serde_json::json!({
+                        "kind": "cron_parse_failed",
+                        "reason": reason,
+                    })
+                    .to_string();
+                    let tx_result: Result<(), right_db::DbError> = async {
                         let tx = conn.transaction().await?;
-                        let delivery_status = persist_successful_cron_output(
+                        right_agent::async_runs::persist_run_output(
                             &tx,
                             &run_id,
-                            &cron_output,
-                            &delivery_json,
+                            right_agent::async_runs::RunOutput {
+                                run_note: None,
+                                delivery_json: None,
+                                error_json: Some(&error_json_str),
+                                delivery_required: false,
+                            },
                         )
                         .await?;
-                        right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "success")
+                        right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "failed")
                             .await?;
                         tx.commit().await?;
-                        Ok(delivery_status)
+                        Ok(())
                     }
                     .await;
 
-                    match tx_result {
-                        Ok(delivery_status) => {
-                            tracing::info!(
-                                job = %job_name,
-                                has_notify = matches!(cron_output.delivery, CronDeliveryDecision::Notify { .. }),
-                                delivery_status,
-                                silent_reason = cron_output.delivery.silent_reason().unwrap_or("-"),
-                                "cron output persisted to DB"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                job = %job_name,
-                                "failed to persist cron output atomically; marking run failed: {e:#}"
-                            );
-                            update_failed_run_record(&conn, &run_id, exit_code).await;
-                        }
+                    if let Err(e) = tx_result {
+                        tracing::error!(
+                            job = %job_name,
+                            "failed to persist cron parse error atomically: {e:#}"
+                        );
+                        update_failed_run_record(&conn, &run_id, exit_code).await;
                     }
-                } else {
-                    tracing::error!(
-                        job = %job_name,
-                        "failed to produce delivery_json; marking run failed"
-                    );
-                    update_failed_run_record(&conn, &run_id, exit_code).await;
-                }
-            }
-            Err(reason) => {
-                tracing::warn!(job = %job_name, reason, "failed to parse cron output");
-                let error_json_str = serde_json::json!({
-                    "kind": "cron_parse_failed",
-                    "reason": reason,
-                })
-                .to_string();
-                let tx_result: Result<(), right_db::DbError> = async {
-                    let tx = conn.transaction().await?;
-                    right_agent::async_runs::persist_run_output(
-                        &tx,
-                        &run_id,
-                        right_agent::async_runs::RunOutput {
-                            run_note: None,
-                            delivery_json: None,
-                            error_json: Some(&error_json_str),
-                            delivery_required: false,
-                        },
-                    )
-                    .await?;
-                    right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "failed").await?;
-                    tx.commit().await?;
-                    Ok(())
-                }
-                .await;
-
-                if let Err(e) = tx_result {
-                    tracing::error!(
-                        job = %job_name,
-                        "failed to persist cron parse error atomically: {e:#}"
-                    );
-                    update_failed_run_record(&conn, &run_id, exit_code).await;
                 }
             }
         }
-    } else {
-        // Failure path: commit terminal status='failed' before reflection runs.
-        // Reflection then writes its own failure notify via persist_run_output,
-        // which is consistent with status='failed'.
-        update_run_record(&conn, &run_id, exit_code, "failed").await;
-        let exit_str = exit_code.map_or("unknown".to_string(), |c| c.to_string());
-        let raw_detail = find_last_result_line(&collected_lines)
-            .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(String::from))
-            .unwrap_or_else(|| stderr_str.to_string());
-        let raw_content =
-            format!("Cron job `{job_name}` failed (exit code {exit_str}):\n{raw_detail}");
+        CronStreamOutcome::Failed { collected_lines } => {
+            // Failure path: commit terminal status='failed' before reflection runs.
+            // Reflection then writes its own failure notify via persist_run_output,
+            // which is consistent with status='failed'.
+            update_run_record(&conn, &run_id, exit_code, "failed").await;
+            let exit_str = exit_code.map_or("unknown".to_string(), |c| c.to_string());
+            let raw_detail = find_last_result_line(&collected_lines)
+                .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(String::from))
+                .unwrap_or_else(|| stderr_str.to_string());
+            let raw_content =
+                format!("Cron job `{job_name}` failed (exit code {exit_str}):\n{raw_detail}");
 
-        let failure_kind = classify_cron_failure(exit_code, &raw_detail, spec.max_budget_usd, None);
+            let failure_kind =
+                classify_cron_failure(exit_code, &raw_detail, spec.max_budget_usd, None);
 
-        // Best-effort ring buffer: parse last ~5 stream-json lines from collected_lines,
-        // keeping only displayable events. Chronological order (oldest → newest) to
-        // match worker's EventRingBuffer convention.
-        let mut tail_newest_first: Vec<_> = collected_lines
-            .iter()
-            .rev()
-            .take(10)
-            .map(|line| crate::cc::stream::parse_stream_event(line))
-            .filter(|e| {
-                matches!(
-                    e,
-                    crate::cc::stream::StreamEvent::Text(_)
-                        | crate::cc::stream::StreamEvent::Thinking
-                        | crate::cc::stream::StreamEvent::ToolUse { .. }
-                )
-            })
-            .take(5)
-            .collect();
-        tail_newest_first.reverse();
-        let ring_tail: std::collections::VecDeque<_> = tail_newest_first.into();
+            // Best-effort ring buffer: parse last ~5 stream-json lines from collected_lines,
+            // keeping only displayable events. Chronological order (oldest → newest) to
+            // match worker's EventRingBuffer convention.
+            let mut tail_newest_first: Vec<_> = collected_lines
+                .iter()
+                .rev()
+                .take(10)
+                .map(|line| crate::cc::stream::parse_stream_event(line))
+                .filter(|e| {
+                    matches!(
+                        e,
+                        crate::cc::stream::StreamEvent::Text(_)
+                            | crate::cc::stream::StreamEvent::Thinking
+                            | crate::cc::stream::StreamEvent::ToolUse { .. }
+                    )
+                })
+                .take(5)
+                .collect();
+            tail_newest_first.reverse();
+            let ring_tail: std::collections::VecDeque<_> = tail_newest_first.into();
 
-        let refl_ctx = crate::reflection::ReflectionContext {
-            session_uuid: run_id.clone(),
-            failure: failure_kind,
-            ring_buffer_tail: ring_tail,
-            limits: crate::reflection::ReflectionLimits::CRON,
-            agent_name: agent_name.to_string(),
-            agent_dir: agent_dir.to_path_buf(),
-            ssh_config_path: ssh_config_path.map(std::path::PathBuf::from),
-            resolved_sandbox: resolved_sandbox.map(String::from),
-            parent_source: crate::reflection::ParentSource::Cron {
-                job_name: job_name.to_string(),
-            },
-            model: model.map(String::from),
-            debug: Some(std::sync::Arc::clone(&debug)),
-        };
+            let refl_ctx = crate::reflection::ReflectionContext {
+                session_uuid: run_id.clone(),
+                failure: failure_kind,
+                ring_buffer_tail: ring_tail,
+                limits: crate::reflection::ReflectionLimits::CRON,
+                agent_name: agent_name.to_string(),
+                agent_dir: agent_dir.to_path_buf(),
+                ssh_config_path: ssh_config_path.map(std::path::PathBuf::from),
+                resolved_sandbox: resolved_sandbox.map(String::from),
+                parent_source: crate::reflection::ParentSource::Cron {
+                    job_name: job_name.to_string(),
+                },
+                model: model.map(String::from),
+                debug: Some(std::sync::Arc::clone(&debug)),
+            };
 
-        let reflected_content = match crate::reflection::reflect_on_failure(refl_ctx).await {
-            Ok(text) => {
-                tracing::info!(job = %job_name, "cron reflection reply produced");
-                text
-            }
-            Err(e) => {
-                tracing::warn!(job = %job_name, "cron reflection failed: {e:#}; using raw content");
-                raw_content
-            }
-        };
-
-        match notify_delivery_json(&reflected_content, None) {
-            Ok(json) => {
-                if let Err(e) = right_agent::async_runs::persist_run_output(
-                    &conn,
-                    &run_id,
-                    right_agent::async_runs::RunOutput {
-                        run_note: Some("failed"),
-                        delivery_json: Some(&json),
-                        error_json: None,
-                        delivery_required: true,
-                    },
-                )
-                .await
-                {
-                    tracing::error!(job = %job_name, "failed to persist failure notify to DB: {e:#}");
+            let reflected_content = match crate::reflection::reflect_on_failure(refl_ctx).await {
+                Ok(text) => {
+                    tracing::info!(job = %job_name, "cron reflection reply produced");
+                    text
                 }
-            }
-            Err(e) => {
-                tracing::error!(job = %job_name, "failed to serialize failure notify: {e:#}");
+                Err(e) => {
+                    tracing::warn!(job = %job_name, "cron reflection failed: {e:#}; using raw content");
+                    raw_content
+                }
+            };
+
+            match notify_delivery_json(&reflected_content, None) {
+                Ok(json) => {
+                    if let Err(e) = right_agent::async_runs::persist_run_output(
+                        &conn,
+                        &run_id,
+                        right_agent::async_runs::RunOutput {
+                            run_note: Some("failed"),
+                            delivery_json: Some(&json),
+                            error_json: None,
+                            delivery_required: true,
+                        },
+                    )
+                    .await
+                    {
+                        tracing::error!(job = %job_name, "failed to persist failure notify to DB: {e:#}");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(job = %job_name, "failed to serialize failure notify: {e:#}");
+                }
             }
         }
     }
@@ -1088,16 +1087,13 @@ fn find_last_result_line(lines: &[String]) -> Option<&str> {
 #[derive(Debug)]
 pub(crate) enum CronStreamOutcome {
     /// A terminal top-level `{"type":"result"}` event was observed (the loop
-    /// broke on it, or it was found at EOF). `result_line` is its raw JSON.
-    Success {
-        result_line: String,
-        collected_lines: Vec<String>,
-    },
+    /// broke on it, or it was found at EOF).
+    Success { collected_lines: Vec<String> },
     /// Stdout reached EOF without a terminal `result` event.
     Failed { collected_lines: Vec<String> },
 }
 
-/// Return the line iff it is the terminal top-level CC result event.
+/// Return `true` iff the line is the terminal top-level CC result event.
 ///
 /// CC emits exactly one top-level `{"type":"result"}` summary at the end of a
 /// turn. Sub-agent (Task tool) results arrive as nested `assistant`/`user`
@@ -1105,15 +1101,17 @@ pub(crate) enum CronStreamOutcome {
 /// terminal; the `parent_tool_use_id` absent/null check is defense-in-depth.
 ///
 /// This shares the `type == "result"` test with [`find_last_result_line`] but
-/// deliberately differs: this helper adds the top-level `parent_tool_use_id`
-/// guard and is forward/owning (it drives the live break-on-terminal loop),
-/// while `find_last_result_line` is reverse/borrowing for `parse_cron_output`'s
+/// deliberately differs: this predicate adds the top-level `parent_tool_use_id`
+/// guard and is forward (it drives the live break-on-terminal loop), while
+/// `find_last_result_line` is reverse/borrowing for `parse_cron_output`'s
 /// fallback. A future change to "what counts as a result" likely touches both.
-fn terminal_result_line(line: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+fn is_terminal_result_line(line: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
     let is_result = v.get("type").and_then(|t| t.as_str()) == Some("result");
     let top_level = v.get("parent_tool_use_id").is_none_or(|p| p.is_null());
-    (is_result && top_level).then(|| line.to_string())
+    is_result && top_level
 }
 
 /// Consume the cron CC subprocess stdout line-by-line and classify the outcome.
@@ -1130,23 +1128,21 @@ pub(crate) async fn consume_cron_stream(
     let mut lines = tokio::io::BufReader::new(stdout).lines();
 
     let mut collected_lines: Vec<String> = Vec::new();
-    let mut result_line: Option<String> = None;
+    let mut saw_terminal_result = false;
     while let Ok(Some(line)) = lines.next_line().await {
-        if result_line.is_none() {
-            result_line = terminal_result_line(&line);
+        if !saw_terminal_result && is_terminal_result_line(&line) {
+            saw_terminal_result = true;
         }
         collected_lines.push(line);
-        if result_line.is_some() {
+        if saw_terminal_result {
             break; // terminal result seen — do not wait for EOF
         }
     }
 
-    match result_line {
-        Some(result_line) => CronStreamOutcome::Success {
-            result_line,
-            collected_lines,
-        },
-        None => CronStreamOutcome::Failed { collected_lines },
+    if saw_terminal_result {
+        CronStreamOutcome::Success { collected_lines }
+    } else {
+        CronStreamOutcome::Failed { collected_lines }
     }
 }
 
@@ -2328,8 +2324,11 @@ mod target_snapshot_tests {
             .expect("consume_cron_stream must return without waiting for EOF");
 
         match outcome {
-            CronStreamOutcome::Success { result_line, .. } => {
-                assert!(result_line.contains("UNIT-OK"), "got: {result_line}");
+            CronStreamOutcome::Success { collected_lines } => {
+                assert!(
+                    collected_lines.iter().any(|l| l.contains("UNIT-OK")),
+                    "got: {collected_lines:?}"
+                );
             }
             other => panic!("expected Success, got {other:?}"),
         }
@@ -2601,17 +2600,10 @@ sleep 120"#;
         );
 
         match outcome {
-            CronStreamOutcome::Success {
-                result_line,
-                collected_lines,
-            } => {
-                assert!(
-                    result_line.contains("REPRO-OK"),
-                    "expected terminal result line carrying REPRO-OK, got: {result_line}"
-                );
+            CronStreamOutcome::Success { collected_lines } => {
                 assert!(
                     collected_lines.iter().any(|l| l.contains("REPRO-OK")),
-                    "collected_lines should contain the REPRO-OK result line"
+                    "collected_lines should contain the REPRO-OK result line, got: {collected_lines:?}"
                 );
             }
             other => panic!("expected Success with REPRO-OK result, got: {other:?}"),
