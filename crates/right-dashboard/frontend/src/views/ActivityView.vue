@@ -1,17 +1,25 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue'
+
 import AsyncState from '../components/AsyncState.vue'
+import CollapsibleSection from '../components/CollapsibleSection.vue'
 import MetricCard from '../components/MetricCard.vue'
+import RunFailureList from '../components/RunFailureList.vue'
 import StatusPill from '../components/StatusPill.vue'
+import { failureMetric } from '../components/failureMetric'
 import { deliveryLabel, deliveryTone, money, notifyText, shortDate, shortId, statusTone } from '../format'
 import type { CronCard, OverviewResponse, RunDetailResponse, RunSummary } from '../types'
 
-defineProps<{
+const props = defineProps<{
   overview: OverviewResponse | null
   selectedRun: RunDetailResponse | null
   selectedRunId: string | null
   loadingDetail: boolean
   detailError: string | null
 }>()
+
+const failuresOpen = ref(false)
+const failures = computed(() => failureMetric(props.overview?.summary.failed_recent_cron_count ?? 0))
 
 const emit = defineEmits<{
   selectRun: [run: RunSummary]
@@ -27,9 +35,24 @@ function cronStatus(cron: CronCard): string {
   <section class="metric-grid">
     <MetricCard label="Jobs" :value="overview?.summary.cron_count ?? 0" />
     <MetricCard label="Running" :value="overview?.summary.active_cron_count ?? 0" tone="active" />
-    <MetricCard label="Failures" :value="overview?.summary.failed_recent_cron_count ?? 0" tone="bad" />
+    <MetricCard
+      label="Failures"
+      :value="overview?.summary.failed_recent_cron_count ?? 0"
+      :tone="failures.tone"
+      :interactive="failures.interactive"
+      @select="failuresOpen = !failuresOpen"
+    />
     <MetricCard label="Today" :value="money(overview?.summary.today_cost_usd)" />
   </section>
+
+  <CollapsibleSection
+    v-if="(overview?.summary.failed_recent_cron_count ?? 0) > 0"
+    v-model:open="failuresOpen"
+    title="Failures"
+    :count="overview?.summary.failed_recent_cron_count ?? 0"
+  >
+    <RunFailureList :runs="overview?.failed_runs ?? []" />
+  </CollapsibleSection>
 
   <section class="two-column wide-main">
     <section class="list-stack">
