@@ -102,11 +102,16 @@ is removed.
   returning. (Auth path already `warn`s; success already `info`s.) Dev bots
   run with `--debug`, so this makes every attempt visible.
 - **Per-backend last-attempt fields.** Add to `ProxyBackend` three
-  in-memory fields behind `RwLock`: `last_attempt_at: Option<OffsetDateTime>`,
-  `last_success_at: Option<OffsetDateTime>`, `last_connect_error: Option<String>`.
-  Written on every `connect()` outcome. The error text is `{e:#}`
-  (transport/protocol detail: host:port, status codes) — **never** header
-  values or tokens.
+  in-memory fields behind `RwLock`:
+  `last_attempt_at: Option<chrono::DateTime<chrono::Utc>>`,
+  `last_success_at: Option<chrono::DateTime<chrono::Utc>>`,
+  `last_connect_error: Option<String>` (chrono is already a `right-mcp`
+  dependency). Written on every `connect()` outcome. The error text is
+  `{e:#}` (transport/protocol detail: host:port, status codes) — **never**
+  header values or tokens. Because `query_string`-auth embeds the token in
+  the URL and rmcp transport errors can quote the URL, the recorded/logged
+  error is passed through a `redact_query_strings` helper that strips `?…`
+  query portions from URL-like substrings.
 - **Reconciler logs transitions, not every probe.** Replace
   `let _ = … connect()` (`health.rs:125`) with a captured result. A failed
   reconnect that leaves the backend `Unreachable` logs at `debug` (no 20s
