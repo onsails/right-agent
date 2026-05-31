@@ -136,3 +136,32 @@ fn ensure_skips_when_profile_already_mentions_bindir() {
         EnsureOutcome::AlreadyOnPath
     );
 }
+
+#[test]
+fn ensure_writes_both_bashrc_and_profile_when_both_exist() {
+    let home = tempdir().unwrap();
+    let bindir = home.path().join(".local/bin");
+    std::fs::write(home.path().join(".bashrc"), "# existing bashrc\n").unwrap();
+    std::fs::write(home.path().join(".profile"), "# existing profile\n").unwrap();
+
+    let outcome = ensure_on_path(&bindir, home.path(), Some("/bin/bash")).unwrap();
+    // Primary (first written) is .bashrc.
+    assert_eq!(
+        outcome,
+        EnsureOutcome::Wrote {
+            file: home.path().join(".bashrc")
+        }
+    );
+
+    for rc in [".bashrc", ".profile"] {
+        let content = std::fs::read_to_string(home.path().join(rc)).unwrap();
+        assert!(
+            content.contains(BLOCK_START),
+            "{rc} should contain the managed block"
+        );
+        assert!(
+            content.contains(&*bindir.to_string_lossy()),
+            "{rc} should mention bindir"
+        );
+    }
+}

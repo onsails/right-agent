@@ -185,7 +185,7 @@ pub fn ensure_on_path(
         if let Err(e) = write_block(rc, bindir, shell) {
             return Ok(EnsureOutcome::CouldNotWrite {
                 file: rc.clone(),
-                reason: format!("{e}"),
+                reason: format!("{e:#}"),
             });
         }
     }
