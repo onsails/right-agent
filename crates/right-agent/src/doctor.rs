@@ -347,6 +347,10 @@ async fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
                 chk.name = format!("{name}/{}", chk.name);
                 checks.push(chk);
             }
+            for mut chk in check_cron_runs(&path).await {
+                chk.name = format!("{name}/{}", chk.name);
+                checks.push(chk);
+            }
         }
     }
 
@@ -1145,6 +1149,61 @@ pub async fn check_cron_targets(agent_dir: &Path) -> Vec<DoctorCheck> {
             name: "cron targets".into(),
             status: CheckStatus::Pass,
             detail: format!("{total} cron(s) with valid targets"),
+            fix: None,
+        });
+    }
+    out
+}
+
+/// List cron runs still `status='running'` in this agent's `data.db`.
+///
+/// Informational only (no staleness threshold): a long-running row may be a
+/// detached sandbox orphan or the rare no-result tail — we show the start time
+/// and let the operator judge. Emits nothing when no run is in flight.
+///
+/// The read path is fail-soft: an unreadable DB or query error returns an empty
+/// Vec rather than a check, because `check_memory` already surfaces an
+/// unreadable `data.db` as a `Fail`. This check exists only to make an in-flight
+/// run visible, so the absence of a readable DB is not its concern.
+pub async fn check_cron_runs(agent_dir: &Path) -> Vec<DoctorCheck> {
+    let conn = match right_db::open_connection(agent_dir, false).await {
+        Ok(c) => c,
+        Err(_) => return Vec::new(), // unreadable DB is covered by check_memory
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT producer_ref, started_at FROM async_runs \
+         WHERE kind = 'cron' AND status = 'running' \
+         ORDER BY started_at",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = match stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for row in rows {
+        // Best-effort informational read: a row-decode error is deliberately
+        // skipped (both columns are nullable TEXT, so a decode error is
+        // near-impossible, and an unreadable DB is already surfaced as Fail by
+        // check_memory). Skipping one bad row is the right behavior for a list view.
+        let Ok((job, started_at)) = row else { continue };
+        let job = job.unwrap_or_else(|| "<unknown>".into());
+        let started = started_at.unwrap_or_else(|| "<unknown>".into());
+        out.push(DoctorCheck {
+            name: "cron run".to_string(),
+            status: CheckStatus::Pass,
+            detail: format!("{job} running since {started}"),
             fix: None,
         });
     }
