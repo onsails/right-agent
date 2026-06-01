@@ -3,10 +3,17 @@
 //! Read path: the `errdet:<id>` callback handler looks it up (scoped by
 //! chat_id) and replies with the JSON.
 
-use right_db::{Connection, DbError, OptionalExtension as _};
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+use std::sync::Arc;
 
-use crate::cc::markdown_utils::html_escape;
+use right_db::{Connection, DbError, OptionalExtension as _};
+use teloxide::prelude::*;
+use teloxide::types::{
+    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ParseMode,
+    ReplyParameters,
+};
+
+use super::handler::AgentDir;
+use crate::cc::markdown_utils::{html_escape, strip_html_tags};
 
 /// Days a stored error detail is retained before the next insert sweeps it.
 pub(crate) const ERROR_DETAILS_TTL_DAYS: i64 = 7;
@@ -92,6 +99,91 @@ pub(crate) async fn get_error_detail(
     )
     .await
     .optional()
+}
+
+/// Handle `errdet:<id>` callback queries: reply with the stored raw error JSON,
+/// scoped to the clicking chat. Callback data format: `errdet:{row_id}`.
+pub(crate) async fn handle_error_details_callback(
+    bot: super::BotType,
+    q: CallbackQuery,
+    agent_dir: Arc<AgentDir>,
+) -> ResponseResult<()> {
+    let qid = q.id.clone();
+
+    // Resolve id + chat from the callback. Missing message or bad id → alert.
+    let id = q.data.as_deref().and_then(parse_errdet_id);
+    let chat = q.message.as_ref().map(|m| m.chat().id);
+    let reply_to_msg_id = q.message.as_ref().map(|m| m.id());
+
+    let (Some(id), Some(chat), Some(reply_to_msg_id)) = (id, chat, reply_to_msg_id) else {
+        bot.answer_callback_query(qid)
+            .text("Details no longer available.")
+            .show_alert(true)
+            .await?;
+        return Ok(());
+    };
+
+    // Open the per-agent DB (no migration on runtime opens) and fetch, scoped.
+    let raw = match right_db::open_connection(&agent_dir.0, false).await {
+        Ok(conn) => match get_error_detail(&conn, id, chat.0).await {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::error!(chat_id = chat.0, "get_error_detail failed: {:#}", e);
+                None
+            }
+        },
+        Err(e) => {
+            tracing::error!(chat_id = chat.0, "open_connection failed: {:#}", e);
+            None
+        }
+    };
+
+    let Some(raw) = raw else {
+        bot.answer_callback_query(qid)
+            .text("Details no longer available.")
+            .show_alert(true)
+            .await?;
+        return Ok(());
+    };
+
+    // Reply to the button's message (a reply auto-stays in the same topic).
+    match details_payload(&raw) {
+        DetailsPayload::Inline(html) => {
+            let send = bot
+                .send_message(chat, &html)
+                .parse_mode(ParseMode::Html)
+                .reply_parameters(ReplyParameters {
+                    message_id: reply_to_msg_id,
+                    ..Default::default()
+                });
+            if let Err(e) = send.await {
+                tracing::warn!(chat_id = chat.0, "details HTML send failed, plain: {:#}", e);
+                let _ = bot
+                    .send_message(chat, strip_html_tags(&html))
+                    .reply_parameters(ReplyParameters {
+                        message_id: reply_to_msg_id,
+                        ..Default::default()
+                    })
+                    .await;
+            }
+        }
+        DetailsPayload::File(bytes) => {
+            let file = InputFile::memory(bytes).file_name("error.json");
+            if let Err(e) = bot
+                .send_document(chat, file)
+                .reply_parameters(ReplyParameters {
+                    message_id: reply_to_msg_id,
+                    ..Default::default()
+                })
+                .await
+            {
+                tracing::warn!(chat_id = chat.0, "details document send failed: {:#}", e);
+            }
+        }
+    }
+
+    bot.answer_callback_query(qid).await?;
+    Ok(())
 }
 
 #[cfg(test)]
