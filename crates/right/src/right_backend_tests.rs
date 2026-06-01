@@ -1778,6 +1778,31 @@ async fn forum_topic_create_rejects_empty_name() {
     assert_eq!(body["error"]["code"], "invalid_argument");
 }
 
+#[tokio::test]
+async fn forum_topic_edit_rejects_blank_name() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "forum_topic_edit",
+            serde_json::json!({ "message_thread_id": 5, "name": "   " }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "blank edit name must be a tool error"
+    );
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+}
+
 // ---------------------------------------------------------------------------
 // cron_update — target_chat_id + target_thread_id (Task 7)
 // ---------------------------------------------------------------------------
