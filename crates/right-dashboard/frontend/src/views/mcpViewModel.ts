@@ -151,6 +151,20 @@ export function mcpStatusDetail(server: McpStatusDetailInput, now: Date): string
   return parts.length > 0 ? parts.join(' · ') : null
 }
 
+export const PLAINTEXT_HTTP_WARNING =
+  'This server uses plaintext http:// — credentials are sent without TLS encryption. Safe only if the transport is otherwise encrypted (e.g. Tailscale/WireGuard) or a trusted LAN. Press Save again to proceed.'
+
+export function evaluateHttpUrlSubmit(
+  url: string,
+  alreadyWarned: boolean,
+): { proceed: boolean; warning: string | null } {
+  const isPlaintextHttp = /^http:\/\//i.test(url.trim())
+  if (isPlaintextHttp && !alreadyWarned) {
+    return { proceed: false, warning: PLAINTEXT_HTTP_WARNING }
+  }
+  return { proceed: true, warning: null }
+}
+
 export function oauthStatusMessage(status: McpOAuthStatusResponse): string {
   if (status.message) {
     return status.message
