@@ -116,7 +116,7 @@ fn system_prompt_mentions_right_mcp() {
 }
 
 #[test]
-fn system_prompt_delegates_remember_routing_to_right_memory_skill() {
+fn system_prompt_keeps_identity_framing_without_remember_routing() {
     let result = generate_system_prompt(
         "test",
         &right_agent_config::SandboxMode::Openshell,
@@ -127,21 +127,23 @@ fn system_prompt_delegates_remember_routing_to_right_memory_skill() {
         "Identity files are always-loaded durable context",
         "`SOUL.md`",
         "agent-authored durable voice",
-        "/right-memory",
     ] {
         assert!(
             result.contains(needle),
-            "system prompt must preserve identity ownership and right-memory delegation: missing {needle:?}"
+            "base prompt must preserve identity-file framing: missing {needle:?}"
         );
     }
 
     for forbidden in [
         concat!("compact ", "operating contract"),
         "\"Remember\" requests are routed by semantic type before storage. Tool/API/env rules go to",
+        // remember -> /right-memory routing is operating-only; it must NOT live
+        // in the base prompt, because Bootstrap mode omits OPERATING_INSTRUCTIONS.
+        "/right-memory",
     ] {
         assert!(
             !result.contains(forbidden),
-            "system prompt must not duplicate detailed routing or prescribe SOUL defaults: found {forbidden:?}"
+            "base prompt must not carry operating-only routing or prescribe SOUL defaults: found {forbidden:?}"
         );
     }
 }
