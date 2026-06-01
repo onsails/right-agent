@@ -117,7 +117,10 @@ pub(crate) async fn handle_mcp_detect(
         Ok(request) => request,
         Err(response) => return response,
     };
-    if !right_mcp::ssrf::is_public_http_url(&request.url) {
+    if !right_mcp::ssrf::is_allowed_http_url(
+        &request.url,
+        right_mcp::ssrf::NetworkPolicy::AllowPrivate,
+    ) {
         return json_error(
             StatusCode::BAD_REQUEST,
             "invalid_url",
@@ -188,7 +191,10 @@ pub(crate) async fn handle_mcp_add(
         Ok(request) => request,
         Err(response) => return response,
     };
-    if !right_mcp::ssrf::is_public_http_url(&request.url) {
+    if !right_mcp::ssrf::is_allowed_http_url(
+        &request.url,
+        right_mcp::ssrf::NetworkPolicy::AllowPrivate,
+    ) {
         return json_error(
             StatusCode::BAD_REQUEST,
             "invalid_url",
@@ -458,7 +464,7 @@ pub(crate) async fn handle_mcp_remove(
 }
 
 fn detection_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    right_mcp::ssrf::hardened_client_builder(right_mcp::ssrf::NetworkPolicy::PublicOnly)
+    right_mcp::ssrf::hardened_client_builder(right_mcp::ssrf::NetworkPolicy::AllowPrivate)
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(15))
         .build()
