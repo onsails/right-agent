@@ -1130,15 +1130,20 @@ impl RightBackend {
                 ));
             }
         };
-        if let Some(name) = params.name.as_deref() {
-            if name.chars().count() > 128 {
-                return Ok(tool_error(
-                    "invalid_argument",
-                    "topic name must be at most 128 characters",
-                    None,
-                ));
+        let trimmed_name = match params.name.as_deref() {
+            Some(raw) => {
+                let t = raw.trim();
+                if t.is_empty() || t.chars().count() > 128 {
+                    return Ok(tool_error(
+                        "invalid_argument",
+                        "topic name must be 1–128 characters",
+                        None,
+                    ));
+                }
+                Some(t.to_owned())
             }
-        }
+            None => None,
+        };
         let Some(invocation_id) = context.invocation_id else {
             return Ok(forum_scope_unavailable());
         };
@@ -1151,7 +1156,7 @@ impl RightBackend {
             invocation_id,
             token: target.bot_send_token,
             message_thread_id: params.message_thread_id,
-            name: params.name.clone(),
+            name: trimmed_name.clone(),
             icon_custom_emoji_id: params.icon_custom_emoji_id.clone(),
         };
         match tokio::time::timeout(FORUM_TOPIC_TIMEOUT, client.forum_topic_edit(&request)).await {
@@ -1165,7 +1170,7 @@ impl RightBackend {
             &conn,
             target.chat_id,
             i64::from(params.message_thread_id),
-            params.name.as_deref(),
+            trimmed_name.as_deref(),
             params.icon_custom_emoji_id.as_deref(),
         )
         .await
@@ -1184,6 +1189,7 @@ impl RightBackend {
             context,
             args,
             right_db::forum_topics::ForumTopicState::Closed,
+            "forum_topic_close",
         )
         .await
     }
@@ -1199,6 +1205,7 @@ impl RightBackend {
             context,
             args,
             right_db::forum_topics::ForumTopicState::Open,
+            "forum_topic_reopen",
         )
         .await
     }
@@ -1210,13 +1217,14 @@ impl RightBackend {
         context: crate::progress::ToolCallContext,
         args: &serde_json::Value,
         new_state: right_db::forum_topics::ForumTopicState,
+        tool: &str,
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: ForumTopicThreadParams = match serde_json::from_value(args.clone()) {
             Ok(p) => p,
             Err(e) => {
                 return Ok(tool_error(
                     "invalid_argument",
-                    format!("invalid params: {e:#}"),
+                    format!("invalid {tool} params: {e:#}"),
                     None,
                 ));
             }
