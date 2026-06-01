@@ -318,6 +318,72 @@ pub(crate) async fn bring_up_sandbox(
     }))
 }
 
+/// Hot-apply a `sandbox.providers` change to a live sandbox without a restart.
+///
+/// Re-renders the provider-aware policy (network-only, via
+/// `openshell policy set --wait`) and reconciles gateway attach/detach. Used by
+/// the config-watcher providers hot path. The supervisor recovery loop is the
+/// fallback if this fails.
+// wired by config_watcher consumer in lib.rs (Task 6)
+#[allow(dead_code)]
+pub(crate) async fn hot_reconcile_providers(
+    agent: &str,
+    agent_dir: &std::path::Path,
+    resolved_sandbox: &str,
+    config: &AgentConfig,
+) -> miette::Result<()> {
+    let policy_path = config
+        .resolve_policy_path(agent_dir)?
+        .ok_or_else(|| miette::miette!(
+            "sandbox mode is openshell but no policy path resolved — check sandbox.policy_file in agent.yaml"
+        ))?;
+
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
+    let sandbox_id =
+        right_openshell::openshell::resolve_sandbox_id(&mut client, resolved_sandbox).await?;
+    let host_ips = right_openshell::openshell::resolve_host_ips(&mut client, &sandbox_id).await?;
+
+    let providers = config
+        .sandbox
+        .as_ref()
+        .map(|s| s.providers.as_slice())
+        .unwrap_or(&[]);
+    let policy_content = right_codegen::policy::apply_provider_stanzas(
+        &right_codegen::policy::generate_policy(
+            right_runtime_state::MCP_HTTP_PORT,
+            &config.network_policy,
+            right_codegen::policy::HostMcpAccess::Resolved(host_ips),
+        ),
+        providers,
+    )
+    .map_err(|e| miette::miette!("provider policy fold failed: {e:#}"))?;
+
+    right_codegen::contract::write_and_apply_sandbox_policy(
+        resolved_sandbox,
+        &policy_path,
+        &policy_content,
+    )
+    .await?;
+
+    let declared: Vec<String> = providers.iter().map(|p| p.name.clone()).collect();
+    let report = right_openshell::providers::reconcile_for_sandbox(
+        &mut client,
+        resolved_sandbox,
+        agent,
+        &declared,
+    )
+    .await
+    .map_err(|e| miette::miette!("provider reconcile failed: {e:#}"))?;
+    tracing::info!(
+        agent = %agent,
+        attached = ?report.attached,
+        detached = ?report.detached,
+        "providers hot-reconcile complete"
+    );
+    Ok(())
+}
+
 /// Recovery backoff schedule, in seconds. Consecutive failed bring-up attempts
 /// advance through this table; the last value repeats indefinitely. A success
 /// resets the counter to 0.
