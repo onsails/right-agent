@@ -51,11 +51,31 @@ poll, not read once (see `ci_openshell_provider.rs::poll_sandbox_env`).
 When the agent makes an HTTPS request through the gateway proxy
 (`HTTPS_PROXY=10.200.0.1:3128`, injected at sandbox boot), the proxy
 substitutes the placeholder with the real credential before forwarding
-upstream. Substitution happens after TLS termination, so the policy
-endpoint must use `protocol: rest` (auto-TLS-terminate) or explicit
-`tls: terminate`. If the placeholder is sent to a raw-tunnel endpoint
-(`tls: skip`), the proxy cannot resolve it and rejects the request with
-HTTP 500 — never forwarding the raw placeholder.
+upstream. Substitution happens **after TLS termination**, so the request
+must hit a TLS-terminated L7 endpoint (`protocol: rest`, auto-detected —
+do not write the deprecated `tls: terminate`). If the request is instead
+handled by a raw-tunnel endpoint (`tls: skip`), the proxy never
+terminates TLS and never inspects the request, so it forwards the bytes
+**verbatim**: the opaque placeholder string reaches the upstream and the
+API rejects it (typically `401`). The real credential is never exposed —
+only the meaningless `openshell:resolve:env:...` token leaks. (Empirically
+confirmed on a throwaway sandbox: the upstream cert was the real CA, not
+the per-sandbox OpenShell CA, and the placeholder was echoed back
+unchanged.)
+
+**Endpoint ordering is load-bearing.** OpenShell evaluates
+`network_policies.outbound.endpoints` in order. In permissive mode the
+hostless `tls: skip` catch-all (ports 443/80, broad `allowed_ips`) would,
+if it appeared first, IP-match and raw-tunnel every provider host —
+stranding the placeholder exactly as above. Provider host L7 endpoints
+are therefore emitted **before** the catch-all: the
+`# right-providers: insert-above` anchor sits at the **top** of the
+endpoints list in `permissive_endpoints()`
+(`crates/right-codegen/src/policy.rs`), so appended stanzas precede the
+catch-all and win the match. IP carve-out alone does not help — removing
+the covering range while the catch-all stays first turns the leak into a
+CONNECT 403. `permissive_provider_endpoint_precedes_tls_skip_catch_all`
+enforces this.
 
 ## State of truth split
 
@@ -110,11 +130,14 @@ On create or upstream-host change:
 1. Load current `policy.yaml`.
 
 The new stanza is inserted at the sentinel anchor
-`# right-providers: insert-above` emitted inside
+`# right-providers: insert-above` emitted at the **top** of
 `network_policies.outbound.endpoints` by `generate_policy(Permissive)`.
-This anchor pins generic provider stanzas to the outbound (permissive)
-section; without it, a naive "find first `endpoints:`" heuristic would
-land in whichever sub-section appears first under `network_policies:`.
+The anchor's position is load-bearing twice over: it pins generic
+provider stanzas to the outbound (permissive) section (without it, a
+naive "find first `endpoints:`" heuristic would land in whichever
+sub-section appears first under `network_policies:`), and it places them
+*before* the hostless `tls: skip` catch-all so the proxy TLS-terminates
+and substitutes (see "Endpoint ordering is load-bearing" above).
 
 2. Look for an existing `endpoints[]` entry matching `upstream_host`.
    - Absent → append a new stanza: `host: <host>`, `port: 443`,
