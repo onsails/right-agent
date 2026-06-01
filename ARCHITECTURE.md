@@ -230,14 +230,19 @@ See [Upgrade & Migration Model](#upgrade--migration-model) for category
 definitions.
 
 **Hot-reloadable fields in `agent.yaml`.** Most fields trigger a graceful
-restart on change (via `config_watcher`). Two exceptions: `model` and
-`debug`. The watcher's smart-diff classifies a `model`/`debug`-only change
-as hot-reloadable and stores the new values into `AgentSettings.model`
-(an `Arc<ArcSwap<...>>`) and `AgentSettings.debug` (an `Arc<AtomicBool>`)
-without restarting. The Telegram `/model` and `/debug` commands exploit
-this path — in-flight CC subprocesses keep their old flags; the next
-invocation in any chat picks up the new value. Adding more hot-reloadable
-fields requires extending the diff in
+restart on change (via `config_watcher`). Three exceptions: `model`,
+`debug`, and `sandbox.providers`. The watcher's smart-diff classifies a
+`model`/`debug`-only change as hot-reloadable and stores the new values
+into `AgentSettings.model` (an `Arc<ArcSwap<...>>`) and
+`AgentSettings.debug` (an `Arc<AtomicBool>`) without restarting. A
+`sandbox.providers`-only change (Stage B of the diff) is classified
+`ProvidersReload`: it applies model/debug in-memory and signals an async
+`sandbox_supervisor::hot_reconcile_providers` (provider-aware policy
+re-apply via `openshell policy set --wait` + gateway attach/detach
+reconcile) instead of restarting. The Telegram `/model` and `/debug`
+commands exploit the hot-reload path — in-flight CC subprocesses keep
+their old flags; the next invocation in any chat picks up the new value.
+Adding more hot-reloadable fields requires extending the two-stage diff in
 `crates/bot/src/config_watcher.rs::diff_classify`.
 
 ### Skill learning

@@ -139,6 +139,32 @@ same `upstream_host`, strip the tagged stanza and hot-apply. The strip
 is idempotent — if the tag is absent, the policy is returned
 unchanged.
 
+### Durability across full regen
+
+The Path-B on-add mutation above patches a single stanza onto the live
+policy, but a full `policy.yaml` regeneration (bot start, `right
+restart`, host reboot, the supervisor recovery loop, or a
+`config_watcher` restart) rebuilds the file from scratch. To stop
+generic-provider stanzas from being wiped on every regen — which strands
+the credential placeholder on a raw tunnel and surfaces as an upstream
+401 — **every** full regen MUST fold providers back in via
+`right_codegen::policy::apply_provider_stanzas(&generate_policy(...),
+providers)`. Callsites: `sandbox_supervisor::bring_up_sandbox`,
+`right_codegen::pipeline::run_single_agent_codegen`, and the
+`right/src/main.rs` init helpers (`write_bootstrap_right_mcp_policy`,
+`apply_exact_right_mcp_policy_for_sandbox`). `apply_provider_stanzas`
+is a no-op on a restrictive (anchorless) policy and idempotent on an
+already-folded one. The network policy is thus reconstructable from
+`agent.yaml` alone.
+
+A `sandbox.providers`-only edit to `agent.yaml` no longer forces a
+restart: `config_watcher` classifies it `ProvidersReload` and signals
+`sandbox_supervisor::hot_reconcile_providers`, which re-renders the
+provider-aware policy with resolved host IPs, hot-applies it (`openshell
+policy set --wait`), and reconciles gateway attach/detach. If that hot
+path fails, the supervisor recovery loop re-applies the same
+provider-aware policy on its next bring-up, so the agent self-heals.
+
 ## Lifecycle
 
 **Create.** Generic providers run: write policy.yaml (with snapshot)
