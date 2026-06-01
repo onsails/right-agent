@@ -133,6 +133,7 @@ pub(crate) fn spawn_config_watcher(
     model_swap: Arc<ArcSwap<Option<String>>>,
     debug_flag: Arc<AtomicBool>,
     initial_debug: bool,
+    providers_tx: tokio::sync::mpsc::UnboundedSender<Box<AgentConfig>>,
 ) -> miette::Result<()> {
     use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
     use std::sync::mpsc;
@@ -217,11 +218,26 @@ pub(crate) fn spawn_config_watcher(
                             token.cancel();
                             return;
                         }
-                        ChangeKind::ProvidersReload { .. } => {
-                            // Wired in Task 5; restart for now so behavior is unchanged.
-                            config_changed.store(true, Ordering::Release);
-                            token.cancel();
-                            return;
+                        ChangeKind::ProvidersReload {
+                            new_model,
+                            new_debug,
+                            new_config,
+                        } => {
+                            tracing::info!(
+                                providers = new_config
+                                    .sandbox
+                                    .as_ref()
+                                    .map(|s| s.providers.len())
+                                    .unwrap_or(0),
+                                "agent.yaml: providers-only change — hot reconcile without restart"
+                            );
+                            model_swap.store(Arc::new(new_model));
+                            debug_flag.store(new_debug.unwrap_or(initial_debug), Ordering::Release);
+                            if let Err(e) = providers_tx.send(new_config) {
+                                tracing::warn!(error = %format!("{e}"),
+                                    "providers reconcile channel closed — recovery loop will retry");
+                            }
+                            last_yaml = new_yaml;
                         }
                     }
                 }

@@ -527,6 +527,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // dispatcher share the same Arc. The watcher writes; the dispatcher reads.
     let model_arc: Arc<arc_swap::ArcSwap<Option<String>>> =
         Arc::new(arc_swap::ArcSwap::from_pointee(config.model.clone()));
+    let (providers_tx, providers_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Box<right_agent::agent::types::AgentConfig>>();
     config_watcher::spawn_config_watcher(
         &agent_yaml_path,
         shutdown.clone(),
@@ -534,6 +536,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         Arc::clone(&model_arc),
         Arc::clone(&debug_flag),
         args.debug,
+        providers_tx,
     )?;
 
     // Build shared OAuth PendingAuth map
@@ -613,6 +616,30 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     } else {
         None
     };
+
+    // Drain providers-reconcile signals from the config watcher (no restart path).
+    {
+        let mut providers_rx = providers_rx;
+        let agent = args.agent.clone();
+        let agent_dir = agent_dir.clone();
+        let resolved_sandbox = resolved_sandbox.clone();
+        tokio::spawn(async move {
+            while let Some(new_cfg) = providers_rx.recv().await {
+                let Some(sandbox) = resolved_sandbox.as_deref() else {
+                    continue; // mode: none — no sandbox to reconcile
+                };
+                tracing::info!("hot-reconciling providers from agent.yaml change");
+                if let Err(e) = sandbox_supervisor::hot_reconcile_providers(
+                    &agent, &agent_dir, sandbox, &new_cfg,
+                )
+                .await
+                {
+                    tracing::warn!(error = %format!("{e:#}"),
+                        "providers hot-reconcile failed; supervisor recovery loop will retry");
+                }
+            }
+        });
+    }
 
     // Shared flag for healthz "webhook_set"; flipped by Task 10's register loop.
     let webhook_set_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
