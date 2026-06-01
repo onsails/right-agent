@@ -121,6 +121,12 @@ the whole group across topics. Agents must never be allowed to pass
 chat_id, thread_id, user ids, session ids, or a broader scope to these
 tools.
 
+`mcp__right__forum_topic_list` is scoped the same way: it returns only the
+current `chat_id`'s tracked topics, resolved server-side from the invocation —
+never agent-supplied. Forum write tools (`forum_topic_create`/`_edit`/`_close`/
+`_reopen`) resolve `chat_id` identically and never accept it as an argument; no
+delete tool exists.
+
 See: `docs/architecture/mcp.md` for the internal REST surface, progress
 register/send wiring, dispatch detail, and rationale.
 

@@ -140,6 +140,21 @@ editing identity files or calling memory tools. Operating instructions do not
 embed the detailed target table; `mcp__right__memory_retain` is residual storage
 after `/right-memory` selects memory as the target.
 
+### Forum Topic Tools
+
+In forum supergroups the agent can organize topics via five tools (forum
+supergroups only; the bot needs the "Manage Topics" admin right; there is no
+delete tool):
+
+- `mcp__right__forum_topic_create` — create a topic; returns its `message_thread_id`.
+- `mcp__right__forum_topic_edit` — rename / change custom-emoji icon by `message_thread_id`.
+- `mcp__right__forum_topic_close` / `mcp__right__forum_topic_reopen` — archive / restore a topic (reversible).
+- `mcp__right__forum_topic_list` — list topics tracked in the CURRENT chat only (server-resolved scope; no Telegram API enumerates all topics, so only tracked topics appear).
+
+`chat_id` is always resolved server-side from the invocation, never agent-supplied
+(same scope rule as conversation search). The registry is the per-agent `data.db`
+`forum_topics` table, populated from successful tool calls.
+
 ### Memory Status Marker
 
 When the agent runs with `memory.provider: hindsight`, the bot injects a
