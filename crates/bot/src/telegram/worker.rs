@@ -1797,18 +1797,20 @@ pub fn spawn_worker(
                 Err(InvokeCcFailure::RateLimited {
                     message,
                     thinking_msg_id,
+                    details_id,
                 }) => {
                     tracing::info!(
                         ?key,
                         "rate-limited turn — sending human notice, skipping reflection"
                     );
+                    let keyboard = super::error_details::details_keyboard(details_id);
                     match thinking_msg_id {
                         Some(msg_id) => {
                             let edit_result = ctx
                                 .bot
                                 .edit_message_text(tg_chat_id, msg_id, &message)
                                 .parse_mode(teloxide::types::ParseMode::Html)
-                                .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
+                                .reply_markup(keyboard.clone())
                                 .await;
                             if let Err(edit_err) = edit_result {
                                 tracing::warn!(
@@ -1817,12 +1819,25 @@ pub fn spawn_worker(
                                     edit_err
                                 );
                                 let _ = ctx.bot.delete_message(tg_chat_id, msg_id).await;
-                                send_error_to_telegram(&ctx, tg_chat_id, eff_thread_id, &message)
-                                    .await;
+                                send_error_to_telegram_with_markup(
+                                    &ctx,
+                                    tg_chat_id,
+                                    eff_thread_id,
+                                    &message,
+                                    keyboard,
+                                )
+                                .await;
                             }
                         }
                         None => {
-                            send_error_to_telegram(&ctx, tg_chat_id, eff_thread_id, &message).await;
+                            send_error_to_telegram_with_markup(
+                                &ctx,
+                                tg_chat_id,
+                                eff_thread_id,
+                                &message,
+                                keyboard,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -1832,6 +1847,7 @@ pub fn spawn_worker(
                     session_uuid: failed_session_uuid,
                     raw_message,
                     thinking_msg_id,
+                    details_id,
                 }) => {
                     // 1. Edit the old thinking message to a short neutral banner
                     //    (no ring-buffer dump) and clear the stop keyboard.
@@ -1884,7 +1900,9 @@ pub fn spawn_worker(
                             let reply_to = default_reply_to;
                             let html = super::markdown::md_to_telegram_html(&reply_text);
                             let parts = super::markdown::split_html_message(&html);
-                            for part in &parts {
+                            let keyboard = super::error_details::details_keyboard(details_id);
+                            let last_idx = parts.len().saturating_sub(1);
+                            for (idx, part) in parts.iter().enumerate() {
                                 let mut send = ctx.bot.send_message(tg_chat_id, part);
                                 send = send.parse_mode(teloxide::types::ParseMode::Html);
                                 if eff_thread_id != 0 {
@@ -1897,6 +1915,9 @@ pub fn spawn_worker(
                                         message_id: MessageId(ref_id),
                                         ..Default::default()
                                     });
+                                }
+                                if idx == last_idx {
+                                    send = send.reply_markup(keyboard.clone());
                                 }
                                 if let Err(e) = send.await {
                                     tracing::warn!(
@@ -1917,6 +1938,9 @@ pub fn spawn_worker(
                                             ..Default::default()
                                         });
                                     }
+                                    if idx == last_idx {
+                                        fb = fb.reply_markup(keyboard.clone());
+                                    }
                                     if let Err(e2) = fb.await {
                                         tracing::error!(
                                             ?key,
@@ -1929,6 +1953,7 @@ pub fn spawn_worker(
                         }
                         Err(e) => {
                             tracing::warn!(?key, "reflection failed: {:#}; showing raw error", e);
+                            let keyboard = super::error_details::details_keyboard(details_id);
                             match thinking_msg_id {
                                 Some(msg_id) => {
                                     // raw_message is valid ParseMode::Html: either
@@ -1940,9 +1965,7 @@ pub fn spawn_worker(
                                         .bot
                                         .edit_message_text(tg_chat_id, msg_id, &raw_message)
                                         .parse_mode(teloxide::types::ParseMode::Html)
-                                        .reply_markup(
-                                            teloxide::types::InlineKeyboardMarkup::default(),
-                                        )
+                                        .reply_markup(keyboard.clone())
                                         .await;
                                     if let Err(edit_err) = edit_result {
                                         tracing::warn!(
@@ -1951,21 +1974,23 @@ pub fn spawn_worker(
                                             edit_err
                                         );
                                         let _ = ctx.bot.delete_message(tg_chat_id, msg_id).await;
-                                        send_error_to_telegram(
+                                        send_error_to_telegram_with_markup(
                                             &ctx,
                                             tg_chat_id,
                                             eff_thread_id,
                                             &raw_message,
+                                            keyboard,
                                         )
                                         .await;
                                     }
                                 }
                                 None => {
-                                    send_error_to_telegram(
+                                    send_error_to_telegram_with_markup(
                                         &ctx,
                                         tg_chat_id,
                                         eff_thread_id,
                                         &raw_message,
+                                        keyboard,
                                     )
                                     .await;
                                 }
@@ -2504,6 +2529,8 @@ pub(crate) enum InvokeCcFailure {
         /// it on reflection success (so the reflection reply is the substantive
         /// final update).
         thinking_msg_id: Option<teloxide::types::MessageId>,
+        /// Row id in `error_details` for the `🔍 Details` button, if stored.
+        details_id: Option<i64>,
     },
     /// A failure we do NOT want to reflect on (parse failures, pre-CC setup
     /// errors, schema read failures). The `message` is sent to Telegram verbatim.
@@ -2515,6 +2542,8 @@ pub(crate) enum InvokeCcFailure {
     RateLimited {
         message: String,
         thinking_msg_id: Option<teloxide::types::MessageId>,
+        /// Row id in `error_details` for the `🔍 Details` button, if stored.
+        details_id: Option<i64>,
     },
     /// The foreground turn was terminated (timeout or user request) and work
     /// has been spawned as an immediate background continuation. `spawn_worker`
@@ -4063,6 +4092,41 @@ async fn invoke_cc(
                 .ok();
         }
 
+        // Persist the raw JSON we classified, for the "🔍 Details" button.
+        // Best-effort: a store failure logs and yields no button — delivering
+        // the user-facing error message is the primary obligation (mirrors the
+        // logged-and-continued touch_session site above). This is the one
+        // sanctioned non-propagating site: the failure is logged and the
+        // degraded state is explicit (no button).
+        let raw_details = if !stdout_str.trim().is_empty() {
+            stdout_str.to_string()
+        } else {
+            stderr_str.to_string()
+        };
+        let details_id = if raw_details.trim().is_empty() {
+            None
+        } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            match super::error_details::insert_error_detail(
+                &conn,
+                chat_id,
+                eff_thread_id,
+                &raw_details,
+                now,
+            )
+            .await
+            {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::error!(?chat_id, "store error_details failed: {:#}", e);
+                    None
+                }
+            }
+        };
+
         // Auth was handled above. Rate-limit gets a human notice and skips
         // reflection; other errors keep reflection but use a human-readable
         // fallback message.
@@ -4070,6 +4134,7 @@ async fn invoke_cc(
             return Err(InvokeCcFailure::RateLimited {
                 message: RATE_LIMIT_MESSAGE.to_string(),
                 thinking_msg_id,
+                details_id,
             });
         }
 
@@ -4096,6 +4161,7 @@ async fn invoke_cc(
             session_uuid: session_uuid.clone(),
             raw_message: raw,
             thinking_msg_id,
+            details_id,
         });
     }
 
@@ -4181,6 +4247,51 @@ async fn send_error_to_telegram(
                 chat_id = ?tg_chat_id,
                 eff_thread_id,
                 "plain text fallback also failed: {:#}",
+                e2
+            );
+        }
+    }
+}
+
+/// Like `send_error_to_telegram` but attaches an inline keyboard (e.g. the
+/// "🔍 Details" button). Falls back to plain text (keyboard preserved) on HTML
+/// send failure.
+async fn send_error_to_telegram_with_markup(
+    ctx: &WorkerContext,
+    tg_chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    message: &str,
+    reply_markup: teloxide::types::InlineKeyboardMarkup,
+) {
+    use teloxide::types::{MessageId, ThreadId};
+    let mut send = ctx
+        .bot
+        .send_message(tg_chat_id, message)
+        .parse_mode(teloxide::types::ParseMode::Html)
+        .reply_markup(reply_markup.clone());
+    if eff_thread_id != 0 {
+        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
+    }
+    if let Err(e) = send.await {
+        tracing::warn!(
+            chat_id = ?tg_chat_id,
+            eff_thread_id,
+            "HTML error send failed, retrying plain text: {:#}",
+            e
+        );
+        let plain = strip_html_tags(message);
+        let mut fallback = ctx
+            .bot
+            .send_message(tg_chat_id, &plain)
+            .reply_markup(reply_markup);
+        if eff_thread_id != 0 {
+            fallback = fallback.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
+        }
+        if let Err(e2) = fallback.await {
+            tracing::error!(
+                chat_id = ?tg_chat_id,
+                eff_thread_id,
+                "plain-text error send also failed: {:#}",
                 e2
             );
         }
