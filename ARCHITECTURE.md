@@ -8,7 +8,7 @@
 
 ## Workspace
 
-Nineteen crates in a Cargo workspace. See: `docs/architecture/modules.md`
+Twenty crates in a Cargo workspace. See: `docs/architecture/modules.md`
 for the crate inventory and per-crate ownership detail.
 
 **Re-export discipline:** `right-agent` does not re-export modules from
