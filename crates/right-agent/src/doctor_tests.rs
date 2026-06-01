@@ -874,3 +874,51 @@ mod memory_tests {
         );
     }
 }
+
+// ---- in-flight cron run checks ----
+
+#[tokio::test]
+async fn check_cron_runs_lists_running_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+    // Seed one running cron run and one finished one; only the running one shows.
+    conn.execute(
+        "INSERT INTO async_runs (id, kind, producer_ref, run_session_id, target_chat_id,
+            status, started_at, delivery_required, delivery_status, created_at, updated_at)
+         VALUES ('r1','cron','hyperbot-tracker','r1',100,'running','2026-06-01T00:00:00+00:00',
+            0,'none','2026-06-01T00:00:00+00:00','2026-06-01T00:00:00+00:00')",
+        [],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO async_runs (id, kind, producer_ref, run_session_id, target_chat_id,
+            status, started_at, finished_at, exit_code, delivery_required, delivery_status,
+            created_at, updated_at)
+         VALUES ('r2','cron','github-tracker','r2',100,'success','2026-06-01T00:00:00+00:00',
+            '2026-06-01T00:03:00+00:00',0,0,'none','2026-06-01T00:00:00+00:00','2026-06-01T00:00:00+00:00')",
+        [],
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    let checks = check_cron_runs(dir.path()).await;
+    assert_eq!(
+        checks.len(),
+        1,
+        "only the running run should be listed: {checks:?}"
+    );
+    assert!(checks[0].detail.contains("hyperbot-tracker"));
+    assert!(checks[0].detail.contains("2026-06-01T00:00:00+00:00"));
+    assert_eq!(checks[0].status, CheckStatus::Pass); // informational, no auto-verdict
+}
+
+#[tokio::test]
+async fn check_cron_runs_empty_when_none_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+    drop(conn);
+    let checks = check_cron_runs(dir.path()).await;
+    assert!(checks.is_empty(), "no running runs → no checks: {checks:?}");
+}
