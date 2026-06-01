@@ -4222,35 +4222,7 @@ async fn send_error_to_telegram(
     eff_thread_id: i64,
     message: &str,
 ) {
-    use teloxide::types::{MessageId, ThreadId};
-    let mut send = ctx
-        .bot
-        .send_message(tg_chat_id, message)
-        .parse_mode(teloxide::types::ParseMode::Html);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-    }
-    if let Err(e) = send.await {
-        tracing::warn!(
-            chat_id = ?tg_chat_id,
-            eff_thread_id,
-            "HTML error send failed, retrying plain text: {:#}",
-            e
-        );
-        let plain = strip_html_tags(message);
-        let mut fallback = ctx.bot.send_message(tg_chat_id, &plain);
-        if eff_thread_id != 0 {
-            fallback = fallback.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-        }
-        if let Err(e2) = fallback.await {
-            tracing::error!(
-                chat_id = ?tg_chat_id,
-                eff_thread_id,
-                "plain text fallback also failed: {:#}",
-                e2
-            );
-        }
-    }
+    send_error_to_telegram_inner(ctx, tg_chat_id, eff_thread_id, message, None).await;
 }
 
 /// Like `send_error_to_telegram` but attaches an inline keyboard (e.g. the
@@ -4263,12 +4235,27 @@ async fn send_error_to_telegram_with_markup(
     message: &str,
     reply_markup: teloxide::types::InlineKeyboardMarkup,
 ) {
+    send_error_to_telegram_inner(ctx, tg_chat_id, eff_thread_id, message, Some(reply_markup)).await;
+}
+
+/// Send a prettified error to Telegram as HTML, falling back to plain text
+/// (with the same optional keyboard) on HTML send failure. `reply_markup`
+/// `None` omits the keyboard entirely, preserving the no-markup send path.
+async fn send_error_to_telegram_inner(
+    ctx: &WorkerContext,
+    tg_chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    message: &str,
+    reply_markup: Option<teloxide::types::InlineKeyboardMarkup>,
+) {
     use teloxide::types::{MessageId, ThreadId};
     let mut send = ctx
         .bot
         .send_message(tg_chat_id, message)
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .reply_markup(reply_markup.clone());
+        .parse_mode(teloxide::types::ParseMode::Html);
+    if let Some(markup) = reply_markup.clone() {
+        send = send.reply_markup(markup);
+    }
     if eff_thread_id != 0 {
         send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
     }
@@ -4280,10 +4267,10 @@ async fn send_error_to_telegram_with_markup(
             e
         );
         let plain = strip_html_tags(message);
-        let mut fallback = ctx
-            .bot
-            .send_message(tg_chat_id, &plain)
-            .reply_markup(reply_markup);
+        let mut fallback = ctx.bot.send_message(tg_chat_id, &plain);
+        if let Some(markup) = reply_markup {
+            fallback = fallback.reply_markup(markup);
+        }
         if eff_thread_id != 0 {
             fallback = fallback.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
         }
@@ -4291,7 +4278,7 @@ async fn send_error_to_telegram_with_markup(
             tracing::error!(
                 chat_id = ?tg_chat_id,
                 eff_thread_id,
-                "plain-text error send also failed: {:#}",
+                "plain text fallback also failed: {:#}",
                 e2
             );
         }
