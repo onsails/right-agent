@@ -73,7 +73,7 @@ plus exactly three private LAN families, with a cloud-metadata deny-list layered
 on top:
 
 ```
-AllowPrivate(ip) = (is_public_ip(ip) || is_user_private_lan(ip))
+AllowPrivate(ip) = (is_public_ip(ip) || is_user_private_lan(ip) || ip.is_loopback())
                    && !is_cloud_metadata(ip)
 
 is_user_private_lan(ip):
@@ -87,10 +87,24 @@ is_cloud_metadata(ip):   # explicit deny-list, applied in BOTH tiers
     fd00:ec2::254        (AWS IMDS — IPv6, INSIDE fc00::/7 ULA)
 ```
 
-Loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`),
-unspecified (`0.0.0.0`, `::`), multicast, and reserved/TEST-NET ranges are not
-members of the three LAN families, so they remain blocked under `AllowPrivate`
-automatically.
+Link-local (`169.254.0.0/16`, `fe80::/10`), unspecified (`0.0.0.0`, `::`),
+multicast, and reserved/TEST-NET ranges are not members of the LAN families and
+are not loopback, so they remain blocked under `AllowPrivate` automatically.
+
+**Loopback amendment (2026-06-02, supersedes the earlier "block loopback
+always").** Loopback (`127.0.0.0/8`, `::1`, and the `localhost`/`localhost.`
+domain) is **allowed** under `AllowPrivate` and stays **blocked** under
+`PublicOnly`. Rationale: (1) the operator base URL is operator-chosen — loopback
+is the operator's own machine, strictly less reachable than the RFC1918/CGNAT
+ranges already permitted, and matches the agreed risk model ("a local IP is not
+a risk; plaintext transport is"); (2) loopback development MCP servers are an
+existing, documented, supported case (`ARCHITECTURE.md` MCP Auth Types: "`URL as
+is` also covers no-auth and loopback development MCP servers"); the pre-existing
+`validate_server_url` already permitted loopback; (3) the SSRF pivot risk lives
+on server-supplied URLs, which remain `PublicOnly` and continue to block
+loopback. Cloud-metadata stays denied in both tiers regardless. Practical
+consequence: upstream-connection integration tests (whose mock servers bind
+`127.0.0.1`) work under `AllowPrivate`.
 
 **The subtle case the deny-list exists for:** two cloud metadata addresses fall
 *inside* allowed families — `fd00:ec2::254` is a valid ULA address, and
@@ -174,7 +188,7 @@ self-healing-platform convention.
 |---|---|---|
 | Public IP | allow | allow |
 | RFC1918 / CGNAT / ULA | **allow** (was block) | block (pivot defense) |
-| Loopback | block | block |
+| Loopback (`127/8`, `::1`, `localhost`) | **allow** (operator's own machine; was already allowed) | block (pivot defense) |
 | Link-local / cloud metadata | block | block |
 | Plaintext HTTP | allow + warn-ack | allow (token endpoints rarely HTTP; covered by HTTPS-typical) |
 
@@ -189,13 +203,16 @@ server and is out of scope for an SSRF DNS guard.
    CGNAT-resolving host does not fail at DNS. Direct obsidian repro.
 2. `PublicOnly` still strips private addresses — pivot `public base →
    token_endpoint 10.x` stays blocked.
-3. Hard block holds in both tiers: loopback, `169.254.169.254`, `0.0.0.0`,
-   `fe80::` rejected under `AllowPrivate` and `PublicOnly`. **Metadata-in-family
+3. Hard block holds in both tiers: `169.254.169.254`, `0.0.0.0`, `fe80::`
+   rejected under `AllowPrivate` and `PublicOnly`. **Metadata-in-family
    carve-out:** `fd00:ec2::254` (inside allowed ULA) and `100.100.100.200`
    (inside allowed CGNAT) MUST be rejected under `AllowPrivate` — this is the
-   test that fails if `is_cloud_metadata` is forgotten.
-4. `validate_server_url`: Tailscale / RFC1918 / ULA pass; loopback / link-local
-   rejected; non-HTTP(S) scheme rejected.
+   test that fails if `is_cloud_metadata` is forgotten. **Loopback tier split:**
+   loopback (`127.0.0.1`, `::1`) is allowed under `AllowPrivate` but rejected
+   under `PublicOnly`.
+4. `validate_server_url`: Tailscale / RFC1918 / ULA / loopback (`127.0.0.1`,
+   `localhost`) pass; link-local / cloud-metadata rejected; non-HTTP(S) scheme
+   rejected.
 5. Dashboard SSR test: `http://` add renders the ack warning; `https://` does
    not; private `https://` renders no privacy warning.
 6. Verification: `devenv shell -- cargo test --workspace` (final, mandatory);
