@@ -56,9 +56,11 @@ async fn set_state_closes_and_reopens() {
     upsert_created(&db, 100, 5, "Bugs", None, None)
         .await
         .unwrap();
-    set_state(&db, 100, 5, "closed").await.unwrap();
+    set_state(&db, 100, 5, ForumTopicState::Closed)
+        .await
+        .unwrap();
     assert_eq!(list(&db, 100).await.unwrap()[0].state, "closed");
-    set_state(&db, 100, 5, "open").await.unwrap();
+    set_state(&db, 100, 5, ForumTopicState::Open).await.unwrap();
     assert_eq!(list(&db, 100).await.unwrap()[0].state, "open");
 }
 

@@ -19,6 +19,22 @@ pub struct ForumTopicRow {
     pub updated_at: String,
 }
 
+/// Open/closed state of a forum topic. The only two states Telegram supports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForumTopicState {
+    Open,
+    Closed,
+}
+
+impl ForumTopicState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ForumTopicState::Open => "open",
+            ForumTopicState::Closed => "closed",
+        }
+    }
+}
+
 fn row_to_topic(r: &Row<'_>) -> Result<ForumTopicRow> {
     Ok(ForumTopicRow {
         message_thread_id: r.get(0)?,
@@ -44,7 +60,7 @@ pub async fn upsert_created(
         "INSERT INTO forum_topics
             (chat_id, message_thread_id, name, icon_color, icon_custom_emoji_id, state, updated_at)
          VALUES (?, ?, ?, ?, ?, 'open', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-         ON CONFLICT DO UPDATE SET
+         ON CONFLICT(chat_id, message_thread_id) DO UPDATE SET
             name = excluded.name,
             icon_color = excluded.icon_color,
             icon_custom_emoji_id = excluded.icon_custom_emoji_id,
@@ -89,14 +105,14 @@ pub async fn set_state(
     conn: &Connection,
     chat_id: i64,
     message_thread_id: i64,
-    state: &str,
+    state: ForumTopicState,
 ) -> Result<()> {
     conn.execute(
         "UPDATE forum_topics SET
             state = ?,
             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
          WHERE chat_id = ? AND message_thread_id = ?",
-        crate::params![state, chat_id, message_thread_id],
+        crate::params![state.as_str(), chat_id, message_thread_id],
     )
     .await?;
     Ok(())
