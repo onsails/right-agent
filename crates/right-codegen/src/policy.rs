@@ -999,6 +999,43 @@ pub fn providers_append(
         .unwrap_or_else(|e| panic!("policy conflict: {e:#}"))
 }
 
+/// Fold an agent's generic-provider host stanzas onto a rendered policy.
+///
+/// For each `ProviderType::Generic` entry with a `generic` config, inserts a
+/// TLS-terminating REST endpoint above the `# right-providers: insert-above`
+/// anchor via [`providers_append_checked`]. Idempotent; a no-op when the policy
+/// has no anchor (restrictive mode) or the list is empty. This is what makes
+/// every full policy regeneration provider-aware so the network policy is
+/// reconstructable from `agent.yaml` on every regen.
+pub fn apply_provider_stanzas(
+    policy: &str,
+    providers: &[right_agent_config::ProviderEntry],
+) -> Result<String, PolicyConflict> {
+    // Restrictive policies have no anchor — folding is a no-op there.
+    // The provider API already rejects generic + restrictive
+    // (`NetworkPolicyForbidsGeneric`), so nothing to insert.
+    const PROVIDERS_ANCHOR: &str = "# right-providers: insert-above";
+    if !policy.contains(PROVIDERS_ANCHOR) {
+        return Ok(policy.to_string());
+    }
+    let mut out = policy.to_string();
+    for entry in providers {
+        if !matches!(entry.type_, right_agent_config::ProviderType::Generic) {
+            continue;
+        }
+        let Some(g) = entry.generic.as_ref() else {
+            continue;
+        };
+        out = providers_append_checked(
+            &out,
+            &entry.name,
+            &g.upstream_host,
+            g.upstream_path_prefix.as_deref(),
+        )?;
+    }
+    Ok(out)
+}
+
 /// Like [`providers_append`] but returns `Err(PolicyConflict)` instead of
 /// panicking when the host is already configured as a raw tunnel.
 pub fn providers_append_checked(
