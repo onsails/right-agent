@@ -619,6 +619,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Drain providers-reconcile signals from the config watcher (no restart path).
     {
+        // The watcher has already advanced past this change, so there is no
+        // automatic retry elsewhere: bound a few in-task attempts to ride out a
+        // transient gateway hiccup during `policy set --wait` / reconcile. The
+        // on-disk policy is durable (folded into every regen), so persistent
+        // failure only leaves the *live* sandbox stale until the next restart or
+        // another re-save of agent.yaml.
+        const HOT_RECONCILE_BACKOFFS_MS: [u64; 2] = [500, 2000];
         let mut providers_rx = providers_rx;
         let agent = args.agent.clone();
         let agent_dir = agent_dir.clone();
@@ -629,13 +636,28 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                     continue; // mode: none — no sandbox to reconcile
                 };
                 tracing::info!("hot-reconciling providers from agent.yaml change");
-                if let Err(e) = sandbox_supervisor::hot_reconcile_providers(
-                    &agent, &agent_dir, sandbox, &new_cfg,
-                )
-                .await
-                {
-                    tracing::warn!(error = %format!("{e:#}"),
-                        "providers hot-reconcile failed; supervisor recovery loop will retry");
+                let mut attempt = 0usize;
+                loop {
+                    match sandbox_supervisor::hot_reconcile_providers(
+                        &agent, &agent_dir, sandbox, &new_cfg,
+                    )
+                    .await
+                    {
+                        Ok(()) => break,
+                        Err(e) if attempt >= HOT_RECONCILE_BACKOFFS_MS.len() => {
+                            tracing::warn!(error = %format!("{e:#}"),
+                                "providers hot-reconcile failed after retries; live sandbox policy stays stale until next bot restart — re-save agent.yaml to retry");
+                            break;
+                        }
+                        Err(e) => {
+                            let backoff = HOT_RECONCILE_BACKOFFS_MS[attempt];
+                            tracing::warn!(error = %format!("{e:#}"),
+                                "providers hot-reconcile attempt {} failed; retrying in {}ms",
+                                attempt + 1, backoff);
+                            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                            attempt += 1;
+                        }
+                    }
                 }
             }
         });
