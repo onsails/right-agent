@@ -322,16 +322,18 @@ pub(crate) async fn bring_up_sandbox(
 ///
 /// Re-renders the provider-aware policy (network-only, via
 /// `openshell policy set --wait`) and reconciles gateway attach/detach. Used by
-/// the config-watcher providers hot path. The supervisor recovery loop is the
-/// fallback if this fails.
-// wired by config_watcher consumer in lib.rs (Task 6)
-#[allow(dead_code)]
+/// the config-watcher providers hot path; on failure the lib.rs consumer retries
+/// with backoff. There is no periodic provider reconcile, so persistent failure
+/// leaves the live sandbox policy stale until the next bot restart — the on-disk
+/// policy is already correct because every full regen folds providers back in.
 pub(crate) async fn hot_reconcile_providers(
     agent: &str,
     agent_dir: &std::path::Path,
     resolved_sandbox: &str,
     config: &AgentConfig,
 ) -> miette::Result<()> {
+    // `resolve_policy_path` yields None only for `mode: none`, which the lib.rs
+    // consumer already pre-filters; this guard covers any direct caller.
     let policy_path = config
         .resolve_policy_path(agent_dir)?
         .ok_or_else(|| miette::miette!(
