@@ -1,5 +1,5 @@
 use std::io::Write as _;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 use http::{HeaderName, HeaderValue};
@@ -280,26 +280,38 @@ fn is_private_or_link_local_host(host: &url::Host<&str>) -> bool {
 
 /// Validate an explicitly registered MCP server URL.
 ///
-/// Servers may use HTTP or HTTPS. Private and link-local network addresses are
-/// rejected by default.
+/// Servers may use HTTP or HTTPS. Operator-supplied private LAN / Tailscale /
+/// ULA addresses are allowed (`AllowPrivate` tier). Loopback, link-local, and
+/// cloud-metadata addresses are always rejected.
 pub fn validate_server_url(url_str: &str) -> Result<(), CredentialError> {
     let parsed = parse_url(url_str)?;
-
-    let url_host = parsed
-        .host()
-        .ok_or_else(|| CredentialError::InvalidServerUrl("URL has no host".to_string()))?;
-
-    if is_private_or_link_local_host(&url_host) {
-        return Err(CredentialError::InvalidServerUrl(format!(
-            "private/link-local address '{}' is not allowed",
-            parsed.host_str().unwrap_or("<unknown>")
-        )));
-    }
 
     if parsed.scheme() != "https" && parsed.scheme() != "http" {
         return Err(CredentialError::InvalidServerUrl(format!(
             "only HTTP/HTTPS URLs are allowed, got '{}'",
             parsed.scheme()
+        )));
+    }
+
+    let url_host = parsed
+        .host()
+        .ok_or_else(|| CredentialError::InvalidServerUrl("URL has no host".to_string()))?;
+
+    // Operator-supplied base URL: allow public + private LAN/Tailscale/ULA, but
+    // never loopback, link-local, or cloud-metadata (AllowPrivate tier).
+    let allowed = match url_host {
+        url::Host::Domain(domain) => !crate::ssrf::is_localhost_domain(domain),
+        url::Host::Ipv4(v4) => {
+            crate::ssrf::ip_allowed(IpAddr::V4(v4), crate::ssrf::NetworkPolicy::AllowPrivate)
+        }
+        url::Host::Ipv6(v6) => {
+            crate::ssrf::ip_allowed(IpAddr::V6(v6), crate::ssrf::NetworkPolicy::AllowPrivate)
+        }
+    };
+    if !allowed {
+        return Err(CredentialError::InvalidServerUrl(format!(
+            "address '{}' is not allowed (loopback, localhost, link-local, or cloud-metadata)",
+            parsed.host_str().unwrap_or("<unknown>")
         )));
     }
 
@@ -962,24 +974,33 @@ mod db_tests {
     }
 
     #[tokio::test]
-    async fn validate_server_url_rejects_private_networks_but_allows_loopback() {
-        assert!(validate_server_url("https://192.168.1.1/mcp").is_err());
-        assert!(validate_server_url("https://10.0.0.1/mcp").is_err());
-        assert!(validate_server_url("https://172.16.0.1/mcp").is_err());
+    async fn validate_server_url_rejects_link_local_and_metadata() {
+        // link-local and cloud-metadata are still rejected
         assert!(validate_server_url("https://169.254.1.1/mcp").is_err());
+        assert!(validate_server_url("http://169.254.169.254/mcp").is_err());
 
-        validate_server_url("http://localhost:3333/mcp").unwrap();
-        validate_server_url("http://127.0.0.1:3333/mcp").unwrap();
-        validate_server_url("http://[::1]:3333/mcp").unwrap();
-        validate_server_url("https://localhost/mcp").unwrap();
+        // RFC1918 ranges are now allowed (operator LAN base URLs)
+        assert!(validate_server_url("https://10.0.0.1/mcp").is_ok());
+        assert!(validate_server_url("https://192.168.1.1/mcp").is_ok());
+        assert!(validate_server_url("https://172.16.0.1/mcp").is_ok());
+
+        // loopback and localhost are rejected (operator base URLs must be reachable)
+        assert!(validate_server_url("http://127.0.0.1:3333/mcp").is_err()); // loopback rejected
+        assert!(validate_server_url("http://[::1]:3333/mcp").is_err()); // loopback rejected
+        assert!(validate_server_url("http://localhost:3333/mcp").is_err()); // localhost rejected
+        assert!(validate_server_url("https://localhost/mcp").is_err()); // localhost rejected
     }
 
     #[tokio::test]
-    async fn validate_server_url_rejects_ipv4_mapped_private_ipv6() {
-        assert!(validate_server_url("https://[::ffff:192.168.1.1]/mcp").is_err());
-        assert!(validate_server_url("https://[::ffff:10.0.0.1]/mcp").is_err());
-        assert!(validate_server_url("https://[::ffff:172.16.0.1]/mcp").is_err());
+    async fn validate_server_url_ipv4_mapped_ipv6() {
+        // RFC1918 via IPv4-mapped IPv6 are now allowed (AllowPrivate tier)
+        assert!(validate_server_url("https://[::ffff:192.168.1.1]/mcp").is_ok());
+        assert!(validate_server_url("https://[::ffff:10.0.0.1]/mcp").is_ok());
+        assert!(validate_server_url("https://[::ffff:172.16.0.1]/mcp").is_ok());
+        // link-local via IPv4-mapped IPv6 is still rejected
         assert!(validate_server_url("https://[::ffff:169.254.1.1]/mcp").is_err());
+        // loopback via IPv4-mapped IPv6 is still rejected
+        assert!(validate_server_url("https://[::ffff:127.0.0.1]/mcp").is_err());
     }
 
     #[tokio::test]
@@ -1741,10 +1762,30 @@ mod db_tests {
 
     #[tokio::test]
     async fn localhost_with_trailing_dot_is_loopback_not_public() {
-        validate_server_url("http://localhost.:3333/mcp").unwrap();
-
         assert!(is_loopback_url("http://localhost.:3333/mcp"));
         assert!(!is_public_url("https://localhost./mcp"));
+    }
+
+    #[test]
+    fn validate_server_url_allows_tailscale_and_rfc1918() {
+        validate_server_url("http://openclaw.owl-skate.ts.net:27123/mcp").unwrap();
+        validate_server_url("http://100.85.147.49:27123/mcp").unwrap();
+        validate_server_url("http://192.168.1.10:8080/mcp").unwrap();
+        validate_server_url("http://10.0.0.5/mcp").unwrap();
+    }
+
+    #[test]
+    fn validate_server_url_rejects_loopback_link_local_and_metadata() {
+        for url in [
+            "http://127.0.0.1:8080/mcp",
+            "http://localhost:8080/mcp",
+            "http://169.254.169.254/latest/meta-data",
+            "http://100.100.100.200/latest/meta-data",
+            "http://[fd00:ec2::254]/mcp",
+            "ftp://example.com/mcp",
+        ] {
+            assert!(validate_server_url(url).is_err(), "{url} must be rejected");
+        }
     }
 }
 
