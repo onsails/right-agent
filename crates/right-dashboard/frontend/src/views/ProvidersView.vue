@@ -36,6 +36,8 @@ const addUpstreamPathPrefix = ref('')
 const addBusy = ref(false)
 const addError = ref<string | null>(null)
 const addWarn = ref<string | null>(null)
+// Set once a prefixed Add credential has been flagged; a second Save then proceeds.
+const addWarnAck = ref(false)
 
 // Prefill for re-create flow
 const prefillType = ref<string | null>(null)
@@ -48,8 +50,8 @@ const rotateCredential = ref('')
 const rotateBusy = ref(false)
 const rotateError = ref<string | null>(null)
 const rotateWarn = ref<string | null>(null)
-// Set once a prefixed credential has been flagged; a second Save then proceeds.
-const credentialWarnAck = ref(false)
+// Set once a prefixed Rotate credential has been flagged; a second Save then proceeds.
+const rotateWarnAck = ref(false)
 
 // Edit modal state (generic only)
 const editOpen = ref(false)
@@ -102,7 +104,7 @@ function openAdd(prefType?: string | null, prefLabel?: string | null): void {
   addUpstreamPathPrefix.value = ''
   addError.value = null
   addWarn.value = null
-  credentialWarnAck.value = false
+  addWarnAck.value = false
   prefillType.value = prefType ?? null
   prefillLabel.value = prefLabel ?? null
 
@@ -127,7 +129,7 @@ function closeAdd(): void {
   addUpstreamPathPrefix.value = ''
   addError.value = null
   addWarn.value = null
-  credentialWarnAck.value = false
+  addWarnAck.value = false
   prefillType.value = null
   prefillLabel.value = null
 }
@@ -159,10 +161,10 @@ async function submitAdd(): Promise<void> {
 
   if (!addCredential.value.trim()) { addError.value = 'Credential is required'; return }
 
-  const credCheck = evaluateCredentialSubmit(addCredential.value, credentialWarnAck.value)
+  const credCheck = evaluateCredentialSubmit(addCredential.value, addWarnAck.value)
   if (!credCheck.proceed) {
     addWarn.value = credCheck.warning
-    credentialWarnAck.value = true
+    addWarnAck.value = true
     return
   }
   addWarn.value = null
@@ -195,7 +197,7 @@ function openRotate(provider: ProviderView): void {
   rotateCredential.value = ''
   rotateError.value = null
   rotateWarn.value = null
-  credentialWarnAck.value = false
+  rotateWarnAck.value = false
   rotateOpen.value = true
 }
 
@@ -205,16 +207,16 @@ function closeRotate(): void {
   rotateCredential.value = ''
   rotateError.value = null
   rotateWarn.value = null
-  credentialWarnAck.value = false
+  rotateWarnAck.value = false
 }
 
 async function submitRotate(): Promise<void> {
   if (!rotateProvider.value) return
   if (!rotateCredential.value.trim()) { rotateError.value = 'Credential is required'; return }
-  const credCheck = evaluateCredentialSubmit(rotateCredential.value, credentialWarnAck.value)
+  const credCheck = evaluateCredentialSubmit(rotateCredential.value, rotateWarnAck.value)
   if (!credCheck.proceed) {
     rotateWarn.value = credCheck.warning
-    credentialWarnAck.value = true
+    rotateWarnAck.value = true
     return
   }
   rotateWarn.value = null
@@ -324,11 +326,11 @@ function isGhost(provider: ProviderView): boolean {
 
 // Editing the credential re-arms the soft prefix warning.
 watch(addCredential, () => {
-  credentialWarnAck.value = false
+  addWarnAck.value = false
   addWarn.value = null
 })
 watch(rotateCredential, () => {
-  credentialWarnAck.value = false
+  rotateWarnAck.value = false
   rotateWarn.value = null
 })
 </script>
@@ -568,6 +570,7 @@ watch(rotateCredential, () => {
 .notice.warn {
   color: var(--tg-theme-text-color, #17212b);
   background: rgba(214, 165, 26, 0.14);
+  border: 1px solid rgba(214, 165, 26, 0.4);
   border-radius: 7px;
   padding: 6px 8px;
 }
