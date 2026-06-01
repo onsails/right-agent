@@ -22,6 +22,7 @@ import SecretInput from '../components/SecretInput.vue'
 import {
   canSaveServer as canSaveServerState,
   createDetectionRequest,
+  evaluateHttpUrlSubmit,
   isOAuthTerminalStatus,
   mcpStatusDetail,
   nonEmptyHeaders,
@@ -46,6 +47,9 @@ const addHeaderRows = ref<McpHeaderInput[]>([{ name: 'Authorization', value: '' 
 const editingServer = ref<string | null>(null)
 const serverHeaderRows = ref<Record<string, McpHeaderInput[]>>({})
 const busyAction = ref<string | null>(null)
+const addWarn = ref<string | null>(null)
+// Set once a plaintext-http URL has been flagged; a second Save then proceeds.
+const addWarnAck = ref(false)
 const oauthFlows = ref<Record<string, string>>({})
 const oauthStatuses = ref<Record<string, McpOAuthStatusResponse>>({})
 const oauthPollTimers = new Map<string, ReturnType<typeof window.setTimeout>>()
@@ -79,6 +83,8 @@ watch(url, () => {
   detection.value = null
   selectedMode.value = 'headers'
   latestDetectionRequestId += 1
+  addWarnAck.value = false
+  addWarn.value = null
 })
 
 async function refresh(): Promise<void> {
@@ -153,6 +159,13 @@ function removeHeaderRow(index: number): void {
 }
 
 async function saveServer(): Promise<void> {
+  const httpCheck = evaluateHttpUrlSubmit(url.value, addWarnAck.value)
+  if (!httpCheck.proceed) {
+    addWarn.value = httpCheck.warning
+    addWarnAck.value = true
+    return
+  }
+  addWarn.value = null
   busyAction.value = 'add'
   error.value = null
   try {
@@ -399,6 +412,8 @@ function resetAdd(): void {
   detection.value = null
   selectedMode.value = 'headers'
   addHeaderRows.value = [{ name: 'Authorization', value: '' }]
+  addWarn.value = null
+  addWarnAck.value = false
 }
 </script>
 
@@ -452,6 +467,7 @@ function resetAdd(): void {
         <button class="tool-button compact-button" type="button" @click="addHeaderRow">Add header</button>
       </div>
 
+      <p v-if="addWarn" class="notice inline warn">{{ addWarn }}</p>
       <div class="button-row">
         <button class="tool-button" type="button" :disabled="!canSaveServer" @click="saveServer">
           {{ busyAction === 'add' ? 'Saving' : 'Save' }}
@@ -651,6 +667,14 @@ function resetAdd(): void {
 .tool-button:disabled {
   cursor: not-allowed;
   opacity: 0.58;
+}
+
+.notice.warn {
+  color: var(--tg-theme-text-color, #17212b);
+  background: rgba(214, 165, 26, 0.14);
+  border: 1px solid rgba(214, 165, 26, 0.4);
+  border-radius: 7px;
+  padding: 6px 8px;
 }
 
 @media (max-width: 680px) {

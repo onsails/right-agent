@@ -1,4 +1,27 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { renderToString } from '@vue/server-renderer'
+import { createApp } from 'vue'
+
+// The view calls these on mount; stub them so SSR doesn't hit the network.
+vi.mock('../api', () => ({
+  mcpServers: () => Promise.resolve({ servers: [] }),
+  mcpDetect: () => Promise.resolve({ bare_url: '', oauth_discovered: false, recommended_mode: 'headers', reason: '', oauth: null }),
+  mcpAdd: () => Promise.resolve({}),
+  mcpRemove: () => Promise.resolve({}),
+  mcpSetHeaders: () => Promise.resolve({}),
+  mcpStartOAuth: () => Promise.resolve({ flow_id: '', auth_url: '' }),
+  mcpOAuthStatus: () => Promise.resolve({ flow_id: '', server_name: '', status: 'pending', message: null, updated_at: '' }),
+  DashboardApiError: class DashboardApiError extends Error { isLocked = false },
+}))
+
+import McpView from './McpView.vue'
+
+describe('McpView', () => {
+  it('renders the panel without throwing', async () => {
+    const html = await renderToString(createApp(McpView))
+    expect(html).toContain('Servers')
+  })
+})
 
 import type { McpDetectResponse, McpServerSummary } from '../types'
 import {
