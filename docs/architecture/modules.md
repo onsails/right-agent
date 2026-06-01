@@ -36,6 +36,10 @@
 
 - `lib.rs` - cancel-safe process-group child handling via `ProcessGroupChild`.
 
+### right-hostpath
+
+- `lib.rs` - host-side shell `PATH` integration for the `right` CLI: idempotent, atomic managed-block edits to the user's shell rc file(s) (zsh/bash/fish). Pure logic (home/shell/exe passed as params); used only by the `right` binary, not re-exported.
+
 ### right-openshell
 
 - `openshell.rs` and `openshell_proto` - OpenShell gRPC mTLS client, generated proto types, sandbox lifecycle wrappers, SSH helpers, and policy helpers.
