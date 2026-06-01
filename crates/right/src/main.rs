@@ -1035,7 +1035,7 @@ async fn main() -> miette::Result<()> {
                 tokio::sync::Mutex<right_mcp::reconnect::ReconnectManager>,
             > = std::collections::HashMap::new();
             let http_client = match right_mcp::ssrf::hardened_client_builder(
-                right_mcp::ssrf::NetworkPolicy::PublicOnly,
+                right_mcp::ssrf::NetworkPolicy::AllowPrivate,
             )
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))
