@@ -88,7 +88,7 @@ pub fn ip_allowed(ip: IpAddr, policy: NetworkPolicy) -> bool {
 
 /// Loopback check that folds IPv4-mapped IPv6 (`::ffff:127.0.0.1`) so it matches
 /// the bare IPv4 form. `Ipv6Addr::is_loopback` alone only catches `::1`.
-fn is_loopback_addr(ip: IpAddr) -> bool {
+pub(crate) fn is_loopback_addr(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback(),
         IpAddr::V6(v6) => {

@@ -3,6 +3,30 @@ use crate::oauth::{
     OAuthDiscovery, OAuthError, canonical_resource_uri, discover_oauth_with_url_policy,
 };
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
+
+/// Privacy class of a resolved base-URL host. Drives the detection
+/// recommendation so private/loopback hostnames never reach OAuth discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedHostClass {
+    Loopback,
+    PrivateLan,
+    PublicOrUnknown,
+}
+
+/// Classify resolved addresses using the canonical `ssrf` predicates (the same
+/// ones the connect tier enforces). Loopback wins over private-LAN; an empty
+/// list (resolution failed) is `PublicOrUnknown` so the caller falls through to
+/// discovery, which surfaces the real connect error.
+fn classify_resolved_host(addrs: &[IpAddr]) -> ResolvedHostClass {
+    if addrs.iter().copied().any(crate::ssrf::is_loopback_addr) {
+        ResolvedHostClass::Loopback
+    } else if addrs.iter().copied().any(crate::ssrf::is_user_private_lan) {
+        ResolvedHostClass::PrivateLan
+    } else {
+        ResolvedHostClass::PublicOrUnknown
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum McpAuthMode {
@@ -601,6 +625,53 @@ mod tests {
             .unwrap();
         assert_eq!(d.recommended_mode, McpAuthMode::UrlAsIs);
         assert_eq!(d.reason, DetectionReason::LoopbackOrPrivate);
+    }
+
+    #[test]
+    fn classify_resolved_host_maps_addresses() {
+        use std::net::IpAddr;
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+
+        // loopback takes precedence
+        assert_eq!(
+            classify_resolved_host(&[ip("127.0.0.1")]),
+            ResolvedHostClass::Loopback
+        );
+        assert_eq!(
+            classify_resolved_host(&[ip("::1")]),
+            ResolvedHostClass::Loopback
+        );
+        // private-LAN families
+        assert_eq!(
+            classify_resolved_host(&[ip("10.0.0.5")]),
+            ResolvedHostClass::PrivateLan
+        );
+        assert_eq!(
+            classify_resolved_host(&[ip("100.85.147.49")]),
+            ResolvedHostClass::PrivateLan
+        );
+        assert_eq!(
+            classify_resolved_host(&[ip("fc00::1")]),
+            ResolvedHostClass::PrivateLan
+        );
+        // public, empty, and unknown all fall through
+        assert_eq!(
+            classify_resolved_host(&[ip("8.8.8.8")]),
+            ResolvedHostClass::PublicOrUnknown
+        );
+        assert_eq!(
+            classify_resolved_host(&[]),
+            ResolvedHostClass::PublicOrUnknown
+        );
+        // mixed: any loopback wins; else any private-LAN
+        assert_eq!(
+            classify_resolved_host(&[ip("8.8.8.8"), ip("127.0.0.1")]),
+            ResolvedHostClass::Loopback
+        );
+        assert_eq!(
+            classify_resolved_host(&[ip("8.8.8.8"), ip("10.0.0.5")]),
+            ResolvedHostClass::PrivateLan
+        );
     }
 
     fn assert_invalid_server_url(
