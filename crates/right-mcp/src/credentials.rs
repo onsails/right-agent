@@ -259,7 +259,9 @@ fn is_loopback_host(host: &url::Host<&str>) -> bool {
 }
 
 fn is_private_or_link_local_ipv4(ip: Ipv4Addr) -> bool {
-    ip.is_private() || ip.is_link_local()
+    // link-local + the operator private-LAN families (RFC1918 + CGNAT) from ssrf,
+    // so the detection gate agrees with the AllowPrivate connect tier.
+    ip.is_link_local() || crate::ssrf::is_user_private_lan(IpAddr::V4(ip))
 }
 
 fn is_private_or_link_local_ipv6(ip: Ipv6Addr) -> bool {
@@ -1743,6 +1745,8 @@ mod db_tests {
         assert!(!is_public_url("http://localhost:3333/mcp"));
         assert!(!is_public_url("https://localhost/mcp"));
         assert!(!is_public_url("https://192.168.1.1/mcp"));
+        // RFC 6598 CGNAT (Tailscale) must be treated as private, not public.
+        assert!(!is_public_url("http://100.85.147.49:27123/mcp"));
     }
 
     #[tokio::test]
