@@ -458,7 +458,7 @@ pub(crate) async fn handle_mcp_remove(
 }
 
 fn detection_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    right_mcp::ssrf::hardened_client_builder()
+    right_mcp::ssrf::hardened_client_builder(right_mcp::ssrf::NetworkPolicy::PublicOnly)
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -582,7 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn public_network_resolver_rejects_localhost() {
-        let resolver = PublicNetworkResolver;
+        let resolver = PublicNetworkResolver::new(right_mcp::ssrf::NetworkPolicy::PublicOnly);
         let name = reqwest::dns::Name::from_str("localhost").unwrap();
 
         let result = resolver.resolve(name).await;

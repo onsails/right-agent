@@ -322,7 +322,7 @@ fn oauth_reconnect_retry_delay(attempt: usize) -> std::time::Duration {
 }
 
 fn oauth_reconnect_http_client() -> reqwest::Client {
-    right_mcp::ssrf::hardened_client_builder()
+    right_mcp::ssrf::hardened_client_builder(right_mcp::ssrf::NetworkPolicy::PublicOnly)
         .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -512,16 +512,17 @@ async fn handle_mcp_add(
 
     // Attempt connection (with timeout to prevent hanging on slow upstreams)
     tracing::info!(server = %req.name, url = %req.url, "mcp-add: connecting to upstream MCP server");
-    let connect_client = match right_mcp::ssrf::hardened_client_builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-    {
-        Ok(client) => client,
-        Err(e) => {
-            return internal_error(format!("reqwest client build: {e:#}")).into_response();
-        }
-    };
+    let connect_client =
+        match right_mcp::ssrf::hardened_client_builder(right_mcp::ssrf::NetworkPolicy::PublicOnly)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+        {
+            Ok(client) => client,
+            Err(e) => {
+                return internal_error(format!("reqwest client build: {e:#}")).into_response();
+            }
+        };
     match handle.connect(connect_client).await {
         Ok(_instructions) => {
             tracing::info!(server = %req.name, "mcp-add: upstream connection successful");
@@ -659,14 +660,17 @@ async fn handle_mcp_set_headers(
     // Build the background-connect client before any mutation: it needs no
     // inputs from persistence, and a build failure must return 500 with zero
     // state changes — never after the credential is already persisted.
-    let connect_client = match right_mcp::ssrf::hardened_client_builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(client) => client,
-        Err(e) => return internal_error(format!("reqwest client build: {e:#}")).into_response(),
-    };
+    let connect_client =
+        match right_mcp::ssrf::hardened_client_builder(right_mcp::ssrf::NetworkPolicy::PublicOnly)
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        {
+            Ok(client) => client,
+            Err(e) => {
+                return internal_error(format!("reqwest client build: {e:#}")).into_response();
+            }
+        };
 
     // Persist next — a credential write does not depend on upstream reachability.
     {
