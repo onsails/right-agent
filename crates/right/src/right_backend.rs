@@ -46,8 +46,10 @@ pub(crate) struct ConversationSearchParams {
     pub(crate) limit: Option<usize>,
 }
 
-/// Allowed forum-topic icon colors (RGB ints), per Telegram Bot API.
-const ALLOWED_ICON_COLORS: [i32; 6] = [7322096, 16766590, 13338331, 9367192, 16749490, 16478047];
+/// Allowed forum-topic icon colors (RGB ints), per Telegram Bot API. Positive
+/// by construction, so `u32` keeps the value lossless down to the bot's
+/// `Rgb::from_u32`.
+const ALLOWED_ICON_COLORS: [u32; 6] = [7322096, 16766590, 13338331, 9367192, 16749490, 16478047];
 
 /// End-to-end timeout for a forum-topic bot round-trip. Must exceed the bot's
 /// own 10s per-call timeout so the bot's clean error surfaces first.
@@ -1058,15 +1060,29 @@ impl RightBackend {
                 None,
             ));
         }
-        if let Some(color) = params.icon_color
-            && !ALLOWED_ICON_COLORS.contains(&color)
-        {
-            return Ok(tool_error(
-                "invalid_argument",
-                format!("icon_color must be one of {ALLOWED_ICON_COLORS:?}"),
-                None,
-            ));
-        }
+        // Validate + convert icon_color once. Telegram colors are positive RGB
+        // ints; reject negatives and non-allowlisted values here so nothing
+        // lossy ever reaches the bot.
+        let icon_color: Option<u32> = match params.icon_color {
+            Some(c) => match u32::try_from(c) {
+                Ok(c) if ALLOWED_ICON_COLORS.contains(&c) => Some(c),
+                _ => {
+                    return Ok(tool_error(
+                        "invalid_argument",
+                        format!("icon_color must be one of {ALLOWED_ICON_COLORS:?}"),
+                        None,
+                    ));
+                }
+            },
+            None => None,
+        };
+        // An empty custom-emoji id removes an icon only on edit; on create it is
+        // meaningless and Telegram rejects it, so drop it.
+        let icon_custom_emoji_id = params
+            .icon_custom_emoji_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
         let Some(invocation_id) = context.invocation_id else {
             return Ok(forum_scope_unavailable());
         };
@@ -1079,8 +1095,8 @@ impl RightBackend {
             invocation_id,
             token: target.bot_send_token,
             name: name.to_owned(),
-            icon_color: params.icon_color,
-            icon_custom_emoji_id: params.icon_custom_emoji_id.clone(),
+            icon_color,
+            icon_custom_emoji_id: icon_custom_emoji_id.clone(),
         };
         let resp: ForumTopicCreateResponse =
             match tokio::time::timeout(FORUM_TOPIC_TIMEOUT, client.forum_topic_create(&request))
@@ -1096,21 +1112,34 @@ impl RightBackend {
                     ));
                 }
             };
-        // Telegram-first ordering is intentional: persist to the local registry only
-        // after the bot call succeeds, so a registry failure never reports a success
-        // the user can't see. Do not reorder.
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        right_db::forum_topics::upsert_created(
-            &conn,
-            target.chat_id,
-            i64::from(resp.message_thread_id),
-            name,
-            params.icon_color.map(i64::from),
-            params.icon_custom_emoji_id.as_deref(),
-        )
+        // Telegram succeeded — the topic now exists and is visible to the user.
+        // The local registry is a best-effort cache that works around Telegram's
+        // missing "list topics" API. A write failure here must NOT discard the
+        // authoritative thread_id: that would make the agent retry and create a
+        // permanent duplicate topic (there is no delete tool to undo it). Log
+        // loudly and still return the result; the cache self-heals on the next op.
+        if let Err(e) = async {
+            let conn_arc = self.get_conn(agent_name).await?;
+            let conn = conn_arc.lock().await;
+            right_db::forum_topics::upsert_created(
+                &conn,
+                target.chat_id,
+                i64::from(resp.message_thread_id),
+                name,
+                icon_color.map(i64::from),
+                icon_custom_emoji_id.as_deref(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+            Ok::<(), anyhow::Error>(())
+        }
         .await
-        .map_err(|e| anyhow::anyhow!("forum registry write failed: {e:#}"))?;
+        {
+            tracing::error!(
+                "forum_topic_create: registry write failed after Telegram created thread {}: {e:#}",
+                resp.message_thread_id
+            );
+        }
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({ "message_thread_id": resp.message_thread_id, "name": name })
                 .to_string(),
@@ -1167,20 +1196,30 @@ impl RightBackend {
             Ok(Err(e)) => return Ok(forum_op_error(e)),
             Err(_) => return Ok(tool_error("forum_op_failed", "forum edit timed out", None)),
         }
-        // Telegram-first ordering is intentional: persist to the local registry only
-        // after the bot call succeeds, so a registry failure never reports a success
-        // the user can't see. Do not reorder.
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        right_db::forum_topics::update_edited(
-            &conn,
-            target.chat_id,
-            i64::from(params.message_thread_id),
-            trimmed_name.as_deref(),
-            params.icon_custom_emoji_id.as_deref(),
-        )
+        // Telegram succeeded; the local registry is a best-effort cache (see
+        // call_forum_topic_create). A write failure must not report failure for
+        // an op the user can already see — log loudly and continue.
+        if let Err(e) = async {
+            let conn_arc = self.get_conn(agent_name).await?;
+            let conn = conn_arc.lock().await;
+            right_db::forum_topics::update_edited(
+                &conn,
+                target.chat_id,
+                i64::from(params.message_thread_id),
+                trimmed_name.as_deref(),
+                params.icon_custom_emoji_id.as_deref(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+            Ok::<(), anyhow::Error>(())
+        }
         .await
-        .map_err(|e| anyhow::anyhow!("forum registry write failed: {e:#}"))?;
+        {
+            tracing::error!(
+                "forum_topic_edit: registry write failed after Telegram edit of thread {}: {e:#}",
+                params.message_thread_id
+            );
+        }
         Ok(forum_success())
     }
 
@@ -1269,19 +1308,29 @@ impl RightBackend {
                 ));
             }
         }
-        // Telegram-first ordering is intentional: persist to the local registry only
-        // after the bot call succeeds, so a registry failure never reports a success
-        // the user can't see. Do not reorder.
-        let conn_arc = self.get_conn(agent_name).await?;
-        let conn = conn_arc.lock().await;
-        right_db::forum_topics::set_state(
-            &conn,
-            target.chat_id,
-            i64::from(params.message_thread_id),
-            new_state,
-        )
+        // Telegram succeeded; the local registry is a best-effort cache (see
+        // call_forum_topic_create). A write failure must not report failure for
+        // an op the user can already see — log loudly and continue.
+        if let Err(e) = async {
+            let conn_arc = self.get_conn(agent_name).await?;
+            let conn = conn_arc.lock().await;
+            right_db::forum_topics::set_state(
+                &conn,
+                target.chat_id,
+                i64::from(params.message_thread_id),
+                new_state,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+            Ok::<(), anyhow::Error>(())
+        }
         .await
-        .map_err(|e| anyhow::anyhow!("forum registry write failed: {e:#}"))?;
+        {
+            tracing::error!(
+                "{tool}: registry write failed after Telegram state change of thread {}: {e:#}",
+                params.message_thread_id
+            );
+        }
         Ok(forum_success())
     }
 

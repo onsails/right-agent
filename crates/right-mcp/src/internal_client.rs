@@ -623,10 +623,27 @@ pub struct ForumTopicCreateRequest {
     pub invocation_id: String,
     pub token: String,
     pub name: String,
+    /// One of the 6 Telegram-allowed RGB ints. Always positive, so `u32`
+    /// rather than `i32` keeps the value lossless from validation to the bot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon_color: Option<i32>,
+    pub icon_color: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_custom_emoji_id: Option<String>,
+}
+
+// Manual Debug redacts `token` — these wire structs carry the bot send token,
+// and the project rule forbids token-bearing structs from being `{:?}`-logged
+// in plaintext (mirrors `ProgressSendRequest`).
+impl std::fmt::Debug for ForumTopicCreateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForumTopicCreateRequest")
+            .field("invocation_id", &self.invocation_id)
+            .field("token", &"<redacted>")
+            .field("name", &self.name)
+            .field("icon_color", &self.icon_color)
+            .field("icon_custom_emoji_id", &self.icon_custom_emoji_id)
+            .finish()
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -640,11 +657,33 @@ pub struct ForumTopicEditRequest {
     pub icon_custom_emoji_id: Option<String>,
 }
 
+impl std::fmt::Debug for ForumTopicEditRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForumTopicEditRequest")
+            .field("invocation_id", &self.invocation_id)
+            .field("token", &"<redacted>")
+            .field("message_thread_id", &self.message_thread_id)
+            .field("name", &self.name)
+            .field("icon_custom_emoji_id", &self.icon_custom_emoji_id)
+            .finish()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ForumTopicThreadRequest {
     pub invocation_id: String,
     pub token: String,
     pub message_thread_id: i32,
+}
+
+impl std::fmt::Debug for ForumTopicThreadRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForumTopicThreadRequest")
+            .field("invocation_id", &self.invocation_id)
+            .field("token", &"<redacted>")
+            .field("message_thread_id", &self.message_thread_id)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -847,12 +886,39 @@ mod tests {
             client_secret: Some("raw-client-secret".to_owned()),
         };
 
+        let forum_create = ForumTopicCreateRequest {
+            invocation_id: "inv-1".to_owned(),
+            token: "forum-bot-token".to_owned(),
+            name: "Bugs".to_owned(),
+            icon_color: Some(7322096),
+            icon_custom_emoji_id: None,
+        };
+        let forum_edit = ForumTopicEditRequest {
+            invocation_id: "inv-1".to_owned(),
+            token: "forum-bot-token".to_owned(),
+            message_thread_id: 5,
+            name: Some("Renamed".to_owned()),
+            icon_custom_emoji_id: None,
+        };
+        let forum_thread = ForumTopicThreadRequest {
+            invocation_id: "inv-1".to_owned(),
+            token: "forum-bot-token".to_owned(),
+            message_thread_id: 5,
+        };
+
         for debug in [
             format!("{header:?}"),
             format!("{add_request:?}"),
             format!("{set_headers_request:?}"),
             format!("{set_token_request:?}"),
+            format!("{forum_create:?}"),
+            format!("{forum_edit:?}"),
+            format!("{forum_thread:?}"),
         ] {
+            assert!(
+                !debug.contains("forum-bot-token"),
+                "Debug must redact forum send tokens: {debug}"
+            );
             assert!(
                 !debug.contains("raw-header-secret"),
                 "Debug must redact header values: {debug}"

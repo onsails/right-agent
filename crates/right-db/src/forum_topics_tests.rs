@@ -77,6 +77,43 @@ async fn update_edited_changes_name_only() {
 }
 
 #[tokio::test]
+async fn update_edited_empty_emoji_clears_to_null() {
+    let db = migrated().await;
+    upsert_created(&db, 100, 5, "Bugs", None, Some("emoji-123"))
+        .await
+        .unwrap();
+    assert_eq!(
+        list(&db, 100).await.unwrap()[0]
+            .icon_custom_emoji_id
+            .as_deref(),
+        Some("emoji-123")
+    );
+    // Empty string is Telegram's "remove the icon" value: the registry must
+    // store NULL, not "", so it stays in sync with Telegram.
+    update_edited(&db, 100, 5, None, Some("")).await.unwrap();
+    assert_eq!(
+        list(&db, 100).await.unwrap()[0].icon_custom_emoji_id,
+        None,
+        "empty emoji id must clear to NULL, not store an empty string"
+    );
+}
+
+#[tokio::test]
+async fn update_edited_none_emoji_leaves_icon_unchanged() {
+    let db = migrated().await;
+    upsert_created(&db, 100, 5, "Bugs", None, Some("emoji-123"))
+        .await
+        .unwrap();
+    // None means "leave unchanged" — the icon must survive a name-only edit.
+    update_edited(&db, 100, 5, Some("Renamed"), None)
+        .await
+        .unwrap();
+    let row = &list(&db, 100).await.unwrap()[0];
+    assert_eq!(row.name.as_deref(), Some("Renamed"));
+    assert_eq!(row.icon_custom_emoji_id.as_deref(), Some("emoji-123"));
+}
+
+#[tokio::test]
 async fn update_edited_is_noop_for_untracked_topic() {
     let db = migrated().await;
     update_edited(&db, 100, 999, Some("ghost"), None)
