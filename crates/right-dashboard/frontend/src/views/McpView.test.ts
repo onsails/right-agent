@@ -4,6 +4,7 @@ import type { McpDetectResponse, McpServerSummary } from '../types'
 import {
   canSaveServer,
   createDetectionRequest,
+  evaluateHttpUrlSubmit,
   isOAuthTerminalStatus,
   mcpStatusDetail,
   oauthPollUnavailableStatus,
@@ -224,6 +225,22 @@ describe('relativeAgo', () => {
   })
   it('returns null for unparseable input', () => {
     expect(relativeAgo('not-a-date', now)).toBeNull()
+  })
+})
+
+describe('evaluateHttpUrlSubmit', () => {
+  it('blocks the first submit of a plaintext http:// url', () => {
+    const r = evaluateHttpUrlSubmit('http://openclaw.owl-skate.ts.net:27123/mcp', false)
+    expect(r.proceed).toBe(false)
+    expect(r.warning).toContain('without TLS')
+  })
+
+  it('proceeds on the second submit (already warned)', () => {
+    expect(evaluateHttpUrlSubmit('http://box.local/mcp', true)).toEqual({ proceed: true, warning: null })
+  })
+
+  it('never warns for https:// urls', () => {
+    expect(evaluateHttpUrlSubmit('https://mcp.example.com/mcp', false)).toEqual({ proceed: true, warning: null })
   })
 })
 
