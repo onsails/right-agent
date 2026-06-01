@@ -212,5 +212,17 @@ Parts 1+2 and Part 3 are independently shippable; the plan phases them.
   host killpg and host-side SIGHUP; it is invisible to the host. Part 3's
   signal (`running` async_runs row) is the proxy that surfaces it; a direct
   in-sandbox scan is out of scope.
-- **`parse_stream_event` reuse** keeps cron and worker result-detection in
-  sync; if the terminal-event shape changes, both update together.
+- **Terminal-result detection is a standalone predicate.** Implementation
+  note: the design above proposed reusing `crate::cc::stream::parse_stream_event`,
+  but that parser maps any `type=="result"` to `StreamEvent::Result` without
+  exposing `parent_tool_use_id`, so it cannot express the top-level guard. The
+  shipped code uses a small `is_terminal_result_line(&str) -> bool` predicate in
+  `cron.rs` instead. Consequence: if the terminal-event shape changes,
+  `is_terminal_result_line`, `find_last_result_line`, and `parse_stream_event`
+  are independent co-update sites (the `is_terminal_result_line` doc comment
+  flags the first two).
+- **`result_line` field dropped.** Implementation note: `CronStreamOutcome`
+  shipped as `Success { collected_lines } | Failed { collected_lines }`. The
+  spec's `result_line`/`exit_code` fields were unused — production re-derives the
+  result from `collected_lines` via `parse_cron_output`, and the exit code is
+  advisory-only — so they were omitted rather than shipped as dead code.

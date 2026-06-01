@@ -2542,7 +2542,7 @@ mod target_snapshot_tests {
     /// therefore never reaches EOF.
     ///
     /// The fix: `consume_cron_stream` breaks the read loop on the terminal
-    /// top-level `result` event (detected via `terminal_result_line`) instead
+    /// top-level `result` event (detected via `is_terminal_result_line`) instead
     /// of waiting for EOF. There is intentionally NO wall-clock deadline — the
     /// 60s shutdown-drain (`SHUTDOWN_JOB_TIMEOUT`) is the only backstop.
     ///
@@ -2587,16 +2587,16 @@ sleep 120"#;
 
         let mut child = right_process::ProcessGroupChild::spawn(cmd).expect("spawn ssh");
 
-        // Mirror cron's deadline plumbing; bound the whole test with an outer
-        // timeout so the RED fails fast instead of hanging CI. ProcessGroupChild
-        // Drop killpg's the lingering ssh/sleep when `child` drops on return.
+        // Bound the whole test with an outer timeout so the RED fails fast
+        // instead of hanging CI. ProcessGroupChild Drop killpg's the lingering
+        // ssh/sleep when `child` drops on return.
         let outcome =
             tokio::time::timeout(Duration::from_secs(25), consume_cron_stream(&mut child)).await;
 
         let outcome = outcome.expect(
             "consume_cron_stream did not return within 25s — wedged-stdout hang reproduced \
              (the unbounded next_line() loop never sees EOF). This is the RED repro: it goes \
-             GREEN once consume_cron_stream enforces the deadline / breaks on the result event.",
+             GREEN once consume_cron_stream breaks on the terminal result event.",
         );
 
         match outcome {
