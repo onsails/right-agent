@@ -441,16 +441,17 @@ async fn record_budget_skip(
     }
 }
 
+/// Max characters of raw error/result detail surfaced in a Telegram error
+/// reply. Applied char-safely (never mid-codepoint) via `truncate_to_chars`,
+/// keeping the message well under Telegram's 4096-char limit after escaping.
+const TELEGRAM_ERROR_DETAIL_MAX_CHARS: usize = 300;
+
 /// Format a CC subprocess error as a Telegram message (D-16).
 ///
 /// Returns HTML intended for `ParseMode::Html`. Callers must fall back to
 /// `strip_html_tags` if Telegram rejects the HTML.
 pub fn format_error_reply(exit_code: i32, stderr: &str) -> String {
-    let truncated = if stderr.len() > 300 {
-        &stderr[..300]
-    } else {
-        stderr
-    };
+    let truncated = truncate_to_chars(stderr, TELEGRAM_ERROR_DETAIL_MAX_CHARS);
     format!(
         "\u{26a0}\u{fe0f} Agent error (exit {exit_code}):\n<pre>{}</pre>",
         html_escape(truncated)
@@ -467,7 +468,10 @@ pub(crate) const RATE_LIMIT_MESSAGE: &str = "\u{26a0}\u{fe0f} Claude's servers a
 pub(crate) fn format_human_error(result_text: &str) -> String {
     format!(
         "\u{26a0}\u{fe0f} The agent hit an error and couldn't finish: {}. Try again, or rephrase if it repeats.",
-        html_escape(result_text)
+        html_escape(truncate_to_chars(
+            result_text,
+            TELEGRAM_ERROR_DETAIL_MAX_CHARS
+        ))
     )
 }
 
@@ -1927,8 +1931,9 @@ pub fn spawn_worker(
                             tracing::warn!(?key, "reflection failed: {:#}; showing raw error", e);
                             match thinking_msg_id {
                                 Some(msg_id) => {
-                                    // raw_message is HTML produced by format_error_reply
-                                    // (stderr is html-escaped, wrapped in <pre>). Try HTML
+                                    // raw_message is valid ParseMode::Html: either
+                                    // format_error_reply (<pre>-wrapped, escaped) or
+                                    // format_human_error (escaped inline text). Try HTML
                                     // edit first; on failure, fall through to the plain-text
                                     // fallback path.
                                     let edit_result = ctx
@@ -3919,8 +3924,11 @@ async fn invoke_cc(
             "claude -p failed"
         );
 
+        // Classify once; reused by the auth branch and the rate-limit/other tail.
+        let cc_class = classify_cc_result(&stdout_str);
+
         // Check for auth error — trigger login flow if sandboxed.
-        if is_auth_error(&stdout_str) {
+        if matches!(cc_class, CcResultClass::Auth) {
             tracing::warn!(
                 chat_id = log_ctx.chat_id,
                 eff_thread_id = log_ctx.eff_thread_id,
@@ -4055,10 +4063,9 @@ async fn invoke_cc(
                 .ok();
         }
 
-        // Classify the failure (auth was already handled above). Rate-limit
-        // gets a human notice and skips reflection; other errors keep
-        // reflection but use a human-readable fallback message.
-        let cc_class = classify_cc_result(&stdout_str);
+        // Auth was handled above. Rate-limit gets a human notice and skips
+        // reflection; other errors keep reflection but use a human-readable
+        // fallback message.
         if matches!(cc_class, CcResultClass::RateLimited) {
             return Err(InvokeCcFailure::RateLimited {
                 message: RATE_LIMIT_MESSAGE.to_string(),
@@ -4560,6 +4567,23 @@ esac
         assert!(reply.contains("&amp;"));
     }
 
+    #[tokio::test]
+    async fn human_error_caps_long_result_text() {
+        // A very long `result` must not blow past Telegram's 4096-char limit.
+        let msg = format_human_error(&"z".repeat(5000));
+        let z_count = msg.chars().filter(|&c| c == 'z').count();
+        assert_eq!(z_count, TELEGRAM_ERROR_DETAIL_MAX_CHARS);
+    }
+
+    #[tokio::test]
+    async fn error_reply_multibyte_boundary_does_not_panic() {
+        // 1 ASCII byte + 3-byte chars makes byte 300 fall mid-codepoint, which
+        // would panic a naive `&stderr[..300]` byte slice.
+        let stderr = format!("x{}", "\u{65e5}".repeat(200)); // 'x' + 日×200
+        let reply = format_error_reply(1, &stderr);
+        assert!(reply.contains("Agent error (exit 1)"));
+    }
+
     // is_auth_error tests
     #[tokio::test]
     async fn is_auth_error_detects_403() {
@@ -4611,6 +4635,15 @@ esac
     #[tokio::test]
     async fn classify_detects_429_rate_limit() {
         let stdout = r#"{"type":"result","is_error":true,"api_error_status":429,"result":"API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"}"#;
+        assert_eq!(classify_cc_result(stdout), CcResultClass::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn classify_detects_429_status_only() {
+        // result text has NO RATE_LIMIT_PATTERNS substring — only the numeric
+        // api_error_status triggers RateLimited. Guards the status-code branch
+        // so a regression that drops it cannot pass on the string match alone.
+        let stdout = r#"{"is_error":true,"api_error_status":429,"result":"API Error: 429 Too Many Requests"}"#;
         assert_eq!(classify_cc_result(stdout), CcResultClass::RateLimited);
     }
 
