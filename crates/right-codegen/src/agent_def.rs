@@ -226,8 +226,6 @@ Identity files are always-loaded durable context. Right Agent explains their pur
 - `USER.md` stores stable facts about the user.
 - `TOOLS.md` stores durable tool, API, environment, and workflow constraints.
 
-When the user says \"remember\", \"save this\", or \"don't forget\", treat it as persistence intent. Use the `/right-memory` skill to choose the persistence target before editing identity files or calling memory tools.
-
 ## Response Rules
 
 Your final response MUST be self-contained. The user ONLY sees your final response — \
