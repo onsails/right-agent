@@ -881,7 +881,8 @@ mod memory_tests {
 async fn check_cron_runs_lists_running_rows() {
     let dir = tempfile::tempdir().unwrap();
     let conn = right_db::open_connection(dir.path(), true).await.unwrap();
-    // Seed one running cron run and one finished one; only the running one shows.
+    // Seed a running cron run, a finished cron run, and a running non-cron run;
+    // only the running cron one shows (exercises both status and kind filters).
     conn.execute(
         "INSERT INTO async_runs (id, kind, producer_ref, run_session_id, target_chat_id,
             status, started_at, delivery_required, delivery_status, created_at, updated_at)
@@ -901,13 +902,25 @@ async fn check_cron_runs_lists_running_rows() {
     )
     .await
     .unwrap();
+    // A running NON-cron row (kind='background') must be excluded by the
+    // `kind = 'cron'` filter — without it a regression dropping that clause
+    // would still pass, since r1 is the only 'running' row.
+    conn.execute(
+        "INSERT INTO async_runs (id, kind, producer_ref, run_session_id, target_chat_id,
+            status, started_at, delivery_required, delivery_status, created_at, updated_at)
+         VALUES ('r3','background','some-fork','r3',100,'running','2026-06-01T00:00:00+00:00',
+            0,'none','2026-06-01T00:00:00+00:00','2026-06-01T00:00:00+00:00')",
+        [],
+    )
+    .await
+    .unwrap();
     drop(conn);
 
     let checks = check_cron_runs(dir.path()).await;
     assert_eq!(
         checks.len(),
         1,
-        "only the running run should be listed: {checks:?}"
+        "only the running cron run should be listed (not the success cron row, not the running background row): {checks:?}"
     );
     assert!(checks[0].detail.contains("hyperbot-tracker"));
     assert!(checks[0].detail.contains("2026-06-01T00:00:00+00:00"));
