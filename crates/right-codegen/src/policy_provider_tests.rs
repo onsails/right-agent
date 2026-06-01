@@ -438,3 +438,20 @@ fn apply_provider_stanzas_noop_restrictive() {
         "restrictive policy has no anchor; fold is a no-op"
     );
 }
+
+#[test]
+fn full_regen_then_fold_reconstructs_host_stanza() {
+    let providers = [generic_entry("right-typefully", "api.typefully.com", None)];
+    let regen = generate_policy(
+        8100,
+        &NetworkPolicy::Permissive,
+        HostMcpAccess::Resolved(vec!["10.0.0.5".parse().unwrap()]),
+    );
+    assert!(
+        !regen.contains("api.typefully.com"),
+        "bare regen must be stanza-less"
+    );
+    let folded = apply_provider_stanzas(&regen, &providers).unwrap();
+    assert!(folded.contains("- host: api.typefully.com"));
+    assert!(folded.contains("protocol: rest"));
+}

@@ -203,11 +203,21 @@ pub async fn run_single_agent_codegen(
         .map(|c| c.network_policy)
         .unwrap_or_default();
     let mcp_port = MCP_HTTP_PORT;
-    let policy_content = crate::policy::generate_policy(
-        mcp_port,
-        &network_policy,
-        crate::policy::HostMcpAccess::BootstrapUnresolved,
-    );
+    let providers = agent
+        .config
+        .as_ref()
+        .and_then(|c| c.sandbox.as_ref())
+        .map(|s| s.providers.as_slice())
+        .unwrap_or(&[]);
+    let policy_content = crate::policy::apply_provider_stanzas(
+        &crate::policy::generate_policy(
+            mcp_port,
+            &network_policy,
+            crate::policy::HostMcpAccess::BootstrapUnresolved,
+        ),
+        providers,
+    )
+    .map_err(|e| miette::miette!("provider policy fold failed: {e:#}"))?;
     let policy_path = generated_policy_path(agent)?;
     write_regenerated(&policy_path, &policy_content)?;
     tracing::debug!(agent = %agent.name, %network_policy, path = %policy_path.display(), "wrote policy");
