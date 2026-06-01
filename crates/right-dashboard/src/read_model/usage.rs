@@ -9,10 +9,11 @@ use right_db::{Connection, params};
 
 use super::ReadModelError;
 
-const SOURCES: [&str; 6] = [
+const SOURCES: [&str; 7] = [
     "interactive",
     "cron",
     "reflection",
+    "idle_compaction",
     "learning_prefilter",
     "learning_probe_writer",
     "learning_curator",
@@ -800,6 +801,47 @@ mod tests {
                 "dashboard SOURCES is missing learning source `{source}`"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn usage_overview_recognizes_idle_compaction_source() {
+        // Regression: idle-compaction spend is recorded with source='idle_compaction'
+        // (crates/bot/src/idle_compaction.rs). It must be a first-class dashboard source,
+        // not fall through the unknown-source path (which warns and bottom-sorts it).
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).await.unwrap();
+        insert_usage(
+            &conn,
+            "2026-05-21T01:00:00Z",
+            "idle_compaction",
+            0.05,
+            "opus",
+        )
+        .await;
+
+        let response = usage_overview(
+            &conn,
+            UsageOverviewInput {
+                agent: "him".to_owned(),
+                generated_at: "2026-05-21T05:00:00Z".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !response.warnings.iter().any(|w| w.kind == "unknown_source"),
+            "idle_compaction must not be reported as an unknown usage source"
+        );
+
+        let today = response.windows.iter().find(|w| w.key == "today").unwrap();
+        let compaction = today
+            .sources
+            .iter()
+            .find(|s| s.source == "idle_compaction")
+            .expect("idle_compaction must appear as a recognized source");
+        assert_eq!(compaction.invocations, 1);
+        assert!((compaction.cost_usd - 0.05).abs() < 1e-9);
     }
 
     #[tokio::test]
