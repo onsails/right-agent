@@ -46,11 +46,12 @@ pub(crate) enum DetailsPayload {
     File(Vec<u8>),
 }
 
-/// Decide how to present `raw_json`. Char count (not bytes) approximates
-/// Telegram's limit conservatively; oversize falls back to a file.
+/// Decide how to present `raw_json`. Measured in UTF-16 code units to match
+/// Telegram's message-length limit exactly (`char` count would undercount
+/// astral-plane characters); oversize falls back to a file.
 pub(crate) fn details_payload(raw_json: &str) -> DetailsPayload {
     let wrapped = format!("<pre>{}</pre>", html_escape(raw_json));
-    if wrapped.chars().count() <= TELEGRAM_MESSAGE_LIMIT {
+    if wrapped.encode_utf16().count() <= TELEGRAM_MESSAGE_LIMIT {
         DetailsPayload::Inline(wrapped)
     } else {
         DetailsPayload::File(raw_json.as_bytes().to_vec())
