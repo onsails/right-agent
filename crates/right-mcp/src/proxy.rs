@@ -92,12 +92,10 @@ pub(crate) fn redact_query_strings(msg: &str) -> String {
     msg.split(' ')
         .map(|tok| {
             if tok.contains("://") {
-                if let Some(idx) = tok.find('?') {
-                    let trailing = if tok.ends_with(')') { ")" } else { "" };
-                    return format!("{}?<redacted>{trailing}", &tok[..idx]);
-                }
+                crate::credentials::redact_url(tok)
+            } else {
+                tok.to_string()
             }
-            tok.to_string()
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -1100,12 +1098,21 @@ mod tests {
 
     #[test]
     fn redact_query_strings_strips_url_query() {
+        // Per-token strip delegates to credentials::redact_url, which truncates at
+        // `?`; any trailing punctuation glued to the URL token (e.g. a closing
+        // paren) is dropped with the query — acceptable for a diagnostic string.
         assert_eq!(
-            redact_query_strings("error sending request for url (http://h:1/mcp?token=abc)"),
-            "error sending request for url (http://h:1/mcp?<redacted>)"
+            redact_query_strings("error sending request for url http://h:1/mcp?token=abc here"),
+            "error sending request for url http://h:1/mcp?<redacted> here"
         );
         assert_eq!(redact_query_strings("plain message"), "plain message");
         assert_eq!(redact_query_strings("http://h:1/mcp"), "http://h:1/mcp");
+        // Documented trade-off: a URL glued to a trailing paren loses it with the
+        // query. Pinned so a future "balance the paren" change is a conscious one.
+        assert_eq!(
+            redact_query_strings("(http://h:1/mcp?token=abc)"),
+            "(http://h:1/mcp?<redacted>"
+        );
     }
 
     #[tokio::test]

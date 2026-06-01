@@ -22,6 +22,12 @@ pub(crate) struct DashboardMcpServer {
     pub auth_type: Option<String>,
     pub header_names: Vec<String>,
     pub protected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_connect_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_attempt_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_success_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +89,9 @@ pub(crate) async fn handle_mcp_servers(
                     tool_count: server.tool_count,
                     auth_type: server.auth_type,
                     header_names: server.header_names,
+                    last_connect_error: server.last_connect_error,
+                    last_attempt_at: server.last_attempt_at,
+                    last_success_at: server.last_success_at,
                 })
                 .collect();
             Json(DashboardMcpServersResponse { servers }).into_response()
