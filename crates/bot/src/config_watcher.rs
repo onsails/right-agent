@@ -35,6 +35,14 @@ pub(crate) enum ChangeKind {
     },
     /// Anything else — graceful restart.
     RestartRequired,
+    /// Only `sandbox.providers` (optionally with model/debug) changed — apply
+    /// model/debug in-memory and hot-reconcile providers without a restart.
+    /// Carries the freshly parsed config so the reconcile reads new providers.
+    ProvidersReload {
+        new_model: Option<String>,
+        new_debug: Option<bool>,
+        new_config: Box<AgentConfig>,
+    },
 }
 
 /// Decide whether a change can be hot-reloaded or requires a restart.
@@ -47,38 +55,53 @@ pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
     if old_yaml == new_yaml {
         return ChangeKind::NoChange;
     }
-    let mut old: AgentConfig = match serde_saphyr::from_str(old_yaml) {
+    let old: AgentConfig = match serde_saphyr::from_str(old_yaml) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(
-                error = %format!("{e:#}"),
-                "config_watcher: failed to parse old agent.yaml — restart required"
-            );
+            tracing::warn!(error = %format!("{e:#}"),
+                "config_watcher: failed to parse old agent.yaml — restart required");
             return ChangeKind::RestartRequired;
         }
     };
-    let mut new: AgentConfig = match serde_saphyr::from_str(new_yaml) {
+    let new: AgentConfig = match serde_saphyr::from_str(new_yaml) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(
-                error = %format!("{e:#}"),
-                "config_watcher: failed to parse new agent.yaml — restart required"
-            );
+            tracing::warn!(error = %format!("{e:#}"),
+                "config_watcher: failed to parse new agent.yaml — restart required");
             return ChangeKind::RestartRequired;
         }
     };
-    let new_model = new.model.take();
-    let new_debug = new.debug.take();
-    normalize_for_reload_diff(&mut old);
-    normalize_for_reload_diff(&mut new);
-    if old == new {
-        ChangeKind::HotReloadable {
+    let new_model = new.model.clone();
+    let new_debug = new.debug;
+
+    // Stage A: only model/debug/learning differ → in-memory hot reload.
+    let mut old_a = old.clone();
+    let mut new_a = new.clone();
+    normalize_for_reload_diff(&mut old_a);
+    normalize_for_reload_diff(&mut new_a);
+    if old_a == new_a {
+        return ChangeKind::HotReloadable {
             new_model,
             new_debug,
-        }
-    } else {
-        ChangeKind::RestartRequired
+        };
     }
+
+    // Stage B: additionally ignore sandbox.providers → providers hot-reconcile.
+    if let Some(s) = old_a.sandbox.as_mut() {
+        s.providers.clear();
+    }
+    if let Some(s) = new_a.sandbox.as_mut() {
+        s.providers.clear();
+    }
+    if old_a == new_a {
+        return ChangeKind::ProvidersReload {
+            new_model,
+            new_debug,
+            new_config: Box::new(new),
+        };
+    }
+
+    ChangeKind::RestartRequired
 }
 
 fn normalize_for_reload_diff(config: &mut AgentConfig) {
@@ -190,6 +213,12 @@ pub(crate) fn spawn_config_watcher(
                             tracing::info!(
                                 "agent.yaml changed (non-model) — initiating graceful restart"
                             );
+                            config_changed.store(true, Ordering::Release);
+                            token.cancel();
+                            return;
+                        }
+                        ChangeKind::ProvidersReload { .. } => {
+                            // Wired in Task 5; restart for now so behavior is unchanged.
                             config_changed.store(true, Ordering::Release);
                             token.cancel();
                             return;
@@ -418,5 +447,41 @@ learning:
             }
             other => panic!("expected HotReloadable, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn diff_providers_only_is_providers_reload() {
+        let old = "restart: never\nmax_restarts: 5\nsandbox:\n  mode: openshell\n";
+        let new = "restart: never\nmax_restarts: 5\nsandbox:\n  mode: openshell\n  providers:\n    - name: right-typefully\n      type: generic\n      generic:\n        env_var: TYPEFULLY_API_KEY\n        upstream_host: api.typefully.com\n";
+        match classify(old, new) {
+            ChangeKind::ProvidersReload { new_config, .. } => {
+                let provs = new_config
+                    .sandbox
+                    .as_ref()
+                    .expect("sandbox")
+                    .providers
+                    .clone();
+                assert_eq!(provs.len(), 1);
+                assert_eq!(provs[0].name, "right-typefully");
+            }
+            other => panic!("expected ProvidersReload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn diff_providers_plus_other_field_is_restart_required() {
+        let old = "restart: never\nmax_restarts: 5\nsandbox:\n  mode: openshell\n";
+        let new = "restart: always\nmax_restarts: 5\nsandbox:\n  mode: openshell\n  providers:\n    - name: right-typefully\n      type: generic\n      generic:\n        env_var: TYPEFULLY_API_KEY\n        upstream_host: api.typefully.com\n";
+        assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
+    }
+
+    #[tokio::test]
+    async fn diff_model_only_still_hot_reloadable() {
+        let old = "restart: never\nmax_restarts: 5\nmodel: opus\n";
+        let new = "restart: never\nmax_restarts: 5\nmodel: sonnet\n";
+        assert!(matches!(
+            classify(old, new),
+            ChangeKind::HotReloadable { .. }
+        ));
     }
 }
