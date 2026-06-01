@@ -1576,21 +1576,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_add_validates_url_private_ip() {
+    async fn mcp_add_rejects_cloud_metadata_url() {
         let tmp = tempfile::tempdir().unwrap();
         let app = make_test_router(tmp.path()).await;
+
+        let (status, _body) = send_json(
+            app.clone(),
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "imds",
+                "url": "http://169.254.169.254/mcp"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
 
         let (status, _body) = send_json(
             app,
             "/mcp-add",
             serde_json::json!({
                 "agent": "test-agent",
-                "name": "notion",
-                "url": "https://192.168.1.1/mcp"
+                "name": "imds2",
+                "url": "http://100.100.100.200/latest/meta-data"
             }),
         )
         .await;
-
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 

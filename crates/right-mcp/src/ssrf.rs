@@ -7,8 +7,8 @@
 //! 1. DNS resolution filters addresses according to the configured
 //!    `NetworkPolicy` (the [`PublicNetworkResolver`]): `PublicOnly` strips all
 //!    non-public addresses; `AllowPrivate` additionally permits the operator's
-//!    RFC1918/CGNAT/ULA ranges but never loopback, link-local, or
-//!    cloud-metadata.
+//!    RFC1918/CGNAT/ULA ranges and loopback (for local dev MCP servers) but
+//!    never link-local or cloud-metadata.
 //! 2. Environment-based proxies are bypassed (`no_proxy`).
 //! 3. Redirects are disabled (the server cannot 302 us into the internal
 //!    network).
@@ -27,8 +27,8 @@ pub const PUBLIC_DNS_ERROR_MARKER: &str = "MCP detection DNS resolved to a non-p
 
 /// Outbound-connection trust tier. `PublicOnly` is the historical SSRF-hardened
 /// behaviour (globally-routable only). `AllowPrivate` additionally permits the
-/// operator's own private LAN / Tailscale / ULA ranges — used only for the
-/// operator-supplied base URL, never for server-supplied metadata URLs.
+/// operator's own private LAN / Tailscale / ULA ranges and loopback — used only
+/// for the operator-supplied base URL, never for server-supplied metadata URLs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkPolicy {
     PublicOnly,
@@ -79,7 +79,23 @@ pub fn ip_allowed(ip: IpAddr, policy: NetworkPolicy) -> bool {
     }
     match policy {
         NetworkPolicy::PublicOnly => is_public_ip(ip),
-        NetworkPolicy::AllowPrivate => is_public_ip(ip) || is_user_private_lan(ip),
+        NetworkPolicy::AllowPrivate => {
+            is_public_ip(ip) || is_user_private_lan(ip) || is_loopback_addr(ip)
+        }
+    }
+}
+
+/// Loopback check that folds IPv4-mapped IPv6 (`::ffff:127.0.0.1`) so it matches
+/// the bare IPv4 form. `Ipv6Addr::is_loopback` alone only catches `::1`.
+fn is_loopback_addr(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_loopback();
+            }
+            v6.is_loopback()
+        }
     }
 }
 
@@ -151,7 +167,10 @@ pub fn is_allowed_http_url(input: &str, policy: NetworkPolicy) -> bool {
         && parsed.password().is_none()
         && parsed.fragment().is_none()
         && parsed.host().is_some_and(|host| match host {
-            url::Host::Domain(domain) => !is_localhost_domain(domain),
+            url::Host::Domain(domain) => match policy {
+                NetworkPolicy::PublicOnly => !is_localhost_domain(domain),
+                NetworkPolicy::AllowPrivate => true,
+            },
             url::Host::Ipv4(ip) => ip_allowed(IpAddr::V4(ip), policy),
             url::Host::Ipv6(ip) => ip_allowed(IpAddr::V6(ip), policy),
         })
@@ -290,15 +309,19 @@ mod tests {
     }
 
     #[test]
-    fn allow_private_still_blocks_loopback_and_link_local() {
-        for ip in [
-            "127.0.0.1",
-            "::1",
-            "169.254.0.5",
-            "fe80::1",
-            "0.0.0.0",
-            "::",
-        ] {
+    fn allow_private_blocks_link_local_unspecified_but_allows_loopback() {
+        for ip in ["127.0.0.1", "::1", "::ffff:127.0.0.1"] {
+            let ip: IpAddr = ip.parse().unwrap();
+            assert!(
+                ip_allowed(ip, NetworkPolicy::AllowPrivate),
+                "loopback {ip} must be allowed under AllowPrivate"
+            );
+            assert!(
+                !ip_allowed(ip, NetworkPolicy::PublicOnly),
+                "loopback {ip} must be blocked under PublicOnly"
+            );
+        }
+        for ip in ["169.254.0.5", "fe80::1", "0.0.0.0", "::"] {
             let ip: IpAddr = ip.parse().unwrap();
             assert!(
                 !ip_allowed(ip, NetworkPolicy::AllowPrivate),
