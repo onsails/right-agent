@@ -3,6 +3,7 @@
 //! Read path: the `errdet:<id>` callback handler looks it up (scoped by
 //! chat_id) and replies with the JSON.
 
+use right_db::{Connection, DbError, OptionalExtension as _};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
 use crate::cc::markdown_utils::html_escape;
@@ -48,8 +49,6 @@ pub(crate) fn details_payload(raw_json: &str) -> DetailsPayload {
         DetailsPayload::File(raw_json.as_bytes().to_vec())
     }
 }
-
-use right_db::{Connection, DbError, OptionalExtension as _};
 
 /// Store the raw error JSON and sweep rows older than the TTL. Insert + delete
 /// are two writes → one immediate transaction. Returns the new row id.
