@@ -1708,6 +1708,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashboard_mcp_servers_surfaces_connect_observability_fields() {
+        // Regression: the DashboardMcpServer DTO must forward the connect
+        // observability fields from /mcp-list, or the dashboard's failure-cause
+        // UI is silently dead even though the frontend type declares them.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let internal = start_internal_mcp_list_server(json!([
+            {
+                "name": "obsidian",
+                "url": "https://mcp.example.com/mcp",
+                "status": "unreachable",
+                "tool_count": 0,
+                "auth_type": "headers",
+                "header_names": ["x-api-key"],
+                "last_connect_error": "connection refused",
+                "last_attempt_at": "2026-06-01T12:00:18Z",
+                "last_success_at": "2026-06-01T11:59:00Z"
+            }
+        ]));
+        let pending_auth = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let state = test_state_with_internal_socket(
+            temp.path().to_path_buf(),
+            internal.socket_path.clone(),
+            pending_auth,
+        );
+
+        let (status, body) = get_json_with_state(
+            "/dashboard/alpha/api/v1/mcp/servers",
+            Some(signed_init_data(42)),
+            state,
+        )
+        .await;
+        internal.handle.await.expect("internal API task");
+
+        assert_eq!(status, StatusCode::OK);
+        let server = &body["servers"][0];
+        assert_eq!(server["last_connect_error"], "connection refused");
+        assert_eq!(server["last_attempt_at"], "2026-06-01T12:00:18Z");
+        assert_eq!(server["last_success_at"], "2026-06-01T11:59:00Z");
+    }
+
+    #[tokio::test]
     async fn dashboard_mcp_oauth_status_requires_auth() {
         let temp = tempfile::tempdir().expect("tempdir");
         let status = get(
