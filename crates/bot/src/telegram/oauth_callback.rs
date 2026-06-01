@@ -230,24 +230,25 @@ async fn complete_oauth_flow(
     cb_state: OAuthCallbackState,
     agent_name: &str,
 ) -> miette::Result<()> {
-    let http_client = match right_mcp::ssrf::hardened_client_builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-    {
-        Ok(http_client) => http_client,
-        Err(error) => {
-            let detail = format!("{error:#}");
-            cb_state
-                .oauth_status
-                .mark_failed(
-                    &pending.state,
-                    token_exchange_failure_dashboard_message(&detail),
-                )
-                .await;
-            return Err(miette::miette!("oauth token HTTP client failed: {detail}"));
-        }
-    };
+    let http_client =
+        match right_mcp::ssrf::hardened_client_builder(right_mcp::ssrf::NetworkPolicy::PublicOnly)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+        {
+            Ok(http_client) => http_client,
+            Err(error) => {
+                let detail = format!("{error:#}");
+                cb_state
+                    .oauth_status
+                    .mark_failed(
+                        &pending.state,
+                        token_exchange_failure_dashboard_message(&detail),
+                    )
+                    .await;
+                return Err(miette::miette!("oauth token HTTP client failed: {detail}"));
+            }
+        };
 
     let token_resp = match exchange_token_with_url_policy(
         &http_client,

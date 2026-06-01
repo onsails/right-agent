@@ -4,8 +4,11 @@
 //! All outbound HTTP from those code paths MUST use [`hardened_client_builder`]
 //! so that:
 //!
-//! 1. DNS resolution rejects private/loopback/link-local addresses (the
-//!    [`PublicNetworkResolver`]).
+//! 1. DNS resolution filters addresses according to the configured
+//!    `NetworkPolicy` (the [`PublicNetworkResolver`]): `PublicOnly` strips all
+//!    non-public addresses; `AllowPrivate` additionally permits the operator's
+//!    RFC1918/CGNAT/ULA ranges but never loopback, link-local, or
+//!    cloud-metadata.
 //! 2. Environment-based proxies are bypassed (`no_proxy`).
 //! 3. Redirects are disabled (the server cannot 302 us into the internal
 //!    network).
@@ -17,7 +20,7 @@ use std::str::FromStr as _;
 use std::sync::Arc;
 
 /// Substring embedded in the error returned by [`PublicNetworkResolver`] when
-/// every resolved address is in a private/loopback/link-local range. Callers
+/// no resolved address survives the active `NetworkPolicy` filter. Callers
 /// match on this marker to distinguish the SSRF-policy rejection from generic
 /// DNS failures without echoing the rejected URL back to the user.
 pub const PUBLIC_DNS_ERROR_MARKER: &str = "MCP detection DNS resolved to a non-public address";
@@ -80,23 +83,31 @@ pub fn ip_allowed(ip: IpAddr, policy: NetworkPolicy) -> bool {
     }
 }
 
-/// `reqwest` DNS resolver that strips private/loopback/link-local addresses
-/// from a hostname's resolved set. If nothing public remains, resolution
-/// fails with [`PUBLIC_DNS_ERROR_MARKER`] in the error message.
+/// `reqwest` DNS resolver that strips addresses disallowed by `policy`. If
+/// nothing remains, resolution fails with [`PUBLIC_DNS_ERROR_MARKER`].
 #[derive(Debug, Clone, Copy)]
-pub struct PublicNetworkResolver;
+pub struct PublicNetworkResolver {
+    policy: NetworkPolicy,
+}
+
+impl PublicNetworkResolver {
+    pub fn new(policy: NetworkPolicy) -> Self {
+        Self { policy }
+    }
+}
 
 impl reqwest::dns::Resolve for PublicNetworkResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let host = name.as_str().to_owned();
+        let policy = self.policy;
         Box::pin(async move {
             let addrs = tokio::net::lookup_host((host.as_str(), 0))
                 .await
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
-            let public_addrs = addrs
-                .filter(|addr| is_public_ip(addr.ip()))
+            let allowed = addrs
+                .filter(|addr| ip_allowed(addr.ip(), policy))
                 .collect::<Vec<_>>();
-            if public_addrs.is_empty() {
+            if allowed.is_empty() {
                 return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     format!("{PUBLIC_DNS_ERROR_MARKER}: {host}"),
@@ -104,18 +115,18 @@ impl reqwest::dns::Resolve for PublicNetworkResolver {
                     as Box<dyn std::error::Error + Send + Sync>);
             }
 
-            Ok(Box::new(public_addrs.into_iter()) as reqwest::dns::Addrs)
+            Ok(Box::new(allowed.into_iter()) as reqwest::dns::Addrs)
         })
     }
 }
 
-/// Build a `reqwest::ClientBuilder` pre-hardened against SSRF. Callers add
-/// their own `connect_timeout` / `timeout` and then call `.build()`.
-pub fn hardened_client_builder() -> reqwest::ClientBuilder {
+/// Build a `reqwest::ClientBuilder` pre-hardened against SSRF under `policy`.
+/// Callers add their own `connect_timeout` / `timeout` and then call `.build()`.
+pub fn hardened_client_builder(policy: NetworkPolicy) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
-        .dns_resolver(Arc::new(PublicNetworkResolver))
+        .dns_resolver(Arc::new(PublicNetworkResolver::new(policy)))
 }
 
 /// Returns true if `domain` is `localhost` (with optional trailing dot,
@@ -127,13 +138,10 @@ pub fn is_localhost_domain(domain: &str) -> bool {
         .eq_ignore_ascii_case("localhost")
 }
 
-/// Validate a user- or metadata-supplied HTTP URL before the host process uses
-/// it for outbound network I/O.
-///
-/// This catches private and loopback IP literals before `reqwest` can bypass
-/// DNS resolution entirely. Domain names are still filtered at connection time
+/// Validate a user-/metadata-supplied HTTP URL under `policy` before outbound
+/// I/O. IP literals are checked directly; domains are filtered at connect time
 /// by [`PublicNetworkResolver`].
-pub fn is_public_http_url(input: &str) -> bool {
+pub fn is_allowed_http_url(input: &str, policy: NetworkPolicy) -> bool {
     let Ok(parsed) = reqwest::Url::parse(input) else {
         return false;
     };
@@ -144,9 +152,15 @@ pub fn is_public_http_url(input: &str) -> bool {
         && parsed.fragment().is_none()
         && parsed.host().is_some_and(|host| match host {
             url::Host::Domain(domain) => !is_localhost_domain(domain),
-            url::Host::Ipv4(ip) => is_public_ipv4(ip),
-            url::Host::Ipv6(ip) => is_public_ipv6(ip),
+            url::Host::Ipv4(ip) => ip_allowed(IpAddr::V4(ip), policy),
+            url::Host::Ipv6(ip) => ip_allowed(IpAddr::V6(ip), policy),
         })
+}
+
+/// Public-only URL check (historical behaviour). Thin wrapper over
+/// [`is_allowed_http_url`] with [`NetworkPolicy::PublicOnly`].
+pub fn is_public_http_url(input: &str) -> bool {
+    is_allowed_http_url(input, NetworkPolicy::PublicOnly)
 }
 
 pub fn is_public_ip(ip: IpAddr) -> bool {
@@ -268,6 +282,10 @@ mod tests {
                 ip_allowed(ip, NetworkPolicy::AllowPrivate),
                 "{ip} must be allowed"
             );
+            assert!(
+                !ip_allowed(ip, NetworkPolicy::PublicOnly),
+                "{ip} must be public-blocked"
+            );
         }
     }
 
@@ -314,5 +332,21 @@ mod tests {
         let ip: IpAddr = "8.8.8.8".parse().unwrap();
         assert!(ip_allowed(ip, NetworkPolicy::AllowPrivate));
         assert!(ip_allowed(ip, NetworkPolicy::PublicOnly));
+    }
+
+    #[tokio::test]
+    async fn resolver_constructs_with_policy_and_resolves_public_host() {
+        use reqwest::dns::Resolve as _;
+        use std::str::FromStr as _;
+        let ip: IpAddr = "100.85.147.49".parse().unwrap();
+        assert!(ip_allowed(ip, NetworkPolicy::AllowPrivate));
+        // Resolver construction must accept a policy.
+        let _ = PublicNetworkResolver::new(NetworkPolicy::AllowPrivate);
+        let r = PublicNetworkResolver::new(NetworkPolicy::PublicOnly);
+        // Public host resolves to >=1 public addr under PublicOnly.
+        let addrs = r
+            .resolve(reqwest::dns::Name::from_str("example.com").unwrap())
+            .await;
+        assert!(addrs.is_ok(), "public host must resolve under PublicOnly");
     }
 }
