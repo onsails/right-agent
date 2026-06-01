@@ -165,3 +165,28 @@ fn ensure_writes_both_bashrc_and_profile_when_both_exist() {
         );
     }
 }
+
+#[test]
+fn ensure_creates_both_bash_rc_files_when_none_exist() {
+    // macOS bash starts as a login shell (sources ~/.profile); Linux
+    // interactive bash sources ~/.bashrc. A fresh account with no rc files
+    // must get BOTH so `right` is on PATH regardless of how bash launches.
+    let home = tempdir().unwrap();
+    let bindir = home.path().join(".local/bin");
+    let outcome = ensure_on_path(&bindir, home.path(), Some("/bin/bash")).unwrap();
+    assert_eq!(
+        outcome,
+        EnsureOutcome::Wrote {
+            file: home.path().join(".bashrc")
+        }
+    );
+    for rc in [".bashrc", ".profile"] {
+        let content = std::fs::read_to_string(home.path().join(rc))
+            .unwrap_or_else(|_| panic!("{rc} should have been created"));
+        assert!(content.contains(BLOCK_START), "{rc} missing managed block");
+        assert!(
+            content.contains(&*bindir.to_string_lossy()),
+            "{rc} missing bindir"
+        );
+    }
+}

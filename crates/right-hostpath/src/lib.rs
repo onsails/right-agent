@@ -157,10 +157,10 @@ fn write_block(rc: &Path, bindir: &Path, shell: Option<&str>) -> std::io::Result
 /// Ensure `bindir` is on PATH for future shells by editing the rc file(s).
 ///
 /// Writes to every existing candidate rc (so login `~/.profile` and
-/// interactive `~/.bashrc` both pick it up), creating the primary if none
-/// exist. Returns `AlreadyOnPath` without writing when already reachable.
-/// Ordinary write failures become `CouldNotWrite` (non-fatal); only an
-/// absent rc target is an `Err`.
+/// interactive `~/.bashrc` both pick it up), creating all candidate rc files
+/// when none exist. Returns `AlreadyOnPath` without writing when already
+/// reachable. Ordinary write failures become `CouldNotWrite` (non-fatal);
+/// only an absent rc target is an `Err`.
 pub fn ensure_on_path(
     bindir: &Path,
     home: &Path,
@@ -171,12 +171,14 @@ pub fn ensure_on_path(
     }
 
     let targets = rc_targets(shell, home);
-    let primary = targets.first().cloned().ok_or(HostPathError::NoRcTarget)?;
-
     let mut to_write: Vec<PathBuf> = targets.iter().filter(|p| p.exists()).cloned().collect();
     if to_write.is_empty() {
-        to_write.push(primary);
+        // No rc files yet: create every candidate so both the interactive
+        // (~/.bashrc) and login-sourced (~/.profile) files exist — macOS bash
+        // login shells source ~/.profile, not ~/.bashrc.
+        to_write = targets;
     }
+    let primary = to_write.first().cloned().ok_or(HostPathError::NoRcTarget)?;
 
     for rc in &to_write {
         if let Err(e) = write_block(rc, bindir, shell) {
@@ -186,9 +188,7 @@ pub fn ensure_on_path(
             });
         }
     }
-    Ok(EnsureOutcome::Wrote {
-        file: to_write[0].clone(),
-    })
+    Ok(EnsureOutcome::Wrote { file: primary })
 }
 
 #[cfg(test)]
