@@ -394,6 +394,43 @@ fn apply_provider_stanzas_folds_generic_above_anchor() {
     );
 }
 
+/// Regression for the permissive provider-shadowing bug: a generic provider's
+/// host L7 endpoint MUST be emitted BEFORE the hostless `tls: skip` catch-all
+/// in `network_policies.outbound.endpoints`. OpenShell evaluates endpoints in
+/// order; a leading hostless `tls: skip` catch-all whose `allowed_ips` cover
+/// the provider host's IP raw-tunnels the connection (no TLS termination, no
+/// credential substitution → the placeholder leaks upstream → 401). Proven on
+/// a throwaway sandbox: host-first terminates TLS and substitutes; catch-all
+/// first leaks. See docs/architecture/providers.md.
+#[test]
+fn permissive_provider_endpoint_precedes_tls_skip_catch_all() {
+    let base = generate_policy(
+        8100,
+        &NetworkPolicy::Permissive,
+        HostMcpAccess::BootstrapUnresolved,
+    );
+    let out = apply_provider_stanzas(
+        &base,
+        &[generic_entry("right-twitterapi", "api.twitterapi.io", None)],
+    )
+    .unwrap();
+
+    let host_idx = out
+        .find("- host: api.twitterapi.io")
+        .expect("provider host endpoint must be present");
+    let catch_all_idx = out
+        .find("tls: skip")
+        .expect("permissive policy must contain a tls: skip catch-all");
+
+    assert!(
+        host_idx < catch_all_idx,
+        "provider host endpoint must precede the tls: skip catch-all so the \
+         proxy terminates TLS and substitutes the credential; otherwise the \
+         catch-all shadows it and the placeholder leaks upstream.\n\
+         host_idx={host_idx} catch_all_idx={catch_all_idx}\npolicy:\n{out}"
+    );
+}
+
 #[test]
 fn apply_provider_stanzas_is_idempotent_and_keeps_path() {
     let base = generate_policy(
