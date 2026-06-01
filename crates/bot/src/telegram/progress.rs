@@ -200,15 +200,17 @@ async fn handle_forum_topic_create(
     }
     let mut call = state
         .bot
-        .create_forum_topic(ChatId(target.chat_id), req.name.clone());
+        .create_forum_topic(ChatId(target.chat_id), req.name);
     if let Some(color) = req.icon_color {
-        call = call.icon_color(Rgb::from_u32(color as u32));
+        if let Ok(rgb) = u32::try_from(color) {
+            call = call.icon_color(Rgb::from_u32(rgb));
+        }
     }
-    if let Some(emoji) = req.icon_custom_emoji_id.clone() {
+    if let Some(emoji) = req.icon_custom_emoji_id {
         call = call.icon_custom_emoji_id(CustomEmojiId(emoji));
     }
-    match call.await {
-        Ok(topic) => (
+    match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, call).await {
+        Ok(Ok(topic)) => (
             StatusCode::OK,
             Json(ForumTopicCreateResponse {
                 ok: true,
@@ -216,7 +218,8 @@ async fn handle_forum_topic_create(
             }),
         )
             .into_response(),
-        Err(e) => forum_telegram_error(&req.invocation_id, e),
+        Ok(Err(e)) => forum_telegram_error(&req.invocation_id, e),
+        Err(_) => forum_timeout(&req.invocation_id),
     }
 }
 
@@ -232,15 +235,16 @@ async fn handle_forum_topic_edit(
     }
     let thread = ThreadId(MessageId(req.message_thread_id));
     let mut call = state.bot.edit_forum_topic(ChatId(target.chat_id), thread);
-    if let Some(name) = req.name.clone() {
+    if let Some(name) = req.name {
         call = call.name(name);
     }
-    if let Some(emoji) = req.icon_custom_emoji_id.clone() {
+    if let Some(emoji) = req.icon_custom_emoji_id {
         call = call.icon_custom_emoji_id(CustomEmojiId(emoji));
     }
-    match call.await {
-        Ok(_) => forum_ok(),
-        Err(e) => forum_telegram_error(&req.invocation_id, e),
+    match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, call).await {
+        Ok(Ok(_)) => forum_ok(),
+        Ok(Err(e)) => forum_telegram_error(&req.invocation_id, e),
+        Err(_) => forum_timeout(&req.invocation_id),
     }
 }
 
@@ -255,13 +259,11 @@ async fn handle_forum_topic_close(
         return forum_forbidden();
     }
     let thread = ThreadId(MessageId(req.message_thread_id));
-    match state
-        .bot
-        .close_forum_topic(ChatId(target.chat_id), thread)
-        .await
-    {
-        Ok(_) => forum_ok(),
-        Err(e) => forum_telegram_error(&req.invocation_id, e),
+    let call = state.bot.close_forum_topic(ChatId(target.chat_id), thread);
+    match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, call).await {
+        Ok(Ok(_)) => forum_ok(),
+        Ok(Err(e)) => forum_telegram_error(&req.invocation_id, e),
+        Err(_) => forum_timeout(&req.invocation_id),
     }
 }
 
@@ -276,13 +278,11 @@ async fn handle_forum_topic_reopen(
         return forum_forbidden();
     }
     let thread = ThreadId(MessageId(req.message_thread_id));
-    match state
-        .bot
-        .reopen_forum_topic(ChatId(target.chat_id), thread)
-        .await
-    {
-        Ok(_) => forum_ok(),
-        Err(e) => forum_telegram_error(&req.invocation_id, e),
+    let call = state.bot.reopen_forum_topic(ChatId(target.chat_id), thread);
+    match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, call).await {
+        Ok(Ok(_)) => forum_ok(),
+        Ok(Err(e)) => forum_telegram_error(&req.invocation_id, e),
+        Err(_) => forum_timeout(&req.invocation_id),
     }
 }
 
@@ -305,6 +305,21 @@ fn forum_forbidden() -> axum::response::Response {
         StatusCode::FORBIDDEN,
         Json(ProgressErrorResponse {
             error: "forum token mismatch".to_owned(),
+        }),
+    )
+        .into_response()
+}
+
+fn forum_timeout(invocation_id: &str) -> axum::response::Response {
+    tracing::warn!(
+        invocation_id = %invocation_id,
+        "forum topic op timed out after {}s",
+        PROGRESS_SEND_TIMEOUT.as_secs(),
+    );
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(ProgressErrorResponse {
+            error: "forum_op_timeout".to_owned(),
         }),
     )
         .into_response()
