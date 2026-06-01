@@ -32,8 +32,9 @@ const V35_SCHEMA: &str = include_str!("sql/v35_legacy_learning_cleanup.sql");
 const V36_SCHEMA: &str = include_str!("sql/v36_mcp_http_headers.sql");
 const V38_SCHEMA: &str = include_str!("sql/v38_skill_spend_and_learning_skip.sql");
 const V39_SCHEMA: &str = include_str!("sql/v39_error_details.sql");
+const V40_SCHEMA: &str = include_str!("sql/v40_forum_topics.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 39;
+pub const LATEST_SCHEMA_VERSION: u32 = 40;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -928,6 +929,11 @@ pub static MIGRATIONS: Migrations = Migrations {
         Migration {
             version: 39,
             sql: V39_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 40,
+            sql: V40_SCHEMA,
             hook: None,
         },
     ],
@@ -3888,5 +3894,21 @@ continue background work',
             .await
             .unwrap();
         assert_eq!(version, i64::from(crate::migrations::LATEST_SCHEMA_VERSION));
+    }
+
+    #[tokio::test]
+    async fn migration_v40_creates_forum_topics_table() {
+        let conn = Connection::open_in_memory().await.unwrap();
+        MIGRATIONS.to_latest(&conn).await.unwrap();
+        let count: i64 = conn
+            .query_one(
+                "SELECT COUNT(*) FROM pragma_table_info('forum_topics') \
+                 WHERE name IN ('chat_id','message_thread_id','name','icon_color','icon_custom_emoji_id','state','updated_at')",
+                (),
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count, 7, "forum_topics must have all 7 columns");
     }
 }
