@@ -244,6 +244,38 @@ impl InternalClient {
         self.post("/progress/send", request).await
     }
 
+    /// Create a forum topic via the bot-local UDS endpoint.
+    pub async fn forum_topic_create(
+        &self,
+        request: &ForumTopicCreateRequest,
+    ) -> Result<ForumTopicCreateResponse, InternalClientError> {
+        self.post("/forum-topic/create", request).await
+    }
+
+    /// Edit (rename / change icon) a forum topic.
+    pub async fn forum_topic_edit(
+        &self,
+        request: &ForumTopicEditRequest,
+    ) -> Result<ForumTopicOkResponse, InternalClientError> {
+        self.post("/forum-topic/edit", request).await
+    }
+
+    /// Close a forum topic.
+    pub async fn forum_topic_close(
+        &self,
+        request: &ForumTopicThreadRequest,
+    ) -> Result<ForumTopicOkResponse, InternalClientError> {
+        self.post("/forum-topic/close", request).await
+    }
+
+    /// Reopen a forum topic.
+    pub async fn forum_topic_reopen(
+        &self,
+        request: &ForumTopicThreadRequest,
+    ) -> Result<ForumTopicOkResponse, InternalClientError> {
+        self.post("/forum-topic/reopen", request).await
+    }
+
     /// List providers for the given agent.
     pub async fn provider_list(
         &self,
@@ -577,6 +609,50 @@ pub struct ProgressSendResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Forum topic management (bot-local UDS endpoints)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ForumTopicCreateRequest {
+    pub invocation_id: String,
+    pub token: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_color: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_custom_emoji_id: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ForumTopicEditRequest {
+    pub invocation_id: String,
+    pub token: String,
+    pub message_thread_id: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_custom_emoji_id: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ForumTopicThreadRequest {
+    pub invocation_id: String,
+    pub token: String,
+    pub message_thread_id: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ForumTopicCreateResponse {
+    pub ok: bool,
+    pub message_thread_id: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ForumTopicOkResponse {
+    pub ok: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -796,5 +872,21 @@ mod tests {
                 "Debug must mark redaction: {debug}"
             );
         }
+    }
+
+    #[test]
+    fn forum_topic_create_request_serializes_expected_fields() {
+        let req = ForumTopicCreateRequest {
+            invocation_id: "inv-1".to_owned(),
+            token: "secret".to_owned(),
+            name: "Bugs".to_owned(),
+            icon_color: Some(7322096),
+            icon_custom_emoji_id: None,
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["invocation_id"], "inv-1");
+        assert_eq!(v["name"], "Bugs");
+        assert_eq!(v["icon_color"], 7322096);
+        assert!(v.get("icon_custom_emoji_id").is_none(), "None is skipped");
     }
 }
