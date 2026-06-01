@@ -518,39 +518,74 @@ pub(crate) fn consume_bg_request(
     }
 }
 
+/// Classification of a `claude -p` result JSON on a non-zero exit.
+#[derive(Debug, PartialEq)]
+pub(crate) enum CcResultClass {
+    /// Authentication failure (401/403/not-logged-in patterns).
+    Auth,
+    /// Anthropic transient throttle/overload — not the user's usage.
+    RateLimited,
+    /// Any other reported error; `result_text` is the trimmed `result`
+    /// field when non-empty.
+    Other { result_text: Option<String> },
+    /// JSON did not parse, or `is_error` is not `true`.
+    NotError,
+}
+
+const AUTH_PATTERNS: &[&str] = &[
+    "API Error: 403",
+    "API Error: 401",
+    "Failed to authenticate",
+    "Not logged in",
+    "Please run /login",
+];
+
+const RATE_LIMIT_PATTERNS: &[&str] = &["Rate limited", "temporarily limiting", "Overloaded"];
+
+/// Parse the CC result JSON once and classify the failure. Auth is checked
+/// before rate-limit; the two are mutually exclusive by `api_error_status`
+/// (401/403 vs 429/529), and auth-first preserves the login-flow trigger.
+pub(crate) fn classify_cc_result(stdout: &str) -> CcResultClass {
+    let parsed: serde_json::Value = match serde_json::from_str(stdout) {
+        Ok(v) => v,
+        Err(_) => return CcResultClass::NotError,
+    };
+    let is_error = parsed
+        .get("is_error")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !is_error {
+        return CcResultClass::NotError;
+    }
+    let result = parsed.get("result").and_then(|v| v.as_str()).unwrap_or("");
+
+    if AUTH_PATTERNS.iter().any(|p| result.contains(p)) {
+        return CcResultClass::Auth;
+    }
+
+    let status = parsed.get("api_error_status").and_then(|v| v.as_u64());
+    let rate_limited = matches!(status, Some(429) | Some(529))
+        || RATE_LIMIT_PATTERNS.iter().any(|p| result.contains(p));
+    if rate_limited {
+        return CcResultClass::RateLimited;
+    }
+
+    let trimmed = result.trim();
+    let result_text = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    CcResultClass::Other { result_text }
+}
+
 /// Check whether CC stdout JSON indicates an authentication failure (403/401).
 ///
 /// Returns true when the JSON has `is_error: true` and the `result` string
 /// contains known auth-failure patterns. Returns false for non-JSON input,
 /// parse errors, or non-auth errors.
 pub fn is_auth_error(stdout: &str) -> bool {
-    let parsed: serde_json::Value = match serde_json::from_str(stdout) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
-    let is_error = parsed
-        .get("is_error")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !is_error {
-        return false;
-    }
-
-    let result = match parsed.get("result").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return false,
-    };
-
-    const AUTH_PATTERNS: &[&str] = &[
-        "API Error: 403",
-        "API Error: 401",
-        "Failed to authenticate",
-        "Not logged in",
-        "Please run /login",
-    ];
-
-    AUTH_PATTERNS.iter().any(|pattern| result.contains(pattern))
+    matches!(classify_cc_result(stdout), CcResultClass::Auth)
 }
 
 /// Extract an OAuth URL from process log lines.
@@ -4497,6 +4532,62 @@ esac
     #[tokio::test]
     async fn is_auth_error_false_for_empty() {
         assert!(!is_auth_error(""));
+    }
+
+    // classify_cc_result tests
+    #[tokio::test]
+    async fn classify_detects_429_rate_limit() {
+        let stdout = r#"{"type":"result","is_error":true,"api_error_status":429,"result":"API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"}"#;
+        assert_eq!(classify_cc_result(stdout), CcResultClass::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn classify_detects_529_overloaded_status() {
+        let stdout = r#"{"is_error":true,"api_error_status":529,"result":"API Error: Overloaded"}"#;
+        assert_eq!(classify_cc_result(stdout), CcResultClass::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn classify_detects_rate_limit_string_without_status() {
+        let stdout = r#"{"is_error":true,"result":"Something · Rate limited"}"#;
+        assert_eq!(classify_cc_result(stdout), CcResultClass::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn classify_detects_overloaded_string() {
+        let stdout = r#"{"is_error":true,"result":"API Error: Overloaded, retry later"}"#;
+        assert_eq!(classify_cc_result(stdout), CcResultClass::RateLimited);
+    }
+
+    #[tokio::test]
+    async fn classify_403_is_auth_not_rate_limit() {
+        let stdout = r#"{"is_error":true,"result":"API Error: 403 Forbidden"}"#;
+        assert_eq!(classify_cc_result(stdout), CcResultClass::Auth);
+    }
+
+    #[tokio::test]
+    async fn classify_ordinary_error_extracts_result_text() {
+        let stdout = r#"{"is_error":true,"result":"Tool execution failed"}"#;
+        assert_eq!(
+            classify_cc_result(stdout),
+            CcResultClass::Other {
+                result_text: Some("Tool execution failed".to_string())
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_non_json_is_not_error() {
+        assert_eq!(
+            classify_cc_result("not json at all"),
+            CcResultClass::NotError
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_is_error_false_is_not_error() {
+        let stdout = r#"{"is_error":false,"result":"ok"}"#;
+        assert_eq!(classify_cc_result(stdout), CcResultClass::NotError);
     }
 
     #[tokio::test]
