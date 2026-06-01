@@ -216,11 +216,23 @@ Parts 1+2 and Part 3 are independently shippable; the plan phases them.
   note: the design above proposed reusing `crate::cc::stream::parse_stream_event`,
   but that parser maps any `type=="result"` to `StreamEvent::Result` without
   exposing `parent_tool_use_id`, so it cannot express the top-level guard. The
-  shipped code uses a small `is_terminal_result_line(&str) -> bool` predicate in
-  `cron.rs` instead. Consequence: if the terminal-event shape changes,
-  `is_terminal_result_line`, `find_last_result_line`, and `parse_stream_event`
-  are independent co-update sites (the `is_terminal_result_line` doc comment
-  flags the first two).
+  shipped code uses `terminal_result_is_error(&str) -> Option<bool>` in `cron.rs`
+  instead (`Some(is_error)` for the terminal top-level result, `None` otherwise).
+  The core `type=="result"` test is factored into a shared
+  `is_result_line(&Value) -> bool` used by `terminal_result_is_error`,
+  `find_last_result_line`, and `parse_cron_output`, so "what counts as a result
+  event" has one owner; `parse_stream_event` (worker side) remains a separate
+  co-update site if the event shape changes.
+- **Error results route to the failure path.** Implementation note: a terminal
+  top-level result with `is_error: true` (auth failure, budget/turn limit) still
+  breaks the read loop — so the wedged-stdout hang cannot recur for error results
+  — but `consume_cron_stream` classifies it `Failed`, not `Success`. This keeps
+  reflection + the user-facing failure notification, matching the old
+  `exit_status`-gated behavior. Without the `is_error` check an error result was
+  mis-routed to `Success`, failed `parse_cron_output` (the `result` field is a
+  bare string), and silently dropped the notification — the same notification-loss
+  class this spec set out to fix. Covered by
+  `consume_cron_stream_is_error_result_is_failed`.
 - **`result_line` field dropped.** Implementation note: `CronStreamOutcome`
   shipped as `Success { collected_lines } | Failed { collected_lines }`. The
   spec's `result_line`/`exit_code` fields were unused — production re-derives the

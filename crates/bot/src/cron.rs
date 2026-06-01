@@ -704,9 +704,7 @@ async fn execute_job(
     // the SSH stdout pipe can linger open after CC exits).
     let outcome = consume_cron_stream(&mut child).await;
     let collected_lines: Vec<String> = match &outcome {
-        CronStreamOutcome::Success {
-            collected_lines, ..
-        }
+        CronStreamOutcome::Success { collected_lines }
         | CronStreamOutcome::Failed { collected_lines } => collected_lines.clone(),
     };
 
@@ -1072,11 +1070,22 @@ async fn execute_job(
     }
 }
 
+/// Return `true` iff the parsed NDJSON value is a CC `{"type":"result"}` event.
+///
+/// The single owner of the "what counts as a result event" test. Shared by
+/// [`find_last_result_line`], [`parse_cron_output`], and
+/// [`terminal_result_is_error`]; each of those adds its own extra guard
+/// (`parent_tool_use_id`, scan direction) on top of this core check, so a future
+/// change to the result-event shape has one place to update here.
+fn is_result_line(v: &serde_json::Value) -> bool {
+    v.get("type").and_then(|t| t.as_str()) == Some("result")
+}
+
 /// Return the last NDJSON line whose `type` field equals `"result"`.
 fn find_last_result_line(lines: &[String]) -> Option<&str> {
     lines.iter().rev().find_map(|line| {
         let v: serde_json::Value = serde_json::from_str(line).ok()?;
-        (v.get("type").and_then(|t| t.as_str()) == Some("result")).then_some(line.as_str())
+        is_result_line(&v).then_some(line.as_str())
     })
 }
 
@@ -1086,41 +1095,55 @@ fn find_last_result_line(lines: &[String]) -> Option<&str> {
 /// can run [`parse_cron_output`].
 #[derive(Debug)]
 pub(crate) enum CronStreamOutcome {
-    /// A terminal top-level `{"type":"result"}` event was observed (the loop
-    /// broke on it, or it was found at EOF).
+    /// A terminal top-level `{"type":"result"}` event with `is_error` false (or
+    /// absent) was observed — the loop broke on it. The success path parses and
+    /// delivers the real notification.
     Success { collected_lines: Vec<String> },
-    /// Stdout reached EOF without a terminal `result` event.
+    /// Either no terminal top-level result was seen (EOF / read error), or the
+    /// terminal result carried `is_error: true` (auth failure, budget/turn
+    /// limit). The failure path runs reflection and delivers a failure notice.
     Failed { collected_lines: Vec<String> },
 }
 
-/// Return `true` iff the line is the terminal top-level CC result event.
+/// Classify a line as the terminal top-level CC result event.
 ///
-/// CC emits exactly one top-level `{"type":"result"}` summary at the end of a
-/// turn. Sub-agent (Task tool) results arrive as nested `assistant`/`user`
-/// messages carrying `parent_tool_use_id`, so `type == "result"` is already
-/// terminal; the `parent_tool_use_id` absent/null check is defense-in-depth.
+/// Returns `Some(is_error)` when `line` is the terminal top-level
+/// `{"type":"result"}` summary CC emits exactly once at the end of a turn (the
+/// bool is the event's `is_error` flag); returns `None` for any other line.
 ///
-/// This shares the `type == "result"` test with [`find_last_result_line`] but
-/// deliberately differs: this predicate adds the top-level `parent_tool_use_id`
-/// guard and is forward (it drives the live break-on-terminal loop), while
-/// `find_last_result_line` is reverse/borrowing for `parse_cron_output`'s
-/// fallback. A future change to "what counts as a result" likely touches both.
-fn is_terminal_result_line(line: &str) -> bool {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-        return false;
-    };
-    let is_result = v.get("type").and_then(|t| t.as_str()) == Some("result");
+/// Sub-agent (Task tool) results arrive as nested `assistant`/`user` messages
+/// carrying `parent_tool_use_id`, so [`is_result_line`] is already terminal; the
+/// `parent_tool_use_id` absent/null check is defense-in-depth.
+///
+/// The `is_error` bool drives outcome routing in [`consume_cron_stream`]: a
+/// terminal result with `is_error: true` (auth failure, budget/turn limit) still
+/// breaks the read loop — avoiding the wedged-stdout hang — but yields
+/// [`CronStreamOutcome::Failed`] so the failure path (reflection + user notice)
+/// runs, matching the pre-result-driven `exit_status`-gated behavior. Without
+/// the `is_error` check, an error result would be mis-routed to the success
+/// path, fail to parse, and silently drop the user-facing failure notification.
+///
+/// Shares the core `type == "result"` test ([`is_result_line`]) with
+/// [`find_last_result_line`] and [`parse_cron_output`].
+fn terminal_result_is_error(line: &str) -> Option<bool> {
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
     let top_level = v.get("parent_tool_use_id").is_none_or(|p| p.is_null());
-    is_result && top_level
+    if !is_result_line(&v) || !top_level {
+        return None;
+    }
+    Some(v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false))
 }
 
 /// Consume the cron CC subprocess stdout line-by-line and classify the outcome.
 ///
 /// Breaks immediately on the terminal top-level `result` event (does NOT wait
-/// for EOF — the SSH stdout pipe can linger open after CC exits). On EOF,
-/// returns `Success` iff a terminal result was seen, else `Failed`. There is no
-/// wall-clock bound here; a turn that never emits a result is bounded by the
-/// shutdown-drain (`SHUTDOWN_JOB_TIMEOUT`).
+/// for EOF — the SSH stdout pipe can linger open after CC exits). The break
+/// happens for an error result too, so a wedged transport can never hang the
+/// task; only the [`CronStreamOutcome`] classification depends on `is_error`: a
+/// non-error terminal result is `Success`, an `is_error: true` result is
+/// `Failed` (so reflection runs), and EOF / read error without any terminal
+/// result is `Failed`. There is no wall-clock bound here; a turn that never
+/// emits a result is bounded by the shutdown-drain (`SHUTDOWN_JOB_TIMEOUT`).
 pub(crate) async fn consume_cron_stream(
     child: &mut right_process::ProcessGroupChild,
 ) -> CronStreamOutcome {
@@ -1128,21 +1151,33 @@ pub(crate) async fn consume_cron_stream(
     let mut lines = tokio::io::BufReader::new(stdout).lines();
 
     let mut collected_lines: Vec<String> = Vec::new();
-    let mut saw_terminal_result = false;
-    while let Ok(Some(line)) = lines.next_line().await {
-        if !saw_terminal_result && is_terminal_result_line(&line) {
-            saw_terminal_result = true;
-        }
-        collected_lines.push(line);
-        if saw_terminal_result {
-            break; // terminal result seen — do not wait for EOF
+    // `Some(is_error)` once the terminal top-level result is seen.
+    let mut terminal_is_error: Option<bool> = None;
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                if terminal_is_error.is_none() {
+                    terminal_is_error = terminal_result_is_error(&line);
+                }
+                collected_lines.push(line);
+                if terminal_is_error.is_some() {
+                    break; // terminal result seen — do not wait for EOF
+                }
+            }
+            Ok(None) => break, // EOF
+            Err(e) => {
+                // Surface the read error (FAIL FAST: never swallow silently),
+                // then stop — no terminal result means the failure path runs.
+                tracing::warn!("cron stdout read error: {e}; ending stream read");
+                break;
+            }
         }
     }
 
-    if saw_terminal_result {
-        CronStreamOutcome::Success { collected_lines }
-    } else {
-        CronStreamOutcome::Failed { collected_lines }
+    match terminal_is_error {
+        Some(false) => CronStreamOutcome::Success { collected_lines },
+        // Error result, or no terminal result at all → failure path.
+        Some(true) | None => CronStreamOutcome::Failed { collected_lines },
     }
 }
 
@@ -1157,11 +1192,7 @@ pub(crate) fn parse_cron_output(lines: &[String]) -> Result<CronReplyOutput, Str
         .rev()
         .find_map(|line| {
             let v: serde_json::Value = serde_json::from_str(line).ok()?;
-            if v.get("type").and_then(|t| t.as_str()) == Some("result") {
-                Some(v)
-            } else {
-                None
-            }
+            if is_result_line(&v) { Some(v) } else { None }
         })
         .ok_or_else(|| "no result line found in stream-json output".to_string())?;
 
@@ -2377,6 +2408,40 @@ mod target_snapshot_tests {
         );
     }
 
+    #[tokio::test]
+    async fn consume_cron_stream_is_error_result_is_failed() {
+        use std::time::Duration;
+        // A terminal top-level result with is_error:true (auth failure, budget
+        // exceeded, turn limit) must still BREAK the loop without waiting for EOF
+        // (sleep holds stdout open) AND classify as Failed, so the reflection /
+        // failure-notify path runs instead of the success-parse path silently
+        // dropping the user-facing failure.
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg(
+            r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"Budget exceeded"}'; sleep 30"#,
+        );
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = right_process::ProcessGroupChild::spawn(cmd).expect("spawn bash");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), consume_cron_stream(&mut child))
+            .await
+            .expect("must break on the terminal result without waiting for EOF");
+
+        match outcome {
+            CronStreamOutcome::Failed { collected_lines } => {
+                assert!(
+                    collected_lines
+                        .iter()
+                        .any(|l| l.contains("Budget exceeded")),
+                    "got: {collected_lines:?}"
+                );
+            }
+            other => panic!("is_error:true terminal result must be Failed, got {other:?}"),
+        }
+    }
+
     async fn migrated_conn() -> (tempfile::TempDir, right_db::Connection) {
         let dir = tempfile::tempdir().unwrap();
         let conn = right_db::open_connection(dir.path(), true).await.unwrap();
@@ -2542,9 +2607,9 @@ mod target_snapshot_tests {
     /// therefore never reaches EOF.
     ///
     /// The fix: `consume_cron_stream` breaks the read loop on the terminal
-    /// top-level `result` event (detected via `is_terminal_result_line`) instead
-    /// of waiting for EOF. There is intentionally NO wall-clock deadline — the
-    /// 60s shutdown-drain (`SHUTDOWN_JOB_TIMEOUT`) is the only backstop.
+    /// top-level `result` event (detected via `terminal_result_is_error`)
+    /// instead of waiting for EOF. There is intentionally NO wall-clock deadline
+    /// — the 60s shutdown-drain (`SHUTDOWN_JOB_TIMEOUT`) is the only backstop.
     ///
     /// So `consume_cron_stream` returns `Success` carrying `REPRO-OK` well
     /// within the outer 25s timeout. If the break-on-terminal-result logic
