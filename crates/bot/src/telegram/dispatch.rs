@@ -609,6 +609,12 @@ fn build_dispatcher(
             })
             .endpoint(handle_bg_callback),
         )
+        .branch(
+            dptree::filter(|q: CallbackQuery| {
+                q.data.as_deref().is_some_and(|d| d.starts_with("errdet:"))
+            })
+            .endpoint(super::error_details::handle_error_details_callback),
+        )
         .endpoint(handle_stop_callback);
 
     let schema = dptree::entry()
