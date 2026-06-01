@@ -80,7 +80,10 @@ pub async fn upsert_created(
 
 /// Update name/icon for an existing tracked topic. No-op (0 rows) if the
 /// topic is not in the registry (e.g. a human-created topic). `None` fields
-/// are left unchanged via COALESCE.
+/// are left unchanged via COALESCE. An empty-string `icon_custom_emoji_id`
+/// is Telegram's "remove the icon" value, so it is normalized to NULL (via
+/// NULLIF) rather than stored as `""`, keeping the registry in sync with
+/// Telegram's actual state.
 pub async fn update_edited(
     conn: &Connection,
     chat_id: i64,
@@ -91,7 +94,7 @@ pub async fn update_edited(
     conn.execute(
         "UPDATE forum_topics SET
             name = COALESCE(?, name),
-            icon_custom_emoji_id = COALESCE(?, icon_custom_emoji_id),
+            icon_custom_emoji_id = NULLIF(COALESCE(?, icon_custom_emoji_id), ''),
             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
          WHERE chat_id = ? AND message_thread_id = ?",
         crate::params![name, icon_custom_emoji_id, chat_id, message_thread_id],

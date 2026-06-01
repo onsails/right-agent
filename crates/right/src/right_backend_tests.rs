@@ -1758,6 +1758,33 @@ async fn forum_topic_create_rejects_bad_icon_color() {
 }
 
 #[tokio::test]
+async fn forum_topic_create_rejects_negative_icon_color() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+
+    // A negative icon_color must be rejected at validation, not silently
+    // dropped (it can no longer slip past as an unset color).
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "forum_topic_create",
+            serde_json::json!({ "name": "Bugs", "icon_color": -1 }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "negative icon_color must be a tool error"
+    );
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+}
+
+#[tokio::test]
 async fn forum_topic_create_rejects_empty_name() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;

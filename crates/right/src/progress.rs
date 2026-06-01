@@ -245,19 +245,37 @@ impl ProgressRegistry {
         Ok(invocation.kind)
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn conversation_scope(
+    /// The single foreground-only scope gate, shared by `conversation_scope`
+    /// and `forum_target`. Enforces the load-bearing invariant in exactly one
+    /// place — scope/topic tools run only in a foreground invocation and the
+    /// chat id is server-resolved, never agent-supplied — so the two callers
+    /// can never silently diverge. Returns the resolved scope plus the bot
+    /// endpoint + send token (the latter cloned only when the caller needs it).
+    async fn foreground_scope(
         &self,
         invocation_id: &str,
-    ) -> Result<ConversationScope, ProgressError> {
+    ) -> Result<(ConversationScope, PathBuf, String), ProgressError> {
         let inner = self.inner.lock().await;
         let invocation = inner.get(invocation_id).ok_or(ProgressError::Unavailable)?;
         if !matches!(invocation.kind, ProgressInvocationKind::Foreground) {
             return Err(ProgressError::Forbidden);
         }
-        invocation
+        let scope = invocation
             .conversation_scope
-            .ok_or(ProgressError::Unavailable)
+            .ok_or(ProgressError::Unavailable)?;
+        Ok((
+            scope,
+            invocation.bot_socket_path.clone(),
+            invocation.bot_send_token.clone(),
+        ))
+    }
+
+    pub(crate) async fn conversation_scope(
+        &self,
+        invocation_id: &str,
+    ) -> Result<ConversationScope, ProgressError> {
+        let (scope, _, _) = self.foreground_scope(invocation_id).await?;
+        Ok(scope)
     }
 
     /// Resolve the bot endpoint + token + chat id for a forum-topic
@@ -267,17 +285,10 @@ impl ProgressRegistry {
         &self,
         invocation_id: &str,
     ) -> Result<ForumTarget, ProgressError> {
-        let inner = self.inner.lock().await;
-        let invocation = inner.get(invocation_id).ok_or(ProgressError::Unavailable)?;
-        if !matches!(invocation.kind, ProgressInvocationKind::Foreground) {
-            return Err(ProgressError::Forbidden);
-        }
-        let scope = invocation
-            .conversation_scope
-            .ok_or(ProgressError::Unavailable)?;
+        let (scope, bot_socket_path, bot_send_token) = self.foreground_scope(invocation_id).await?;
         Ok(ForumTarget {
-            bot_socket_path: invocation.bot_socket_path.clone(),
-            bot_send_token: invocation.bot_send_token.clone(),
+            bot_socket_path,
+            bot_send_token,
             chat_id: scope.chat_id,
         })
     }

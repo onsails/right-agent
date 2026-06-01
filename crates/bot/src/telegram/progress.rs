@@ -201,10 +201,8 @@ async fn handle_forum_topic_create(
     let mut call = state
         .bot
         .create_forum_topic(ChatId(target.chat_id), req.name);
-    if let Some(color) = req.icon_color
-        && let Ok(rgb) = u32::try_from(color)
-    {
-        call = call.icon_color(Rgb::from_u32(rgb));
+    if let Some(color) = req.icon_color {
+        call = call.icon_color(Rgb::from_u32(color));
     }
     if let Some(emoji) = req.icon_custom_emoji_id {
         call = call.icon_custom_emoji_id(CustomEmojiId(emoji));
