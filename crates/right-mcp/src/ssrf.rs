@@ -35,8 +35,9 @@ pub enum NetworkPolicy {
     AllowPrivate,
 }
 
-/// RFC1918 + RFC6598 CGNAT (Tailscale) + IPv6 ULA — the operator's own network.
-fn is_user_private_lan(ip: IpAddr) -> bool {
+/// RFC1918 + RFC6598 CGNAT (Tailscale) + IPv6 ULA — the operator's own private
+/// network. Shared with the detection gate in credentials.rs so both agree on "private".
+pub(crate) fn is_user_private_lan(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let n = u32::from(v4);

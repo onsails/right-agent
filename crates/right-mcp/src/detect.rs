@@ -20,6 +20,8 @@ pub enum DetectionReason {
     QueryStringPresent,
     #[serde(rename = "loopback_or_private")]
     LoopbackOrPrivate,
+    #[serde(rename = "private_network_no_oauth")]
+    PrivateNetworkNoOauth,
     #[serde(rename = "oauth_discovered")]
     OAuthDiscovered,
     #[serde(rename = "no_oauth_metadata")]
@@ -86,12 +88,25 @@ where
         });
     }
 
-    if is_loopback_url(original_url) || !is_public_url(&bare_url) {
+    if is_loopback_url(original_url) {
         return Ok(McpAuthDetection {
             bare_url,
             oauth_discovered: false,
             recommended_mode: McpAuthMode::UrlAsIs,
             reason: DetectionReason::LoopbackOrPrivate,
+            oauth: None,
+        });
+    }
+
+    if !is_public_url(&bare_url) {
+        // Private / LAN / Tailscale base URL: OAuth is not supported for local
+        // servers (its token_endpoint would be private and rejected by the strict
+        // metadata policy). Recommend Headers and skip OAuth discovery.
+        return Ok(McpAuthDetection {
+            bare_url,
+            oauth_discovered: false,
+            recommended_mode: McpAuthMode::Headers,
+            reason: DetectionReason::PrivateNetworkNoOauth,
             oauth: None,
         });
     }
@@ -195,6 +210,10 @@ mod tests {
             serde_json::json!("loopback_or_private")
         );
         assert_eq!(
+            serde_json::to_value(DetectionReason::PrivateNetworkNoOauth).unwrap(),
+            serde_json::json!("private_network_no_oauth")
+        );
+        assert_eq!(
             serde_json::to_value(DetectionReason::OAuthDiscovered).unwrap(),
             serde_json::json!("oauth_discovered")
         );
@@ -278,7 +297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detect_recommends_url_as_is_for_private_address() {
+    async fn detect_recommends_headers_for_private_address() {
         let client = client();
 
         let result = detect_mcp_auth(&client, "https://192.168.1.1/mcp")
@@ -287,13 +306,13 @@ mod tests {
 
         assert_eq!(result.bare_url, "https://192.168.1.1/mcp");
         assert!(!result.oauth_discovered);
-        assert_eq!(result.recommended_mode, McpAuthMode::UrlAsIs);
-        assert_eq!(result.reason, DetectionReason::LoopbackOrPrivate);
+        assert_eq!(result.recommended_mode, McpAuthMode::Headers);
+        assert_eq!(result.reason, DetectionReason::PrivateNetworkNoOauth);
         assert_eq!(result.oauth, None);
     }
 
     #[tokio::test]
-    async fn detect_recommends_url_as_is_for_link_local_address() {
+    async fn detect_recommends_headers_for_link_local_address() {
         let client = client();
 
         let result = detect_mcp_auth(&client, "https://169.254.1.1/mcp")
@@ -302,8 +321,8 @@ mod tests {
 
         assert_eq!(result.bare_url, "https://169.254.1.1/mcp");
         assert!(!result.oauth_discovered);
-        assert_eq!(result.recommended_mode, McpAuthMode::UrlAsIs);
-        assert_eq!(result.reason, DetectionReason::LoopbackOrPrivate);
+        assert_eq!(result.recommended_mode, McpAuthMode::Headers);
+        assert_eq!(result.reason, DetectionReason::PrivateNetworkNoOauth);
         assert_eq!(result.oauth, None);
     }
 
@@ -552,6 +571,36 @@ mod tests {
             Ok(result) => panic!("malformed metadata must not be classified as {result:?}"),
             Err(error) => panic!("unexpected OAuth error: {error}"),
         }
+    }
+
+    #[tokio::test]
+    async fn private_base_url_recommends_headers_not_oauth() {
+        let client = client();
+        // 100.64/10 is RFC 6598 CGNAT (Tailscale) — !is_public_url, not loopback.
+        let d = detect_mcp_auth(&client, "http://100.85.147.49:27123/mcp")
+            .await
+            .unwrap();
+        assert_eq!(d.recommended_mode, McpAuthMode::Headers);
+        assert_eq!(d.reason, DetectionReason::PrivateNetworkNoOauth);
+        assert!(!d.oauth_discovered);
+        assert!(d.oauth.is_none());
+
+        // RFC 1918 private range routes the same way.
+        let rfc1918 = detect_mcp_auth(&client, "http://192.168.10.50:27123/mcp")
+            .await
+            .unwrap();
+        assert_eq!(rfc1918.recommended_mode, McpAuthMode::Headers);
+        assert_eq!(rfc1918.reason, DetectionReason::PrivateNetworkNoOauth);
+    }
+
+    #[tokio::test]
+    async fn loopback_base_url_still_recommends_url_as_is() {
+        let client = client();
+        let d = detect_mcp_auth(&client, "http://127.0.0.1:8080/mcp")
+            .await
+            .unwrap();
+        assert_eq!(d.recommended_mode, McpAuthMode::UrlAsIs);
+        assert_eq!(d.reason, DetectionReason::LoopbackOrPrivate);
     }
 
     fn assert_invalid_server_url(
