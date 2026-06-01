@@ -457,6 +457,20 @@ pub fn format_error_reply(exit_code: i32, stderr: &str) -> String {
     )
 }
 
+/// User-facing notice for an Anthropic-side rate limit / overload
+/// (HTTP 429/529). Reassures the user it is transient and account-neutral.
+pub(crate) const RATE_LIMIT_MESSAGE: &str = "\u{26a0}\u{fe0f} Claude's servers are briefly overloaded and limited this request. It's temporary and not about your account or usage — try again in a moment.";
+
+/// Human-readable error notice built from the CC `result` text, for the
+/// generic (non-auth, non-rate-limit) failure fallback. `result_text` is
+/// HTML-escaped because the reply is sent with `ParseMode::Html`.
+pub(crate) fn format_human_error(result_text: &str) -> String {
+    format!(
+        "\u{26a0}\u{fe0f} The agent hit an error and couldn't finish: {}. Try again, or rephrase if it repeats.",
+        html_escape(result_text)
+    )
+}
+
 /// Decide whether a bg-request flag should be honored.
 ///
 /// Even after `consume_bg_request` returns true, an intra-turn race can fire
@@ -4588,6 +4602,21 @@ esac
     async fn classify_is_error_false_is_not_error() {
         let stdout = r#"{"is_error":false,"result":"ok"}"#;
         assert_eq!(classify_cc_result(stdout), CcResultClass::NotError);
+    }
+
+    // RATE_LIMIT_MESSAGE / format_human_error tests
+    #[tokio::test]
+    async fn rate_limit_message_is_reassuring_and_not_about_usage() {
+        assert!(RATE_LIMIT_MESSAGE.contains("not about your account or usage"));
+        assert!(RATE_LIMIT_MESSAGE.contains("try again"));
+        assert!(RATE_LIMIT_MESSAGE.starts_with('\u{26a0}'));
+    }
+
+    #[tokio::test]
+    async fn human_error_interpolates_and_escapes_result_text() {
+        let msg = format_human_error("boom <x> & y");
+        assert!(msg.contains("couldn't finish: boom &lt;x&gt; &amp; y."));
+        assert!(msg.contains("Try again, or rephrase if it repeats."));
     }
 
     #[tokio::test]
