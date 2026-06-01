@@ -12,6 +12,19 @@
 
 **Git:** Work on a feature branch (or this session's in-place checkout) and land via fast-forward to `origin/master`. Conventional Commits. Do not push until the final workspace test passes.
 
+> **Amendment (2026-06-02, applied during execution):** loopback (`127.0.0.0/8`,
+> `::1`, `localhost`) is **allowed** under `AllowPrivate` and stays **blocked**
+> under `PublicOnly`. This supersedes the original "block loopback always" intent
+> after execution revealed it removed the existing loopback-dev-server feature and
+> broke every upstream-connection integration test (mock servers bind `127.0.0.1`).
+> Code delta: `ip_allowed`'s `AllowPrivate` arm also accepts `ip.is_loopback()`;
+> the domain arm of `is_allowed_http_url` / `validate_server_url` accepts
+> `localhost` under `AllowPrivate`. Test delta vs the task bodies below: the
+> Task 1.1 `allow_private_still_blocks_loopback_and_link_local` test drops loopback
+> from the AllowPrivate-blocked set (loopback now allowed under AllowPrivate,
+> blocked under PublicOnly); Task 1.4 `validate_server_url` loopback URLs assert
+> **ok**, not err. Implemented as Task 1.6 below.
+
 ---
 
 ## File Structure
