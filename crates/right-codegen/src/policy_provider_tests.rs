@@ -354,3 +354,87 @@ fn strip_one_of_two_adjacent_providers_does_not_touch_neighbor() {
     assert!(stripped.contains("- host: api.b.com"));
     assert!(stripped.contains("protocol: rest"));
 }
+
+// --- apply_provider_stanzas tests ---
+
+use right_agent_config::{GenericProvider, NetworkPolicy, ProviderEntry, ProviderType};
+
+fn generic_entry(name: &str, host: &str, path: Option<&str>) -> ProviderEntry {
+    ProviderEntry {
+        name: name.to_string(),
+        type_: ProviderType::Generic,
+        label: Some("lbl".to_string()),
+        generic: Some(GenericProvider {
+            env_var: "API_KEY".to_string(),
+            header_name: "Authorization".to_string(),
+            upstream_host: host.to_string(),
+            upstream_path_prefix: path.map(str::to_string),
+        }),
+    }
+}
+
+#[test]
+fn apply_provider_stanzas_folds_generic_above_anchor() {
+    let base = generate_policy(
+        8100,
+        &NetworkPolicy::Permissive,
+        HostMcpAccess::BootstrapUnresolved,
+    );
+    let out = apply_provider_stanzas(
+        &base,
+        &[generic_entry("right-typefully", "api.typefully.com", None)],
+    )
+    .unwrap();
+    assert!(out.contains("# managed-by: right-providers:right-typefully"));
+    assert!(out.contains("- host: api.typefully.com"));
+    assert!(out.contains("protocol: rest"));
+    assert!(
+        out.find("api.typefully.com").unwrap()
+            < out.find("# right-providers: insert-above").unwrap()
+    );
+}
+
+#[test]
+fn apply_provider_stanzas_is_idempotent_and_keeps_path() {
+    let base = generate_policy(
+        8100,
+        &NetworkPolicy::Permissive,
+        HostMcpAccess::BootstrapUnresolved,
+    );
+    let providers = [generic_entry("right-acme", "api.acme.com", Some("/v1"))];
+    let once = apply_provider_stanzas(&base, &providers).unwrap();
+    let twice = apply_provider_stanzas(&once, &providers).unwrap();
+    assert_eq!(once, twice);
+    assert!(once.contains("path: /v1"));
+}
+
+#[test]
+fn apply_provider_stanzas_skips_builtin_and_none() {
+    let base = generate_policy(
+        8100,
+        &NetworkPolicy::Permissive,
+        HostMcpAccess::BootstrapUnresolved,
+    );
+    let providers = [ProviderEntry {
+        name: "right-anthropic".to_string(),
+        type_: ProviderType::BuiltIn("anthropic".to_string()),
+        label: None,
+        generic: None,
+    }];
+    assert_eq!(apply_provider_stanzas(&base, &providers).unwrap(), base);
+}
+
+#[test]
+fn apply_provider_stanzas_noop_restrictive() {
+    let base = generate_policy(
+        8100,
+        &NetworkPolicy::Restrictive,
+        HostMcpAccess::BootstrapUnresolved,
+    );
+    let out = apply_provider_stanzas(&base, &[generic_entry("right-acme", "api.acme.com", None)])
+        .unwrap();
+    assert_eq!(
+        out, base,
+        "restrictive policy has no anchor; fold is a no-op"
+    );
+}
