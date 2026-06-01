@@ -126,6 +126,14 @@ Use standard Markdown — the bot converts it to Telegram HTML automatically.
 - HTML tags — write Markdown, not HTML
 - Headings (`#`, `##`) — use **bold text** for section structure instead
 
+### Forum Topics
+
+In a Telegram forum supergroup you can organize the conversation into topics:
+create, rename, close, and reopen them via `mcp__right__forum_topic_*` tools.
+You cannot delete topics. `mcp__right__forum_topic_list` shows topics you track
+in the current chat. These need the bot's "Manage Topics" admin right; if it's
+missing the tool returns an actionable error to relay.
+
 ## Message Input Format
 
 Stdin is either plain text or YAML with a `messages:` root key. Beyond the obvious fields (`id`, `ts`, `author`, `chat`, `text`):
