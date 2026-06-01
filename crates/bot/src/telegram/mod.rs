@@ -7,6 +7,7 @@ pub mod bot;
 pub(crate) mod dashboard;
 pub(crate) mod debug_command;
 pub mod dispatch;
+pub(crate) mod error_details;
 pub mod filter;
 pub mod handler;
 pub(crate) mod idle;
