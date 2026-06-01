@@ -153,22 +153,33 @@ fn public_web_allowed_ips_yaml(indent: usize) -> String {
 
 fn permissive_endpoints() -> String {
     let allowed_ips = public_web_allowed_ips_yaml(10);
-    // The trailing `# right-providers: insert-above` line is the anchor used
-    // by `providers_append_checked` to locate the correct insertion point.
-    // Without it, the heuristic "find first endpoints:" picks whichever
-    // network_policies sub-section is rendered first (`outbound` in
-    // permissive mode, `anthropic` in restrictive mode) — and the latter
-    // smuggles generic provider stanzas into the Anthropic-gated allowlist.
+    // The `# right-providers: insert-above` line is the anchor used by
+    // `providers_append`/`providers_append_checked` to locate the insertion
+    // point; appended stanzas land immediately ABOVE it. It sits at the TOP of
+    // the endpoints list so generic-provider host endpoints (`protocol: rest`,
+    // TLS-terminated) are emitted BEFORE the hostless `tls: skip` catch-all.
+    //
+    // Ordering is load-bearing: OpenShell evaluates `outbound.endpoints` in
+    // order. A leading hostless `tls: skip` catch-all whose `allowed_ips` cover
+    // a provider host's IP raw-tunnels the connection (no TLS termination, no
+    // credential substitution), so the literal `openshell:resolve:env:...`
+    // placeholder leaks upstream and the API returns 401. Provider host
+    // endpoints MUST precede the catch-all to win the match and terminate TLS.
+    //
+    // The anchor also keeps generic stanzas inside `outbound.endpoints` rather
+    // than the first-rendered `anthropic` section in restrictive mode (the
+    // `policy.find("endpoints:")` fallback would otherwise smuggle them into
+    // the Anthropic-gated allowlist).
     format!(
-        r#"      - port: 443
+        r#"      # right-providers: insert-above
+      - port: 443
         allowed_ips:
 {allowed_ips}
         tls: skip
       - port: 80
         allowed_ips:
 {allowed_ips}
-        tls: skip
-      # right-providers: insert-above"#
+        tls: skip"#
     )
 }
 
