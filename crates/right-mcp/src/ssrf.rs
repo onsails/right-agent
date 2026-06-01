@@ -22,6 +22,64 @@ use std::sync::Arc;
 /// DNS failures without echoing the rejected URL back to the user.
 pub const PUBLIC_DNS_ERROR_MARKER: &str = "MCP detection DNS resolved to a non-public address";
 
+/// Outbound-connection trust tier. `PublicOnly` is the historical SSRF-hardened
+/// behaviour (globally-routable only). `AllowPrivate` additionally permits the
+/// operator's own private LAN / Tailscale / ULA ranges — used only for the
+/// operator-supplied base URL, never for server-supplied metadata URLs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkPolicy {
+    PublicOnly,
+    AllowPrivate,
+}
+
+/// RFC1918 + RFC6598 CGNAT (Tailscale) + IPv6 ULA — the operator's own network.
+fn is_user_private_lan(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let n = u32::from(v4);
+            n >> 24 == 10
+                || in_ipv4_cidr(n, Ipv4Addr::new(172, 16, 0, 0), 12)
+                || in_ipv4_cidr(n, Ipv4Addr::new(192, 168, 0, 0), 16)
+                || in_ipv4_cidr(n, Ipv4Addr::new(100, 64, 0, 0), 10)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_user_private_lan(IpAddr::V4(v4));
+            }
+            in_ipv6_cidr(u128::from(v6), Ipv6Addr::from_str("fc00::").unwrap(), 7)
+        }
+    }
+}
+
+/// Cloud instance-metadata addresses. Denied in EVERY tier. Two of these fall
+/// inside otherwise-allowed families (`100.100.100.200` in CGNAT, `fd00:ec2::254`
+/// in ULA), so the deny-list is essential — range membership alone would re-open
+/// them to a DNS-rebinding pivot on the AllowPrivate base-URL client.
+fn is_cloud_metadata(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4 == Ipv4Addr::new(169, 254, 169, 254) || v4 == Ipv4Addr::new(100, 100, 100, 200)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_cloud_metadata(IpAddr::V4(v4));
+            }
+            v6 == Ipv6Addr::from_str("fd00:ec2::254").unwrap()
+        }
+    }
+}
+
+/// Is `ip` permitted as a connection target under `policy`?
+pub fn ip_allowed(ip: IpAddr, policy: NetworkPolicy) -> bool {
+    if is_cloud_metadata(ip) {
+        return false;
+    }
+    match policy {
+        NetworkPolicy::PublicOnly => is_public_ip(ip),
+        NetworkPolicy::AllowPrivate => is_public_ip(ip) || is_user_private_lan(ip),
+    }
+}
+
 /// `reqwest` DNS resolver that strips private/loopback/link-local addresses
 /// from a hostname's resolved set. If nothing public remains, resolution
 /// fails with [`PUBLIC_DNS_ERROR_MARKER`] in the error message.
@@ -178,5 +236,83 @@ mod tests {
     fn public_http_url_allows_public_hosts() {
         assert!(is_public_http_url("https://mcp.example.com/token"));
         assert!(is_public_http_url("http://8.8.8.8/token"));
+    }
+
+    #[test]
+    fn allow_private_admits_tailscale_cgnat() {
+        // 100.85.147.49 is the obsidian repro address; 100.64.0.0/10 CGNAT.
+        for ip in ["100.85.147.49", "100.64.0.0", "100.127.255.255"] {
+            let ip: IpAddr = ip.parse().unwrap();
+            assert!(
+                ip_allowed(ip, NetworkPolicy::AllowPrivate),
+                "{ip} must be allowed"
+            );
+            assert!(
+                !ip_allowed(ip, NetworkPolicy::PublicOnly),
+                "{ip} must be public-blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_private_admits_rfc1918_and_ula() {
+        for ip in [
+            "10.0.0.5",
+            "172.16.9.9",
+            "192.168.1.10",
+            "fc00::1",
+            "fd12:3456::1",
+        ] {
+            let ip: IpAddr = ip.parse().unwrap();
+            assert!(
+                ip_allowed(ip, NetworkPolicy::AllowPrivate),
+                "{ip} must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_private_still_blocks_loopback_and_link_local() {
+        for ip in [
+            "127.0.0.1",
+            "::1",
+            "169.254.0.5",
+            "fe80::1",
+            "0.0.0.0",
+            "::",
+        ] {
+            let ip: IpAddr = ip.parse().unwrap();
+            assert!(
+                !ip_allowed(ip, NetworkPolicy::AllowPrivate),
+                "{ip} must stay blocked"
+            );
+            assert!(
+                !ip_allowed(ip, NetworkPolicy::PublicOnly),
+                "{ip} must stay blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_metadata_blocked_even_inside_allowed_families() {
+        // fd00:ec2::254 is inside ULA fc00::/7; 100.100.100.200 is inside CGNAT 100.64/10.
+        for ip in ["169.254.169.254", "100.100.100.200", "fd00:ec2::254"] {
+            let ip: IpAddr = ip.parse().unwrap();
+            assert!(
+                !ip_allowed(ip, NetworkPolicy::AllowPrivate),
+                "metadata {ip} must be denied"
+            );
+            assert!(
+                !ip_allowed(ip, NetworkPolicy::PublicOnly),
+                "metadata {ip} must be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_private_admits_public() {
+        let ip: IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(ip_allowed(ip, NetworkPolicy::AllowPrivate));
+        assert!(ip_allowed(ip, NetworkPolicy::PublicOnly));
     }
 }
