@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   providerList,
   providerTypes,
@@ -14,7 +14,7 @@ import type {
   ProviderGenericBody,
 } from '../types'
 import SecretInput from '../components/SecretInput.vue'
-import { validateSlug, validateEnvVar } from './providersViewModel'
+import { validateSlug, validateEnvVar, evaluateCredentialSubmit, CREDENTIAL_HINT, HEADER_NAME_HINT } from './providersViewModel'
 
 const providers = ref<ProviderView[]>([])
 const types = ref<ProviderProfileView[]>([])
@@ -35,6 +35,7 @@ const addUpstreamHost = ref('')
 const addUpstreamPathPrefix = ref('')
 const addBusy = ref(false)
 const addError = ref<string | null>(null)
+const addWarn = ref<string | null>(null)
 
 // Prefill for re-create flow
 const prefillType = ref<string | null>(null)
@@ -46,6 +47,9 @@ const rotateProvider = ref<ProviderView | null>(null)
 const rotateCredential = ref('')
 const rotateBusy = ref(false)
 const rotateError = ref<string | null>(null)
+const rotateWarn = ref<string | null>(null)
+// Set once a prefixed credential has been flagged; a second Save then proceeds.
+const credentialWarnAck = ref(false)
 
 // Edit modal state (generic only)
 const editOpen = ref(false)
@@ -97,6 +101,8 @@ function openAdd(prefType?: string | null, prefLabel?: string | null): void {
   addUpstreamHost.value = ''
   addUpstreamPathPrefix.value = ''
   addError.value = null
+  addWarn.value = null
+  credentialWarnAck.value = false
   prefillType.value = prefType ?? null
   prefillLabel.value = prefLabel ?? null
 
@@ -120,6 +126,8 @@ function closeAdd(): void {
   addUpstreamHost.value = ''
   addUpstreamPathPrefix.value = ''
   addError.value = null
+  addWarn.value = null
+  credentialWarnAck.value = false
   prefillType.value = null
   prefillLabel.value = null
 }
@@ -151,6 +159,14 @@ async function submitAdd(): Promise<void> {
 
   if (!addCredential.value.trim()) { addError.value = 'Credential is required'; return }
 
+    const credCheck = evaluateCredentialSubmit(addCredential.value, credentialWarnAck.value)
+    if (!credCheck.proceed) {
+      addWarn.value = credCheck.warning
+      credentialWarnAck.value = true
+      return
+    }
+    addWarn.value = null
+
   addBusy.value = true
   try {
     await providerCreate({
@@ -178,6 +194,8 @@ function openRotate(provider: ProviderView): void {
   rotateProvider.value = provider
   rotateCredential.value = ''
   rotateError.value = null
+  rotateWarn.value = null
+  credentialWarnAck.value = false
   rotateOpen.value = true
 }
 
@@ -186,11 +204,20 @@ function closeRotate(): void {
   rotateProvider.value = null
   rotateCredential.value = ''
   rotateError.value = null
+  rotateWarn.value = null
+  credentialWarnAck.value = false
 }
 
 async function submitRotate(): Promise<void> {
   if (!rotateProvider.value) return
   if (!rotateCredential.value.trim()) { rotateError.value = 'Credential is required'; return }
+  const credCheck = evaluateCredentialSubmit(rotateCredential.value, credentialWarnAck.value)
+  if (!credCheck.proceed) {
+    rotateWarn.value = credCheck.warning
+    credentialWarnAck.value = true
+    return
+  }
+  rotateWarn.value = null
   rotateBusy.value = true
   rotateError.value = null
   try {
@@ -294,6 +321,16 @@ function typeLabel(provider: ProviderView): string {
 function isGhost(provider: ProviderView): boolean {
   return provider.status.kind === 'missing' || provider.status.kind === 'gateway_error'
 }
+
+// Editing the credential re-arms the soft prefix warning.
+watch(addCredential, () => {
+  credentialWarnAck.value = false
+  addWarn.value = null
+})
+watch(rotateCredential, () => {
+  credentialWarnAck.value = false
+  rotateWarn.value = null
+})
 </script>
 
 <template>
@@ -353,6 +390,7 @@ function isGhost(provider: ProviderView): boolean {
           <label class="field">
             <span class="label">Header name (optional)</span>
             <input v-model="addHeaderName" class="text-input" autocomplete="off" placeholder="e.g. Authorization">
+            <span class="hint">{{ HEADER_NAME_HINT }}</span>
           </label>
           <label class="field">
             <span class="label">Upstream path prefix (optional)</span>
@@ -363,10 +401,12 @@ function isGhost(provider: ProviderView): boolean {
         <label class="field full-width">
           <span class="label">Credential (API key)</span>
           <SecretInput v-model="addCredential" placeholder="Paste API key" />
+          <span class="hint">{{ CREDENTIAL_HINT }}</span>
         </label>
       </div>
 
       <p v-if="addError" class="notice inline">{{ addError }}</p>
+      <p v-if="addWarn" class="notice inline warn">{{ addWarn }}</p>
 
       <div v-if="addStep === 'fill-form'" class="button-row">
         <button class="tool-button" type="button" :disabled="addBusy" @click="submitAdd">
@@ -382,8 +422,10 @@ function isGhost(provider: ProviderView): boolean {
       <label class="field">
         <span class="label">New credential</span>
         <SecretInput v-model="rotateCredential" placeholder="Paste new API key" />
+        <span class="hint">{{ CREDENTIAL_HINT }}</span>
       </label>
       <p v-if="rotateError" class="notice inline">{{ rotateError }}</p>
+      <p v-if="rotateWarn" class="notice inline warn">{{ rotateWarn }}</p>
       <div class="button-row">
         <button class="tool-button" type="button" :disabled="rotateBusy" @click="submitRotate">
           {{ rotateBusy ? 'Saving' : 'Save' }}
@@ -407,6 +449,7 @@ function isGhost(provider: ProviderView): boolean {
         <label class="field">
           <span class="label">Header name (optional)</span>
           <input v-model="editHeaderName" class="text-input" autocomplete="off">
+          <span class="hint">{{ HEADER_NAME_HINT }}</span>
         </label>
         <label class="field">
           <span class="label">Upstream path prefix (optional)</span>
@@ -514,6 +557,19 @@ function isGhost(provider: ProviderView): boolean {
   color: var(--tg-theme-hint-color, #6b7b88);
   font-size: 0.75rem;
   font-weight: 700;
+}
+
+.hint {
+  color: var(--tg-theme-hint-color, #6b7b88);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.notice.warn {
+  color: var(--tg-theme-text-color, #17212b);
+  background: rgba(214, 165, 26, 0.14);
+  border-radius: 7px;
+  padding: 6px 8px;
 }
 
 .text-input {
