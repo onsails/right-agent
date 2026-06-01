@@ -75,6 +75,26 @@ impl std::fmt::Debug for ProgressRegistration {
     }
 }
 
+/// Everything the aggregator needs to perform a forum-topic operation for an
+/// invocation: where to reach the bot, the shared send token, and the
+/// server-resolved chat id (never agent-supplied).
+#[derive(Clone)]
+pub(crate) struct ForumTarget {
+    pub(crate) bot_socket_path: PathBuf,
+    pub(crate) bot_send_token: String,
+    pub(crate) chat_id: i64,
+}
+
+impl std::fmt::Debug for ForumTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForumTarget")
+            .field("bot_socket_path", &self.bot_socket_path)
+            .field("bot_send_token", &"<redacted>")
+            .field("chat_id", &self.chat_id)
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ProgressSendTarget {
     pub(crate) bot_socket_path: PathBuf,
@@ -238,6 +258,28 @@ impl ProgressRegistry {
         invocation
             .conversation_scope
             .ok_or(ProgressError::Unavailable)
+    }
+
+    /// Resolve the bot endpoint + token + chat id for a forum-topic
+    /// operation. Foreground-only (like progress and conversation search):
+    /// cron/delivery/reflection/background turns must not manage topics.
+    pub(crate) async fn forum_target(
+        &self,
+        invocation_id: &str,
+    ) -> Result<ForumTarget, ProgressError> {
+        let inner = self.inner.lock().await;
+        let invocation = inner.get(invocation_id).ok_or(ProgressError::Unavailable)?;
+        if !matches!(invocation.kind, ProgressInvocationKind::Foreground) {
+            return Err(ProgressError::Forbidden);
+        }
+        let scope = invocation
+            .conversation_scope
+            .ok_or(ProgressError::Unavailable)?;
+        Ok(ForumTarget {
+            bot_socket_path: invocation.bot_socket_path.clone(),
+            bot_send_token: invocation.bot_send_token.clone(),
+            chat_id: scope.chat_id,
+        })
     }
 
     /// Clear `last_sent_at` so the next attempt is not rate-limited.
@@ -405,6 +447,60 @@ mod tests {
         let target = ProgressSendTarget {
             bot_socket_path: PathBuf::from("/tmp/bot.sock"),
             bot_send_token: "supersecret".to_owned(),
+        };
+        let s = format!("{target:?}");
+        assert!(
+            !s.contains("supersecret"),
+            "Debug must redact bot_send_token: {s}"
+        );
+        assert!(s.contains("<redacted>"), "Debug must mark redaction: {s}");
+    }
+
+    #[tokio::test]
+    async fn forum_target_returns_scope_for_foreground() {
+        let reg = ProgressRegistry::default();
+        reg.register(ProgressRegistration {
+            invocation_id: "inv-1".to_owned(),
+            kind: ProgressInvocationKind::Foreground,
+            bot_socket_path: "/tmp/bot.sock".into(),
+            bot_send_token: "tok".to_owned(),
+            conversation_scope: Some(ConversationScope {
+                chat_id: 42,
+                thread_id: 7,
+            }),
+        })
+        .await;
+        let target = reg.forum_target("inv-1").await.unwrap();
+        assert_eq!(target.chat_id, 42);
+        assert_eq!(target.bot_send_token, "tok");
+    }
+
+    #[tokio::test]
+    async fn forum_target_forbidden_for_non_foreground() {
+        let reg = ProgressRegistry::default();
+        reg.register(ProgressRegistration {
+            invocation_id: "inv-2".to_owned(),
+            kind: ProgressInvocationKind::NonForeground,
+            bot_socket_path: "/tmp/bot.sock".into(),
+            bot_send_token: "tok".to_owned(),
+            conversation_scope: Some(ConversationScope {
+                chat_id: 42,
+                thread_id: 7,
+            }),
+        })
+        .await;
+        assert!(matches!(
+            reg.forum_target("inv-2").await,
+            Err(ProgressError::Forbidden)
+        ));
+    }
+
+    #[test]
+    fn forum_target_debug_redacts_token() {
+        let target = ForumTarget {
+            bot_socket_path: PathBuf::from("/tmp/bot.sock"),
+            bot_send_token: "supersecret".to_owned(),
+            chat_id: 42,
         };
         let s = format!("{target:?}");
         assert!(
