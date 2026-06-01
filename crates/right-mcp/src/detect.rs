@@ -18,6 +18,12 @@ enum ResolvedHostClass {
 /// ones the connect tier enforces). Loopback wins over private-LAN; an empty
 /// list (resolution failed) is `PublicOrUnknown` so the caller falls through to
 /// discovery, which surfaces the real connect error.
+///
+/// Link-local and cloud-metadata addresses are deliberately *not* short-circuited
+/// here: `is_user_private_lan` covers RFC1918/CGNAT/ULA only. A domain resolving
+/// solely to such an address classifies `PublicOrUnknown` and falls through to
+/// discovery, where the hardened `PublicNetworkResolver` strips it in both tiers
+/// (no probe fires). This is the spec's intended edge-case behavior, not a gap.
 fn classify_resolved_host(addrs: &[IpAddr]) -> ResolvedHostClass {
     if addrs.iter().copied().any(crate::ssrf::is_loopback_addr) {
         ResolvedHostClass::Loopback
@@ -95,6 +101,35 @@ pub async fn detect_mcp_auth_with_url_policy<F>(
 where
     F: Fn(&str) -> Result<(), OAuthError>,
 {
+    detect_mcp_auth_inner(client, original_url, url_policy, system_resolve).await
+}
+
+/// Resolve a host to its addresses for the detection gate, mirroring the
+/// resolver the connect tier uses. A resolution failure is non-fatal: it yields
+/// an empty list so the caller falls through to discovery, which surfaces the
+/// real connect error with URL context (the connection itself is always made
+/// through the hardened client, never here).
+async fn system_resolve(host: String) -> Vec<IpAddr> {
+    match tokio::net::lookup_host((host.as_str(), 0)).await {
+        Ok(addrs) => addrs.map(|addr| addr.ip()).collect(),
+        Err(error) => {
+            tracing::debug!("MCP detect host resolution failed for {host}: {error}");
+            Vec::new()
+        }
+    }
+}
+
+async fn detect_mcp_auth_inner<F, R, Fut>(
+    client: &reqwest::Client,
+    original_url: &str,
+    url_policy: F,
+    resolve_host: R,
+) -> Result<McpAuthDetection, OAuthError>
+where
+    F: Fn(&str) -> Result<(), OAuthError>,
+    R: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Vec<IpAddr>>,
+{
     let parsed = reqwest::Url::parse(original_url).map_err(|_| invalid_server_url())?;
     validate_detection_url(&parsed)?;
     let has_query = parsed.query().is_some();
@@ -123,9 +158,10 @@ where
     }
 
     if !is_public_url(&bare_url) {
-        // Private / LAN / Tailscale base URL: OAuth is not supported for local
-        // servers (its token_endpoint would be private and rejected by the strict
-        // metadata policy). Recommend Headers and skip OAuth discovery.
+        // Private / LAN / Tailscale base URL given as an IP literal: OAuth is not
+        // supported for local servers (its token_endpoint would be private and
+        // rejected by the strict metadata policy). Recommend Headers and skip
+        // OAuth discovery.
         return Ok(McpAuthDetection {
             bare_url,
             oauth_discovered: false,
@@ -133,6 +169,38 @@ where
             reason: DetectionReason::PrivateNetworkNoOauth,
             oauth: None,
         });
+    }
+
+    // Domain host: resolve before deciding. A hostname that resolves to a private
+    // or loopback address (e.g. Tailscale MagicDNS) must short-circuit exactly like
+    // the equivalent IP literal, so detection never probes private space and the
+    // discovery client below only ever sees public targets.
+    let domain_host = match bare.host() {
+        Some(url::Host::Domain(host)) => Some(host.to_string()),
+        _ => None,
+    };
+    if let Some(host) = domain_host {
+        match classify_resolved_host(&resolve_host(host).await) {
+            ResolvedHostClass::Loopback => {
+                return Ok(McpAuthDetection {
+                    bare_url,
+                    oauth_discovered: false,
+                    recommended_mode: McpAuthMode::UrlAsIs,
+                    reason: DetectionReason::LoopbackOrPrivate,
+                    oauth: None,
+                });
+            }
+            ResolvedHostClass::PrivateLan => {
+                return Ok(McpAuthDetection {
+                    bare_url,
+                    oauth_discovered: false,
+                    recommended_mode: McpAuthMode::Headers,
+                    reason: DetectionReason::PrivateNetworkNoOauth,
+                    oauth: None,
+                });
+            }
+            ResolvedHostClass::PublicOrUnknown => {}
+        }
     }
 
     match discover_oauth_with_url_policy(client, &bare_url, url_policy).await {
@@ -625,6 +693,68 @@ mod tests {
             .unwrap();
         assert_eq!(d.recommended_mode, McpAuthMode::UrlAsIs);
         assert_eq!(d.reason, DetectionReason::LoopbackOrPrivate);
+    }
+
+    #[tokio::test]
+    async fn detect_private_resolving_hostname_recommends_headers_without_probe() {
+        let server = wiremock::MockServer::start().await;
+        let host = "private-magicdns.test";
+        let addr = *server.address();
+        let client = client_resolving(host, addr);
+        let url = format!("http://{host}:{}/mcp", addr.port());
+
+        let resolve = |_h: String| async { vec!["10.0.0.5".parse::<std::net::IpAddr>().unwrap()] };
+        let result = detect_mcp_auth_inner(&client, &url, |_| Ok(()), resolve)
+            .await
+            .expect("private hostname should classify without error");
+
+        assert_eq!(result.recommended_mode, McpAuthMode::Headers);
+        assert_eq!(result.reason, DetectionReason::PrivateNetworkNoOauth);
+        assert!(!result.oauth_discovered);
+        assert_eq!(request_count(&server).await, 0); // no discovery probe fired
+    }
+
+    #[tokio::test]
+    async fn detect_loopback_resolving_hostname_recommends_url_as_is() {
+        let server = wiremock::MockServer::start().await;
+        let host = "loopback-name.test";
+        let addr = *server.address();
+        let client = client_resolving(host, addr);
+        let url = format!("http://{host}:{}/mcp", addr.port());
+
+        let resolve = |_h: String| async { vec!["127.0.0.1".parse::<std::net::IpAddr>().unwrap()] };
+        let result = detect_mcp_auth_inner(&client, &url, |_| Ok(()), resolve)
+            .await
+            .expect("loopback hostname should classify without error");
+
+        assert_eq!(result.recommended_mode, McpAuthMode::UrlAsIs);
+        assert_eq!(result.reason, DetectionReason::LoopbackOrPrivate);
+        assert_eq!(request_count(&server).await, 0);
+    }
+
+    #[tokio::test]
+    async fn detect_public_resolving_hostname_runs_discovery() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, ResponseTemplate};
+
+        let server = wiremock::MockServer::start().await;
+        let host = "public-name.test";
+        let addr = *server.address();
+        let client = client_resolving(host, addr);
+        let url = format!("http://{host}:{}/mcp", addr.port());
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let resolve = |_h: String| async { vec!["8.8.8.8".parse::<std::net::IpAddr>().unwrap()] };
+        let result = detect_mcp_auth_inner(&client, &url, |_| Ok(()), resolve)
+            .await
+            .expect("public hostname should reach discovery");
+
+        assert_eq!(result.recommended_mode, McpAuthMode::Headers);
+        assert_eq!(result.reason, DetectionReason::NoOAuthMetadata);
+        assert!(request_count(&server).await > 0); // discovery probed
     }
 
     #[test]
