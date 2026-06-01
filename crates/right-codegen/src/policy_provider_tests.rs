@@ -455,3 +455,26 @@ fn full_regen_then_fold_reconstructs_host_stanza() {
     assert!(folded.contains("- host: api.typefully.com"));
     assert!(folded.contains("protocol: rest"));
 }
+
+#[test]
+fn generate_provider_aware_policy_matches_manual_fold() {
+    let providers = [generic_entry("right-typefully", "api.typefully.com", None)];
+    let manual = apply_provider_stanzas(
+        &generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        ),
+        &providers,
+    )
+    .unwrap();
+    let helper = generate_provider_aware_policy(
+        8100,
+        &NetworkPolicy::Permissive,
+        HostMcpAccess::BootstrapUnresolved,
+        &providers,
+    )
+    .unwrap();
+    assert_eq!(helper, manual);
+    assert!(helper.contains("- host: api.typefully.com"));
+}

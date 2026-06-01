@@ -630,8 +630,20 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let agent = args.agent.clone();
         let agent_dir = agent_dir.clone();
         let resolved_sandbox = resolved_sandbox.clone();
+        let shutdown = shutdown.clone();
         tokio::spawn(async move {
-            while let Some(new_cfg) = providers_rx.recv().await {
+            loop {
+                // Don't start a fresh reconcile once shutdown begins: a queued
+                // providers change is superseded by the restart's own bring_up,
+                // which re-applies the provider-aware policy from scratch.
+                let new_cfg = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    msg = providers_rx.recv() => match msg {
+                        Some(c) => c,
+                        None => break, // watcher dropped the sender (restart/shutdown)
+                    },
+                };
                 let Some(sandbox) = resolved_sandbox.as_deref() else {
                     continue; // mode: none — no sandbox to reconcile
                 };
@@ -646,7 +658,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         Ok(()) => break,
                         Err(e) if attempt >= HOT_RECONCILE_BACKOFFS_MS.len() => {
                             tracing::warn!(error = %format!("{e:#}"),
-                                "providers hot-reconcile failed after retries; live sandbox policy stays stale until next bot restart — re-save agent.yaml to retry");
+                                "providers hot-reconcile failed after retries; live sandbox policy stays stale until next bot restart — re-edit sandbox.providers or restart to retry");
                             break;
                         }
                         Err(e) => {
@@ -654,7 +666,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                             tracing::warn!(error = %format!("{e:#}"),
                                 "providers hot-reconcile attempt {} failed; retrying in {}ms",
                                 attempt + 1, backoff);
-                            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                            // Abort the backoff promptly if shutdown begins.
+                            tokio::select! {
+                                biased;
+                                _ = shutdown.cancelled() => return,
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(backoff)) => {}
+                            }
                             attempt += 1;
                         }
                     }

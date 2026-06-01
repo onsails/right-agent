@@ -717,6 +717,17 @@ impl AgentConfig {
             .unwrap_or(&SandboxMode::Openshell)
     }
 
+    /// Declared `sandbox.providers`, or an empty slice when the `sandbox`
+    /// section is absent. The single source for the provider list that every
+    /// policy regen folds back in via
+    /// `right_codegen::policy::generate_provider_aware_policy`.
+    pub fn providers(&self) -> &[ProviderEntry] {
+        self.sandbox
+            .as_ref()
+            .map(|s| s.providers.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Resolved policy file path (absolute), or None if mode is None.
     /// Returns Err if mode is Openshell but policy_file is missing.
     pub fn resolve_policy_path(&self, agent_dir: &Path) -> miette::Result<Option<PathBuf>> {

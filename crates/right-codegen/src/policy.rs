@@ -1036,6 +1036,23 @@ pub fn apply_provider_stanzas(
     Ok(out)
 }
 
+/// Render a provider-aware policy: [`generate_policy`] followed by
+/// [`apply_provider_stanzas`]. Every full policy regeneration MUST go through
+/// this (not bare `generate_policy`) so generic-provider stanzas survive the
+/// regen and the network policy stays reconstructable from `agent.yaml`. A
+/// no-op fold on restrictive (anchorless) policies; idempotent.
+pub fn generate_provider_aware_policy(
+    right_mcp_port: u16,
+    network_policy: &NetworkPolicy,
+    host_mcp_access: HostMcpAccess,
+    providers: &[right_agent_config::ProviderEntry],
+) -> Result<String, PolicyConflict> {
+    apply_provider_stanzas(
+        &generate_policy(right_mcp_port, network_policy, host_mcp_access),
+        providers,
+    )
+}
+
 /// Like [`providers_append`] but returns `Err(PolicyConflict)` instead of
 /// panicking when the host is already configured as a raw tunnel.
 pub fn providers_append_checked(

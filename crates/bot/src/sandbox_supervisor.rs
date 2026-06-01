@@ -143,18 +143,11 @@ pub(crate) async fn bring_up_sandbox(
 
     // Regenerate policy with resolved host IPs and apply.
     let network_policy = config.network_policy;
-    let providers = config
-        .sandbox
-        .as_ref()
-        .map(|s| s.providers.as_slice())
-        .unwrap_or(&[]);
-    let policy_content = right_codegen::policy::apply_provider_stanzas(
-        &right_codegen::policy::generate_policy(
-            right_runtime_state::MCP_HTTP_PORT,
-            &network_policy,
-            right_codegen::policy::HostMcpAccess::Resolved(host_ips.clone()),
-        ),
-        providers,
+    let policy_content = right_codegen::policy::generate_provider_aware_policy(
+        right_runtime_state::MCP_HTTP_PORT,
+        &network_policy,
+        right_codegen::policy::HostMcpAccess::Resolved(host_ips.clone()),
+        config.providers(),
     )
     .map_err(|e| miette::miette!("provider policy fold failed: {e:#}"))?;
     // Drift check BEFORE write+apply: `openshell policy set --wait` rejects
@@ -346,17 +339,11 @@ pub(crate) async fn hot_reconcile_providers(
         right_openshell::openshell::resolve_sandbox_id(&mut client, resolved_sandbox).await?;
     let host_ips = right_openshell::openshell::resolve_host_ips(&mut client, &sandbox_id).await?;
 
-    let providers = config
-        .sandbox
-        .as_ref()
-        .map(|s| s.providers.as_slice())
-        .unwrap_or(&[]);
-    let policy_content = right_codegen::policy::apply_provider_stanzas(
-        &right_codegen::policy::generate_policy(
-            right_runtime_state::MCP_HTTP_PORT,
-            &config.network_policy,
-            right_codegen::policy::HostMcpAccess::Resolved(host_ips),
-        ),
+    let providers = config.providers();
+    let policy_content = right_codegen::policy::generate_provider_aware_policy(
+        right_runtime_state::MCP_HTTP_PORT,
+        &config.network_policy,
+        right_codegen::policy::HostMcpAccess::Resolved(host_ips),
         providers,
     )
     .map_err(|e| miette::miette!("provider policy fold failed: {e:#}"))?;
@@ -381,8 +368,19 @@ pub(crate) async fn hot_reconcile_providers(
         agent = %agent,
         attached = ?report.attached,
         detached = ?report.detached,
+        missing = ?report.missing,
         "providers hot-reconcile complete"
     );
+    // Mirror `bring_up_sandbox`: per-provider attach/detach errors are reported
+    // in `report.errors` (the call itself returned Ok). Surface them — the
+    // reconcile is "complete" but some providers may not match declared state.
+    if !report.errors.is_empty() {
+        tracing::warn!(
+            agent = %agent,
+            errors = ?report.errors,
+            "providers hot-reconcile had per-provider errors; re-edit sandbox.providers or restart to retry"
+        );
+    }
     Ok(())
 }
 

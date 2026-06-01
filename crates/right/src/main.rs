@@ -2285,11 +2285,7 @@ async fn cmd_agent_init(
             })
         })?;
         let init_config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
-        let init_providers = init_config
-            .as_ref()
-            .and_then(|c| c.sandbox.as_ref())
-            .map(|s| s.providers.as_slice())
-            .unwrap_or(&[]);
+        let init_providers = init_config.as_ref().map(|c| c.providers()).unwrap_or(&[]);
         apply_exact_right_mcp_policy_for_sandbox_sync(
             &sb_name,
             &policy_path,
@@ -2405,12 +2401,10 @@ fn write_bootstrap_right_mcp_policy(
     network_policy: right_agent::agent::types::NetworkPolicy,
     providers: &[right_agent_config::ProviderEntry],
 ) -> miette::Result<()> {
-    let policy_content = right_codegen::policy::apply_provider_stanzas(
-        &right_codegen::policy::generate_policy(
-            right_runtime_state::MCP_HTTP_PORT,
-            &network_policy,
-            right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
-        ),
+    let policy_content = right_codegen::policy::generate_provider_aware_policy(
+        right_runtime_state::MCP_HTTP_PORT,
+        &network_policy,
+        right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
         providers,
     )
     .map_err(|e| miette::miette!("provider policy fold failed: {e:#}"))?;
@@ -2448,12 +2442,10 @@ async fn apply_exact_right_mcp_policy_for_sandbox(
     let sandbox_id =
         right_openshell::openshell::resolve_sandbox_id(&mut grpc, sandbox_name).await?;
     let host_ips = right_openshell::openshell::resolve_host_ips(&mut grpc, &sandbox_id).await?;
-    let policy_content = right_codegen::policy::apply_provider_stanzas(
-        &right_codegen::policy::generate_policy(
-            right_runtime_state::MCP_HTTP_PORT,
-            &network_policy,
-            right_codegen::policy::HostMcpAccess::Resolved(host_ips.clone()),
-        ),
+    let policy_content = right_codegen::policy::generate_provider_aware_policy(
+        right_runtime_state::MCP_HTTP_PORT,
+        &network_policy,
+        right_codegen::policy::HostMcpAccess::Resolved(host_ips.clone()),
         providers,
     )
     .map_err(|e| miette::miette!("provider policy fold failed: {e:#}"))?;
@@ -3370,11 +3362,7 @@ async fn cmd_agent_restore(
             write_bootstrap_right_mcp_policy(
                 &policy_path,
                 config.as_ref().map(|c| c.network_policy).unwrap_or_default(),
-                config
-                    .as_ref()
-                    .and_then(|c| c.sandbox.as_ref())
-                    .map(|s| s.providers.as_slice())
-                    .unwrap_or(&[]),
+                config.as_ref().map(|c| c.providers()).unwrap_or(&[]),
             )?;
 
             // Verify OpenShell is reachable.
@@ -3441,11 +3429,7 @@ async fn cmd_agent_restore(
                 &new_sandbox_name,
                 &policy_path,
                 config.as_ref().map(|c| c.network_policy).unwrap_or_default(),
-                config
-                    .as_ref()
-                    .and_then(|c| c.sandbox.as_ref())
-                    .map(|s| s.providers.as_slice())
-                    .unwrap_or(&[]),
+                config.as_ref().map(|c| c.providers()).unwrap_or(&[]),
             )
             .await?;
 
@@ -6266,8 +6250,7 @@ async fn perform_migration(
             .unwrap_or_default(),
         migration_config
             .as_ref()
-            .and_then(|c| c.sandbox.as_ref())
-            .map(|s| s.providers.as_slice())
+            .map(|c| c.providers())
             .unwrap_or(&[]),
     )
     .await?;
