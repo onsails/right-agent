@@ -2090,6 +2090,44 @@ mod tests {
         assert!(!detail.contains("127.0.0.1"));
     }
 
+    /// Regression guard: forced OAuth with an RFC1918 `token_endpoint` is
+    /// rejected by the `PublicOnly` policy before any network I/O.
+    /// Proves "OAuth-local cannot silently succeed" (Task 2.2).
+    #[tokio::test]
+    async fn token_exchange_rejects_private_token_endpoint() {
+        setup_crypto();
+        let client = reqwest::Client::new();
+        let policy = |u: &str| -> Result<(), OAuthError> {
+            if crate::ssrf::is_public_http_url(u) {
+                Ok(())
+            } else {
+                Err(OAuthError::TokenExchangeFailed(
+                    crate::ssrf::PUBLIC_DNS_ERROR_MARKER.to_string(),
+                ))
+            }
+        };
+        let result = exchange_token_with_url_policy(
+            &client,
+            "http://192.168.1.10/token",
+            "code",
+            "https://example.com/cb",
+            "client-id",
+            None,
+            "verifier",
+            "https://example.com/mcp",
+            policy,
+        )
+        .await;
+        let err = result.expect_err("private token_endpoint must be rejected");
+        assert!(
+            matches!(err, OAuthError::TokenExchangeFailed(_)),
+            "expected TokenExchangeFailed, got: {err:?}"
+        );
+        // The error message contains the wrapper prefix, proving the policy
+        // path fired rather than a network error.
+        assert!(format!("{err:#}").contains("unsafe token_endpoint"));
+    }
+
     #[tokio::test]
     async fn discover_as_linear_pattern_uses_origin_well_known() {
         setup_crypto();
