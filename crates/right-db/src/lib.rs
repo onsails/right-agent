@@ -11,6 +11,7 @@ mod bootstrap_lock;
 pub mod connection;
 pub mod conversation;
 pub mod error;
+pub mod forum_topics;
 pub mod migrations;
 mod multiprocess_io;
 pub mod params;
