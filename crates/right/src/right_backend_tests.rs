@@ -176,11 +176,11 @@ async fn insert_async_run(
 fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
-    // 7 cron + 1 mcp + 1 progress + 2 learning + 2 search + 1 bootstrap = 14
+    // 7 cron + 1 mcp + 1 progress + 2 learning + 2 search + 5 forum + 1 bootstrap = 19
     assert_eq!(
         tools.len(),
-        14,
-        "expected 14 tools, got {}: {:?}",
+        19,
+        "expected 19 tools, got {}: {:?}",
         tools.len(),
         tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
     );
@@ -1726,6 +1726,56 @@ async fn cron_create_rejects_when_allowlist_missing() {
         text.contains("does not exist") || text.contains("cannot be validated"),
         "expected missing-allowlist error, got: {text}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Forum topic validation tests (validation runs before invocation lookup)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn forum_topic_create_rejects_bad_icon_color() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "forum_topic_create",
+            serde_json::json!({ "name": "Bugs", "icon_color": 123 }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "bad icon_color must be a tool error"
+    );
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+}
+
+#[tokio::test]
+async fn forum_topic_create_rejects_empty_name() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "forum_topic_create",
+            serde_json::json!({ "name": "   " }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
 }
 
 // ---------------------------------------------------------------------------
