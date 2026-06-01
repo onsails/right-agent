@@ -31,8 +31,9 @@ const V34_SCHEMA: &str = include_str!("sql/v34_turso_fts_indexes.sql");
 const V35_SCHEMA: &str = include_str!("sql/v35_legacy_learning_cleanup.sql");
 const V36_SCHEMA: &str = include_str!("sql/v36_mcp_http_headers.sql");
 const V38_SCHEMA: &str = include_str!("sql/v38_skill_spend_and_learning_skip.sql");
+const V39_SCHEMA: &str = include_str!("sql/v39_error_details.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 38;
+pub const LATEST_SCHEMA_VERSION: u32 = 39;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -922,6 +923,11 @@ pub static MIGRATIONS: Migrations = Migrations {
         Migration {
             version: 38,
             sql: V38_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 39,
+            sql: V39_SCHEMA,
             hook: None,
         },
     ],
@@ -3844,5 +3850,43 @@ continue background work',
 
         // Idempotent: re-running to_latest is a no-op and does not error.
         MIGRATIONS.to_latest(&mut conn).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v39_creates_error_details_table_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        // First open runs migrations to LATEST.
+        crate::open_connection(dir.path(), true).await.unwrap();
+        // Second open must be a no-op (CREATE TABLE IF NOT EXISTS), not error.
+        let conn = crate::open_connection(dir.path(), true).await.unwrap();
+
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='error_details'",
+                [],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(table_exists, 1, "error_details table must exist after v39");
+
+        let index_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_error_details_created_at'",
+                [],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            index_exists, 1,
+            "idx_error_details_created_at index must exist after v39"
+        );
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .await
+            .unwrap();
+        assert_eq!(version, i64::from(crate::migrations::LATEST_SCHEMA_VERSION));
     }
 }
