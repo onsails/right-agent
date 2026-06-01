@@ -1058,14 +1058,14 @@ impl RightBackend {
                 None,
             ));
         }
-        if let Some(color) = params.icon_color {
-            if !ALLOWED_ICON_COLORS.contains(&color) {
-                return Ok(tool_error(
-                    "invalid_argument",
-                    format!("icon_color must be one of {ALLOWED_ICON_COLORS:?}"),
-                    None,
-                ));
-            }
+        if let Some(color) = params.icon_color
+            && !ALLOWED_ICON_COLORS.contains(&color)
+        {
+            return Ok(tool_error(
+                "invalid_argument",
+                format!("icon_color must be one of {ALLOWED_ICON_COLORS:?}"),
+                None,
+            ));
         }
         let Some(invocation_id) = context.invocation_id else {
             return Ok(forum_scope_unavailable());
@@ -1096,6 +1096,9 @@ impl RightBackend {
                     ));
                 }
             };
+        // Telegram-first ordering is intentional: persist to the local registry only
+        // after the bot call succeeds, so a registry failure never reports a success
+        // the user can't see. Do not reorder.
         let conn_arc = self.get_conn(agent_name).await?;
         let conn = conn_arc.lock().await;
         right_db::forum_topics::upsert_created(
@@ -1164,6 +1167,9 @@ impl RightBackend {
             Ok(Err(e)) => return Ok(forum_op_error(e)),
             Err(_) => return Ok(tool_error("forum_op_failed", "forum edit timed out", None)),
         }
+        // Telegram-first ordering is intentional: persist to the local registry only
+        // after the bot call succeeds, so a registry failure never reports a success
+        // the user can't see. Do not reorder.
         let conn_arc = self.get_conn(agent_name).await?;
         let conn = conn_arc.lock().await;
         right_db::forum_topics::update_edited(
@@ -1263,6 +1269,9 @@ impl RightBackend {
                 ));
             }
         }
+        // Telegram-first ordering is intentional: persist to the local registry only
+        // after the bot call succeeds, so a registry failure never reports a success
+        // the user can't see. Do not reorder.
         let conn_arc = self.get_conn(agent_name).await?;
         let conn = conn_arc.lock().await;
         right_db::forum_topics::set_state(
@@ -1280,8 +1289,15 @@ impl RightBackend {
         &self,
         agent_name: &str,
         context: crate::progress::ToolCallContext,
-        _args: &serde_json::Value,
+        args: &serde_json::Value,
     ) -> Result<CallToolResult, anyhow::Error> {
+        if let Err(e) = serde_json::from_value::<ForumTopicListParams>(args.clone()) {
+            return Ok(tool_error(
+                "invalid_argument",
+                format!("invalid forum_topic_list params: {e:#}"),
+                None,
+            ));
+        }
         let Some(invocation_id) = context.invocation_id else {
             return Ok(forum_scope_unavailable());
         };

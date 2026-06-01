@@ -79,8 +79,25 @@ pub(crate) fn disallow_conversation_search(mut tools: Vec<String>) -> Vec<String
     tools
 }
 
+pub(crate) fn disallow_forum_topic_tools(mut tools: Vec<String>) -> Vec<String> {
+    for tool_name in [
+        right_mcp::internal_client::FORUM_TOPIC_CREATE_MCP_TOOL,
+        right_mcp::internal_client::FORUM_TOPIC_EDIT_MCP_TOOL,
+        right_mcp::internal_client::FORUM_TOPIC_CLOSE_MCP_TOOL,
+        right_mcp::internal_client::FORUM_TOPIC_REOPEN_MCP_TOOL,
+        right_mcp::internal_client::FORUM_TOPIC_LIST_MCP_TOOL,
+    ] {
+        if !tools.iter().any(|tool| tool == tool_name) {
+            tools.push(tool_name.to_owned());
+        }
+    }
+    tools
+}
+
 pub(crate) fn disallow_foreground_only_tools(tools: Vec<String>) -> Vec<String> {
-    disallow_conversation_search(disallow_learning_tools(disallow_send_progress(tools)))
+    disallow_forum_topic_tools(disallow_conversation_search(disallow_learning_tools(
+        disallow_send_progress(tools),
+    )))
 }
 
 pub(crate) fn disable_all_tools_args() -> Vec<String> {
@@ -1031,6 +1048,11 @@ mod tests {
             right_mcp::internal_client::SKILL_LEARNING_FINISH_MCP_TOOL,
             right_mcp::internal_client::THREAD_SEARCH_MCP_TOOL,
             right_mcp::internal_client::CHAT_SEARCH_MCP_TOOL,
+            right_mcp::internal_client::FORUM_TOPIC_CREATE_MCP_TOOL,
+            right_mcp::internal_client::FORUM_TOPIC_EDIT_MCP_TOOL,
+            right_mcp::internal_client::FORUM_TOPIC_CLOSE_MCP_TOOL,
+            right_mcp::internal_client::FORUM_TOPIC_REOPEN_MCP_TOOL,
+            right_mcp::internal_client::FORUM_TOPIC_LIST_MCP_TOOL,
         ] {
             let count = tools
                 .iter()

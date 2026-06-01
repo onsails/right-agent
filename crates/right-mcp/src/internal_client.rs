@@ -34,6 +34,12 @@ pub const SKILL_LEARNING_FINISH_MCP_TOOL: &str = "mcp__right__skill_learning_fin
 pub const THREAD_SEARCH_MCP_TOOL: &str = "mcp__right__thread_search";
 pub const CHAT_SEARCH_MCP_TOOL: &str = "mcp__right__chat_search";
 
+pub const FORUM_TOPIC_CREATE_MCP_TOOL: &str = "mcp__right__forum_topic_create";
+pub const FORUM_TOPIC_EDIT_MCP_TOOL: &str = "mcp__right__forum_topic_edit";
+pub const FORUM_TOPIC_CLOSE_MCP_TOOL: &str = "mcp__right__forum_topic_close";
+pub const FORUM_TOPIC_REOPEN_MCP_TOOL: &str = "mcp__right__forum_topic_reopen";
+pub const FORUM_TOPIC_LIST_MCP_TOOL: &str = "mcp__right__forum_topic_list";
+
 /// Maximum length (in Unicode scalar values) of a `send_progress` message.
 ///
 /// Single source of truth for: the JSON-schema `maxLength` advertised in
