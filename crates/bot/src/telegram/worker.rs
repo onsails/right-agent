@@ -1509,6 +1509,7 @@ pub fn spawn_worker(
                     let uuid = match &failure {
                         InvokeCcFailure::Reflectable { session_uuid, .. } => session_uuid.clone(),
                         InvokeCcFailure::NonReflectable { .. } => String::new(),
+                        InvokeCcFailure::RateLimited { .. } => String::new(),
                         InvokeCcFailure::Backgrounded {
                             main_session_id, ..
                         } => main_session_id.clone(),
@@ -1788,6 +1789,38 @@ pub fn spawn_worker(
                 Err(InvokeCcFailure::NonReflectable { message }) => {
                     tracing::info!(?key, "sending non-reflectable error reply to Telegram");
                     send_error_to_telegram(&ctx, tg_chat_id, eff_thread_id, &message).await;
+                }
+                Err(InvokeCcFailure::RateLimited {
+                    message,
+                    thinking_msg_id,
+                }) => {
+                    tracing::info!(
+                        ?key,
+                        "rate-limited turn — sending human notice, skipping reflection"
+                    );
+                    match thinking_msg_id {
+                        Some(msg_id) => {
+                            let edit_result = ctx
+                                .bot
+                                .edit_message_text(tg_chat_id, msg_id, &message)
+                                .parse_mode(teloxide::types::ParseMode::Html)
+                                .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
+                                .await;
+                            if let Err(edit_err) = edit_result {
+                                tracing::warn!(
+                                    ?key,
+                                    "rate-limit banner edit failed ({:#}); sending as new message",
+                                    edit_err
+                                );
+                                let _ = ctx.bot.delete_message(tg_chat_id, msg_id).await;
+                                send_error_to_telegram(&ctx, tg_chat_id, eff_thread_id, &message)
+                                    .await;
+                            }
+                        }
+                        None => {
+                            send_error_to_telegram(&ctx, tg_chat_id, eff_thread_id, &message).await;
+                        }
+                    }
                 }
                 Err(InvokeCcFailure::Reflectable {
                     kind,
@@ -2470,6 +2503,14 @@ pub(crate) enum InvokeCcFailure {
     /// A failure we do NOT want to reflect on (parse failures, pre-CC setup
     /// errors, schema read failures). The `message` is sent to Telegram verbatim.
     NonReflectable { message: String },
+    /// Anthropic-side rate limit / overload (HTTP 429/529). Reflection is
+    /// skipped — it would just 429 again and add load during the throttle
+    /// window. `spawn_worker` edits `thinking_msg_id` into `message`, or
+    /// sends it as a new message when there is no thinking message.
+    RateLimited {
+        message: String,
+        thinking_msg_id: Option<teloxide::types::MessageId>,
+    },
     /// The foreground turn was terminated (timeout or user request) and work
     /// has been spawned as an immediate background continuation. `spawn_worker`
     /// edits `thinking_msg_id` with a per-reason banner.
@@ -4014,16 +4055,34 @@ async fn invoke_cc(
                 .ok();
         }
 
-        // Non-auth error: generic error reply.
-        let error_detail = if stderr_str.trim().is_empty() && !stdout_str.trim().is_empty() {
-            format!(
-                "(stderr empty, stdout): {}",
-                stdout_str.chars().take(500).collect::<String>()
-            )
-        } else {
-            stderr_str.to_string()
+        // Classify the failure (auth was already handled above). Rate-limit
+        // gets a human notice and skips reflection; other errors keep
+        // reflection but use a human-readable fallback message.
+        let cc_class = classify_cc_result(&stdout_str);
+        if matches!(cc_class, CcResultClass::RateLimited) {
+            return Err(InvokeCcFailure::RateLimited {
+                message: RATE_LIMIT_MESSAGE.to_string(),
+                thinking_msg_id,
+            });
+        }
+
+        let raw = match &cc_class {
+            CcResultClass::Other {
+                result_text: Some(text),
+            } => format_human_error(text),
+            _ => {
+                let error_detail = if stderr_str.trim().is_empty() && !stdout_str.trim().is_empty()
+                {
+                    format!(
+                        "(stderr empty, stdout): {}",
+                        stdout_str.chars().take(500).collect::<String>()
+                    )
+                } else {
+                    stderr_str.to_string()
+                };
+                format_error_reply(exit_code, &error_detail)
+            }
         };
-        let raw = format_error_reply(exit_code, &error_detail);
         return Err(InvokeCcFailure::Reflectable {
             kind: FailureKind::NonZeroExit { code: exit_code },
             ring_buffer_tail: ring_buffer.events().clone(),
