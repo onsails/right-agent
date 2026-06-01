@@ -596,6 +596,12 @@ impl rmcp::ServerHandler for Aggregator {
                  invocation only. Use for complex or long-running work, not routine \
                  short tasks. Rate limited to one message every 30 seconds. Cron, \
                  delivery, reflection, and background-continuation turns must not use it.\n\n\
+                 ## Forum Topics (forum supergroups only)\n\
+                 - mcp__right__forum_topic_create: Create a topic in the current group; returns its message_thread_id.\n\
+                 - mcp__right__forum_topic_edit: Rename / re-icon a topic by message_thread_id.\n\
+                 - mcp__right__forum_topic_close / mcp__right__forum_topic_reopen: Archive / restore a topic (reversible; never deletes).\n\
+                 - mcp__right__forum_topic_list: List topics this agent tracks in the CURRENT chat only (server-scoped).\n\
+                 You cannot delete topics. Requires the bot's 'Manage Topics' admin right; errors surface as forum_op_failed with an actionable message.\n\n\
                  ## Learning\n\
                  - mcp__right__skill_learning_start: Stage 1 foreground metadata/progress for learned skill create/update. Call before writing or patching skill package files. action=create and action=update both require rightx-* skill names. Accepts skill names only, never paths.\n\
                  - mcp__right__skill_learning_finish: Stage 1 foreground metadata/receipt for skill create/update completion. Successful statuses require a non-empty LLM-authored message argument, verify the skill package exists at .claude/skills/<skill_name>/SKILL.md, and send learned/updated receipts. Does not move files. Optional field hint_outcome: \"applied_as_hinted\" | \"applied_differently\" | \"refused\" — probe-writer must include this when a prefilter hint was provided.\n\n\
