@@ -418,9 +418,17 @@ fn permissive_provider_endpoint_precedes_tls_skip_catch_all() {
     let host_idx = out
         .find("- host: api.twitterapi.io")
         .expect("provider host endpoint must be present");
+    // Locate the catch-all by its list-item port line. Provider stanzas render
+    // `port: 443` as an indented value line (no leading dash), so `- port: 443`
+    // uniquely matches the hostless catch-all and cannot be shadowed by a
+    // provider stanza that might one day carry a `tls` field.
     let catch_all_idx = out
-        .find("tls: skip")
-        .expect("permissive policy must contain a tls: skip catch-all");
+        .find("- port: 443")
+        .expect("permissive policy must contain a hostless catch-all on port 443");
+    assert!(
+        out[catch_all_idx..].contains("tls: skip"),
+        "the located catch-all must be a tls: skip raw tunnel"
+    );
 
     assert!(
         host_idx < catch_all_idx,
