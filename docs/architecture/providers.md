@@ -157,13 +157,22 @@ is a no-op on a restrictive (anchorless) policy and idempotent on an
 already-folded one. The network policy is thus reconstructable from
 `agent.yaml` alone.
 
+Every regen callsite renders through
+`right_codegen::policy::generate_provider_aware_policy(...)` (the single
+`generate_policy` + `apply_provider_stanzas` composition) rather than
+calling `generate_policy` bare.
+
 A `sandbox.providers`-only edit to `agent.yaml` no longer forces a
 restart: `config_watcher` classifies it `ProvidersReload` and signals
 `sandbox_supervisor::hot_reconcile_providers`, which re-renders the
 provider-aware policy with resolved host IPs, hot-applies it (`openshell
-policy set --wait`), and reconciles gateway attach/detach. If that hot
-path fails, the supervisor recovery loop re-applies the same
-provider-aware policy on its next bring-up, so the agent self-heals.
+policy set --wait`), and reconciles gateway attach/detach. The lib.rs
+consumer retries the hot path with bounded backoff. There is no periodic
+provider reconcile, so if it still fails the *live* sandbox policy stays
+stale until the next bot restart or sandbox bring-up — re-edit
+`sandbox.providers` or restart to retry. The *on-disk* policy is always
+correct (every full regen folds providers back in), so a restart fully
+self-heals.
 
 ## Lifecycle
 

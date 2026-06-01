@@ -234,7 +234,7 @@ pub(crate) fn spawn_config_watcher(
                             model_swap.store(Arc::new(new_model));
                             debug_flag.store(new_debug.unwrap_or(initial_debug), Ordering::Release);
                             if let Err(e) = providers_tx.send(new_config) {
-                                tracing::warn!(error = %format!("{e}"),
+                                tracing::warn!(error = %format!("{e:#}"),
                                     "providers reconcile channel closed (consumer task gone, e.g. shutdown) — skipping hot reconcile");
                             }
                             last_yaml = new_yaml;
