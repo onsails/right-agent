@@ -13,7 +13,9 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use dashmap::DashMap;
 use right_mcp::internal_client::{
-    InternalClient, ProgressSendRequest, SKILL_LEARNING_FINISH_TOOL, SKILL_LEARNING_START_TOOL,
+    ForumTopicCreateRequest, ForumTopicCreateResponse, ForumTopicEditRequest,
+    ForumTopicThreadRequest, InternalClient, InternalClientError, ProgressSendRequest,
+    SKILL_LEARNING_FINISH_TOOL, SKILL_LEARNING_START_TOOL,
 };
 use right_mcp::tool_error::tool_error;
 use rmcp::handler::server::tool::schema_for_type;
@@ -43,6 +45,46 @@ pub(crate) struct ConversationSearchParams {
     pub(crate) query: String,
     pub(crate) limit: Option<usize>,
 }
+
+/// Allowed forum-topic icon colors (RGB ints), per Telegram Bot API.
+const ALLOWED_ICON_COLORS: [i32; 6] = [7322096, 16766590, 13338331, 9367192, 16749490, 16478047];
+
+/// End-to-end timeout for a forum-topic bot round-trip. Must exceed the bot's
+/// own 10s per-call timeout so the bot's clean error surfaces first.
+const FORUM_TOPIC_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ForumTopicCreateParams {
+    /// Topic name, 1–128 characters.
+    pub(crate) name: String,
+    /// Optional icon color (one of the 6 Telegram-allowed RGB integers).
+    pub(crate) icon_color: Option<i32>,
+    /// Optional custom-emoji icon id (from getForumTopicIconStickers).
+    pub(crate) icon_custom_emoji_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ForumTopicEditParams {
+    /// Target topic's message_thread_id.
+    pub(crate) message_thread_id: i32,
+    /// New name (1–128 chars). Omit to keep current.
+    pub(crate) name: Option<String>,
+    /// New custom-emoji icon id; empty string removes the icon. Omit to keep.
+    pub(crate) icon_custom_emoji_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ForumTopicThreadParams {
+    /// Target topic's message_thread_id.
+    pub(crate) message_thread_id: i32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ForumTopicListParams {}
 
 /// Connection cache keyed by agent name.
 type ConnCache = Arc<DashMap<String, Arc<tokio::sync::Mutex<right_db::Connection>>>>;
@@ -146,6 +188,32 @@ impl RightBackend {
                 "Search archived Telegram conversation messages in the current chat across all threads. Scope is server-enforced from the current foreground invocation and is not agent-controlled.",
                 schema_for_type::<ConversationSearchParams>(),
             ),
+            // Forum topic management (forum supergroups only; never deletes)
+            Tool::new(
+                "forum_topic_create",
+                "Create a forum topic in the current Telegram forum supergroup. Returns the new message_thread_id. Forum supergroups only; the bot needs the 'Manage Topics' admin right. icon_color must be one of the 6 Telegram-allowed RGB integers if set.",
+                schema_for_type::<ForumTopicCreateParams>(),
+            ),
+            Tool::new(
+                "forum_topic_edit",
+                "Rename a forum topic and/or change its custom-emoji icon, by message_thread_id, in the current chat. Empty icon_custom_emoji_id removes the icon.",
+                schema_for_type::<ForumTopicEditParams>(),
+            ),
+            Tool::new(
+                "forum_topic_close",
+                "Close (archive) a forum topic by message_thread_id in the current chat. Reversible with forum_topic_reopen; does not delete the topic or its messages.",
+                schema_for_type::<ForumTopicThreadParams>(),
+            ),
+            Tool::new(
+                "forum_topic_reopen",
+                "Reopen a previously closed forum topic by message_thread_id in the current chat.",
+                schema_for_type::<ForumTopicThreadParams>(),
+            ),
+            Tool::new(
+                "forum_topic_list",
+                "List forum topics this agent has created or managed in the CURRENT chat only. Scope is server-enforced and not agent-controlled. There is no Telegram API to enumerate all topics, so this returns only tracked topics.",
+                schema_for_type::<ForumTopicListParams>(),
+            ),
             // Bootstrap
             Tool::new(
                 "bootstrap_done",
@@ -204,6 +272,20 @@ impl RightBackend {
                 )
                 .await
             }
+            "forum_topic_create" => {
+                self.call_forum_topic_create(agent_name, context, &args)
+                    .await
+            }
+            "forum_topic_edit" => self.call_forum_topic_edit(agent_name, context, &args).await,
+            "forum_topic_close" => {
+                self.call_forum_topic_close(agent_name, context, &args)
+                    .await
+            }
+            "forum_topic_reopen" => {
+                self.call_forum_topic_reopen(agent_name, context, &args)
+                    .await
+            }
+            "forum_topic_list" => self.call_forum_topic_list(agent_name, context, &args).await,
             "bootstrap_done" => self.call_bootstrap_done(agent_name).await,
             other => bail!("unknown tool: {other}"),
         }
@@ -949,6 +1031,279 @@ impl RightBackend {
     }
 
     // ------------------------------------------------------------------
+    // Forum topic management
+    // ------------------------------------------------------------------
+
+    async fn call_forum_topic_create(
+        &self,
+        agent_name: &str,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: ForumTopicCreateParams = match serde_json::from_value(args.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    format!("invalid forum_topic_create params: {e:#}"),
+                    None,
+                ));
+            }
+        };
+        let name = params.name.trim();
+        if name.is_empty() || name.chars().count() > 128 {
+            return Ok(tool_error(
+                "invalid_argument",
+                "topic name must be 1–128 characters",
+                None,
+            ));
+        }
+        if let Some(color) = params.icon_color {
+            if !ALLOWED_ICON_COLORS.contains(&color) {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    format!("icon_color must be one of {ALLOWED_ICON_COLORS:?}"),
+                    None,
+                ));
+            }
+        }
+        let Some(invocation_id) = context.invocation_id else {
+            return Ok(forum_scope_unavailable());
+        };
+        let target = match self.progress.forum_target(&invocation_id).await {
+            Ok(t) => t,
+            Err(_) => return Ok(forum_scope_unavailable()),
+        };
+        let client = InternalClient::new(target.bot_socket_path);
+        let request = ForumTopicCreateRequest {
+            invocation_id,
+            token: target.bot_send_token,
+            name: name.to_owned(),
+            icon_color: params.icon_color,
+            icon_custom_emoji_id: params.icon_custom_emoji_id.clone(),
+        };
+        let resp: ForumTopicCreateResponse =
+            match tokio::time::timeout(FORUM_TOPIC_TIMEOUT, client.forum_topic_create(&request))
+                .await
+            {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => return Ok(forum_op_error(e)),
+                Err(_) => {
+                    return Ok(tool_error(
+                        "forum_op_failed",
+                        "forum create timed out",
+                        None,
+                    ));
+                }
+            };
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
+        right_db::forum_topics::upsert_created(
+            &conn,
+            target.chat_id,
+            i64::from(resp.message_thread_id),
+            name,
+            params.icon_color.map(i64::from),
+            params.icon_custom_emoji_id.as_deref(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("forum registry write failed: {e:#}"))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({ "message_thread_id": resp.message_thread_id, "name": name })
+                .to_string(),
+        )]))
+    }
+
+    async fn call_forum_topic_edit(
+        &self,
+        agent_name: &str,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: ForumTopicEditParams = match serde_json::from_value(args.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    format!("invalid forum_topic_edit params: {e:#}"),
+                    None,
+                ));
+            }
+        };
+        if let Some(name) = params.name.as_deref() {
+            if name.chars().count() > 128 {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    "topic name must be at most 128 characters",
+                    None,
+                ));
+            }
+        }
+        let Some(invocation_id) = context.invocation_id else {
+            return Ok(forum_scope_unavailable());
+        };
+        let target = match self.progress.forum_target(&invocation_id).await {
+            Ok(t) => t,
+            Err(_) => return Ok(forum_scope_unavailable()),
+        };
+        let client = InternalClient::new(target.bot_socket_path);
+        let request = ForumTopicEditRequest {
+            invocation_id,
+            token: target.bot_send_token,
+            message_thread_id: params.message_thread_id,
+            name: params.name.clone(),
+            icon_custom_emoji_id: params.icon_custom_emoji_id.clone(),
+        };
+        match tokio::time::timeout(FORUM_TOPIC_TIMEOUT, client.forum_topic_edit(&request)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Ok(forum_op_error(e)),
+            Err(_) => return Ok(tool_error("forum_op_failed", "forum edit timed out", None)),
+        }
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
+        right_db::forum_topics::update_edited(
+            &conn,
+            target.chat_id,
+            i64::from(params.message_thread_id),
+            params.name.as_deref(),
+            params.icon_custom_emoji_id.as_deref(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("forum registry write failed: {e:#}"))?;
+        Ok(forum_success())
+    }
+
+    async fn call_forum_topic_close(
+        &self,
+        agent_name: &str,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        self.forum_set_state(
+            agent_name,
+            context,
+            args,
+            right_db::forum_topics::ForumTopicState::Closed,
+        )
+        .await
+    }
+
+    async fn call_forum_topic_reopen(
+        &self,
+        agent_name: &str,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        self.forum_set_state(
+            agent_name,
+            context,
+            args,
+            right_db::forum_topics::ForumTopicState::Open,
+        )
+        .await
+    }
+
+    /// Shared close/reopen path.
+    async fn forum_set_state(
+        &self,
+        agent_name: &str,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+        new_state: right_db::forum_topics::ForumTopicState,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: ForumTopicThreadParams = match serde_json::from_value(args.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    format!("invalid params: {e:#}"),
+                    None,
+                ));
+            }
+        };
+        let Some(invocation_id) = context.invocation_id else {
+            return Ok(forum_scope_unavailable());
+        };
+        let target = match self.progress.forum_target(&invocation_id).await {
+            Ok(t) => t,
+            Err(_) => return Ok(forum_scope_unavailable()),
+        };
+        let client = InternalClient::new(target.bot_socket_path);
+        let request = ForumTopicThreadRequest {
+            invocation_id,
+            token: target.bot_send_token,
+            message_thread_id: params.message_thread_id,
+        };
+        let fut = async {
+            match new_state {
+                right_db::forum_topics::ForumTopicState::Closed => {
+                    client.forum_topic_close(&request).await
+                }
+                right_db::forum_topics::ForumTopicState::Open => {
+                    client.forum_topic_reopen(&request).await
+                }
+            }
+        };
+        match tokio::time::timeout(FORUM_TOPIC_TIMEOUT, fut).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Ok(forum_op_error(e)),
+            Err(_) => {
+                return Ok(tool_error(
+                    "forum_op_failed",
+                    "forum state change timed out",
+                    None,
+                ));
+            }
+        }
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
+        right_db::forum_topics::set_state(
+            &conn,
+            target.chat_id,
+            i64::from(params.message_thread_id),
+            new_state,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("forum registry write failed: {e:#}"))?;
+        Ok(forum_success())
+    }
+
+    async fn call_forum_topic_list(
+        &self,
+        agent_name: &str,
+        context: crate::progress::ToolCallContext,
+        _args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let Some(invocation_id) = context.invocation_id else {
+            return Ok(forum_scope_unavailable());
+        };
+        let scope = match self.progress.conversation_scope(&invocation_id).await {
+            Ok(s) => s,
+            Err(_) => return Ok(forum_scope_unavailable()),
+        };
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
+        let rows = right_db::forum_topics::list(&conn, scope.chat_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("forum list failed: {e:#}"))?;
+        let json: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|t| {
+                serde_json::json!({
+                    "message_thread_id": t.message_thread_id,
+                    "name": t.name,
+                    "icon_color": t.icon_color,
+                    "icon_custom_emoji_id": t.icon_custom_emoji_id,
+                    "state": t.state,
+                })
+            })
+            .collect();
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({ "topics": json }).to_string(),
+        )]))
+    }
+
+    // ------------------------------------------------------------------
     // Bootstrap
     // ------------------------------------------------------------------
 
@@ -1039,6 +1394,37 @@ fn conversation_scope_unavailable() -> CallToolResult {
         "conversation scope is available only for the current foreground invocation",
         None,
     )
+}
+
+fn forum_scope_unavailable() -> CallToolResult {
+    tool_error(
+        "forum_scope_unavailable",
+        "forum topic tools are available only in the current foreground invocation in a group chat",
+        None,
+    )
+}
+
+fn forum_success() -> CallToolResult {
+    CallToolResult::success(vec![Content::text(
+        serde_json::json!({ "status": "ok" }).to_string(),
+    )])
+}
+
+fn forum_op_error(e: InternalClientError) -> CallToolResult {
+    // The bot endpoint already mapped Telegram errors to a friendly message in
+    // the response body; surface it verbatim.
+    let msg = match &e {
+        InternalClientError::Server { body, .. } => serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| {
+                v.get("error")
+                    .and_then(|s| s.as_str())
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| format!("{e:#}")),
+        _ => format!("{e:#}"),
+    };
+    tool_error("forum_op_failed", msg, None)
 }
 
 /// Validate that `chat_id` is in the agent's allowlist (users or groups).
