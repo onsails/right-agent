@@ -143,11 +143,20 @@ pub(crate) async fn bring_up_sandbox(
 
     // Regenerate policy with resolved host IPs and apply.
     let network_policy = config.network_policy;
-    let policy_content = right_codegen::policy::generate_policy(
-        right_runtime_state::MCP_HTTP_PORT,
-        &network_policy,
-        right_codegen::policy::HostMcpAccess::Resolved(host_ips.clone()),
-    );
+    let providers = config
+        .sandbox
+        .as_ref()
+        .map(|s| s.providers.as_slice())
+        .unwrap_or(&[]);
+    let policy_content = right_codegen::policy::apply_provider_stanzas(
+        &right_codegen::policy::generate_policy(
+            right_runtime_state::MCP_HTTP_PORT,
+            &network_policy,
+            right_codegen::policy::HostMcpAccess::Resolved(host_ips.clone()),
+        ),
+        providers,
+    )
+    .map_err(|e| miette::miette!("provider policy fold failed: {e:#}"))?;
     // Drift check BEFORE write+apply: `openshell policy set --wait` rejects
     // landlock changes on a live sandbox with InvalidArgument, so applying
     // a drifted filesystem policy cannot safely repair the sandbox. Fail
