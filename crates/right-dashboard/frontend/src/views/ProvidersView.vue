@@ -159,13 +159,13 @@ async function submitAdd(): Promise<void> {
 
   if (!addCredential.value.trim()) { addError.value = 'Credential is required'; return }
 
-    const credCheck = evaluateCredentialSubmit(addCredential.value, credentialWarnAck.value)
-    if (!credCheck.proceed) {
-      addWarn.value = credCheck.warning
-      credentialWarnAck.value = true
-      return
-    }
-    addWarn.value = null
+  const credCheck = evaluateCredentialSubmit(addCredential.value, credentialWarnAck.value)
+  if (!credCheck.proceed) {
+    addWarn.value = credCheck.warning
+    credentialWarnAck.value = true
+    return
+  }
+  addWarn.value = null
 
   addBusy.value = true
   try {
