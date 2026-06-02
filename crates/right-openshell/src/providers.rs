@@ -127,6 +127,12 @@ pub fn profile_catalog() -> Vec<ProviderProfile> {
             env_var: "GITHUB_TOKEN".into(),
         },
         ProviderProfile {
+            type_slug: "right-github".into(),
+            display_name: "GitHub".into(),
+            category: ProviderCategory::SourceControl,
+            env_var: "GITHUB_TOKEN".into(),
+        },
+        ProviderProfile {
             type_slug: "gitlab".into(),
             display_name: "GitLab".into(),
             category: ProviderCategory::SourceControl,
@@ -470,6 +476,12 @@ mod providers_tests;
 mod tests {
     use super::*;
 
+    /// An upstream OpenShell built-in: not the `generic` fallback and not a
+    /// RightClaw-owned `right-*` managed profile.
+    fn is_upstream_builtin(p: &ProviderProfile) -> bool {
+        p.type_slug != "generic" && !p.type_slug.starts_with("right-")
+    }
+
     #[test]
     fn catalog_excludes_claude() {
         let catalog = profile_catalog();
@@ -481,7 +493,7 @@ mod tests {
         let catalog = profile_catalog();
         let built_in: Vec<&str> = catalog
             .iter()
-            .filter(|p| p.type_slug != "generic")
+            .filter(|p| is_upstream_builtin(p))
             .map(|p| p.type_slug.as_str())
             .collect();
         assert_eq!(built_in.len(), 8);
@@ -549,6 +561,29 @@ mod tests {
         assert!(
             debug_output.contains("upstream_host"),
             "Debug output should show config keys/values; got: {debug_output}"
+        );
+    }
+
+    #[test]
+    fn catalog_has_full_github_and_keeps_builtin() {
+        let catalog = profile_catalog();
+        let upstream_builtin = catalog.iter().filter(|p| is_upstream_builtin(p)).count();
+        assert_eq!(upstream_builtin, 8, "8 upstream built-ins unchanged");
+
+        let gh = catalog
+            .iter()
+            .find(|p| p.type_slug == "github")
+            .expect("github kept");
+        let rgh = catalog
+            .iter()
+            .find(|p| p.type_slug == "right-github")
+            .expect("right-github present");
+        assert_eq!(gh.env_var, "GITHUB_TOKEN");
+        assert_eq!(rgh.env_var, "GITHUB_TOKEN");
+        assert_eq!(rgh.display_name, "GitHub");
+        assert!(
+            catalog.iter().all(|p| p.type_slug != "right-github-write"),
+            "old right-github-write removed"
         );
     }
 }
