@@ -246,11 +246,25 @@ summary of the failure instead of the raw ring-buffer dump.
 - `async_runs.status` gates delivery: `'failed'` routes to
   `DELIVERY_INSTRUCTION_FAILURE`, any other status (currently `'success'`)
   routes to `DELIVERY_INSTRUCTION_SUCCESS` (verbatim relay).
+- **Budget-exhausted cron failures skip reflection.** `--max-budget-usd` is a
+  session-cumulative cap, and reflection `--resume`s the run's session — so
+  reflecting a `BudgetExceeded` failure would immediately re-hit the cap (a
+  futile, billable turn). `cron.rs` detects `FailureKind::BudgetExceeded` and
+  reports a deterministic reason instead of calling `reflect_on_failure`.
 
 Cron success output stores `async_runs.run_note` plus a structured
 `delivery_json` decision. `delivery.kind = "notify"` enters the async delivery
 queue; `delivery.kind = "silent"` is a completed non-delivering run. The
 delivery loop never uses `run_note` as fallback Telegram content.
+
+Cron **failure** output derives its reason from the terminal CC `result` line
+via `cron.rs::terminal_failure_detail`: CC error subtypes
+(`error_max_budget_usd`, `error_max_turns`, `error_during_execution`) carry no
+`result` text, so the detail is synthesized from `subtype` + `total_cost_usd`.
+That detail feeds `classify_cron_failure`, the user-facing notice, and a
+structured `async_runs.error_json` (`{kind, exit_code, failure, detail}`) that is
+persisted regardless of whether reflection runs — so a failure reason is never
+reduced to a bare exit code.
 
 ## Cron Schedule Kinds
 
