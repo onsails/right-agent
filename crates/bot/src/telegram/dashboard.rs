@@ -33,7 +33,9 @@ pub(super) const DASHBOARD_SANDBOX_TIMEOUT_SECS: u64 = 4;
 /// the lightweight health/identity reads use. A generous bound here avoids
 /// the misleading "0 learned skills" empty state — we now surface a timeout
 /// error instead of silently falling back to the host filesystem (where no
-/// `rightx-*` learned skills exist for sandboxed agents).
+/// `rightx-*` learned skills exist for sandboxed agents). Scoped to the cold
+/// list scan only; interactive single-skill reads (detail/pin) run on an
+/// already-warm sandbox and keep the short `DASHBOARD_SANDBOX_TIMEOUT_SECS`.
 pub(super) const DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS: u64 = 20;
 const INIT_DATA_MAX_AGE_SECS: i64 = 86_400;
 const MAX_LOG_LINES: usize = 80;
