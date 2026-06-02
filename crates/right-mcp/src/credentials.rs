@@ -268,8 +268,9 @@ fn is_private_or_link_local_ipv6(ip: Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4_mapped() {
         return is_private_or_link_local_ipv4(v4);
     }
-
-    ip.is_unique_local() || ip.is_unicast_link_local()
+    // ULA (fc00::/7) classification shares ssrf's canonical predicate; link-local
+    // (fe80::/10) stays on the stdlib check.
+    crate::ssrf::is_user_private_lan(IpAddr::V6(ip)) || ip.is_unicast_link_local()
 }
 
 fn is_private_or_link_local_host(host: &url::Host<&str>) -> bool {
@@ -1916,5 +1917,19 @@ mod tests {
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(content["key"], "value");
+    }
+
+    #[test]
+    fn is_private_or_link_local_ipv6_matches_ula_and_link_local() {
+        let v6 = |s: &str| s.parse::<std::net::Ipv6Addr>().unwrap();
+        // ULA fc00::/7
+        assert!(is_private_or_link_local_ipv6(v6("fc00::1")));
+        assert!(is_private_or_link_local_ipv6(v6("fdff:ffff::1")));
+        // link-local fe80::/10
+        assert!(is_private_or_link_local_ipv6(v6("fe80::1")));
+        // ipv4-mapped private folds through
+        assert!(is_private_or_link_local_ipv6(v6("::ffff:10.0.0.1")));
+        // public stays public
+        assert!(!is_private_or_link_local_ipv6(v6("2001:4860:4860::8888")));
     }
 }
