@@ -288,6 +288,23 @@ longer schedulable. `ScheduleKind::from_db_row` rejects them, and
 `load_specs_from_db` skips them so one stale row does not break all
 cron loading.
 
+## Force-notify trigger
+
+`mcp__right__cron_trigger(job_name, notify=true)` force-runs a job and
+guarantees a prompt report. It sets `cron_specs.trigger_force_notify`
+alongside `triggered_at` (both cleared together by `clear_triggered_at`).
+The reconciler's triggered branch passes the flag via the in-memory
+`CronSpec` to `execute_job`, which (1) prepends an "always notify, don't
+go silent" `⟨⟨SYSTEM_NOTICE⟩⟩` directive to the run prompt, and (2) stamps
+`async_runs.force_notify = 1`. `persist_successful_cron_output` then forces
+`delivery_required = 1` even on a silent decision (delivering the silent
+reason as content), and the delivery loop's `should_hold_delivery` skips the
+idle gate for force-notify rows — evaluated against the deduplicated delivery
+candidate, so a forced newer run overrides even when an older non-forced run
+is the oldest pending row. Force-trigger while the job is locked is dropped,
+same as a plain trigger; the flag is transient, so scheduled runs of a
+recurring job are unaffected.
+
 Worker-created background rows start as `status = 'queued'` and
 `handoff_state = 'queued'`. Startup recovery converts only those interrupted
 queued handoffs into failed rows with pending delivery. It does not infer stale
