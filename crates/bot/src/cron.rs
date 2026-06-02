@@ -466,11 +466,14 @@ async fn execute_job(
     agent_name: &str,
     model: Option<&str>,
     ssh_config_path: Option<&std::path::Path>,
-    internal_client: &right_mcp::internal_client::InternalClient,
+    internal_client: &Arc<right_mcp::internal_client::InternalClient>,
     resolved_sandbox: Option<&str>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    learning: &right_agent_config::LearningConfig,
+    session_locks: &crate::telegram::SessionLocks,
 ) {
+    let _ = (learning, session_locks); // wired in Task 4
     use std::process::Stdio;
 
     // Lock check (CRON-04)
@@ -1474,6 +1477,8 @@ pub(crate) async fn run_cron_task(
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    learning: right_agent_config::LearningConfig,
+    session_locks: crate::telegram::SessionLocks,
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
@@ -1505,13 +1510,15 @@ pub(crate) async fn run_cron_task(
         &resolved_sandbox,
         &upgrade_lock,
         &debug,
+        &learning,
+        &session_locks,
     )
     .await;
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock, &debug).await;
+                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock, &debug, &learning, &session_locks).await;
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
@@ -1658,6 +1665,8 @@ fn fire_one_shot_specs(
     resolved_sandbox: &Option<String>,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    learning: &right_agent_config::LearningConfig,
+    session_locks: &crate::telegram::SessionLocks,
 ) {
     for (name, spec) in specs {
         let lock_ttl = effective_lock_ttl(&spec);
@@ -1679,6 +1688,8 @@ fn fire_one_shot_specs(
         let rs = resolved_sandbox.clone();
         let ul = Arc::clone(upgrade_lock);
         let dbg = debug.clone();
+        let learn = learning.clone();
+        let slk = session_locks.clone();
         let one_shot_deleter = OneShotSpecDeleter {
             agent_dir: ad.clone(),
             job_name: jn.clone(),
@@ -1696,6 +1707,8 @@ fn fire_one_shot_specs(
                 rs.as_deref(),
                 ul,
                 dbg,
+                &learn,
+                &slk,
             )
             .await;
         });
@@ -1720,6 +1733,8 @@ async fn reconcile_jobs(
     resolved_sandbox: &Option<String>,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    learning: &right_agent_config::LearningConfig,
+    session_locks: &crate::telegram::SessionLocks,
 ) {
     // Clean up finished triggered handles
     triggered_handles.retain(|h| !h.is_finished());
@@ -1752,6 +1767,8 @@ async fn reconcile_jobs(
         resolved_sandbox,
         upgrade_lock,
         debug,
+        learning,
+        session_locks,
     );
 
     // Fire Immediate specs (every tick — they are one-shot)
@@ -1774,6 +1791,8 @@ async fn reconcile_jobs(
         resolved_sandbox,
         upgrade_lock,
         debug,
+        learning,
+        session_locks,
     );
 
     // Abort handles for removed or changed jobs (CRON-06)
@@ -1810,6 +1829,8 @@ async fn reconcile_jobs(
         let job_sandbox = resolved_sandbox.clone();
         let job_upgrade_lock = Arc::clone(upgrade_lock);
         let job_debug = debug.clone();
+        let job_learning = learning.clone();
+        let job_session_locks = session_locks.clone();
 
         let handle = tokio::spawn(async move {
             run_job_loop(
@@ -1824,6 +1845,8 @@ async fn reconcile_jobs(
                 job_sandbox,
                 job_upgrade_lock,
                 job_debug,
+                job_learning,
+                job_session_locks,
             )
             .await;
         });
@@ -1857,6 +1880,8 @@ async fn reconcile_jobs(
             let rs = resolved_sandbox.clone();
             let ul = Arc::clone(upgrade_lock);
             let dbg = debug.clone();
+            let learn = learning.clone();
+            let slk = session_locks.clone();
             tracing::info!(job = %name, "executing triggered job");
             let trigger_name = name.clone();
             let handle = tokio::spawn(async move {
@@ -1871,6 +1896,8 @@ async fn reconcile_jobs(
                     rs.as_deref(),
                     ul,
                     dbg,
+                    &learn,
+                    &slk,
                 )
                 .await;
             });
@@ -1899,6 +1926,8 @@ async fn run_job_loop(
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    learning: right_agent_config::LearningConfig,
+    session_locks: crate::telegram::SessionLocks,
 ) {
     use cron::Schedule;
     use std::str::FromStr;
@@ -1948,6 +1977,8 @@ async fn run_job_loop(
         let rs = resolved_sandbox.clone();
         let ul = Arc::clone(&upgrade_lock);
         let dbg = debug.clone();
+        let learn = learning.clone();
+        let slk = session_locks.clone();
         let one_shot_deleter = spec
             .schedule_kind
             .is_one_shot()
@@ -1968,6 +1999,8 @@ async fn run_job_loop(
                 rs.as_deref(),
                 ul,
                 dbg,
+                &learn,
+                &slk,
             )
             .await;
         });
@@ -2581,6 +2614,8 @@ mod tests {
             None,
             Arc::new(tokio::sync::RwLock::new(())),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            right_agent_config::LearningConfig::default(),
+            Arc::new(dashmap::DashMap::new()),
         ));
 
         // Give cron engine time to reconcile and spawn the job loop
