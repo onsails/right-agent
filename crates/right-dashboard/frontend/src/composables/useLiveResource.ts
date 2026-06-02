@@ -56,7 +56,13 @@ export function useLiveResource<T>(fetcher: () => Promise<T>, options: LiveResou
       return
     }
     inFlight = true
-    loading.value = true
+    // Only surface `loading` on the initial fetch (no data yet). Background
+    // polls must not toggle it: views gate content behind `loading` via
+    // AsyncState, and flipping it every interval would unmount the content
+    // slot, collapse the scroll height, and reset the user's scroll to top.
+    if (data.value === null) {
+      loading.value = true
+    }
     const gen = ++generation
     try {
       const result = await fetcher()
