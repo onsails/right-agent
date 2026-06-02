@@ -8,6 +8,7 @@ pub(crate) mod cron;
 pub(crate) mod idle_compaction;
 mod keepalive;
 pub(crate) mod learning_curator;
+pub(crate) mod learning_pipeline;
 pub(crate) mod learning_prefilter;
 pub(crate) mod learning_probe_writer;
 pub(crate) mod lifecycle;
