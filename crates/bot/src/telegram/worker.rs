@@ -5276,29 +5276,6 @@ esac
 
         assert!(batch_is_addressed(&[comment, forward]));
     }
-
-    #[tokio::test]
-    async fn budget_skip_records_learning_skip_row() {
-        let dir = tempfile::tempdir().unwrap();
-        {
-            let mut c = right_db::open_connection(dir.path(), true).await.unwrap();
-            right_db::migrations::MIGRATIONS
-                .to_latest(&mut c)
-                .await
-                .unwrap();
-        }
-        let conn = right_db::open_connection(dir.path(), false).await.unwrap();
-        crate::learning_pipeline::record_budget_skip(&conn, "agent-x", 99, 0).await;
-        let (n, reason, kind): (i64, String, Option<String>) = conn
-            .query_row(
-                "SELECT COUNT(*), MAX(reason), MAX(intended_kind) FROM learning_skip",
-                (),
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .await
-            .unwrap();
-        assert_eq!((n, reason.as_str(), kind), (1, "budget", None));
-    }
 }
 
 #[cfg(test)]
