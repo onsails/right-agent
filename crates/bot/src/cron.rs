@@ -974,6 +974,13 @@ async fn execute_job(
                                         num_turns,
                                         total_cost_usd: cost_usd,
                                         wall_elapsed_ms: run_started.elapsed().as_millis() as u64,
+                                        // Empty by design: the cron output schema carries no
+                                        // per-skill receipts (unlike the foreground reply schema),
+                                        // so there is nothing to extract from `collected_lines`.
+                                        // The prefilter reads the full rightx-* skill index
+                                        // itself, so `PatchExisting` stays reachable; the only
+                                        // effect of empty receipts is CreateNew-leaning framing,
+                                        // acceptable for v1.
                                         used_skill_receipts: Vec::new(),
                                     };
                                     let learn_ctx = crate::learning_pipeline::PostTurnLearningCtx {
