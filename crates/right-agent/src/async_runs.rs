@@ -9,6 +9,7 @@ pub struct NewCronRun<'a> {
     pub log_path: &'a str,
     pub target_chat_id: Option<i64>,
     pub target_thread_id: Option<i64>,
+    pub force_notify: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -64,11 +65,11 @@ pub async fn insert_running_cron_run(
         "INSERT INTO async_runs (
             id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
             status, started_at, log_path, delivery_required, delivery_status,
-            created_at, updated_at
+            force_notify, created_at, updated_at
          ) VALUES (
             ?1, 'cron', ?2, ?1, ?3, ?4,
             'running', ?5, ?6, 0, 'none',
-            ?5, ?5
+            ?7, ?5, ?5
          )",
         params![
             run.id,
@@ -77,6 +78,7 @@ pub async fn insert_running_cron_run(
             run.target_thread_id,
             run.started_at,
             run.log_path,
+            run.force_notify,
         ],
     )
     .await?;
@@ -246,6 +248,7 @@ mod tests {
                 log_path: "/log/run-1.ndjson",
                 target_chat_id: Some(-100),
                 target_thread_id: Some(7),
+                force_notify: false,
             },
         )
         .await
@@ -274,6 +277,7 @@ mod tests {
                 log_path: "/log/run-1.ndjson",
                 target_chat_id: None,
                 target_thread_id: None,
+                force_notify: false,
             },
         )
         .await
@@ -304,6 +308,7 @@ mod tests {
                 log_path: "/log/run-1.ndjson",
                 target_chat_id: Some(-100),
                 target_thread_id: None,
+                force_notify: false,
             },
         )
         .await
@@ -352,6 +357,7 @@ mod tests {
                 log_path: "/log/run-1.ndjson",
                 target_chat_id: Some(-100),
                 target_thread_id: None,
+                force_notify: false,
             },
         )
         .await
@@ -511,6 +517,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insert_running_cron_run_persists_force_notify() {
+        let conn = setup().await;
+        insert_running_cron_run(
+            &conn,
+            NewCronRun {
+                id: "run-fn",
+                job_name: "job",
+                started_at: "2026-06-02T00:00:00Z",
+                log_path: "/log",
+                target_chat_id: Some(42),
+                target_thread_id: None,
+                force_notify: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let force: i64 = conn
+            .query_row(
+                "SELECT force_notify FROM async_runs WHERE id = 'run-fn'",
+                right_db::params![],
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(force, 1);
+    }
+
+    #[tokio::test]
     async fn finish_run_sets_terminal_fields() {
         let conn = setup().await;
         insert_running_cron_run(
@@ -522,6 +557,7 @@ mod tests {
                 log_path: "/log/run-1.ndjson",
                 target_chat_id: Some(-100),
                 target_thread_id: None,
+                force_notify: false,
             },
         )
         .await
