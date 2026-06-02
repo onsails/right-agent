@@ -51,6 +51,67 @@ impl ServerHandler for TwoToolServer {
 /// Bind the `TwoToolServer` on a loopback port; return its
 /// `http://127.0.0.1:<port>/mcp` URL. The join handle keeps the server alive.
 pub(crate) async fn serve_two_tool_server() -> (tokio::task::JoinHandle<()>, String) {
+    serve_handler(TwoToolServer).await
+}
+
+/// In-test MCP server whose `call_tool` always succeeds. Used to exercise the
+/// reconnect-and-retry self-heal path in `ProxyBackend::tools_call` against a
+/// live upstream.
+#[derive(Clone)]
+pub(crate) struct CallableServer;
+
+impl ServerHandler for CallableServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    }
+
+    #[allow(clippy::manual_async_fn)]
+    fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + Send + '_
+    {
+        async move {
+            let schema: rmcp::model::JsonObject =
+                serde_json::from_value(serde_json::json!({"type": "object"})).unwrap();
+            let schema = Arc::new(schema);
+            Ok(ListToolsResult {
+                tools: vec![Tool::new("alpha".to_string(), "test tool", schema)],
+                next_cursor: None,
+                meta: None,
+            })
+        }
+    }
+
+    #[allow(clippy::manual_async_fn)]
+    fn call_tool(
+        &self,
+        _request: rmcp::model::CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>
+    + Send
+    + '_ {
+        async move {
+            Ok(rmcp::model::CallToolResult::success(vec![
+                rmcp::model::Content::text("ok"),
+            ]))
+        }
+    }
+}
+
+/// Bind the `CallableServer` on a loopback port; return its
+/// `http://127.0.0.1:<port>/mcp` URL. The join handle keeps the server alive.
+pub(crate) async fn serve_callable_server() -> (tokio::task::JoinHandle<()>, String) {
+    serve_handler(CallableServer).await
+}
+
+/// Bind an arbitrary `ServerHandler` on a loopback port; return its
+/// `http://127.0.0.1:<port>/mcp` URL. The join handle keeps the server alive.
+async fn serve_handler<H>(handler: H) -> (tokio::task::JoinHandle<()>, String)
+where
+    H: ServerHandler + Clone + 'static,
+{
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
@@ -61,7 +122,7 @@ pub(crate) async fn serve_two_tool_server() -> (tokio::task::JoinHandle<()>, Str
     // already accepts the 127.0.0.1 client used by this test.
     let config = StreamableHttpServerConfig::default();
     let service = StreamableHttpService::new(
-        || Ok::<_, std::io::Error>(TwoToolServer),
+        move || Ok::<_, std::io::Error>(handler.clone()),
         Arc::new(LocalSessionManager::default()),
         config,
     );

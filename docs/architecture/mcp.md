@@ -125,6 +125,24 @@ this by inspecting the rmcp error string via
 `ProxyError::NeedsAuth` (not opaque `tool_failed`), so `mcp_list` reports the
 truth instead of `connected`.
 
+### Dead-session reconnect-and-retry
+
+A session can also drop without an auth error: a flaky upstream (e.g. a
+Tailscale-hosted server that recycles its session every few minutes) leaves
+the cached rmcp session dead while the health reconciler still reports
+`Connected` — it lags a dropped session by up to `MAX_STRIKES *
+CONNECTED_CADENCE` (3 × 120s). A tool call landing in that window would
+otherwise surface a raw transport error. `ProxyBackend::tools_call` instead
+self-heals: on a **transport-class** failure (`proxy.rs::is_dead_session_error`
+→ `ServiceError::TransportSend`/`TransportClosed`, or a missing cached
+session) it reconnects once with the client stashed from the last `connect()`
+and retries the call a single time. It deliberately does **not** retry
+`McpError` (a live server's JSON-RPC error — a retry could double-apply a
+non-idempotent write), `Timeout`, or `Cancelled`; those surface unchanged as
+`CallToolFailed`. Auth-required is checked first and still flips to
+`NeedsAuth`. A failed reconnect propagates its own error (`InitFailed` /
+`NeedsAuth`).
+
 ### Post-refresh reconnect
 
 When the scheduler completes a successful refresh while the backend was
