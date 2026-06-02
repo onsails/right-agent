@@ -2787,6 +2787,33 @@ async fn cmd_up(
     );
     t_phase = std::time::Instant::now();
 
+    // Provision RightClaw-owned provider profiles (right-*) to the gateway,
+    // once per gateway, before bots start. Only when sandboxed agents exist —
+    // no sandboxed agent means no managed profiles are needed, and we must not
+    // let provisioning gate `right up` for a host with zero sandboxed agents.
+    // FAIL FAST on error.
+    if any_sandboxed {
+        use right_openshell::openshell::{OpenShellStatus, connect_grpc, preflight_check};
+        // The preflight above already ensured the gateway is Ready (or returned
+        // an error). Re-check and FAIL FAST on anything else rather than silently
+        // skipping: a non-Ready gateway here means sandboxed agents would start
+        // without their right-* profiles, which must surface — not be swallowed.
+        let mtls_dir = match preflight_check() {
+            OpenShellStatus::Ready(dir) => dir,
+            other => return Err(openshell_status_error(other)),
+        };
+        let mut client = connect_grpc(&mtls_dir)
+            .await
+            .map_err(|e| miette::miette!("provision profiles: connect gateway: {e:#}"))?;
+        let outcomes = right_openshell::managed_profiles::ensure_profiles(
+            &mut client,
+            &right_openshell::managed_profiles::managed_profiles(),
+        )
+        .await
+        .map_err(|e| miette::miette!("provision managed profiles failed: {e:#}"))?;
+        tracing::info!(?outcomes, "up: managed_profiles_provisioned");
+    }
+
     // Download any whisper models needed by STT-enabled agents.
     {
         use right_agent_config::WhisperModel;
