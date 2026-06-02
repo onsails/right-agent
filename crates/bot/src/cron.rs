@@ -965,6 +965,10 @@ async fn execute_job(
                                         assistant_reply_text: reply_text,
                                         main_session_uuid: run_id.clone(),
                                         captured_at: chrono::Utc::now(),
+                                        // `0` sentinel for untargeted crons: chat/thread are
+                                        // attribution-only on usage/skip rows here — baselines
+                                        // are agent-wide and the prefilter does no chat-scoped
+                                        // search, so the sentinel cannot mis-scope anything.
                                         chat_id: spec.target_chat_id.unwrap_or(0),
                                         thread_id: spec.target_thread_id.unwrap_or(0),
                                         num_turns,
