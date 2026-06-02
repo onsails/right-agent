@@ -3139,6 +3139,61 @@ sleep 120"#;
         }
     }
 
+    /// Live end-to-end: a recurring cron run whose prompt demonstrates a clearly
+    /// codifiable procedure feeds the shared learning pipeline (prefilter →
+    /// probe-writer fork of the run's own session) and lands a `rightx-*` skill
+    /// in the sandbox skill index. Verifies spec risk (a): a just-finished cron
+    /// session (fresh `new_session_id = run_id`) is forkable/resumable inside the
+    /// sandbox immediately after the run.
+    #[ignore = "ci-claude: requires live sandbox + Claude + OAuth token"]
+    #[tokio::test]
+    async fn ci_claude_recurring_cron_creates_skill() {
+        // ARRANGE — real sandbox (reuse the TestSandbox harness; never the CLI,
+        // never a hardcoded sandbox name — see ARCHITECTURE.md "Integration Tests
+        // Using Live Sandboxes").
+        let sandbox = right_openshell::test_support::TestSandbox::create("right-cron-learn").await;
+
+        // Sanity: the rightx skill index reader works against this live sandbox
+        // and starts WITHOUT our target skill, so a later positive read is
+        // attributable to the learning run (not pre-existing state).
+        //
+        // `collect_rightx_skill_index(Some(name), _)` routes to the sandbox gRPC
+        // path; `agent_dir` is only consulted for the `None` (host-mode) branch
+        // and is never read here.
+        let before = crate::learning_prefilter::collect_rightx_skill_index(
+            Some(sandbox.name()),
+            std::path::Path::new(""),
+        )
+        .await
+        .expect("read skill index before learning run");
+        assert!(
+            !before.iter().any(|s| s.name.starts_with("rightx-")),
+            "fresh sandbox should have no rightx-* skills before the learning run; \
+             found: {before:?}"
+        );
+
+        // ACT + ASSERT — drive one recurring cron run through `execute_job` (or
+        // `run_post_turn` directly against a real in-sandbox session) so the
+        // prefilter + probe-writer fork run live, then poll
+        // `collect_rightx_skill_index` until a `rightx-*` skill appears
+        // (bounded wait). This requires:
+        //   - the agent's Claude OAuth token injected as CLAUDE_CODE_OAUTH_TOKEN
+        //     (mirror build_claude_command in crates/bot/src/cc/invocation.rs);
+        //   - a recurring CronSpec (ScheduleKind::Recurring) persisted in a temp
+        //     data.db with learning.prefilter_enabled = true and a funded
+        //     learning.max_daily_budget_usd;
+        //   - a real internal_client (MCP aggregator Unix socket) for the
+        //     probe-writer.
+        // None of these can be constructed/validated offline, so the live drive
+        // is left as a runbook stub per the plan's single sanctioned todo!().
+        let _ = &sandbox;
+        todo!(
+            "wire the live cron→learning drive against TestSandbox + a real OAuth \
+             token + internal_client, then assert a rightx-* skill appears via \
+             collect_rightx_skill_index within a bounded wait"
+        );
+    }
+
     #[tokio::test]
     async fn persist_force_notify_silent_delivers_pending() {
         let (_dir, conn) = migrated_conn().await;
