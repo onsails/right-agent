@@ -126,14 +126,16 @@ pub struct CronSpec {
     pub lock_ttl: Option<String>,
     pub max_budget_usd: f64,
     pub triggered_at: Option<String>,
+    pub trigger_force_notify: bool,
     pub target_chat_id: Option<i64>,
     pub target_thread_id: Option<i64>,
 }
 
 /// Compare only the spec fields that define the job configuration.
-/// `triggered_at` is transient state (set/cleared by trigger flow) and must NOT
-/// participate in equality — otherwise the reconciler aborts running jobs on every
-/// trigger because the in-memory snapshot differs from the DB snapshot.
+/// `triggered_at` and `trigger_force_notify` are transient state (set/cleared by
+/// the trigger flow) and must NOT participate in equality — otherwise the
+/// reconciler aborts running jobs on every trigger because the in-memory snapshot
+/// differs from the DB snapshot.
 /// `target_chat_id` and `target_thread_id` ARE config: changing them via
 /// `cron_update` is a real change the reconciler must react to.
 impl PartialEq for CronSpec {
@@ -702,7 +704,7 @@ pub fn format_result(result: &CronSpecResult) -> String {
 pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, CronSpec>, DbError> {
     let mut specs = HashMap::new();
     let rows = conn.query_all(
-        "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, recurring, run_at, target_chat_id, target_thread_id FROM cron_specs",
+        "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, trigger_force_notify, recurring, run_at, target_chat_id, target_thread_id FROM cron_specs",
         (),
         |row| {
         Ok((
@@ -713,9 +715,10 @@ pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, Cro
             row.get::<_, f64>(4)?,
             row.get::<_, Option<String>>(5)?,
             row.get::<_, i64>(6)?,
-            row.get::<_, Option<String>>(7)?,
-            row.get::<_, Option<i64>>(8)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, Option<String>>(8)?,
             row.get::<_, Option<i64>>(9)?,
+            row.get::<_, Option<i64>>(10)?,
         ))
     })
     .await?;
@@ -728,6 +731,7 @@ pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, Cro
             lock_ttl,
             max_budget_usd,
             triggered_at,
+            trigger_force_notify,
             recurring,
             run_at,
             target_chat_id,
@@ -755,6 +759,7 @@ pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, Cro
                 lock_ttl,
                 max_budget_usd,
                 triggered_at,
+                trigger_force_notify: trigger_force_notify != 0,
                 target_chat_id,
                 target_thread_id,
             },
@@ -774,12 +779,19 @@ pub fn describe_schedule(schedule: &str) -> String {
 }
 
 /// Mark a cron spec for immediate execution on the next engine tick.
-pub async fn trigger_spec(conn: &Connection, job_name: &str) -> Result<String, String> {
+///
+/// When `force_notify` is set, the resulting run delivers a report regardless
+/// of the job's own silent decision and bypasses the delivery idle gate.
+pub async fn trigger_spec(
+    conn: &Connection,
+    job_name: &str,
+    force_notify: bool,
+) -> Result<String, String> {
     let now = chrono::Utc::now().to_rfc3339();
     let rows = conn
         .execute(
-            "UPDATE cron_specs SET triggered_at = ?2 WHERE job_name = ?1",
-            params![job_name, now],
+            "UPDATE cron_specs SET triggered_at = ?2, trigger_force_notify = ?3 WHERE job_name = ?1",
+            params![job_name, now, force_notify as i64],
         )
         .await
         .map_err(|e| format!("trigger failed: {e:#}"))?;
@@ -790,9 +802,11 @@ pub async fn trigger_spec(conn: &Connection, job_name: &str) -> Result<String, S
 }
 
 /// Clear the `triggered_at` timestamp after a triggered run completes.
+/// Also resets `trigger_force_notify` so the flag does not bleed into
+/// subsequent non-triggered runs.
 pub async fn clear_triggered_at(conn: &Connection, job_name: &str) -> Result<(), String> {
     conn.execute(
-        "UPDATE cron_specs SET triggered_at = NULL WHERE job_name = ?1",
+        "UPDATE cron_specs SET triggered_at = NULL, trigger_force_notify = 0 WHERE job_name = ?1",
         params![job_name],
     )
     .await
