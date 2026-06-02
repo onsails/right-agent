@@ -137,6 +137,7 @@ button {
   font: inherit;
 }
 
+/* Do not set overflow on this element — .view-tabs sticky (min-width:561px) depends on it */
 .app-shell {
   width: min(1160px, 100%);
   margin: 0 auto;
@@ -267,6 +268,20 @@ dt,
 
 .view-tabs {
   overflow-x: auto;
+}
+
+@media (min-width: 561px) {
+  .view-tabs {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    margin-inline: -12px;
+    margin-bottom: 0;
+    padding: 8px 12px;
+    /* page bg, not secondary — sticky bar blends with content behind it (mobile uses secondary for a floating tray) */
+    background: var(--tg-theme-bg-color, #f4f6f8);
+    border-bottom: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.18));
+  }
 }
 
 .display-mode-button,
