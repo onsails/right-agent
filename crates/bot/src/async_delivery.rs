@@ -19,6 +19,7 @@ pub(crate) struct PendingAsyncResult {
     pub status: String,
     pub target_chat_id: Option<i64>,
     pub target_thread_id: Option<i64>,
+    pub force_notify: bool,
 }
 
 /// Query the oldest undelivered async result with a non-null delivery_json.
@@ -35,7 +36,7 @@ async fn fetch_pending_batch(
 ) -> Result<Vec<PendingAsyncResult>, right_db::DbError> {
     let mut stmt = conn.prepare(
         "SELECT id, kind, producer_ref, delivery_json, COALESCE(run_note, ''), status, \
-                NULLIF(target_chat_id, 0), target_thread_id \
+                NULLIF(target_chat_id, 0), target_thread_id, force_notify \
          FROM async_runs \
          WHERE delivery_required = 1 \
            AND delivery_status IN ('pending', 'retryable') \
@@ -59,6 +60,7 @@ fn pending_from_row(row: &right_db::row::Row<'_>) -> Result<PendingAsyncResult, 
         status: row.get(5)?,
         target_chat_id: row.get(6)?,
         target_thread_id: row.get(7)?,
+        force_notify: row.get::<_, i64>(8)? != 0,
     })
 }
 
@@ -124,7 +126,7 @@ pub(crate) async fn deduplicate_job(
     let latest = conn
         .query_row(
             "SELECT id, kind, producer_ref, delivery_json, COALESCE(run_note, ''), status, \
-                    NULLIF(target_chat_id, 0), target_thread_id \
+                    NULLIF(target_chat_id, 0), target_thread_id, force_notify \
              FROM async_runs \
              WHERE kind = 'cron' \
                AND producer_ref = ?1 \
@@ -330,6 +332,13 @@ fn should_wait_for_idle(mode: DeliveryMode, idle_for: i64) -> bool {
     mode == DeliveryMode::Normal && idle_for < IDLE_THRESHOLD_SECS
 }
 
+/// Whether a pending result must wait before delivery. Force-notify runs are
+/// never held — they bypass the idle gate so a forced verification result lands
+/// promptly.
+fn should_hold_delivery(force_notify: bool, mode: DeliveryMode, idle_for: i64) -> bool {
+    !force_notify && should_wait_for_idle(mode, idle_for)
+}
+
 struct DeliveryLoopState {
     delivered_in_memory: HashSet<String>,
     attempt_counts: std::collections::HashMap<String, u32>,
@@ -405,22 +414,6 @@ async fn run_delivery_once(
         }
     };
 
-    let last = idle_ts.0.load(std::sync::atomic::Ordering::Relaxed);
-    let now = chrono::Utc::now().timestamp();
-    let idle_for = now - last;
-    if should_wait_for_idle(mode, idle_for) {
-        let wait = IDLE_THRESHOLD_SECS - idle_for;
-        tracing::info!(
-            kind = %pending.kind,
-            producer_ref = ?pending.producer_ref,
-            run_id = %pending.id,
-            idle_secs = idle_for,
-            wait_secs = wait,
-            "async delivery: result pending, waiting for chat idle ({IDLE_THRESHOLD_SECS}s)"
-        );
-        return false;
-    }
-
     let (to_deliver, skipped) = match select_delivery_candidate(conn, pending).await {
         Ok(Some((result, s))) => (result, s),
         Ok(None) => return false,
@@ -429,6 +422,26 @@ async fn run_delivery_once(
             return false;
         }
     };
+
+    // Idle gate runs against the row that will actually be delivered. For cron,
+    // `select_delivery_candidate` may return a newer run than the one fetched
+    // (dedup keeps the latest), so a force-notify newer run must override the
+    // gate even when the oldest pending row is non-forced.
+    let last = idle_ts.0.load(std::sync::atomic::Ordering::Relaxed);
+    let now = chrono::Utc::now().timestamp();
+    let idle_for = now - last;
+    if should_hold_delivery(to_deliver.force_notify, mode, idle_for) {
+        let wait = IDLE_THRESHOLD_SECS - idle_for;
+        tracing::info!(
+            kind = %to_deliver.kind,
+            producer_ref = ?to_deliver.producer_ref,
+            run_id = %to_deliver.id,
+            idle_secs = idle_for,
+            wait_secs = wait,
+            "async delivery: result pending, waiting for chat idle ({IDLE_THRESHOLD_SECS}s)"
+        );
+        return false;
+    }
 
     if state.delivered_in_memory.contains(&to_deliver.id) {
         if mark_delivery_outcome(conn, &to_deliver.id, "delivered")
@@ -1718,6 +1731,7 @@ mod tests {
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,
+            force_notify: false,
         };
         let output = format_async_yaml(&pending, 2).unwrap();
         // Instruction prefix assertions
@@ -1744,6 +1758,7 @@ mod tests {
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,
+            force_notify: false,
         };
         let output = format_async_yaml(&pending, 0).unwrap();
         assert!(output.starts_with("You are delivering a cron job result"));
@@ -1763,6 +1778,7 @@ mod tests {
             status: "failed".into(),
             target_chat_id: None,
             target_thread_id: None,
+            force_notify: false,
         };
         let out = format_async_yaml(&pending, 0).unwrap();
         assert!(out.contains("did not complete successfully"));
@@ -1780,6 +1796,7 @@ mod tests {
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,
+            force_notify: false,
         };
         let out = format_async_yaml(&pending, 0).unwrap();
         assert!(out.contains("VERBATIM"));
@@ -1796,6 +1813,7 @@ mod tests {
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,
+            force_notify: false,
         };
         let err = format_async_yaml(&pending, 0).unwrap_err();
         assert!(
@@ -1816,6 +1834,7 @@ mod tests {
             status: "success".into(),
             target_chat_id: Some(-100),
             target_thread_id: None,
+            force_notify: false,
         };
 
         let out = format_async_yaml(&pending, 0).unwrap();
@@ -1837,6 +1856,7 @@ mod tests {
             status: "failed".into(),
             target_chat_id: Some(-100),
             target_thread_id: None,
+            force_notify: false,
         };
 
         let out = format_async_yaml(&pending, 0).unwrap();
@@ -2159,5 +2179,106 @@ mod tests {
 
         let err = ensure_delivery_send_report_non_empty(report).unwrap_err();
         assert!(err.contains("empty delivery reply"));
+    }
+
+    #[test]
+    fn force_notify_skips_idle_gate() {
+        // Non-forced, recently active chat → held.
+        assert!(should_hold_delivery(false, DeliveryMode::Normal, 10));
+        // Forced → never held, even when active.
+        assert!(!should_hold_delivery(true, DeliveryMode::Normal, 10));
+        // Idle long enough → not held regardless.
+        assert!(!should_hold_delivery(
+            false,
+            DeliveryMode::Normal,
+            IDLE_THRESHOLD_SECS + 1
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_pending_reads_force_notify() {
+        let (_dir, conn) = setup_db().await;
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
+                status, started_at, finished_at, log_path, run_note, delivery_json,
+                delivery_required, delivery_status, force_notify, created_at, updated_at
+             ) VALUES (
+                'r-fn', 'cron', 'job', 'r-fn', 5, NULL,
+                'success', '2026-06-02T00:00:00Z', '2026-06-02T00:01:00Z', '/log', 'note',
+                '{\"kind\":\"notify\",\"content\":\"hi\"}',
+                1, 'pending', 1, '2026-06-02T00:00:00Z', '2026-06-02T00:01:00Z'
+             )",
+            right_db::params![],
+        )
+        .await
+        .unwrap();
+
+        let pending = fetch_pending(&conn).await.unwrap().unwrap();
+        assert_eq!(pending.id, "r-fn");
+        assert!(
+            pending.force_notify,
+            "force_notify must be read from the row"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_surfaces_latest_force_notify() {
+        // Two cron runs for the same job: older non-forced, newer forced. The
+        // delivery loop fetches the oldest, but candidate selection (dedup) must
+        // surface the newer forced run so the idle gate reads its force_notify.
+        let (_dir, conn) = setup_db().await;
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "older",
+                job_name: "job",
+                started_at: "2026-06-02T00:00:00Z",
+                finished_at: Some("2026-06-02T00:01:00Z"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"old\"}"),
+                ..Default::default()
+            },
+        )
+        .await;
+        // Newer forced run. insert_async_cron_run does not set force_notify, so
+        // stamp it directly after insert.
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "newer",
+                job_name: "job",
+                started_at: "2026-06-02T00:05:00Z",
+                finished_at: Some("2026-06-02T00:06:00Z"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"new\"}"),
+                ..Default::default()
+            },
+        )
+        .await;
+        conn.execute(
+            "UPDATE async_runs SET force_notify = 1 WHERE id = 'newer'",
+            right_db::params![],
+        )
+        .await
+        .unwrap();
+
+        // Fetch returns the oldest (non-forced) row.
+        let delivered_in_memory = HashSet::new();
+        let pending = fetch_next_pending(&conn, &delivered_in_memory)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.id, "older");
+        assert!(!pending.force_notify);
+
+        // Candidate selection surfaces the newer forced run.
+        let (to_deliver, _skipped) = select_delivery_candidate(&conn, pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(to_deliver.id, "newer");
+        assert!(
+            to_deliver.force_notify,
+            "candidate must carry the forced flag of the latest run"
+        );
     }
 }
