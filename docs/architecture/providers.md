@@ -63,6 +63,21 @@ confirmed on a throwaway sandbox: the upstream cert was the real CA, not
 the per-sandbox OpenShell CA, and the placeholder was echoed back
 unchanged.)
 
+**Substitution is keyed by env-var name, not by host.** The proxy
+resolves a placeholder on any TLS-terminated endpoint using the combined
+set of the sandbox's attached-provider credentials — it does **not** check
+that the destination host belongs to the provider that owns the
+credential. So a placeholder for provider A is substituted even if it
+appears in a request to provider B's terminated host (verified live with
+two throwaway providers + fake creds). Raw-tunnel (`tls: skip`) hosts
+never substitute (above), so credentials cannot reach the open internet,
+but cross-provider delivery among an agent's own terminated hosts is
+possible. Do not rely on provider-profile endpoints to confine a
+credential. This is a documented OpenShell limitation (see the
+[providers-v2 docs](https://docs.nvidia.com/openshell/sandboxes/providers-v2)
+— endpoint-scoped credential injection is roadmap, not implemented);
+tracked in onsails/right-agent#92.
+
 **Endpoint ordering is load-bearing.** OpenShell evaluates
 `network_policies.outbound.endpoints` in order. In permissive mode the
 hostless `tls: skip` catch-all (ports 443/80, broad `allowed_ips`) would,
@@ -230,3 +245,60 @@ credential or strips the entry from `agent.yaml`.
 Right iterates `agent.yaml::sandbox::providers` and calls
 `DeleteProvider` on each. Failures are logged and skipped so destroy
 proceeds; orphans clean up on the next `right up`.
+
+## Managed profiles (RightClaw-owned)
+
+`right_openshell::managed_profiles` owns a small set of gateway provider
+profiles whose names carry the `right-*` ownership prefix and are
+maintained entirely by the platform — never created, edited, or deleted by
+the user.
+
+**`right-github`** is the first managed profile and the single GitHub
+provider users add. It is derived from the `github` built-in profile by
+copying its endpoints and credential set, then setting every endpoint's
+`access` preset to **`full`** (rename id/display to `right-github` /
+"GitHub"). Deriving — rather than authoring — keeps it drift-proof: the
+managed profile is always re-derived from whatever the live `github`
+profile contains at the time `ensure_profiles` runs, so it tracks any
+upstream change to the base endpoints.
+
+**Why `access: full`.** Once credential injection forces TLS termination
+on the GitHub endpoints, `access` and `rules` are method-level and
+mutually exclusive. The `github` built-in ships `access: read-only`, which
+blocks every non-GET/HEAD method — including git push (a POST to
+`git-receive-pack`), rejected with a gateway 403. The `full` preset
+permits all methods, unblocking fetch _and_ push, without hand-authoring
+allow-all `rules` (the two are exclusive — `derive` clears `rules` and
+sets the preset).
+
+**One provider, not a toggle.** Providers are a credential-injection
+mechanism, not a read/write boundary — and on the recommended `permissive`
+network policy a read-only distinction is not a real security boundary
+anyway (the catch-all raw tunnel already carries non-provider traffic).
+So there is no read/write toggle: `right-github` is full-access, and the
+read-only built-in `github` is kept in the catalog (so already-provisioned
+`github` providers still resolve their `GITHUB_TOKEN` env var) but hidden
+from the dashboard add-list via `HIDDEN_FROM_DASHBOARD` in
+`internal_api_providers.rs`. Credential confinement (a provider token must
+only reach that provider's hosts) is **not** host-scoped at runtime — an
+accepted OpenShell limitation tracked in `onsails/right-agent#92`; this
+profile does not change that posture.
+
+**`ensure_profiles` reconcile.** Called once per gateway at `right up`,
+before the reconciler attaches providers to agent sandboxes.
+
+- If the base `github` profile does not exist on this gateway,
+  `ensure_profiles` logs a warning and returns `EnsureOutcome::Skipped` for
+  `right-github` — a non-fatal per-profile skip, never an abort of
+  `right up`. Real gRPC errors still propagate (FAIL FAST).
+- The fingerprint used for idempotency includes both `access` and `rules`;
+  a profile still on the old `read-only` preset is detected as drift and
+  re-imported, while an already-correct profile is left untouched.
+- No auto-GC in v1: if `right-github` is present on the gateway but no
+  agent is using it, it stays. Cleanup is a manual operator action.
+
+**Path A purity.** Like all built-in providers, `right-github` follows
+Path A: the gateway contributes its endpoints to the effective sandbox policy
+automatically on attach. `policy.yaml` for each agent is never touched.
+Git LFS is a separate sandbox-tooling concern and is out of scope for this
+subsystem.
