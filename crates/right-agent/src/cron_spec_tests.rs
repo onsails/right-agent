@@ -445,7 +445,7 @@ async fn trigger_spec_sets_timestamp() {
     create_spec(&conn, "trig-job", "*/5 * * * *", "do stuff", None, None)
         .await
         .unwrap();
-    let msg = trigger_spec(&conn, "trig-job").await.unwrap();
+    let msg = trigger_spec(&conn, "trig-job", false).await.unwrap();
     assert!(msg.contains("Triggered"));
     let ts: Option<String> = conn
         .query_row(
@@ -461,7 +461,7 @@ async fn trigger_spec_sets_timestamp() {
 #[tokio::test]
 async fn trigger_spec_nonexistent_job() {
     let (_dir, conn) = setup_db().await;
-    let err = trigger_spec(&conn, "ghost").await.unwrap_err();
+    let err = trigger_spec(&conn, "ghost", false).await.unwrap_err();
     assert!(err.contains("not found"));
 }
 
@@ -471,8 +471,8 @@ async fn trigger_spec_idempotent() {
     create_spec(&conn, "idem-job", "*/5 * * * *", "do stuff", None, None)
         .await
         .unwrap();
-    trigger_spec(&conn, "idem-job").await.unwrap();
-    trigger_spec(&conn, "idem-job").await.unwrap();
+    trigger_spec(&conn, "idem-job", false).await.unwrap();
+    trigger_spec(&conn, "idem-job", false).await.unwrap();
     let ts: Option<String> = conn
         .query_row(
             "SELECT triggered_at FROM cron_specs WHERE job_name = 'idem-job'",
@@ -490,7 +490,7 @@ async fn clear_triggered_at_clears() {
     create_spec(&conn, "clr-job", "*/5 * * * *", "do stuff", None, None)
         .await
         .unwrap();
-    trigger_spec(&conn, "clr-job").await.unwrap();
+    trigger_spec(&conn, "clr-job", false).await.unwrap();
     clear_triggered_at(&conn, "clr-job").await.unwrap();
     let ts: Option<String> = conn
         .query_row(
@@ -620,6 +620,7 @@ async fn triggered_at_does_not_affect_equality() {
         lock_ttl: None,
         max_budget_usd: 1.0,
         triggered_at: None,
+        trigger_force_notify: false,
         target_chat_id: None,
         target_thread_id: None,
     };
@@ -638,6 +639,7 @@ async fn spec_equality_detects_real_changes() {
         lock_ttl: None,
         max_budget_usd: 1.0,
         triggered_at: None,
+        trigger_force_notify: false,
         target_chat_id: None,
         target_thread_id: None,
     };
@@ -672,7 +674,7 @@ async fn load_specs_includes_triggered_at() {
     create_spec(&conn, "tr-load", "*/5 * * * *", "p", None, None)
         .await
         .unwrap();
-    trigger_spec(&conn, "tr-load").await.unwrap();
+    trigger_spec(&conn, "tr-load", false).await.unwrap();
     let specs = load_specs_from_db(&conn).await.unwrap();
     assert!(specs["tr-load"].triggered_at.is_some());
 }
@@ -725,6 +727,84 @@ async fn create_spec_v2_with_run_at_succeeds() {
     .await
     .unwrap();
     assert!(result.message.contains("Created"));
+}
+
+#[tokio::test]
+async fn trigger_spec_force_notify_sets_both_columns() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "fn-job", "*/5 * * * *", "do stuff", None, None)
+        .await
+        .unwrap();
+
+    trigger_spec(&conn, "fn-job", true).await.unwrap();
+
+    let (triggered_at, force): (Option<String>, i64) = conn
+        .query_row(
+            "SELECT triggered_at, trigger_force_notify FROM cron_specs WHERE job_name = ?1",
+            right_db::params!["fn-job"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .await
+        .unwrap();
+    assert!(triggered_at.is_some(), "triggered_at must be set");
+    assert_eq!(force, 1, "trigger_force_notify must be set");
+}
+
+#[tokio::test]
+async fn trigger_spec_without_force_notify_leaves_flag_zero() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "plain-job", "*/5 * * * *", "do stuff", None, None)
+        .await
+        .unwrap();
+
+    trigger_spec(&conn, "plain-job", false).await.unwrap();
+
+    let force: i64 = conn
+        .query_row(
+            "SELECT trigger_force_notify FROM cron_specs WHERE job_name = ?1",
+            right_db::params!["plain-job"],
+            |r| r.get(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(force, 0);
+}
+
+#[tokio::test]
+async fn clear_triggered_at_resets_force_notify() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "clr-fn-job", "*/5 * * * *", "do stuff", None, None)
+        .await
+        .unwrap();
+    trigger_spec(&conn, "clr-fn-job", true).await.unwrap();
+
+    clear_triggered_at(&conn, "clr-fn-job").await.unwrap();
+
+    let (triggered_at, force): (Option<String>, i64) = conn
+        .query_row(
+            "SELECT triggered_at, trigger_force_notify FROM cron_specs WHERE job_name = ?1",
+            right_db::params!["clr-fn-job"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .await
+        .unwrap();
+    assert!(triggered_at.is_none(), "triggered_at must be cleared");
+    assert_eq!(force, 0, "trigger_force_notify must be reset");
+}
+
+#[tokio::test]
+async fn load_specs_carries_force_notify() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "load-fn-job", "*/5 * * * *", "do stuff", None, None)
+        .await
+        .unwrap();
+    trigger_spec(&conn, "load-fn-job", true).await.unwrap();
+
+    let specs = load_specs_from_db(&conn).await.unwrap();
+    assert!(
+        specs["load-fn-job"].trigger_force_notify,
+        "loaded spec must carry trigger_force_notify"
+    );
 }
 
 #[tokio::test]
