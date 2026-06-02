@@ -259,6 +259,12 @@ dashboard `SOURCES` array pick it up; the dashboard test
 (`usage_overview_sources_match_learning_sources_constant`) enforces sync
 via a dev-dep cross-crate assertion.
 
+The per-turn pipeline runs from two call sites through the shared
+`bot::learning_pipeline::run_post_turn`: foreground `Normal` turns and
+recurring-cron successes (`ScheduleKind::Recurring`; one-shot cron runs are
+excluded). No new `LEARNING_SOURCES` entry — cron learning *is*
+`learning_prefilter` + `learning_probe_writer` spend.
+
 Skill lifecycle state lives in `data.db.skill_lifecycle`. Curator
 transitions skip pinned rows. The dashboard is the only operator
 pin/unpin surface — do not add CLI pinning.
