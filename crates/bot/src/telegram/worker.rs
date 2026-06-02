@@ -421,26 +421,6 @@ fn used_skill_names_from_receipts(
         .collect()
 }
 
-/// Record a budget-blocked learning attempt. Best-effort; logs and swallows.
-async fn record_budget_skip(
-    conn: &right_db::Connection,
-    agent_name: &str,
-    chat_id: i64,
-    thread_id: i64,
-) {
-    if let Err(e) = right_agent::usage::insert::insert_learning_skip(
-        conn,
-        "budget",
-        None,
-        Some(chat_id),
-        Some(thread_id),
-    )
-    .await
-    {
-        tracing::warn!(agent = %agent_name, "learning_skip insert failed: {e:#}");
-    }
-}
-
 /// Max characters of raw error/result detail surfaced in a Telegram error
 /// reply. Applied char-safely (never mid-codepoint) via `truncate_to_chars`,
 /// keeping the message well under Telegram's 4096-char limit after escaping.
@@ -1067,16 +1047,6 @@ fn routed_message_ids(batch: &[DebounceMsg]) -> Vec<i32> {
 
 fn assistant_text_was_delivered(caption_consumed: bool, sent_any_text_message: bool) -> bool {
     caption_consumed || sent_any_text_message
-}
-
-/// First non-empty line of a `rightx-*` SKILL.md excerpt, capped at 200 chars.
-fn summary_first_line(excerpt: &str) -> String {
-    excerpt
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(|l| l.chars().take(200).collect())
-        .unwrap_or_default()
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2126,148 +2096,34 @@ pub fn spawn_worker(
             }
 
             // Post-turn learning pipeline (prefilter → probe-writer). Fire-and-forget;
-            // never blocks user-visible latency. All failure paths log and skip.
+            // never blocks user-visible latency. Foreground gate: Normal turns only.
             if let Some(anchor) = post_turn_probe_anchor.take()
                 && ctx.learning.prefilter_enabled
                 && matches!(cc_prompt_mode, Some(crate::cc::prompt::PromptMode::Normal))
             {
-                let agent_dir = ctx.agent_dir.clone();
-                let agent_db_dir = ctx.agent_db_dir.clone();
-                let agent_name = ctx.agent_name.clone();
-                let ssh_config = ctx.ssh_config_path.clone();
-                let resolved = ctx.resolved_sandbox.clone();
-                let prefilter_model = ctx
-                    .learning
-                    .prefilter_model
-                    .clone()
-                    .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_owned());
-                let probe_writer_enabled = ctx.learning.probe_writer_enabled;
-                let probe_writer_model_override = ctx.learning.probe_writer_model.clone();
-                let model_arc = Arc::clone(&ctx.model);
-                let session_locks = ctx.session_locks.clone();
-                let debug_flag = Arc::clone(&ctx.debug);
-                let daily_budget = ctx.learning.max_daily_budget_usd;
-                let baseline_window_days = ctx.learning.baseline_window_days;
-                let baseline_min_sample = ctx.learning.baseline_min_sample;
-                let internal_client = Arc::clone(&ctx.internal_client);
-
+                let learn_ctx = crate::learning_pipeline::PostTurnLearningCtx {
+                    agent_dir: ctx.agent_dir.clone(),
+                    agent_db_dir: ctx.agent_db_dir.clone(),
+                    agent_name: ctx.agent_name.clone(),
+                    ssh_config_path: ctx.ssh_config_path.clone(),
+                    resolved_sandbox: ctx.resolved_sandbox.clone(),
+                    internal_client: Arc::clone(&ctx.internal_client),
+                    session_locks: ctx.session_locks.clone(),
+                    debug_flag: Arc::clone(&ctx.debug),
+                    prefilter_model: ctx
+                        .learning
+                        .prefilter_model
+                        .clone()
+                        .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_owned()),
+                    probe_writer_enabled: ctx.learning.probe_writer_enabled,
+                    probe_writer_model_override: ctx.learning.probe_writer_model.clone(),
+                    probe_writer_model_fallback: (**ctx.model.load()).clone(),
+                    daily_budget: ctx.learning.max_daily_budget_usd,
+                    baseline_window_days: ctx.learning.baseline_window_days,
+                    baseline_min_sample: ctx.learning.baseline_min_sample,
+                };
                 tokio::spawn(async move {
-                    let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-                    let conn = match right_db::open_connection(&agent_db_dir, false).await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::warn!(agent = %agent_name, "prefilter budget gate: open_connection failed: {e:#}");
-                            return;
-                        }
-                    };
-                    let today_spend = match crate::learning_prefilter::today_spend_usd(
-                        &conn, &now_utc,
-                    )
-                    .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(agent = %agent_name, "prefilter budget gate: today_spend query failed: {e:#}");
-                            return;
-                        }
-                    };
-                    if today_spend >= daily_budget {
-                        tracing::debug!(
-                            agent = %agent_name,
-                            spend = today_spend,
-                            budget = daily_budget,
-                            "learning pipeline skipped: daily budget exhausted"
-                        );
-                        record_budget_skip(&conn, &agent_name, anchor.chat_id, anchor.thread_id)
-                            .await;
-                        return;
-                    }
-
-                    let prefilter_ctx = crate::learning_prefilter::PrefilterContext {
-                        agent_dir: agent_dir.clone(),
-                        agent_db_dir: agent_db_dir.clone(),
-                        agent_name: agent_name.clone(),
-                        ssh_config_path: ssh_config.clone(),
-                        resolved_sandbox: resolved.clone(),
-                        model: prefilter_model,
-                        chat_id: anchor.chat_id,
-                        thread_id: anchor.thread_id,
-                        baseline_window_days,
-                        baseline_min_sample,
-                    };
-                    let decision =
-                        crate::learning_prefilter::run(prefilter_ctx, anchor.clone()).await;
-                    let hint = match decision {
-                        crate::learning_prefilter::PrefilterDecision::Skip { reason } => {
-                            tracing::debug!(reason = %reason, "prefilter skipped");
-                            return;
-                        }
-                        crate::learning_prefilter::PrefilterDecision::PatchExisting {
-                            target_skill,
-                            reason,
-                        } => crate::learning_probe_writer::ProbeWriterHint::PatchExisting {
-                            target_skill,
-                            reason,
-                        },
-                        crate::learning_prefilter::PrefilterDecision::CreateNew {
-                            topic_hint,
-                            reason,
-                        } => crate::learning_probe_writer::ProbeWriterHint::CreateNew {
-                            topic_hint,
-                            reason,
-                        },
-                    };
-                    if !probe_writer_enabled {
-                        return;
-                    }
-                    let probe_writer_model = match probe_writer_model_override
-                        .or_else(|| (**model_arc.load()).clone())
-                    {
-                        Some(m) if !m.is_empty() => m,
-                        _ => {
-                            tracing::warn!(
-                                agent = %agent_name,
-                                "probe-writer model unresolved, skipping"
-                            );
-                            return;
-                        }
-                    };
-
-                    let skill_index = match crate::learning_prefilter::collect_rightx_skill_index(
-                        resolved.as_deref(),
-                        &agent_dir,
-                    )
-                    .await
-                    {
-                        Ok(entries) => entries
-                            .into_iter()
-                            .map(|s| format!("- {}: {}", s.name, summary_first_line(&s.excerpt)))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        Err(e) => {
-                            tracing::warn!(
-                                agent = %agent_name,
-                                "collect_rightx_skill_index failed: {e:#}"
-                            );
-                            String::new()
-                        }
-                    };
-
-                    let writer_ctx = crate::learning_probe_writer::ProbeWriterContext {
-                        agent_dir,
-                        agent_db_dir,
-                        agent_name,
-                        ssh_config_path: ssh_config,
-                        resolved_sandbox: resolved,
-                        internal_client,
-                        model: probe_writer_model,
-                        debug_flag,
-                        session_locks,
-                        chat_id: anchor.chat_id,
-                        thread_id: anchor.thread_id,
-                        incoming_hint: hint,
-                    };
-                    crate::learning_probe_writer::run(writer_ctx, anchor, skill_index).await;
+                    crate::learning_pipeline::run_post_turn(learn_ctx, anchor).await;
                 });
             }
 
@@ -5434,7 +5290,7 @@ esac
                 .unwrap();
         }
         let conn = right_db::open_connection(dir.path(), false).await.unwrap();
-        record_budget_skip(&conn, "agent-x", 99, 0).await;
+        crate::learning_pipeline::record_budget_skip(&conn, "agent-x", 99, 0).await;
         let (n, reason, kind): (i64, String, Option<String>) = conn
             .query_row(
                 "SELECT COUNT(*), MAX(reason), MAX(intended_kind) FROM learning_skip",
