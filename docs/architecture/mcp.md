@@ -33,10 +33,18 @@ private/link-local ranges remain rejected.
 Dashboard MCP detection applies the same public-network URL policy to every
 OAuth discovery fetch, including the original MCP probe, RFC 9728
 `resource_metadata` URLs, synthesized well-known URLs, and authorization-server
-metadata URLs. Literal private or localhost IP URLs are rejected before fetch;
+metadata URLs. Before discovery runs, detection resolves a domain base URL and
+short-circuits any host resolving to a loopback or private-LAN
+(RFC1918/CGNAT/ULA) address to `URL as-is`/`Headers` without probing — mirroring
+the IP-literal short-circuits so private/MagicDNS base URLs never reach OAuth
+discovery. Literal private or localhost IP URLs are rejected before fetch;
 obvious localhost domain aliases such as `localhost` and `localhost.` are also
-rejected before fetch. Other domain names are allowed through the dashboard
-detection client's guarded DNS resolver.
+rejected before fetch. The detection probe client itself is `PublicOnly`: its
+guarded DNS resolver strips any remaining domain — including a server-supplied
+discovered URL that rebinds to a private IP — so private reach is never
+available during detection. The runtime proxy and registration paths stay on the
+private-admitting policy because they connect to the operator's own registered
+base URL.
 
 Dashboard OAuth start is a Mini-App-authenticated API flow. The route lists
 registered MCP servers through the Aggregator internal API, finds the selected
