@@ -499,7 +499,14 @@ async fn complete_background_run(
             drop(child);
             let stderr = await_stderr_reader(stderr_handle).await;
             let reason = append_stderr_to_reason(&reason, &stderr);
-            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason).await;
+            persist_completion_failed_at_agent(
+                &agent_dir,
+                &request.run_id,
+                None,
+                BACKGROUND_FAILURE_NOTIFY_CONTENT,
+                &reason,
+            )
+            .await;
             return;
         }
         Err(e) => {
@@ -510,7 +517,14 @@ async fn complete_background_run(
                 &format!("background stdout reader task failed: {e:#}"),
                 &stderr,
             );
-            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason).await;
+            persist_completion_failed_at_agent(
+                &agent_dir,
+                &request.run_id,
+                None,
+                BACKGROUND_FAILURE_NOTIFY_CONTENT,
+                &reason,
+            )
+            .await;
             return;
         }
     };
@@ -521,7 +535,14 @@ async fn complete_background_run(
             let stderr = await_stderr_reader(stderr_handle).await;
             let reason =
                 append_stderr_to_reason(&format!("background child wait failed: {e:#}"), &stderr);
-            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason).await;
+            persist_completion_failed_at_agent(
+                &agent_dir,
+                &request.run_id,
+                None,
+                BACKGROUND_FAILURE_NOTIFY_CONTENT,
+                &reason,
+            )
+            .await;
             return;
         }
         Err(_) => {
@@ -532,7 +553,14 @@ async fn complete_background_run(
                 "background child wait timed out after stdout closed",
                 &stderr,
             );
-            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason).await;
+            persist_completion_failed_at_agent(
+                &agent_dir,
+                &request.run_id,
+                None,
+                BACKGROUND_FAILURE_NOTIFY_CONTENT,
+                &reason,
+            )
+            .await;
             return;
         }
     };
@@ -546,13 +574,41 @@ async fn complete_background_run(
         );
     }
 
+    // CC's terminal result line is authoritative. An `is_error` result — e.g. a
+    // 529 overload that exhausted retries — can accompany either exit code and
+    // never carries a parseable delivery, so classify it into a user-facing
+    // message before falling back to generic exit-code / parse handling.
+    if let Some(classified) = crate::cron::classify_failed_result(&lines) {
+        tracing::warn!(
+            run_id = %request.run_id,
+            detail = %classified.detail,
+            "background run reported an error result"
+        );
+        persist_completion_failed_at_agent(
+            &agent_dir,
+            &request.run_id,
+            exit_code,
+            &classified.user_message,
+            &classified.detail,
+        )
+        .await;
+        return;
+    }
+
     if !exit_status.success() {
         let reason = if stderr.trim().is_empty() {
             format!("background subprocess failed with exit code {exit_code:?}")
         } else {
             format!("background subprocess failed with exit code {exit_code:?}: {stderr}")
         };
-        persist_completion_failed_at_agent(&agent_dir, &request.run_id, exit_code, &reason).await;
+        persist_completion_failed_at_agent(
+            &agent_dir,
+            &request.run_id,
+            exit_code,
+            BACKGROUND_FAILURE_NOTIFY_CONTENT,
+            &reason,
+        )
+        .await;
         return;
     }
 
@@ -567,13 +623,25 @@ async fn complete_background_run(
             )
             .await
             {
-                persist_completion_failed_at_agent(&agent_dir, &request.run_id, exit_code, &reason)
-                    .await;
+                persist_completion_failed_at_agent(
+                    &agent_dir,
+                    &request.run_id,
+                    exit_code,
+                    BACKGROUND_FAILURE_NOTIFY_CONTENT,
+                    &reason,
+                )
+                .await;
             }
         }
         Err(reason) => {
-            persist_completion_failed_at_agent(&agent_dir, &request.run_id, exit_code, &reason)
-                .await;
+            persist_completion_failed_at_agent(
+                &agent_dir,
+                &request.run_id,
+                exit_code,
+                BACKGROUND_FAILURE_NOTIFY_CONTENT,
+                &reason,
+            )
+            .await;
         }
     }
 }
@@ -698,9 +766,11 @@ async fn serialize_notify_delivery_for_host(
 async fn persist_background_failure_notify(
     conn: &right_db::Connection,
     run_id: &str,
+    user_content: &str,
     reason: &str,
 ) -> Result<(), right_db::DbError> {
-    let (run_note, delivery_json, error_json) = background_failure_payload(run_id, reason)?;
+    let (run_note, delivery_json, error_json) =
+        background_failure_payload(run_id, user_content, reason)?;
     right_agent::async_runs::persist_run_output(
         conn,
         run_id,
@@ -716,9 +786,10 @@ async fn persist_background_failure_notify(
 
 fn background_failure_payload(
     run_id: &str,
+    user_content: &str,
     reason: &str,
 ) -> Result<(String, String, String), right_db::DbError> {
-    let delivery_json = crate::cron::notify_delivery_json(BACKGROUND_FAILURE_NOTIFY_CONTENT, None)
+    let delivery_json = crate::cron::notify_delivery_json(user_content, None)
         .map_err(|e| right_db::DbError::InvalidParameter(e.to_string()))?;
     let run_note = format!("Background run `{run_id}` failed before producing a result");
     let error_json = serde_json::json!({
@@ -735,7 +806,8 @@ async fn mark_handoff_failed(
     run_id: &str,
     reason: &str,
 ) -> Result<(), right_db::DbError> {
-    persist_background_failure_notify(conn, run_id, reason).await?;
+    persist_background_failure_notify(conn, run_id, BACKGROUND_FAILURE_NOTIFY_CONTENT, reason)
+        .await?;
     let now = chrono::Utc::now().to_rfc3339();
     let rows = conn
         .execute(
@@ -782,8 +854,11 @@ async fn mark_interrupted_handoff_failed_if_still_queued(
     conn: &right_db::Connection,
     run_id: &str,
 ) -> Result<bool, right_db::DbError> {
-    let (run_note, delivery_json, error_json) =
-        background_failure_payload(run_id, INTERRUPTED_HANDOFF_REASON)?;
+    let (run_note, delivery_json, error_json) = background_failure_payload(
+        run_id,
+        BACKGROUND_FAILURE_NOTIFY_CONTENT,
+        INTERRUPTED_HANDOFF_REASON,
+    )?;
     let now = chrono::Utc::now().to_rfc3339();
     let rows = conn
         .execute(
@@ -812,10 +887,11 @@ async fn mark_completion_failed(
     conn: &right_db::Connection,
     run_id: &str,
     exit_code: Option<i32>,
+    user_content: &str,
     reason: &str,
 ) -> Result<(), right_db::DbError> {
     let tx = conn.transaction().await?;
-    persist_background_failure_notify(&tx, run_id, reason).await?;
+    persist_background_failure_notify(&tx, run_id, user_content, reason).await?;
     right_agent::async_runs::finish_run(&tx, run_id, exit_code, "failed").await?;
     tx.commit().await
 }
@@ -841,11 +917,14 @@ async fn persist_completion_failed_at_agent(
     agent_dir: &Path,
     run_id: &str,
     exit_code: Option<i32>,
+    user_content: &str,
     reason: &str,
 ) {
     match right_db::open_connection(agent_dir, false).await {
         Ok(conn) => {
-            if let Err(e) = mark_completion_failed(&conn, run_id, exit_code, reason).await {
+            if let Err(e) =
+                mark_completion_failed(&conn, run_id, exit_code, user_content, reason).await
+            {
                 tracing::error!(
                     run_id,
                     "failed to persist background completion failure: {e:#}"
@@ -969,6 +1048,67 @@ mod tests {
         assert_eq!(row.3, "pending");
         assert!(row.4.contains("Background work failed"));
         assert!(row.5.contains("init timeout"));
+    }
+
+    #[tokio::test]
+    async fn completion_failure_delivers_classified_529_message_to_user() {
+        // Regression for the contentless "failed without result" notification:
+        // a 529 overload result line must reach the user as a transient-overload
+        // message, with the raw status preserved only in the internal error_json.
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).await.unwrap();
+        right_agent::async_runs::insert_queued_background_run(
+            &conn,
+            right_agent::async_runs::NewBackgroundRun {
+                id: "run-529",
+                producer_ref: Some("background"),
+                source_session_id: "main-1",
+                run_session_id: "run-529",
+                target_chat_id: -42,
+                target_thread_id: Some(7),
+                created_at: "2026-06-02T13:39:00Z",
+            },
+        )
+        .await
+        .unwrap();
+
+        let lines = vec![
+            r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":529,"result":"API Error: 529 Overloaded."}"#.to_string(),
+        ];
+        let classified =
+            crate::cron::classify_failed_result(&lines).expect("529 classifies as failure");
+        mark_completion_failed(
+            &conn,
+            "run-529",
+            Some(1),
+            &classified.user_message,
+            &classified.detail,
+        )
+        .await
+        .unwrap();
+
+        let row: (String, i64, String, String, String) = conn
+            .query_row(
+                "SELECT status, delivery_required, delivery_status, delivery_json, error_json \
+                 FROM async_runs WHERE id = 'run-529'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1, 1);
+        assert_eq!(row.2, "pending");
+        // User-facing delivery carries the transient-overload explanation, not
+        // the generic "Background work failed" string.
+        assert!(row.3.contains("overloaded"), "delivery_json: {}", row.3);
+        assert!(
+            !row.3.contains("Background work failed"),
+            "should not be the generic message: {}",
+            row.3
+        );
+        // Raw status is preserved internally for debugging.
+        assert!(row.4.contains("529"), "error_json: {}", row.4);
     }
 
     #[tokio::test]

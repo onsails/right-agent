@@ -313,6 +313,18 @@ read only `async_runs.kind = 'background'` rows for the chat, including running
 rows and finished `success`/`failed` rows with `delivery_status IN
 ('pending', 'retryable')`.
 
+When a spawned background continuation finishes but its terminal CC `result`
+line carries `is_error: true` (e.g. a 529 overload that exhausted CC's internal
+retries — which surfaces as `subtype: success`, `is_error: true`,
+`api_error_status: 529` with no `structured_output`), `complete_background_run`
+classifies it via `cron::classify_failed_result` and delivers a user-facing
+explanation (transient-overload / rate-limit / HTTP-status / turn-limit) instead
+of the generic `BACKGROUND_FAILURE_NOTIFY_CONTENT`. The raw status is kept only
+in the internal `error_json`. This is deterministic — the background path never
+runs reflection (reflection would re-issue the same overloaded call), unlike the
+cron failure path. Infrastructure failures (reader/exit/parse) keep the generic
+notice.
+
 Process shutdown (`SIGINT`/`SIGTERM`) requests background handoff for active
 foreground Telegram turns instead of dropping them. The worker uses the same
 `async_runs kind='background'` continuation path as the Background button, but

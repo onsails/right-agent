@@ -1161,6 +1161,87 @@ fn find_last_result_line(lines: &[String]) -> Option<&str> {
     })
 }
 
+/// A user-facing summary of why a CC run failed, derived deterministically from
+/// the terminal `result` line — no extra CC call. A 529/overload means another
+/// invocation would just fail the same way, so reflection is the wrong tool here.
+///
+/// Sibling of [`terminal_failure_detail`], which extracts a raw detail to *feed*
+/// reflection (a [`crate::reflection::FailureKind`]) on the cron path. This one
+/// instead produces the finished user message directly and is HTTP-status-aware
+/// (`api_error_status`), because the background path has no reflection stage. If
+/// you extend one with a new error shape, check whether the other needs it too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FailureClassification {
+    /// Message relayed to the user (carries the facts; the agent naturalizes it).
+    pub user_message: String,
+    /// Internal detail for `error_json`/logs — never the sole user-facing text.
+    pub detail: String,
+}
+
+/// Inspect CC's terminal `result` line and, when it reports `is_error: true`,
+/// build a [`FailureClassification`] explaining what happened in user terms.
+///
+/// Returns `None` when there is no terminal result line or the run did not
+/// error (the caller then proceeds with normal parsing / generic handling).
+/// Classification uses CC's own observable signals (`api_error_status`,
+/// `subtype`, `result`) rather than inferring from side effects.
+pub(crate) fn classify_failed_result(lines: &[String]) -> Option<FailureClassification> {
+    let line = find_last_result_line(lines)?;
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("is_error").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+
+    let api_status = v
+        .get("api_error_status")
+        .and_then(serde_json::Value::as_i64);
+    let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+    let result_text = v
+        .get("result")
+        .and_then(|r| r.as_str())
+        .unwrap_or("")
+        .trim();
+
+    let user_message = match api_status {
+        Some(529) | Some(503) => "The AI backend was temporarily overloaded, so the background task \
+             couldn't run — no work was done and nothing was lost. This is a \
+             transient issue on Anthropic's side; ask again in a moment and it \
+             should go through."
+            .to_string(),
+        Some(429) => "The AI backend hit a rate limit before the background task could run, so it \
+             produced no result and nothing was lost. Wait a moment, then try again."
+            .to_string(),
+        Some(status) if (500..600).contains(&status) => format!(
+            "The AI backend returned a server error (HTTP {status}) before the background task \
+             could finish, so it produced no result. This is usually transient — try again shortly."
+        ),
+        Some(status) => format!(
+            "The AI backend rejected the background task (HTTP {status}), so it produced no result."
+        ),
+        None if subtype == "error_max_turns" => {
+            "The background task hit its turn limit before finishing, so it didn't produce a result."
+                .to_string()
+        }
+        None if !result_text.is_empty() => format!(
+            "The background task ended with an error before producing a result: {result_text}"
+        ),
+        None => "The background task ended with an error before it could produce a result."
+            .to_string(),
+    };
+
+    let detail = match (api_status, result_text.is_empty()) {
+        (Some(status), false) => format!("api_error_status={status}; result={result_text}"),
+        (Some(status), true) => format!("api_error_status={status}; subtype={subtype}"),
+        (None, false) => format!("subtype={subtype}; result={result_text}"),
+        (None, true) => format!("subtype={subtype}"),
+    };
+
+    Some(FailureClassification {
+        user_message,
+        detail,
+    })
+}
+
 /// Outcome of consuming the cron CC subprocess stdout stream.
 ///
 /// `collected_lines` carries every NDJSON line read from stdout so the caller
@@ -2231,6 +2312,74 @@ mod tests {
         ];
         let err = parse_cron_output(&lines).unwrap_err();
         assert!(err.contains("empty silent reason"));
+    }
+
+    // -- failure classification (deterministic, no extra CC call) --
+
+    #[test]
+    fn classify_failed_result_529_overload_is_transient_user_message() {
+        // The real-world 529 result line: subtype "success" but is_error true.
+        let lines = vec![
+            r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":529,"result":"API Error: 529 Overloaded."}"#.to_string(),
+        ];
+        let c = classify_failed_result(&lines).expect("529 is an error result");
+        assert!(
+            c.user_message.contains("overloaded"),
+            "message should name the overload: {}",
+            c.user_message
+        );
+        assert!(
+            c.user_message.contains("nothing was lost"),
+            "message should reassure no work lost: {}",
+            c.user_message
+        );
+        assert!(
+            c.detail.contains("529"),
+            "detail keeps status: {}",
+            c.detail
+        );
+    }
+
+    #[test]
+    fn classify_failed_result_429_rate_limit() {
+        let lines = vec![
+            r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"rate_limit"}"#.to_string(),
+        ];
+        let c = classify_failed_result(&lines).unwrap();
+        assert!(c.user_message.contains("rate limit"), "{}", c.user_message);
+    }
+
+    #[test]
+    fn classify_failed_result_max_turns_without_api_status() {
+        let lines = vec![
+            r#"{"type":"result","subtype":"error_max_turns","is_error":true,"result":""}"#
+                .to_string(),
+        ];
+        let c = classify_failed_result(&lines).unwrap();
+        assert!(c.user_message.contains("turn limit"), "{}", c.user_message);
+    }
+
+    #[test]
+    fn classify_failed_result_unknown_error_uses_result_text() {
+        let lines = vec![
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom"}"#.to_string(),
+        ];
+        let c = classify_failed_result(&lines).unwrap();
+        assert!(c.user_message.contains("boom"), "{}", c.user_message);
+    }
+
+    #[test]
+    fn classify_failed_result_returns_none_for_successful_result() {
+        let lines = vec![
+            r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"delivery":{"kind":"notify","content":"ok"},"run_note":"n"}}"#.to_string(),
+        ];
+        assert!(classify_failed_result(&lines).is_none());
+    }
+
+    #[test]
+    fn classify_failed_result_returns_none_without_result_line() {
+        let lines = vec![r#"{"type":"assistant","message":{"content":[]}}"#.to_string()];
+        assert!(classify_failed_result(&lines).is_none());
     }
 
     #[tokio::test]
