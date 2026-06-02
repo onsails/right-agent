@@ -109,6 +109,11 @@ pub struct CronListParams {}
 pub struct CronTriggerParams {
     #[schemars(description = "Job name to trigger for immediate execution")]
     pub job_name: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Force a verification report: override a silent decision and skip the idle gate so the user receives the result promptly. Default false."
+    )]
+    pub notify: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -363,14 +368,14 @@ impl MemoryServer {
     // must stay byte-for-byte equal to that constant — the
     // `cron_trigger_description_matches_const` test in this file enforces it.
     #[tool(
-        description = "Trigger a cron job for immediate execution. Lock check applies — if the job is currently running, the trigger is skipped. Delivery is conditional: the cron itself decides whether to notify (sets `delivery` in its structured output), and any notification is held until the chat has been idle for 2 minutes. Use `cron_list_runs` to inspect `delivery_status` and `delivery`."
+        description = "Trigger a cron job for immediate execution. Lock check applies — if the job is currently running, the trigger is skipped. By default delivery is conditional: the cron decides whether to notify (sets `delivery` in its structured output), and any notification is held until the chat has been idle for 2 minutes. Set `notify=true` to force a verification report — it overrides a silent decision and skips the idle gate, so the user is sure to receive the result promptly. Use `notify=true` to check a job instead of creating a second cron to watch it. Use `cron_list_runs` to inspect `delivery_status` and `delivery`."
     )]
     async fn cron_trigger(
         &self,
         Parameters(params): Parameters<CronTriggerParams>,
     ) -> Result<CallToolResult, McpError> {
         let conn = self.conn.lock().await;
-        let msg = right_agent::cron_spec::trigger_spec(&conn, &params.job_name)
+        let msg = right_agent::cron_spec::trigger_spec(&conn, &params.job_name, params.notify)
             .await
             .map_err(|e| McpError::invalid_params(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(msg)]))
@@ -519,7 +524,7 @@ impl rmcp::ServerHandler for MemoryServer {
                  - mcp__right__cron_list: List all current cron job specs\n\
                  - mcp__right__cron_list_runs: List recent cron job runs with results (run_note + delivery)\n\
                  - mcp__right__cron_show_run: Get full details of a specific cron run (run_note + delivery)\n\
-                 - mcp__right__cron_trigger: Trigger a cron job for immediate execution\n\n\
+                 - mcp__right__cron_trigger: Trigger a cron job for immediate execution; pass notify=true to force a verification report (overrides silent + idle gate) instead of creating a watcher cron\n\n\
                  ## MCP Management\n\
                  - mcp__right__mcp_list: List all registered MCP servers (read-only — add/remove/auth through the Telegram dashboard MCP view opened by /mcp)\n\n\
                  ## Conversation Search\n\
@@ -632,6 +637,18 @@ mod mcp_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::CronTriggerParams;
+
+    #[test]
+    fn cron_trigger_params_notify_defaults_false() {
+        let p: CronTriggerParams =
+            serde_json::from_value(serde_json::json!({ "job_name": "j" })).unwrap();
+        assert!(!p.notify);
+        let p2: CronTriggerParams =
+            serde_json::from_value(serde_json::json!({ "job_name": "j", "notify": true })).unwrap();
+        assert!(p2.notify);
+    }
+
     /// rmcp's `#[tool]` macro accepts only string literals for `description`,
     /// so we mirror `TRIGGER_TOOL_DESC` as a literal in this file. This test
     /// pins the literal to the central constant so they cannot drift.

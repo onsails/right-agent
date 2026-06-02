@@ -39,11 +39,14 @@ pub(crate) const BG_SENTINEL_PREFIX: &str = "@bg:";
 /// from `IDLE_THRESHOLD_MIN` so the number cannot drift from the runtime.
 pub const TRIGGER_TOOL_DESC: &str = const_format::formatcp!(
     "Trigger a cron job for immediate execution. Lock check applies — if the \
-     job is currently running, the trigger is skipped. Delivery is conditional: \
-     the cron itself decides whether to notify (sets `delivery` in its structured \
-     output), and any notification is held until the chat has been idle for {} \
-     minutes. Use `cron_list_runs` to inspect `delivery_status` and \
-     `delivery`.",
+     job is currently running, the trigger is skipped. By default delivery is \
+     conditional: the cron decides whether to notify (sets `delivery` in its \
+     structured output), and any notification is held until the chat has been \
+     idle for {} minutes. Set `notify=true` to force a verification report — it \
+     overrides a silent decision and skips the idle gate, so the user is sure to \
+     receive the result promptly. Use `notify=true` to check a job instead of \
+     creating a second cron to watch it. Use `cron_list_runs` to inspect \
+     `delivery_status` and `delivery`.",
     IDLE_THRESHOLD_MIN,
 );
 
