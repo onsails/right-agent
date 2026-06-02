@@ -901,7 +901,7 @@ async fn execute_job(
                         // type, so one map_err/ok covers both.
                         other => {
                             if spec.trigger_force_notify
-                                && let CronDeliveryDecision::Silent { reason } = other
+                                && let Some(reason) = other.silent_reason()
                             {
                                 notify_delivery_json(
                                     &format!("Verification run — nothing to report. {reason}"),

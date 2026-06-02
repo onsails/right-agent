@@ -123,10 +123,24 @@ pub(crate) async fn deduplicate_job(
     conn: &right_db::Connection,
     producer_ref: &str,
 ) -> Result<Option<(PendingAsyncResult, u32)>, right_db::DbError> {
+    // The candidate's `force_notify` is the OR across all undelivered runs of
+    // this job, not just the latest row's value. Otherwise a forced run would
+    // lose its idle-gate bypass whenever a later non-forced scheduled run wins
+    // the `finished_at DESC` tie-break — the forced verification report the user
+    // explicitly requested would be silently held behind the idle gate.
     let latest = conn
         .query_row(
             "SELECT id, kind, producer_ref, delivery_json, COALESCE(run_note, ''), status, \
-                    NULLIF(target_chat_id, 0), target_thread_id, force_notify \
+                    NULLIF(target_chat_id, 0), target_thread_id, \
+                    COALESCE(( \
+                        SELECT MAX(force_notify) FROM async_runs a2 \
+                        WHERE a2.kind = 'cron' \
+                          AND a2.producer_ref = ?1 \
+                          AND a2.delivery_required = 1 \
+                          AND a2.delivery_status IN ('pending', 'retryable') \
+                          AND a2.status IN ('success', 'failed') \
+                          AND a2.delivery_json IS NOT NULL \
+                    ), 0) \
              FROM async_runs \
              WHERE kind = 'cron' \
                AND producer_ref = ?1 \
@@ -2279,6 +2293,55 @@ mod tests {
         assert!(
             to_deliver.force_notify,
             "candidate must carry the forced flag of the latest run"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_carries_force_notify_from_older_displaced_run() {
+        // Inverse of the above: the OLDER run is forced, a NEWER non-forced
+        // scheduled run wins the finished_at tie-break. The candidate is the
+        // newer run (freshest content), but it must still carry force_notify so
+        // the user's forced verification request bypasses the idle gate.
+        let (_dir, conn) = setup_db().await;
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "older-forced",
+                job_name: "job",
+                started_at: "2026-06-02T00:00:00Z",
+                finished_at: Some("2026-06-02T00:01:00Z"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"old\"}"),
+                ..Default::default()
+            },
+        )
+        .await;
+        conn.execute(
+            "UPDATE async_runs SET force_notify = 1 WHERE id = 'older-forced'",
+            right_db::params![],
+        )
+        .await
+        .unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "newer-scheduled",
+                job_name: "job",
+                started_at: "2026-06-02T00:05:00Z",
+                finished_at: Some("2026-06-02T00:06:00Z"),
+                delivery_json: Some("{\"kind\":\"notify\",\"content\":\"new\"}"),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (to_deliver, _skipped) = deduplicate_job(&conn, "job").await.unwrap().unwrap();
+        assert_eq!(
+            to_deliver.id, "newer-scheduled",
+            "latest run wins on content"
+        );
+        assert!(
+            to_deliver.force_notify,
+            "force_notify must be OR'd across the group so the older forced run's bypass survives"
         );
     }
 }
