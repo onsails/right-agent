@@ -34,7 +34,7 @@ const V38_SCHEMA: &str = include_str!("sql/v38_skill_spend_and_learning_skip.sql
 const V39_SCHEMA: &str = include_str!("sql/v39_error_details.sql");
 const V40_SCHEMA: &str = include_str!("sql/v40_forum_topics.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 40;
+pub const LATEST_SCHEMA_VERSION: u32 = 41;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -734,6 +734,53 @@ fn v37_drop_legacy_usage_sources(
     })
 }
 
+/// v41: Force-notify trigger support.
+///
+/// `cron_specs.trigger_force_notify` is set together with `triggered_at` by a
+/// force-notify trigger and cleared together. `async_runs.force_notify` marks a
+/// run whose delivery overrides the silent decision and the idle gate.
+///
+/// Idempotent — checks `pragma_table_info` (no `ADD COLUMN IF NOT EXISTS` in
+/// SQLite). Also guards on table existence via `sqlite_master`, like v37: the
+/// synthetic `create_legacy_v33_fts5_database` test fixture starts at
+/// `user_version = 33` without ever running v6/v23, so it lacks `cron_specs`
+/// and `async_runs`; `to_latest` still drives it through v41, where a bare
+/// ALTER on a missing table would error. Real agent DBs always have both
+/// tables here, so the guard never short-circuits a genuine upgrade.
+fn v41_cron_force_notify(
+    conn: &dyn MigrationConnection,
+) -> BoxFuture<'_, Result<(), crate::DbError>> {
+    Box::pin(async move {
+        let cron_specs_exists = conn
+            .query_i64(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cron_specs'",
+                MigrationParams::Empty,
+            )
+            .await?;
+        if cron_specs_exists > 0
+            && !column_exists(conn, "cron_specs", "trigger_force_notify").await?
+        {
+            conn.execute_batch(
+                "ALTER TABLE cron_specs ADD COLUMN trigger_force_notify INTEGER NOT NULL DEFAULT 0",
+            )
+            .await?;
+        }
+        let async_runs_exists = conn
+            .query_i64(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='async_runs'",
+                MigrationParams::Empty,
+            )
+            .await?;
+        if async_runs_exists > 0 && !column_exists(conn, "async_runs", "force_notify").await? {
+            conn.execute_batch(
+                "ALTER TABLE async_runs ADD COLUMN force_notify INTEGER NOT NULL DEFAULT 0",
+            )
+            .await?;
+        }
+        Ok(())
+    })
+}
+
 pub static MIGRATIONS: Migrations = Migrations {
     migrations: &[
         Migration {
@@ -936,6 +983,11 @@ pub static MIGRATIONS: Migrations = Migrations {
             sql: V40_SCHEMA,
             hook: None,
         },
+        Migration {
+            version: 41,
+            sql: "",
+            hook: Some(v41_cron_force_notify),
+        },
     ],
 };
 
@@ -958,6 +1010,35 @@ mod tests {
             },
         ],
     };
+
+    #[tokio::test]
+    async fn v41_adds_force_notify_columns() {
+        let conn = Connection::open_in_memory().await.unwrap();
+        MIGRATIONS.to_latest(&conn).await.unwrap();
+
+        let spec_col: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('cron_specs') WHERE name = 'trigger_force_notify'",
+                [],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(spec_col, 1, "cron_specs.trigger_force_notify must exist");
+
+        let run_col: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('async_runs') WHERE name = 'force_notify'",
+                [],
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(run_col, 1, "async_runs.force_notify must exist");
+
+        // Idempotent: re-running to_latest is a no-op, not an error.
+        MIGRATIONS.to_latest(&conn).await.unwrap();
+    }
 
     #[tokio::test]
     async fn migration_runner_semantics_latest_rejects_future_user_version() {
