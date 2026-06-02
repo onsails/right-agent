@@ -73,6 +73,32 @@ pub fn is_upstream_auth_error(msg: &str) -> bool {
     msg.contains("Auth required")
 }
 
+/// Transport-class `call_tool` failures that mean the cached upstream session is
+/// dead and a fresh `connect()` may recover it. Deliberately EXCLUDES
+/// `McpError` (a live server's JSON-RPC error — reconnecting cannot help and a
+/// retry could double-apply a non-idempotent write), `Timeout`/`Cancelled` (the
+/// request may already have reached the server), and `UnexpectedResponse`.
+/// Auth-required is a `TransportSend` subset already handled earlier via
+/// [`is_upstream_auth_error`], so callers must check auth first.
+fn is_dead_session_error(e: &rmcp::service::ServiceError) -> bool {
+    matches!(
+        e,
+        rmcp::service::ServiceError::TransportSend(_)
+            | rmcp::service::ServiceError::TransportClosed
+    )
+}
+
+/// Outcome of a single `tools_call` attempt against the cached session.
+enum CallAttempt {
+    Ok(CallToolResult),
+    /// Upstream signalled auth-required — flip the backend to `NeedsAuth`.
+    Auth,
+    /// Transport-class failure or missing session — a reconnect may recover.
+    DeadSession,
+    /// Live-server error (`McpError`, timeout, cancelled) — surface unchanged.
+    Other(rmcp::service::ServiceError),
+}
+
 /// Outcome of a lightweight liveness probe against a backend's live session.
 #[derive(Debug)]
 pub(crate) enum ProbeOutcome {
@@ -367,6 +393,10 @@ pub struct ProxyBackend {
     last_success_at: RwLock<Option<chrono::DateTime<chrono::Utc>>>,
     /// Redacted detail of the most recent connect() failure; cleared on success.
     last_connect_error: RwLock<Option<String>>,
+    /// HTTP client stashed from the most recent `connect()`, reused by
+    /// `tools_call` to reconnect-and-retry when a cached session goes dead while
+    /// status still reads Connected. `None` until the first `connect()`.
+    reconnect_client: RwLock<Option<reqwest::Client>>,
 }
 
 impl ProxyBackend {
@@ -390,6 +420,7 @@ impl ProxyBackend {
             last_attempt_at: RwLock::new(None),
             last_success_at: RwLock::new(None),
             last_connect_error: RwLock::new(None),
+            reconnect_client: RwLock::new(None),
         }
     }
 
@@ -404,6 +435,9 @@ impl ProxyBackend {
         // so refresh-driven reconnects and dashboard OAuth reconnects can't
         // interleave writes to `client`/`cached_tools`/`status`.
         let _guard = self.connect_mutex.lock().await;
+        // Stash the client so `tools_call` can reconnect-and-retry a dead session
+        // without plumbing a client through every dispatch call.
+        *self.reconnect_client.write().await = Some(http_client.clone());
         let dynamic =
             DynamicAuthClient::new(http_client, self.token.clone(), self.auth_method.clone());
         let config = StreamableHttpClientTransportConfig::with_uri(self.url.clone());
@@ -511,7 +545,15 @@ impl ProxyBackend {
         })
     }
 
-    /// Forward a tool call to the upstream MCP server.
+    /// Forward a tool call to the upstream MCP server, self-healing a dead
+    /// cached session with a single reconnect-and-retry.
+    ///
+    /// The health monitor lags a dropped upstream session by up to
+    /// `MAX_STRIKES * CONNECTED_CADENCE`, leaving a window where status still
+    /// reads `Connected` but the cached session is dead. A flaky upstream (e.g.
+    /// a Tailscale-hosted server that recycles its session every few minutes)
+    /// hits that window regularly, so a single in-band reconnect-and-retry on a
+    /// transport-class failure keeps the agent from seeing a raw transport error.
     pub async fn tools_call(
         &self,
         tool_name: &str,
@@ -532,41 +574,99 @@ impl ProxyBackend {
             BackendStatus::Connected => {}
         }
 
-        let client_guard = self.client.read().await;
-        let client = client_guard.as_ref().ok_or_else(|| ProxyError::NoSession {
-            server: self.server_name.clone(),
-        })?;
-
         let arguments = match args {
-            serde_json::Value::Object(map) => Some(map),
-            _ => None,
+            serde_json::Value::Object(map) => map,
+            _ => serde_json::Map::new(),
         };
 
-        let params = CallToolRequestParams::new(tool_name.to_owned())
-            .with_arguments(arguments.unwrap_or_default());
-
-        let result = client.peer().call_tool(params).await;
-        match result {
-            Ok(r) => Ok(r),
-            Err(e) => {
-                let msg = format!("{e:#}");
-                if is_upstream_auth_error(&msg) {
-                    tracing::warn!(
-                        server = %self.server_name,
-                        tool = tool_name,
-                        "upstream returned auth-required; flipping backend to NeedsAuth"
-                    );
-                    *self.status.write().await = BackendStatus::NeedsAuth;
-                    return Err(ProxyError::NeedsAuth {
-                        server: self.server_name.clone(),
-                    });
-                }
-                Err(ProxyError::CallToolFailed {
+        // First attempt against the cached session.
+        match self.call_once(tool_name, arguments.clone()).await {
+            CallAttempt::Ok(r) => return Ok(r),
+            CallAttempt::Auth => return Err(self.flip_needs_auth(tool_name).await),
+            CallAttempt::Other(e) => {
+                return Err(ProxyError::CallToolFailed {
                     server: self.server_name.clone(),
                     tool: tool_name.to_owned(),
                     source: e,
-                })
+                });
             }
+            // Dead/absent session — fall through to reconnect-and-retry.
+            CallAttempt::DeadSession => {}
+        }
+
+        let Some(http) = self.reconnect_client.read().await.clone() else {
+            // Never connected with a reusable client — nothing to retry with.
+            return Err(ProxyError::NoSession {
+                server: self.server_name.clone(),
+            });
+        };
+        tracing::info!(
+            server = %self.server_name,
+            tool = tool_name,
+            "upstream session dead while Connected; reconnecting before retry"
+        );
+        // `connect()` serializes on `connect_mutex`, so concurrent dead-session
+        // callers reconnect one-at-a-time; a later caller may redundantly replace
+        // a session a peer just established. That is intentional and safe (each
+        // caller retries against the current cached client) — do not add
+        // in-flight reconnect dedup believing it's a bug.
+        // Surface a reconnect failure (transport or auth) directly to the caller.
+        self.connect(http).await?;
+
+        match self.call_once(tool_name, arguments).await {
+            CallAttempt::Ok(r) => Ok(r),
+            CallAttempt::Auth => Err(self.flip_needs_auth(tool_name).await),
+            CallAttempt::DeadSession => Err(ProxyError::NoSession {
+                server: self.server_name.clone(),
+            }),
+            CallAttempt::Other(e) => Err(ProxyError::CallToolFailed {
+                server: self.server_name.clone(),
+                tool: tool_name.to_owned(),
+                source: e,
+            }),
+        }
+    }
+
+    /// One tool-call attempt against the currently-cached session. Holds the
+    /// `client` read-lock only for this call and releases it before returning,
+    /// so the caller may `connect()` (which write-locks `client`) without
+    /// deadlocking. A missing session classifies as `DeadSession` so the caller
+    /// reconnects rather than erroring.
+    async fn call_once(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> CallAttempt {
+        let client_guard = self.client.read().await;
+        let Some(client) = client_guard.as_ref() else {
+            return CallAttempt::DeadSession;
+        };
+        let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(arguments);
+        match client.peer().call_tool(params).await {
+            Ok(r) => CallAttempt::Ok(r),
+            Err(e) => {
+                if is_upstream_auth_error(&format!("{e:#}")) {
+                    CallAttempt::Auth
+                } else if is_dead_session_error(&e) {
+                    CallAttempt::DeadSession
+                } else {
+                    CallAttempt::Other(e)
+                }
+            }
+        }
+    }
+
+    /// Flip the backend to `NeedsAuth` after an upstream auth-required signal and
+    /// return the corresponding error.
+    async fn flip_needs_auth(&self, tool_name: &str) -> ProxyError {
+        tracing::warn!(
+            server = %self.server_name,
+            tool = tool_name,
+            "upstream returned auth-required; flipping backend to NeedsAuth"
+        );
+        *self.status.write().await = BackendStatus::NeedsAuth;
+        ProxyError::NeedsAuth {
+            server: self.server_name.clone(),
         }
     }
 
@@ -716,6 +816,25 @@ mod tests {
             "Transport send error: Transport [foo] error: timeout"
         ));
         assert!(!is_upstream_auth_error("Mcp error: invalid_params"));
+    }
+
+    #[test]
+    fn is_dead_session_error_retries_only_transport_failures() {
+        use rmcp::service::ServiceError;
+        // Transport-class failures → reconnect-and-retry.
+        assert!(is_dead_session_error(&ServiceError::TransportClosed));
+        // Live-server / ambiguous failures → must NOT retry (avoid double-apply
+        // of non-idempotent writes and pointless reconnects on tool errors).
+        assert!(!is_dead_session_error(&ServiceError::UnexpectedResponse));
+        assert!(!is_dead_session_error(&ServiceError::Cancelled {
+            reason: None
+        }));
+        assert!(!is_dead_session_error(&ServiceError::Timeout {
+            timeout: std::time::Duration::from_secs(1),
+        }));
+        assert!(!is_dead_session_error(&ServiceError::McpError(
+            rmcp::ErrorData::invalid_params("bad args", None)
+        )));
     }
 
     #[test]
@@ -1083,6 +1202,94 @@ mod tests {
         );
         // probe_live does not write status.
         assert_eq!(backend.status().await, BackendStatus::Connected);
+    }
+
+    /// A `Connected` backend whose cached upstream session has gone dead (the
+    /// health monitor lags a dropped session by up to MAX_STRIKES *
+    /// CONNECTED_CADENCE) must self-heal: reconnect with the stashed client and
+    /// retry the call, rather than surfacing a transport error to the agent.
+    #[tokio::test]
+    async fn tools_call_self_heals_dead_session() {
+        setup_crypto();
+        let (_srv, url) = crate::test_server::serve_callable_server().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).await.unwrap();
+        crate::credentials::db_add_server(&conn, "obsidian", &url)
+            .await
+            .unwrap();
+        let token = Arc::new(RwLock::new(None));
+        let backend = ProxyBackend::new(
+            "obsidian".into(),
+            tmp.path().to_path_buf(),
+            url,
+            token,
+            AuthMethod::default(),
+        );
+
+        backend
+            .connect(reqwest::Client::new())
+            .await
+            .expect("initial connect should succeed");
+        assert_eq!(backend.status().await, BackendStatus::Connected);
+
+        // Simulate a dropped upstream session that health hasn't yet flipped to
+        // Unreachable: clear the cached client while leaving status Connected.
+        *backend.client.write().await = None;
+
+        let result = backend.tools_call("alpha", serde_json::json!({})).await;
+
+        assert!(
+            result.is_ok(),
+            "tools_call must reconnect and retry, got: {result:#?}"
+        );
+        assert_eq!(backend.status().await, BackendStatus::Connected);
+    }
+
+    /// End-to-end transport-error path: a real `TransportSend`/`TransportClosed`
+    /// from a vanished upstream must route through the dead-session reconnect
+    /// branch (not first-attempt `CallToolFailed`). With the server gone the
+    /// reconnect itself fails, so `tools_call` surfaces the reconnect error —
+    /// proving the transport-error classification fires end-to-end.
+    #[tokio::test]
+    async fn tools_call_transport_error_takes_reconnect_path() {
+        setup_crypto();
+        let (srv, url) = crate::test_server::serve_callable_server().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).await.unwrap();
+        crate::credentials::db_add_server(&conn, "obsidian", &url)
+            .await
+            .unwrap();
+        let token = Arc::new(RwLock::new(None));
+        let backend = ProxyBackend::new(
+            "obsidian".into(),
+            tmp.path().to_path_buf(),
+            url,
+            token,
+            AuthMethod::default(),
+        );
+        backend
+            .connect(reqwest::Client::new())
+            .await
+            .expect("initial connect should succeed");
+
+        // Kill the upstream: the cached session's next call hits a real
+        // transport error, and the in-band reconnect also fails.
+        srv.abort();
+
+        let err = backend
+            .tools_call("alpha", serde_json::json!({}))
+            .await
+            .expect_err("call against a vanished upstream must fail");
+
+        // The reconnect path ran: the error is a reconnect failure
+        // (InitFailed/ListToolsFailed), not a first-attempt CallToolFailed.
+        assert!(
+            matches!(
+                err,
+                ProxyError::InitFailed { .. } | ProxyError::ListToolsFailed { .. }
+            ),
+            "expected a reconnect failure, got: {err:#?}"
+        );
     }
 
     #[tokio::test]
