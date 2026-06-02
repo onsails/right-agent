@@ -193,7 +193,10 @@ async fn probe_sandbox_skill_package(
         "dashboard-skill-pin",
         skill_path.as_str(),
     ];
-    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS);
+    // Interactive single-skill ops (pin/detail) only run after the list scan
+    // already succeeded, so the sandbox is warm — use the short probe budget,
+    // not the cold-start list-scan budget, so a transient failure fails fast.
+    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
     let (_, exit_code) =
         match tokio::time::timeout(timeout, sandbox_exec.exec(&probe_command)).await {
             Ok(result) => result.map_err(|error| {
@@ -202,7 +205,7 @@ async fn probe_sandbox_skill_package(
             Err(_) => {
                 return Err(PinSkillError::Sandbox(format!(
                     "sandbox skill probe timed out after {}s",
-                    super::DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS
+                    super::DASHBOARD_SANDBOX_TIMEOUT_SECS
                 )));
             }
         };
@@ -291,14 +294,16 @@ async fn read_sandbox_skill_detail(
         skill_name,
         limit.as_str(),
     ];
-    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS);
+    // Warm-path read (see probe_sandbox_skill_package): the user reaches a
+    // skill detail only after the list scan loaded, so use the short budget.
+    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
     let (mut content_preview, exit_code) =
         match tokio::time::timeout(timeout, sandbox_exec.exec(&read_command)).await {
             Ok(result) => result.map_err(sandbox_error)?,
             Err(_) => {
                 return Err(SkillDetailError::Sandbox(format!(
                     "sandbox skill read timed out after {}s",
-                    super::DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS
+                    super::DASHBOARD_SANDBOX_TIMEOUT_SECS
                 )));
             }
         };
