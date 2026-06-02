@@ -227,18 +227,15 @@ pub fn validate_type_slug(slug: &str) -> Result<(), ProviderApiError> {
             reason: "type \"claude\" is reserved for the in-sandbox login flow".into(),
         });
     }
-    let known = [
-        "anthropic",
-        "codex",
-        "copilot",
-        "github",
-        "gitlab",
-        "nvidia",
-        "openai",
-        "opencode",
-        "generic",
-    ];
-    if !known.contains(&slug) {
+    // The catalog is the single source of truth for valid provider types.
+    // Derive the allowlist from it rather than mirroring a hand-maintained
+    // parallel array — that mirror silently omitted `right-github`, which made
+    // every dashboard "GitHub" create fail with `unknown type`. Catalog-driven
+    // validation keeps create in lockstep with new entries automatically.
+    let known = right_openshell::providers::profile_catalog()
+        .iter()
+        .any(|p| p.type_slug == slug);
+    if !known {
         return Err(ProviderApiError::InvalidName {
             name: slug.into(),
             reason: format!("unknown type \"{slug}\""),
@@ -288,6 +285,28 @@ mod provider_validation_tests {
         ));
         assert!(validate_type_slug("anthropic").is_ok());
         assert!(validate_type_slug("generic").is_ok());
+    }
+
+    #[test]
+    fn validate_type_slug_accepts_right_github() {
+        // Regression: the dashboard offers `right-github` as the GitHub type, so
+        // create-validation must accept it. A stale hand-maintained allowlist
+        // previously rejected it, breaking the feature end-to-end.
+        assert!(validate_type_slug("right-github").is_ok());
+    }
+
+    #[test]
+    fn validate_type_slug_in_sync_with_catalog() {
+        // Every catalog type (except the reserved `claude` login slug, which is
+        // never a catalog entry) must be creatable. Guards against the validator
+        // and the catalog drifting apart again.
+        for p in right_openshell::providers::profile_catalog() {
+            assert!(
+                validate_type_slug(&p.type_slug).is_ok(),
+                "catalog type {} must pass create-validation",
+                p.type_slug
+            );
+        }
     }
 
     // ── config-update env_var collision tests ────────────────────────────────
@@ -2485,9 +2504,20 @@ pub struct ProviderProfileView {
 }
 
 pub(crate) async fn handle_provider_types() -> axum::Json<Vec<ProviderProfileView>> {
+    // A built-in profile that a right-* managed profile supersedes stays in the
+    // catalog (so existing providers still resolve their env var) but is not
+    // offered as a new provider type. The supersession relationship lives in
+    // exactly one place — `ManagedProfile::base_id()` — so deriving the hidden
+    // set from it keeps the offered list correct automatically when a managed
+    // profile is added, with no parallel denylist to forget to update.
+    let hidden: Vec<&'static str> = right_openshell::managed_profiles::managed_profiles()
+        .iter()
+        .filter_map(|p| p.base_id())
+        .collect();
     let catalog = right_openshell::providers::profile_catalog();
     let views: Vec<_> = catalog
         .into_iter()
+        .filter(|p| !hidden.iter().any(|h| *h == p.type_slug.as_str()))
         .map(|p| ProviderProfileView {
             type_slug: p.type_slug,
             env_var: p.env_var,
@@ -2496,4 +2526,46 @@ pub(crate) async fn handle_provider_types() -> axum::Json<Vec<ProviderProfileVie
         })
         .collect();
     axum::Json(views)
+}
+
+#[cfg(test)]
+mod provider_types_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn provider_types_hides_builtin_github_and_shows_right_github() {
+        let axum::Json(types) = handle_provider_types().await;
+        assert!(
+            types.iter().all(|t| t.type_slug != "github"),
+            "built-in read-only github is hidden from the dashboard"
+        );
+        assert!(
+            types
+                .iter()
+                .any(|t| t.type_slug == "right-github" && t.display_name == "GitHub"),
+            "right-github offered as GitHub"
+        );
+        assert!(
+            types.iter().any(|t| t.type_slug == "gitlab"),
+            "filter is narrow — other built-ins (gitlab) still offered"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_managed_profile_base_is_hidden() {
+        // Invariant: for every managed profile that supersedes a base, the base
+        // slug must be absent from the offered list. Enforces the derivation so a
+        // future right-* profile can't accidentally show its base alongside it.
+        let axum::Json(types) = handle_provider_types().await;
+        for mp in right_openshell::managed_profiles::managed_profiles() {
+            if let Some(base) = mp.base_id() {
+                assert!(
+                    types.iter().all(|t| t.type_slug != base),
+                    "managed profile {} supersedes base {} — base must be hidden",
+                    mp.id(),
+                    base
+                );
+            }
+        }
+    }
 }

@@ -14,6 +14,7 @@ import type {
   ProviderGenericBody,
 } from '../types'
 import SecretInput from '../components/SecretInput.vue'
+import ProviderTypeList from './ProviderTypeList.vue'
 import { validateSlug, validateEnvVar, evaluateCredentialSubmit, CREDENTIAL_HINT, HEADER_NAME_HINT } from './providersViewModel'
 
 const providers = ref<ProviderView[]>([])
@@ -339,7 +340,7 @@ watch(rotateCredential, () => {
   <section class="panel providers-panel">
     <header class="panel-head">
       <div>
-        <p class="eyebrow">AI Providers</p>
+        <p class="eyebrow">Integrations</p>
         <h2>Providers</h2>
       </div>
       <button class="tool-button" type="button" @click="addOpen ? closeAdd() : openAdd()">
@@ -350,20 +351,11 @@ watch(rotateCredential, () => {
     <!-- Add modal -->
     <section v-if="addOpen" class="providers-section">
       <!-- Step 1: choose type -->
-      <div v-if="addStep === 'choose-type'" class="type-grid">
-        <p class="muted-line">Choose a provider type:</p>
-        <article
-          v-for="t in types"
-          :key="t.type"
-          class="type-card"
-          @click="selectType(t)"
-        >
-          <strong>{{ t.display_name }}</strong>
-          <small>{{ t.category }}</small>
-          <small>{{ t.env_var }}</small>
-        </article>
-        <p v-if="types.length === 0" class="muted-line">No provider types available</p>
-      </div>
+      <ProviderTypeList
+        v-if="addStep === 'choose-type'"
+        :types="types"
+        @select="selectType"
+      />
 
       <!-- Step 2: fill form -->
       <div v-if="addStep === 'fill-form' && addSelectedType" class="form-grid">
@@ -529,7 +521,6 @@ watch(rotateCredential, () => {
 .providers-section,
 .form-grid,
 .data-list,
-.type-grid,
 .button-row {
   display: grid;
   gap: 8px;
@@ -594,33 +585,6 @@ watch(rotateCredential, () => {
 
 .compact-button {
   width: max-content;
-}
-
-.type-grid {
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-}
-
-.type-card {
-  display: grid;
-  gap: 2px;
-  padding: 8px 10px;
-  border: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.18));
-  border-radius: 7px;
-  background: var(--tg-theme-bg-color, #f4f6f8);
-  cursor: pointer;
-}
-
-.type-card:hover {
-  border-color: var(--tg-theme-button_color, #2481cc);
-}
-
-.type-card strong {
-  font-size: 0.84rem;
-}
-
-.type-card small {
-  color: var(--tg-theme-hint-color, #6b7b88);
-  font-size: 0.72rem;
 }
 
 .type-badge-row {
