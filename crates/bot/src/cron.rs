@@ -312,6 +312,7 @@ async fn insert_running_run(
             log_path,
             target_chat_id: Some(target_chat_id),
             target_thread_id: spec.target_thread_id,
+            force_notify: spec.trigger_force_notify,
         },
     )
     .await
@@ -413,9 +414,11 @@ async fn persist_successful_cron_output(
     run_id: &str,
     cron_output: &CronReplyOutput,
     delivery_json: &str,
+    force_notify: bool,
 ) -> Result<&'static str, right_db::DbError> {
     let (delivery_required, delivery_status) = match cron_output.delivery {
         CronDeliveryDecision::Notify { .. } => (true, "pending"),
+        CronDeliveryDecision::Silent { .. } if force_notify => (true, "pending"),
         CronDeliveryDecision::Silent { .. } => (false, "none"),
     };
     right_agent::async_runs::persist_run_output(
@@ -534,7 +537,16 @@ async fn execute_job(
         crate::cc::invocation::baseline_disallowed_tools(),
     );
 
-    let prompt_for_cc = spec.prompt.clone();
+    let prompt_for_cc = if spec.trigger_force_notify {
+        format!(
+            "⟨⟨SYSTEM_NOTICE⟩⟩ Manual verification trigger: always emit \
+             delivery.kind=\"notify\" with a complete report of what you found; \
+             do not go silent. ⟨⟨/SYSTEM_NOTICE⟩⟩\n\n{}",
+            spec.prompt
+        )
+    } else {
+        spec.prompt.clone()
+    };
 
     let mcp_path = crate::cc::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
@@ -839,56 +851,71 @@ async fn execute_job(
                 Ok(cron_output) => {
                     // Download attachments from sandbox to host outbox
                     let delivery_json = match &cron_output.delivery {
-                    CronDeliveryDecision::Notify {
-                        content,
-                        attachments: Some(atts),
-                    } => {
-                        let outbox_dir = agent_dir.join("outbox").join("cron").join(&run_id);
-                        if let Err(e) = std::fs::create_dir_all(&outbox_dir) {
-                            tracing::error!(job = %job_name, "failed to create cron outbox dir: {e:#}");
-                        } else if ssh_config_path.is_some() {
-                            let sandbox = resolved_sandbox.unwrap();
-                            for att in atts {
-                                let dest = outbox_dir.join(attachment_filename(&att.path));
-                                if let Err(e) = right_openshell::openshell::download_file(
-                                    sandbox, &att.path, &dest,
-                                )
-                                .await
-                                {
-                                    tracing::error!(
-                                        job = %job_name,
-                                        path = %att.path,
-                                        "failed to download cron attachment: {e:#}"
-                                    );
+                        CronDeliveryDecision::Notify {
+                            content,
+                            attachments: Some(atts),
+                        } => {
+                            let outbox_dir = agent_dir.join("outbox").join("cron").join(&run_id);
+                            if let Err(e) = std::fs::create_dir_all(&outbox_dir) {
+                                tracing::error!(job = %job_name, "failed to create cron outbox dir: {e:#}");
+                            } else if ssh_config_path.is_some() {
+                                let sandbox = resolved_sandbox.unwrap();
+                                for att in atts {
+                                    let dest = outbox_dir.join(attachment_filename(&att.path));
+                                    if let Err(e) = right_openshell::openshell::download_file(
+                                        sandbox, &att.path, &dest,
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(
+                                            job = %job_name,
+                                            path = %att.path,
+                                            "failed to download cron attachment: {e:#}"
+                                        );
+                                    }
                                 }
                             }
-                        }
 
-                        let host_attachments: Vec<OutboundAttachment> = atts
-                            .iter()
-                            .map(|att| OutboundAttachment {
-                                kind: att.kind,
-                                path: outbox_dir
-                                    .join(attachment_filename(&att.path))
-                                    .to_string_lossy()
-                                    .into_owned(),
-                                filename: att.filename.clone(),
-                                caption: att.caption.clone(),
-                                media_group_id: att.media_group_id.clone(),
-                            })
-                            .collect();
-                        notify_delivery_json(content, Some(&host_attachments))
+                            let host_attachments: Vec<OutboundAttachment> = atts
+                                .iter()
+                                .map(|att| OutboundAttachment {
+                                    kind: att.kind,
+                                    path: outbox_dir
+                                        .join(attachment_filename(&att.path))
+                                        .to_string_lossy()
+                                        .into_owned(),
+                                    filename: att.filename.clone(),
+                                    caption: att.caption.clone(),
+                                    media_group_id: att.media_group_id.clone(),
+                                })
+                                .collect();
+                            notify_delivery_json(content, Some(&host_attachments))
                             .map_err(|e| {
                                 tracing::error!(job = %job_name, "failed to serialize delivery_json: {e:#}");
                             })
                             .ok()
-                    }
-                    other => serde_json::to_string(other)
-                        .map_err(|e| {
-                            tracing::error!(job = %job_name, "failed to serialize delivery_json: {e:#}");
-                        })
-                        .ok(),
-                };
+                        }
+                        // Forced silent run: deliver the silent reason as notify
+                        // content so there is always something to report. Otherwise
+                        // serialize the decision as-is. Both yield the same Result
+                        // type, so one map_err/ok covers both.
+                        other => {
+                            if spec.trigger_force_notify
+                                && let CronDeliveryDecision::Silent { reason } = other
+                            {
+                                notify_delivery_json(
+                                    &format!("Verification run — nothing to report. {reason}"),
+                                    None,
+                                )
+                            } else {
+                                serde_json::to_string(other)
+                            }
+                            .map_err(|e| {
+                                tracing::error!(job = %job_name, "failed to serialize delivery_json: {e:#}");
+                            })
+                            .ok()
+                        }
+                    };
 
                     // Persist output and flip status='success' atomically. If either
                     // write fails, roll back and mark the row 'failed' so the operator
@@ -902,6 +929,7 @@ async fn execute_job(
                                 &run_id,
                                 &cron_output,
                                 &delivery_json,
+                                spec.trigger_force_notify,
                             )
                             .await?;
                             right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "success")
@@ -2077,6 +2105,7 @@ mod tests {
             lock_ttl: None,
             max_budget_usd: 1.0,
             triggered_at: None,
+            trigger_force_notify: false,
             target_chat_id: None,
             target_thread_id: None,
         };
@@ -2214,6 +2243,7 @@ mod tests {
             lock_ttl: None,
             max_budget_usd: 1.0,
             triggered_at: None,
+            trigger_force_notify: false,
             target_chat_id: Some(-100),
             target_thread_id: Some(3),
         };
@@ -2236,7 +2266,7 @@ mod tests {
         };
         let json = serde_json::to_string(&output.delivery).unwrap();
 
-        let status = persist_successful_cron_output(&conn, "run-notify", &output, &json)
+        let status = persist_successful_cron_output(&conn, "run-notify", &output, &json, false)
             .await
             .unwrap();
 
@@ -2268,6 +2298,7 @@ mod tests {
             lock_ttl: None,
             max_budget_usd: 1.0,
             triggered_at: None,
+            trigger_force_notify: false,
             target_chat_id: Some(-100),
             target_thread_id: None,
         };
@@ -2289,7 +2320,7 @@ mod tests {
         };
         let json = serde_json::to_string(&output.delivery).unwrap();
 
-        let status = persist_successful_cron_output(&conn, "run-silent", &output, &json)
+        let status = persist_successful_cron_output(&conn, "run-silent", &output, &json, false)
             .await
             .unwrap();
 
@@ -2323,7 +2354,7 @@ mod tests {
         )
         .await
         .unwrap();
-        right_agent::cron_spec::trigger_spec(&conn, "trig-test")
+        right_agent::cron_spec::trigger_spec(&conn, "trig-test", false)
             .await
             .unwrap();
 
@@ -2344,7 +2375,7 @@ mod tests {
         right_agent::cron_spec::create_spec(&conn, "clr-test", "*/5 * * * *", "test", None, None)
             .await
             .unwrap();
-        right_agent::cron_spec::trigger_spec(&conn, "clr-test")
+        right_agent::cron_spec::trigger_spec(&conn, "clr-test", false)
             .await
             .unwrap();
         right_agent::cron_spec::clear_triggered_at(&conn, "clr-test")
@@ -2586,6 +2617,7 @@ mod target_snapshot_tests {
             lock_ttl: None,
             max_budget_usd: 1.0,
             triggered_at: None,
+            trigger_force_notify: false,
             target_chat_id: Some(-777),
             target_thread_id: Some(13),
         };
@@ -2620,6 +2652,7 @@ mod target_snapshot_tests {
             lock_ttl: None,
             max_budget_usd: 1.0,
             triggered_at: None,
+            trigger_force_notify: false,
             target_chat_id: None,
             target_thread_id: None,
         };
@@ -2654,6 +2687,7 @@ mod target_snapshot_tests {
             lock_ttl: None,
             max_budget_usd: 1.0,
             triggered_at: None,
+            trigger_force_notify: false,
             target_chat_id: Some(-777),
             target_thread_id: Some(13),
         };
@@ -2697,6 +2731,7 @@ mod target_snapshot_tests {
             lock_ttl: None,
             max_budget_usd: 1.0,
             triggered_at: None,
+            trigger_force_notify: false,
             target_chat_id: None,
             target_thread_id: None,
         };
@@ -2802,5 +2837,85 @@ sleep 120"#;
             }
             other => panic!("expected Success with REPRO-OK result, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn persist_force_notify_silent_delivers_pending() {
+        let (_dir, conn) = migrated_conn().await;
+        right_agent::async_runs::insert_running_cron_run(
+            &conn,
+            right_agent::async_runs::NewCronRun {
+                id: "run-fns",
+                job_name: "job",
+                started_at: "2026-06-02T00:00:00Z",
+                log_path: "/log",
+                target_chat_id: Some(7),
+                target_thread_id: None,
+                force_notify: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let cron_output = CronReplyOutput {
+            delivery: CronDeliveryDecision::Silent {
+                reason: "no changes".into(),
+            },
+            run_note: "checked".into(),
+        };
+        let delivery_json =
+            notify_delivery_json("Verification run — nothing to report. no changes", None).unwrap();
+
+        let status =
+            persist_successful_cron_output(&conn, "run-fns", &cron_output, &delivery_json, true)
+                .await
+                .unwrap();
+        assert_eq!(status, "pending");
+
+        let required: i64 = conn
+            .query_row(
+                "SELECT delivery_required FROM async_runs WHERE id = 'run-fns'",
+                [],
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(required, 1, "forced silent run must require delivery");
+    }
+
+    #[tokio::test]
+    async fn persist_non_forced_silent_stays_none() {
+        let (_dir, conn) = migrated_conn().await;
+        right_agent::async_runs::insert_running_cron_run(
+            &conn,
+            right_agent::async_runs::NewCronRun {
+                id: "run-ns",
+                job_name: "job",
+                started_at: "2026-06-02T00:00:00Z",
+                log_path: "/log",
+                target_chat_id: Some(7),
+                target_thread_id: None,
+                force_notify: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let cron_output = CronReplyOutput {
+            delivery: CronDeliveryDecision::Silent {
+                reason: "no changes".into(),
+            },
+            run_note: "checked".into(),
+        };
+        let delivery_json = serde_json::to_string(&cron_output.delivery).unwrap();
+
+        let status =
+            persist_successful_cron_output(&conn, "run-ns", &cron_output, &delivery_json, false)
+                .await
+                .unwrap();
+        assert_eq!(
+            status, "none",
+            "non-forced silent run stays silent (regression)"
+        );
     }
 }
