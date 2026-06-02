@@ -549,6 +549,12 @@ Rules:
   gateway placeholder values (`openshell:resolve:env:v…_<NAME>`) are
   never logged on the host. Use `secrecy::SecretString` for in-memory
   transport; do not pass credential fields to tracing macros.
+  Placeholder substitution is keyed by env-var name on any TLS-terminated
+  endpoint, NOT scoped to the owning provider's host — do not rely on
+  provider-profile endpoints to confine a credential (OpenShell
+  limitation; raw `tls: skip` hosts never substitute, so credentials
+  can't reach the open internet). See `docs/architecture/providers.md` and
+  onsails/right-agent#92.
 
 ## Brand-conformant CLI output
 
@@ -577,6 +583,14 @@ loading-flash these primitives exist to prevent. Identity per-file state
 labels go through `components/identityLabels.ts`, never raw enum codes.
 Component tests use Vue SSR (`@vue/server-renderer` `renderToString`); pure
 decision logic is extracted to a `*.ts` helper and unit-tested directly.
+
+RightClaw-owned technical identifiers are `right-*` namespaced; the dashboard
+MUST NOT surface raw slugs/prefixes, presenting user-friendly `display_name`
+labels instead (e.g. `right-github` renders as "GitHub"). A superseded built-in
+profile is kept in the catalog for env-var resolution but filtered from the
+offered provider-type list server-side (`HIDDEN_FROM_DASHBOARD` in
+`internal_api_providers.rs`), so the UI shows one flat list. Technical precision
+lives in the backend; the UI optimizes for user clarity.
 
 ## OpenShell Integration Conventions
 

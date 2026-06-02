@@ -56,6 +56,12 @@ Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw
 - **Never delete sandboxes for recovery**: Sandboxes contain agent data (credentials, installed tools, agent-created files). Deleting a sandbox destroys this data. Platform changes must be designed to work with existing sandboxes — never require sandbox recreation as a migration path.
 - **Upgrade-friendly design**: Every new feature must be adoptable by already-deployed agents without recreation. New config fields default to the previous behavior (backward-compatible defaults). `agent config` must expose all user-facing settings — if a feature exists but can't be toggled via CLI, it's incomplete. Think in terms of upgrades, not fresh installs.
   - **Bot-managed fields are a documented exception to the CLI-exposure rule.** Operational/runtime concerns reached over Telegram or the Telegram Mini App dashboard (`/mcp`, `/model`) are intentionally **not** mirrored as `right agent config` flags — the bot/dashboard is the control plane for these, and `agent.yaml` (the source of truth) remains directly user-editable for out-of-band changes.
+- **Simplest for the user, most maintainable for us.** When a feature has
+  multiple working implementations, choose the one that (a) gives the user
+  fewer steps and an explicit, auditable choice, and (b) reuses existing,
+  tested paths instead of new control planes or invariant hybrids. Add new
+  gateway/sandbox surface only when it is isolated and additive, not when the
+  alternative smears complexity across load-bearing machinery.
 ## Architecture docs split
 
 `ARCHITECTURE.md` is **prescriptive only** — load-bearing rules,

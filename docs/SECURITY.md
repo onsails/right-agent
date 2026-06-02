@@ -19,6 +19,13 @@ Host credentials (`.credentials.json`) are **never** uploaded to sandboxes. Each
 
 MCP OAuth tokens and HTTP header secrets are stored per-agent in the host-side SQLite credential store. Token refresh happens on the host; agents see MCP tools through the aggregator/proxy layer, not through sandbox-local `.mcp.json` uploads.
 
+### Provider Credentials
+
+Third-party API credentials (provider keys such as `GITHUB_TOKEN`) are held on the OpenShell gateway, never in the sandbox. The sandbox receives only an opaque placeholder env var (`openshell:resolve:env:v…_<NAME>`); the gateway proxy substitutes the real value into outbound requests **after** TLS-terminating the connection. Two consequences for the threat model:
+
+- **No exfiltration to the open internet.** Under `network_policy: permissive`, general internet traffic travels through raw `tls: skip` tunnels that the proxy never terminates or inspects, so it forwards the inert placeholder verbatim — the real credential is never substituted onto an arbitrary host. A compromised agent cannot read the credential (it only holds the placeholder) and cannot leak it to an attacker-controlled internet endpoint.
+- **Substitution is not host-scoped (known limitation).** The proxy resolves a placeholder by environment-variable name on *any* TLS-terminated endpoint — not only the owning provider's host. An agent with two or more credentialed providers attached could therefore route one provider's token to another provider's host. The exposure is bounded (only the operator can attach providers and MCP servers) and is a documented OpenShell limitation: credential confinement is not yet enforced at runtime, and endpoint-scoped injection is on OpenShell's roadmap. Tracked in [#92](https://github.com/onsails/right-agent/issues/92).
+
 ## Network Policy
 
 All sandbox network traffic goes through OpenShell's HTTPS proxy:
