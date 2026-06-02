@@ -473,7 +473,6 @@ async fn execute_job(
     learning: &right_agent_config::LearningConfig,
     session_locks: &crate::telegram::SessionLocks,
 ) {
-    let _ = (learning, session_locks); // wired in Task 4
     use std::process::Stdio;
 
     // Lock check (CRON-04)
@@ -705,6 +704,7 @@ async fn execute_job(
 
     tracing::info!(job = %job_name, run_id = %run_id, "executing cron job");
 
+    let run_started = tokio::time::Instant::now();
     let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
@@ -951,6 +951,56 @@ async fn execute_job(
                                     silent_reason = cron_output.delivery.silent_reason().unwrap_or("-"),
                                     "cron output persisted to DB"
                                 );
+                                // Skill learning: recurring cron runs feed the
+                                // shared pipeline (prefilter → probe-writer fork
+                                // of this run's session). Fire-and-forget; never
+                                // affects delivery or the run record.
+                                if learning.prefilter_enabled
+                                    && schedule_kind_feeds_learning(&spec.schedule_kind)
+                                    && let Some((reply_text, num_turns, cost_usd)) =
+                                        parse_result_stats(&collected_lines)
+                                {
+                                    let anchor = crate::telegram::worker::ProbeAnchor {
+                                        user_msg_text: spec.prompt.clone(),
+                                        assistant_reply_text: reply_text,
+                                        main_session_uuid: run_id.clone(),
+                                        captured_at: chrono::Utc::now(),
+                                        chat_id: spec.target_chat_id.unwrap_or(0),
+                                        thread_id: spec.target_thread_id.unwrap_or(0),
+                                        num_turns,
+                                        total_cost_usd: cost_usd,
+                                        wall_elapsed_ms: run_started.elapsed().as_millis() as u64,
+                                        used_skill_receipts: Vec::new(),
+                                    };
+                                    let learn_ctx = crate::learning_pipeline::PostTurnLearningCtx {
+                                        agent_dir: agent_dir.to_path_buf(),
+                                        agent_db_dir: agent_dir.to_path_buf(),
+                                        agent_name: agent_name.to_owned(),
+                                        ssh_config_path: ssh_config_path.map(|p| p.to_path_buf()),
+                                        resolved_sandbox: resolved_sandbox.map(|s| s.to_owned()),
+                                        internal_client: Arc::clone(internal_client),
+                                        session_locks: session_locks.clone(),
+                                        debug_flag: Arc::clone(&debug),
+                                        prefilter_model: learning
+                                            .prefilter_model
+                                            .clone()
+                                            .unwrap_or_else(|| {
+                                                "claude-haiku-4-5-20251001".to_owned()
+                                            }),
+                                        probe_writer_enabled: learning.probe_writer_enabled,
+                                        probe_writer_model_override: learning
+                                            .probe_writer_model
+                                            .clone(),
+                                        probe_writer_model_fallback: model.map(|s| s.to_owned()),
+                                        daily_budget: learning.max_daily_budget_usd,
+                                        baseline_window_days: learning.baseline_window_days,
+                                        baseline_min_sample: learning.baseline_min_sample,
+                                    };
+                                    tokio::spawn(async move {
+                                        crate::learning_pipeline::run_post_turn(learn_ctx, anchor)
+                                            .await;
+                                    });
+                                }
                             }
                             Err(e) => {
                                 tracing::error!(
@@ -1162,6 +1212,36 @@ fn find_last_result_line(lines: &[String]) -> Option<&str> {
         let v: serde_json::Value = serde_json::from_str(line).ok()?;
         is_result_line(&v).then_some(line.as_str())
     })
+}
+
+/// Extract `(result_text, num_turns, total_cost_usd)` from the terminal
+/// `{"type":"result"}` line. `None` if there is no result line. Missing
+/// `num_turns`/`total_cost_usd` default to 0 — anchor capture must never panic
+/// on a partial line.
+fn parse_result_stats(lines: &[String]) -> Option<(String, u32, f64)> {
+    let line = find_last_result_line(lines)?;
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let text = v
+        .get("result")
+        .and_then(|r| r.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let turns = v
+        .get("num_turns")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as u32;
+    let cost = v
+        .get("total_cost_usd")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    Some((text, turns, cost))
+}
+
+/// Recurring crons are the only kind whose runs feed skill learning — one-shot
+/// (`OneShotCron`/`RunAt`/`Immediate`) runs never repeat, so a learned skill
+/// cannot amortize.
+fn schedule_kind_feeds_learning(kind: &right_agent::cron_spec::ScheduleKind) -> bool {
+    matches!(kind, right_agent::cron_spec::ScheduleKind::Recurring(_))
 }
 
 /// A user-facing summary of why a CC run failed, derived deterministically from
@@ -2144,6 +2224,41 @@ mod tests {
         cell.store(Arc::new(Some("claude-opus-4-5".to_owned())));
         let snapshot2: Option<String> = crate::snapshot_model(&cell);
         assert_eq!(snapshot2.as_deref(), Some("claude-opus-4-5"));
+    }
+
+    #[test]
+    fn parse_result_stats_reads_text_turns_cost() {
+        let lines = vec![
+            r#"{"type":"assistant","message":{}}"#.to_string(),
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done: 3 PRs","num_turns":7,"total_cost_usd":0.34}"#.to_string(),
+        ];
+        let (text, turns, cost) = super::parse_result_stats(&lines).expect("stats");
+        assert_eq!(text, "done: 3 PRs");
+        assert_eq!(turns, 7);
+        assert!((cost - 0.34).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_result_stats_none_without_result_line() {
+        let lines = vec![r#"{"type":"assistant","message":{}}"#.to_string()];
+        assert!(super::parse_result_stats(&lines).is_none());
+    }
+
+    #[test]
+    fn only_recurring_feeds_learning() {
+        use right_agent::cron_spec::ScheduleKind;
+        assert!(super::schedule_kind_feeds_learning(
+            &ScheduleKind::Recurring("*/5 * * * *".into())
+        ));
+        assert!(!super::schedule_kind_feeds_learning(
+            &ScheduleKind::OneShotCron("*/5 * * * *".into())
+        ));
+        assert!(!super::schedule_kind_feeds_learning(
+            &ScheduleKind::Immediate
+        ));
+        assert!(!super::schedule_kind_feeds_learning(&ScheduleKind::RunAt(
+            chrono::Utc::now()
+        )));
     }
 
     #[test]
