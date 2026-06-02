@@ -373,4 +373,28 @@ mod tests {
             .await;
         assert!(addrs.is_ok(), "public host must resolve under PublicOnly");
     }
+
+    #[tokio::test]
+    async fn public_only_resolver_strips_private_resolving_hostname() {
+        use reqwest::dns::Resolve as _;
+        use std::str::FromStr as _;
+
+        let public_only = PublicNetworkResolver::new(NetworkPolicy::PublicOnly);
+        let stripped = public_only
+            .resolve(reqwest::dns::Name::from_str("localhost").unwrap())
+            .await;
+        assert!(
+            stripped.is_err(),
+            "localhost resolves to loopback; PublicOnly must strip it and fail resolution"
+        );
+
+        let allow_private = PublicNetworkResolver::new(NetworkPolicy::AllowPrivate);
+        let admitted = allow_private
+            .resolve(reqwest::dns::Name::from_str("localhost").unwrap())
+            .await;
+        assert!(
+            admitted.is_ok(),
+            "AllowPrivate must admit a loopback-resolving hostname"
+        );
+    }
 }

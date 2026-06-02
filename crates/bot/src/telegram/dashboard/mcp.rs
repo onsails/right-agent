@@ -464,7 +464,11 @@ pub(crate) async fn handle_mcp_remove(
 }
 
 fn detection_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    right_mcp::ssrf::hardened_client_builder(right_mcp::ssrf::NetworkPolicy::AllowPrivate)
+    // PublicOnly: detection probes untrusted URLs. Private/loopback BASE URLs are
+    // short-circuited to Headers/UrlAsIs in `detect` before discovery, so the probe
+    // never needs private reach; this ensures server-supplied discovered URLs
+    // (incl. domains that rebind to a private IP) are stripped at the resolver.
+    right_mcp::ssrf::hardened_client_builder(right_mcp::ssrf::NetworkPolicy::PublicOnly)
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(15))
         .build()
