@@ -17,7 +17,7 @@ Replaces the prior fork-probe classifier.
    assistant reply is sent, the worker captures a `ProbeAnchor` (user text,
    assistant text, main session UUID, captured_at, chat/thread, **num_turns,
    total_cost_usd, wall_elapsed_ms, used_skill_receipts**) for downstream
-   consumption.
+   consumption. Recurring cron runs capture the same `ProbeAnchor` in `bot::cron::execute_job` (with `main_session_uuid` = the cron run's session id).
 
 2. **Prefilter** (`bot::learning_prefilter`): a Haiku classifier returns a
    structured three-way decision —
@@ -93,6 +93,18 @@ Two independent gates run today.
    probe-writer fork. The session mutex on the main session UUID prevents
    concurrent `--resume` against the same transcript; the writer holds it
    only until its `system/init` handshake.
+
+   The same gate (budget check → prefilter → probe-writer) runs from two
+   call sites via the shared `bot::learning_pipeline::run_post_turn`. The
+   foreground worker invokes it for `PromptMode::Normal` turns; cron
+   (`bot::cron::execute_job`) invokes it after a **recurring** run
+   (`ScheduleKind::Recurring`) succeeds, building a `ProbeAnchor` whose
+   `main_session_uuid` is the cron run's session id so the probe-writer
+   forks that run's transcript. One-shot cron runs
+   (`OneShotCron`/`RunAt`/`Immediate`) are excluded. Cron reuses the
+   foreground 14-day baselines as-is (v1 approximation — cron runs read as
+   above-baseline; revisit with cron-specific baselines only if the
+   prefilter over-triggers).
 
 2. **Curator gate** (periodic, agent ticker, pure logic in
    `bot::learning_curator::should_run_now`): order is `enabled` → `!paused`
