@@ -918,6 +918,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         upgrade::run_startup_upgrade(cfg_path, &args.agent, sandbox).await;
     }
 
+    // Per-main-session mutex map and per-(chat,thread) bg-request flags.
+    // Shared across worker, delivery, and callback handlers.
+    let session_locks: crate::telegram::SessionLocks = Arc::new(dashmap::DashMap::new());
+
     // CRON-01: spawn cron task alongside Telegram dispatcher.
     // Cron results are persisted to DB; Telegram delivery is handled separately.
     let cron_agent_dir = agent_dir.clone();
@@ -929,6 +933,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let cron_sandbox = resolved_sandbox.clone();
     let cron_upgrade_lock = Arc::clone(&upgrade_lock);
     let cron_debug = Arc::clone(&debug_flag);
+    let cron_learning = config.learning.clone();
+    let cron_session_locks = Arc::clone(&session_locks);
     let cron_handle = tokio::spawn(async move {
         cron::run_cron_task(
             cron_agent_dir,
@@ -940,6 +946,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             cron_sandbox,
             cron_upgrade_lock,
             cron_debug,
+            cron_learning,
+            cron_session_locks,
         )
         .await;
     });
@@ -950,9 +958,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         chrono::Utc::now().timestamp(),
     ))));
 
-    // Per-main-session mutex map and per-(chat,thread) bg-request flags.
-    // Shared across worker, delivery, and callback handlers.
-    let session_locks: crate::telegram::SessionLocks = Arc::new(dashmap::DashMap::new());
     let compact_timers: crate::telegram::CompactTimers = Arc::new(dashmap::DashMap::new());
     let bg_requests: crate::telegram::BgRequests = Arc::new(dashmap::DashMap::new());
 
