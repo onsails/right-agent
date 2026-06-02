@@ -535,7 +535,7 @@ impl RightBackend {
             serde_json::from_value(args.clone()).context("invalid cron_trigger params")?;
         let conn_arc = self.get_conn(agent_name).await?;
         let conn = conn_arc.lock().await;
-        let msg = right_agent::cron_spec::trigger_spec(&conn, &params.job_name)
+        let msg = right_agent::cron_spec::trigger_spec(&conn, &params.job_name, params.notify)
             .await
             .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
         Ok(CallToolResult::success(vec![Content::text(msg)]))
