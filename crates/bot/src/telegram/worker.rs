@@ -2110,11 +2110,9 @@ pub fn spawn_worker(
                     internal_client: Arc::clone(&ctx.internal_client),
                     session_locks: ctx.session_locks.clone(),
                     debug_flag: Arc::clone(&ctx.debug),
-                    prefilter_model: ctx
-                        .learning
-                        .prefilter_model
-                        .clone()
-                        .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_owned()),
+                    prefilter_model: ctx.learning.prefilter_model.clone().unwrap_or_else(|| {
+                        crate::learning_pipeline::DEFAULT_PREFILTER_MODEL.to_owned()
+                    }),
                     probe_writer_enabled: ctx.learning.probe_writer_enabled,
                     probe_writer_model_override: ctx.learning.probe_writer_model.clone(),
                     probe_writer_model_fallback: (**ctx.model.load()).clone(),
