@@ -789,7 +789,20 @@ async fn execute_job(
         CronStreamOutcome::Failed { .. } => "failed",
     };
     if matches!(outcome, CronStreamOutcome::Failed { .. }) {
-        tracing::error!(job = %job_name, exit_code = ?exit_code, "cron job produced no terminal result");
+        // Distinguish a captured error result from a genuinely absent one — the
+        // old blanket "no terminal result" wording masked budget/turn-limit
+        // failures that DID emit a result.
+        if let Some(line) = find_last_result_line(&collected_lines) {
+            let detail = terminal_failure_detail(line);
+            tracing::error!(
+                job = %job_name,
+                exit_code = ?exit_code,
+                detail = detail.as_deref().unwrap_or("error result"),
+                "cron job ended with an error result"
+            );
+        } else {
+            tracing::error!(job = %job_name, exit_code = ?exit_code, "cron job produced no terminal result");
+        }
     }
 
     // The terminal `status='success'` transition is deferred to the success branch
@@ -967,9 +980,12 @@ async fn execute_job(
             // which is consistent with status='failed'.
             update_run_record(&conn, &run_id, exit_code, "failed").await;
             let exit_str = exit_code.map_or("unknown".to_string(), |c| c.to_string());
+            // CC error results (budget/turn limits) carry no `result` text — read
+            // the reason from the result `subtype` so it survives to the notice,
+            // the classifier, and `error_json` instead of degrading to bare exit
+            // code. Falls back to stderr for non-result failures.
             let raw_detail = find_last_result_line(&collected_lines)
-                .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(String::from))
+                .and_then(terminal_failure_detail)
                 .unwrap_or_else(|| stderr_str.to_string());
             let raw_content =
                 format!("Cron job `{job_name}` failed (exit code {exit_str}):\n{raw_detail}");
@@ -977,51 +993,79 @@ async fn execute_job(
             let failure_kind =
                 classify_cron_failure(exit_code, &raw_detail, spec.max_budget_usd, None);
 
-            // Best-effort ring buffer: parse last ~5 stream-json lines from collected_lines,
-            // keeping only displayable events. Chronological order (oldest → newest) to
-            // match worker's EventRingBuffer convention.
-            let mut tail_newest_first: Vec<_> = collected_lines
-                .iter()
-                .rev()
-                .take(10)
-                .map(|line| crate::cc::stream::parse_stream_event(line))
-                .filter(|e| {
-                    matches!(
-                        e,
-                        crate::cc::stream::StreamEvent::Text(_)
-                            | crate::cc::stream::StreamEvent::Thinking
-                            | crate::cc::stream::StreamEvent::ToolUse { .. }
-                    )
-                })
-                .take(5)
-                .collect();
-            tail_newest_first.reverse();
-            let ring_tail: std::collections::VecDeque<_> = tail_newest_first.into();
+            // Machine-readable failure record, persisted regardless of whether
+            // reflection runs or succeeds — so the reason is never lost (the
+            // `error_json IS NULL` gap that surfaced only "exit code 1").
+            let error_json_str = serde_json::json!({
+                "kind": "cron_failed",
+                "exit_code": exit_code,
+                "failure": format!("{failure_kind:?}"),
+                "detail": raw_detail.as_str(),
+            })
+            .to_string();
+            let run_note_detail: String = raw_detail.chars().take(200).collect();
 
-            let refl_ctx = crate::reflection::ReflectionContext {
-                session_uuid: run_id.clone(),
-                failure: failure_kind,
-                ring_buffer_tail: ring_tail,
-                limits: crate::reflection::ReflectionLimits::CRON,
-                agent_name: agent_name.to_string(),
-                agent_dir: agent_dir.to_path_buf(),
-                ssh_config_path: ssh_config_path.map(std::path::PathBuf::from),
-                resolved_sandbox: resolved_sandbox.map(String::from),
-                parent_source: crate::reflection::ParentSource::Cron {
-                    job_name: job_name.to_string(),
-                },
-                model: model.map(String::from),
-                debug: Some(std::sync::Arc::clone(&debug)),
-            };
+            // Reflection `--resume`s the run's session, whose `--max-budget-usd`
+            // is cumulative — so reflecting a budget-exhausted session always
+            // immediately re-hits the cap (a futile, billable turn). Skip it and
+            // report the deterministic reason.
+            let reflected_content = if matches!(
+                &failure_kind,
+                crate::reflection::FailureKind::BudgetExceeded { .. }
+            ) {
+                tracing::info!(
+                    job = %job_name,
+                    detail = %raw_detail,
+                    "cron hit budget cap; skipping futile reflection"
+                );
+                raw_content
+            } else {
+                // Best-effort ring buffer: parse last ~5 stream-json lines from
+                // collected_lines, keeping only displayable events. Chronological
+                // order (oldest → newest) to match worker's EventRingBuffer.
+                let mut tail_newest_first: Vec<_> = collected_lines
+                    .iter()
+                    .rev()
+                    .take(10)
+                    .map(|line| crate::cc::stream::parse_stream_event(line))
+                    .filter(|e| {
+                        matches!(
+                            e,
+                            crate::cc::stream::StreamEvent::Text(_)
+                                | crate::cc::stream::StreamEvent::Thinking
+                                | crate::cc::stream::StreamEvent::ToolUse { .. }
+                        )
+                    })
+                    .take(5)
+                    .collect();
+                tail_newest_first.reverse();
+                let ring_tail: std::collections::VecDeque<_> = tail_newest_first.into();
 
-            let reflected_content = match crate::reflection::reflect_on_failure(refl_ctx).await {
-                Ok(text) => {
-                    tracing::info!(job = %job_name, "cron reflection reply produced");
-                    text
-                }
-                Err(e) => {
-                    tracing::warn!(job = %job_name, "cron reflection failed: {e:#}; using raw content");
-                    raw_content
+                let refl_ctx = crate::reflection::ReflectionContext {
+                    session_uuid: run_id.clone(),
+                    failure: failure_kind,
+                    ring_buffer_tail: ring_tail,
+                    limits: crate::reflection::ReflectionLimits::CRON,
+                    agent_name: agent_name.to_string(),
+                    agent_dir: agent_dir.to_path_buf(),
+                    ssh_config_path: ssh_config_path.map(std::path::PathBuf::from),
+                    resolved_sandbox: resolved_sandbox.map(String::from),
+                    parent_source: crate::reflection::ParentSource::Cron {
+                        job_name: job_name.to_string(),
+                    },
+                    model: model.map(String::from),
+                    debug: Some(std::sync::Arc::clone(&debug)),
+                };
+
+                match crate::reflection::reflect_on_failure(refl_ctx).await {
+                    Ok(text) => {
+                        tracing::info!(job = %job_name, "cron reflection reply produced");
+                        text
+                    }
+                    Err(e) => {
+                        tracing::warn!(job = %job_name, "cron reflection failed: {e:#}; using raw content");
+                        raw_content
+                    }
                 }
             };
 
@@ -1031,9 +1075,9 @@ async fn execute_job(
                         &conn,
                         &run_id,
                         right_agent::async_runs::RunOutput {
-                            run_note: Some("failed"),
+                            run_note: Some(&run_note_detail),
                             delivery_json: Some(&json),
-                            error_json: None,
+                            error_json: Some(&error_json_str),
                             delivery_required: true,
                         },
                     )
@@ -1132,6 +1176,44 @@ fn terminal_result_is_error(line: &str) -> Option<bool> {
         return None;
     }
     Some(v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false))
+}
+
+/// Extract a human-readable, classifiable failure detail from a terminal CC
+/// `{"type":"result"}` line.
+///
+/// CC error results — `error_max_budget_usd`, `error_max_turns`,
+/// `error_during_execution` — carry NO `result` text; their only signal is the
+/// `subtype` (+ `total_cost_usd`). Reading just the `result` field therefore
+/// drops the reason, mis-routes [`classify_cron_failure`] to `NonZeroExit`, and
+/// leaves the user notice empty. This synthesizes a detail that both reads
+/// cleanly and contains the keywords [`classify_cron_failure`] matches. Returns
+/// `None` for non-result lines and for non-error results without `result` text.
+fn terminal_failure_detail(line: &str) -> Option<String> {
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    if !is_result_line(&v) {
+        return None;
+    }
+    // Prefer explicit assistant result text when CC provides it.
+    if let Some(text) = v
+        .get("result")
+        .and_then(|r| r.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(text.to_owned());
+    }
+    if !v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("error");
+    let cost = match v.get("total_cost_usd").and_then(|c| c.as_f64()) {
+        Some(c) => format!(" (spent ${c:.2})"),
+        None => String::new(),
+    };
+    Some(match subtype {
+        "error_max_budget_usd" => format!("max budget exceeded{cost}"),
+        "error_max_turns" => "max turns reached".to_owned(),
+        other => format!("{other}{cost}"),
+    })
 }
 
 /// Consume the cron CC subprocess stdout line-by-line and classify the outcome.
@@ -1850,6 +1932,53 @@ mod classify_tests {
         } else {
             panic!("expected NonZeroExit");
         }
+    }
+
+    #[test]
+    fn terminal_failure_detail_synthesizes_budget_reason_from_subtype() {
+        // error_max_budget_usd results carry NO `result` text — the reason lives
+        // in `subtype` + `total_cost_usd`. The detail must survive regardless.
+        let line = r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":1,"total_cost_usd":2.08122}"#;
+        let detail = terminal_failure_detail(line).expect("error result yields a detail");
+        assert!(detail.contains("max budget"), "got: {detail}");
+        assert!(detail.contains("2.08"), "must report spend, got: {detail}");
+        // And it must classify correctly (the prior bug mis-routed to NonZeroExit).
+        let kind = classify_cron_failure(Some(1), &detail, 1.5, None);
+        assert!(
+            matches!(kind, FailureKind::BudgetExceeded { .. }),
+            "got: {kind:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_failure_detail_synthesizes_max_turns_reason() {
+        let line = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":5}"#;
+        let detail = terminal_failure_detail(line).expect("error result yields a detail");
+        assert!(detail.contains("max turns"), "got: {detail}");
+        let kind = classify_cron_failure(Some(1), &detail, 1.5, Some(5));
+        assert!(
+            matches!(kind, FailureKind::MaxTurns { .. }),
+            "got: {kind:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_failure_detail_prefers_explicit_result_text() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"all good"}"#;
+        assert_eq!(terminal_failure_detail(line).as_deref(), Some("all good"));
+    }
+
+    #[test]
+    fn terminal_failure_detail_none_for_non_result_or_textless_non_error() {
+        assert_eq!(
+            terminal_failure_detail(r#"{"type":"assistant","message":{}}"#),
+            None
+        );
+        // A non-error result with no text yields no failure detail.
+        assert_eq!(
+            terminal_failure_detail(r#"{"type":"result","subtype":"success","is_error":false}"#),
+            None
+        );
     }
 }
 
