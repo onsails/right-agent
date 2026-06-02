@@ -34,6 +34,14 @@ file="$2/SKILL.md"
 head -c "$3" "$file""#;
 
 #[derive(Debug, thiserror::Error)]
+pub(super) enum SkillsResponseError {
+    #[error(transparent)]
+    Inventory(#[from] SkillInventoryError),
+    #[error("sandbox skill scan failed: {0}")]
+    Sandbox(String),
+}
+
+#[derive(Debug, thiserror::Error)]
 pub(super) enum SkillDetailError {
     #[error(transparent)]
     Inventory(#[from] SkillInventoryError),
@@ -75,28 +83,18 @@ pub(super) enum SkillLifecycleReadError {
 
 pub(super) async fn skills_response(
     state: &DashboardState,
-) -> Result<SkillsResponse, SkillInventoryError> {
+) -> Result<SkillsResponse, SkillsResponseError> {
     if let Some(sandbox_exec) = state.sandbox_exec.as_ref() {
-        match scan_sandbox_skills(&state.agent_name, sandbox_exec).await {
-            Ok(mut response) => {
-                try_enrich_skills_response(state, &mut response).await;
-                return Ok(response);
-            }
-            Err(error) => {
-                let mut response = scan_host_skills(
-                    &state.agent_name,
-                    &state.agent_dir,
-                    right_codegen::BUILTIN_SKILL_NAMES,
-                    "host",
-                    SKILL_PREVIEW_LIMIT_BYTES,
-                )?;
-                response.warning = Some(format!(
-                    "sandbox skill scan failed; showing host skills: {error:#}"
-                ));
-                try_enrich_skills_response(state, &mut response).await;
-                return Ok(response);
-            }
-        }
+        // Learned (`rightx-*`) skills live only inside the sandbox at
+        // `/sandbox/.claude/skills`. Falling back to the host filesystem on a
+        // scan failure would show "0 learned" — a wrong answer dressed as a
+        // valid one. Propagate the failure so the dashboard renders an error
+        // (and keeps any previously loaded skills) instead.
+        let mut response = scan_sandbox_skills(&state.agent_name, sandbox_exec)
+            .await
+            .map_err(|error| SkillsResponseError::Sandbox(format!("{error:#}")))?;
+        try_enrich_skills_response(state, &mut response).await;
+        return Ok(response);
     }
 
     let mut response = scan_host_skills(
@@ -195,7 +193,7 @@ async fn probe_sandbox_skill_package(
         "dashboard-skill-pin",
         skill_path.as_str(),
     ];
-    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
+    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS);
     let (_, exit_code) =
         match tokio::time::timeout(timeout, sandbox_exec.exec(&probe_command)).await {
             Ok(result) => result.map_err(|error| {
@@ -204,7 +202,7 @@ async fn probe_sandbox_skill_package(
             Err(_) => {
                 return Err(PinSkillError::Sandbox(format!(
                     "sandbox skill probe timed out after {}s",
-                    super::DASHBOARD_SANDBOX_TIMEOUT_SECS
+                    super::DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS
                 )));
             }
         };
@@ -228,7 +226,7 @@ async fn scan_sandbox_skills(
         SANDBOX_SKILLS_PATH,
         SANDBOX_SKILL_LIMIT_STR,
     ];
-    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
+    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS);
     let (stdout, exit_code) =
         match tokio::time::timeout(timeout, sandbox_exec.exec(&list_command)).await {
             Ok(result) => result?,
@@ -293,14 +291,14 @@ async fn read_sandbox_skill_detail(
         skill_name,
         limit.as_str(),
     ];
-    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_TIMEOUT_SECS);
+    let timeout = Duration::from_secs(super::DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS);
     let (mut content_preview, exit_code) =
         match tokio::time::timeout(timeout, sandbox_exec.exec(&read_command)).await {
             Ok(result) => result.map_err(sandbox_error)?,
             Err(_) => {
                 return Err(SkillDetailError::Sandbox(format!(
                     "sandbox skill read timed out after {}s",
-                    super::DASHBOARD_SANDBOX_TIMEOUT_SECS
+                    super::DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS
                 )));
             }
         };

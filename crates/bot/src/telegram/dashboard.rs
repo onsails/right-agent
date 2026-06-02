@@ -28,6 +28,13 @@ mod skills;
 
 const REFRESH_INTERVAL_SECS: u64 = 5;
 pub(super) const DASHBOARD_SANDBOX_TIMEOUT_SECS: u64 = 4;
+/// Skills are listed by exec-ing a shell script inside the sandbox, which on
+/// a cold sandbox (SSH/gRPC warm-up) routinely exceeds the 4s probe budget
+/// the lightweight health/identity reads use. A generous bound here avoids
+/// the misleading "0 learned skills" empty state — we now surface a timeout
+/// error instead of silently falling back to the host filesystem (where no
+/// `rightx-*` learned skills exist for sandboxed agents).
+pub(super) const DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS: u64 = 20;
 const INIT_DATA_MAX_AGE_SECS: i64 = 86_400;
 const MAX_LOG_LINES: usize = 80;
 
@@ -452,10 +459,11 @@ async fn handle_skills_overview(
         Ok(response) => Json(response).into_response(),
         Err(error) => {
             tracing::error!(agent = %state.agent_name, "dashboard skills query failed: {error:#}");
+            let detail = format!("{error:#}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "skills_failed",
-                Some("failed to read skills"),
+                Some(detail.as_str()),
             )
         }
     }
