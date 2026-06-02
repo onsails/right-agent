@@ -8,6 +8,11 @@ use std::sync::atomic::AtomicBool;
 
 use crate::telegram::worker::ProbeAnchor;
 
+/// Default Haiku model for the skill-learning prefilter when the agent's
+/// `learning.prefilter_model` is unset. Shared by the foreground worker and the
+/// cron learning path.
+pub(crate) const DEFAULT_PREFILTER_MODEL: &str = "claude-haiku-4-5-20251001";
+
 /// Everything `run_post_turn` needs, owned so it can move into a spawned task.
 pub(crate) struct PostTurnLearningCtx {
     pub agent_dir: PathBuf,

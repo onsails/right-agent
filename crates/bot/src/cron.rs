@@ -985,7 +985,8 @@ async fn execute_job(
                                             .prefilter_model
                                             .clone()
                                             .unwrap_or_else(|| {
-                                                "claude-haiku-4-5-20251001".to_owned()
+                                                crate::learning_pipeline::DEFAULT_PREFILTER_MODEL
+                                                    .to_owned()
                                             }),
                                         probe_writer_enabled: learning.probe_writer_enabled,
                                         probe_writer_model_override: learning
