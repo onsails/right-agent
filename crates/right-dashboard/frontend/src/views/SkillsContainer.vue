@@ -6,7 +6,7 @@ import { useLiveResource } from '../composables/useLiveResource'
 import SkillsView from './SkillsView.vue'
 import type { SkillDetailResponse, SkillSummary, SkillsResponse } from '../types'
 
-const { data: skills, refresh } = useLiveResource(skillsOverview, { key: 'skills' })
+const { data: skills, loading: skillsLoading, error: skillsError, refresh } = useLiveResource(skillsOverview, { key: 'skills' })
 
 const pinnedPatches = ref(new Map<string, boolean>())
 
@@ -76,6 +76,8 @@ function applySkillPinned({ skillName, pinned }: { skillName: string, pinned: bo
     :selected-skill-name="selectedSkillName"
     :loading="loadingSkill"
     :error="skillError"
+    :list-loading="skillsLoading"
+    :list-error="skillsError"
     @select-skill="selectSkill"
     @skill-pinned="applySkillPinned"
   />

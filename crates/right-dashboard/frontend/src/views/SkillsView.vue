@@ -16,6 +16,8 @@ const props = defineProps<{
   selectedSkillName: string | null
   loading: boolean
   error: string | null
+  listLoading?: boolean
+  listError?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -38,6 +40,8 @@ const selectedPinError = computed(() => {
 function skillsFor(response: SkillsResponse | null, group: SkillGroupName): SkillSummary[] {
   return response?.groups[group] ?? []
 }
+
+const listEmpty = computed(() => skillGroups.every((group) => skillsFor(props.skills, group).length === 0))
 
 function hasLifecycleRow(skill: SkillSummary): boolean {
   return skill.state !== null && skill.created_by !== null
@@ -86,35 +90,42 @@ async function togglePinned(): Promise<void> {
 <template>
   <section class="two-column wide-main">
     <section class="list-stack">
-      <p v-if="skills?.warning" class="notice inline">{{ skills.warning }}</p>
-      <CollapsibleSection
-        v-for="group in skillGroups"
-        :key="group"
-        :title="group"
-        :count="skillsFor(skills, group).length"
-        :default-open="skillsFor(skills, group).some((s) => s.name === selectedSkillName)"
+      <AsyncState
+        :loading="(listLoading ?? false) && skills === null"
+        :error="skills === null ? (listError ?? null) : null"
+        :empty="skills !== null && listEmpty"
+        empty-text="No skills"
       >
-        <div class="row-list">
-          <button
-            v-for="skill in skillsFor(skills, group)"
-            :key="skill.name"
-            type="button"
-            class="data-row"
-            :class="{ selected: selectedSkillName === skill.name }"
-            @click="emit('selectSkill', skill)"
-          >
-            <span class="row-main">
-              <strong>{{ skill.name }}</strong>
-              <small>{{ skill.description ?? skill.path }}</small>
-            </span>
-            <span v-if="hasLifecycleRow(skill)" class="row-side">
-              <span>{{ pinLabel(skill) }}</span>
-              <small>{{ lifecycleLabel(skill.state) }}</small>
-            </span>
-          </button>
-          <p v-if="skillsFor(skills, group).length === 0" class="muted-line">None</p>
-        </div>
-      </CollapsibleSection>
+        <p v-if="skills?.warning" class="notice inline">{{ skills.warning }}</p>
+        <CollapsibleSection
+          v-for="group in skillGroups"
+          :key="group"
+          :title="group"
+          :count="skillsFor(skills, group).length"
+          :default-open="skillsFor(skills, group).some((s) => s.name === selectedSkillName)"
+        >
+          <div class="row-list">
+            <button
+              v-for="skill in skillsFor(skills, group)"
+              :key="skill.name"
+              type="button"
+              class="data-row"
+              :class="{ selected: selectedSkillName === skill.name }"
+              @click="emit('selectSkill', skill)"
+            >
+              <span class="row-main">
+                <strong>{{ skill.name }}</strong>
+                <small>{{ skill.description ?? skill.path }}</small>
+              </span>
+              <span v-if="hasLifecycleRow(skill)" class="row-side">
+                <span>{{ pinLabel(skill) }}</span>
+                <small>{{ lifecycleLabel(skill.state) }}</small>
+              </span>
+            </button>
+            <p v-if="skillsFor(skills, group).length === 0" class="muted-line">None</p>
+          </div>
+        </CollapsibleSection>
+      </AsyncState>
     </section>
 
     <aside class="panel detail-panel">
