@@ -135,7 +135,12 @@ register/send wiring, dispatch detail, and rationale.
 Session-bearing `claude -p` invocations get a composite system prompt via
 `--system-prompt-file` (the sole prompt mechanism — no `--agent` flag).
 Prompt caching is critical — avoid per-message tool calls to read
-identity files.
+identity files. Worker prompts MUST use per-session prompt-file paths
+because the `## Current Conversation` block is session-scoped. The system
+prompt contains only stable/base prompt content, mode instructions, identity
+files, TOOLS, chat context, MCP instructions, and file-mode `MEMORY.md`;
+Hindsight recall, memory-status markers, and repair notices MUST be
+prepended to stdin/user message instead.
 
 The per-turn skill-learning pipeline (anchor capture → Haiku prefilter →
 probe-writer fork → periodic curator) replaces the prior fork-probe
@@ -297,8 +302,8 @@ Turso FTS indexes over archived Telegram messages and is scoped by the
 current foreground invocation (see MCP Aggregator above).
 
 See: `docs/architecture/memory.md` for auto-retain/recall semantics,
-prefetch cache behavior, cron-skip rules, backgrounded-turn handling, and
-the resilience layer.
+prompt placement, prefetch cache behavior, cron-skip rules,
+backgrounded-turn handling, and the resilience layer.
 
 ### Memory Schema
 

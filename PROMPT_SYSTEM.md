@@ -7,7 +7,8 @@ invocations, plus the explicit non-composite exception.
 
 Session-bearing CC invocations get a **single composite system prompt**
 assembled from multiple files. No `--agent` flag — all composite prompt content
-is in `--system-prompt-file`.
+is in `--system-prompt-file`. Worker prompts use per-session prompt-file paths
+because the `## Current Conversation` block is session-scoped.
 
 **Why not `--agent`?** Testing proved that `--agent` with `@` file references doesn't work
 reliably when MCP tools are present (~8K+ tokens of tool definitions drown the agent's
@@ -85,26 +86,32 @@ session UUID matches CC's own JSONL filename. Off by default.
 ## Environment and Tools
 {TOOLS.md — agent-owned tools and environment notes}
 
+## Current Conversation
+{per-session chat-context block: chat id plus DM partner or group/topic metadata}
+
 ## MCP Server Instructions  (if any external MCP servers have instructions)
 {fetched from aggregator via POST /mcp-instructions at prompt assembly time}
 
-## Memory
-{composite-memory: bot-trusted system note (label) → ironclaw
- untrusted-content wrap (SECURITY NOTICE + BEGIN/END EXTERNAL CONTENT,
- with boundary escape) → optional bot-trusted status / bg markers.
- Wrap text is owned by `ironclaw_safety::wrap_external_content` and
- may evolve with crate updates; see `docs/architecture/memory.md` for
- the integration.}
+## Memory  (file mode only)
+{MEMORY.md content, truncated to 200 lines and ironclaw-wrapped as untrusted
+ external content.}
 ```
 
 Missing agent-owned files are silently skipped. Operating instructions and bootstrap
 content are compiled into the binary — no file sync needed. MCP instructions are
-fetched from the aggregator's internal API (non-fatal if unavailable). Memory section
-is appended last: file mode inlines MEMORY.md contents, Hindsight mode inlines
-prefetched recall results. Each recalled memory is rendered as
-`- [observed <date>] <text>` (date = `occurred_start` else `mentioned_at`,
-`YYYY-MM-DD`; no date → bare bullet). Operating instructions direct the agent
-to re-verify any dated fact with a live check before asserting it as current.
+fetched from the aggregator's internal API (non-fatal if unavailable). In file
+mode, `MEMORY.md` is inlined into the system prompt. In Hindsight mode,
+auto-recall is not part of the system prompt; it is prepended to the stdin user
+message by `build_volatile_prefix()` under the recalled-memory label and
+ironclaw wrap. Each recalled memory is rendered as `- [observed <date>] <text>`
+(date = `occurred_start` else `mentioned_at`, `YYYY-MM-DD`; no date → bare
+bullet). Operating instructions direct the agent to re-verify any dated fact
+with a live check before asserting it as current.
+
+The volatile stdin prefix is omitted when empty. It may contain Hindsight recall
+(wrapped as untrusted external content), an edge-triggered `<memory-status>`
+marker, and a one-shot repair notice as `<system-notification>`. These blocks
+are current-turn context, not durable system prompt content.
 
 Operating instructions include a `### Subagents` section that teaches use of the
 built-in Claude Code `Agent` tool for bounded independent workstreams. This is
@@ -112,6 +119,11 @@ prompt guidance only; Right Agent does not create separate subagent definition
 files.
 They also document stdin user-turn formats, including Telegram YAML reply
 metadata (`reply_to_id`, `reply_to`, and `quoted_text`).
+
+Telegram message YAML is sequence-only. DMs omit per-message `author` and
+`chat` because the stable chat-context block carries the partner identity.
+Groups keep per-message `author` for speaker attribution and omit chat/topic
+metadata because the stable chat-context block carries it.
 
 ### Conversation and Memory Tiers
 
@@ -157,10 +169,11 @@ delete tool):
 
 ### Memory Status Marker
 
-When the agent runs with `memory.provider: hindsight`, the bot injects a
-`<memory-status>...</memory-status>` marker at the end of
-`composite-memory.md` whenever the ResilientHindsight wrapper is not
-`Healthy`. Four states:
+When the agent runs with `memory.provider: hindsight`, the bot may prepend a
+`<memory-status>...</memory-status>` marker to the stdin user message. It is
+edge-triggered per `(chat_id, effective_thread_id)`: unhealthy state changes
+emit once, repeated unchanged states stay silent, and recovery emits once.
+Four states:
 
 - `degraded — recall may be incomplete or stale, retain may be queued` —
   circuit breaker is open or half-open, or a recent transient failure occurred.
@@ -176,8 +189,9 @@ When the agent runs with `memory.provider: hindsight`, the bot injects a
   logs` — in a Healthy state but Client-kind (4xx) retain drops occurred in
   the last 24h.
 
-The marker is always the last section of the system prompt, preserving
-prompt cache for all preceding blocks.
+The marker is never written to `MEMORY.md` and is not appended to the system
+prompt. Repair notices use the same volatile stdin prefix as
+`<system-notification>`, not the base system prompt.
 
 ### Bootstrap mode
 
