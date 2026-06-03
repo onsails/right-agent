@@ -387,8 +387,8 @@ pub struct ForwardInfo {
     pub date: DateTime<Utc>,
 }
 
-/// Chat kind + identity for the incoming message. Always emits a `chat:` block.
-/// DM uses `kind: dm`; Group uses `kind: group` with optional title/topic_id.
+/// Chat kind + identity for the incoming message.
+/// Message YAML omits chat metadata; chat context is emitted in the system prompt.
 #[derive(Debug, Clone)]
 pub enum ChatContext {
     Private {
@@ -427,7 +427,8 @@ pub struct InputMessage {
 
 /// Format input for CC stdin.
 ///
-/// Always formats as YAML with `messages:` root key containing author metadata.
+/// Always formats as YAML with `messages:` root key. Group messages include per-message
+/// author metadata because authors vary; DM identity lives in the system prompt.
 ///
 /// Returns None if there is nothing to send.
 pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
@@ -455,43 +456,20 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
         )
         .expect("infallible");
 
-        // Author block (always present)
-        out.push_str("    author:\n");
-        writeln!(
-            out,
-            "      name: \"{}\"",
-            yaml_escape_string(&m.author.name)
-        )
-        .expect("infallible");
-        if let Some(ref username) = m.author.username {
-            writeln!(out, "      username: \"{}\"", yaml_escape_string(username))
-                .expect("infallible");
-        }
-        if let Some(user_id) = m.author.user_id {
-            writeln!(out, "      user_id: {user_id}").expect("infallible");
-        }
-
-        // Chat block — always present.
-        out.push_str("    chat:\n");
-        match &m.chat {
-            ChatContext::Private { id } => {
-                writeln!(out, "      kind: dm").expect("infallible");
-                writeln!(out, "      id: {id}").expect("infallible");
+        if matches!(&m.chat, ChatContext::Group { .. }) {
+            out.push_str("    author:\n");
+            writeln!(
+                out,
+                "      name: \"{}\"",
+                yaml_escape_string(&m.author.name)
+            )
+            .expect("infallible");
+            if let Some(ref username) = m.author.username {
+                writeln!(out, "      username: \"{}\"", yaml_escape_string(username))
+                    .expect("infallible");
             }
-            ChatContext::Group {
-                id,
-                title,
-                topic_id,
-            } => {
-                writeln!(out, "      kind: group").expect("infallible");
-                writeln!(out, "      id: {id}").expect("infallible");
-                if let Some(t) = title {
-                    writeln!(out, "      title: \"{}\"", yaml_escape_string(t))
-                        .expect("infallible");
-                }
-                if let Some(tid) = topic_id {
-                    writeln!(out, "      topic_id: {tid}").expect("infallible");
-                }
+            if let Some(user_id) = m.author.user_id {
+                writeln!(out, "      user_id: {user_id}").expect("infallible");
             }
         }
 
@@ -1573,7 +1551,64 @@ mod tests {
         let result = format_cc_input(&msgs).unwrap();
         assert!(result.starts_with("messages:\n"));
         assert!(result.contains("    text: \"hello world\"\n"));
-        assert!(result.contains("    author:\n"));
+        assert!(!result.contains("    author:\n"));
+        assert!(!result.contains("    chat:\n"));
+    }
+
+    #[tokio::test]
+    async fn format_cc_input_dm_omits_author_and_chat() {
+        let m = InputMessage {
+            message_id: 1,
+            text: Some("hi".into()),
+            timestamp: Utc::now(),
+            attachments: vec![],
+            author: MessageAuthor {
+                name: "Alice".into(),
+                username: Some("alice".into()),
+                user_id: Some(789),
+            },
+            forward_info: None,
+            reply_to_id: None,
+            quoted_text: None,
+            chat: ChatContext::Private { id: 789 },
+            reply_to_body: None,
+        };
+        let yaml = format_cc_input(&[m]).unwrap();
+        assert!(yaml.contains("text: \"hi\""));
+        assert!(!yaml.contains("author:"), "DM must omit author block");
+        assert!(!yaml.contains("chat:"), "DM must omit chat block");
+    }
+
+    #[tokio::test]
+    async fn format_cc_input_group_keeps_author_omits_chat() {
+        let m = InputMessage {
+            message_id: 2,
+            text: Some("yo".into()),
+            timestamp: Utc::now(),
+            attachments: vec![],
+            author: MessageAuthor {
+                name: "Bob".into(),
+                username: None,
+                user_id: Some(42),
+            },
+            forward_info: None,
+            reply_to_id: None,
+            quoted_text: None,
+            chat: ChatContext::Group {
+                id: -100,
+                title: Some("Team".into()),
+                topic_id: Some(7),
+            },
+            reply_to_body: None,
+        };
+        let yaml = format_cc_input(&[m]).unwrap();
+        assert!(yaml.contains("author:"), "group keeps per-message author");
+        assert!(yaml.contains("Bob"));
+        assert!(!yaml.contains("chat:"), "group omits chat block");
+        assert!(
+            !yaml.contains("topic_id:"),
+            "topic now lives in system prompt"
+        );
     }
 
     #[tokio::test]
@@ -1990,7 +2025,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn format_cc_input_includes_author() {
+    async fn format_cc_input_group_includes_author() {
         let ts = DateTime::parse_from_rfc3339("2026-04-08T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -2007,7 +2042,11 @@ mod tests {
             forward_info: None,
             reply_to_id: None,
             quoted_text: None,
-            chat: ChatContext::Private { id: 99 },
+            chat: ChatContext::Group {
+                id: -1001,
+                title: Some("Dev".into()),
+                topic_id: Some(7),
+            },
             reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
@@ -2536,8 +2575,7 @@ mod group_format_tests {
     }
 
     #[tokio::test]
-    async fn dm_single_message_emits_yaml_with_chat_block() {
-        // In DM, Telegram-side chat_id == user_id.
+    async fn dm_single_message_omits_sequence_constant_identity() {
         let m = InputMessage {
             message_id: 1,
             text: Some("hi".into()),
@@ -2557,21 +2595,17 @@ mod group_format_tests {
         let yaml = format_cc_input(&[m]).unwrap();
         assert!(yaml.contains("messages:"));
         assert!(
-            yaml.contains("chat:"),
-            "DM must include a chat block, got:\n{yaml}"
+            !yaml.contains("author:"),
+            "DM must omit per-message author block, got:\n{yaml}"
         );
         assert!(
-            yaml.contains("kind: dm"),
-            "DM block must mark kind: dm, got:\n{yaml}"
-        );
-        assert!(
-            yaml.contains("id: 42"),
-            "DM chat block must include id, got:\n{yaml}"
+            !yaml.contains("chat:"),
+            "DM must omit per-message chat block, got:\n{yaml}"
         );
     }
 
     #[tokio::test]
-    async fn group_message_emits_chat_block_and_topic() {
+    async fn group_message_emits_author_without_chat_or_topic() {
         let m = InputMessage {
             message_id: 9,
             text: Some("what does foo do".into()),
@@ -2593,11 +2627,13 @@ mod group_format_tests {
             reply_to_body: None,
         };
         let yaml = format_cc_input(&[m]).unwrap();
-        assert!(yaml.contains("chat:"), "got: {yaml}");
-        assert!(yaml.contains("kind: group"));
-        assert!(yaml.contains("id: -1001"));
-        assert!(yaml.contains("title:"));
-        assert!(yaml.contains("topic_id: 7"));
+        assert!(yaml.contains("author:"), "got: {yaml}");
+        assert!(yaml.contains("Alice"));
+        assert!(!yaml.contains("chat:"), "got: {yaml}");
+        assert!(!yaml.contains("kind: group"));
+        assert!(!yaml.contains("id: -1001"));
+        assert!(!yaml.contains("title:"));
+        assert!(!yaml.contains("topic_id:"));
     }
 
     #[tokio::test]
