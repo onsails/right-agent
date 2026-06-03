@@ -73,7 +73,13 @@ fn format_chat_context_scalar(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.extend(c.escape_default()),
+            // Control chars plus the Unicode line/paragraph separators
+            // (U+2028/U+2029): the latter are not `is_control()`, but some
+            // renderers treat them as line breaks, so an untrusted display
+            // name could inject a fake markdown header without escaping them.
+            c if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') => {
+                out.extend(c.escape_default())
+            }
             c => out.push(c),
         }
     }

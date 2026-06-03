@@ -822,10 +822,11 @@ impl Drop for BgHandoffGateRelease {
     }
 }
 
-/// Build the `<memory-status>` marker appended to composite-memory.md.
+/// Build the `<memory-status>` marker. Edge-triggered and prepended to the
+/// stdin user message via `build_volatile_prefix`; not written to any file.
 ///
 /// Returns `None` when memory is healthy and no retain-side drops have
-/// accumulated in the last 24h — no marker is injected in that case.
+/// accumulated in the last 24h — no marker is emitted in that case.
 fn build_memory_marker(
     status: right_memory::MemoryStatus,
     client_drops_24h: usize,
@@ -873,7 +874,9 @@ const MEMORY_RECOVERED_MARKER: &str =
 ///
 /// - unchanged -> emit nothing;
 /// - changed to a non-healthy state -> emit it;
-/// - changed to healthy (recovery) -> emit the recovered marker once.
+/// - changed to healthy (recovery) -> emit the recovered marker once, UNLESS
+///   the prior marker was the Healthy-state retain-errors info marker (the
+///   provider was never unhealthy, so its clearing is not a recovery).
 ///
 /// `new_last_emitted` tracks the underlying status (`cur`), not the recovered
 /// text, so the next healthy turn stays silent.
@@ -883,7 +886,39 @@ fn edge_memory_marker(prev: Option<&str>, cur: Option<&str>) -> (Option<String>,
     }
     match cur {
         Some(m) => (Some(m.to_owned()), Some(m.to_owned())),
+        // Returning to silence: only announce "recovered" when leaving a
+        // genuine provider-health problem. The retain-errors marker is emitted
+        // while the provider is Healthy, so its clearing must not masquerade
+        // as a provider recovery.
+        None if prev.is_some_and(is_retain_errors_marker) => (None, None),
         None => (Some(MEMORY_RECOVERED_MARKER.to_owned()), None),
+    }
+}
+
+/// The bad-payload retain-drops marker is the only one emitted while the
+/// provider is Healthy; distinguish it from genuine degraded/unavailable
+/// states (see [`edge_memory_marker`]).
+fn is_retain_errors_marker(marker: &str) -> bool {
+    marker.contains("retain-errors")
+}
+
+fn commit_memory_status_edge_state(
+    memory_status_last: &DashMap<SessionKey, String>,
+    session_key: SessionKey,
+    input_delivered: bool,
+    pending: Option<Option<String>>,
+) {
+    if !input_delivered {
+        return;
+    }
+    match pending {
+        Some(Some(marker)) => {
+            memory_status_last.insert(session_key, marker);
+        }
+        Some(None) => {
+            memory_status_last.remove(&session_key);
+        }
+        None => {}
     }
 }
 
@@ -2797,6 +2832,14 @@ async fn invoke_cc(
         right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
 
     let session_key: SessionKey = (chat_id, eff_thread_id);
+    // The edge-triggered memory-status state is committed only after the marker
+    // is actually written to the agent's stdin (see below). Committing here, at
+    // computation time, would silently drop the marker on any pre-delivery
+    // early return (sandbox guard, shutdown, spawn/stdin failure) — and the
+    // sandbox guard fails precisely when memory is most likely degraded.
+    // `Some(new_last)` = there is a pending commit; the inner `Option<String>`
+    // is the value to store (`Some` insert / `None` remove).
+    let mut pending_memory_status_commit: Option<Option<String>> = None;
     let (memory_mode, volatile_prefix) = if ctx.hindsight.is_some() {
         let cache_key = format!("{}:{}", chat_id, eff_thread_id);
         let cached = if let Some(ref cache) = ctx.prefetch_cache {
@@ -2856,11 +2899,8 @@ async fn invoke_cc(
         let prev_marker = ctx.memory_status_last.get(&session_key).map(|r| r.clone());
         let (emit_marker, new_last) =
             edge_memory_marker(prev_marker.as_deref(), cur_marker.as_deref());
-        if let Some(marker) = new_last {
-            ctx.memory_status_last.insert(session_key, marker);
-        } else {
-            ctx.memory_status_last.remove(&session_key);
-        }
+        // Defer the commit until the marker reaches stdin (see below).
+        pending_memory_status_commit = Some(new_last);
 
         (
             Some(crate::cc::prompt::MemoryMode::Hindsight),
@@ -2902,14 +2942,23 @@ async fn invoke_cc(
                 topic_id,
             } => {
                 let topic_name = match topic_id {
-                    Some(tid) => right_db::forum_topics::list(&conn, *id)
-                        .await
-                        .ok()
-                        .and_then(|rows| {
-                            rows.into_iter()
-                                .find(|r| r.message_thread_id == *tid)
-                                .and_then(|r| r.name)
-                        }),
+                    Some(tid) => match right_db::forum_topics::list(&conn, *id).await {
+                        Ok(rows) => rows
+                            .into_iter()
+                            .find(|r| r.message_thread_id == *tid)
+                            .and_then(|r| r.name),
+                        // Best-effort: topic name is cosmetic context, so a
+                        // lookup failure must not fail the turn — but log it
+                        // rather than swallowing it silently.
+                        Err(e) => {
+                            tracing::warn!(
+                                chat_id = *id,
+                                topic_id = *tid,
+                                "chat-context: forum_topics::list failed, omitting topic name: {e:#}"
+                            );
+                            None
+                        }
+                    },
                     None => None,
                 };
                 let input = crate::cc::prompt::ChatContextInput {
@@ -3164,6 +3213,9 @@ async fn invoke_cc(
 
     let mut timed_out = false;
     let mut stopped = false;
+    // Set once stdin (carrying the volatile prefix's memory-status marker) is
+    // fully written; gates the deferred edge-trigger commit below.
+    let mut input_delivered = false;
 
     // Write input to stdin, then drop to signal EOF.
     if let Some(mut stdin) = child.stdin() {
@@ -3205,9 +3257,20 @@ async fn invoke_cc(
                     }
                     return Err(format_error_reply(-1, &format!("stdin write failed: {:#}", e)).into());
                 }
+                input_delivered = true;
             }
         }
     }
+
+    // The memory-status marker is now in the agent's stdin, so commit the
+    // edge-trigger state. If we never got here (early return / cancellation),
+    // the state stays unchanged and the marker re-emits on the next turn.
+    commit_memory_status_edge_state(
+        ctx.memory_status_last.as_ref(),
+        session_key,
+        input_delivered,
+        pending_memory_status_commit.take(),
+    );
 
     let visibility_key = (chat_id, eff_thread_id);
     let fallback_expanded = super::initial_thinking_visibility(ctx.show_thinking, is_group);
@@ -4743,6 +4806,44 @@ esac
         assert_eq!(last, None);
         let (emit2, _) = edge_memory_marker(None, None);
         assert_eq!(emit2, None);
+    }
+
+    #[test]
+    fn edge_marker_retain_errors_clearing_is_silent_not_recovered() {
+        // The retain-errors marker is a Healthy-state info marker; its clearing
+        // must NOT announce a provider recovery (the provider was never down).
+        let retain = "<memory-status>retain-errors: 3 records dropped \
+                      in last 24h due to bad payload — check logs</memory-status>";
+        let (emit, last) = edge_memory_marker(Some(retain), None);
+        assert_eq!(emit, None, "retain-errors clearing must be silent");
+        assert_eq!(last, None);
+    }
+
+    #[test]
+    fn memory_status_edge_state_commits_only_after_input_delivery() {
+        let memory_status_last = DashMap::new();
+        let key = (42, 0);
+        let marker = "<memory-status>degraded</memory-status>".to_string();
+
+        commit_memory_status_edge_state(
+            &memory_status_last,
+            key,
+            false,
+            Some(Some(marker.clone())),
+        );
+        assert!(memory_status_last.get(&key).is_none());
+
+        commit_memory_status_edge_state(&memory_status_last, key, true, Some(Some(marker.clone())));
+        assert_eq!(
+            memory_status_last.get(&key).map(|v| v.clone()),
+            Some(marker)
+        );
+
+        commit_memory_status_edge_state(&memory_status_last, key, false, Some(None));
+        assert!(memory_status_last.get(&key).is_some());
+
+        commit_memory_status_edge_state(&memory_status_last, key, true, Some(None));
+        assert!(memory_status_last.get(&key).is_none());
     }
 
     // extract_auth_url tests

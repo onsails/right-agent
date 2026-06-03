@@ -136,7 +136,7 @@ missing the tool returns an actionable error to relay.
 
 ## Message Input Format
 
-Stdin is either plain text or YAML with a `messages:` root key. Beyond the obvious fields (`id`, `ts`, `author`, `chat`, `text`):
+Stdin is either plain text or YAML with a `messages:` root key. The chat and partner identity live in the `## Current Conversation` system-prompt section, not in each message; per-message fields are `id`, `ts`, `text`, and (groups only) `author` for speaker attribution. Beyond those:
 
 - `reply_to_id` / `reply_to` — Telegram reply chain (id + full block of replied-to message: author, text, attachments).
 - `quoted_text` — user-selected partial-quote substring of the replied-to text.
