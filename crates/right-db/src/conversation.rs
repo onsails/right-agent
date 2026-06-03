@@ -231,6 +231,58 @@ pub async fn search_chat(
     .await
 }
 
+/// A message fetched by id for on-demand reply recovery.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FetchedMessage {
+    pub message_id: Option<i32>,
+    pub sender_name: Option<String>,
+    pub text: String,
+    pub role: String,
+}
+
+/// Fetch archived messages by telegram message id, scoped to one
+/// `(chat_id, thread_id)`. Ids outside the scope or not archived are absent
+/// from the result. Empty `message_ids` returns an empty Vec.
+pub async fn fetch_by_ids(
+    conn: &Connection,
+    platform: &str,
+    chat_id: i64,
+    thread_id: i64,
+    message_ids: &[i32],
+) -> Result<Vec<FetchedMessage>> {
+    if message_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(message_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT message_id, sender_name, content, role
+         FROM conversation_messages
+         WHERE platform = ? AND chat_id = ? AND thread_id = ?
+           AND message_id IN ({placeholders})
+         ORDER BY message_id ASC"
+    );
+    let mut params = crate::params::ParamsBuilder::new();
+    params.push(platform)?;
+    params.push(chat_id)?;
+    params.push(thread_id)?;
+    for id in message_ids {
+        params.push(*id)?;
+    }
+    conn.query_all(&sql, params, fetched_from_row).await
+}
+
+fn fetched_from_row(row: &crate::row::Row<'_>) -> Result<FetchedMessage> {
+    Ok(FetchedMessage {
+        message_id: row.get(0)?,
+        sender_name: row.get(1)?,
+        text: row.get(2)?,
+        role: row.get(3)?,
+    })
+}
+
 fn trimmed_content(content: &str) -> Result<&str> {
     let content = content.trim();
     if content.is_empty() {
@@ -391,6 +443,37 @@ mod tests {
             role: ConversationRole::User,
             content,
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_by_ids_returns_matching_scoped_messages() {
+        let conn = migrated_connection().await;
+        archive_message(&conn, user_message(100, 10, 25, "hello"))
+            .await
+            .unwrap();
+        archive_message(&conn, user_message(100, 10, 26, "world"))
+            .await
+            .unwrap();
+        archive_message(&conn, user_message(100, 99, 27, "other thread"))
+            .await
+            .unwrap();
+
+        let rows = fetch_by_ids(&conn, "telegram", 100, 10, &[25, 26, 27, 999])
+            .await
+            .unwrap();
+
+        let ids: Vec<Option<i32>> = rows.iter().map(|r| r.message_id).collect();
+        // 27 is in thread 99 (out of scope); 999 does not exist.
+        assert_eq!(ids, vec![Some(25), Some(26)]);
+        assert_eq!(rows[0].text, "hello");
+        assert_eq!(rows[0].role, "user");
+    }
+
+    #[tokio::test]
+    async fn fetch_by_ids_empty_input_returns_empty() {
+        let conn = migrated_connection().await;
+        let rows = fetch_by_ids(&conn, "telegram", 100, 10, &[]).await.unwrap();
+        assert!(rows.is_empty());
     }
 
     #[tokio::test]
