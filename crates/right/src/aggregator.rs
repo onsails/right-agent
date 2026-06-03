@@ -480,7 +480,7 @@ impl ToolDispatcher {
     }
 
     /// Merge tool lists from all backends for a given agent.
-    pub(crate) fn tools_list(&self, agent_name: &str) -> Vec<Tool> {
+    pub(crate) async fn tools_list(&self, agent_name: &str) -> Vec<Tool> {
         let Some(registry) = self.agents.get(agent_name) else {
             return Vec::new();
         };
@@ -494,24 +494,27 @@ impl ToolDispatcher {
         // Add rightmeta__mcp_list
         tools.push(BackendRegistry::mcp_list_tool_def());
 
-        // Add prefixed proxy tools. Use try_read to avoid blocking in sync context.
-        let Some(proxies) = registry.proxies.try_read().ok() else {
-            return tools;
+        let proxies = Arc::clone(&registry.proxies);
+        drop(registry);
+
+        let proxy_handles: Vec<(String, Arc<ProxyBackend>)> = {
+            let proxies = proxies.read().await;
+            proxies
+                .iter()
+                .map(|(proxy_name, handle)| (proxy_name.clone(), Arc::clone(handle)))
+                .collect()
         };
-        for (proxy_name, handle) in proxies.iter() {
-            // We read the tools using try_read on the internal lock via a
-            // synchronous accessor. tools_list is not async to keep the
-            // ServerHandler impl simple. Fallback: skip if lock is contended.
-            if let Some(proxy_tools) = handle.try_tools() {
-                for t in proxy_tools.iter() {
-                    let prefixed_name = format!("{proxy_name}__{}", t.name);
-                    let mut prefixed = t.clone();
-                    prefixed.name = Cow::Owned(prefixed_name);
-                    tools.push(prefixed);
-                }
+
+        // Await proxy caches for a complete list; sort for canonical order.
+        for (proxy_name, handle) in proxy_handles {
+            for t in handle.tools().await {
+                let mut prefixed = t.clone();
+                prefixed.name = Cow::Owned(format!("{proxy_name}__{}", t.name));
+                tools.push(prefixed);
             }
         }
 
+        tools.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()));
         tools
     }
 }
@@ -633,7 +636,7 @@ impl rmcp::ServerHandler for Aggregator {
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         async move {
             let agent = Self::agent_from_context(&context)?;
-            let tools = self.dispatcher.tools_list(&agent.name);
+            let tools = self.dispatcher.tools_list(&agent.name).await;
             Ok(ListToolsResult {
                 tools,
                 next_cursor: None,
@@ -850,15 +853,14 @@ mod tests {
 
     // ---- tools_list tests ----
 
-    #[test]
-    fn tools_list_includes_right_and_meta() {
+    #[tokio::test]
+    async fn tools_list_includes_right_and_meta() {
         let tmp = tempfile::tempdir().unwrap();
         let dispatcher = make_dispatcher(tmp.path());
 
-        let tools = dispatcher.tools_list("test-agent");
+        let tools = dispatcher.tools_list("test-agent").await;
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
 
-        // RightBackend tools present (unprefixed)
         assert!(names.contains(&"cron_create"), "missing cron_create");
         assert!(
             names.contains(&crate::progress::SEND_PROGRESS_TOOL),
@@ -867,11 +869,25 @@ mod tests {
         assert!(names.contains(&"thread_search"), "missing thread_search");
         assert!(names.contains(&"chat_search"), "missing chat_search");
         assert!(names.contains(&"bootstrap_done"), "missing bootstrap_done");
-
-        // Meta tool present
         assert!(
             names.contains(&"rightmeta__mcp_list"),
             "missing rightmeta__mcp_list"
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_list_is_sorted_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dispatcher = make_dispatcher(tmp.path());
+
+        let tools = dispatcher.tools_list("test-agent").await;
+        let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(
+            names, sorted,
+            "advertised tools must be in canonical (sorted) order"
         );
     }
 
