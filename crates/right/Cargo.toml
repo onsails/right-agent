@@ -1,5 +1,6 @@
 [package]
 name = "right"
+# The workspace version is the single release line for Right Agent crates.
 version.workspace = true
 edition.workspace = true
 
