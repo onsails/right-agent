@@ -62,6 +62,10 @@ pub struct CronCreateParams {
         description = "Optional supergroup topic (message_thread_id). Set only when the cron should reply to a specific topic; leave unset for ordinary chat delivery."
     )]
     pub target_thread_id: Option<i64>,
+    #[schemars(
+        description = "Model tier for this cron, chosen by complexity: 'haiku' (trivial request-and-format), 'sonnet' (mechanical multi-step — the usual choice), 'opus' (complex reasoning/research). Omit to inherit the agent's current /model. See the right-cron skill for the full heuristic."
+    )]
+    pub model: Option<CronModel>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -94,6 +98,11 @@ pub struct CronUpdateParams {
     )]
     #[serde(default, deserialize_with = "deserialize_double_option_i64")]
     pub target_thread_id: Option<Option<i64>>,
+    #[schemars(
+        description = "New model tier ('haiku'|'sonnet'|'opus'). Pass null to clear back to inheriting the agent's /model. Omit to leave unchanged."
+    )]
+    #[serde(default, deserialize_with = "deserialize_double_option_cron_model")]
+    pub model: Option<Option<CronModel>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -159,6 +168,39 @@ where
     D: Deserializer<'de>,
 {
     Option::<i64>::deserialize(deserializer).map(Some)
+}
+
+/// Per-cron model tier chosen by the creating session. Mapped to the bare CC
+/// alias and passed straight to `--model`. Kept local to this module per the
+/// project's "no central registries" convention (`feedback_no_central_registries`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CronModel {
+    Haiku,
+    Sonnet,
+    Opus,
+}
+
+impl CronModel {
+    pub fn as_alias(self) -> &'static str {
+        match self {
+            Self::Haiku => "haiku",
+            Self::Sonnet => "sonnet",
+            Self::Opus => "opus",
+        }
+    }
+}
+
+/// Distinguish "field absent" (`None`) from "explicit null" (`Some(None)`) for
+/// the nullable `model` on `cron_update`, so the agent can clear it back to
+/// inherit-global. Mirrors `deserialize_double_option_i64`.
+fn deserialize_double_option_cron_model<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<CronModel>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<CronModel>::deserialize(deserializer).map(Some)
 }
 
 // --- Server struct ---
@@ -637,7 +679,7 @@ mod mcp_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::CronTriggerParams;
+    use super::{CronCreateParams, CronTriggerParams, CronUpdateParams};
 
     #[test]
     fn cron_trigger_params_notify_defaults_false() {
@@ -676,5 +718,35 @@ mod tests {
             "cron_trigger #[tool(description = ...)] literal must equal \
              right_agent::cron_spec::TRIGGER_TOOL_DESC verbatim"
         );
+    }
+
+    #[test]
+    fn cron_create_params_parse_model_enum() {
+        let p: CronCreateParams = serde_json::from_value(serde_json::json!({
+            "job_name": "j", "schedule": "17 9 * * *", "prompt": "p",
+            "target_chat_id": 1, "model": "sonnet"
+        }))
+        .unwrap();
+        assert_eq!(p.model.map(|m| m.as_alias()), Some("sonnet"));
+
+        let p_none: CronCreateParams = serde_json::from_value(serde_json::json!({
+            "job_name": "j", "schedule": "17 9 * * *", "prompt": "p", "target_chat_id": 1
+        }))
+        .unwrap();
+        assert!(p_none.model.is_none());
+    }
+
+    #[test]
+    fn cron_update_params_model_double_option() {
+        let omit: CronUpdateParams =
+            serde_json::from_value(serde_json::json!({ "job_name": "j" })).unwrap();
+        assert!(omit.model.is_none());
+        let clear: CronUpdateParams =
+            serde_json::from_value(serde_json::json!({ "job_name": "j", "model": null })).unwrap();
+        assert_eq!(clear.model, Some(None));
+        let set: CronUpdateParams =
+            serde_json::from_value(serde_json::json!({ "job_name": "j", "model": "haiku" }))
+                .unwrap();
+        assert_eq!(set.model.flatten().map(|m| m.as_alias()), Some("haiku"));
     }
 }
