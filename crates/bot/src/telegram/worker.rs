@@ -1385,14 +1385,16 @@ pub fn spawn_worker(
                 cc_usage,
                 cc_wall_elapsed_ms,
             ) = match invoke_cc(
-                &input,
-                first_text,
-                chat_id,
-                eff_thread_id,
-                is_group,
-                &routed_message_ids,
-                &trigger_chat,
-                &trigger_author,
+                InvokeCcRequest {
+                    input: &input,
+                    first_text,
+                    chat_id,
+                    eff_thread_id,
+                    is_group,
+                    routed_message_ids: &routed_message_ids,
+                    chat: &trigger_chat,
+                    author: &trigger_author,
+                },
                 &ctx,
             )
             .await
@@ -2379,6 +2381,17 @@ pub(crate) struct CcReply {
     pub(crate) wall_elapsed_ms: u64,
 }
 
+struct InvokeCcRequest<'a> {
+    input: &'a str,
+    first_text: Option<&'a str>,
+    chat_id: i64,
+    eff_thread_id: i64,
+    is_group: bool,
+    routed_message_ids: &'a [i32],
+    chat: &'a super::attachments::ChatContext,
+    author: &'a super::attachments::MessageAuthor,
+}
+
 #[derive(Debug)]
 struct ActiveProgressInvocation {
     invocation_id: String,
@@ -2640,16 +2653,20 @@ async fn remove_sandbox_progress_config_file(
 /// handoff). Returns `Err(InvokeCcFailure)` for subprocess failures, parse
 /// failures, or other conditions that require an error reply.
 async fn invoke_cc(
-    input: &str,
-    first_text: Option<&str>,
-    chat_id: i64,
-    eff_thread_id: i64,
-    is_group: bool,
-    routed_message_ids: &[i32],
-    chat: &super::attachments::ChatContext,
-    author: &super::attachments::MessageAuthor,
+    req: InvokeCcRequest<'_>,
     ctx: &WorkerContext,
 ) -> Result<CcReply, InvokeCcFailure> {
+    let InvokeCcRequest {
+        input,
+        first_text,
+        chat_id,
+        eff_thread_id,
+        is_group,
+        routed_message_ids,
+        chat,
+        author,
+    } = req;
+
     let conn = right_db::open_connection(&ctx.agent_dir, false)
         .await
         .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
@@ -2850,13 +2867,13 @@ async fn invoke_cc(
             crate::cc::prompt::build_volatile_prefix(
                 recall_content.as_deref(),
                 emit_marker.as_deref(),
-                repair_notice.as_deref(),
+                repair_notice,
             ),
         )
     } else {
         (
             Some(crate::cc::prompt::MemoryMode::File),
-            crate::cc::prompt::build_volatile_prefix(None, None, repair_notice.as_deref()),
+            crate::cc::prompt::build_volatile_prefix(None, None, repair_notice),
         )
     };
 
