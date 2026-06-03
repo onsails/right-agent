@@ -2,10 +2,10 @@
 
 /// Memory injection mode for prompt assembly.
 pub(crate) enum MemoryMode {
-    /// Inject MEMORY.md from agent directory.
+    /// Inject MEMORY.md from agent directory (file mode).
     File,
-    /// Inject composite memory file written by bot (Hindsight recall results).
-    Hindsight { composite_memory_path: String },
+    /// Hindsight mode - recall is injected on the user message, not here.
+    Hindsight,
 }
 
 /// Which composite prompt body to assemble.
@@ -166,6 +166,7 @@ pub(crate) fn build_prompt_assembly_script(
     claude_args: &[String],
     mcp_instructions: Option<&str>,
     memory_mode: Option<&MemoryMode>,
+    chat_context: Option<&str>,
 ) -> String {
     let escaped_base = base_prompt.replace('\'', "'\\''");
     let escaped_args: Vec<String> = claude_args.iter().map(|a| shell_escape(a)).collect();
@@ -233,20 +234,21 @@ if [ -s {root_path}/MEMORY.md ]; then
 fi"#
                 )
             }
-            Some(MemoryMode::Hindsight {
-                composite_memory_path,
-            }) => format!(
-                r#"
-if [ -s {composite_memory_path} ]; then
-  cat {composite_memory_path}
-fi"#
-            ),
+            Some(MemoryMode::Hindsight) => String::new(),
             None => String::new(),
         }
     };
 
+    let chat_context_section = match chat_context {
+        Some(ctx) if !ctx.trim().is_empty() => {
+            let escaped = ctx.replace('\'', "'\\''");
+            format!("\nprintf '\\n'\nprintf '%s\\n' '{escaped}'")
+        }
+        _ => String::new(),
+    };
+
     format!(
-        "{sandbox_env_prelude}\n{{ printf '{escaped_base}'\n{file_sections}\n{mcp_section}\n{memory_section}\n}} > {prompt_file}\ncd {workdir} && {claude_cmd} --system-prompt-file {prompt_file}"
+        "{sandbox_env_prelude}\n{{ printf '{escaped_base}'\n{file_sections}\n{chat_context_section}\n{mcp_section}\n{memory_section}\n}} > {prompt_file}\ncd {workdir} && {claude_cmd} --system-prompt-file {prompt_file}"
     )
 }
 

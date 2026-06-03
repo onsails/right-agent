@@ -11,6 +11,7 @@ fn test_script(base: &str, mode: PromptMode, args: &[String], mcp: Option<&str>)
         args,
         mcp,
         None,
+        None,
     )
 }
 
@@ -116,6 +117,7 @@ async fn script_custom_paths() {
         &["claude".into(), "-p".into()],
         None,
         None,
+        None,
     );
     assert!(
         script.contains("/home/agent/IDENTITY.md"),
@@ -140,6 +142,7 @@ async fn script_bootstrap_mode_same_regardless_of_paths() {
         "/home/agent/.claude/composite-system-prompt.md",
         "/home/agent",
         &["claude".into()],
+        None,
         None,
         None,
     );
@@ -185,6 +188,7 @@ async fn script_mcp_instructions_with_custom_paths() {
         "/home/agent",
         &["claude".into()],
         Some("# MCP Server Instructions\n\n## notion\n\nNotion tools.\n"),
+        None,
         None,
     );
     assert!(script.contains("MCP Server Instructions"));
@@ -239,6 +243,7 @@ async fn script_includes_memory_section_for_file_mode() {
         &["claude".into()],
         None,
         Some(&MemoryMode::File),
+        None,
     );
     assert!(
         script.contains("MEMORY.md"),
@@ -252,25 +257,36 @@ async fn script_includes_memory_section_for_file_mode() {
 }
 
 #[tokio::test]
-async fn script_includes_composite_memory_for_hindsight_mode() {
-    let hs_mode = MemoryMode::Hindsight {
-        composite_memory_path: "/sandbox/.claude/composite-memory.md".to_owned(),
-    };
+async fn script_hindsight_mode_emits_no_memory_section() {
     let script = build_prompt_assembly_script(
         "Base",
         PromptMode::Normal,
         "/sandbox",
         "/tmp/right-system-prompt.md",
         "/sandbox",
-        &["claude".into()],
+        &["claude".into(), "-p".into()],
         None,
-        Some(&hs_mode),
+        Some(&MemoryMode::Hindsight),
+        Some("## Current Conversation\nchat_id: 1\nkind: dm\n"),
     );
-    assert!(
-        script.contains("composite-memory.md"),
-        "must reference composite-memory"
+    assert!(!script.contains("composite-memory.md"));
+    assert!(script.contains("## Current Conversation"));
+}
+
+#[tokio::test]
+async fn script_file_mode_still_emits_memory_md() {
+    let script = build_prompt_assembly_script(
+        "Base",
+        PromptMode::Normal,
+        "/sandbox",
+        "/tmp/right-system-prompt.md",
+        "/sandbox",
+        &["claude".into(), "-p".into()],
+        None,
+        Some(&MemoryMode::File),
+        None,
     );
-    assert!(script.contains("if [ -s"), "must check file exists");
+    assert!(script.contains("MEMORY.md"));
 }
 
 #[tokio::test]
@@ -282,6 +298,7 @@ async fn script_no_memory_section_when_none() {
         "/tmp/right-system-prompt.md",
         "/sandbox",
         &["claude".into()],
+        None,
         None,
         None,
     );
@@ -300,6 +317,7 @@ async fn script_memory_section_is_last() {
         &["claude".into()],
         Some("# MCP Instructions\n\n## composio\n"),
         Some(&MemoryMode::File),
+        None,
     );
     let mcp_pos = script.rfind("MCP").unwrap();
     let memory_pos = script.rfind("MEMORY.md").unwrap();
@@ -320,6 +338,7 @@ async fn script_file_mode_wraps_memory_md_with_ironclaw_markers() {
         &["claude".into()],
         None,
         Some(&MemoryMode::File),
+        None,
     );
     assert!(
         script.contains("BEGIN EXTERNAL CONTENT"),
@@ -368,6 +387,7 @@ async fn script_file_mode_sed_escape_produces_actual_zwsp_at_runtime() {
         &["true".into()], // safe no-op claude_args; we only inspect prompt output
         None,
         Some(&MemoryMode::File),
+        None,
     );
 
     // Run the script up through the prompt-file production. The script
@@ -422,6 +442,7 @@ async fn script_bootstrap_no_memory() {
         &["claude".into()],
         None,
         Some(&MemoryMode::File),
+        None,
     );
     assert!(
         !script.contains("MEMORY.md"),
@@ -487,46 +508,6 @@ async fn deploy_composite_memory_preserves_background_marker_unwrapped() {
     assert!(body.contains("<memory-status>healthy</memory-status>"));
     assert!(body.contains("<background-jobs>running task</background-jobs>"));
     assert!(!body.contains("<system-notification>"));
-}
-
-#[tokio::test]
-async fn composite_memory_section_is_last_in_assembled_script() {
-    // With a hindsight-like memory_mode, the memory block must be the final
-    // appended section of the prompt-assembly script to preserve cache.
-    let script = build_prompt_assembly_script(
-        "Base",
-        PromptMode::Normal,
-        "/sandbox",
-        "/tmp/prompt.md",
-        "/sandbox",
-        &["claude".into(), "-p".into()],
-        None,
-        Some(&MemoryMode::Hindsight {
-            composite_memory_path: "/sandbox/.claude/composite-memory.md".into(),
-        }),
-    );
-
-    // Find the position of the last }-closing-brace before the `>` redirect.
-    let redirect_pos = script.rfind("} >").expect("redirect must exist");
-    let head = &script[..redirect_pos];
-
-    // Anything that would bust the cache (other sections like TOOLS.md,
-    // MCP instructions) must appear BEFORE the composite-memory section.
-    let memory_pos = head
-        .rfind("composite-memory.md")
-        .expect("composite-memory.md must appear");
-    let tools_pos = head.find("TOOLS.md");
-    let mcp_pos = head.find("# MCP Server Instructions");
-
-    if let Some(tp) = tools_pos {
-        assert!(tp < memory_pos, "TOOLS.md must precede composite-memory.md");
-    }
-    if let Some(mp) = mcp_pos {
-        assert!(
-            mp < memory_pos,
-            "MCP instructions must precede composite-memory.md"
-        );
-    }
 }
 
 #[tokio::test]
@@ -629,6 +610,7 @@ async fn cron_mode_does_not_emit_memory_section_when_memory_mode_none() {
         &["claude".into()],
         None,
         None, // cron callsites always pass None today
+        None,
     );
     assert!(
         !script.contains("MEMORY.md"),
@@ -649,6 +631,7 @@ async fn sandbox_script_sources_user_local_env_before_claude() {
         "/tmp/right-system-prompt.md",
         "/sandbox",
         &["claude".into(), "-p".into()],
+        None,
         None,
         None,
     );
@@ -684,6 +667,7 @@ async fn no_sandbox_script_does_not_reference_sandbox_user_local_env() {
         "/Users/example/.right/agents/demo/.claude/prompt.md",
         "/Users/example/.right/agents/demo",
         &["claude".into(), "-p".into()],
+        None,
         None,
         None,
     );
