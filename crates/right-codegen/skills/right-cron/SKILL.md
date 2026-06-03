@@ -5,7 +5,7 @@ description: >-
   and deletes cron specs stored in the agent database. The Rust runtime handles
   scheduling and execution automatically. Use when the user mentions cron
   jobs, scheduled tasks, reminders, one-shot tasks, or recurring tasks.
-version: 3.4.0
+version: 3.5.0
 ---
 
 # /right-cron -- Cron Job Manager
@@ -97,6 +97,28 @@ agent to look for an external messaging tool.
 @username is fine as plain text — it ends up in the delivered
 message and Telegram renders it as a mention. Don't strip the user's
 content or schedule; only rephrase the delivery-imperative verbs.
+
+## Choosing the Model
+
+The session that creates a cron picks that cron's model by judging the task's
+complexity — the runtime never decides for you. Set `model:` on `cron_create`
+(and `cron_update`) deliberately:
+
+- **`haiku`** — trivial: one request or tool call plus mechanical formatting of
+  the result (fetch a page, extract a field, report it). No reasoning, no
+  multi-step decisions.
+- **`sonnet`** — mechanical multi-step with light judgment: health checks,
+  summaries, scheduled briefings, status polls. **This is the right default for
+  most crons.**
+- **`opus`** — genuinely complex: multi-source research, nuanced analysis,
+  anything you'd want your strongest model for.
+
+Omit `model` only when you deliberately want the cron to track the agent's
+current `/model`. Otherwise set it explicitly — a mechanical cron left on an
+Opus global wastes budget and latency.
+
+To change a cron's model later: `mcp__right__cron_update(job_name: "...", model: "sonnet")`.
+Pass `model: null` to clear it back to inheriting the agent's `/model`.
 
 ## Editing a Cron Job
 
@@ -194,6 +216,7 @@ Returns: job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at
 | `prompt` | string | Yes | - | The task prompt that Claude executes when the cron fires. |
 | `lock_ttl` | string | No | `30m` | Duration after which a lock is considered stale (e.g. `10m`, `1h`). |
 | `max_budget_usd` | number | No | `2.0` | Maximum dollar spend per invocation. Claude stops gracefully when budget is reached. |
+| `model` | enum | No | inherit | `haiku` \| `sonnet` \| `opus`. Picks the model for this cron by complexity (see "Choosing the Model"). Omit to inherit the agent's current `/model`. |
 | `target_chat_id` | integer | No | - | Telegram chat ID to deliver cron notifications to. See guidance below. |
 | `target_thread_id` | integer | No | - | Message thread ID within a supergroup topic. Only relevant when `target_chat_id` is a supergroup with topics enabled. |
 
