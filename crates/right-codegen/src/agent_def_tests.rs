@@ -236,7 +236,7 @@ fn operating_instructions_document_inbound_reply_metadata() {
         "`reply_to_id` is the target id",
         "`reply_to` includes author",
         "inline text/attachments",
-        "fetch note when an archived/recoverable body is omitted",
+        "fetch note when archived/recoverable text-only body content is omitted",
     ] {
         assert!(
             ops.contains(needle),

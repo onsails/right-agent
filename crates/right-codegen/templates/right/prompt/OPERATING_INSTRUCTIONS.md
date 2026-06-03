@@ -138,7 +138,7 @@ missing the tool returns an actionable error to relay.
 
 Stdin is either plain text or YAML with a `messages:` root key. The chat and partner identity live in the `## Current Conversation` system-prompt section, not in each message; per-message fields are `id`, `ts`, `text`, and (groups only) `author` for speaker attribution. Beyond those:
 
-- `reply_to_id` / `reply_to` — Telegram reply chain. `reply_to_id` is the target id; `reply_to` includes author and may include inline text/attachments, or a fetch note when an archived/recoverable body is omitted.
+- `reply_to_id` / `reply_to` — Telegram reply chain. `reply_to_id` is the target id; `reply_to` includes author and may include inline text/attachments, or a fetch note when archived/recoverable text-only body content is omitted.
 - `quoted_text` — user-selected partial-quote substring of the replied-to text.
 - `attachments[*].path` — absolute path; Read the file to view it. Inbound files live in `inbox/`.
 - `attachments[*].type` — one of: photo, document, video, audio, voice, video_note, sticker, animation.
