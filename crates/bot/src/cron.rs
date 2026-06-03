@@ -2349,6 +2349,7 @@ mod tests {
             trigger_force_notify: false,
             target_chat_id: None,
             target_thread_id: None,
+            model: None,
         };
         let recurring = CronSpec {
             schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
@@ -2555,6 +2556,7 @@ mod tests {
             trigger_force_notify: false,
             target_chat_id: Some(-100),
             target_thread_id: Some(3),
+            model: None,
         };
         insert_running_run(
             &conn,
@@ -2610,6 +2612,7 @@ mod tests {
             trigger_force_notify: false,
             target_chat_id: Some(-100),
             target_thread_id: None,
+            model: None,
         };
         insert_running_run(
             &conn,
@@ -2931,6 +2934,7 @@ mod target_snapshot_tests {
             trigger_force_notify: false,
             target_chat_id: Some(-777),
             target_thread_id: Some(13),
+            model: None,
         };
         insert_running_run(
             &conn,
@@ -2966,6 +2970,7 @@ mod target_snapshot_tests {
             trigger_force_notify: false,
             target_chat_id: None,
             target_thread_id: None,
+            model: None,
         };
         insert_running_run(
             &conn,
@@ -3001,6 +3006,7 @@ mod target_snapshot_tests {
             trigger_force_notify: false,
             target_chat_id: Some(-777),
             target_thread_id: Some(13),
+            model: None,
         };
         insert_running_run(
             &conn,
@@ -3045,6 +3051,7 @@ mod target_snapshot_tests {
             trigger_force_notify: false,
             target_chat_id: None,
             target_thread_id: None,
+            model: None,
         };
         insert_running_run(
             &conn,
