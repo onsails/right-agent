@@ -116,6 +116,27 @@ fn system_prompt_mentions_right_mcp() {
 }
 
 #[test]
+fn system_prompt_requires_acting_over_promising() {
+    let result = generate_system_prompt(
+        "test",
+        &right_agent_config::SandboxMode::Openshell,
+        "/sandbox",
+    );
+
+    for needle in [
+        "A turn is work done, then reported.",
+        "promises an action you can take",
+        "the turn is unfinished",
+        "scheduling a cron in the same turn",
+    ] {
+        assert!(
+            result.contains(needle),
+            "base prompt must require acting over promising: missing {needle:?}"
+        );
+    }
+}
+
+#[test]
 fn system_prompt_keeps_identity_framing_without_remember_routing() {
     let result = generate_system_prompt(
         "test",
