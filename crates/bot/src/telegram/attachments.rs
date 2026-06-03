@@ -408,8 +408,8 @@ pub struct ReplyToBody {
     pub author: MessageAuthor,
     pub text: Option<String>,
     pub attachments: Vec<ResolvedAttachment>,
-    /// True when the body was stripped (recoverable from the archive); the
-    /// YAML then emits author + a fetch note instead of text/attachments.
+    /// True when text-only body content was stripped from YAML because it is
+    /// recoverable from the archive; resolved attachments stay inline.
     pub omitted: bool,
 }
 

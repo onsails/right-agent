@@ -1017,6 +1017,9 @@ async fn strip_recoverable_reply_to_body(
 ) -> Option<super::attachments::ReplyToBody> {
     match (reply_to_id, reply_to_body) {
         (Some(reply_to_id), Some(mut body)) if !body.omitted => {
+            if !body.attachments.is_empty() {
+                return Some(body);
+            }
             let recoverable = match right_db::open_connection(agent_dir, false).await {
                 Ok(conn) => match right_db::conversation::fetch_by_ids(
                     &conn,
@@ -5278,7 +5281,11 @@ esac
         assert_eq!(input.quoted_text.as_deref(), Some("selected fragment"));
     }
 
-    fn reply_body(text: &str, omitted: bool) -> super::super::attachments::ReplyToBody {
+    fn reply_body(
+        text: &str,
+        omitted: bool,
+        attachments: Vec<super::super::attachments::ResolvedAttachment>,
+    ) -> super::super::attachments::ReplyToBody {
         super::super::attachments::ReplyToBody {
             author: super::super::attachments::MessageAuthor {
                 name: "Alice".into(),
@@ -5286,13 +5293,17 @@ esac
                 user_id: Some(9001),
             },
             text: Some(text.into()),
-            attachments: vec![super::super::attachments::ResolvedAttachment {
-                kind: super::super::attachments::AttachmentKind::Document,
-                path: PathBuf::from("/sandbox/inbox/reply.pdf"),
-                mime_type: "application/pdf".into(),
-                filename: Some("reply.pdf".into()),
-            }],
+            attachments,
             omitted,
+        }
+    }
+
+    fn reply_attachment() -> super::super::attachments::ResolvedAttachment {
+        super::super::attachments::ResolvedAttachment {
+            kind: super::super::attachments::AttachmentKind::Document,
+            path: PathBuf::from("/sandbox/inbox/reply.pdf"),
+            mime_type: "application/pdf".into(),
+            filename: Some("reply.pdf".into()),
         }
     }
 
@@ -5329,7 +5340,7 @@ esac
             100,
             7,
             Some(41),
-            Some(reply_body("SECRET INLINE", false)),
+            Some(reply_body("SECRET INLINE", false, vec![])),
         )
         .await
         .unwrap();
@@ -5343,6 +5354,28 @@ esac
     }
 
     #[tokio::test]
+    async fn strip_recoverable_reply_body_keeps_archived_target_with_attachment_inline() {
+        let temp = tempfile::tempdir().unwrap();
+        archive_reply_target(temp.path(), 100, 7, 41).await;
+
+        let kept = strip_recoverable_reply_to_body(
+            temp.path(),
+            100,
+            7,
+            Some(41),
+            Some(reply_body("SECRET INLINE", false, vec![reply_attachment()])),
+        )
+        .await
+        .unwrap();
+
+        assert!(!kept.omitted);
+        assert_eq!(kept.text.as_deref(), Some("SECRET INLINE"));
+        assert_eq!(kept.attachments.len(), 1);
+        assert_eq!(kept.attachments[0].filename.as_deref(), Some("reply.pdf"));
+        assert_eq!(kept.author.name, "Alice");
+    }
+
+    #[tokio::test]
     async fn strip_recoverable_reply_body_keeps_unarchived_target_inline() {
         let temp = tempfile::tempdir().unwrap();
         archive_reply_target(temp.path(), 100, 99, 41).await;
@@ -5352,7 +5385,7 @@ esac
             100,
             7,
             Some(41),
-            Some(reply_body("SECRET INLINE", false)),
+            Some(reply_body("SECRET INLINE", false, vec![reply_attachment()])),
         )
         .await
         .unwrap();
@@ -5377,7 +5410,7 @@ esac
             100,
             7,
             Some(41),
-            Some(reply_body("SECRET INLINE", false)),
+            Some(reply_body("SECRET INLINE", false, vec![reply_attachment()])),
         )
         .await
         .unwrap();
@@ -5399,7 +5432,11 @@ esac
             100,
             7,
             Some(41),
-            Some(reply_body("already omitted", true)),
+            Some(reply_body(
+                "already omitted",
+                true,
+                vec![reply_attachment()],
+            )),
         )
         .await
         .unwrap();
