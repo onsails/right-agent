@@ -233,7 +233,10 @@ fn operating_instructions_document_inbound_reply_metadata() {
         "`reply_to_id` / `reply_to`",
         "`quoted_text`",
         "user-selected partial-quote substring",
-        "full block of replied-to message: author, text, attachments",
+        "`reply_to_id` is the target id",
+        "`reply_to` includes author",
+        "inline text/attachments",
+        "fetch note when an archived/recoverable body is omitted",
     ] {
         assert!(
             ops.contains(needle),

@@ -107,9 +107,10 @@ indexes. Old SQLite FTS index contents are not preserved.
 Conversation transcript search uses Turso FTS indexes over archived Telegram
 messages in `right-db`, not Hindsight. `mcp__right__thread_search` and
 `mcp__right__chat_search` return archived transcript snippets scoped by the
-current foreground Telegram invocation. Use these tools, not
-`mcp__right__memory_recall`, when the user asks what was said or asks for past
-wording.
+current foreground Telegram invocation; `mcp__right__get_messages_by_id`
+fetches exact archived messages by Telegram id in the same scope. Use these
+tools, not `mcp__right__memory_recall`, when the user asks what was said or asks
+for past wording.
 
 The archive records newly observed Telegram messages only. There is no backfill
 from older Telegram history or Claude session JSONL.

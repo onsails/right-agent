@@ -5365,6 +5365,31 @@ esac
     }
 
     #[tokio::test]
+    async fn strip_recoverable_reply_body_keeps_mark_routed_stub_inline() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+        right_db::conversation::mark_routed(&conn, "telegram", 100, 7, 41, "session-abc", 42)
+            .await
+            .unwrap();
+
+        let kept = strip_recoverable_reply_to_body(
+            temp.path(),
+            100,
+            7,
+            Some(41),
+            Some(reply_body("SECRET INLINE", false)),
+        )
+        .await
+        .unwrap();
+
+        assert!(!kept.omitted);
+        assert_eq!(kept.text.as_deref(), Some("SECRET INLINE"));
+        assert_eq!(kept.attachments.len(), 1);
+        assert_eq!(kept.attachments[0].filename.as_deref(), Some("reply.pdf"));
+        assert_eq!(kept.author.name, "Alice");
+    }
+
+    #[tokio::test]
     async fn strip_recoverable_reply_body_keeps_already_omitted_body() {
         let temp = tempfile::tempdir().unwrap();
         archive_reply_target(temp.path(), 100, 7, 41).await;
