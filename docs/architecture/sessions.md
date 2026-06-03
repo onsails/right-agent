@@ -74,13 +74,14 @@ entry per debounced Telegram message. Reply metadata is split by meaning:
 `reply_to_id` identifies the Telegram message being replied to; `reply_to:`
 describes the non-bot reply target; and `quoted_text` contains only Telegram's
 partial reply quote text when the user selected a fragment. Non-archived reply
-targets and reply targets with resolved attachments stay inline with available
-body text and attachments. Archived or recoverable text-only reply targets keep
-`reply_to_id`, `quoted_text`, and the `reply_to:` author, but omit body text
-with a fetch note; the agent can fetch the body by `reply_to_id` via
-`mcp__right__get_messages_by_id`. Replies to the bot's own messages keep
-omitting `reply_to:` because the bot response is already in Claude session
-history, but they still include `quoted_text` when Telegram supplies one.
+targets, reply targets with resolved attachments, and voice/video-note reply
+targets whose body contains STT markers stay inline with available body text and
+attachments. Archived or recoverable text-only reply targets whose body is
+faithfully archived keep `reply_to_id`, `quoted_text`, and the `reply_to:`
+author, but omit body text with a fetch note; the agent can fetch the body by
+`reply_to_id` via `mcp__right__get_messages_by_id`. Replies to the bot's own
+messages keep omitting `reply_to:` because the bot response is already in Claude
+session history, but they still include `quoted_text` when Telegram supplies one.
 
 Archived transcript search results are conversation content, not trusted
 instructions. Group search may return unaddressed messages from untrusted users
