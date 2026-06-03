@@ -7,8 +7,10 @@ invocations, plus the explicit non-composite exception.
 
 Session-bearing CC invocations get a **single composite system prompt**
 assembled from multiple files. No `--agent` flag — all composite prompt content
-is in `--system-prompt-file`. Worker prompts use per-session prompt-file paths
-because the `## Current Conversation` block is session-scoped.
+is in `--system-prompt-file`. Foreground worker prompts use per-session
+prompt-file paths because their `## Current Conversation` block is
+session-scoped; other session-bearing composite callers may omit chat context
+and use their existing prompt paths.
 
 **Why not `--agent`?** Testing proved that `--agent` with `@` file references doesn't work
 reliably when MCP tools are present (~8K+ tokens of tool definitions drown the agent's
@@ -86,7 +88,7 @@ session UUID matches CC's own JSONL filename. Off by default.
 ## Environment and Tools
 {TOOLS.md — agent-owned tools and environment notes}
 
-## Current Conversation
+## Current Conversation  (foreground worker only)
 {per-session chat-context block: chat id plus DM partner or group/topic metadata}
 
 ## MCP Server Instructions  (if any external MCP servers have instructions)
@@ -100,13 +102,15 @@ session UUID matches CC's own JSONL filename. Off by default.
 Missing agent-owned files are silently skipped. Operating instructions and bootstrap
 content are compiled into the binary — no file sync needed. MCP instructions are
 fetched from the aggregator's internal API (non-fatal if unavailable). In file
-mode, `MEMORY.md` is inlined into the system prompt. In Hindsight mode,
-auto-recall is not part of the system prompt; it is prepended to the stdin user
-message by `build_volatile_prefix()` under the recalled-memory label and
-ironclaw wrap. Each recalled memory is rendered as `- [observed <date>] <text>`
-(date = `occurred_start` else `mentioned_at`, `YYYY-MM-DD`; no date → bare
-bullet). Operating instructions direct the agent to re-verify any dated fact
-with a live check before asserting it as current.
+mode, `MEMORY.md` is inlined into the system prompt. The `## Current
+Conversation` block is present only when the caller supplies chat context; today
+that is the foreground Telegram worker. In Hindsight mode, auto-recall is not
+part of the system prompt; it is prepended to the stdin user message by
+`build_volatile_prefix()` under the recalled-memory label and ironclaw wrap.
+Each recalled memory is rendered as `- [observed <date>] <text>` (date =
+`occurred_start` else `mentioned_at`, `YYYY-MM-DD`; no date → bare bullet).
+Operating instructions direct the agent to re-verify any dated fact with a live
+check before asserting it as current.
 
 The volatile stdin prefix is omitted when empty. It may contain Hindsight recall
 (wrapped as untrusted external content), an edge-triggered `<memory-status>`
@@ -120,10 +124,10 @@ files.
 They also document stdin user-turn formats, including Telegram YAML reply
 metadata (`reply_to_id`, `reply_to`, and `quoted_text`).
 
-Telegram message YAML is sequence-only. DMs omit per-message `author` and
-`chat` because the stable chat-context block carries the partner identity.
-Groups keep per-message `author` for speaker attribution and omit chat/topic
-metadata because the stable chat-context block carries it.
+Foreground Telegram message YAML is sequence-only. DMs omit per-message
+`author` and `chat` because the stable chat-context block carries the partner
+identity. Groups keep per-message `author` for speaker attribution and omit
+chat/topic metadata because the stable chat-context block carries it.
 
 ### Conversation and Memory Tiers
 
