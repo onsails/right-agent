@@ -65,10 +65,12 @@ No MCP memory tools.
 
 Session-bearing invocations assemble a composite system prompt with stable
 content: base prompt, operating/bootstrap/cron instructions, identity files,
-TOOLS, per-session `## Current Conversation`, MCP instructions, and file-mode
-`MEMORY.md` only. Worker prompt files are per session because the chat-context
-block is per session. The system prompt is not the home for Hindsight recall,
-memory-status markers, repair notices, or background-job status.
+TOOLS, optional foreground-worker `## Current Conversation`, MCP instructions,
+and file-mode `MEMORY.md` only. Foreground worker prompt files are per session
+because the chat-context block is per session. Other session-bearing composite
+callers may omit chat context and use their existing prompt paths. The system
+prompt is not the home for Hindsight recall, memory-status markers, repair
+notices, or background-job status.
 
 In Hindsight mode, foreground worker recall is rendered by
 `render_recall_with_dates`, ironclaw-wrapped by `build_volatile_prefix`, and
@@ -85,10 +87,10 @@ Quota exhaustion uses this marker to tell the user to top up at
 volatile prefix as `<system-notification>`. The removed `composite-memory.md`
 and `<background-jobs>` marker are not generated.
 
-Telegram message YAML is sequence-only. DMs omit per-message `author` and
-`chat` because `## Current Conversation` carries the partner identity. Groups
-keep per-message `author` for speaker attribution and omit chat/topic metadata
-because the chat-context block carries it.
+Foreground Telegram message YAML is sequence-only. DMs omit per-message
+`author` and `chat` because `## Current Conversation` carries the partner
+identity. Groups keep per-message `author` for speaker attribution and omit
+chat/topic metadata because the chat-context block carries it.
 
 The legacy `store_record` / `query_records` / `search_records` / `delete_record`
 tools are removed from the surface; their backing tables (`memories`,
