@@ -176,11 +176,11 @@ async fn insert_async_run(
 fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
-    // 7 cron + 1 mcp + 1 progress + 2 learning + 2 search + 5 forum + 1 bootstrap = 19
+    // 7 cron + 1 mcp + 1 progress + 2 learning + 3 conversation + 5 forum + 1 bootstrap = 20
     assert_eq!(
         tools.len(),
-        19,
-        "expected 19 tools, got {}: {:?}",
+        20,
+        "expected 20 tools, got {}: {:?}",
         tools.len(),
         tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
     );
@@ -210,8 +210,12 @@ fn tools_list_includes_conversation_search_tools_without_scope_params() {
 
     assert!(names.contains(&"thread_search"), "missing thread_search");
     assert!(names.contains(&"chat_search"), "missing chat_search");
+    assert!(
+        names.contains(&"get_messages_by_id"),
+        "missing get_messages_by_id"
+    );
 
-    for tool_name in ["thread_search", "chat_search"] {
+    for tool_name in ["thread_search", "chat_search", "get_messages_by_id"] {
         let tool = tools
             .iter()
             .find(|tool| tool.name.as_ref() == tool_name)
@@ -221,6 +225,24 @@ fn tools_list_includes_conversation_search_tools_without_scope_params() {
             !json_contains_forbidden_scope_name(&schema),
             "{tool_name} schema exposes forbidden scope fields: {schema}"
         );
+        if tool_name == "get_messages_by_id" {
+            let properties = schema
+                .pointer("/properties")
+                .and_then(serde_json::Value::as_object)
+                .expect("get_messages_by_id schema must expose object properties");
+            let property_names: Vec<&str> = properties.keys().map(String::as_str).collect();
+            assert_eq!(
+                property_names,
+                vec!["message_ids"],
+                "{tool_name} schema must expose only message_ids for agent input: {schema}"
+            );
+            assert!(
+                properties
+                    .get("message_ids")
+                    .is_some_and(serde_json::Value::is_object),
+                "{tool_name} schema must expose message_ids only for agent input: {schema}"
+            );
+        }
     }
 }
 
@@ -434,6 +456,60 @@ async fn thread_search_rejects_agent_supplied_scope_params() {
 }
 
 #[tokio::test]
+async fn get_messages_by_id_without_invocation_scope_returns_tool_error() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "get_messages_by_id",
+            json!({ "message_ids": [1] }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "conversation_scope_unavailable");
+}
+
+#[tokio::test]
+async fn get_messages_by_id_rejects_agent_supplied_scope_params() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+
+    for (field_name, args) in [
+        ("chat_id", json!({ "message_ids": [1], "chat_id": 100 })),
+        ("thread_id", json!({ "message_ids": [1], "thread_id": 7 })),
+    ] {
+        let result = backend
+            .tools_call(
+                "test-agent",
+                &agent_dir,
+                "get_messages_by_id",
+                args,
+                crate::progress::ToolCallContext::default(),
+            )
+            .await
+            .expect("tool errors should be returned as CallToolResult");
+
+        assert_eq!(result.is_error, Some(true));
+        let body = extract_error_body(&result);
+        assert_eq!(body["error"]["code"], "invalid_argument");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .expect("error message")
+                .contains(field_name),
+            "error should identify rejected field {field_name}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn chat_search_rejects_query_without_searchable_terms() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
@@ -496,6 +572,86 @@ async fn register_foreground_scope(backend: &RightBackend, agent_dir: &std::path
             }),
         })
         .await;
+}
+
+#[tokio::test]
+async fn get_messages_by_id_filters_current_thread_and_returns_messages() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    {
+        let conn = right_db::open_connection(&agent_dir, false)
+            .await
+            .expect("open db");
+        archive_search_fixture(&conn).await;
+    }
+    register_foreground_scope(&backend, &agent_dir).await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "get_messages_by_id",
+            json!({ "message_ids": [1, 2, 3, 999] }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-search".to_owned()),
+            },
+        )
+        .await
+        .expect("get_messages_by_id should succeed");
+
+    assert_ne!(result.is_error, Some(true));
+    let body = extract_json_body(&result);
+    let messages = body["messages"]
+        .as_array()
+        .expect("messages must be an array");
+    assert_eq!(messages.len(), 1, "unexpected messages: {body}");
+    let row = messages.first().expect("one message");
+    assert_eq!(row["message_id"].as_i64(), Some(1));
+    assert_eq!(row["sender_name"].as_str(), Some("Ada"));
+    assert_eq!(row["text"].as_str(), Some("needle in current thread"));
+    assert_eq!(row["role"].as_str(), Some("user"));
+    for field_name in ["message_id", "sender_name", "text", "role"] {
+        assert!(
+            row.get(field_name).is_some(),
+            "message missing {field_name}: {row}"
+        );
+    }
+    assert!(
+        !json_contains_key(&body, "chat_id"),
+        "leaked chat_id: {body}"
+    );
+}
+
+#[tokio::test]
+async fn get_messages_by_id_rejects_too_many_ids() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    register_foreground_scope(&backend, &agent_dir).await;
+    let message_ids: Vec<i32> = (0..51).collect();
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "get_messages_by_id",
+            json!({ "message_ids": message_ids }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-search".to_owned()),
+            },
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("at most 50"),
+        "unexpected error body: {body}"
+    );
 }
 
 #[tokio::test]
