@@ -874,6 +874,31 @@ fn build_memory_marker(
     }
 }
 
+/// Emitted once when memory transitions back to healthy from any non-healthy
+/// state. `build_memory_marker` returns `None` for healthy, so recovery needs
+/// its own marker.
+const MEMORY_RECOVERED_MARKER: &str =
+    "<memory-status>recovered - memory provider is healthy again</memory-status>";
+
+/// Edge-trigger the memory-status marker against the value last emitted for
+/// this session. Returns `(marker_to_emit, new_last_emitted)`.
+///
+/// - unchanged -> emit nothing;
+/// - changed to a non-healthy state -> emit it;
+/// - changed to healthy (recovery) -> emit the recovered marker once.
+///
+/// `new_last_emitted` tracks the underlying status (`cur`), not the recovered
+/// text, so the next healthy turn stays silent.
+fn edge_memory_marker(prev: Option<&str>, cur: Option<&str>) -> (Option<String>, Option<String>) {
+    if prev == cur {
+        return (None, cur.map(str::to_owned));
+    }
+    match cur {
+        Some(m) => (Some(m.to_owned()), Some(m.to_owned())),
+        None => (Some(MEMORY_RECOVERED_MARKER.to_owned()), None),
+    }
+}
+
 /// Build the `<background-jobs>` marker tail for `composite-memory.md`.
 ///
 /// Surfaces in-flight background runs targeted at this chat so the foreground
@@ -4709,6 +4734,62 @@ esac
     async fn marker_healthy_no_drops_returns_none() {
         let status = right_memory::MemoryStatus::Healthy;
         assert!(build_memory_marker(status, 0).is_none());
+    }
+
+    #[test]
+    fn edge_marker_silent_when_healthy_unchanged() {
+        let (emit, last) = edge_memory_marker(None, None);
+        assert_eq!(emit, None);
+        assert_eq!(last, None);
+    }
+
+    #[test]
+    fn edge_marker_emits_on_entering_degraded() {
+        let (emit, last) =
+            edge_memory_marker(None, Some("<memory-status>degraded</memory-status>"));
+        assert_eq!(
+            emit.as_deref(),
+            Some("<memory-status>degraded</memory-status>")
+        );
+        assert_eq!(
+            last.as_deref(),
+            Some("<memory-status>degraded</memory-status>")
+        );
+    }
+
+    #[test]
+    fn edge_marker_silent_while_degraded_unchanged() {
+        let (emit, last) = edge_memory_marker(
+            Some("<memory-status>degraded</memory-status>"),
+            Some("<memory-status>degraded</memory-status>"),
+        );
+        assert_eq!(emit, None);
+        assert_eq!(
+            last.as_deref(),
+            Some("<memory-status>degraded</memory-status>")
+        );
+    }
+
+    #[test]
+    fn edge_marker_emits_on_degradation_degree_change() {
+        let (emit, _) = edge_memory_marker(
+            Some("<memory-status>degraded</memory-status>"),
+            Some("<memory-status>unavailable</memory-status>"),
+        );
+        assert_eq!(
+            emit.as_deref(),
+            Some("<memory-status>unavailable</memory-status>")
+        );
+    }
+
+    #[test]
+    fn edge_marker_emits_recovered_once_then_silent() {
+        let (emit, last) =
+            edge_memory_marker(Some("<memory-status>degraded</memory-status>"), None);
+        assert_eq!(emit.as_deref(), Some(MEMORY_RECOVERED_MARKER));
+        assert_eq!(last, None);
+        let (emit2, _) = edge_memory_marker(None, None);
+        assert_eq!(emit2, None);
     }
 
     // extract_auth_url tests
