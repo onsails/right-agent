@@ -10,13 +10,24 @@ use right_openshell::openshell::{connect_grpc, default_mtls_dir};
 /// Raw-tunnel base policy mirroring production `permissive`: 443 and 80 reachable
 /// as `tls: skip`, so a provider's terminated L7 endpoint is the active policy
 /// for its host. Shared by the live full-access tests below.
-const RAW_TUNNEL_BASE_POLICY: &str = "version: 1\n\
-filesystem_policy: { include_workdir: true, read_write: [/tmp, /sandbox] }\n\
-process: { run_as_user: sandbox, run_as_group: sandbox }\n\
-network_policies:\n  outbound:\n    endpoints:\n\
-      - { host: \"0.0.0.0/0\", port: 443, tls: skip }\n\
-      - { host: \"0.0.0.0/0\", port: 80, tls: skip }\n\
-    binaries: [{ path: \"**\" }]\n";
+const RAW_TUNNEL_BASE_POLICY: &str = r#"version: 1
+filesystem_policy: { include_workdir: true, read_write: [/tmp, /sandbox] }
+process: { run_as_user: sandbox, run_as_group: sandbox }
+network_policies:
+  outbound:
+    endpoints:
+      - { host: "0.0.0.0/0", port: 443, tls: skip }
+      - { host: "0.0.0.0/0", port: 80, tls: skip }
+    binaries: [{ path: "**" }]
+"#;
+
+#[test]
+fn raw_tunnel_base_policy_keeps_endpoint_list_nested() {
+    assert!(
+        RAW_TUNNEL_BASE_POLICY.contains("    endpoints:\n      - "),
+        "endpoint list items must remain indented under network_policies.outbound.endpoints"
+    );
+}
 
 #[tokio::test]
 #[ignore = "ci-openshell: live github profile provisioning"]
