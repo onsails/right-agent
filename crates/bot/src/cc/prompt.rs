@@ -97,7 +97,12 @@ pub(crate) fn format_chat_context_block(input: &ChatContextInput) -> String {
             out.push_str("kind: dm\n");
             let _ = write!(out, "user: {}", format_chat_context_scalar(name));
             if let Some(u) = username {
-                let _ = write!(out, " ({}", format_chat_context_scalar(&format!("@{u}")));
+                let normalized_username = u.strip_prefix('@').unwrap_or(u);
+                let _ = write!(
+                    out,
+                    " ({}",
+                    format_chat_context_scalar(&format!("@{normalized_username}"))
+                );
                 if let Some(id) = user_id {
                     let _ = write!(out, ", id {id}");
                 }

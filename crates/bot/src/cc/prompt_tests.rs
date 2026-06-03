@@ -712,6 +712,24 @@ fn chat_context_block_dm_exact_output_quotes_scalars() {
 }
 
 #[test]
+fn chat_context_block_dm_preserves_single_at_for_prefixed_username() {
+    let block = format_chat_context_block(&ChatContextInput {
+        chat_id: 456,
+        kind: ChatContextKind::Dm {
+            name: "Alice",
+            username: Some("@alice"),
+            user_id: Some(789),
+        },
+    });
+
+    assert_eq!(
+        block,
+        "## Current Conversation\nchat_id: 456\nkind: dm\nuser: \"Alice\" (\"@alice\", id 789)\n"
+    );
+    assert!(!block.contains("@@alice"));
+}
+
+#[test]
 fn chat_context_block_escapes_newline_header_like_input() {
     let block = format_chat_context_block(&ChatContextInput {
         chat_id: 456,
