@@ -29,6 +29,7 @@ use serde::Deserialize;
 /// stalls.
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const CONVERSATION_SEARCH_DEFAULT_LIMIT: usize = 10;
+const GET_MESSAGES_BY_ID_MAX_IDS: usize = 50;
 
 use crate::learning::{
     LearningMessagePhase, SkillLearningFinishParams, SkillLearningStartParams,
@@ -44,6 +45,14 @@ use crate::memory_server::{
 pub(crate) struct ConversationSearchParams {
     pub(crate) query: String,
     pub(crate) limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GetMessagesByIdParams {
+    /// Telegram message ids to fetch. Resolved within the CURRENT chat/topic
+    /// only - you cannot fetch from other chats.
+    pub(crate) message_ids: Vec<i32>,
 }
 
 /// Allowed forum-topic icon colors (RGB ints), per Telegram Bot API. Positive
@@ -190,6 +199,14 @@ impl RightBackend {
                 "Search archived Telegram conversation messages in the current chat across all threads. Scope is server-enforced from the current foreground invocation and is not agent-controlled.",
                 schema_for_type::<ConversationSearchParams>(),
             ),
+            Tool::new(
+                "get_messages_by_id",
+                "Fetch the full content of messages in the CURRENT chat/topic by their ids. \
+                 Scope is server-enforced from the current invocation - you cannot fetch from \
+                 other chats. Use this to read a replied-to message that isn't already in your \
+                 context, or to revisit an earlier message.",
+                schema_for_type::<GetMessagesByIdParams>(),
+            ),
             // Forum topic management (forum supergroups only; never deletes)
             Tool::new(
                 "forum_topic_create",
@@ -273,6 +290,10 @@ impl RightBackend {
                     ConversationSearchMode::Chat,
                 )
                 .await
+            }
+            "get_messages_by_id" => {
+                self.call_get_messages_by_id(agent_name, context, &args)
+                    .await
             }
             "forum_topic_create" => {
                 self.call_forum_topic_create(agent_name, context, &args)
@@ -1029,6 +1050,70 @@ impl RightBackend {
             "results": rows,
         });
 
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output)?,
+        )]))
+    }
+
+    async fn call_get_messages_by_id(
+        &self,
+        agent_name: &str,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: GetMessagesByIdParams = match serde_json::from_value(args.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    format!("invalid get_messages_by_id params: {e:#}"),
+                    None,
+                ));
+            }
+        };
+        if params.message_ids.len() > GET_MESSAGES_BY_ID_MAX_IDS {
+            return Ok(tool_error(
+                "invalid_argument",
+                format!(
+                    "get_messages_by_id accepts at most {GET_MESSAGES_BY_ID_MAX_IDS} message_ids"
+                ),
+                None,
+            ));
+        }
+
+        let Some(invocation_id) = context.invocation_id else {
+            return Ok(conversation_scope_unavailable());
+        };
+        let scope = match self.progress.conversation_scope(&invocation_id).await {
+            Ok(scope) => scope,
+            Err(_) => return Ok(conversation_scope_unavailable()),
+        };
+
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
+        let rows = right_db::conversation::fetch_by_ids(
+            &conn,
+            "telegram",
+            scope.chat_id,
+            scope.thread_id,
+            &params.message_ids,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("get_messages_by_id failed: {e:#}"))?;
+
+        let messages: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|row| {
+                serde_json::json!({
+                    "message_id": row.message_id,
+                    "sender_name": row.sender_name,
+                    "text": row.text,
+                    "role": row.role,
+                })
+            })
+            .collect();
+
+        let output = serde_json::json!({ "messages": messages });
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output)?,
         )]))

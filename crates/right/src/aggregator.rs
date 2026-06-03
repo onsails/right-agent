@@ -875,6 +875,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tools_list_includes_get_messages_by_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dispatcher = make_dispatcher(tmp.path());
+        let tools = dispatcher.tools_list("test-agent").await;
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(
+            names.contains(&"get_messages_by_id"),
+            "missing get_messages_by_id"
+        );
+    }
+
+    #[tokio::test]
     async fn tools_list_is_sorted_by_name() {
         let tmp = tempfile::tempdir().unwrap();
         let dispatcher = make_dispatcher(tmp.path());
