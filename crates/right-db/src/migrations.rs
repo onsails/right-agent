@@ -34,7 +34,7 @@ const V38_SCHEMA: &str = include_str!("sql/v38_skill_spend_and_learning_skip.sql
 const V39_SCHEMA: &str = include_str!("sql/v39_error_details.sql");
 const V40_SCHEMA: &str = include_str!("sql/v40_forum_topics.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 41;
+pub const LATEST_SCHEMA_VERSION: u32 = 42;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -781,6 +781,29 @@ fn v41_cron_force_notify(
     })
 }
 
+/// v42: Add a per-cron `model` column to `cron_specs`.
+///
+/// Nullable TEXT holding a CC model alias (`haiku`/`sonnet`/`opus`). NULL =
+/// inherit the agent's global `/model` (the prior behavior), so existing rows
+/// keep working unchanged. Idempotent — checks `pragma_table_info` before the
+/// ALTER. Guards on table existence via `sqlite_master` like v41, because the
+/// synthetic legacy-v33 test fixture lacks `cron_specs`.
+fn v42_cron_model(conn: &dyn MigrationConnection) -> BoxFuture<'_, Result<(), crate::DbError>> {
+    Box::pin(async move {
+        let cron_specs_exists = conn
+            .query_i64(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cron_specs'",
+                MigrationParams::Empty,
+            )
+            .await?;
+        if cron_specs_exists > 0 && !column_exists(conn, "cron_specs", "model").await? {
+            conn.execute_batch("ALTER TABLE cron_specs ADD COLUMN model TEXT")
+                .await?;
+        }
+        Ok(())
+    })
+}
+
 pub static MIGRATIONS: Migrations = Migrations {
     migrations: &[
         Migration {
@@ -988,6 +1011,11 @@ pub static MIGRATIONS: Migrations = Migrations {
             sql: "",
             hook: Some(v41_cron_force_notify),
         },
+        Migration {
+            version: 42,
+            sql: "",
+            hook: Some(v42_cron_model),
+        },
     ],
 };
 
@@ -1010,6 +1038,38 @@ mod tests {
             },
         ],
     };
+
+    #[tokio::test]
+    async fn v42_adds_cron_specs_model_column() {
+        let conn = Connection::open_in_memory().await.unwrap();
+        MIGRATIONS.to_latest(&conn).await.unwrap();
+        conn.execute_batch(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, created_at, updated_at) \
+             VALUES ('j-null', '17 9 * * *', 'p', 5.0, 1, '2026-06-03T00:00:00Z', '2026-06-03T00:00:00Z'); \
+             INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, model, created_at, updated_at) \
+             VALUES ('j-set', '17 9 * * *', 'p', 5.0, 1, 'sonnet', '2026-06-03T00:00:00Z', '2026-06-03T00:00:00Z');",
+        )
+        .await
+        .unwrap();
+        let got: Option<String> = conn
+            .query_row(
+                "SELECT model FROM cron_specs WHERE job_name = 'j-set'",
+                (),
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("sonnet"));
+        let null_model: Option<String> = conn
+            .query_row(
+                "SELECT model FROM cron_specs WHERE job_name = 'j-null'",
+                (),
+                |row| row.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(null_model, None);
+    }
 
     #[tokio::test]
     async fn v41_adds_force_notify_columns() {
