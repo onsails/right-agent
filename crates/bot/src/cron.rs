@@ -3176,9 +3176,9 @@ sleep 120"#;
     /// in the sandbox skill index. Verifies spec risk (a): a just-finished cron
     /// session (fresh `new_session_id = run_id`) is forkable/resumable inside the
     /// sandbox immediately after the run.
-    #[ignore = "ci-claude: requires live sandbox + Claude + OAuth token"]
+    #[ignore = "manual-live-todo: requires live sandbox + Claude + OAuth token"]
     #[tokio::test]
-    async fn ci_claude_recurring_cron_creates_skill() {
+    async fn manual_live_todo_recurring_cron_creates_skill() {
         // ARRANGE — real sandbox (reuse the TestSandbox harness; never the CLI,
         // never a hardcoded sandbox name — see ARCHITECTURE.md "Integration Tests
         // Using Live Sandboxes").
