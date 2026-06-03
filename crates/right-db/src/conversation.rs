@@ -262,6 +262,7 @@ pub async fn fetch_by_ids(
          FROM conversation_messages
          WHERE platform = ? AND chat_id = ? AND thread_id = ?
            AND message_id IN ({placeholders})
+           AND content <> ''
          ORDER BY message_id ASC"
     );
     let mut params = crate::params::ParamsBuilder::new();
@@ -467,6 +468,23 @@ mod tests {
         assert_eq!(ids, vec![Some(25), Some(26)]);
         assert_eq!(rows[0].text, "hello");
         assert_eq!(rows[0].role, "user");
+    }
+
+    #[tokio::test]
+    async fn fetch_by_ids_omits_mark_routed_stub_without_archive() {
+        let conn = migrated_connection().await;
+        mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42)
+            .await
+            .unwrap();
+
+        let rows = fetch_by_ids(&conn, "telegram", 100, 10, &[25])
+            .await
+            .unwrap();
+
+        assert!(
+            rows.is_empty(),
+            "mark_routed stub is not archived content: {rows:?}"
+        );
     }
 
     #[tokio::test]
