@@ -429,52 +429,64 @@ async fn script_bootstrap_no_memory() {
     );
 }
 
-#[tokio::test]
-async fn deploy_composite_memory_format_wraps_content_in_external_content_markers() {
-    // Pure formatting test: the file body produced by the format
-    // pipeline must wrap the recall content with ironclaw's wrap
-    // (BEGIN/END EXTERNAL CONTENT markers), not the legacy
-    // <memory-context> fence.
-    let content = "user prefers dark mode";
-    let label = "test label";
-    let formatted = format_composite_memory(content, label, None, None);
-    assert!(
-        formatted.contains("BEGIN EXTERNAL CONTENT"),
-        "must contain ironclaw wrap begin marker, got: {formatted}"
-    );
-    assert!(
-        formatted.contains("END EXTERNAL CONTENT"),
-        "must contain ironclaw wrap end marker, got: {formatted}"
-    );
-    assert!(
-        formatted.contains("user prefers dark mode"),
-        "content body must be preserved"
-    );
-    assert!(
-        !formatted.contains("<memory-context>"),
-        "legacy memory-context fence must be removed"
-    );
-    assert!(
-        formatted.contains("[System: recalled memory context, test label.]"),
-        "label annotation must remain as a bot-trusted system note"
-    );
+#[test]
+fn volatile_prefix_none_when_all_empty() {
+    assert!(build_volatile_prefix(None, None, None).is_none());
+    assert!(build_volatile_prefix(Some("   "), None, None).is_none());
+    assert!(build_volatile_prefix(None, Some("   "), None).is_none());
+    assert!(build_volatile_prefix(None, None, Some("   ")).is_none());
+    assert!(build_volatile_prefix(Some("   "), Some("   "), Some("   ")).is_none());
+}
+
+#[test]
+fn volatile_prefix_wraps_recall_with_untrusted_label() {
+    let out = build_volatile_prefix(Some("- [observed 2026-06-01] likes tea"), None, None)
+        .expect("recall present");
+    assert!(out.contains("NOT new user input"));
+    assert!(out.contains("Do not call memory tools"));
+    assert!(out.contains("likes tea"));
+    assert!(out.contains(right_prompt_safety::memory_wrap_suffix().trim()));
+}
+
+#[test]
+fn volatile_prefix_markers_are_unwrapped_and_appended() {
+    let out = build_volatile_prefix(
+        None,
+        Some("<memory-status>degraded - recall may be incomplete</memory-status>"),
+        Some("MCP server reconnected after a transient error"),
+    )
+    .expect("markers present");
+    assert!(out.contains("<memory-status>degraded"));
+    assert!(out.contains("<system-notification>"));
+    assert!(out.contains("MCP server reconnected"));
+    assert!(!out.contains("EXTERNAL CONTENT"));
 }
 
 #[tokio::test]
-async fn deploy_composite_memory_format_appends_status_marker_outside_wrap() {
-    let content = "stuff";
-    let formatted = format_composite_memory(
-        content,
-        "label",
-        Some("<memory-status>degraded</memory-status>"),
+async fn deploy_composite_memory_preserves_background_marker_unwrapped() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    tokio::fs::create_dir(&claude_dir).await.unwrap();
+
+    deploy_composite_memory(
+        "recalled fact",
+        "legacy label",
+        dir.path(),
         None,
-    );
-    let end_marker_pos = formatted.find("END EXTERNAL CONTENT").unwrap();
-    let status_pos = formatted.find("<memory-status>").unwrap();
-    assert!(
-        status_pos > end_marker_pos,
-        "status marker must come after the wrap close (trusted system signal, not untrusted data)"
-    );
+        Some("<memory-status>healthy</memory-status>"),
+        Some("<background-jobs>running task</background-jobs>"),
+    )
+    .await
+    .unwrap();
+
+    let body = tokio::fs::read_to_string(claude_dir.join("composite-memory.md"))
+        .await
+        .unwrap();
+    assert!(body.contains("[System: recalled memory context, legacy label.]"));
+    assert!(body.contains("recalled fact"));
+    assert!(body.contains("<memory-status>healthy</memory-status>"));
+    assert!(body.contains("<background-jobs>running task</background-jobs>"));
+    assert!(!body.contains("<system-notification>"));
 }
 
 #[tokio::test]
