@@ -623,6 +623,7 @@ async fn triggered_at_does_not_affect_equality() {
         trigger_force_notify: false,
         target_chat_id: None,
         target_thread_id: None,
+        model: None,
     };
     let triggered = CronSpec {
         triggered_at: Some("2026-04-15T12:00:00Z".into()),
@@ -642,6 +643,7 @@ async fn spec_equality_detects_real_changes() {
         trigger_force_notify: false,
         target_chat_id: None,
         target_thread_id: None,
+        model: None,
     };
     let changed_schedule = CronSpec {
         schedule_kind: ScheduleKind::Recurring("*/10 * * * *".into()),
@@ -1765,4 +1767,42 @@ async fn from_db_row_legacy_bg_schedule_errors() {
     let main = uuid::Uuid::new_v4();
     let err = ScheduleKind::from_db_row(&format!("@bg:{main}"), None, 0).unwrap_err();
     assert!(err.contains("no longer schedulable"));
+}
+
+#[tokio::test]
+async fn load_specs_reads_model_column() {
+    let (_dir, conn) = setup_db().await;
+    conn.execute_batch(
+        "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, model, created_at, updated_at) \
+         VALUES ('with-model', '17 9 * * *', 'p', 5.0, 1, 'haiku', '2026-06-03T00:00:00Z', '2026-06-03T00:00:00Z'); \
+         INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, created_at, updated_at) \
+         VALUES ('no-model', '17 9 * * *', 'p', 5.0, 1, '2026-06-03T00:00:00Z', '2026-06-03T00:00:00Z');",
+    )
+    .await
+    .unwrap();
+    let specs = super::load_specs_from_db(&conn).await.unwrap();
+    assert_eq!(specs["with-model"].model.as_deref(), Some("haiku"));
+    assert_eq!(specs["no-model"].model, None);
+}
+
+#[test]
+fn cron_spec_eq_reacts_to_model_change() {
+    let base = super::CronSpec {
+        schedule_kind: super::ScheduleKind::Recurring("17 9 * * *".into()),
+        prompt: "p".into(),
+        lock_ttl: None,
+        max_budget_usd: 5.0,
+        triggered_at: None,
+        trigger_force_notify: false,
+        target_chat_id: None,
+        target_thread_id: None,
+        model: Some("sonnet".into()),
+    };
+    let mut other = base.clone();
+    assert_eq!(base, other);
+    other.model = Some("haiku".into());
+    assert_ne!(
+        base, other,
+        "changing model must make specs unequal so the reconciler reacts"
+    );
 }

@@ -132,6 +132,10 @@ pub struct CronSpec {
     pub trigger_force_notify: bool,
     pub target_chat_id: Option<i64>,
     pub target_thread_id: Option<i64>,
+    /// Per-cron model alias (`haiku`/`sonnet`/`opus`), or `None` to inherit the
+    /// agent's global `/model` at fire time. Config (not transient state) — see
+    /// `PartialEq` below.
+    pub model: Option<String>,
 }
 
 /// Compare only the spec fields that define the job configuration.
@@ -149,6 +153,7 @@ impl PartialEq for CronSpec {
             && self.max_budget_usd == other.max_budget_usd
             && self.target_chat_id == other.target_chat_id
             && self.target_thread_id == other.target_thread_id
+            && self.model == other.model
     }
 }
 
@@ -658,7 +663,7 @@ pub async fn list_specs(conn: &Connection) -> Result<String, String> {
         .query_all(
             "SELECT s.job_name, s.schedule, s.prompt, s.lock_ttl, s.max_budget_usd, \
                     s.created_at, s.updated_at, s.recurring, s.run_at, \
-                    s.target_chat_id, s.target_thread_id, \
+                    s.target_chat_id, s.target_thread_id, s.model, \
                     r.id, r.started_at, r.status \
              FROM cron_specs s \
              LEFT JOIN ( \
@@ -682,9 +687,10 @@ pub async fn list_specs(conn: &Connection) -> Result<String, String> {
                 "run_at": row.get::<_, Option<String>>(8)?,
                 "target_chat_id": row.get::<_, Option<i64>>(9)?,
                 "target_thread_id": row.get::<_, Option<i64>>(10)?,
-                "last_run_id": row.get::<_, Option<String>>(11)?,
-                "last_run_at": row.get::<_, Option<String>>(12)?,
-                "last_status": row.get::<_, Option<String>>(13)?,
+                "model": row.get::<_, Option<String>>(11)?,
+                "last_run_id": row.get::<_, Option<String>>(12)?,
+                "last_run_at": row.get::<_, Option<String>>(13)?,
+                "last_status": row.get::<_, Option<String>>(14)?,
             }))
         })
         .await
@@ -707,7 +713,7 @@ pub fn format_result(result: &CronSpecResult) -> String {
 pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, CronSpec>, DbError> {
     let mut specs = HashMap::new();
     let rows = conn.query_all(
-        "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, trigger_force_notify, recurring, run_at, target_chat_id, target_thread_id FROM cron_specs",
+        "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, trigger_force_notify, recurring, run_at, target_chat_id, target_thread_id, model FROM cron_specs",
         (),
         |row| {
         Ok((
@@ -722,6 +728,7 @@ pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, Cro
             row.get::<_, Option<String>>(8)?,
             row.get::<_, Option<i64>>(9)?,
             row.get::<_, Option<i64>>(10)?,
+            row.get::<_, Option<String>>(11)?,
         ))
     })
     .await?;
@@ -739,6 +746,7 @@ pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, Cro
             run_at,
             target_chat_id,
             target_thread_id,
+            model,
         ) = row;
 
         let schedule_kind = match ScheduleKind::from_db_row(&schedule, run_at.as_deref(), recurring)
@@ -765,6 +773,7 @@ pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, Cro
                 trigger_force_notify: trigger_force_notify != 0,
                 target_chat_id,
                 target_thread_id,
+                model,
             },
         );
     }
