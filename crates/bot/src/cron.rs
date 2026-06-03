@@ -640,6 +640,7 @@ async fn execute_job(
             &claude_args,
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
+            None,
         );
         if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
@@ -676,6 +677,7 @@ async fn execute_job(
             &claude_args,
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
+            None,
         );
         if which::which("claude").is_err() && which::which("claude-bun").is_err() {
             tracing::error!(job = %job_name, "claude binary not found in PATH");

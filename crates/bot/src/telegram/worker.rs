@@ -2865,16 +2865,6 @@ async fn invoke_cc(
     );
 
     let memory_mode = if ctx.hindsight.is_some() {
-        let sandbox_path = if ctx.ssh_config_path.is_some() {
-            "/sandbox/.claude/composite-memory.md".to_owned()
-        } else {
-            ctx.agent_dir
-                .join(".claude")
-                .join("composite-memory.md")
-                .to_string_lossy()
-                .into_owned()
-        };
-
         let cache_key = format!("{}:{}", chat_id, eff_thread_id);
         let cached = if let Some(ref cache) = ctx.prefetch_cache {
             cache.get(&cache_key).await
@@ -2967,9 +2957,7 @@ async fn invoke_cc(
                 }
             }
         }
-        Some(crate::cc::prompt::MemoryMode::Hindsight {
-            composite_memory_path: sandbox_path,
-        })
+        Some(crate::cc::prompt::MemoryMode::Hindsight)
     } else {
         Some(crate::cc::prompt::MemoryMode::File)
     };
@@ -3014,6 +3002,7 @@ async fn invoke_cc(
             &claude_args,
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
+            None,
         );
         // Inject auth token as env var in the remote shell
         if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
@@ -3054,6 +3043,7 @@ async fn invoke_cc(
             &claude_args,
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
+            None,
         );
 
         let mut c = tokio::process::Command::new("bash");
