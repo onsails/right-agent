@@ -452,6 +452,16 @@ fn is_run_job_loop_skip_kind(kind: &right_agent::cron_spec::ScheduleKind) -> boo
     )
 }
 
+/// Resolve the model for a cron firing: the spec's own model wins; otherwise
+/// fall back to the agent's current global `/model` snapshot; otherwise `None`
+/// (CC default). Snapshotting at fire time keeps `/model` hot-reload working.
+fn resolve_cron_model(
+    spec: &CronSpec,
+    global: &arc_swap::ArcSwap<Option<String>>,
+) -> Option<String> {
+    spec.model.clone().or_else(|| crate::snapshot_model(global))
+}
+
 /// Execute one cron job: lock check → DB insert → subprocess → log write → DB update → lock delete.
 ///
 /// Per D-02: subprocess failures log `tracing::error` only, do not propagate.
@@ -1774,7 +1784,8 @@ fn fire_one_shot_specs(
         let an = agent_name.to_string();
         // Snapshot the model at fire time, not at loop-spawn time, so /model
         // changes take effect on the next cron firing rather than next restart.
-        let md: Option<String> = crate::snapshot_model(model);
+        // Per-cron model wins over the global agent model.
+        let md: Option<String> = resolve_cron_model(&spec, model);
         let sc = ssh_config_path.clone();
         let ic = Arc::clone(internal_client);
         let rs = resolved_sandbox.clone();
@@ -1966,7 +1977,7 @@ async fn reconcile_jobs(
             let sp = spec.clone();
             let ad = agent_dir.to_path_buf();
             let an = agent_name.to_string();
-            let md: Option<String> = crate::snapshot_model(model);
+            let md: Option<String> = resolve_cron_model(spec, model);
             let sc = ssh_config_path.clone();
             let ic = Arc::clone(internal_client);
             let rs = resolved_sandbox.clone();
@@ -2063,7 +2074,7 @@ async fn run_job_loop(
         let sp = spec.clone();
         let ad = agent_dir.clone();
         let an = agent_name.clone();
-        let md: Option<String> = crate::snapshot_model(&model);
+        let md: Option<String> = resolve_cron_model(&spec, &model);
         let sc = ssh_config_path.clone();
         let ic = Arc::clone(&internal_client);
         let rs = resolved_sandbox.clone();
@@ -3290,5 +3301,36 @@ sleep 120"#;
             status, "none",
             "non-forced silent run stays silent (regression)"
         );
+    }
+
+    #[test]
+    fn resolve_cron_model_prefers_spec_then_global() {
+        let global = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Some("opus".to_string())));
+
+        let spec_with = CronSpec {
+            schedule_kind: right_agent::cron_spec::ScheduleKind::Recurring("17 9 * * *".into()),
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 5.0,
+            triggered_at: None,
+            trigger_force_notify: false,
+            target_chat_id: None,
+            target_thread_id: None,
+            model: Some("haiku".into()),
+        };
+        assert_eq!(
+            resolve_cron_model(&spec_with, &global).as_deref(),
+            Some("haiku")
+        );
+
+        let mut spec_without = spec_with.clone();
+        spec_without.model = None;
+        assert_eq!(
+            resolve_cron_model(&spec_without, &global).as_deref(),
+            Some("opus")
+        );
+
+        let empty_global = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(None::<String>));
+        assert_eq!(resolve_cron_model(&spec_without, &empty_global), None);
     }
 }
