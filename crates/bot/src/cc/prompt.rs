@@ -43,6 +43,90 @@ struct PromptSection {
     header: &'static str,
 }
 
+/// Stable per-session chat identity emitted into the system prompt. Replaces
+/// the constant `author`/`chat` YAML that was repeated on every message.
+pub(crate) struct ChatContextInput<'a> {
+    pub chat_id: i64,
+    pub kind: ChatContextKind<'a>,
+}
+
+pub(crate) enum ChatContextKind<'a> {
+    Dm {
+        name: &'a str,
+        username: Option<&'a str>,
+        user_id: Option<i64>,
+    },
+    Group {
+        title: Option<&'a str>,
+        topic_id: Option<i64>,
+        topic_name: Option<&'a str>,
+    },
+}
+
+fn format_chat_context_scalar(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.extend(c.escape_default()),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Render the chat-context block. Pure; stable input -> byte-identical output
+/// so it stays inside the cached system-prompt prefix.
+pub(crate) fn format_chat_context_block(input: &ChatContextInput) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(128);
+    out.push_str("## Current Conversation\n");
+    let _ = writeln!(out, "chat_id: {}", input.chat_id);
+    match &input.kind {
+        ChatContextKind::Dm {
+            name,
+            username,
+            user_id,
+        } => {
+            out.push_str("kind: dm\n");
+            let _ = write!(out, "user: {}", format_chat_context_scalar(name));
+            if let Some(u) = username {
+                let _ = write!(out, " ({}", format_chat_context_scalar(&format!("@{u}")));
+                if let Some(id) = user_id {
+                    let _ = write!(out, ", id {id}");
+                }
+                out.push(')');
+            } else if let Some(id) = user_id {
+                let _ = write!(out, " (id {id})");
+            }
+            out.push('\n');
+        }
+        ChatContextKind::Group {
+            title,
+            topic_id,
+            topic_name,
+        } => {
+            out.push_str("kind: group\n");
+            if let Some(t) = title {
+                let _ = writeln!(out, "title: {}", format_chat_context_scalar(t));
+            }
+            if let Some(tid) = topic_id {
+                let _ = writeln!(out, "topic_id: {tid}");
+            }
+            if let Some(tn) = topic_name {
+                let _ = writeln!(out, "topic: {}", format_chat_context_scalar(tn));
+            }
+        }
+    }
+    out
+}
+
 /// Identity and config files included in the system prompt (normal mode).
 const PROMPT_SECTIONS: &[PromptSection] = &[
     PromptSection {
