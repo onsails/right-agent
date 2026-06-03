@@ -724,6 +724,7 @@ async fn create_spec_v2_with_run_at_succeeds() {
         Some("2026-12-25T15:30:00Z"),
         None,
         None,
+        None,
         false,
     )
     .await
@@ -823,6 +824,7 @@ async fn create_spec_v2_with_both_schedule_and_run_at_fails() {
         Some("2026-12-25T15:30:00Z"),
         None,
         None,
+        None,
         false,
     )
     .await
@@ -838,6 +840,7 @@ async fn create_spec_v2_with_neither_schedule_nor_run_at_fails() {
         "neither-job",
         None,
         "prompt",
+        None,
         None,
         None,
         None,
@@ -865,6 +868,7 @@ async fn create_spec_v2_with_invalid_run_at_fails() {
         Some("not-a-datetime"),
         None,
         None,
+        None,
         false,
     )
     .await
@@ -886,6 +890,7 @@ async fn create_spec_v2_with_past_run_at_succeeds() {
         Some("2020-01-01T00:00:00Z"),
         None,
         None,
+        None,
         false,
     )
     .await
@@ -904,6 +909,7 @@ async fn create_spec_v2_recurring_false_stored_as_one_shot_cron() {
         None,
         None,
         Some(false),
+        None,
         None,
         None,
         None,
@@ -932,6 +938,7 @@ async fn load_specs_round_trips_all_schedule_kinds() {
         None,
         None,
         None,
+        None,
         false,
     )
     .await
@@ -944,6 +951,7 @@ async fn load_specs_round_trips_all_schedule_kinds() {
         None,
         None,
         Some(false),
+        None,
         None,
         None,
         None,
@@ -960,6 +968,7 @@ async fn load_specs_round_trips_all_schedule_kinds() {
         None,
         None,
         Some("2026-12-25T15:30:00Z"),
+        None,
         None,
         None,
         false,
@@ -996,6 +1005,7 @@ async fn update_spec_partial_prompt_only() {
         None,
         None,
         None,
+        None,
         false,
     )
     .await
@@ -1006,6 +1016,7 @@ async fn update_spec_partial_prompt_only() {
         None,
         None,
         Some("new prompt"),
+        None,
         None,
         None,
         None,
@@ -1034,6 +1045,7 @@ async fn update_spec_partial_schedule_clears_run_at() {
         Some("2026-12-25T15:30:00Z"),
         None,
         None,
+        None,
         false,
     )
     .await
@@ -1042,6 +1054,7 @@ async fn update_spec_partial_schedule_clears_run_at() {
         &conn,
         "switch",
         Some("*/10 * * * *"),
+        None,
         None,
         None,
         None,
@@ -1073,6 +1086,7 @@ async fn update_spec_partial_run_at_clears_schedule() {
         None,
         None,
         None,
+        None,
         false,
     )
     .await
@@ -1082,6 +1096,7 @@ async fn update_spec_partial_run_at_clears_schedule() {
         "switch2",
         None,
         Some("2026-12-25T15:30:00Z"),
+        None,
         None,
         None,
         None,
@@ -1112,6 +1127,7 @@ async fn update_spec_partial_both_schedule_and_run_at_fails() {
         None,
         None,
         None,
+        None,
         false,
     )
     .await
@@ -1121,6 +1137,7 @@ async fn update_spec_partial_both_schedule_and_run_at_fails() {
         "both",
         Some("*/10 * * * *"),
         Some("2026-12-25T15:30:00Z"),
+        None,
         None,
         None,
         None,
@@ -1147,12 +1164,13 @@ async fn update_spec_partial_no_fields_fails() {
         None,
         None,
         None,
+        None,
         false,
     )
     .await
     .unwrap();
     let err = update_spec_partial(
-        &conn, "empty", None, None, None, None, None, None, None, None,
+        &conn, "empty", None, None, None, None, None, None, None, None, None,
     )
     .await
     .unwrap_err();
@@ -1168,6 +1186,7 @@ async fn update_spec_partial_not_found() {
         None,
         None,
         Some("p"),
+        None,
         None,
         None,
         None,
@@ -1193,6 +1212,7 @@ async fn create_spec_v2_persists_target_fields() {
         None,
         Some(-100),
         Some(7),
+        None,
         false,
     )
     .await
@@ -1218,6 +1238,7 @@ async fn create_spec_v2_persists_null_target_when_omitted() {
         "no-target",
         Some("*/5 * * * *"),
         "do thing",
+        None,
         None,
         None,
         None,
@@ -1255,6 +1276,7 @@ async fn update_spec_partial_sets_target_chat_id() {
         None,
         None,
         None,
+        None,
         false,
     )
     .await
@@ -1269,6 +1291,7 @@ async fn update_spec_partial_sets_target_chat_id() {
         None,
         None,
         Some(-555),
+        None,
         None,
     )
     .await
@@ -1298,6 +1321,7 @@ async fn update_spec_partial_clears_target_thread_id() {
         None,
         Some(-1),
         Some(42),
+        None,
         false,
     )
     .await
@@ -1314,6 +1338,7 @@ async fn update_spec_partial_clears_target_thread_id() {
         None,
         None,
         Some(None),
+        None,
     )
     .await
     .unwrap();
@@ -1342,6 +1367,7 @@ async fn update_spec_partial_leaves_target_when_omitted() {
         None,
         Some(-1),
         Some(42),
+        None,
         false,
     )
     .await
@@ -1353,6 +1379,7 @@ async fn update_spec_partial_leaves_target_when_omitted() {
         None,
         None,
         Some("new prompt"),
+        None,
         None,
         None,
         None,
@@ -1410,6 +1437,7 @@ async fn list_specs_includes_target_fields() {
         None,
         Some(-100),
         Some(5),
+        None,
         false,
     )
     .await
@@ -1449,6 +1477,7 @@ async fn create_spec_v2_immediate_inserts_sentinel() {
         None,
         Some(-100),
         Some(7),
+        None,
         true,
     )
     .await
@@ -1547,6 +1576,7 @@ async fn update_spec_target_propagates_to_undelivered_async_runs() {
         None,
         None,
         Some(200),
+        None,
         None,
     )
     .await
@@ -1658,6 +1688,7 @@ async fn update_spec_partial_propagates_thread_only_change() {
         None,
         None,
         Some(Some(99)),
+        None,
     )
     .await
     .unwrap();
@@ -1711,6 +1742,7 @@ async fn update_spec_partial_non_target_change_leaves_runs_alone() {
         None,
         None,
         Some("new prompt"),
+        None,
         None,
         None,
         None,
