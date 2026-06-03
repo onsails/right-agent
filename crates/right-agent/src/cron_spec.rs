@@ -358,6 +358,7 @@ pub async fn create_spec_v2(
     run_at: Option<&str>,
     target_chat_id: Option<i64>,
     target_thread_id: Option<i64>,
+    model: Option<&str>,
     immediate: bool,
 ) -> Result<CronSpecResult, String> {
     validate_job_name(job_name)?;
@@ -379,9 +380,9 @@ pub async fn create_spec_v2(
     let now = chrono::Utc::now().to_rfc3339();
     let budget = max_budget_usd.unwrap_or(DEFAULT_CRON_BUDGET_USD);
     let result = conn.execute(
-        "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![job_name, db_schedule, prompt, lock_ttl, budget, db_recurring, db_run_at, target_chat_id, target_thread_id, &now, &now],
+        "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, model, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![job_name, db_schedule, prompt, lock_ttl, budget, db_recurring, db_run_at, target_chat_id, target_thread_id, model, &now, &now],
     )
     .await;
 
@@ -446,6 +447,7 @@ pub async fn update_spec_partial(
     max_budget_usd: Option<f64>,
     target_chat_id: Option<i64>,
     target_thread_id: Option<Option<i64>>,
+    model: Option<Option<&str>>,
 ) -> Result<CronSpecResult, String> {
     validate_job_name(job_name)?;
 
@@ -457,6 +459,7 @@ pub async fn update_spec_partial(
         && max_budget_usd.is_none()
         && target_chat_id.is_none()
         && target_thread_id.is_none()
+        && model.is_none()
     {
         return Err("at least one field must be provided to update".into());
     }
@@ -554,6 +557,19 @@ pub async fn update_spec_partial(
             }
             None => {
                 sets.push("target_thread_id = NULL");
+            }
+        }
+    }
+    if let Some(model_opt) = model {
+        match model_opt {
+            Some(m) => {
+                sets.push("model = ?");
+                values
+                    .push(m)
+                    .map_err(|e| format!("invalid parameter: {e:#}"))?;
+            }
+            None => {
+                sets.push("model = NULL");
             }
         }
     }

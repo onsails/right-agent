@@ -1660,6 +1660,75 @@ async fn cron_create_accepts_target_in_allowlist_group() {
 }
 
 #[tokio::test]
+async fn cron_create_persists_model_and_update_clears_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agents_dir = tmp.path().to_path_buf();
+    let agent_dir = agents_dir.join("a1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    write_allowlist(&agent_dir, &[7], &[]);
+    right_db::open_connection(&agent_dir, true).await.unwrap();
+
+    let backend = RightBackend::new(agents_dir.clone(), None);
+
+    backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_create",
+            serde_json::json!({
+                "job_name": "j1",
+                "schedule": "17 9 * * *",
+                "prompt": "p",
+                "target_chat_id": 7_i64,
+                "model": "haiku",
+            }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("cron_create ok");
+
+    let conn = right_db::open_connection(&agent_dir, false)
+        .await
+        .expect("open db");
+    let m: Option<String> = conn
+        .query_row(
+            "SELECT model FROM cron_specs WHERE job_name='j1'",
+            [],
+            |r| r.get(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(m.as_deref(), Some("haiku"));
+
+    backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_update",
+            serde_json::json!({
+                "job_name": "j1",
+                "model": null,
+            }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("cron_update ok");
+
+    let m2: Option<String> = conn
+        .query_row(
+            "SELECT model FROM cron_specs WHERE job_name='j1'",
+            [],
+            |r| r.get(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        m2, None,
+        "explicit null clears model back to inherit-global"
+    );
+}
+
+#[tokio::test]
 async fn cron_create_rejects_missing_target_chat_id() {
     let tmp = tempfile::tempdir().unwrap();
     let agents_dir = tmp.path().to_path_buf();

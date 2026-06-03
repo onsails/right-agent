@@ -342,6 +342,7 @@ impl MemoryServer {
             params.run_at.as_deref(),
             Some(params.target_chat_id),
             params.target_thread_id,
+            params.model.map(|m| m.as_alias()),
             false,
         )
         .await
@@ -370,6 +371,7 @@ impl MemoryServer {
             params.max_budget_usd,
             params.target_chat_id,
             params.target_thread_id,
+            params.model.map(|o| o.map(|m| m.as_alias())),
         )
         .await
         .map_err(|e| McpError::invalid_params(e, None))?;
