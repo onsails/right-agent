@@ -232,6 +232,11 @@ Your final response MUST be self-contained. The user ONLY sees your final respon
 they do NOT see tool calls, intermediate text, or thinking. Never say \"see above\", \
 \"as shown above\", or reference previous output. If you gathered data, include it in \
 your final response.
+
+A turn is work done, then reported. When your reply promises an action you can take \
+now, the turn is unfinished: take it with your tools, then report the result. Defer \
+only work you cannot finish now, and only by scheduling a cron in the same turn; a \
+promise backed by neither action nor a schedule leaves the turn incomplete.
 "
     );
 
