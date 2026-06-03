@@ -365,6 +365,7 @@ pub async fn handle_message(
                     progress_state: worker_ctl.progress.clone(),
                     hindsight: settings.hindsight.clone(),
                     prefetch_cache: settings.prefetch_cache.clone(),
+                    memory_status_last: Arc::new(DashMap::new()),
                     upgrade_lock: Arc::clone(&settings.upgrade_lock),
                     stt: settings.stt.clone(),
                     learning: settings.learning.clone(),

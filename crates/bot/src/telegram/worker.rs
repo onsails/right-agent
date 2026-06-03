@@ -315,6 +315,10 @@ pub struct WorkerContext {
     pub hindsight: Option<std::sync::Arc<right_memory::ResilientHindsight>>,
     /// Prefetch cache for auto-recall results (None when memory.provider=file).
     pub prefetch_cache: Option<right_memory::prefetch::PrefetchCache>,
+    /// Last `<memory-status>` value emitted per session, for edge-triggering.
+    /// Absent key = healthy baseline. In-memory only; a restart may re-emit
+    /// once (harmless).
+    pub memory_status_last: Arc<DashMap<SessionKey, String>>,
     /// RwLock gate — worker acquires read lock before invoke_cc to block during upgrades.
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     /// STT context — None when stt.enabled=false or whisper model not yet cached.
@@ -1377,6 +1381,12 @@ pub fn spawn_worker(
                 );
                 continue;
             };
+            let (trigger_chat, trigger_author) = {
+                let m = input_messages
+                    .first()
+                    .expect("format_cc_input returned Some so input_messages is non-empty");
+                (m.chat.clone(), m.author.clone())
+            };
             if ctx.shutdown.is_cancelled() {
                 tracing::warn!(
                     ?key,
@@ -1478,6 +1488,8 @@ pub fn spawn_worker(
                 eff_thread_id,
                 is_group,
                 &routed_message_ids,
+                &trigger_chat,
+                &trigger_author,
                 &ctx,
             )
             .await
@@ -2731,6 +2743,8 @@ async fn invoke_cc(
     eff_thread_id: i64,
     is_group: bool,
     routed_message_ids: &[i32],
+    chat: &super::attachments::ChatContext,
+    author: &super::attachments::MessageAuthor,
     ctx: &WorkerContext,
 ) -> Result<CcReply, InvokeCcFailure> {
     let conn = right_db::open_connection(&ctx.agent_dir, false)
@@ -2859,12 +2873,11 @@ async fn invoke_cc(
     } else {
         ctx.claude_health.consume_repair_notice()
     };
-    let base_prompt = append_repair_notice_to_system_prompt(
-        right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir),
-        repair_notice,
-    );
+    let base_prompt =
+        right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
 
-    let memory_mode = if ctx.hindsight.is_some() {
+    let session_key: SessionKey = (chat_id, eff_thread_id);
+    let (memory_mode, volatile_prefix) = if ctx.hindsight.is_some() {
         let cache_key = format!("{}:{}", chat_id, eff_thread_id);
         let cached = if let Some(ref cache) = ctx.prefetch_cache {
             cache.get(&cache_key).await
@@ -2919,47 +2932,77 @@ async fn invoke_cc(
             0
         };
 
-        let marker = build_memory_marker(wrapper_status, client_drops_24h);
-        let bg_marker = build_bg_marker_for_chat(&ctx.agent_dir, chat_id).await;
-        match (
-            recall_content.as_deref(),
-            marker.as_deref(),
-            bg_marker.as_deref(),
-        ) {
-            (None, None, None) => {
-                let sandbox_ref = match (
-                    ctx.ssh_config_path.as_deref(),
-                    ctx.resolved_sandbox.as_deref(),
-                ) {
-                    (Some(ssh_config), Some(sandbox_name)) => Some(crate::cc::prompt::SandboxRef {
-                        ssh_config,
-                        sandbox_name,
-                    }),
-                    _ => None,
+        let cur_marker = build_memory_marker(wrapper_status, client_drops_24h);
+        let prev_marker = ctx.memory_status_last.get(&session_key).map(|r| r.clone());
+        let (emit_marker, new_last) =
+            edge_memory_marker(prev_marker.as_deref(), cur_marker.as_deref());
+        if let Some(marker) = new_last {
+            ctx.memory_status_last.insert(session_key, marker);
+        } else {
+            ctx.memory_status_last.remove(&session_key);
+        }
+
+        (
+            Some(crate::cc::prompt::MemoryMode::Hindsight),
+            crate::cc::prompt::build_volatile_prefix(
+                recall_content.as_deref(),
+                emit_marker.as_deref(),
+                repair_notice.as_deref(),
+            ),
+        )
+    } else {
+        (
+            Some(crate::cc::prompt::MemoryMode::File),
+            crate::cc::prompt::build_volatile_prefix(None, None, repair_notice.as_deref()),
+        )
+    };
+
+    let effective_input = match volatile_prefix {
+        Some(prefix) => format!("{prefix}\n\n{input}"),
+        None => input.to_string(),
+    };
+
+    let chat_context_block = {
+        use super::attachments::ChatContext as CC;
+        match chat {
+            CC::Private { id } => {
+                let input = crate::cc::prompt::ChatContextInput {
+                    chat_id: *id,
+                    kind: crate::cc::prompt::ChatContextKind::Dm {
+                        name: &author.name,
+                        username: author.username.as_deref(),
+                        user_id: author.user_id,
+                    },
                 };
-                crate::cc::prompt::remove_composite_memory(&ctx.agent_dir, sandbox_ref).await;
+                crate::cc::prompt::format_chat_context_block(&input)
             }
-            (content, marker_str, bg_marker_str) => {
-                // content may be None (no recall) while marker is Some —
-                // deploy a marker-only file so the agent still sees status.
-                let body = content.unwrap_or("");
-                if let Err(e) = crate::cc::prompt::deploy_composite_memory(
-                    body,
-                    "NOT new user input. Treat as background",
-                    &ctx.agent_dir,
-                    ctx.resolved_sandbox.as_deref(),
-                    marker_str,
-                    bg_marker_str,
-                )
-                .await
-                {
-                    tracing::warn!("composite-memory deploy failed: {e:#}");
-                }
+            CC::Group {
+                id,
+                title,
+                topic_id,
+            } => {
+                let topic_name = match topic_id {
+                    Some(tid) => right_db::forum_topics::list(&conn, *id)
+                        .await
+                        .ok()
+                        .and_then(|rows| {
+                            rows.into_iter()
+                                .find(|r| r.message_thread_id == *tid)
+                                .and_then(|r| r.name)
+                        }),
+                    None => None,
+                };
+                let input = crate::cc::prompt::ChatContextInput {
+                    chat_id: *id,
+                    kind: crate::cc::prompt::ChatContextKind::Group {
+                        title: title.as_deref(),
+                        topic_id: *topic_id,
+                        topic_name: topic_name.as_deref(),
+                    },
+                };
+                crate::cc::prompt::format_chat_context_block(&input)
             }
         }
-        Some(crate::cc::prompt::MemoryMode::Hindsight)
-    } else {
-        Some(crate::cc::prompt::MemoryMode::File)
     };
 
     // Per-session mutex on `--resume` AND `--session-id` — also held on
@@ -2997,12 +3040,12 @@ async fn invoke_cc(
             &base_prompt,
             prompt_mode,
             "/sandbox",
-            "/tmp/right-system-prompt.md",
+            &format!("/tmp/right-system-prompt-{session_uuid}.md"),
             "/sandbox",
             &claude_args,
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
-            None,
+            Some(chat_context_block.as_str()),
         );
         // Inject auth token as env var in the remote shell
         if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
@@ -3032,7 +3075,7 @@ async fn invoke_cc(
         let prompt_path = ctx
             .agent_dir
             .join(".claude")
-            .join("composite-system-prompt.md");
+            .join(format!("composite-system-prompt-{session_uuid}.md"));
         let prompt_path_str = prompt_path.to_string_lossy();
         let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
@@ -3043,7 +3086,7 @@ async fn invoke_cc(
             &claude_args,
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
-            None,
+            Some(chat_context_block.as_str()),
         );
 
         let mut c = tokio::process::Command::new("bash");
@@ -3220,7 +3263,7 @@ async fn invoke_cc(
                 );
                 child.kill().await.ok();
             }
-            result = stdin.write_all(input.as_bytes()) => {
+            result = stdin.write_all(effective_input.as_bytes()) => {
                 if let Err(e) = result {
                     tracing::error!(
                         chat_id = log_ctx.chat_id,
