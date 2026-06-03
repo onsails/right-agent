@@ -46,8 +46,6 @@ function windowRows(window: UsageWindow | null | undefined) {
       </span>
     </section>
 
-    <TokenLegend />
-
     <section class="two-column wide-main">
       <UsageSpendChart
         :points="usage?.daily_series ?? []"
@@ -83,5 +81,7 @@ function windowRows(window: UsageWindow | null | undefined) {
 
       <article v-if="(usage?.windows ?? []).length === 0" class="empty-panel">No usage data for period</article>
     </section>
+
+    <TokenLegend />
   </AsyncState>
 </template>

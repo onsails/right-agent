@@ -11,12 +11,25 @@
 
 <style scoped>
 .token-legend {
+  position: sticky;
+  bottom: 0;
+  z-index: 15;
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
   font-size: 0.72rem;
   color: var(--tg-theme-hint-color, #6b7b88);
-  margin: 0 0 4px;
+  margin: 8px -12px 0;
+  padding: 8px 12px;
+  background: var(--tg-theme-secondary-bg-color, #ffffff);
+  border-top: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.18));
+}
+
+@media (max-width: 560px) {
+  .token-legend {
+    /* clear the fixed mobile nav bar (.app-shell reserves 78px for it) */
+    bottom: calc(78px + env(safe-area-inset-bottom));
+  }
 }
 .lg {
   display: inline-flex;
