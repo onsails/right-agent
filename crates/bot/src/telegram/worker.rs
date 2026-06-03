@@ -1008,6 +1008,52 @@ fn build_input_message_from_debounce(
     }
 }
 
+async fn strip_recoverable_reply_to_body(
+    agent_dir: &Path,
+    chat_id: i64,
+    eff_thread_id: i64,
+    reply_to_id: Option<i32>,
+    reply_to_body: Option<super::attachments::ReplyToBody>,
+) -> Option<super::attachments::ReplyToBody> {
+    match (reply_to_id, reply_to_body) {
+        (Some(reply_to_id), Some(mut body)) if !body.omitted => {
+            let recoverable = match right_db::open_connection(agent_dir, false).await {
+                Ok(conn) => match right_db::conversation::fetch_by_ids(
+                    &conn,
+                    "telegram",
+                    chat_id,
+                    eff_thread_id,
+                    &[reply_to_id],
+                )
+                .await
+                {
+                    Ok(rows) => !rows.is_empty(),
+                    Err(e) => {
+                        tracing::warn!(
+                            ?chat_id,
+                            ?eff_thread_id,
+                            ?reply_to_id,
+                            "reply strip: fetch_by_ids failed: {e:#}"
+                        );
+                        false
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(?chat_id, "reply strip: open_connection failed: {e:#}");
+                    false
+                }
+            };
+            if recoverable {
+                body.text = None;
+                body.attachments = vec![];
+                body.omitted = true;
+            }
+            Some(body)
+        }
+        (_, other) => other,
+    }
+}
+
 fn routed_message_ids(batch: &[DebounceMsg]) -> Vec<i32> {
     batch.iter().map(|message| message.message_id).collect()
 }
@@ -1300,6 +1346,17 @@ pub fn spawn_worker(
                     );
                     body
                 });
+
+                // Strip the inlined reply body when it is recoverable from the
+                // archive. If the target is not archived, keep the inline copy.
+                let reply_to_body = strip_recoverable_reply_to_body(
+                    &ctx.agent_dir,
+                    chat_id,
+                    eff_thread_id,
+                    msg.reply_to_id,
+                    reply_to_body,
+                )
+                .await;
 
                 input_messages.push(build_input_message_from_debounce(
                     msg,
@@ -5219,6 +5276,113 @@ esac
 
         assert_eq!(input.reply_to_id, Some(6));
         assert_eq!(input.quoted_text.as_deref(), Some("selected fragment"));
+    }
+
+    fn reply_body(text: &str, omitted: bool) -> super::super::attachments::ReplyToBody {
+        super::super::attachments::ReplyToBody {
+            author: super::super::attachments::MessageAuthor {
+                name: "Alice".into(),
+                username: Some("alice".into()),
+                user_id: Some(9001),
+            },
+            text: Some(text.into()),
+            attachments: vec![super::super::attachments::ResolvedAttachment {
+                kind: super::super::attachments::AttachmentKind::Document,
+                path: PathBuf::from("/sandbox/inbox/reply.pdf"),
+                mime_type: "application/pdf".into(),
+                filename: Some("reply.pdf".into()),
+            }],
+            omitted,
+        }
+    }
+
+    async fn archive_reply_target(agent_dir: &Path, chat_id: i64, thread_id: i64, message_id: i32) {
+        let conn = right_db::open_connection(agent_dir, true).await.unwrap();
+        right_db::conversation::archive_message(
+            &conn,
+            right_db::conversation::ConversationMessage {
+                platform: "telegram",
+                chat_id,
+                thread_id,
+                message_id: Some(message_id),
+                sender_user_id: Some(9001),
+                sender_name: Some("Alice"),
+                addressed_to_bot: true,
+                routed_to_agent: false,
+                root_session_id: None,
+                turn_id: None,
+                role: right_db::conversation::ConversationRole::User,
+                content: "archived body",
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn strip_recoverable_reply_body_omits_archived_target() {
+        let temp = tempfile::tempdir().unwrap();
+        archive_reply_target(temp.path(), 100, 7, 41).await;
+
+        let stripped = strip_recoverable_reply_to_body(
+            temp.path(),
+            100,
+            7,
+            Some(41),
+            Some(reply_body("SECRET INLINE", false)),
+        )
+        .await
+        .unwrap();
+
+        assert!(stripped.omitted);
+        assert_eq!(stripped.text, None);
+        assert!(stripped.attachments.is_empty());
+        assert_eq!(stripped.author.name, "Alice");
+        assert_eq!(stripped.author.username.as_deref(), Some("alice"));
+        assert_eq!(stripped.author.user_id, Some(9001));
+    }
+
+    #[tokio::test]
+    async fn strip_recoverable_reply_body_keeps_unarchived_target_inline() {
+        let temp = tempfile::tempdir().unwrap();
+        archive_reply_target(temp.path(), 100, 99, 41).await;
+
+        let kept = strip_recoverable_reply_to_body(
+            temp.path(),
+            100,
+            7,
+            Some(41),
+            Some(reply_body("SECRET INLINE", false)),
+        )
+        .await
+        .unwrap();
+
+        assert!(!kept.omitted);
+        assert_eq!(kept.text.as_deref(), Some("SECRET INLINE"));
+        assert_eq!(kept.attachments.len(), 1);
+        assert_eq!(kept.attachments[0].filename.as_deref(), Some("reply.pdf"));
+        assert_eq!(kept.author.name, "Alice");
+    }
+
+    #[tokio::test]
+    async fn strip_recoverable_reply_body_keeps_already_omitted_body() {
+        let temp = tempfile::tempdir().unwrap();
+        archive_reply_target(temp.path(), 100, 7, 41).await;
+
+        let kept = strip_recoverable_reply_to_body(
+            temp.path(),
+            100,
+            7,
+            Some(41),
+            Some(reply_body("already omitted", true)),
+        )
+        .await
+        .unwrap();
+
+        assert!(kept.omitted);
+        assert_eq!(kept.text.as_deref(), Some("already omitted"));
+        assert_eq!(kept.attachments.len(), 1);
+        assert_eq!(kept.author.name, "Alice");
     }
 
     #[tokio::test]
