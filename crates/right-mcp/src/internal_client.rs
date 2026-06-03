@@ -33,6 +33,7 @@ pub const SKILL_LEARNING_FINISH_MCP_TOOL: &str = "mcp__right__skill_learning_fin
 
 pub const THREAD_SEARCH_MCP_TOOL: &str = "mcp__right__thread_search";
 pub const CHAT_SEARCH_MCP_TOOL: &str = "mcp__right__chat_search";
+pub const GET_MESSAGES_BY_ID_MCP_TOOL: &str = "mcp__right__get_messages_by_id";
 
 pub const FORUM_TOPIC_CREATE_MCP_TOOL: &str = "mcp__right__forum_topic_create";
 pub const FORUM_TOPIC_EDIT_MCP_TOOL: &str = "mcp__right__forum_topic_edit";

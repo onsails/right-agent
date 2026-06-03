@@ -415,6 +415,18 @@ async fn stdio_conversation_search_returns_scope_unavailable() {
     let chat_body: serde_json::Value =
         serde_json::from_str(&chat_text).expect("body must be valid JSON");
     assert_eq!(chat_body["error"]["code"], "conversation_scope_unavailable");
+
+    let get_result = server
+        .get_messages_by_id(Parameters(crate::right_backend::GetMessagesByIdParams {
+            message_ids: vec![1],
+        }))
+        .await
+        .expect("get_messages_by_id dispatch should be Ok with operation error");
+    assert_eq!(get_result.is_error, Some(true));
+    let get_text = call_result_text(get_result);
+    let get_body: serde_json::Value =
+        serde_json::from_str(&get_text).expect("body must be valid JSON");
+    assert_eq!(get_body["error"]["code"], "conversation_scope_unavailable");
 }
 
 #[tokio::test]

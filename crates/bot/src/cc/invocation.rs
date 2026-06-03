@@ -71,6 +71,7 @@ pub(crate) fn disallow_conversation_search(mut tools: Vec<String>) -> Vec<String
     for tool_name in [
         right_mcp::internal_client::THREAD_SEARCH_MCP_TOOL,
         right_mcp::internal_client::CHAT_SEARCH_MCP_TOOL,
+        right_mcp::internal_client::GET_MESSAGES_BY_ID_MCP_TOOL,
     ] {
         if !tools.iter().any(|tool| tool == tool_name) {
             tools.push(tool_name.to_owned());
@@ -1048,6 +1049,7 @@ mod tests {
             right_mcp::internal_client::SKILL_LEARNING_FINISH_MCP_TOOL,
             right_mcp::internal_client::THREAD_SEARCH_MCP_TOOL,
             right_mcp::internal_client::CHAT_SEARCH_MCP_TOOL,
+            right_mcp::internal_client::GET_MESSAGES_BY_ID_MCP_TOOL,
             right_mcp::internal_client::FORUM_TOPIC_CREATE_MCP_TOOL,
             right_mcp::internal_client::FORUM_TOPIC_EDIT_MCP_TOOL,
             right_mcp::internal_client::FORUM_TOPIC_CLOSE_MCP_TOOL,
