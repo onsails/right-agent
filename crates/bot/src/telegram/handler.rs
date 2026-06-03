@@ -286,6 +286,7 @@ pub async fn handle_message(
                     },
                     text: r.text().or(r.caption()).map(|t| t.to_string()),
                     attachments: vec![], // populated post-debounce in worker
+                    omitted: false,
                 };
                 let inbound = super::attachments::extract_attachments(r);
                 (Some(body), inbound)

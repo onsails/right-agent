@@ -408,6 +408,9 @@ pub struct ReplyToBody {
     pub author: MessageAuthor,
     pub text: Option<String>,
     pub attachments: Vec<ResolvedAttachment>,
+    /// True when the body was stripped (recoverable from the archive); the
+    /// YAML then emits author + a fetch note instead of text/attachments.
+    pub omitted: bool,
 }
 
 /// Message in a debounce batch -- text and/or attachments.
@@ -526,18 +529,26 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
             if let Some(uid) = r.author.user_id {
                 writeln!(out, "        user_id: {uid}").expect("infallible");
             }
-            if let Some(ref t) = r.text {
-                writeln!(out, "      text: \"{}\"", yaml_escape_string(t)).expect("infallible");
-            }
-            if !r.attachments.is_empty() {
-                out.push_str("      attachments:\n");
-                for att in &r.attachments {
-                    writeln!(out, "        - type: {}", att.kind.as_str()).expect("infallible");
-                    writeln!(out, "          path: {}", att.path.display()).expect("infallible");
-                    writeln!(out, "          mime_type: {}", att.mime_type).expect("infallible");
-                    if let Some(ref fname) = att.filename {
-                        let escaped = yaml_escape_string(fname);
-                        writeln!(out, "          filename: \"{escaped}\"").expect("infallible");
+            if r.omitted {
+                out.push_str(
+                    "      note: \"body omitted - fetch with mcp__right__get_messages_by_id if not in your context\"\n",
+                );
+            } else {
+                if let Some(ref t) = r.text {
+                    writeln!(out, "      text: \"{}\"", yaml_escape_string(t)).expect("infallible");
+                }
+                if !r.attachments.is_empty() {
+                    out.push_str("      attachments:\n");
+                    for att in &r.attachments {
+                        writeln!(out, "        - type: {}", att.kind.as_str()).expect("infallible");
+                        writeln!(out, "          path: {}", att.path.display())
+                            .expect("infallible");
+                        writeln!(out, "          mime_type: {}", att.mime_type)
+                            .expect("infallible");
+                        if let Some(ref fname) = att.filename {
+                            let escaped = yaml_escape_string(fname);
+                            writeln!(out, "          filename: \"{escaped}\"").expect("infallible");
+                        }
                     }
                 }
             }
@@ -2165,6 +2176,7 @@ mod tests {
                 },
                 text: Some("first sentence. only this sentence. last sentence.".into()),
                 attachments: vec![],
+                omitted: false,
             }),
         }];
 
@@ -2178,6 +2190,71 @@ mod tests {
             result.contains("      text: \"first sentence. only this sentence. last sentence.\"\n")
         );
         assert!(result.contains("    quoted_text: \"only this sentence\"\n"));
+    }
+
+    #[tokio::test]
+    async fn format_cc_input_omitted_reply_emits_note_not_body() {
+        let m = InputMessage {
+            message_id: 2,
+            text: Some("and this?".into()),
+            timestamp: Utc::now(),
+            attachments: vec![],
+            author: MessageAuthor {
+                name: "Bob".into(),
+                username: None,
+                user_id: Some(7),
+            },
+            forward_info: None,
+            reply_to_id: Some(41),
+            quoted_text: None,
+            chat: ChatContext::Group {
+                id: -100,
+                title: Some("T".into()),
+                topic_id: Some(3),
+            },
+            reply_to_body: Some(ReplyToBody {
+                author: MessageAuthor {
+                    name: "Alice".into(),
+                    username: Some("@alice".into()),
+                    user_id: Some(9),
+                },
+                text: Some("SECRET BODY".into()),
+                attachments: vec![ResolvedAttachment {
+                    kind: AttachmentKind::Document,
+                    path: std::path::PathBuf::from("/sandbox/inbox/secret.pdf"),
+                    mime_type: "application/pdf".into(),
+                    filename: Some("secret.pdf".into()),
+                }],
+                omitted: true,
+            }),
+        };
+        let yaml = format_cc_input(&[m]).unwrap();
+        assert!(yaml.contains("reply_to_id: 41"), "reply_to_id kept");
+        assert!(yaml.contains("Alice"), "author kept");
+        assert!(
+            yaml.contains("mcp__right__get_messages_by_id"),
+            "fetch note present"
+        );
+        assert!(
+            !yaml.contains("SECRET BODY"),
+            "stripped body must not appear"
+        );
+        assert!(
+            !yaml.contains("attachments:"),
+            "omitted reply attachments must not appear:\n{yaml}"
+        );
+        assert!(
+            !yaml.contains("/sandbox/inbox/secret.pdf"),
+            "omitted reply attachment path must not appear"
+        );
+        assert!(
+            !yaml.contains("application/pdf"),
+            "omitted reply attachment MIME type must not appear"
+        );
+        assert!(
+            !yaml.contains("secret.pdf"),
+            "omitted reply attachment filename must not appear"
+        );
     }
 
     #[tokio::test]
@@ -2227,6 +2304,7 @@ mod tests {
                     mime_type: "application/pdf".into(),
                     filename: Some("edf.pdf".into()),
                 }],
+                omitted: false,
             }),
         }];
         let result = format_cc_input(&msgs).unwrap();
@@ -2664,6 +2742,7 @@ mod group_format_tests {
                 },
                 text: Some("here is the function: foo()".into()),
                 attachments: vec![],
+                omitted: false,
             }),
         };
         let yaml = format_cc_input(&[m]).unwrap();
