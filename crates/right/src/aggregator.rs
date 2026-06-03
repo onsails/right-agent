@@ -507,10 +507,9 @@ impl ToolDispatcher {
 
         // Await proxy caches for a complete list; sort for canonical order.
         for (proxy_name, handle) in proxy_handles {
-            for t in handle.tools().await {
-                let mut prefixed = t.clone();
-                prefixed.name = Cow::Owned(format!("{proxy_name}__{}", t.name));
-                tools.push(prefixed);
+            for mut t in handle.tools().await {
+                t.name = Cow::Owned(format!("{proxy_name}__{}", t.name));
+                tools.push(t);
             }
         }
 
