@@ -19,9 +19,11 @@ array, `document_id` = CC session UUID (same as `--resume`), `update_mode:
 "append"` so only new content triggers LLM extraction (O(n) vs O(n²) for
 full-session replace). Tags: `["chat:<chat_id>"]` for per-chat scoping.
 
-Auto-recall before each `claude -p`: query truncated to 800 chars, tags
-`["chat:<chat_id>"]` with `tags_match: "any"` (returns per-chat + global untagged
-memories). Prefetch uses same parameters.
+Auto-recall before each foreground worker `claude -p`: query truncated to
+800 chars, tags `["chat:<chat_id>"]` with `tags_match: "any"` (returns
+per-chat + global untagged memories). Prefetch uses same parameters. The query
+source is the original Telegram message YAML, before any volatile prefix is
+prepended.
 
 **Recall response shape.** Hindsight returns ~13 fields per result; the client
 models `text`, `type`, `id`, `mentioned_at`, `occurred_start`, `occurred_end`
@@ -58,6 +60,35 @@ foreground turn's auto-retain.
 **File mode (fallback):** Agent manages `MEMORY.md` via CC Edit/Write.
 Bot injects file contents into system prompt (truncated to 200 lines).
 No MCP memory tools.
+
+## Prompt placement
+
+Session-bearing invocations assemble a composite system prompt with stable
+content: base prompt, operating/bootstrap/cron instructions, identity files,
+TOOLS, per-session `## Current Conversation`, MCP instructions, and file-mode
+`MEMORY.md` only. Worker prompt files are per session because the chat-context
+block is per session. The system prompt is not the home for Hindsight recall,
+memory-status markers, repair notices, or background-job status.
+
+In Hindsight mode, foreground worker recall is rendered by
+`render_recall_with_dates`, ironclaw-wrapped by `build_volatile_prefix`, and
+prepended to the stdin user message before the `messages:` YAML. The volatile
+prefix label says the recalled memory is not new user input and tells the agent
+not to call memory tools for information already present in the block.
+
+`<memory-status>` markers are also prepended through the volatile stdin prefix.
+They are edge-triggered per `(chat_id, effective_thread_id)`: entering or
+changing an unhealthy state emits once, unchanged unhealthy state is silent,
+and recovery emits a single recovered marker before returning to silence.
+Quota exhaustion uses this marker to tell the user to top up at
+`https://hindsight.vectorize.io`. Repair notices are prepended in the same
+volatile prefix as `<system-notification>`. The removed `composite-memory.md`
+and `<background-jobs>` marker are not generated.
+
+Telegram message YAML is sequence-only. DMs omit per-message `author` and
+`chat` because `## Current Conversation` carries the partner identity. Groups
+keep per-message `author` for speaker attribution and omit chat/topic metadata
+because the chat-context block carries it.
 
 The legacy `store_record` / `query_records` / `search_records` / `delete_record`
 tools are removed from the surface; their backing tables (`memories`,
@@ -109,8 +140,8 @@ on:
 - >20 `Client`-kind drops in a 1h rolling window (`client_flood`)
 
 `QuotaExhausted` does **not** trigger a Telegram broadcast. The agent
-informs the user via the `<memory-status>` marker injected into the
-system prompt (see PROMPT_SYSTEM.md), which carries an explicit
+informs the user via the edge-triggered `<memory-status>` marker prepended to
+the stdin user message (see PROMPT_SYSTEM.md), which carries an explicit
 "tell the user" instruction and the top-up URL.
 
 Doctor checks queue size (500/900 row thresholds), oldest-row age (1h/12h
@@ -140,7 +171,7 @@ that prevents attacker payloads from breaking out of the wrap.
 
 | Mode | Phase 1 (write) | Phase 2 (read) |
 |---|---|---|
-| Hindsight | ✅ in `ResilientHindsight::retain` | ✅ wrap inside `deploy_composite_memory` (host writes wrapped composite-memory.md, script `cat`s) |
+| Hindsight | ✅ in `ResilientHindsight::retain` | ✅ `build_volatile_prefix` wraps recall before prepending it to stdin/user message |
 | File (MEMORY.md) | ❌ uninterceptable (agent writes via CC's Edit/Write) | ✅ shell-side wrap in `build_prompt_assembly_script` (prefix/suffix derived from ironclaw, sed escape) |
 
 **File-mode write-side gap.** The agent writes MEMORY.md via CC's
