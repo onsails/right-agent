@@ -128,10 +128,11 @@ Foreground Telegram message YAML is sequence-only. DMs omit per-message
 `author` and `chat` because the stable chat-context block carries the partner
 identity. Groups keep per-message `author` for speaker attribution and omit
 chat/topic metadata because the stable chat-context block carries it.
-For archived or recoverable text-only reply targets, `reply_to:` keeps author
-plus a fetch note while body text is omitted; use `reply_to_id` from context or
-`mcp__right__get_messages_by_id` to fetch it. Non-archived reply targets and
-reply targets with resolved attachments stay inlined.
+For archived or recoverable text-only reply targets whose body is faithfully
+archived, `reply_to:` keeps author plus a fetch note while body text is omitted;
+use `reply_to_id` from context or `mcp__right__get_messages_by_id` to fetch it.
+Non-archived reply targets, reply targets with resolved attachments, and
+voice/video-note STT marker bodies stay inlined.
 
 ### Conversation and Memory Tiers
 

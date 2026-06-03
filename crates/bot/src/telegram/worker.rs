@@ -1008,15 +1008,24 @@ fn build_input_message_from_debounce(
     }
 }
 
+/// Drop the inline reply body when its text is faithfully recoverable from the
+/// local archive, so the agent can fetch it on demand instead of paying for it
+/// in every turn.
+///
+/// `had_voice_markers` is true when the reply target was a voice/video-note
+/// whose body text carries an STT success or failure marker. The archive stores
+/// those messages only as a `[voice]` placeholder, so the marker is NOT
+/// recoverable -- such bodies are kept inline regardless of archive presence.
 async fn strip_recoverable_reply_to_body(
     agent_dir: &Path,
     chat_id: i64,
     eff_thread_id: i64,
     reply_to_id: Option<i32>,
+    had_voice_markers: bool,
     reply_to_body: Option<super::attachments::ReplyToBody>,
 ) -> Option<super::attachments::ReplyToBody> {
     match (reply_to_id, reply_to_body) {
-        (Some(reply_to_id), Some(mut body)) if !body.omitted => {
+        (Some(reply_to_id), Some(mut body)) if !body.omitted && !had_voice_markers => {
             if !body.attachments.is_empty() {
                 return Some(body);
             }
@@ -1047,8 +1056,9 @@ async fn strip_recoverable_reply_to_body(
                 }
             };
             if recoverable {
+                // attachments are already empty here (the guard above returns
+                // early when they are not), so only text needs clearing.
                 body.text = None;
-                body.attachments = vec![];
                 body.omitted = true;
             }
             Some(body)
@@ -1352,11 +1362,14 @@ pub fn spawn_worker(
 
                 // Strip the inlined reply body when it is recoverable from the
                 // archive. If the target is not archived, keep the inline copy.
+                // Voice/video-note targets carry an STT marker the archive does
+                // not store, so they are never stripped.
                 let reply_to_body = strip_recoverable_reply_to_body(
                     &ctx.agent_dir,
                     chat_id,
                     eff_thread_id,
                     msg.reply_to_id,
+                    !reply_to_voice_markers.is_empty(),
                     reply_to_body,
                 )
                 .await;
@@ -5340,6 +5353,7 @@ esac
             100,
             7,
             Some(41),
+            false,
             Some(reply_body("SECRET INLINE", false, vec![])),
         )
         .await
@@ -5363,6 +5377,7 @@ esac
             100,
             7,
             Some(41),
+            false,
             Some(reply_body("SECRET INLINE", false, vec![reply_attachment()])),
         )
         .await
@@ -5385,6 +5400,7 @@ esac
             100,
             7,
             Some(41),
+            false,
             Some(reply_body("SECRET INLINE", false, vec![reply_attachment()])),
         )
         .await
@@ -5405,20 +5421,23 @@ esac
             .await
             .unwrap();
 
+        // Text-only body (no attachments) so the DB recoverability check runs:
+        // a mark_routed stub carries content='' and is not archived content, so
+        // fetch_by_ids returns nothing and the body must stay inline.
         let kept = strip_recoverable_reply_to_body(
             temp.path(),
             100,
             7,
             Some(41),
-            Some(reply_body("SECRET INLINE", false, vec![reply_attachment()])),
+            false,
+            Some(reply_body("SECRET INLINE", false, vec![])),
         )
         .await
         .unwrap();
 
         assert!(!kept.omitted);
         assert_eq!(kept.text.as_deref(), Some("SECRET INLINE"));
-        assert_eq!(kept.attachments.len(), 1);
-        assert_eq!(kept.attachments[0].filename.as_deref(), Some("reply.pdf"));
+        assert!(kept.attachments.is_empty());
         assert_eq!(kept.author.name, "Alice");
     }
 
@@ -5432,6 +5451,7 @@ esac
             100,
             7,
             Some(41),
+            false,
             Some(reply_body(
                 "already omitted",
                 true,
@@ -5444,6 +5464,33 @@ esac
         assert!(kept.omitted);
         assert_eq!(kept.text.as_deref(), Some("already omitted"));
         assert_eq!(kept.attachments.len(), 1);
+        assert_eq!(kept.author.name, "Alice");
+    }
+
+    #[tokio::test]
+    async fn strip_recoverable_reply_body_keeps_voice_transcription_inline() {
+        // A replied-to voice/video-note message is archived only as a `[voice]`
+        // placeholder, while the inline body text is the STT transcription. Even
+        // though the target is archived (recoverable), the transcription is not,
+        // so the body must stay inline rather than be replaced with a fetch note
+        // that would resolve to `[voice]`.
+        let temp = tempfile::tempdir().unwrap();
+        archive_reply_target(temp.path(), 100, 7, 41).await;
+
+        let kept = strip_recoverable_reply_to_body(
+            temp.path(),
+            100,
+            7,
+            Some(41),
+            true, // had_voice_markers: body text is an STT transcription
+            Some(reply_body("[transcription: hello there]", false, vec![])),
+        )
+        .await
+        .unwrap();
+
+        assert!(!kept.omitted, "voice transcription must not be stripped");
+        assert_eq!(kept.text.as_deref(), Some("[transcription: hello there]"));
+        assert!(kept.attachments.is_empty());
         assert_eq!(kept.author.name, "Alice");
     }
 
