@@ -113,13 +113,15 @@ Foreground progress uses the built-in `mcp__right__send_progress` tool.
 Cron, delivery, reflection, and background-continuation invocations
 disallow it.
 
-Conversation search scope is server-enforced.
+Conversation transcript scope is server-enforced.
 `mcp__right__thread_search` searches only the current
 `(chat_id, effective_thread_id)`. `mcp__right__chat_search` searches only
 the current `chat_id`; in DMs this is only that DM, and in groups this is
-the whole group across topics. Agents must never be allowed to pass
-chat_id, thread_id, user ids, session ids, or a broader scope to these
-tools.
+the whole group across topics. `mcp__right__get_messages_by_id` is scoped to
+the current `(chat_id, effective_thread_id)`; the agent supplies only
+`message_ids`, and ids outside scope or not archived are absent. Agents must
+never be allowed to pass chat_id, thread_id, user ids, session ids, or a
+broader scope to these tools.
 
 `mcp__right__forum_topic_list` is scoped the same way: it returns only the
 current `chat_id`'s tracked topics, resolved server-side from the invocation —

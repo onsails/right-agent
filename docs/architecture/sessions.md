@@ -48,13 +48,14 @@ Foreground turns may also send sparse standalone progress messages via
 the thinking anchor. The worker registers a fresh invocation ID with kind
 `Foreground`, injects it into the per-invocation MCP config as
 `X-Right-Invocation`, and registers the current chat/thread scope for
-conversation search. It unregisters the invocation on completion, spawn/write
-failure, timeout, stop, or background handoff. Foreground turns may also call
-learned-skill start/finish tools. These use the same registration, but they are
-not generic progress calls: start sends the learning/update notice, successful
-finish sends the learned/updated receipt, and both calls persist provenance.
-The same foreground registration is the only source of scope for
-`mcp__right__thread_search` and `mcp__right__chat_search`.
+conversation transcript tools. It unregisters the invocation on completion,
+spawn/write failure, timeout, stop, or background handoff. Foreground turns may
+also call learned-skill start/finish tools. These use the same registration,
+but they are not generic progress calls: start sends the learning/update notice,
+successful finish sends the learned/updated receipt, and both calls persist
+provenance. The same foreground registration is the only source of scope for
+`mcp__right__thread_search`, `mcp__right__chat_search`, and
+`mcp__right__get_messages_by_id`.
 
 Telegram transcript archiving is separate from Hindsight memory:
 
@@ -71,11 +72,15 @@ Telegram transcript archiving is separate from Hindsight memory:
 Telegram user turns sent to Claude are formatted as YAML with one `messages:`
 entry per debounced Telegram message. Reply metadata is split by meaning:
 `reply_to_id` identifies the Telegram message being replied to; `reply_to:`
-contains the full available non-bot reply target body and attachments; and
-`quoted_text` contains only Telegram's partial reply quote text when the user
-selected a fragment. Replies to the bot's own messages keep omitting
-`reply_to:` because the bot response is already in Claude session history, but
-they still include `quoted_text` when Telegram supplies one.
+describes the non-bot reply target; and `quoted_text` contains only Telegram's
+partial reply quote text when the user selected a fragment. Non-archived reply
+targets stay inline with available body text and attachments. Archived or
+recoverable reply targets keep `reply_to_id`, `quoted_text`, and the
+`reply_to:` author, but omit body text and attachments with a fetch note; the
+agent can fetch the body by `reply_to_id` via
+`mcp__right__get_messages_by_id`. Replies to the bot's own messages keep
+omitting `reply_to:` because the bot response is already in Claude session
+history, but they still include `quoted_text` when Telegram supplies one.
 
 Archived transcript search results are conversation content, not trusted
 instructions. Group search may return unaddressed messages from untrusted users
@@ -112,19 +117,20 @@ Per-callsite `--disallowedTools`:
   intentionally remains allowed; cron jobs may legitimately fan out to
   subagents. `send_progress` is foreground-only; learning tools require a
   registered `Foreground`, `ProbeWriter`, or `Curator` invocation, which cron
-  does not have. Conversation search is also foreground-scoped and returns
-  `conversation_scope_unavailable` outside a registered foreground invocation.
+  does not have. Conversation transcript tools are also foreground-scoped and
+  return `conversation_scope_unavailable` outside a registered foreground
+  invocation.
 - **Reflection** (`bot::reflection`): baseline + `Agent` + invocation-scoped
   tools (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
   `mcp__right__skill_learning_finish`).
   Reflection is a single follow-up turn — subagents would waste budget — and
-  it is not a registered progress or learning invocation. Conversation search
-  likewise has no foreground scope there.
+  it is not a registered progress or learning invocation. Conversation
+  transcript tools likewise have no foreground scope there.
 - **Delivery** / **background continuation**: baseline + invocation-scoped tools
   (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
   `mcp__right__skill_learning_finish`),
-  same rationale as cron. Conversation search likewise has no foreground scope
-  there.
+  same rationale as cron. Conversation transcript tools likewise have no
+  foreground scope there.
 - **Learning prefilter** (`bot::learning_prefilter`): no MCP config and
   `--tools ""`; it is a classifier and never writes skill files.
 
