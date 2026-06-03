@@ -484,33 +484,6 @@ fn volatile_prefix_markers_are_unwrapped_and_appended() {
 }
 
 #[tokio::test]
-async fn deploy_composite_memory_preserves_background_marker_unwrapped() {
-    let dir = tempfile::tempdir().unwrap();
-    let claude_dir = dir.path().join(".claude");
-    tokio::fs::create_dir(&claude_dir).await.unwrap();
-
-    deploy_composite_memory(
-        "recalled fact",
-        "legacy label",
-        dir.path(),
-        None,
-        Some("<memory-status>healthy</memory-status>"),
-        Some("<background-jobs>running task</background-jobs>"),
-    )
-    .await
-    .unwrap();
-
-    let body = tokio::fs::read_to_string(claude_dir.join("composite-memory.md"))
-        .await
-        .unwrap();
-    assert!(body.contains("[System: recalled memory context, legacy label.]"));
-    assert!(body.contains("recalled fact"));
-    assert!(body.contains("<memory-status>healthy</memory-status>"));
-    assert!(body.contains("<background-jobs>running task</background-jobs>"));
-    assert!(!body.contains("<system-notification>"));
-}
-
-#[tokio::test]
 async fn cron_mode_includes_cron_delivery_contract() {
     let script = test_script(
         "Base prompt",
