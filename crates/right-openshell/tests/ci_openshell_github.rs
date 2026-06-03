@@ -1,6 +1,6 @@
 //! Live OpenShell gateway tests for RightClaw managed profile provisioning.
-//! Each test is `#[ignore]` (ci-openshell:) — requires a live gateway with the
-//! built-in `github` base profile present. Invoked explicitly by CI.
+//! CI-filtered tests use `#[ignore]` markers with `ci-openshell:` and
+//! `ci_openshell_` names. Manual probes stay outside that filter.
 
 use right_openshell::managed_profiles::{
     EnsureOutcome, delete_profile, ensure_profiles, get_profile, github,
@@ -83,8 +83,12 @@ async fn ci_openshell_get_profile_absent_returns_none() {
     );
 }
 
-/// De-risk: proves that `access: full` on a terminated provider endpoint
-/// permits POST requests (full-method access). No real credential required.
+/// Manual de-risk probe for `access: full` on a terminated provider endpoint.
+/// No real credential required.
+///
+/// This is intentionally not a CI-filtered `ci_openshell_` test. The plan that
+/// introduced it called out public echo-host networking as optional and finicky;
+/// the load-bearing gate is `ci_openshell_github_push_succeeds`.
 /// A throwaway profile is imported with one `httpbin.org` REST endpoint and
 /// `access: full`. A provider is created with that type, attached to an
 /// ephemeral sandbox, and `curl -X POST https://httpbin.org/post` is executed.
@@ -93,8 +97,8 @@ async fn ci_openshell_get_profile_absent_returns_none() {
 ///
 /// `#[ignore]` — requires live gateway; compiles with `--no-run`.
 #[tokio::test]
-#[ignore = "ci-openshell: full-access permits POST on a terminated endpoint"]
-async fn ci_openshell_full_access_allows_post() {
+#[ignore = "manual-live: full-access POST de-risk on a public echo host"]
+async fn manual_live_full_access_allows_post() {
     use right_openshell::managed_profiles::lint_and_import;
     use right_openshell::openshell_proto::openshell::sandbox::v1 as sandbox_v1;
     use right_openshell::openshell_proto::openshell::v1 as proto_v1;
