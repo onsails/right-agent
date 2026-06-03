@@ -38,8 +38,9 @@ You MUST always include `used_skill_receipts` in your reply. Use an empty array
 `[]` if no `rightx-*` skill materially guided your answer. When one or more
 `rightx-*` skills did guide your answer, include one entry per skill. The
 `message` field describes the workflow you applied (e.g. "Built and verified
-npm package", not "Done") and is shown to the user. Do not emit receipts for
-built-in skills, core skills, or trivial mentions.
+npm package", not "Done"), is shown to the user, and MUST be written in the
+same language as your `content` reply. Do not emit receipts for built-in
+skills, core skills, or trivial mentions.
 
 ## MCP Management
 

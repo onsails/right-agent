@@ -509,10 +509,13 @@ It NEVER deletes a skill. Constant is `right_codegen::CURATOR_SYSTEM_PROMPT`.
 
 Every reply MUST include `used_skill_receipts` (array, possibly empty).
 Each entry has `package_name` (pattern `^rightx-`) and `message`
-(minLength 1). The worker filters non-rightx package_names and renders
-each entry as `\n\n💡 <message> (<code><package_name></code>)` after the
-assistant's content, and records `use_count` + `last_used_at` for the named
-skill in the skill lifecycle database.
+(minLength 1). The `message` is authored in the same language as the reply
+`content` (enforced by prose in `OPERATING_INSTRUCTIONS.md`, not the schema —
+no schema field carries a `description`). The worker filters non-rightx
+package_names and renders each entry as
+`\n\n💡 <message> (<code><package_name></code>)` after the assistant's
+content, and records `use_count` + `last_used_at` for the named skill in the
+skill lifecycle database.
 
 ## MCP Server Instructions
 
