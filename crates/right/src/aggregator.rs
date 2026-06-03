@@ -1039,11 +1039,11 @@ mod tests {
 
     /// CC silently drops ALL MCP tools if any tool has an invalid inputSchema.
     /// An empty `{}` is invalid — every schema must have `"type": "object"`.
-    #[test]
-    fn all_tools_have_valid_input_schema() {
+    #[tokio::test]
+    async fn all_tools_have_valid_input_schema() {
         let tmp = tempfile::tempdir().unwrap();
         let dispatcher = make_dispatcher(tmp.path());
-        let tools = dispatcher.tools_list("test-agent");
+        let tools = dispatcher.tools_list("test-agent").await;
 
         for tool in &tools {
             let schema = &tool.input_schema;
