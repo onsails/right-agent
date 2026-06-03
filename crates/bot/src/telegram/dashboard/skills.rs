@@ -15,23 +15,30 @@ const SKILL_PREVIEW_LIMIT_BYTES: usize = 64 * 1024;
 const SKILL_DESCRIPTION_PREVIEW_LIMIT_BYTES: usize = 8 * 1024;
 const SANDBOX_SKILL_LIMIT_STR: &str = "200";
 const SANDBOX_SKILLS_PATH: &str = "/sandbox/.claude/skills";
-const SANDBOX_LIST_SKILLS_SCRIPT: &str = r#"cd "$1" 2>/dev/null || exit 0
-limit="$2"
-count=0
-for d in *; do
-  [ -d "$d" ] || continue
-  [ -L "$d/SKILL.md" ] && continue
-  [ -f "$d/SKILL.md" ] || continue
-  printf '%s\n' "$d"
-  count=$((count + 1))
-  [ "$count" -ge "$limit" ] && break
-done"#;
-const SANDBOX_READ_SKILL_SCRIPT: &str = r#"cd "$1" 2>/dev/null || exit 3
-file="$2/SKILL.md"
-[ -e "$file" ] || exit 3
-[ -L "$file" ] && exit 3
-[ -f "$file" ] || exit 3
-head -c "$3" "$file""#;
+// These two scripts MUST stay single-line: OpenShell's gRPC `ExecSandbox`
+// rejects any command argument containing a real newline/CR byte, and each is
+// passed as one `sh -c <script>` arg. Rust's `\`-line-continuation strips the
+// trailing newline AND the next line's leading whitespace, so the source
+// indentation is cosmetic — the space before each `\` is the statement
+// separator. Do not reflow into a raw multi-line string. `script_constants_tests`
+// guards this; `printf '%s\\n'` is a literal backslash+n for printf, not 0x0A.
+const SANDBOX_LIST_SKILLS_SCRIPT: &str = "cd \"$1\" 2>/dev/null || exit 0; \
+     limit=\"$2\"; \
+     count=0; \
+     for d in *; do \
+     [ -d \"$d\" ] || continue; \
+     [ -L \"$d/SKILL.md\" ] && continue; \
+     [ -f \"$d/SKILL.md\" ] || continue; \
+     printf '%s\\n' \"$d\"; \
+     count=$((count + 1)); \
+     [ \"$count\" -ge \"$limit\" ] && break; \
+     done";
+const SANDBOX_READ_SKILL_SCRIPT: &str = "cd \"$1\" 2>/dev/null || exit 3; \
+     file=\"$2/SKILL.md\"; \
+     [ -e \"$file\" ] || exit 3; \
+     [ -L \"$file\" ] && exit 3; \
+     [ -f \"$file\" ] || exit 3; \
+     head -c \"$3\" \"$file\"";
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum SkillsResponseError {
@@ -463,4 +470,134 @@ async fn spend_by_skill(
 > {
     let conn = right_db::open_connection_readonly(agent_dir).await?;
     Ok(right_dashboard::read_model::learning::skill_spend_by_skill(&conn).await?)
+}
+
+#[cfg(test)]
+mod ci_sandbox_tests {
+    use super::{SANDBOX_LIST_SKILLS_SCRIPT, SANDBOX_READ_SKILL_SCRIPT, SANDBOX_SKILLS_PATH};
+
+    use right_openshell::sandbox_exec::SandboxExec;
+
+    /// Build a `SandboxExec` against a live test sandbox using the same
+    /// (name + mtls_dir + resolved id) pattern the bot's other live
+    /// sandbox tests use (see `sync.rs`).
+    async fn sandbox_exec_for(sandbox: &right_openshell::test_support::TestSandbox) -> SandboxExec {
+        let mtls_dir = match right_openshell::openshell::preflight_check() {
+            right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+            other => panic!("OpenShell not ready: {other:?}"),
+        };
+        let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
+            .await
+            .expect("connect_grpc to OpenShell gateway");
+        let sandbox_id =
+            right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox.name())
+                .await
+                .expect("resolve sandbox id");
+        SandboxExec::new(mtls_dir, sandbox.name().to_owned(), sandbox_id)
+    }
+
+    /// Run one dashboard command array through `SandboxExec::exec`, panicking
+    /// with the newline-rejection error if OpenShell refuses the argument.
+    /// Returns the exit code so the caller can sanity-check it.
+    async fn exec_dashboard_command(sbox: &SandboxExec, label: &str, command: &[&str]) -> i32 {
+        let (_stdout, exit_code) = sbox.exec(command).await.unwrap_or_else(|error| {
+            panic!(
+                "{label} was rejected by OpenShell ExecSandbox (multi-line \
+                 constant contains real newline bytes): {error:#}"
+            );
+        });
+        exit_code
+    }
+
+    /// Regression repro for the dashboard "Skills" tab on sandboxed agents.
+    ///
+    /// `SANDBOX_LIST_SKILLS_SCRIPT` and `SANDBOX_READ_SKILL_SCRIPT` are
+    /// multi-line raw strings passed as a single `sh -c <script>` argument.
+    /// OpenShell's `ExecSandbox` server rejects any command argument that
+    /// contains newline or carriage-return bytes, so every dashboard scan
+    /// fails with:
+    ///   `command argument 2 contains newline or carriage return characters`.
+    ///
+    /// This runs each script constant through `SandboxExec::exec` exactly as
+    /// `scan_sandbox_skills` / `read_sandbox_skill_detail` do, and asserts the
+    /// exec is not rejected. It is RED while the constants contain real
+    /// newlines and goes GREEN once they are rewritten as single-line scripts.
+    #[ignore = "ci-openshell: requires live OpenShell gateway"]
+    #[tokio::test]
+    async fn ci_openshell_dashboard_skill_scripts_have_no_newline_args() {
+        let sandbox =
+            right_openshell::test_support::TestSandbox::create("dashboard-skill-script-newline")
+                .await;
+        let sbox = sandbox_exec_for(&sandbox).await;
+
+        // The exact command arrays the dashboard builds. The list script `cd`s
+        // into a possibly-empty/missing dir and exits 0; the read script exits
+        // 3 when the file is absent. We assert only that the exec itself is not
+        // rejected by the newline guard — not on specific stdout/exit code.
+        let list_exit = exec_dashboard_command(
+            &sbox,
+            "SANDBOX_LIST_SKILLS_SCRIPT",
+            &[
+                "sh",
+                "-c",
+                SANDBOX_LIST_SKILLS_SCRIPT,
+                "dashboard-skill-list",
+                SANDBOX_SKILLS_PATH,
+                "200",
+            ],
+        )
+        .await;
+        // List script exits 0 even when the skills dir is missing/empty.
+        assert_eq!(
+            list_exit, 0,
+            "SANDBOX_LIST_SKILLS_SCRIPT ran but returned unexpected exit code {list_exit}"
+        );
+
+        let read_exit = exec_dashboard_command(
+            &sbox,
+            "SANDBOX_READ_SKILL_SCRIPT",
+            &[
+                "sh",
+                "-c",
+                SANDBOX_READ_SKILL_SCRIPT,
+                "dashboard-skill-read",
+                SANDBOX_SKILLS_PATH,
+                "rightx-nonexistent",
+                "1024",
+            ],
+        )
+        .await;
+        // Read script exits 3 when the target SKILL.md is absent.
+        assert_eq!(
+            read_exit, 3,
+            "SANDBOX_READ_SKILL_SCRIPT ran but returned unexpected exit code {read_exit}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod script_constants_tests {
+    use super::{SANDBOX_LIST_SKILLS_SCRIPT, SANDBOX_READ_SKILL_SCRIPT};
+
+    /// OpenShell's gRPC `ExecSandbox` rejects any command argument that
+    /// contains a real newline or carriage-return byte. These scripts are
+    /// passed as a single `sh -c <script>` argument, so they MUST stay
+    /// single-line. The only `\n` they may carry is the two-char escaped
+    /// `\n` handed to `printf` (a backslash followed by `n`), never a real
+    /// 0x0A byte. This fast guard fails without needing a live sandbox, so a
+    /// reintroduced multi-line script is caught in the normal test suite.
+    #[test]
+    fn dashboard_skill_scripts_have_no_real_newline_bytes() {
+        for (name, script) in [
+            ("SANDBOX_LIST_SKILLS_SCRIPT", SANDBOX_LIST_SKILLS_SCRIPT),
+            ("SANDBOX_READ_SKILL_SCRIPT", SANDBOX_READ_SKILL_SCRIPT),
+        ] {
+            assert!(
+                !script.contains('\n') && !script.contains('\r'),
+                "{name} contains a real newline/CR byte; OpenShell ExecSandbox \
+                 rejects command arguments with newlines — keep it single-line \
+                 (`;`-joined statements; use \\\\n for printf)"
+            );
+        }
+    }
 }
