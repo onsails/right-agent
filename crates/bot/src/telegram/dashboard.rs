@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, future::Future, path::PathBuf};
 
 use axum::Json;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
@@ -19,6 +19,7 @@ use right_dashboard::read_model::{
     usage::{UsageOverviewInput, usage_overview},
 };
 use right_db::Connection;
+use serde::Deserialize;
 
 mod health;
 mod identity;
@@ -39,6 +40,11 @@ pub(super) const DASHBOARD_SANDBOX_TIMEOUT_SECS: u64 = 4;
 pub(super) const DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS: u64 = 20;
 const INIT_DATA_MAX_AGE_SECS: i64 = 86_400;
 const MAX_LOG_LINES: usize = 80;
+
+#[derive(Debug, Deserialize)]
+struct UsageOverviewQuery {
+    timezone: Option<String>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DashboardUrlError {
@@ -355,6 +361,7 @@ async fn handle_activity_run_detail(
 async fn handle_usage_overview(
     AxumPath(agent): AxumPath<String>,
     State(state): State<DashboardState>,
+    Query(query): Query<UsageOverviewQuery>,
     headers: HeaderMap,
 ) -> Response {
     if let Err(error) = authenticate_api(&state, &agent, &headers) {
@@ -364,6 +371,7 @@ async fn handle_usage_overview(
     let input = UsageOverviewInput {
         agent: state.agent_name.clone(),
         generated_at: chrono::Utc::now().to_rfc3339(),
+        timezone: query.timezone,
     };
 
     let agent_name = state.agent_name.clone();
