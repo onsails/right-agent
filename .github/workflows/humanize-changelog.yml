@@ -1,20 +1,30 @@
 name: Humanize Changelog
 
+# Triggered by an admin commenting `/humanize` on a release-plz PR.
+# Manual trigger (not pull_request) so the run is never cancelled mid-flight
+# by a synchronize event, and so the prompt is taken from the default branch
+# — edit the prompt on master and re-comment `/humanize` to apply instantly.
+#
+# Security: no untrusted free-text input (comment.body, titles, branch names)
+# is ever interpolated into a run: script. comment.body is matched only in the
+# `if:` expression; all run: steps use trusted numeric ids / repo slug / sha
+# passed through env vars.
+
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
 
 concurrency:
-  group: humanize-changelog-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: humanize-changelog-${{ github.event.issue.number }}
+  cancel-in-progress: false
 
 jobs:
   humanize:
     name: humanize
-    if: |
-      startsWith(github.event.pull_request.title, 'chore: release') &&
-      startsWith(github.event.pull_request.head.ref, 'release-plz-') &&
-      github.event.sender.login != 'claude[bot]'
+    if: >
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/humanize') &&
+      contains(fromJSON('["OWNER","MEMBER"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -22,19 +32,51 @@ jobs:
       id-token: write
       actions: read
     steps:
+      - name: Acknowledge command and resolve PR head ref
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh api -X POST \
+            "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content=eyes >/dev/null || true
+          ref="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref')"
+          echo "Resolved PR head ref: $ref"
+          case "$ref" in
+            release-plz-*) ;;
+            *)
+              echo "::error::/humanize is only for release-plz PRs (got head ref '$ref')."
+              exit 1
+              ;;
+          esac
+          echo "head_ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Checkout PR head
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: ${{ steps.pr.outputs.head_ref }}
           fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
 
-      - name: Read humanize prompt
+      - name: Read humanize prompt from default branch
         id: prompt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DEFAULT_SHA: ${{ github.sha }}
         run: |
+          # github.sha on issue_comment is the default-branch tip, so the prompt
+          # is always the latest master version regardless of the PR branch age.
+          gh api \
+            "repos/${REPO}/contents/.github/prompts/humanize-changelog.md?ref=${DEFAULT_SHA}" \
+            --jq '.content' | base64 -d > "${RUNNER_TEMP}/humanize-prompt.md"
           {
             echo 'value<<PROMPT_EOF'
-            cat .github/prompts/humanize-changelog.md
+            cat "${RUNNER_TEMP}/humanize-prompt.md"
             echo 'PROMPT_EOF'
           } >> "$GITHUB_OUTPUT"
 
@@ -44,4 +86,5 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: ${{ steps.prompt.outputs.value }}
           claude_args: |
+            --model sonnet
             --allowedTools Edit,Read,Write,Bash
