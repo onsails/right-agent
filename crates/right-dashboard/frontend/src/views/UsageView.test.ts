@@ -28,6 +28,9 @@ function windowStub(overrides: Partial<UsageWindow> = {}): UsageWindow {
   return {
     key: '7d',
     label: 'Last 7 days',
+    range_start: '2026-01-01T00:00:00Z',
+    range_end: '2026-01-08T00:00:00Z',
+    range_label: 'Jan 1 00:00-Jan 8 00:00',
     sources: [sourceSummaryStub()],
     total_cost_usd: 1.0,
     subscription_cost_usd: 0,
@@ -50,6 +53,7 @@ function usageStub(overrides: Partial<UsageOverviewResponse> = {}): UsageOvervie
   return {
     agent: 'test-agent',
     generated_at: '2026-01-01T00:00:00Z',
+    timezone: 'UTC',
     windows: [windowStub()],
     selected_window: '7d',
     daily_series: [],

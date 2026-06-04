@@ -116,8 +116,13 @@ export function learningOverview(): Promise<LearningOverviewResponse> {
   return requestJson<LearningOverviewResponse>('api/v1/knowledge/learning/overview')
 }
 
-export function usageOverview(): Promise<UsageOverviewResponse> {
-  return requestJson<UsageOverviewResponse>('api/v1/usage')
+export function browserUsageTimezone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+}
+
+export function usageOverview(timezone: string = browserUsageTimezone()): Promise<UsageOverviewResponse> {
+  const params = new URLSearchParams({ timezone })
+  return requestJson<UsageOverviewResponse>(`api/v1/usage?${params.toString()}`)
 }
 
 export function skillsOverview(): Promise<SkillsResponse> {

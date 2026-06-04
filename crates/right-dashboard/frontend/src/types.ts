@@ -139,6 +139,7 @@ export interface OverviewSandboxStatus {
 export interface UsageOverviewResponse {
   agent: string
   generated_at: string
+  timezone: string
   windows: UsageWindow[]
   selected_window: string
   daily_series: UsageDailyPoint[]
@@ -149,6 +150,9 @@ export interface UsageOverviewResponse {
 export interface UsageWindow {
   key: string
   label: string
+  range_start: string | null
+  range_end: string
+  range_label: string
   sources: UsageSourceSummary[]
   total_cost_usd: number
   subscription_cost_usd: number
