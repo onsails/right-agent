@@ -139,14 +139,16 @@ type RuleFp = (String, String, String, String);
 /// `(name, sorted env vars, required, auth_style, header_name, query_param)`.
 type CredentialFp = (String, Vec<String>, bool, String, String, String);
 /// One endpoint's fingerprint:
-/// `(host, port, protocol, tls, enforcement, access, path, sorted rules)`.
+/// `(host, port, sorted ports, protocol, tls, enforcement, access, sorted allowed IPs, path, sorted rules)`.
 type EndpointFp = (
     String,
     u32,
+    Vec<u32>,
     String,
     String,
     String,
     String,
+    Vec<String>,
     String,
     Vec<RuleFp>,
 );
@@ -177,13 +179,22 @@ fn endpoint_fp(e: &sandbox_v1::NetworkEndpoint) -> EndpointFp {
         })
         .collect();
     rules.sort();
+
+    let mut ports = e.ports.clone();
+    ports.sort();
+
+    let mut allowed_ips = e.allowed_ips.clone();
+    allowed_ips.sort();
+
     (
         e.host.clone(),
         e.port,
+        ports,
         e.protocol.clone(),
         e.tls.clone(),
         e.enforcement.clone(),
         e.access.clone(),
+        allowed_ips,
         e.path.clone(),
         rules,
     )
@@ -453,10 +464,26 @@ mod tests {
         assert_eq!(ep.protocol, "rest");
         assert_eq!(ep.access, "full");
         assert_eq!(ep.path, "/v1");
+        assert!(ep.tls.is_empty());
         let cred = &p.credentials[0];
         assert!(cred.env_vars.contains(&"MY_API_KEY".to_string()));
         assert_eq!(cred.header_name.to_lowercase(), "x-api-key");
         assert!(p.binaries.iter().any(|b| b.path == "**"));
+    }
+
+    #[test]
+    fn author_generic_profile_uses_bearer_auth_for_authorization_header() {
+        let p = author_generic_profile(
+            "right-acme",
+            "api.acme.com",
+            None,
+            "Authorization",
+            "MY_API_KEY",
+        );
+
+        let cred = &p.credentials[0];
+        assert_eq!(cred.auth_style, "bearer");
+        assert_eq!(cred.header_name, "Authorization");
     }
 
     #[test]
@@ -544,6 +571,31 @@ mod tests {
         assert!(
             needs_import(Some(&stored_old_path), &desired),
             "endpoint path drift → import"
+        );
+    }
+
+    #[test]
+    fn needs_import_true_when_authored_endpoint_port_allowlist_drift() {
+        let desired = author_generic_profile(
+            "right-acme",
+            "api.acme.com",
+            Some("/v1"),
+            "x-api-key",
+            "MY_API_KEY",
+        );
+
+        let mut stored_old_ports = desired.clone();
+        stored_old_ports.endpoints[0].ports = vec![80];
+        assert!(
+            needs_import(Some(&stored_old_ports), &desired),
+            "ports drift → import"
+        );
+
+        let mut stored_old_allowed_ips = desired.clone();
+        stored_old_allowed_ips.endpoints[0].allowed_ips = vec!["203.0.113.10".into()];
+        assert!(
+            needs_import(Some(&stored_old_allowed_ips), &desired),
+            "allowed IP drift → import"
         );
     }
 }
