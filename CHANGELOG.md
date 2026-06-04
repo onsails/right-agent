@@ -1,4 +1,56 @@
 # Changelog
+## [0.3.0] - 2026-06-04
+
+### Learning & Skills
+
+- The skill-learning pipeline is now fully automatic: after each foreground turn a Haiku prefilter classifies whether the interaction contains reusable logic; if yes, a probe-writer forks to write or patch a `rightx-*` skill package; a periodic curator consolidates and archives the library. The old manual background review stage is replaced by this lightweight prefilter → probe-writer path.
+- Recurring cron jobs now feed the same skill-learning pipeline — a successful recurring run captures a probe anchor and passes it through the same prefilter/probe-writer path as foreground turns.
+- Skill learning is capped by a configurable daily USD budget with a circuit breaker that pauses learning on repeated probe failures and resets on a successful review. Budget exhaustion and circuit state are observable in the dashboard.
+- Skill lifecycle — use counts, last-patched date, curator transitions — is now stored in the database and visible in the dashboard Knowledge tab. Operators can pin skills from the dashboard to prevent the curator from evicting them.
+- Per-skill learning cost (create, patch, maintain, usage) is recorded in `data.db.skill_spend`; per-skill spend aggregates and budget-skip counts are exposed as dashboard read models.
+
+### Dashboard
+
+- The Telegram Mini App dashboard (opened with `/mcp`) now provides a full agent management UI with tabs for Overview, Activity, Knowledge, Usage, Identity, and Health — replacing most operational log-watching with observable dashboards.
+- MCP server management moved from Telegram slash commands into the dashboard: add servers with URL-first detection and an explicit auth-mode choice (OAuth, headers, or URL as-is), view live connection status, and start OAuth flows — with completion status visible inline as you wait.
+- Dashboard views are now chart-first: spend timelines, learning-flow funnels, and cost/activity correlations replace the previous table layout.
+- Provider credential management is now in the dashboard (opened with `/providers`): attach typed gateway-backed credentials to sandboxed agents with no secrets stored on disk.
+- Cron jobs can be deleted directly from the dashboard without using the CLI.
+
+### Providers & Sandbox
+
+- A new gateway-backed credential provider system lets operators attach typed credentials (GitHub, Anthropic, custom) to sandboxed agents. The `right-github` managed profile ships built-in, giving agents full GitHub access (read, push, PR management) with credentials injected at the gateway — never stored in the sandbox or visible to the agent.
+- When the OpenShell gateway is unreachable at startup or becomes unavailable mid-session, the bot stays up, tells users in Telegram that the sandbox is temporarily unavailable, and auto-recovers when the gateway comes back without requiring a restart.
+- `/sandbox/.local/bin` is now the standard user-local binary directory in all sandboxes. npm is configured with `NPM_CONFIG_PREFIX=/sandbox/.local` so CLIs installed by agents are immediately on `PATH` without manual configuration.
+
+### MCP
+
+- A background MCP health reconciler probes each registered backend on an adaptive debounced schedule, automatically detecting recovery from outages and keeping dashboard connection status accurate without requiring an agent restart.
+- Operators can now register Tailscale, LAN, and loopback MCP servers via the dashboard; the detection gate resolves hostnames before classifying them, so private hostnames are not incorrectly offered OAuth discovery.
+- MCP servers that require multiple HTTP headers for authentication (e.g. a bearer token plus a workspace ID) can now be registered with all headers stored securely.
+
+### Cron & Background
+
+- Each cron spec accepts a `model` parameter (`haiku`, `sonnet`, `opus`) set at create/update time, overriding the global model for that specific job — mechanical scheduled tasks no longer have to run on the default model.
+- `cron_trigger` gains a `notify=true` flag that forces delivery to Telegram regardless of the cron's own silent decision or idle gate — useful for triggering an on-demand verification report without wiring up a separate watcher cron.
+- Cron runs that return a terminal result event no longer hang waiting for the subprocess to exit; the stream breaks immediately on the terminal event and delivery proceeds even if the process does not exit cleanly.
+- Background runs that fail (timeout, budget exceeded, error) now produce a user-facing diagnostic message instead of disappearing silently.
+
+### Telegram & Agents
+
+- Agents can create, rename, close, and reopen Telegram forum topics via four new MCP tools (`mcp__right__forum_topic_create`, `_edit`, `_close`, `_reopen`) — letting them organize group conversations programmatically.
+- A "Working..." anchor now appears immediately after Claude starts processing (not after the first stream event), giving users the Stop and Background controls right away during high time-to-first-token turns.
+- Error messages now include a "Details" button for viewing the raw error JSON on demand. Rate-limit errors (429/529) show a human-readable message and skip the reflection turn to avoid hammering the throttled endpoint.
+- Recalled Hindsight memories are tagged with an observed date (e.g. `[observed 2026-05-27]`), signaling to agents that facts may be stale and should be re-verified before asserting them as current.
+- Three new MCP tools enable agents to search past messages: `mcp__right__thread_search` and `mcp__right__chat_search` use local full-text indexes over archived Telegram messages, and `mcp__right__get_messages_by_id` fetches specific messages — all scoped server-side to the current chat context.
+
+### Platform
+
+- Idle `claude-opus-…-1m` sessions that exceed 40% context usage are automatically compacted after 2 hours of inactivity. The `/compact` call runs under the per-session lock, collapsing conversation history while preserving recent context.
+- The per-session chat context block has moved from the system prompt to a per-turn volatile stdin prefix. The system prompt is now stable across turns for the same agent, enabling better prompt caching and reducing per-turn overhead.
+- `right setup-path` idempotently adds the `right` binary directory to the current user's shell rc files (`.bashrc`, `.zshrc`, etc.), fixing post-install "command not found" errors in new shells.
+- `right-composio` is now a built-in bundled skill, available in agent sandboxes without manual installation. It guides agents on when to use Composio's action workbench versus embedding large tool responses directly in context.
+
 ## [0.2.15] - 2026-05-18
 
 - Agents can now save reusable skill packages from real work using `/right-learn-skill` — captured workflows and API discoveries are persisted as `rightx-*` packages available in future sessions.
