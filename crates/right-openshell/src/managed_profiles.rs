@@ -26,13 +26,16 @@ pub enum ManagedProfileError {
 pub enum ManagedProfile {
     /// Clone the live `github` profile and open all endpoints to full access.
     Github,
-    // Future: Authored(Box<proto_v1::ProviderProfile>) for e.g. right-browser-use.
+    /// A profile authored by Right from scratch (e.g. a generic provider).
+    /// Self-contained — has no upstream base to derive from.
+    Authored(Box<proto_v1::ProviderProfile>),
 }
 
 impl ManagedProfile {
-    pub fn id(&self) -> &'static str {
+    pub fn id(&self) -> String {
         match self {
-            ManagedProfile::Github => "right-github",
+            ManagedProfile::Github => "right-github".into(),
+            ManagedProfile::Authored(p) => p.id.clone(),
         }
     }
 
@@ -40,6 +43,7 @@ impl ManagedProfile {
     pub fn base_id(&self) -> Option<&'static str> {
         match self {
             ManagedProfile::Github => Some("github"),
+            ManagedProfile::Authored(_) => None,
         }
     }
 
@@ -50,7 +54,7 @@ impl ManagedProfile {
     pub fn derive(&self, mut base: proto_v1::ProviderProfile) -> proto_v1::ProviderProfile {
         match self {
             ManagedProfile::Github => {
-                base.id = self.id().into();
+                base.id = self.id();
                 base.display_name = "GitHub".into();
                 for ep in &mut base.endpoints {
                     // access and rules are mutually exclusive — full preset permits git push POSTs.
@@ -59,6 +63,7 @@ impl ManagedProfile {
                 }
                 base
             }
+            ManagedProfile::Authored(p) => (**p).clone(),
         }
     }
 }
@@ -66,6 +71,53 @@ impl ManagedProfile {
 /// Helper constructor used by tests and the registry.
 pub fn github() -> ManagedProfile {
     ManagedProfile::Github
+}
+
+/// Author a self-contained OpenShell profile for a generic provider.
+pub fn author_generic_profile(
+    id: &str,
+    upstream_host: &str,
+    upstream_path_prefix: Option<&str>,
+    header_name: &str,
+    env_var: &str,
+) -> proto_v1::ProviderProfile {
+    let auth_style = if header_name.eq_ignore_ascii_case("authorization") {
+        "bearer"
+    } else {
+        "header"
+    };
+
+    proto_v1::ProviderProfile {
+        id: id.to_string(),
+        display_name: id.to_string(),
+        description: "Right-managed generic provider".into(),
+        category: proto_v1::ProviderProfileCategory::Other as i32,
+        credentials: vec![proto_v1::ProviderProfileCredential {
+            name: "api_token".into(),
+            description: String::new(),
+            env_vars: vec![env_var.to_string()],
+            required: true,
+            auth_style: auth_style.into(),
+            header_name: header_name.to_string(),
+            query_param: String::new(),
+            refresh: None,
+        }],
+        endpoints: vec![sandbox_v1::NetworkEndpoint {
+            host: upstream_host.to_string(),
+            port: 443,
+            protocol: "rest".into(),
+            enforcement: "enforce".into(),
+            access: "full".into(),
+            path: upstream_path_prefix.unwrap_or("").to_string(),
+            ..Default::default()
+        }],
+        binaries: vec![sandbox_v1::NetworkBinary {
+            path: "**".into(),
+            ..Default::default()
+        }],
+        inference_capable: false,
+        discovery: None,
+    }
 }
 
 /// The set of profiles RightClaw provisions on every `right up`.
@@ -83,10 +135,32 @@ pub fn managed_profiles() -> Vec<ManagedProfile> {
 
 /// One endpoint allow-rule fingerprint: `(method, path, command, operation_type)`.
 type RuleFp = (String, String, String, String);
-/// One endpoint's fingerprint: `(host, port, protocol, access, sorted rules)`.
-type EndpointFp = (String, u32, String, String, Vec<RuleFp>);
-/// A whole profile's fingerprint: `(id, display_name, category, sorted endpoints)`.
-type ProfileFp = (String, String, i32, Vec<EndpointFp>);
+/// One credential fingerprint:
+/// `(name, sorted env vars, required, auth_style, header_name, query_param)`.
+type CredentialFp = (String, Vec<String>, bool, String, String, String);
+/// One endpoint's fingerprint:
+/// `(host, port, protocol, tls, enforcement, access, path, sorted rules)`.
+type EndpointFp = (
+    String,
+    u32,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Vec<RuleFp>,
+);
+/// A whole profile's fingerprint:
+/// `(id, display_name, description, category, sorted credentials, sorted endpoints, sorted binaries)`.
+type ProfileFp = (
+    String,
+    String,
+    String,
+    i32,
+    Vec<CredentialFp>,
+    Vec<EndpointFp>,
+    Vec<String>,
+);
 
 /// Per-endpoint fingerprint of the fields RightClaw controls. Includes
 /// `access` AND `rules`; the managed profile's drift signal lives in `access`
@@ -107,7 +181,10 @@ fn endpoint_fp(e: &sandbox_v1::NetworkEndpoint) -> EndpointFp {
         e.host.clone(),
         e.port,
         e.protocol.clone(),
+        e.tls.clone(),
+        e.enforcement.clone(),
         e.access.clone(),
+        e.path.clone(),
         rules,
     )
 }
@@ -115,9 +192,39 @@ fn endpoint_fp(e: &sandbox_v1::NetworkEndpoint) -> EndpointFp {
 /// Stable structural fingerprint of a profile. Compared instead of the whole
 /// message so gateway-filled defaults don't force re-imports.
 fn fingerprint(p: &proto_v1::ProviderProfile) -> ProfileFp {
+    let mut credentials: Vec<_> = p
+        .credentials
+        .iter()
+        .map(|c| {
+            let mut env_vars = c.env_vars.clone();
+            env_vars.sort();
+            (
+                c.name.clone(),
+                env_vars,
+                c.required,
+                c.auth_style.clone(),
+                c.header_name.clone(),
+                c.query_param.clone(),
+            )
+        })
+        .collect();
+    credentials.sort();
+
     let mut eps: Vec<_> = p.endpoints.iter().map(endpoint_fp).collect();
     eps.sort();
-    (p.id.clone(), p.display_name.clone(), p.category, eps)
+
+    let mut binaries: Vec<_> = p.binaries.iter().map(|b| b.path.clone()).collect();
+    binaries.sort();
+
+    (
+        p.id.clone(),
+        p.display_name.clone(),
+        p.description.clone(),
+        p.category,
+        credentials,
+        eps,
+        binaries,
+    )
 }
 
 /// True if `desired` must be (re)imported given the currently `stored` profile.
@@ -128,6 +235,18 @@ fn needs_import(
     match stored {
         None => true,
         Some(s) => fingerprint(s) != fingerprint(desired),
+    }
+}
+
+pub(crate) enum DesiredProfileSource {
+    DeriveFromBase(&'static str),
+    Authored(Box<proto_v1::ProviderProfile>),
+}
+
+pub(crate) fn desired_profile_source(mp: &ManagedProfile) -> DesiredProfileSource {
+    match mp {
+        ManagedProfile::Github => DesiredProfileSource::DeriveFromBase("github"),
+        ManagedProfile::Authored(p) => DesiredProfileSource::Authored(p.clone()),
     }
 }
 
@@ -225,38 +344,32 @@ pub async fn ensure_profiles(
 ) -> Result<Vec<EnsureOutcome>, ManagedProfileError> {
     let mut outcomes = Vec::with_capacity(profiles.len());
     for mp in profiles {
-        // A profile with no base is self-contained (the future `Authored`
-        // variant). That import path isn't built yet — skip non-fatally with a
-        // warning instead of panicking, so adding the variant can never crash
-        // `right up` before its handling is wired in here.
-        let Some(base_id) = mp.base_id() else {
-            tracing::warn!(
-                profile = mp.id(),
-                "managed profile has no base — authored profiles not yet supported, skipping"
-            );
-            outcomes.push(EnsureOutcome::Skipped(mp.id().to_string()));
-            continue;
-        };
-        let desired = match get_profile(client, base_id).await? {
-            Some(base) => mp.derive(base),
-            None => {
-                tracing::warn!(
-                    profile = mp.id(),
-                    base = base_id,
-                    "base profile missing on gateway — skipping managed profile"
-                );
-                outcomes.push(EnsureOutcome::Skipped(mp.id().to_string()));
-                continue;
+        let id = mp.id();
+        let desired = match desired_profile_source(mp) {
+            DesiredProfileSource::DeriveFromBase(base_id) => {
+                match get_profile(client, base_id).await? {
+                    Some(base) => mp.derive(base),
+                    None => {
+                        tracing::warn!(
+                            profile = id,
+                            base = base_id,
+                            "base profile missing on gateway — skipping managed profile"
+                        );
+                        outcomes.push(EnsureOutcome::Skipped(id));
+                        continue;
+                    }
+                }
             }
+            DesiredProfileSource::Authored(profile) => *profile,
         };
-        let stored = get_profile(client, mp.id()).await?;
+        let stored = get_profile(client, &id).await?;
         if needs_import(stored.as_ref(), &desired) {
             lint_and_import(client, desired).await?;
-            tracing::info!(profile = mp.id(), "managed profile drift → imported");
-            outcomes.push(EnsureOutcome::Imported(mp.id().to_string()));
+            tracing::info!(profile = id, "managed profile drift → imported");
+            outcomes.push(EnsureOutcome::Imported(id));
         } else {
-            tracing::debug!(profile = mp.id(), "managed profile unchanged");
-            outcomes.push(EnsureOutcome::Unchanged(mp.id().to_string()));
+            tracing::debug!(profile = id, "managed profile unchanged");
+            outcomes.push(EnsureOutcome::Unchanged(id));
         }
     }
     Ok(outcomes)
@@ -313,6 +426,61 @@ mod tests {
     }
 
     #[test]
+    fn authored_profile_reports_id_and_no_base() {
+        let prof = proto_v1::ProviderProfile {
+            id: "right-acme".into(),
+            display_name: "acme".into(),
+            ..Default::default()
+        };
+        let mp = ManagedProfile::Authored(Box::new(prof));
+        assert_eq!(mp.id(), "right-acme");
+        assert_eq!(mp.base_id(), None);
+    }
+
+    #[test]
+    fn author_generic_profile_sets_endpoint_credential_and_binaries() {
+        let p = author_generic_profile(
+            "right-acme",
+            "api.acme.com",
+            Some("/v1"),
+            "x-api-key",
+            "MY_API_KEY",
+        );
+        assert_eq!(p.id, "right-acme");
+        let ep = &p.endpoints[0];
+        assert_eq!(ep.host, "api.acme.com");
+        assert_eq!(ep.port, 443);
+        assert_eq!(ep.protocol, "rest");
+        assert_eq!(ep.access, "full");
+        assert_eq!(ep.path, "/v1");
+        let cred = &p.credentials[0];
+        assert!(cred.env_vars.contains(&"MY_API_KEY".to_string()));
+        assert_eq!(cred.header_name.to_lowercase(), "x-api-key");
+        assert!(p.binaries.iter().any(|b| b.path == "**"));
+    }
+
+    #[test]
+    fn desired_profile_for_authored_is_the_authored_body() {
+        let authored = proto_v1::ProviderProfile {
+            id: "right-acme".into(),
+            ..Default::default()
+        };
+        let mp = ManagedProfile::Authored(Box::new(authored.clone()));
+        match desired_profile_source(&mp) {
+            DesiredProfileSource::Authored(p) => assert_eq!(p.id, "right-acme"),
+            _ => panic!("authored must not require a base fetch"),
+        }
+    }
+
+    #[test]
+    fn desired_profile_for_github_requires_base() {
+        match desired_profile_source(&ManagedProfile::Github) {
+            DesiredProfileSource::DeriveFromBase(base) => assert_eq!(base, "github"),
+            _ => panic!("github derives from base"),
+        }
+    }
+
+    #[test]
     fn managed_profiles_all_right_prefixed() {
         for mp in managed_profiles() {
             assert!(
@@ -345,5 +513,37 @@ mod tests {
             "access drift → import"
         );
         assert!(needs_import(None, &desired), "absent → import");
+    }
+
+    #[test]
+    fn needs_import_true_when_authored_profile_controlled_fields_differ() {
+        let desired = author_generic_profile(
+            "right-acme",
+            "api.acme.com",
+            Some("/v1"),
+            "x-api-key",
+            "MY_API_KEY",
+        );
+
+        let mut stored_old_credential = desired.clone();
+        stored_old_credential.credentials[0].env_vars = vec!["OLD_API_KEY".into()];
+        assert!(
+            needs_import(Some(&stored_old_credential), &desired),
+            "credential drift → import"
+        );
+
+        let mut stored_missing_binary = desired.clone();
+        stored_missing_binary.binaries.clear();
+        assert!(
+            needs_import(Some(&stored_missing_binary), &desired),
+            "binary drift → import"
+        );
+
+        let mut stored_old_path = desired.clone();
+        stored_old_path.endpoints[0].path = "/v0".into();
+        assert!(
+            needs_import(Some(&stored_old_path), &desired),
+            "endpoint path drift → import"
+        );
     }
 }
