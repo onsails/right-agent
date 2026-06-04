@@ -894,10 +894,47 @@ Run the `-- --ignored` `ci_openshell_` provider + github gates once on the dev m
 Run: `devenv shell -- cargo clippy --workspace`
 Expected: clean (fix warnings in touched code).
 
+### Task 18: Rebase on `sandbox-supervisor-phase-aware-recovery`
+
+**Files:** conflict-dependent
+
+This branch also modified OpenShell-related and sandbox-supervisor recovery code. Rebase carefully after all implementation and normal verification are complete, then correct any semantic conflicts instead of choosing either side mechanically.
+
+- [ ] **Step 1: Confirm a clean worktree**
+
+Run: `devenv shell -- git status --short`
+Expected: no output.
+
+- [ ] **Step 2: Rebase**
+
+Run: `devenv shell -- git rebase sandbox-supervisor-phase-aware-recovery`
+Expected: PASS or conflicts that are resolved deliberately.
+
+- [ ] **Step 3: Resolve conflicts and re-run affected checks**
+
+For every conflict, inspect both sides and preserve the phase-aware recovery behavior plus this plan's provider-composition behavior. After resolution, run targeted checks for touched crates, then rerun the Task 17 full build/test/clippy gates if any code changed during conflict resolution.
+
+### Task 19: Run `$cc-review` max effort and fix findings
+
+**Files:** review-dependent
+
+- [ ] **Step 1: Run review**
+
+Run `$cc-review` at max effort against the rebased branch.
+Expected: review completes and reports findings, or explicitly reports no findings.
+
+- [ ] **Step 2: Fix actionable findings**
+
+Apply fixes for valid findings, rejecting only findings that are demonstrably wrong with evidence. Re-run targeted checks for touched code.
+
+- [ ] **Step 3: Final verification after review fixes**
+
+Run the full Task 17 verification gates again after review fixes.
+
 ---
 
 ## Self-Review notes
 
-- **Spec coverage:** §1 profiles-only (Tasks 9,13); §2 generic→profile (Tasks 4,6,9); §3 delete folding (Tasks 10–12); §4 reliability (Tasks 7,8,13); §5 proto/version (Tasks 1,2); §6 migration no-recreation (Tasks 13,15); §7 agent-facing curl→gh (Task 16 docs). All covered.
+- **Spec coverage:** §1 profiles-only (Tasks 9,13); §2 generic→profile (Tasks 4,6,9); §3 delete folding (Tasks 10–12); §4 reliability (Tasks 7,8,13); §5 proto/version (Tasks 1,2); §6 migration no-recreation (Tasks 13,15); §7 agent-facing curl→gh (Task 16 docs). Post-work integration review is covered by Tasks 18–19.
 - **Open item carried into execution:** Task 7 spike fixes the exact ensure-loaded mechanism before Task 8 codes it — intentional, with a FAIL-LOUD fallback.
 - **Type consistency:** `ManagedProfile::id()` returns `String` after Task 3 — every caller updated in Tasks 3/5/6. `author_generic_profile` field names must be reconciled against regenerated v0.0.56 stubs in Task 4 (compiler-driven). `ProviderSpec.type_` = profile id is the contract used in Tasks 9/13.
