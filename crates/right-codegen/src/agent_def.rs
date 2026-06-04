@@ -98,10 +98,12 @@ contain newer activity — IGNORE it. Focus exclusively on the anchored turn.
 ";
 
 /// Class-first guidance + naming + protocol + quality for the probe-writer.
-/// Concatenated after the anchor block in the first user message of the fork.
+/// Prepended before the hint, outcome contract, skill index, and anchor block
+/// in the first user message of the fork.
 pub const PROBE_WRITER_INSTRUCTIONS: &str = "\
-Decide whether the anchored exchange contains a reusable workflow worth \
-capturing as a `rightx-*` skill, or whether an existing `rightx-*` skill needs \
+Decide whether the anchored exchange (presented at the end of this message) \
+contains a reusable workflow worth capturing as a `rightx-*` skill, or whether \
+an existing `rightx-*` skill needs \
 to be patched. Apply class-first preference:
 
 1. Survey existing `rightx-*` skills (via Read on `.claude/skills/installed.json` \
