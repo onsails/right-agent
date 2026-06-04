@@ -117,9 +117,27 @@ const option = computed(() => {
     singleAxis: {
       type: 'time',
       top: 16,
-      bottom: 42,
+      bottom: 52,
       axisLabel: { hideOverlap: true },
     },
+    dataZoom: [
+      {
+        type: 'inside',
+        singleAxisIndex: 0,
+        zoomOnMouseWheel: true,
+        moveOnMouseWheel: false,
+        start: 0,
+        end: 100,
+      },
+      {
+        type: 'slider',
+        singleAxisIndex: 0,
+        bottom: 26,
+        height: 18,
+        start: 0,
+        end: 100,
+      },
+    ],
     series: [
       {
         type: 'themeRiver',
