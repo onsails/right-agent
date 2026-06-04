@@ -6,10 +6,9 @@ import AsyncState from '../components/AsyncState.vue'
 import CollapsibleSection from '../components/CollapsibleSection.vue'
 import MetricCard from '../components/MetricCard.vue'
 import RunFailureList from '../components/RunFailureList.vue'
-import StatusPill from '../components/StatusPill.vue'
 import { failureMetric } from '../components/failureMetric'
-import { money, shortDate } from '../format'
-import type { DashboardOverviewResponse, DashboardSignal, LearningMarker, OverviewResponse } from '../types'
+import { money } from '../format'
+import type { DashboardOverviewResponse, DashboardSignal, OverviewResponse } from '../types'
 
 const props = defineProps<{
   overview: DashboardOverviewResponse | null
@@ -19,51 +18,17 @@ const props = defineProps<{
 }>()
 
 const selectedId = ref<string | null>(null)
-const selectedMarkerId = ref<string | null>(null)
 const failuresOpen = ref(false)
 const failures = computed(() => failureMetric(props.overview?.recent_failures ?? 0))
 
-const selectedMarker = computed(() =>
-  (props.overview?.cost_learning_river?.markers ?? []).find((m) => m.id === selectedMarkerId.value) ?? null,
-)
-
-const markerCostLabel = computed(() => {
-  const cost = selectedMarker.value?.cost_usd
-  return cost !== null && cost !== undefined ? money(cost) : 'none'
-})
-
 function selectSignal(signal: DashboardSignal): void {
   selectedId.value = selectedId.value === signal.id ? null : signal.id
-  if (selectedId.value !== null) {
-    selectedMarkerId.value = null
-  }
-}
-
-function selectMarker(marker: LearningMarker): void {
-  selectedMarkerId.value = selectedMarkerId.value === marker.id ? null : marker.id
-  if (selectedMarkerId.value !== null) {
-    selectedId.value = null
-  }
 }
 </script>
 
 <template>
   <AsyncState :loading="loading" :error="error" :empty="overview === null && !loading" empty-text="No overview data">
-    <CostLearningRiver :river="overview?.cost_learning_river ?? null" @select-marker="selectMarker" />
-
-    <template v-if="selectedMarker">
-      <div class="marker-detail-header">
-        <span class="marker-detail-label">{{ selectedMarker.label }}</span>
-        <StatusPill :status="selectedMarker.severity" />
-      </div>
-      <dl class="meta-grid compact marker-detail">
-        <div><dt>When</dt><dd>{{ shortDate(selectedMarker.occurred_at) }}</dd></div>
-        <div><dt>Source</dt><dd>{{ selectedMarker.source ?? 'none' }}</dd></div>
-        <div><dt>Skill</dt><dd>{{ selectedMarker.skill_name ?? 'none' }}</dd></div>
-        <div><dt>Cost</dt><dd>{{ markerCostLabel }}</dd></div>
-        <div><dt>Kind</dt><dd>{{ selectedMarker.kind }}</dd></div>
-      </dl>
-    </template>
+    <CostLearningRiver :river="overview?.cost_learning_river ?? null" />
 
     <section class="metric-grid">
       <MetricCard label="Active" :value="overview?.active_runs ?? 0" tone="active" />
@@ -103,23 +68,3 @@ function selectMarker(marker: LearningMarker): void {
     />
   </AsyncState>
 </template>
-
-<style scoped>
-.marker-detail-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px 4px;
-  background: var(--tg-theme-secondary-bg-color, rgba(127, 127, 127, 0.1));
-  border-radius: 10px 10px 0 0;
-}
-.marker-detail-label {
-  font-weight: 600;
-}
-.marker-detail {
-  padding: 4px 12px 14px;
-  background: var(--tg-theme-secondary-bg-color, rgba(127, 127, 127, 0.1));
-  border-radius: 0 0 10px 10px;
-  margin-bottom: 8px;
-}
-</style>

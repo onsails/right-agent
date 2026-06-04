@@ -584,25 +584,6 @@ dd {
   font-size: 0.84rem;
 }
 
-.marker-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.marker-chip {
-  min-width: 0;
-  min-height: 28px;
-  padding: 4px 8px;
-  border: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.18));
-  border-radius: 7px;
-  background: var(--tg-theme-bg-color, #f4f6f8);
-  color: var(--tg-theme-text-color, #17212b);
-  cursor: pointer;
-  overflow-wrap: anywhere;
-}
-
 .text-block {
   padding-top: 9px;
   border-top: 1px solid var(--tg-theme-section_separator_color, rgba(84, 102, 117, 0.14));
