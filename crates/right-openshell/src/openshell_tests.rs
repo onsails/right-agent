@@ -199,7 +199,7 @@ fn parse_getent_ahosts_ips_returns_empty_for_no_valid_ips() {
 }
 
 #[test]
-fn sandbox_response_decodes_openshell_0_0_56_status_nested_phase() {
+fn sandbox_response_decodes_metadata_and_status_phase_layout() {
     fn push_varint(buf: &mut Vec<u8>, mut value: u64) {
         while value >= 0x80 {
             buf.push((value as u8) | 0x80);
@@ -268,7 +268,9 @@ fn sandbox_response_decodes_openshell_0_0_56_status_nested_phase() {
         "phase must be read from SandboxStatus, not the reserved top-level field"
     );
     assert!(
-        SandboxReadiness::from_sandbox(sandbox).is_ready(),
+        SandboxReadiness::from_sandbox("right-probe", sandbox)
+            .expect("status should parse")
+            .is_ready(),
         "status-nested READY phase must drive readiness"
     );
 }
@@ -660,6 +662,22 @@ async fn is_sandbox_ready_returns_false_on_not_found() {
     let result = is_sandbox_ready(&mut client, "nonexistent").await;
     assert!(result.is_ok(), "expected Ok, got: {result:?}");
     assert!(!result.unwrap(), "NotFound should map to Ok(false)");
+}
+
+#[tokio::test]
+async fn is_sandbox_ready_fails_immediately_when_status_missing() {
+    let (addr, _shutdown) =
+        start_mock_server(MockOpenShell::with_missing_status(SANDBOX_PHASE_READY)).await;
+    let mut client = mock_client(addr).await;
+
+    let result = is_sandbox_ready(&mut client, "right-test-missing-status").await;
+
+    assert!(result.is_err(), "missing status should fail fast");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("GetSandbox response for 'right-test-missing-status' missing status"),
+        "unexpected error: {msg}"
+    );
 }
 
 #[tokio::test]

@@ -405,21 +405,19 @@ struct SandboxReadiness {
 }
 
 impl SandboxReadiness {
-    fn from_sandbox(sandbox: Sandbox) -> Self {
+    fn from_sandbox(name: &str, sandbox: Sandbox) -> miette::Result<Self> {
         // OpenShell 0.0.56 moved the gateway-derived lifecycle phase out of the
         // top-level `Sandbox` message (reserved field 4) into
-        // `SandboxStatus.phase` (field 6). Absent status — or an unset phase —
-        // reads as UNSPECIFIED, which `is_ready()`/`is_error()` treat as
-        // "not ready, not terminal".
-        let phase = sandbox
+        // `SandboxStatus.phase` (field 6). Absent status means the gateway
+        // response shape drifted and the caller should fail fast.
+        let status = sandbox
             .status
             .as_ref()
-            .map(|status| status.phase)
-            .unwrap_or(SandboxPhase::Unspecified as i32);
-        Self {
-            phase,
-            status_summary: summarize_sandbox_status(sandbox.status.as_ref()),
-        }
+            .ok_or_else(|| miette::miette!("GetSandbox response for '{name}' missing status"))?;
+        Ok(Self {
+            phase: status.phase,
+            status_summary: summarize_sandbox_status(Some(status)),
+        })
     }
 
     fn is_ready(&self) -> bool {
@@ -503,7 +501,7 @@ async fn get_sandbox_readiness(
         .sandbox
         .ok_or_else(|| miette::miette!("GetSandbox returned empty response for '{name}'"))?;
 
-    Ok(Some(SandboxReadiness::from_sandbox(sandbox)))
+    Ok(Some(SandboxReadiness::from_sandbox(name, sandbox)?))
 }
 
 fn sandbox_phase_name(phase: i32) -> &'static str {
