@@ -10,6 +10,7 @@
 
 use right_agent::agent::types::AgentConfig;
 use right_openshell::diagnosis::{GatewayCause, GatewayDiagnosis, diagnose_gateway};
+use right_openshell::openshell::SandboxPhaseStatus;
 use right_openshell::preflight::PreflightError;
 use right_openshell::sandbox_exec::SandboxExec;
 use std::path::{Path, PathBuf};
@@ -452,13 +453,54 @@ fn spawn_sync_task(deps: &SupervisorDeps, sandbox: SandboxExec) -> tokio::task::
     ))
 }
 
-/// Direct reachability probe: a successful gRPC channel connect to the OpenShell
-/// gateway. Used to verify a failure report before degrading — transient worker
-/// errors should not flip a healthy backend to Unavailable.
-async fn probe_reachable() -> bool {
-    right_openshell::openshell::connect_grpc(&right_openshell::openshell::default_mtls_dir())
-        .await
-        .is_ok()
+enum ProbeOutcome {
+    Ready,
+    Error { detail: String },
+    Other { phase: String, detail: String },
+    GatewayDiagnosis(GatewayDiagnosis),
+}
+
+fn degrade_decision(outcome: ProbeOutcome, sandbox: &str) -> Option<GatewayDiagnosis> {
+    match outcome {
+        ProbeOutcome::Ready => None,
+        ProbeOutcome::Other { phase, detail } => {
+            tracing::debug!(%phase, %detail, "sandbox in transient phase; not degrading");
+            None
+        }
+        ProbeOutcome::Error { detail } => {
+            tracing::warn!(%detail, "sandbox is in ERROR phase");
+            Some(
+                GatewayCause::SandboxError {
+                    sandbox: sandbox.to_owned(),
+                }
+                .diagnose(),
+            )
+        }
+        ProbeOutcome::GatewayDiagnosis(diag) => Some(diag),
+    }
+}
+
+async fn probe_phase(sandbox: &str) -> ProbeOutcome {
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    let mut client = match right_openshell::openshell::connect_grpc(&mtls_dir).await {
+        Ok(c) => c,
+        Err(_) => return ProbeOutcome::GatewayDiagnosis(diagnose_gateway().await),
+    };
+    match right_openshell::openshell::sandbox_phase_status(&mut client, sandbox).await {
+        Ok(SandboxPhaseStatus::Ready) => ProbeOutcome::Ready,
+        Ok(SandboxPhaseStatus::Error { detail }) => ProbeOutcome::Error { detail },
+        Ok(SandboxPhaseStatus::Other { phase, detail }) => ProbeOutcome::Other { phase, detail },
+        Ok(SandboxPhaseStatus::NotFound) => ProbeOutcome::GatewayDiagnosis(
+            GatewayCause::SandboxNotFound {
+                sandbox: sandbox.to_owned(),
+            }
+            .diagnose(),
+        ),
+        Err(e) => {
+            tracing::warn!("sandbox phase probe failed: {e:#}");
+            ProbeOutcome::GatewayDiagnosis(diagnose_gateway().await)
+        }
+    }
 }
 
 /// Control-flow signal returned by a single supervisor loop iteration.
@@ -483,11 +525,11 @@ async fn monitor_step(
             if msg.is_none() {
                 return LoopStep::Break;
             }
-            // Verify with a single direct probe before degrading.
-            if probe_reachable().await {
+            let Some(diag) =
+                degrade_decision(probe_phase(&deps.resolved_sandbox).await, &deps.resolved_sandbox)
+            else {
                 return LoopStep::Continue;
-            }
-            let diag = diagnose_gateway().await;
+            };
             tracing::error!(agent = %deps.agent, cause = ?diag.cause, "{}", diag.summary);
             handle.set_unavailable(Arc::new(diag));
             if let Some(t) = sync_task.take() {
@@ -629,3 +671,7 @@ async fn notify_back_online(handle: &Arc<SandboxRuntimeHandle>, bot: &crate::tel
         }
     }
 }
+
+#[cfg(test)]
+#[path = "sandbox_supervisor_phase_tests.rs"]
+mod phase_tests;
