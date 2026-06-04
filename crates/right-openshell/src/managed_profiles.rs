@@ -120,6 +120,40 @@ pub fn author_generic_profile(
     }
 }
 
+/// Config-free generic provider data used to author a managed OpenShell profile.
+pub struct GenericProviderProfileInput<'a> {
+    pub name: &'a str,
+    pub upstream_host: &'a str,
+    pub upstream_path_prefix: Option<&'a str>,
+    pub header_name: &'a str,
+    pub env_var: &'a str,
+}
+
+/// Author one Right-managed profile per generic provider, deduped by profile id.
+pub fn generic_provider_profiles<'a, I>(providers: I) -> Vec<ManagedProfile>
+where
+    I: IntoIterator<Item = GenericProviderProfileInput<'a>>,
+{
+    let mut seen = std::collections::HashSet::new();
+    let mut profiles = Vec::new();
+
+    for provider in providers {
+        let id = format!("right-{}", provider.name.trim_start_matches("right-"));
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        profiles.push(ManagedProfile::Authored(Box::new(author_generic_profile(
+            &id,
+            provider.upstream_host,
+            provider.upstream_path_prefix,
+            provider.header_name,
+            provider.env_var,
+        ))));
+    }
+
+    profiles
+}
+
 /// The set of profiles RightClaw provisions on every `right up`.
 ///
 /// Module-local free-form list — intentionally NOT a cross-crate registry
@@ -490,6 +524,29 @@ mod tests {
         let cred = &p.credentials[0];
         assert_eq!(cred.auth_style, "bearer");
         assert_eq!(cred.header_name, "Authorization");
+    }
+
+    #[test]
+    fn generic_provider_profiles_dedupes_by_authored_profile_id() {
+        let profiles = generic_provider_profiles([
+            GenericProviderProfileInput {
+                name: "right-acme",
+                upstream_host: "api.acme.com",
+                upstream_path_prefix: None,
+                header_name: "x-api-key",
+                env_var: "ACME_API_KEY",
+            },
+            GenericProviderProfileInput {
+                name: "acme",
+                upstream_host: "api.acme.com",
+                upstream_path_prefix: None,
+                header_name: "x-api-key",
+                env_var: "ACME_API_KEY",
+            },
+        ]);
+
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id(), "right-acme");
     }
 
     #[test]

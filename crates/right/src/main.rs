@@ -2652,6 +2652,31 @@ fn cmd_list(home: &Path) -> miette::Result<()> {
     Ok(())
 }
 
+fn generic_provider_profiles(
+    configs: &[(String, right_agent_config::AgentConfig)],
+) -> Vec<right_openshell::managed_profiles::ManagedProfile> {
+    let providers = configs.iter().flat_map(|(_, config)| {
+        config
+            .sandbox
+            .iter()
+            .flat_map(|sandbox| sandbox.providers.iter())
+            .filter_map(|entry| match (&entry.type_, entry.generic.as_ref()) {
+                (right_agent_config::ProviderType::Generic, Some(generic)) => Some(
+                    right_openshell::managed_profiles::GenericProviderProfileInput {
+                        name: &entry.name,
+                        upstream_host: &generic.upstream_host,
+                        upstream_path_prefix: generic.upstream_path_prefix.as_deref(),
+                        header_name: &generic.header_name,
+                        env_var: &generic.env_var,
+                    },
+                ),
+                _ => None,
+            })
+    });
+
+    right_openshell::managed_profiles::generic_provider_profiles(providers)
+}
+
 async fn cmd_up(
     home: &Path,
     agents_filter: Option<Vec<String>>,
@@ -2805,12 +2830,15 @@ async fn cmd_up(
         let mut client = connect_grpc(&mtls_dir)
             .await
             .map_err(|e| miette::miette!("provision profiles: connect gateway: {e:#}"))?;
-        let outcomes = right_openshell::managed_profiles::ensure_profiles(
-            &mut client,
-            &right_openshell::managed_profiles::managed_profiles(),
-        )
-        .await
-        .map_err(|e| miette::miette!("provision managed profiles failed: {e:#}"))?;
+        let mut profiles = right_openshell::managed_profiles::managed_profiles();
+        let loaded_agent_configs: Vec<(String, right_agent_config::AgentConfig)> = agents
+            .iter()
+            .filter_map(|a| a.config.as_ref().map(|cfg| (a.name.clone(), cfg.clone())))
+            .collect();
+        profiles.extend(generic_provider_profiles(&loaded_agent_configs));
+        let outcomes = right_openshell::managed_profiles::ensure_profiles(&mut client, &profiles)
+            .await
+            .map_err(|e| miette::miette!("provision managed profiles failed: {e:#}"))?;
         tracing::info!(?outcomes, "up: managed_profiles_provisioned");
     }
 
@@ -4662,13 +4690,85 @@ mod tests {
     use super::{
         ConfigCommands, MemoryCommands, build_agent_ssh_command, cleanup_failed_restore_agent_dir,
         copy_agent_backup_config_files, copy_agent_restore_config_files,
-        copy_database_snapshot_for_restore, remove_database_sidecars, resolve_agent_db,
-        resolve_restored_policy_path, restored_mcp_auth_method, truncate_content,
+        copy_database_snapshot_for_restore, generic_provider_profiles, remove_database_sidecars,
+        resolve_agent_db, resolve_restored_policy_path, restored_mcp_auth_method, truncate_content,
         write_bootstrap_right_mcp_policy, write_managed_settings,
+    };
+    use right_agent_config::{
+        AgentConfig, GenericProvider, ProviderEntry, ProviderType, SandboxConfig, SandboxMode,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    fn config_with_provider(provider: ProviderEntry) -> AgentConfig {
+        AgentConfig {
+            sandbox: Some(SandboxConfig {
+                mode: SandboxMode::Openshell,
+                policy_file: Some(PathBuf::from("policy.yaml")),
+                name: None,
+                providers: vec![provider],
+            }),
+            ..AgentConfig::default()
+        }
+    }
+
+    fn generic_provider(name: &str) -> ProviderEntry {
+        ProviderEntry {
+            name: name.to_string(),
+            type_: ProviderType::Generic,
+            label: None,
+            generic: Some(GenericProvider {
+                env_var: "MY_API_KEY".to_string(),
+                header_name: "x-api-key".to_string(),
+                upstream_host: "api.acme.com".to_string(),
+                upstream_path_prefix: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn generic_provider_profiles_authors_one_per_generic_entry() {
+        let config = config_with_provider(generic_provider("right-acme"));
+
+        let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)]);
+
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id(), "right-acme");
+    }
+
+    #[test]
+    fn generic_provider_profiles_dedupes_duplicate_provider_names() {
+        let configs = [
+            (
+                "agent-a".to_string(),
+                config_with_provider(generic_provider("right-acme")),
+            ),
+            (
+                "agent-b".to_string(),
+                config_with_provider(generic_provider("right-acme")),
+            ),
+        ];
+
+        let profiles = generic_provider_profiles(&configs);
+
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id(), "right-acme");
+    }
+
+    #[test]
+    fn generic_provider_profiles_skips_built_in_provider() {
+        let config = config_with_provider(ProviderEntry {
+            name: "right-anthropic".to_string(),
+            type_: ProviderType::BuiltIn("anthropic".to_string()),
+            label: None,
+            generic: None,
+        });
+
+        let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)]);
+
+        assert!(profiles.is_empty());
+    }
 
     #[test]
     fn agent_ssh_command_quotes_remote_argv_as_one_argument() {
