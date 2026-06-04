@@ -380,6 +380,7 @@ export interface LearningSignalPoint {
   kind: string
   label: string
   severity: string
+  detail: string | null
   skill_name: string | null
   count: number
 }
