@@ -575,7 +575,7 @@ async fn recent_learning_signals(
 ) -> Result<Vec<LearningSignalPoint>, ReadModelError> {
     let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
     let mut stmt = conn.prepare(
-        "SELECT id, action, skill_name, status, hint_outcome, created_at
+        "SELECT id, action, skill_name, status, hint_outcome, COALESCE(summary, message), created_at
          FROM skill_learning_events
          WHERE agent_name=?1
            AND phase='finish'
@@ -591,13 +591,14 @@ async fn recent_learning_signals(
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
-                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
             ))
         })
         .await?;
     let mut signals = Vec::<(DateTime<Utc>, i64, LearningSignalPoint)>::new();
     for row in rows {
-        let (id, action, skill_name, status, hint_outcome, occurred_at) = row?;
+        let (id, action, skill_name, status, hint_outcome, detail, occurred_at) = row?;
         let occurred_at_utc = parse_utc(&occurred_at)?;
         if occurred_at_utc < *since || occurred_at_utc > *now {
             continue;
@@ -613,6 +614,7 @@ async fn recent_learning_signals(
                 label: skill_name.clone(),
                 severity: learning_outcome_severity(status.as_deref(), hint_outcome.as_deref())
                     .to_owned(),
+                detail,
                 skill_name: Some(skill_name),
                 count: 1,
             },
@@ -1093,6 +1095,40 @@ mod tests {
         assert_eq!(labels, vec!["rightx-offset", "rightx-normal"]);
         assert_eq!(response.recent_learning_signals[0].kind, "skill_updated");
         assert_eq!(response.recent_learning_signals[0].severity, "ok");
+    }
+
+    #[tokio::test]
+    async fn recent_learning_signals_include_detail_summary_then_message() {
+        let (_dir, conn) = fixture().await;
+        conn.execute(
+            "INSERT INTO skill_learning_events (
+                invocation_id, agent_name, action, skill_name, phase, status,
+                message, summary, event_refs_json, hint_outcome, created_at
+             ) VALUES
+                ('s1', 'right', 'create', 'rightx-sum', 'finish', 'aborted',
+                 'msg-a', 'summary-a', '[]', 'refused', '2026-05-20T10:00:00Z'),
+                ('s2', 'right', 'create', 'rightx-msg', 'finish', 'aborted',
+                 'msg-b', NULL, '[]', 'refused', '2026-05-20T09:00:00Z')",
+            [],
+        )
+        .await
+        .unwrap();
+
+        let response = learning_overview(&conn, input()).await.unwrap();
+
+        let sum = response
+            .recent_learning_signals
+            .iter()
+            .find(|s| s.label == "rightx-sum")
+            .expect("summary signal present");
+        assert_eq!(sum.detail.as_deref(), Some("summary-a"));
+
+        let msg = response
+            .recent_learning_signals
+            .iter()
+            .find(|s| s.label == "rightx-msg")
+            .expect("message-fallback signal present");
+        assert_eq!(msg.detail.as_deref(), Some("msg-b"));
     }
 
     #[tokio::test]
