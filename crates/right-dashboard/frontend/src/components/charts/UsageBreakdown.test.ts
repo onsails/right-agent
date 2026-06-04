@@ -21,8 +21,8 @@ function point(over: Partial<UsageDailyPoint> = {}): UsageDailyPoint {
   }
 }
 
-async function render(p: UsageDailyPoint | null) {
-  const app = createSSRApp({ render: () => h(UsageBreakdown, { point: p }) })
+async function render(p: UsageDailyPoint | null = point(), rangeLabel: string | null = null) {
+  const app = createSSRApp({ render: () => h(UsageBreakdown, { point: p, rangeLabel }) })
   return renderToString(app)
 }
 
@@ -58,5 +58,11 @@ describe('UsageBreakdown tokens', () => {
     }))
     expect(html).toContain('cron')
     expect(html).toContain('hit-bar') // per-day Counters still input-bearing
+  })
+
+  it('renders the selected local day range when provided', async () => {
+    const html = await render(point(), 'Asia/Dubai · Jun 4 00:00-20:47')
+    expect(html).toContain('<p class="muted-line">Asia/Dubai · Jun 4 00:00-20:47</p>')
+    expect(html).not.toContain('range-label=')
   })
 })

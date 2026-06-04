@@ -5,6 +5,7 @@ import type { UsageDailyPoint } from '../../types'
 
 defineProps<{
   point: UsageDailyPoint | null
+  rangeLabel?: string | null
 }>()
 </script>
 
@@ -14,6 +15,7 @@ defineProps<{
       <div>
         <p class="eyebrow">Breakdown</p>
         <h2>{{ point?.date ?? 'None selected' }}</h2>
+        <p v-if="rangeLabel" class="muted-line">{{ rangeLabel }}</p>
       </div>
       <strong>{{ money(point?.total_cost_usd) }}</strong>
     </header>
