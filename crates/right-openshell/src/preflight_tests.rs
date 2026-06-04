@@ -192,7 +192,7 @@ async fn openshell_preflight_with_fails_fast_on_cli_too_old() {
     let mut client = mock_client(addr).await;
 
     let result = super::openshell_preflight_with(
-        || async { Ok("openshell 0.0.42\n".to_string()) },
+        || async { Ok("openshell 0.0.55\n".to_string()) },
         &mut client,
     )
     .await;
