@@ -764,7 +764,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             resolved_sandbox: &resolved,
             config: &config,
         };
-        let (initial_health, sbox_opt, sync_seed) =
+        let (initial_health, sbox_opt) =
             match sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await? {
                 Ok(sandbox_supervisor::SandboxBringUp {
                     sandbox: sbox,
@@ -777,16 +777,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         generated_ssh_config, stable_ssh_config,
                         "bring-up ssh-config path diverged from the stable path formula"
                     );
-                    let sync_seed = tokio::spawn(sync::run_sync_task(
-                        agent_dir.clone(),
-                        sbox.clone(),
-                        shutdown.clone(),
-                    ));
-                    (
-                        sandbox_runtime::SandboxHealth::Ready,
-                        Some(sbox),
-                        Some(sync_seed),
-                    )
+                    (sandbox_runtime::SandboxHealth::Ready, Some(sbox))
                 }
                 Err(diag) => {
                     tracing::error!(
@@ -801,7 +792,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                             diagnosis: std::sync::Arc::new(diag),
                         },
                         None,
-                        None,
                     )
                 }
             };
@@ -812,6 +802,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             // health from initial_health but leaves the sandbox slot empty.)
             handle.set_ready(sbox.clone());
         }
+        let sync_seed = sbox_opt.as_ref().map(|sbox| {
+            tokio::spawn(sync::run_sync_task(
+                agent_dir.clone(),
+                sbox.clone(),
+                Some(std::sync::Arc::clone(&handle)),
+                shutdown.clone(),
+            ))
+        });
         sandbox_runtime = handle;
 
         // Spawn the supervisor (monitor + recovery), seeded with the startup
