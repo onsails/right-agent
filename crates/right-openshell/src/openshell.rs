@@ -439,6 +439,48 @@ impl SandboxReadiness {
     }
 }
 
+/// Public sandbox phase status from the OpenShell gateway.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum SandboxPhaseStatus {
+    /// Sandbox is READY.
+    Ready,
+    /// Sandbox is in ERROR with gateway status detail.
+    Error { detail: String },
+    /// Sandbox is in another phase with gateway status detail.
+    Other { phase: String, detail: String },
+    /// Sandbox was not found by the gateway.
+    NotFound,
+}
+
+impl SandboxPhaseStatus {
+    fn from_phase(phase: i32, detail: String) -> Self {
+        if phase == SANDBOX_PHASE_READY {
+            SandboxPhaseStatus::Ready
+        } else if phase == SANDBOX_PHASE_ERROR {
+            SandboxPhaseStatus::Error { detail }
+        } else {
+            SandboxPhaseStatus::Other {
+                phase: sandbox_phase_name(phase).to_owned(),
+                detail,
+            }
+        }
+    }
+}
+
+/// Query the current OpenShell sandbox phase.
+pub async fn sandbox_phase_status(
+    client: &mut OpenShellClient<Channel>,
+    name: &str,
+) -> miette::Result<SandboxPhaseStatus> {
+    match get_sandbox_readiness(client, name).await? {
+        Some(readiness) => Ok(SandboxPhaseStatus::from_phase(
+            readiness.phase,
+            readiness.describe(),
+        )),
+        None => Ok(SandboxPhaseStatus::NotFound),
+    }
+}
+
 async fn get_sandbox_readiness(
     client: &mut OpenShellClient<Channel>,
     name: &str,
@@ -2087,5 +2129,25 @@ pub fn parse_policy_yaml_filesystem(
 }
 
 #[cfg(test)]
-#[path = "openshell_tests.rs"]
-mod tests;
+mod tests {
+    include!("openshell_tests.rs");
+
+    #[test]
+    fn phase_status_classifies_phase_ints() {
+        assert_eq!(
+            SandboxPhaseStatus::from_phase(SANDBOX_PHASE_READY, "ok".to_owned()),
+            SandboxPhaseStatus::Ready
+        );
+        match SandboxPhaseStatus::from_phase(SANDBOX_PHASE_ERROR, "boom".to_owned()) {
+            SandboxPhaseStatus::Error { detail } => assert_eq!(detail, "boom"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        match SandboxPhaseStatus::from_phase(SandboxPhase::Provisioning as i32, "prov".to_owned()) {
+            SandboxPhaseStatus::Other { phase, detail } => {
+                assert_eq!(phase, "PROVISIONING");
+                assert_eq!(detail, "prov");
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+}
