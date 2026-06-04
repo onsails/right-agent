@@ -84,28 +84,54 @@ canonical ladder both writer surfaces point at.
 This file is prompt-tier — paid on every turn — so the rewrite must not grow
 materially beyond the sentence it replaces.
 
-### 2. Automatic writer — `build_user_prompt`
+### 2. Automatic writer — consolidate, then add the directive (Option 2)
 
-Add one instruction in the **shared** block (after the hint branches, alongside
-the existing `hint_outcome` instruction) so it applies to both `create` and
-`patch` hints:
+**Drift discovered during planning.** The automatic-writer prompt exists in two
+divergent places:
 
-> When the captured procedure is multi-step with mechanical or
-> disposable-intermediate steps, write those steps as concrete subagent-delegation
-> directives naming the model tier (`haiku` for purely mechanical, `sonnet` for
-> mechanical work needing light comprehension). Do not add delegation boilerplate
-> to simple single-procedure recipes.
+- **Canonical-but-dead:** `right_codegen::PROBE_WRITER_ANCHOR_TEMPLATE` +
+  `PROBE_WRITER_INSTRUCTIONS` (`crates/right-codegen/src/agent_def.rs:90-137`).
+  Rich content with a full "rightx-* skill quality" section. Exported, tested
+  (`agent_def_tests.rs`), and documented in `PROMPT_SYSTEM.md` as the source of
+  truth — but **nothing consumes its content at runtime** (its marker
+  `"USER (target):"` appears nowhere else).
+- **Live-but-thin:** `bot::learning_probe_writer::build_user_prompt` builds the
+  actual runtime prompt inline (emits `"USER:"`). It has the hint-branching and
+  `hint_outcome` machinery but **no skill-quality section at all**.
 
-Include a compact one-line tier reminder inline. Rationale: the probe-writer runs
-as a forked/resumed session, and it is not yet confirmed that the fork inherits
-`OPERATING_INSTRUCTIONS.md` verbatim into its system prompt. Writer output quality
-matters, so the prompt restates the tiers in one line rather than relying on
-inheritance.
+**Fix the drift first.** Rewire `build_user_prompt` to compose the runtime prompt
+from the canonical constants — `PROBE_WRITER_INSTRUCTIONS` (general class-first
+protocol + quality) followed by the bot-specific hint block, the `hint_outcome`
+instruction, the skill index, and finally `PROBE_WRITER_ANCHOR_TEMPLATE` (with
+`{user_msg_text}`/`{assistant_reply_text}` substituted). This collapses the two
+definitions into one source of truth that matches `PROMPT_SYSTEM.md`, and the
+automatic writer **gains the quality section it currently lacks**.
 
-**Implementation note:** during implementation, verify whether the forked
-probe-writer session inherits the composite system prompt (and thus the ladder).
-If confirmed, shrink the inline reminder to a pointer ("per the operating
-instructions' model ladder") to avoid duplication.
+Constraints on the rewire:
+
+- Preserve the existing hint mechanics and exact tokens the tests pin:
+  `PREFILTER HINT: patch_existing` / `create_new`, `TARGET SKILL:`, `TOPIC HINT:`,
+  `REASON:`, `hint_outcome`, and the empty-index placeholder
+  `"no existing rightx-* skills"`.
+- Trim the hint block's redundant create/patch/exit restatement (now covered by
+  `PROBE_WRITER_INSTRUCTIONS`) down to the prefilter's specific recommendation
+  plus "verify against the protocol above; apply or override."
+- **Fix a latent bug while reviving:** `PROBE_WRITER_INSTRUCTIONS` step 2 says
+  "patch the skill files via Edit/Write," but the probe-writer's `allowed_tools`
+  has no `Edit` (only `Write`, `Read`, `Bash`). Change to "via Read + Write."
+
+**Then add the delegation directive** to `PROBE_WRITER_INSTRUCTIONS`'s
+"rightx-* skill quality" bullets:
+
+> If the procedure is multi-step with mechanical or disposable-intermediate
+> steps, encode concrete subagent-delegation directives in the steps, naming the
+> model tier (`haiku` for purely mechanical, `sonnet` for mechanical work needing
+> light comprehension). Do NOT add delegation directives to simple
+> single-procedure recipes.
+
+Because the directive lives in `PROBE_WRITER_INSTRUCTIONS` (now actually sent),
+no separate inline reminder in `build_user_prompt` is needed — the consolidation
+removes the earlier uncertainty about prompt inheritance.
 
 ### 3. Explicit writer — `right-learn-skill/SKILL.md`
 
@@ -123,16 +149,22 @@ genuinely mechanical or produce intermediates that do not matter to the outcome.
 ## Sync obligations
 
 - **`PROMPT_SYSTEM.md`** — mandatory update when prompt generation changes.
-  Document the writer's delegation-authoring behavior and the three-tier ladder.
+  Document (a) that `build_user_prompt` now composes from
+  `PROBE_WRITER_ANCHOR_TEMPLATE` + `PROBE_WRITER_INSTRUCTIONS` (no longer an
+  inline duplicate), (b) the delegation-authoring behavior, and (c) the
+  three-tier model ladder.
 - **Tests:**
-  - Extend `learning_probe_writer` tests to assert the delegation instruction is
-    present in `build_user_prompt` output (hint-agnostic — present for both create
-    and patch hints).
-  - Add a test asserting the `right-learn-skill/SKILL.md` "Skill Quality" bullet
-    exists (or extend an existing SKILL.md content test if one exists).
-  - Confirm `agent_def_tests.rs` still passes with the reworded
-    `OPERATING_INSTRUCTIONS.md` line; update any exact-content assertion it holds
-    on that line.
+  - Extend `learning_probe_writer` tests so `build_user_prompt` output contains
+    the composed `PROBE_WRITER_INSTRUCTIONS` content (e.g. `"Survey"`) and the
+    anchor markers, for both create and patch hints, while still containing the
+    pinned hint tokens and `hint_outcome`.
+  - Extend `agent_def_tests.rs::probe_writer_instructions_contain_class_first_guidance`
+    to assert the delegation directive (`haiku`/`sonnet`) and that the text no
+    longer says `Edit/Write`.
+  - Extend `skills.rs::right_learn_skill_mentions_protocol_and_boundaries` (or add
+    a sibling test) to assert the SKILL.md delegation bullet.
+  - Add a test asserting `OPERATING_INSTRUCTIONS` contains both `model: "haiku"`
+    and `model: "sonnet"` tiers.
 
 ## Verification cadence
 
