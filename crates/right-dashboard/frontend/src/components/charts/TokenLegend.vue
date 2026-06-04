@@ -1,7 +1,11 @@
-<script setup lang="ts"></script>
+<script setup lang="ts">
+withDefaults(defineProps<{ sticky?: boolean }>(), {
+  sticky: true,
+})
+</script>
 
 <template>
-  <div class="token-legend">
+  <div class="token-legend" :class="{ 'is-sticky': sticky }">
     <span class="lg lg-input">input</span>
     <span class="lg lg-output">output</span>
     <span class="lg lg-create">cache create</span>
@@ -11,14 +15,19 @@
 
 <style scoped>
 .token-legend {
-  position: sticky;
-  bottom: 0;
-  z-index: 15;
   display: flex;
   gap: 12px;
   flex-wrap: wrap;
   font-size: 0.72rem;
   color: var(--tg-theme-hint-color, #6b7b88);
+  margin: 8px 0;
+  padding: 8px 0;
+}
+
+.token-legend.is-sticky {
+  position: sticky;
+  bottom: 0;
+  z-index: 15;
   margin: 8px -12px 0;
   padding: 8px 12px;
   background: var(--tg-theme-secondary-bg-color, #ffffff);
@@ -26,7 +35,7 @@
 }
 
 @media (max-width: 560px) {
-  .token-legend {
+  .token-legend.is-sticky {
     /* clear the fixed mobile nav bar (.app-shell reserves 78px for it) */
     bottom: calc(78px + env(safe-area-inset-bottom));
   }

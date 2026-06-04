@@ -7,6 +7,7 @@ import TokenLine from '../components/charts/TokenLine.vue'
 import TokenLegend from '../components/charts/TokenLegend.vue'
 import { money } from '../format'
 import type { UsageOverviewResponse, UsageWindow } from '../types'
+import { selectedDayRangeLabel } from './usageDayRange'
 
 const props = defineProps<{
   usage: UsageOverviewResponse | null
@@ -32,6 +33,10 @@ const selectedPoint = computed(() =>
   props.usage?.daily_series.find((point) => point.date === selectedDate.value) ?? null,
 )
 
+const selectedRangeLabel = computed(() =>
+  selectedDayRangeLabel(selectedDate.value, props.usage?.timezone ?? 'UTC', props.usage?.generated_at ?? new Date().toISOString()),
+)
+
 function windowRows(window: UsageWindow | null | undefined) {
   return window?.sources ?? []
 }
@@ -46,13 +51,15 @@ function windowRows(window: UsageWindow | null | undefined) {
       </span>
     </section>
 
+    <TokenLegend :sticky="false" />
+
     <section class="two-column wide-main">
       <UsageSpendChart
         :points="usage?.daily_series ?? []"
         :selected-date="selectedDate"
         @select-date="selectedDate = $event"
       />
-      <UsageBreakdown :point="selectedPoint" />
+      <UsageBreakdown :point="selectedPoint" :range-label="selectedRangeLabel" />
     </section>
 
     <section class="list-stack">
@@ -61,6 +68,7 @@ function windowRows(window: UsageWindow | null | undefined) {
           <div>
             <p class="eyebrow">{{ window.key }}</p>
             <h2>{{ window.label }}</h2>
+            <p class="muted-line">{{ window.range_label }}</p>
           </div>
           <strong>{{ money(window.total_cost_usd) }}</strong>
         </header>

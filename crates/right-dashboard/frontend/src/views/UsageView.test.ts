@@ -28,9 +28,9 @@ function windowStub(overrides: Partial<UsageWindow> = {}): UsageWindow {
   return {
     key: '7d',
     label: 'Last 7 days',
-    range_start: '2026-01-01T00:00:00Z',
-    range_end: '2026-01-08T00:00:00Z',
-    range_label: 'Jan 1 00:00-Jan 8 00:00',
+    range_start: '2025-12-26T00:00:00+04:00',
+    range_end: '2026-01-01T04:00:00+04:00',
+    range_label: 'Asia/Dubai · Dec 26 00:00-Jan 1 04:00',
     sources: [sourceSummaryStub()],
     total_cost_usd: 1.0,
     subscription_cost_usd: 0,
@@ -53,7 +53,7 @@ function usageStub(overrides: Partial<UsageOverviewResponse> = {}): UsageOvervie
   return {
     agent: 'test-agent',
     generated_at: '2026-01-01T00:00:00Z',
-    timezone: 'UTC',
+    timezone: 'Asia/Dubai',
     windows: [windowStub()],
     selected_window: '7d',
     daily_series: [],
@@ -103,13 +103,42 @@ describe('UsageView token legend and per-source TokenLine', () => {
       loading: false,
       error: null,
     })
-    expect(html).toContain('token-legend')
+    expect((html.match(/token-legend/g) ?? []).length).toBe(2)
+    expect((html.match(/is-sticky/g) ?? []).length).toBe(1)
     expect(html).toContain('token-line')
     expect(html).toContain('interactive')
-    // New legend exposes cache via stable marker classes.
+    expect(html).toContain('Asia/Dubai · Dec 26 00:00-Jan 1 04:00')
     expect(html).toContain('lg-create')
     expect(html).toContain('lg-read')
-    // Old CacheSubline component (class `cache-subline`) is gone.
     expect(html).not.toContain('cache-subline')
+  })
+
+  it('passes the selected local day range to the breakdown panel', async () => {
+    const html = await render({
+      usage: usageStub({
+        generated_at: '2026-06-04T16:47:36Z',
+        timezone: 'Asia/Dubai',
+        daily_series: [{
+          date: '2026-06-04',
+          total_cost_usd: 1,
+          subscription_cost_usd: 1,
+          api_cost_usd: 0,
+          turns: 1,
+          invocations: 1,
+          input_tokens: 10,
+          output_tokens: 20,
+          cache_creation_tokens: 5,
+          cache_read_tokens: 40,
+          web_search_requests: 0,
+          web_fetch_requests: 0,
+          sources: [],
+          models: [],
+        }],
+      }),
+      loading: false,
+      error: null,
+    })
+
+    expect(html).toContain('Asia/Dubai · Jun 4 00:00-20:47')
   })
 })
