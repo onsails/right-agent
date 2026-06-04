@@ -20,8 +20,9 @@ pub(super) fn learning_outcome_severity(
     hint_outcome: Option<&str>,
 ) -> &'static str {
     match (status, hint_outcome) {
-        (_, Some("refused")) => "warn",
+        (_, Some("refused")) => "info",
         (Some("failed" | "aborted"), _) => "bad",
+        (Some("created" | "updated"), _) => "ok",
         _ => "info",
     }
 }
