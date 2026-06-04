@@ -64,6 +64,25 @@ fn diagnose_preflight(err: PreflightError) -> GatewayDiagnosis {
     }
 }
 
+fn bring_up_phase_diagnosis(status: SandboxPhaseStatus, sandbox: &str) -> Option<GatewayDiagnosis> {
+    match status {
+        SandboxPhaseStatus::Ready => None,
+        SandboxPhaseStatus::Error { .. } => Some(
+            GatewayCause::SandboxError {
+                sandbox: sandbox.to_owned(),
+            }
+            .diagnose(),
+        ),
+        SandboxPhaseStatus::NotFound => Some(
+            GatewayCause::SandboxNotFound {
+                sandbox: sandbox.to_owned(),
+            }
+            .diagnose(),
+        ),
+        SandboxPhaseStatus::Other { .. } => Some(GatewayCause::Unreachable.diagnose()),
+    }
+}
+
 /// Bring the OpenShell sandbox backend up for an agent.
 ///
 /// Returns:
@@ -119,14 +138,10 @@ pub(crate) async fn bring_up_sandbox(
     }
     tracing::info!("OpenShell version preflight passed");
 
-    let sandbox_exists =
-        right_openshell::openshell::is_sandbox_ready(&mut grpc_client, &sandbox).await?;
-
-    if !sandbox_exists {
-        return Ok(Err(GatewayCause::SandboxNotFound {
-            sandbox: sandbox.clone(),
-        }
-        .diagnose()));
+    let phase_status =
+        right_openshell::openshell::sandbox_phase_status(&mut grpc_client, &sandbox).await?;
+    if let Some(diag) = bring_up_phase_diagnosis(phase_status, &sandbox) {
+        return Ok(Err(diag));
     }
 
     // Resolve host IPs from inside sandbox for policy allowed_ips.
