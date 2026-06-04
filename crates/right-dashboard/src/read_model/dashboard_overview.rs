@@ -1,7 +1,7 @@
 use crate::api_types::{
     CostLearningPoint, CostLearningRiver, CostLearningSeries, CostSeriesPoint,
-    DashboardDataWarning, DashboardOverviewResponse, DashboardSignal, LearningMarker,
-    OverviewDoctorStatus, OverviewSandboxStatus, RunSummary, UsageSourcePoint,
+    DashboardDataWarning, DashboardOverviewResponse, DashboardSignal, OverviewDoctorStatus,
+    OverviewSandboxStatus, RunSummary, UsageSourcePoint,
 };
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use super::{
     ReadModelError, coarse_timestamp_bounds, count_parsed_window_rows,
-    learning_outcomes::{learning_outcome_kind, learning_outcome_severity, learning_outcome_title},
+    learning_outcomes::{learning_outcome_severity, learning_outcome_title},
     parse_utc,
 };
 
@@ -40,11 +40,9 @@ pub async fn dashboard_overview(
     let learning_candidates_24h =
         learning_candidate_count(conn, &input.agent, &input.generated_at).await?;
     let generated_at_utc = parse_utc(&input.generated_at)?;
-    let (mut cost_learning_river, mut warnings) =
-        cost_learning_river(conn, &input.generated_at, &input.agent).await?;
-    let (curator_signals, curator_markers, curator_warnings) =
-        curator_projection(conn, &generated_at_utc).await?;
-    cost_learning_river.markers.extend(curator_markers);
+    let (cost_learning_river, mut warnings) =
+        cost_learning_river(conn, &input.generated_at).await?;
+    let (curator_signals, curator_warnings) = curator_projection(conn, &generated_at_utc).await?;
     warnings.extend(curator_warnings);
     let mut signals = overview_signals(
         conn,
@@ -315,7 +313,6 @@ async fn learning_outcome_signals(
 async fn cost_learning_river(
     conn: &Connection,
     generated_at: &str,
-    agent: &str,
 ) -> Result<(CostLearningRiver, Vec<DashboardDataWarning>), ReadModelError> {
     let now = parse_utc(generated_at)?;
     let start_naive = (now.date_naive() - Duration::days(RIVER_DAYS - 1))
@@ -410,13 +407,12 @@ async fn cost_learning_river(
     }
 
     let series = build_cost_series(&points);
-    let markers = learning_markers(conn, agent, &start_utc, &now).await?;
     Ok((
         CostLearningRiver {
             window: RIVER_WINDOW.to_owned(),
             points,
             series,
-            markers,
+            markers: Vec::new(),
         },
         Vec::new(),
     ))
@@ -446,58 +442,6 @@ fn build_cost_series(points: &[CostLearningPoint]) -> Vec<CostLearningSeries> {
                 .collect(),
         })
         .collect()
-}
-
-async fn learning_markers(
-    conn: &Connection,
-    agent: &str,
-    since: &DateTime<Utc>,
-    now: &DateTime<Utc>,
-) -> Result<Vec<LearningMarker>, ReadModelError> {
-    let (coarse_since, coarse_until) = coarse_timestamp_bounds(since, now);
-    let mut stmt = conn.prepare(
-        "SELECT id, action, skill_name, status, hint_outcome, created_at
-         FROM skill_learning_events
-         WHERE agent_name = ?1
-           AND phase = 'finish'
-           AND created_at >= ?2
-           AND created_at <= ?3
-         ORDER BY created_at DESC",
-    )?;
-    let rows = stmt
-        .query_map(params![agent, coarse_since, coarse_until], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, String>(5)?,
-            ))
-        })
-        .await?;
-
-    let mut markers = Vec::new();
-    for row in rows {
-        let (id, action, skill_name, status, hint_outcome, occurred_at) = row?;
-        let occurred_at_utc = parse_utc(&occurred_at)?;
-        if occurred_at_utc < *since || occurred_at_utc > *now {
-            continue;
-        }
-        markers.push(LearningMarker {
-            id: format!("marker:{id}:{skill_name}"),
-            occurred_at: occurred_at_utc.to_rfc3339(),
-            kind: learning_outcome_kind(&action, status.as_deref(), hint_outcome.as_deref())
-                .to_owned(),
-            label: skill_name.clone(),
-            severity: learning_outcome_severity(status.as_deref(), hint_outcome.as_deref())
-                .to_owned(),
-            skill_name: Some(skill_name),
-            source: Some("learning_probe_writer".to_owned()),
-            cost_usd: None,
-        });
-    }
-    Ok(markers)
 }
 
 fn cost_spike_signals(river: &CostLearningRiver) -> Vec<DashboardSignal> {
@@ -544,11 +488,7 @@ fn median(sorted: &[f64]) -> f64 {
     }
 }
 
-type CuratorProjection = (
-    Vec<DashboardSignal>,
-    Vec<LearningMarker>,
-    Vec<DashboardDataWarning>,
-);
+type CuratorProjection = (Vec<DashboardSignal>, Vec<DashboardDataWarning>);
 
 async fn curator_projection(
     conn: &Connection,
@@ -575,7 +515,6 @@ async fn curator_projection(
     else {
         return Ok((
             Vec::new(),
-            Vec::new(),
             vec![DashboardDataWarning {
                 source: "curator_state".to_owned(),
                 kind: "unavailable".to_owned(),
@@ -585,7 +524,6 @@ async fn curator_projection(
     };
 
     let mut signals = Vec::new();
-    let mut markers = Vec::new();
     let mut warnings = Vec::new();
 
     if let (Some(last_run_at), Some(last_run_status)) = (
@@ -661,16 +599,6 @@ async fn curator_projection(
                         related_skill_name: None,
                         related_report_id: None,
                     });
-                    markers.push(LearningMarker {
-                        id: format!("marker:curator:{}", evidence.occurred_at.to_rfc3339()),
-                        occurred_at: evidence.occurred_at.to_rfc3339(),
-                        kind: "cost_spike".to_owned(),
-                        label: "Cost spike".to_owned(),
-                        severity: "warn".to_owned(),
-                        skill_name: None,
-                        source: Some("curator_state".to_owned()),
-                        cost_usd: evidence.cost_usd,
-                    });
                 }
             }
             Ok(_) => {}
@@ -688,7 +616,7 @@ async fn curator_projection(
         }
     }
 
-    Ok((signals, markers, warnings))
+    Ok((signals, warnings))
 }
 
 struct CuratorStateRow {
@@ -1057,9 +985,9 @@ mod tests {
                 .iter()
                 .any(|series| series.source == "learning_probe_writer")
         );
-        assert_eq!(
-            response.cost_learning_river.markers[0].kind,
-            "skill_created"
+        assert!(
+            response.cost_learning_river.markers.is_empty(),
+            "overview river must not carry learning markers"
         );
     }
 
@@ -1257,11 +1185,7 @@ mod tests {
                 && signal.title == "Learning refused"
                 && signal.related_skill_name.as_deref() == Some("rightx-refused")
         }));
-        assert!(response.cost_learning_river.markers.iter().any(|marker| {
-            marker.kind == "skill_refused"
-                && marker.severity == "info"
-                && marker.skill_name.as_deref() == Some("rightx-refused")
-        }));
+        assert!(response.cost_learning_river.markers.is_empty());
     }
 
     #[tokio::test]
@@ -1352,11 +1276,6 @@ mod tests {
             signal.kind == "cost_spike"
                 && signal.source.as_deref() == Some("curator_state")
                 && signal.cost_usd == Some(2.5)
-        }));
-        assert!(response.cost_learning_river.markers.iter().any(|marker| {
-            marker.kind == "cost_spike"
-                && marker.source.as_deref() == Some("curator_state")
-                && marker.cost_usd == Some(2.5)
         }));
 
         conn.execute(
