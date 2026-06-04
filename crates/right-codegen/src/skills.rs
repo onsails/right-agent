@@ -297,6 +297,9 @@ mod tests {
             "scripts/",
             "references/",
             "assets/",
+            // delegation-authoring directive
+            "disposable-intermediate",
+            "`haiku`",
         ] {
             assert!(
                 content.contains(needle),

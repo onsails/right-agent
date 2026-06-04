@@ -109,5 +109,12 @@ In `SKILL.md`, include:
 - when not to use it
 - that future use of this `rightx-*` learned skill should emit a short localized `used_skill_receipts` message when it materially guides the answer
 
+When the procedure is multi-step with mechanical or disposable-intermediate
+steps, encode concrete subagent-delegation directives in the steps, naming the
+model tier (`haiku` for purely mechanical work like format conversion or field
+extraction, `sonnet` for mechanical work needing light comprehension like long
+reads or summarization). Keep simple single-procedure recipes free of
+delegation directives.
+
 Do not store secrets. Do not copy large transcripts. Keep references focused.
 
