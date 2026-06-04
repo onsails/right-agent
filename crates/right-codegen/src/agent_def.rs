@@ -109,7 +109,7 @@ to be patched. Apply class-first preference:
 2. If the workflow matches an existing skill that's broken or incomplete: \
    call `mcp__right__skill_learning_start` with `action=\"update\"` and \
    `skill_name=\"<existing-rightx-slug>\"`, then patch the skill files via \
-   Edit/Write, then call `mcp__right__skill_learning_finish` with \
+   Read + Write, then call `mcp__right__skill_learning_finish` with \
    `status=\"updated\"`.
 3. If the workflow is genuinely novel and reusable: call \
    `mcp__right__skill_learning_start` with `action=\"create\"` and \
@@ -123,6 +123,11 @@ to be patched. Apply class-first preference:
   `description` (≤1024 chars, concrete activation triggers — \"when to use\").
 - Body: when to use, exact steps that worked, tool/API gotchas, verification, \
   when not to use.
+- If the procedure is multi-step with mechanical or disposable-intermediate \
+  steps, encode concrete subagent-delegation directives in the steps, naming \
+  the model tier (`haiku` for purely mechanical, `sonnet` for mechanical work \
+  needing light comprehension). Do NOT add delegation directives to simple \
+  single-procedure recipes.
 - Optional subdirs: `scripts/`, `references/`, `assets/` only when they remove \
   real future complexity.
 - Never store secrets, transcripts, or session-specific narrative.
