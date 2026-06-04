@@ -831,6 +831,36 @@ pub async fn apply_policy(name: &str, policy_path: &Path) -> miette::Result<()> 
     Ok(())
 }
 
+/// Ensure the provider-composed policy has loaded after provider attach.
+///
+/// Re-applying the current base policy with `openshell policy set --wait` is
+/// the deterministic OpenShell v0.0.56 loaded signal; errors propagate.
+pub async fn ensure_provider_policy_loaded(name: &str, policy_path: &Path) -> miette::Result<()> {
+    apply_policy(name, policy_path).await
+}
+
+/// Poll `probe` every `interval` up to `max_attempts`; true once it returns true.
+#[allow(dead_code)]
+pub(crate) async fn poll_until_loaded<F, Fut>(
+    mut probe: F,
+    interval: Duration,
+    max_attempts: u32,
+) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for attempt in 0..max_attempts {
+        if probe().await {
+            return true;
+        }
+        if attempt + 1 < max_attempts {
+            tokio::time::sleep(interval).await;
+        }
+    }
+    false
+}
+
 /// Execute a command inside a sandbox over SSH.
 ///
 /// Uses `-F config_path` to pick up the sandbox SSH config, and
@@ -2127,8 +2157,40 @@ pub fn parse_policy_yaml_filesystem(
 }
 
 #[cfg(test)]
-mod tests {
-    include!("openshell_tests.rs");
+mod ensure_loaded_tests {
+    use super::poll_until_loaded;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn ensure_loaded_polls_until_probe_succeeds() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let c = calls.clone();
+        let probe = move || {
+            let c = c.clone();
+            async move { c.fetch_add(1, Ordering::SeqCst) >= 2 }
+        };
+
+        let ok = poll_until_loaded(probe, Duration::from_millis(10), 10).await;
+
+        assert!(ok);
+        assert!(calls.load(Ordering::SeqCst) >= 3);
+    }
+
+    #[tokio::test]
+    async fn ensure_loaded_times_out_when_probe_never_succeeds() {
+        let probe = || async { false };
+
+        let ok = poll_until_loaded(probe, Duration::from_millis(1), 3).await;
+
+        assert!(!ok);
+    }
+}
+
+#[cfg(test)]
+mod phase_status_tests {
+    use super::*;
 
     #[test]
     fn phase_status_classifies_phase_ints() {
@@ -2149,3 +2211,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "openshell_tests.rs"]
+mod tests;
