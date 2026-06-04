@@ -2267,8 +2267,17 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["agent"], "alpha");
+        assert_eq!(body["timezone"], "UTC");
         assert!(body["windows"].is_array());
         assert_eq!(body["windows"][0]["key"], "today");
+        assert!(body["windows"][0]["range_start"].is_string());
+        assert!(body["windows"][0]["range_end"].is_string());
+        assert!(
+            body["windows"][0]["range_label"]
+                .as_str()
+                .unwrap()
+                .contains("UTC")
+        );
         assert_eq!(body["selected_window"], "last_30_days");
         assert!(
             body.get("daily_series").is_some(),
@@ -2277,6 +2286,45 @@ mod tests {
         assert!(
             body.get("source_series").is_some(),
             "usage must expose source_series"
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_accepts_timezone_query_for_authorized_user() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        conn.execute(
+            "INSERT INTO usage_events (
+                ts, source, chat_id, thread_id, job_name, session_uuid,
+                total_cost_usd, num_turns, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, web_search_requests,
+                web_fetch_requests, model_usage_json, api_key_source
+             ) VALUES (
+                '2026-06-03T20:00:00Z', 'interactive', 1, 0, NULL, 's1',
+                0.15, 1, 10, 20, 0, 0, 0, 0,
+                '{\"sonnet\":{\"costUSD\":0.15}}', 'none'
+             )",
+            [],
+        )
+        .await
+        .unwrap();
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/usage?timezone=Asia%2FDubai",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["timezone"], "Asia/Dubai");
+        assert!(
+            body["windows"][0]["range_label"]
+                .as_str()
+                .unwrap()
+                .starts_with("Asia/Dubai")
         );
     }
 
