@@ -1,6 +1,6 @@
 # Usage Panel: Local-Time Ranges and Token Legends
 
-**Status:** Design approved, implementation planning pending
+**Status:** Design approved, implementation plan written
 
 ## Problem
 
