@@ -154,3 +154,45 @@ async fn usage_overview_missing_timezone_falls_back_to_utc_with_warning() {
         warning.source == "usage.timezone" && warning.kind == "missing_timezone"
     }));
 }
+
+#[tokio::test]
+async fn usage_overview_uses_first_valid_local_instant_when_midnight_is_skipped() {
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), true).await.unwrap();
+
+    insert_usage(&conn, "2026-09-06T03:59:59Z", "interactive", 9.99).await;
+    insert_usage(&conn, "2026-09-06T04:00:00Z", "interactive", 1.25).await;
+    insert_usage(&conn, "2026-09-06T05:30:00Z", "interactive", 2.50).await;
+
+    let response = usage_overview(
+        &conn,
+        UsageOverviewInput {
+            agent: "right".to_owned(),
+            generated_at: "2026-09-06T05:30:00Z".to_owned(),
+            timezone: Some("America/Santiago".to_owned()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let today = window(&response, "today");
+    let interactive = today
+        .sources
+        .iter()
+        .find(|source| source.source == "interactive")
+        .unwrap();
+    assert_eq!(interactive.invocations, 2);
+    assert!((interactive.cost_usd - 3.75).abs() < 1e-9);
+    assert_eq!(
+        today.range_start.as_deref(),
+        Some("2026-09-06T01:00:00-03:00")
+    );
+    assert_eq!(today.range_end, "2026-09-06T02:30:00-03:00");
+    assert_eq!(today.range_label, "America/Santiago · Sep 6 01:00-02:30");
+    assert!(
+        response
+            .daily_series
+            .iter()
+            .any(|point| point.date == "2026-09-06")
+    );
+}
