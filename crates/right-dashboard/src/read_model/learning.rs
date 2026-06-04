@@ -754,58 +754,58 @@ async fn learning_lifecycle(
     since_7d: &DateTime<Utc>,
     now: &DateTime<Utc>,
 ) -> Result<LearningLifecycle, ReadModelError> {
-    let (failed_or_aborted_7d, recent_failed_events) =
+    let (failed_7d, recent_failed_events) =
         recent_failed_events(conn, agent, since_7d, now).await?;
+    let (refused_7d, recent_refused_events) =
+        recent_refused_events(conn, agent, since_7d, now).await?;
     Ok(LearningLifecycle {
         created_7d: writer_status_count_in_window(conn, agent, "created", since_7d, now).await?,
         updated_7d: writer_status_count_in_window(conn, agent, "updated", since_7d, now).await?,
-        // Exact windowed total from the failed-events scan; the list it returns
-        // is capped at FAILURE_SAMPLE_LIMIT.
-        failed_or_aborted_7d: failed_or_aborted_7d as i64,
+        failed_7d: failed_7d as i64,
+        refused_7d: refused_7d as i64,
         recent_successful_events: recent_successful_events(conn, agent, since_7d, now).await?,
         recent_failed_events,
+        recent_refused_events,
         candidate_skill_names_7d: candidate_skill_names(conn, agent, since_7d, now).await?,
     })
 }
 
 /// Learning-event rows for `agent` whose `created_at` falls in `[since_7d, now]`,
-/// newest first, restricted to the two given statuses. Returns the exact count
-/// of precise-window matches and the list, optionally truncated to `limit`
-/// (applied AFTER counting, so the count is unaffected by the cap).
+/// newest first, restricted to the static internal status predicate. Returns
+/// the exact count of precise-window matches and the list, optionally truncated
+/// to `limit` (applied AFTER counting, so the count is unaffected by the cap).
 async fn learning_events_in_window(
     conn: &Connection,
     agent: &str,
     since_7d: &DateTime<Utc>,
     now: &DateTime<Utc>,
-    statuses: [&str; 2],
+    status_predicate: &str,
     limit: Option<usize>,
 ) -> Result<(usize, Vec<LearningEventSummary>), ReadModelError> {
     let (coarse_since, coarse_until) = coarse_timestamp_bounds(since_7d, now);
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT id, skill_name, action, status, message, summary, created_at
          FROM skill_learning_events
          WHERE agent_name=?1
            AND phase='finish'
-           AND status IN (?4, ?5)
+           AND ({status_predicate})
            AND created_at >= ?2
            AND created_at <= ?3
-         ORDER BY created_at DESC, id DESC",
-    )?;
+         ORDER BY created_at DESC, id DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(
-            params![agent, coarse_since, coarse_until, statuses[0], statuses[1]],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                ))
-            },
-        )
+        .query_map(params![agent, coarse_since, coarse_until], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
         .await?;
     let mut events = Vec::<(DateTime<Utc>, i64, LearningEventSummary)>::new();
     for row in rows {
@@ -849,7 +849,7 @@ async fn recent_successful_events(
         agent,
         since_7d,
         now,
-        ["created", "updated"],
+        "status IN ('created','updated')",
         Some(RECENT_EVENT_LIMIT as usize),
     )
     .await?;
@@ -864,13 +864,30 @@ async fn recent_failed_events(
 ) -> Result<(usize, Vec<LearningEventSummary>), ReadModelError> {
     // Capped at FAILURE_SAMPLE_LIMIT (newest-first); the returned total is the
     // exact windowed count, which may exceed the list length and feeds
-    // `failed_or_aborted_7d`.
+    // `failed_7d`.
     learning_events_in_window(
         conn,
         agent,
         since_7d,
         now,
-        ["failed", "aborted"],
+        "status='failed' OR (status='aborted' AND COALESCE(hint_outcome,'') <> 'refused')",
+        Some(super::FAILURE_SAMPLE_LIMIT),
+    )
+    .await
+}
+
+async fn recent_refused_events(
+    conn: &Connection,
+    agent: &str,
+    since_7d: &DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<(usize, Vec<LearningEventSummary>), ReadModelError> {
+    learning_events_in_window(
+        conn,
+        agent,
+        since_7d,
+        now,
+        "status='aborted' AND hint_outcome='refused'",
         Some(super::FAILURE_SAMPLE_LIMIT),
     )
     .await
@@ -1044,7 +1061,8 @@ mod tests {
 
         assert_eq!(response.lifecycle.created_7d, 1);
         assert_eq!(response.lifecycle.updated_7d, 1);
-        assert_eq!(response.lifecycle.failed_or_aborted_7d, 2);
+        assert_eq!(response.lifecycle.failed_7d, 1);
+        assert_eq!(response.lifecycle.refused_7d, 1);
         assert_eq!(
             response.lifecycle.candidate_skill_names_7d,
             vec!["rightx-updated", "rightx-created"]
@@ -1066,6 +1084,56 @@ mod tests {
             1
         );
         assert_eq!(response.recent_learning_signals[0].label, "rightx-failed");
+    }
+
+    #[tokio::test]
+    async fn learning_lifecycle_excludes_refusals_from_failed_and_counts_them_separately() {
+        let (_dir, conn) = fixture().await;
+        // 1 genuine failure, 1 genuine abort (not refused), 2 refusals.
+        conn.execute(
+            "INSERT INTO skill_learning_events
+                (invocation_id, agent_name, action, skill_name, phase, status,
+                 hint_outcome, message, summary, event_refs_json, created_at)
+             VALUES
+                ('i1','alpha','update','rightx-a','finish','failed',
+                 NULL,'boom',NULL,'[]','2026-06-03T09:00:00Z'),
+                ('i2','alpha','update','rightx-b','finish','aborted',
+                 NULL,'crash',NULL,'[]','2026-06-03T09:05:00Z'),
+                ('i3','alpha','update','rightx-c','finish','aborted',
+                 'refused','already covered',NULL,'[]','2026-06-03T09:10:00Z'),
+                ('i4','alpha','update','rightx-c','finish','aborted',
+                 'refused','already covered','dup','[]','2026-06-03T09:15:00Z')",
+            [],
+        )
+        .await
+        .unwrap();
+
+        let now = parse_utc("2026-06-04T10:00:00Z").unwrap();
+        let since = now - Duration::days(7);
+        let lifecycle = learning_lifecycle(&conn, "alpha", &since, &now)
+            .await
+            .unwrap();
+
+        assert_eq!(lifecycle.failed_7d, 2);
+        assert_eq!(lifecycle.refused_7d, 2);
+        assert_eq!(lifecycle.recent_failed_events.len(), 2);
+        assert_eq!(
+            lifecycle
+                .recent_failed_events
+                .iter()
+                .map(|e| (e.skill_name.as_str(), e.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("rightx-b", "aborted"), ("rightx-a", "failed")]
+        );
+        assert_eq!(lifecycle.recent_refused_events.len(), 2);
+        assert_eq!(
+            lifecycle
+                .recent_refused_events
+                .iter()
+                .map(|e| (e.skill_name.as_str(), e.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("rightx-c", "aborted"), ("rightx-c", "aborted")]
+        );
     }
 
     #[tokio::test]
@@ -1179,7 +1247,7 @@ mod tests {
 
         assert_eq!(
             response.lifecycle.recent_failed_events.len() as i64,
-            response.lifecycle.failed_or_aborted_7d
+            response.lifecycle.failed_7d
         );
         assert!(
             response.lifecycle.recent_failed_events.len() >= 13,
@@ -1259,7 +1327,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(response.lifecycle.failed_or_aborted_7d, 51);
+        assert_eq!(response.lifecycle.failed_7d, 51);
         assert_eq!(response.lifecycle.recent_failed_events.len(), 50);
     }
 }

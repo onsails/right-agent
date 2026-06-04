@@ -355,9 +355,11 @@ pub struct LearningSignalPoint {
 pub struct LearningLifecycle {
     pub created_7d: i64,
     pub updated_7d: i64,
-    pub failed_or_aborted_7d: i64,
+    pub failed_7d: i64,
+    pub refused_7d: i64,
     pub recent_successful_events: Vec<LearningEventSummary>,
     pub recent_failed_events: Vec<LearningEventSummary>,
+    pub recent_refused_events: Vec<LearningEventSummary>,
     pub candidate_skill_names_7d: Vec<String>,
 }
 
@@ -935,7 +937,8 @@ mod learning_tests {
             lifecycle: LearningLifecycle {
                 created_7d: 1,
                 updated_7d: 0,
-                failed_or_aborted_7d: 0,
+                failed_7d: 0,
+                refused_7d: 0,
                 recent_successful_events: vec![LearningEventSummary {
                     skill_name: "rightx-oauth-debugging".to_owned(),
                     action: "create".to_owned(),
@@ -945,6 +948,7 @@ mod learning_tests {
                     created_at: "2026-05-20T10:00:00Z".to_owned(),
                 }],
                 recent_failed_events: vec![],
+                recent_refused_events: vec![],
                 candidate_skill_names_7d: vec!["rightx-oauth-debugging".to_owned()],
             },
             flow_nodes: vec![LearningFlowNode {
