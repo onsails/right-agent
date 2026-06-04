@@ -2,12 +2,25 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 
+use crate::sandbox_runtime::SandboxRuntimeHandle;
+
 /// Interval between sync cycles.
 const SYNC_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Ask the supervisor to verify the backend after a sync-cycle failure.
+///
+/// No-ops without a handle; the sync task reports suspicion and does not decide
+/// sandbox health.
+pub(crate) fn report_sync_failure(handle: Option<&SandboxRuntimeHandle>) {
+    if let Some(h) = handle {
+        h.report_suspected_failure();
+    }
+}
 
 /// Run one sync cycle. Called synchronously at startup before teloxide starts,
 /// ensuring sandbox has correct config before any `claude -p` invocations.
@@ -35,6 +48,7 @@ pub(crate) async fn initial_sync(
 pub(crate) async fn run_sync_task(
     agent_dir: PathBuf,
     sbox: right_openshell::sandbox_exec::SandboxExec,
+    sandbox_runtime: Option<Arc<SandboxRuntimeHandle>>,
     shutdown: CancellationToken,
 ) {
     let mut tick = interval(SYNC_INTERVAL);
@@ -47,6 +61,7 @@ pub(crate) async fn run_sync_task(
 
                 if let Err(e) = sync_cycle(&agent_dir, &sbox).await {
                     tracing::error!(sandbox = %sbox.sandbox_name(), "sync cycle failed: {e:#}");
+                    report_sync_failure(sandbox_runtime.as_deref());
                 }
             }
             _ = shutdown.cancelled() => {

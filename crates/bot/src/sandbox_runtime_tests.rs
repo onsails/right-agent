@@ -46,6 +46,19 @@ async fn report_suspected_failure_wakes_supervisor() {
     assert!(rx.try_recv().is_ok());
 }
 
+#[tokio::test]
+async fn sync_failure_reporter_wakes_supervisor() {
+    let (h, mut rx) = SandboxRuntimeHandle::new(SandboxHealth::Ready);
+    let reporter: Option<std::sync::Arc<SandboxRuntimeHandle>> = Some(h.clone());
+    crate::sync::report_sync_failure(reporter.as_deref());
+    assert!(rx.try_recv().is_ok());
+}
+
+#[tokio::test]
+async fn sync_failure_reporter_is_noop_without_handle() {
+    crate::sync::report_sync_failure(None);
+}
+
 #[test]
 fn non_sandboxed_always_proceeds() {
     assert_eq!(

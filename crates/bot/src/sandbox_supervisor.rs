@@ -445,10 +445,15 @@ impl SupervisorDeps {
 
 /// Spawn the long-lived sync task for a freshly-Ready sandbox. Relocated from
 /// the former inline `tokio::spawn(sync::run_sync_task(...))` in `lib.rs`.
-fn spawn_sync_task(deps: &SupervisorDeps, sandbox: SandboxExec) -> tokio::task::JoinHandle<()> {
+fn spawn_sync_task(
+    deps: &SupervisorDeps,
+    handle: &Arc<SandboxRuntimeHandle>,
+    sandbox: SandboxExec,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(sync::run_sync_task(
         deps.agent_dir.clone(),
         sandbox,
+        Some(Arc::clone(handle)),
         deps.shutdown.clone(),
     ))
 }
@@ -555,7 +560,7 @@ async fn recovery_step(
     match bring_up_sandbox(&ctx).await {
         Ok(Ok(bring_up)) => {
             handle.set_ready(bring_up.sandbox.clone());
-            *sync_task = Some(spawn_sync_task(deps, bring_up.sandbox));
+            *sync_task = Some(spawn_sync_task(deps, handle, bring_up.sandbox));
             notify_back_online(handle, bot).await;
             *attempt = 0;
             tracing::info!(agent = %deps.agent, "sandbox backend recovered");
