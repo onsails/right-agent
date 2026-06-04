@@ -22,6 +22,11 @@ pub enum GatewayCause {
     SandboxNotFound {
         sandbox: String,
     },
+    /// The sandbox exists, but its pod entered OpenShell Phase: Error.
+    /// The gateway may still be reachable; this is distinct from Unreachable.
+    SandboxError {
+        sandbox: String,
+    },
     /// Connect failed but probes are inconclusive (race/transient).
     Unreachable,
 }
@@ -63,6 +68,12 @@ impl GatewayCause {
                 "my sandbox doesn't exist yet",
                 vec!["Create it on the host with: right init"],
             ),
+            GatewayCause::SandboxError { .. } => (
+                "my secure sandbox stopped responding",
+                vec![
+                    "I'll reconnect automatically as soon as the sandbox is back. If it stays down, the sandbox container needs to be restarted in OpenShell -- your data is preserved.",
+                ],
+            ),
             GatewayCause::Unreachable => (
                 "I can't reach the sandbox backend",
                 vec![
@@ -79,6 +90,9 @@ impl GatewayCause {
             }
             GatewayCause::SandboxNotFound { sandbox } => {
                 format!("my sandbox '{sandbox}' doesn't exist yet")
+            }
+            GatewayCause::SandboxError { sandbox } => {
+                format!("my secure sandbox '{sandbox}' is in an error state")
             }
             _ => summary.to_owned(),
         };
