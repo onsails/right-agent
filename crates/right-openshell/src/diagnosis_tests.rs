@@ -43,3 +43,19 @@ fn docker_down_diagnosis_summary_and_fixes_are_actionable() {
     assert!(!d.fixes.is_empty());
     assert!(d.fixes[0].to_lowercase().contains("docker"));
 }
+
+#[test]
+fn sandbox_error_diagnosis_names_the_sandbox_and_is_recovery_oriented() {
+    let d = GatewayCause::SandboxError {
+        sandbox: "test-sandbox-1".to_owned(),
+    }
+    .diagnose();
+    assert_eq!(
+        d.cause,
+        GatewayCause::SandboxError {
+            sandbox: "test-sandbox-1".to_owned()
+        }
+    );
+    assert!(d.summary.contains("test-sandbox-1"));
+    assert!(!d.fixes.is_empty());
+}
