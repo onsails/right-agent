@@ -139,10 +139,9 @@ type RuleFp = (String, String, String, String);
 /// `(name, sorted env vars, required, auth_style, header_name, query_param)`.
 type CredentialFp = (String, Vec<String>, bool, String, String, String);
 /// One endpoint's fingerprint:
-/// `(host, port, sorted ports, protocol, tls, enforcement, access, sorted allowed IPs, path, sorted rules)`.
+/// `(host, effective ports, protocol, tls, enforcement, access, sorted allowed IPs, path, sorted rules)`.
 type EndpointFp = (
     String,
-    u32,
     Vec<u32>,
     String,
     String,
@@ -180,16 +179,23 @@ fn endpoint_fp(e: &sandbox_v1::NetworkEndpoint) -> EndpointFp {
         .collect();
     rules.sort();
 
-    let mut ports = e.ports.clone();
-    ports.sort();
+    let mut effective_ports = if e.ports.is_empty() {
+        if e.port == 0 {
+            Vec::new()
+        } else {
+            vec![e.port]
+        }
+    } else {
+        e.ports.clone()
+    };
+    effective_ports.sort();
 
     let mut allowed_ips = e.allowed_ips.clone();
     allowed_ips.sort();
 
     (
         e.host.clone(),
-        e.port,
-        ports,
+        effective_ports,
         e.protocol.clone(),
         e.tls.clone(),
         e.enforcement.clone(),
@@ -596,6 +602,27 @@ mod tests {
         assert!(
             needs_import(Some(&stored_old_allowed_ips), &desired),
             "allowed IP drift → import"
+        );
+    }
+
+    #[test]
+    fn needs_import_false_when_gateway_normalizes_port_into_ports() {
+        let desired = author_generic_profile(
+            "right-acme",
+            "api.acme.com",
+            Some("/v1"),
+            "x-api-key",
+            "MY_API_KEY",
+        );
+        assert_eq!(desired.endpoints[0].port, 443);
+        assert!(desired.endpoints[0].ports.is_empty());
+
+        let mut stored_normalized = desired.clone();
+        stored_normalized.endpoints[0].ports = vec![443];
+
+        assert!(
+            !needs_import(Some(&stored_normalized), &desired),
+            "gateway port normalization must not force re-import"
         );
     }
 }
