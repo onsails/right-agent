@@ -66,6 +66,7 @@ tar = "0.4"
 flate2 = "1"
 tempfile = "3.27"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 cron = "0.16"
 cron-descriptor = "0.1"
 sha2 = "0.11"

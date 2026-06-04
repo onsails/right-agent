@@ -4,10 +4,13 @@ use crate::api_types::{
     CostSeriesPoint, DashboardDataWarning, UsageDailyPoint, UsageModelSummary,
     UsageOverviewResponse, UsageSourcePoint, UsageSourceSeries, UsageSourceSummary, UsageWindow,
 };
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{DateTime, Duration, Utc};
 use right_db::{Connection, params};
 
 use super::ReadModelError;
+
+#[path = "usage_time.rs"]
+mod usage_time;
 
 const SOURCES: [&str; 7] = [
     "interactive",
@@ -24,60 +27,30 @@ const DAILY_SERIES_DAYS: i64 = 30;
 pub struct UsageOverviewInput {
     pub agent: String,
     pub generated_at: String,
+    pub timezone: Option<String>,
 }
 
 pub async fn usage_overview(
     conn: &Connection,
     input: UsageOverviewInput,
 ) -> Result<UsageOverviewResponse, ReadModelError> {
-    let now = DateTime::parse_from_rfc3339(&input.generated_at)?.with_timezone(&Utc);
-    let today_start = Utc.from_utc_datetime(
-        &now.date_naive()
-            .and_hms_opt(0, 0, 0)
-            .ok_or_else(|| ReadModelError::InvalidStartOfDay(input.generated_at.clone()))?,
-    );
-    let week_start = now - Duration::days(7);
-    let month_start = now - Duration::days(30);
-    let unknown_sources = unknown_usage_sources(conn, &now).await?;
+    let clock = usage_time::resolve_usage_clock(&input.generated_at, input.timezone.as_deref())?;
+    let unknown_sources = unknown_usage_sources(conn, &clock.now_utc).await?;
 
-    let windows = vec![
-        build_window(
-            conn,
-            "today",
-            "Today",
-            Some(&today_start),
-            &now,
-            &unknown_sources,
-        )
-        .await?,
-        build_window(
-            conn,
-            "last_7_days",
-            "Last 7 days",
-            Some(&week_start),
-            &now,
-            &unknown_sources,
-        )
-        .await?,
-        build_window(
-            conn,
-            "last_30_days",
-            "Last 30 days",
-            Some(&month_start),
-            &now,
-            &unknown_sources,
-        )
-        .await?,
-        build_window(conn, "all_time", "All time", None, &now, &unknown_sources).await?,
-    ];
+    let mut windows = Vec::new();
+    for range in usage_time::usage_window_ranges(&clock)? {
+        windows.push(build_window(conn, &range, &unknown_sources).await?);
+    }
 
-    let (daily_series, mut warnings) = build_daily_series(conn, &now).await?;
-    warnings.extend(unknown_source_warnings(&unknown_sources));
+    let (daily_series, mut warnings) = build_daily_series(conn, &clock).await?;
     let source_series = build_source_series(&daily_series, &unknown_sources);
+    warnings.extend(clock.warnings);
+    warnings.extend(unknown_source_warnings(&unknown_sources));
 
     Ok(UsageOverviewResponse {
         agent: input.agent,
         generated_at: input.generated_at,
+        timezone: clock.timezone,
         windows,
         selected_window: DEFAULT_CHART_WINDOW.to_owned(),
         daily_series,
@@ -88,12 +61,11 @@ pub async fn usage_overview(
 
 async fn build_window(
     conn: &Connection,
-    key: &str,
-    label: &str,
-    since: Option<&DateTime<Utc>>,
-    until: &DateTime<Utc>,
+    range: &usage_time::UsageWindowRange,
     unknown_sources: &[String],
 ) -> Result<UsageWindow, ReadModelError> {
+    let since = range.since_utc.as_ref();
+    let until = &range.until_utc;
     let mut sources = Vec::with_capacity(SOURCES.len() + unknown_sources.len());
     for source in SOURCES {
         sources.push(aggregate_source(conn, source, since, until).await?);
@@ -107,8 +79,11 @@ async fn build_window(
     let per_model = aggregate_window_models(&sources);
 
     Ok(UsageWindow {
-        key: key.to_owned(),
-        label: label.to_owned(),
+        key: range.key.to_owned(),
+        label: range.label.to_owned(),
+        range_start: range.range_start.clone(),
+        range_end: range.range_end.clone(),
+        range_label: range.range_label.clone(),
         total_cost_usd: sources.iter().map(|source| source.cost_usd).sum(),
         subscription_cost_usd: sources
             .iter()
@@ -162,37 +137,30 @@ async fn budget_skip_count(
 
 async fn build_daily_series(
     conn: &Connection,
-    now: &DateTime<Utc>,
+    clock: &usage_time::UsageClock,
 ) -> Result<(Vec<UsageDailyPoint>, Vec<DashboardDataWarning>), ReadModelError> {
     let mut warnings = Vec::new();
-    let chart_start_naive = (now.date_naive() - Duration::days(DAILY_SERIES_DAYS - 1))
-        .and_hms_opt(0, 0, 0)
-        .ok_or_else(|| ReadModelError::InvalidStartOfDay(now.to_rfc3339()))?;
-    let chart_start_utc = Utc.from_utc_datetime(&chart_start_naive);
+    let chart_start_utc = usage_time::chart_start_utc(clock, DAILY_SERIES_DAYS)?;
     let coarse_since = (chart_start_utc - Duration::days(1)).to_rfc3339();
-    let coarse_until = (*now + Duration::days(1)).to_rfc3339();
+    let coarse_until = (clock.now_utc + Duration::days(1)).to_rfc3339();
 
-    let mut points = (0..DAILY_SERIES_DAYS)
-        .map(|offset| {
-            let date = (now.date_naive() - Duration::days(DAILY_SERIES_DAYS - 1 - offset))
-                .format("%Y-%m-%d")
-                .to_string();
-            UsageDailyPoint {
-                date,
-                total_cost_usd: 0.0,
-                subscription_cost_usd: 0.0,
-                api_cost_usd: 0.0,
-                turns: 0,
-                invocations: 0,
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
-                web_search_requests: 0,
-                web_fetch_requests: 0,
-                sources: Vec::new(),
-                models: Vec::new(),
-            }
+    let mut points = usage_time::local_chart_dates(clock, DAILY_SERIES_DAYS)?
+        .into_iter()
+        .map(|date| UsageDailyPoint {
+            date,
+            total_cost_usd: 0.0,
+            subscription_cost_usd: 0.0,
+            api_cost_usd: 0.0,
+            turns: 0,
+            invocations: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            web_search_requests: 0,
+            web_fetch_requests: 0,
+            sources: Vec::new(),
+            models: Vec::new(),
         })
         .collect::<Vec<_>>();
 
@@ -247,11 +215,11 @@ async fn build_daily_series(
             api_key_source,
         ) = row?;
         let event_at = DateTime::parse_from_rfc3339(&ts)?.with_timezone(&Utc);
-        if event_at < chart_start_utc || event_at > *now {
+        if event_at < chart_start_utc || event_at > clock.now_utc {
             continue;
         }
 
-        let date = event_at.date_naive().format("%Y-%m-%d").to_string();
+        let date = usage_time::local_date_label(&event_at, &clock.tz);
         let Some(idx) = by_date.get(&date).copied() else {
             continue;
         };
@@ -775,6 +743,7 @@ mod tests {
             UsageOverviewInput {
                 agent: "agent-b".to_owned(),
                 generated_at: "2026-05-21T05:00:00Z".to_owned(),
+                timezone: Some("UTC".to_owned()),
             },
         )
         .await
@@ -824,6 +793,7 @@ mod tests {
             UsageOverviewInput {
                 agent: "agent-b".to_owned(),
                 generated_at: "2026-05-21T05:00:00Z".to_owned(),
+                timezone: Some("UTC".to_owned()),
             },
         )
         .await
@@ -856,6 +826,7 @@ mod tests {
             UsageOverviewInput {
                 agent: "alpha".to_owned(),
                 generated_at: "2026-05-20T12:00:00Z".to_owned(),
+                timezone: Some("UTC".to_owned()),
             },
         )
         .await
@@ -928,6 +899,7 @@ mod tests {
             UsageOverviewInput {
                 agent: "alpha".to_owned(),
                 generated_at: "2026-05-23T12:00:00Z".to_owned(),
+                timezone: Some("UTC".to_owned()),
             },
         )
         .await
@@ -1089,6 +1061,7 @@ mod tests {
             UsageOverviewInput {
                 agent: "alpha".to_owned(),
                 generated_at: "2026-05-23T12:00:00Z".to_owned(),
+                timezone: Some("UTC".to_owned()),
             },
         )
         .await
@@ -1151,6 +1124,7 @@ mod tests {
             UsageOverviewInput {
                 agent: "alpha".to_owned(),
                 generated_at: "2026-05-23T12:00:00Z".to_owned(),
+                timezone: Some("UTC".to_owned()),
             },
         )
         .await
@@ -1191,6 +1165,7 @@ mod tests {
             UsageOverviewInput {
                 agent: "alpha".to_owned(),
                 generated_at: "2026-05-20T12:00:00Z".to_owned(),
+                timezone: Some("UTC".to_owned()),
             },
         )
         .await
@@ -1224,6 +1199,7 @@ mod tests {
             UsageOverviewInput {
                 agent: "alpha".to_owned(),
                 generated_at: "2026-05-20T12:00:00Z".to_owned(),
+                timezone: Some("UTC".to_owned()),
             },
         )
         .await
@@ -1266,6 +1242,7 @@ mod tests {
             UsageOverviewInput {
                 agent: "agent-b".to_owned(),
                 generated_at: "2026-05-21T05:00:00Z".to_owned(),
+                timezone: Some("UTC".to_owned()),
             },
         )
         .await
@@ -1282,3 +1259,7 @@ mod tests {
         assert_eq!(all_time.budget_skip_count, 3);
     }
 }
+
+#[cfg(test)]
+#[path = "usage_local_time_tests.rs"]
+mod usage_local_time_tests;

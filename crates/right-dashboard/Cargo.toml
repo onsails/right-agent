@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 cron = { workspace = true }
 cron-descriptor = { workspace = true }
 hmac = { workspace = true }

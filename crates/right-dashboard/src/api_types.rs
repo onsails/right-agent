@@ -77,6 +77,7 @@ pub struct OverviewSandboxStatus {
 pub struct UsageOverviewResponse {
     pub agent: String,
     pub generated_at: String,
+    pub timezone: String,
     pub windows: Vec<UsageWindow>,
     pub selected_window: String,
     pub daily_series: Vec<UsageDailyPoint>,
@@ -88,6 +89,9 @@ pub struct UsageOverviewResponse {
 pub struct UsageWindow {
     pub key: String,
     pub label: String,
+    pub range_start: Option<String>,
+    pub range_end: String,
+    pub range_label: String,
     pub sources: Vec<UsageSourceSummary>,
     pub total_cost_usd: f64,
     pub subscription_cost_usd: f64,
@@ -865,6 +869,7 @@ mod dashboard_v2_tests {
         let response = UsageOverviewResponse {
             agent: "alpha".to_owned(),
             generated_at: "2026-05-23T10:00:00Z".to_owned(),
+            timezone: "UTC".to_owned(),
             windows: vec![],
             selected_window: "last_30_days".to_owned(),
             daily_series: vec![UsageDailyPoint {
