@@ -129,16 +129,20 @@ single bring-up attempt) is the sole owner of sandbox lifecycle after startup:
   "✅ Sandbox back online" notice to every chat that received an unavailability
   message during the outage.
 - **Monitor mode:** when `Ready`, the supervisor waits for a failure report or
-  shutdown. A suspected failure from the worker triggers one verification probe
-  before degrading — avoiding false alarms from transient SSH hiccups.
+  shutdown. Worker, keepalive, and periodic sync failures all call
+  `SandboxRuntimeHandle::report_suspected_failure()`; the supervisor verifies
+  each coalesced wake by reading the real OpenShell sandbox phase via
+  `sandbox_phase_status`, degrades on `SANDBOX_PHASE_ERROR` with
+  `GatewayCause::SandboxError`, and ignores transient non-ready phases.
 - **Sync task ownership:** the supervisor seeds the startup sync task (when bring-up
   succeeded) or skips it (degraded). On degrade-from-ready it aborts the sync task;
   on recovery it re-spawns it.
 
-Mid-session failures are reported via `SandboxRuntimeHandle::report_suspected_failure()`
-at the worker's `invoke_cc` error site. The supervisor coalesces rapid bursts
-(channel capacity 1 with `try_send`) and performs one probe before switching
-`SandboxHealth` to `Unavailable`.
+`SandboxError` recovery is intentionally diagnostic and retry-based: Right does
+not use Docker, podman, or container-runtime APIs, restart containers, or
+recreate sandboxes. The recovery loop keeps retrying `bring_up_sandbox` with
+backoff and resumes automatically once OpenShell or the operator restores the
+existing sandbox to Ready.
 
 The `ssh_config_path` for sandboxed agents is computed as a deterministic stable
 path (`<home>/run/ssh/<sandbox>.ssh-config`) on both the Ready and degraded

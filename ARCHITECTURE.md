@@ -557,7 +557,7 @@ Rules:
   tools. Only the user can manage servers via the Telegram dashboard MCP
   view routed through the internal Unix socket API. Prevents sandbox
   escape via data exfiltration to attacker-controlled MCP endpoints.
-- **Sandboxed CC fails closed**: a sandboxed agent (`resolved_sandbox` set) runs Claude Code only inside its sandbox — every CC-command-construction site MUST call `guard_no_sandboxed_host_exec` (`crates/bot/src/cc/invocation.rs`), which refuses to build a host command when the sandbox connection is absent. On backend outage the worker replies with a diagnosis and skips CC; `SandboxSupervisor` (the sole writer of `SandboxRuntimeHandle` health) retries with backoff — no host fallback ever occurs.
+- **Sandboxed CC fails closed**: a sandboxed agent (`resolved_sandbox` set) runs Claude Code only inside its sandbox — every CC-command-construction site MUST call `guard_no_sandboxed_host_exec` (`crates/bot/src/cc/invocation.rs`), which refuses to build a host command when the sandbox connection is absent. On backend outage the worker replies with a diagnosis and skips CC; `SandboxSupervisor` (the sole writer of `SandboxRuntimeHandle` health) retries with backoff — no host fallback ever occurs. The supervisor MUST verify reported sandbox failures by reading the real sandbox phase over gRPC (`sandbox_phase_status`), not by gateway reachability alone.
 - **OAuth CSRF**: Token matching in callback server.
 - **Provider credential isolation**: Provider credential values and
   gateway placeholder values (`openshell:resolve:env:v…_<NAME>`) are
