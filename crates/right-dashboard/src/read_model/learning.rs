@@ -818,6 +818,7 @@ async fn learning_events_in_window(
             created_at_utc,
             id,
             LearningEventSummary {
+                id,
                 skill_name,
                 action,
                 status,
@@ -1121,11 +1122,27 @@ mod tests {
             lifecycle
                 .recent_failed_events
                 .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert_eq!(
+            lifecycle
+                .recent_failed_events
+                .iter()
                 .map(|e| (e.skill_name.as_str(), e.status.as_str()))
                 .collect::<Vec<_>>(),
             vec![("rightx-b", "aborted"), ("rightx-a", "failed")]
         );
         assert_eq!(lifecycle.recent_refused_events.len(), 2);
+        assert_eq!(
+            lifecycle
+                .recent_refused_events
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![4, 3]
+        );
         assert_eq!(
             lifecycle
                 .recent_refused_events

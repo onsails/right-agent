@@ -397,6 +397,7 @@ export interface LearningLifecycle {
 }
 
 export interface LearningEventSummary {
+  id: number
   skill_name: string
   action: string
   status: string

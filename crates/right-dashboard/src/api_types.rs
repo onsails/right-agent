@@ -365,6 +365,7 @@ pub struct LearningLifecycle {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LearningEventSummary {
+    pub id: i64,
     pub skill_name: String,
     pub action: String,
     pub status: String,
@@ -940,6 +941,7 @@ mod learning_tests {
                 failed_7d: 0,
                 refused_7d: 0,
                 recent_successful_events: vec![LearningEventSummary {
+                    id: 42,
                     skill_name: "rightx-oauth-debugging".to_owned(),
                     action: "create".to_owned(),
                     status: "created".to_owned(),
@@ -984,6 +986,7 @@ mod learning_tests {
         assert!(value.get("quality").is_none());
         assert!(value.get("recent_reports").is_none());
         assert_eq!(value["lifecycle"]["created_7d"], 1);
+        assert_eq!(value["lifecycle"]["recent_successful_events"][0]["id"], 42);
         assert_eq!(value["flow_nodes"][0]["id"], "skill_created");
         assert_eq!(value["flow_edges"][0]["count"], 1);
         assert_eq!(value["recent_learning_signals"][0]["kind"], "skill_created");

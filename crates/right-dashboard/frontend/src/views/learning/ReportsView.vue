@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 
 import LearningFlowChart from '../../components/charts/LearningFlowChart.vue'
 import LearningSignalPanel from '../../components/charts/LearningSignalPanel.vue'
-import CollapsibleSection from '../../components/CollapsibleSection.vue'
 import FailedSkillList from '../../components/FailedSkillList.vue'
 import MetricCard from '../../components/MetricCard.vue'
 import { failureMetric } from '../../components/failureMetric'
@@ -13,8 +12,8 @@ const props = defineProps<{
   learning: LearningOverviewResponse | null
 }>()
 
-const failuresOpen = ref(false)
-const failures = computed(() => failureMetric(props.learning?.lifecycle.failed_or_aborted_7d ?? 0))
+const failureTone = computed(() => failureMetric(props.learning?.lifecycle.failed_7d ?? 0).tone)
+const refusedCount = computed(() => props.learning?.lifecycle.refused_7d ?? 0)
 </script>
 
 <template>
@@ -25,35 +24,38 @@ const failures = computed(() => failureMetric(props.learning?.lifecycle.failed_o
     </span>
   </section>
 
-  <section class="two-column wide-main">
+  <section class="chart-panel-wrap">
     <LearningFlowChart
       :nodes="learning?.flow_nodes ?? []"
       :edges="learning?.flow_edges ?? []"
     />
-    <LearningSignalPanel :signals="learning?.recent_learning_signals ?? []" />
   </section>
 
   <section class="metric-grid">
     <MetricCard label="Created 7d" :value="learning?.lifecycle.created_7d ?? 0" tone="ok" />
     <MetricCard label="Updated 7d" :value="learning?.lifecycle.updated_7d ?? 0" tone="active" />
-    <MetricCard
-      label="Failed 7d"
-      :value="learning?.lifecycle.failed_or_aborted_7d ?? 0"
-      :tone="failures.tone"
-      :interactive="failures.interactive"
-      @select="failuresOpen = !failuresOpen"
+    <MetricCard label="Failed 7d" :value="learning?.lifecycle.failed_7d ?? 0" :tone="failureTone" />
+  </section>
+
+  <section class="two-column">
+    <LearningSignalPanel :signals="learning?.recent_learning_signals ?? []" />
+    <FailedSkillList
+      :events="learning?.lifecycle.recent_failed_events ?? []"
+      :total="learning?.lifecycle.failed_7d ?? 0"
     />
   </section>
 
-  <CollapsibleSection
-    v-if="failures.interactive"
-    v-model:open="failuresOpen"
-    title="Failed skills"
-    :count="learning?.lifecycle.failed_or_aborted_7d ?? 0"
-  >
-    <FailedSkillList
-      :events="learning?.lifecycle.recent_failed_events ?? []"
-      :total="learning?.lifecycle.failed_or_aborted_7d ?? 0"
-    />
-  </CollapsibleSection>
+  <p v-if="refusedCount > 0" class="muted-line refusals-caption">
+    Refused {{ refusedCount }} - the skill already covered the request; nothing changed.
+  </p>
 </template>
+
+<style scoped>
+.chart-panel-wrap {
+  margin-bottom: 10px;
+}
+
+.refusals-caption {
+  margin-top: 8px;
+}
+</style>
