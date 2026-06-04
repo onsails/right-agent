@@ -88,7 +88,7 @@
 - `read_model/activity.rs` — activity projections over async runs, usage rows, cron specs, run notifications, and bounded run logs.
 - `read_model/dashboard_overview.rs` — top-level Mini App overview aggregation over active work, recent failures, today's usage, learning candidates, and injected runtime health summaries.
 - `read_model/learning.rs` — learned-skill overview projections over `skill_learning_events`, `skill_lifecycle`, `curator_state`, usage, and trusted conversation data. It must not query removed Stage 2 tables.
-- `read_model/usage.rs` — usage/cost projections over `usage_events`, including time-window totals, source splits, and model summaries.
+- `read_model/usage.rs` — usage/cost projections over `usage_events`, including time-window totals, source splits, and model summaries. Usage read models accept a viewer timezone and bucket Usage-tab windows by that local calendar before converting bounds back to UTC for storage filtering.
 - `skill_inventory.rs` — bounded host-side skill inventory/detail helpers grouped as core, learned, and other.
 - `identity_files.rs` — bounded host-side identity-file summary/detail helpers for `IDENTITY.md`, `SOUL.md`, and `USER.md`.
 - `assets.rs` — embedded static dashboard asset lookup and content types.
