@@ -482,13 +482,23 @@ The probe-writer is a session-bearing `claude -p --resume <main>
 --fork-session --session-id <new> --allowedTools Write,Read,Bash,
 mcp__right__skill_learning_start,mcp__right__skill_learning_finish
 --max-turns 16 --output-format stream-json` invocation fired when the
-prefilter votes `Probe`. The first user message wraps the captured
-`<probe_writer_anchor>` (verbatim user_msg_text + assistant_reply_text)
-plus the class-first guidance in `PROBE_WRITER_INSTRUCTIONS` plus the
-agent's current `rightx-*` skill index. The writer either calls
-`mcp__right__skill_learning_start` + writes a SKILL.md +
-`mcp__right__skill_learning_finish`, or exits silently. Constants are
-`right_codegen::PROBE_WRITER_ANCHOR_TEMPLATE` and
+prefilter votes `Probe`. The first user message is composed by
+`bot::learning_probe_writer::build_user_prompt` from five parts in order:
+(1) `right_codegen::PROBE_WRITER_INSTRUCTIONS` — class-first protocol and
+`rightx-*` skill quality bullets, including the delegation directive that
+instructs the writer to bake concrete subagent-delegation directives (naming
+the model tier per the three-tier ladder in `OPERATING_INSTRUCTIONS.md`) into
+multi-step skills with mechanical or disposable-intermediate steps, while
+leaving simple single-procedure recipes delegation-free;
+(2) the prefilter hint block (variant-branched on `PatchExisting` vs
+`CreateNew`);
+(3) the `hint_outcome` contract explaining the three outcome codes;
+(4) the agent's current `rightx-*` skill index (an `EXISTING SKILLS:`
+block); (5) `right_codegen::PROBE_WRITER_ANCHOR_TEMPLATE` — the anchored
+turn containing the verbatim `user_msg_text + assistant_reply_text`.
+The writer either calls `mcp__right__skill_learning_start` + writes a
+SKILL.md + `mcp__right__skill_learning_finish`, or exits silently.
+Constants are `right_codegen::PROBE_WRITER_ANCHOR_TEMPLATE` and
 `right_codegen::PROBE_WRITER_INSTRUCTIONS`.
 
 ### CURATOR_SYSTEM_PROMPT (periodic skill curator)
