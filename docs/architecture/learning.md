@@ -130,6 +130,20 @@ usage/patch counters, and the operator pin flag. The dashboard reads this
 table for lifecycle overview and is the only operator pin/unpin surface.
 Curator transitions read/write DB rows and skip pinned rows.
 
+## Dashboard projections
+
+The Knowledge -> Learning lifecycle summary reads finish rows from
+`skill_learning_events`. Genuine failures are `status='failed'` plus aborted
+finishes whose `hint_outcome` is not `refused`; refused finishes are counted
+separately and shown as a muted caption because they mean the writer decided
+the skill already covered the request. Recent lifecycle samples include the
+event row `id` so expandable dashboard rows have stable keys even when a skill
+has repeated events at the same timestamp.
+
+The Overview cost river is cost-only. Learning outcomes and curator evidence
+remain in the signal timeline, while the river's marker field is left empty so
+raw skill slugs do not appear as chart chips or pins.
+
 ## Spend ledger & skip accounting
 
 `data.db.skill_spend(skill_name, kind, cost_usd, cache_read, cache_creation,
