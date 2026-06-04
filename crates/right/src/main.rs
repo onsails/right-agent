@@ -2654,27 +2654,43 @@ fn cmd_list(home: &Path) -> miette::Result<()> {
 
 fn generic_provider_profiles(
     configs: &[(String, right_agent_config::AgentConfig)],
-) -> Vec<right_openshell::managed_profiles::ManagedProfile> {
-    let providers = configs.iter().flat_map(|(_, config)| {
-        config
+) -> miette::Result<Vec<right_openshell::managed_profiles::ManagedProfile>> {
+    let mut providers = Vec::new();
+
+    for (agent_name, config) in configs {
+        if !config.is_sandboxed() {
+            continue;
+        }
+
+        for entry in config
             .sandbox
             .iter()
             .flat_map(|sandbox| sandbox.providers.iter())
-            .filter_map(|entry| match (&entry.type_, entry.generic.as_ref()) {
-                (right_agent_config::ProviderType::Generic, Some(generic)) => Some(
-                    right_openshell::managed_profiles::GenericProviderProfileInput {
+        {
+            match &entry.type_ {
+                right_agent_config::ProviderType::Generic => {
+                    let generic = entry.generic.as_ref().ok_or_else(|| {
+                        miette::miette!(
+                            "agent {agent_name} generic provider {} is missing generic config",
+                            entry.name
+                        )
+                    })?;
+                    providers.push(right_openshell::managed_profiles::GenericProviderProfileInput {
                         name: &entry.name,
                         upstream_host: &generic.upstream_host,
                         upstream_path_prefix: generic.upstream_path_prefix.as_deref(),
                         header_name: &generic.header_name,
                         env_var: &generic.env_var,
-                    },
-                ),
-                _ => None,
-            })
-    });
+                    });
+                }
+                right_agent_config::ProviderType::BuiltIn(_) => {}
+            }
+        }
+    }
 
-    right_openshell::managed_profiles::generic_provider_profiles(providers)
+    Ok(right_openshell::managed_profiles::generic_provider_profiles(
+        providers,
+    ))
 }
 
 async fn cmd_up(
@@ -2835,7 +2851,7 @@ async fn cmd_up(
             .iter()
             .filter_map(|a| a.config.as_ref().map(|cfg| (a.name.clone(), cfg.clone())))
             .collect();
-        profiles.extend(generic_provider_profiles(&loaded_agent_configs));
+        profiles.extend(generic_provider_profiles(&loaded_agent_configs)?);
         let outcomes = right_openshell::managed_profiles::ensure_profiles(&mut client, &profiles)
             .await
             .map_err(|e| miette::miette!("provision managed profiles failed: {e:#}"))?;
@@ -4731,7 +4747,7 @@ mod tests {
     fn generic_provider_profiles_authors_one_per_generic_entry() {
         let config = config_with_provider(generic_provider("right-acme"));
 
-        let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)]);
+        let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)]).unwrap();
 
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].id(), "right-acme");
@@ -4750,7 +4766,7 @@ mod tests {
             ),
         ];
 
-        let profiles = generic_provider_profiles(&configs);
+        let profiles = generic_provider_profiles(&configs).unwrap();
 
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].id(), "right-acme");
@@ -4765,7 +4781,42 @@ mod tests {
             generic: None,
         });
 
-        let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)]);
+        let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)]).unwrap();
+
+        assert!(profiles.is_empty());
+    }
+
+    #[test]
+    fn generic_provider_profiles_errors_on_missing_generic_config() {
+        let config = config_with_provider(ProviderEntry {
+            name: "right-bad".to_string(),
+            type_: ProviderType::Generic,
+            label: None,
+            generic: None,
+        });
+
+        let err = generic_provider_profiles(&[("agent-a".to_string(), config)])
+            .expect_err("generic provider entries must require generic config");
+        let message = format!("{err:#}");
+
+        assert!(message.contains("agent-a"), "error was: {message}");
+        assert!(message.contains("right-bad"), "error was: {message}");
+    }
+
+    #[test]
+    fn generic_provider_profiles_skips_non_sandboxed_config() {
+        let config = AgentConfig {
+            sandbox: Some(SandboxConfig {
+                mode: SandboxMode::None,
+                policy_file: None,
+                name: None,
+                providers: vec![generic_provider("right-acme")],
+            }),
+            ..AgentConfig::default()
+        };
+
+        let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)])
+            .expect("non-sandboxed providers should be skipped without error");
 
         assert!(profiles.is_empty());
     }
