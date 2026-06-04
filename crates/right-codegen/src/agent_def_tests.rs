@@ -773,6 +773,21 @@ fn probe_writer_instructions_contain_class_first_guidance() {
     assert!(PROBE_WRITER_INSTRUCTIONS.contains("rightx-"));
     assert!(PROBE_WRITER_INSTRUCTIONS.contains("skill_learning_start"));
     assert!(PROBE_WRITER_INSTRUCTIONS.contains("skill_learning_finish"));
+    // Delegation-authoring directive (multi-model awareness).
+    assert!(
+        PROBE_WRITER_INSTRUCTIONS.contains(r#"`haiku`"#)
+            && PROBE_WRITER_INSTRUCTIONS.contains(r#"`sonnet`"#),
+        "PROBE_WRITER_INSTRUCTIONS must teach delegation model tiers"
+    );
+    assert!(
+        PROBE_WRITER_INSTRUCTIONS.contains("disposable-intermediate"),
+        "PROBE_WRITER_INSTRUCTIONS must scope delegation to mechanical/disposable steps"
+    );
+    // The probe-writer has no Edit tool; instructions must not tell it to use Edit.
+    assert!(
+        !PROBE_WRITER_INSTRUCTIONS.contains("Edit/Write"),
+        "PROBE_WRITER_INSTRUCTIONS must not instruct the writer to use the (unavailable) Edit tool"
+    );
 }
 
 #[test]
