@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
+use right_codegen::{PROBE_WRITER_ANCHOR_TEMPLATE, PROBE_WRITER_INSTRUCTIONS};
+
 use crate::telegram::SessionLocks;
 use crate::telegram::worker::ProbeAnchor;
 
@@ -48,6 +50,12 @@ pub(crate) struct ProbeWriterContext {
 }
 
 /// Compose the first user-message body delivered to the fork.
+///
+/// Layered prompt: canonical class-first instructions + quality (incl. the
+/// delegation directive) from `right_codegen::PROBE_WRITER_INSTRUCTIONS`, then
+/// the prefilter's per-turn hint, the `hint_outcome` reporting contract, the
+/// agent's `rightx-*` skill index, and finally the anchored turn rendered from
+/// `right_codegen::PROBE_WRITER_ANCHOR_TEMPLATE`.
 pub(crate) fn build_user_prompt(
     anchor: &ProbeAnchor,
     skill_index: &str,
@@ -55,6 +63,7 @@ pub(crate) fn build_user_prompt(
 ) -> String {
     let user: String = anchor.user_msg_text.chars().take(8000).collect();
     let assistant: String = anchor.assistant_reply_text.chars().take(12000).collect();
+
     let hint_block = match hint {
         ProbeWriterHint::PatchExisting {
             target_skill,
@@ -63,20 +72,17 @@ pub(crate) fn build_user_prompt(
             "PREFILTER HINT: patch_existing\n\
 TARGET SKILL: {target_skill}\n\
 REASON: {reason}\n\n\
-Verify the gap described in REASON by reading {target_skill}/SKILL.md \
-and the turn transcript below. If you confirm the gap, patch the skill. \
-If the hint is mistaken (skill is already correct, or the gap is \
-elsewhere), exit silently or create a new skill if a different procedure \
-is exposed.",
+Verify this recommendation against the protocol above and the anchored turn \
+below, then apply it or override it (patch a different skill, create instead, \
+or exit silently) as the protocol directs.",
         ),
         ProbeWriterHint::CreateNew { topic_hint, reason } => format!(
             "PREFILTER HINT: create_new\n\
 TOPIC HINT: {topic_hint}\n\
 REASON: {reason}\n\n\
-Verify that no existing skill covers TOPIC HINT by scanning the index \
-below. If a close-enough skill exists, patch it instead. If nothing \
-matches, create a new rightx-* skill. If the hint is wrong (the turn \
-does not expose a reusable procedure), exit silently.",
+Verify this recommendation against the protocol above and the anchored turn \
+below, then apply it or override it (patch an existing skill instead, or exit \
+silently) as the protocol directs.",
         ),
     };
 
@@ -86,15 +92,20 @@ does not expose a reusable procedure), exit silently.",
         skill_index
     };
 
+    let anchor_rendered = PROBE_WRITER_ANCHOR_TEMPLATE
+        .replace("{user_msg_text}", &user)
+        .replace("{assistant_reply_text}", &assistant);
+
     format!(
-        "{hint_block}\n\n\
+        "{PROBE_WRITER_INSTRUCTIONS}\n\n\
+{hint_block}\n\n\
 When you call mcp__right__skill_learning_finish, ALWAYS include the field\n\
 \"hint_outcome\" with one of:\n\
   - \"applied_as_hinted\" — you patched/created exactly as the hint suggested.\n\
   - \"applied_differently\" — you took action but not as hinted (e.g. patched a\n\
     different skill, created instead of patched).\n\
   - \"refused\" — you exited without writing because the hint was unjustified.\n\n\
-EXISTING SKILLS:\n{index}\n\nTURN:\nUSER: {user}\nASSISTANT: {assistant}\n"
+EXISTING SKILLS:\n{index}\n\n{anchor_rendered}"
     )
 }
 
@@ -454,6 +465,10 @@ mod tests {
         assert!(p.contains("bye"));
         assert!(p.contains("rightx-foo: bar"));
         assert!(p.contains("hint_outcome"));
+        // Composed from the canonical codegen constants (drift fixed).
+        assert!(p.contains("Survey"), "must include PROBE_WRITER_INSTRUCTIONS body");
+        assert!(p.contains("disposable-intermediate"), "must include delegation directive");
+        assert!(p.contains("probe_writer_anchor"), "must include the anchor template markers");
     }
 
     #[tokio::test]
