@@ -1,4 +1,539 @@
 # Changelog
+## [0.3.0] - 2026-06-04
+
+
+### Bug Fixes
+
+- **memory**: Initialize rustls provider in resilient tests
+- **prompt**: Document sandbox user-local bins
+- **prompt**: Make sandbox tool guidance a section
+- **prompt**: Delegate remember routing to right-memory
+- **prompt**: Tighten identity routing contract
+- **prompt**: Document inbound reply metadata
+- **right-composio**: Rewrite trigger so the skill actually loads
+- **prompt**: Point MCP-error learning at TOOLS.md not CC memory
+- **codegen**: Emit provider host endpoints before permissive tls:skip catch-all
+- **skills**: Teach cron_trigger notify=true + clean chaining in right-cron
+- **prompt**: Emit skill receipt message in reply language ([#95](https://github.com/onsails/right-agent/pull/95))
+- **mcp**: Close loopback url validation gaps
+- **mcp**: Cancel in-flight oauth refresh requests
+- **oauth**: Treat non-metadata probes as misses
+- **mcp**: Bound health-reconciler wake, prune removed-backend state, tighten visibility
+- **mcp**: Compare-and-set status so reconciler can't clobber concurrent NeedsAuth
+- **mcp**: Reconnect-and-retry dead upstream session in tools_call
+- **db**: Migrate legacy bg runs by schedule
+- **db**: Preserve async run thread snapshots
+- **db**: Migrate legacy immediate background specs
+- **db**: Preserve legacy immediate fork sources
+- **db**: Make libsql sync wrapper runtime-safe
+- **db**: Shut down libsql runtime on open errors
+- **db**: Preserve migration runner semantics
+- **db**: Cover libsql migration rollback
+- **db**: Enforce readonly turso wrapper guard
+- **db**: Reject readonly pragma call setters
+- **db**: Preserve legacy conversation upserts
+- **db**: Scrub legacy fts5 before turso opens
+- **db**: Harden turso review follow-ups
+- **db**: Avoid turso sync bridge LocalSet panic
+- **db**: Drop legacy learning tables
+- **db**: Retry transient turso file locks
+- **db**: Serialize schema bootstrap
+- **db**: Allow multiprocess turso opens
+- **right-db**: Use repeat_n for message fetch placeholders
+- **bot**: Classify cron-backed backgrounds as async backgrounds
+- **bot**: Report failed background async runs
+- **bot**: Reject silent background continuation output
+- **bot**: Hold session lock through background handoff
+- **bot**: Harden interrupted handoff recovery
+- **bot**: Strengthen learned-skill review prompt
+- **bot**: Log learned-skill review outcomes
+- **bot**: Deploy sandbox user-local env
+- **bot**: Harden sandbox env sync
+- **bot**: Make sandbox env bashrc repair idempotent
+- **bot**: Normalize sandbox env bashrc blocks
+- **bot**: Source sandbox user-local env for claude
+- **bot**: Source sandbox env for review runs
+- **bot**: Align review env path fallback
+- **bot**: Reject non-file sandbox bashrc
+- **bot**: Update learning review gate callsites
+- **bot**: Broaden execution event redaction
+- **bot**: Harden execution event persistence
+- **bot**: Redact header-style execution secrets
+- **bot**: Capture learning episodes before review gate
+- **bot**: Harden learning episode drain
+- **bot**: Harden selected episode review
+- **bot**: Clear stale Telegram command scopes
+- **bot**: Harden dashboard route auth
+- **bot**: Satisfy dashboard route clippy
+- **dashboard**: Harden telegram launch surface
+- **dashboard**: Address review hardening
+- **dashboard**: Address review issues (2 iterations)
+- **bot**: Split doctor output for Telegram
+- **dashboard**: Address review issues across simplify + 2 iterations
+- **bot**: Use configured model for async delivery
+- Address review-loop iter2 findings
+- **bot**: Probe parser handles CC structured_output envelope and insert-order
+- **bot**: Use probe_signal_source helper to silence dead-code warning
+- **cron**: Abort owned jobs after shutdown timeout
+- **bot**: Delay worker shutdown until handoff drain
+- **bot**: Close shutdown handoff races
+- **bot**: Address review issues (2 iterations)
+- **bot**: Harden background learning cleanup
+- **dashboard**: Harden skill lifecycle pin API
+- **db**: Rollback dropped turso transactions
+- **dashboard**: Stop advertising legacy evidence snippets
+- **mcp**: Tighten oauth status redaction
+- **mcp**: Report oauth completion to dashboard
+- **mcp**: Preserve oauth terminal status
+- **mcp**: Ignore replayed provider oauth errors
+- **mcp**: Atomically fail pending oauth status
+- **mcp**: Harden oauth status polling
+- **mcp**: Purge terminal oauth status and match any error code
+- **mcp**: Retain recent terminal oauth statuses
+- **bot**: Clarify mini app auth failures
+- **bot**: Bump learning prefilter max_turns to 5
+- **dashboard**: Coalesce identity sandbox read; distinguish unreachable from not-authored
+- **bot**: Fail-closed backstop — refuse host CC execution for sandboxed agents
+- **bot**: Keepalive reports sandbox-backend failures (review iteration 1)
+- **learning**: Skip on failed sandbox skill-index read; learning-only per-skill cache
+- **idle-compaction**: Pin verified opus[1m] model on the /compact invocation
+- **idle-compaction**: Kill /compact process group on timeout and abort on activity
+- **idle-compaction**: Reclaim compact_timers entry on fire-task exit
+- **dashboard**: Forward MCP connect-observability fields through DTO
+- **cron**: Break cron stream on terminal result event, drop deadline placeholder
+- **cron**: Deliver cron result from terminal event regardless of subprocess exit
+- **providers**: Bounded retry + honest logging on hot-reconcile failure
+- **bot**: Bound Telegram error text and dedup CC result classification
+- **bot**: Bound forum topic Telegram calls + checked icon_color conversion
+- **cron**: Surface budget/turn-limit failure reason; skip futile reflection
+- **mcp**: Detection probe client is PublicOnly (close discovered-URL rebind)
+- **cron**: Preserve force_notify across dedup displacement
+- **dashboard**: Surface sandbox skill-scan failures instead of host fallback
+- **dashboard**: Single-line sandbox skill-scan scripts so OpenShell ExecSandbox accepts them
+- **prompt**: Avoid double-prefixing chat-context usernames
+- **prompt**: Harden chat context and marker delivery
+- **right-db**: Exclude routing stubs from message-id fetch
+- **bot**: Preserve reply attachments when fetch body is text-only
+- **bot**: Preserve voice reply stt markers
+- **agent**: Enforce async run helper invariants
+- **bot**: Harden async delivery progress
+- **bot**: Recover interrupted background handoffs
+- **cron**: Preserve immediate lock defaults
+- Address review issues (2 iterations)
+- **agent**: Enforce learning episode transitions
+- **agent**: Constrain learning episode terminal states
+- **config**: Validate learning episode settings
+- **bot**: Harden learning episode review
+- **bot**: Address review-loop findings for learning episode selector
+- **bot**: Pin opus 1m in model menu
+- Address review-loop findings (simplify + 2 iterations)
+- **learning**: Address review-loop findings (simplify + 2 iterations)
+- **db**: Preserve fallible params and read-only destroy backup
+- **db**: Address libsql review findings
+- **config**: Ignore deprecated learning keys in reload diff
+- **cron**: Catch peak :00/:30 minutes in step expressions
+- **bot**: Drain probe-writer stdout fully; record usage + create/patch spend
+- **learning**: Split curator maintain spend evenly across archived skills
+- **cron**: Route is_error terminal results to the failure path
+- **memory**: Address review issues across 2 iterations
+- **cron**: Harden async run history queries
+- **test**: Satisfy workspace clippy checks
+- **mcp**: Improve Telegram HTTP warning UX
+- **memory**: Route remember requests by persistence target
+- **memory**: Keep retain as residual fallback
+- **cron**: Deliver only explicit notify decisions
+- Address review-loop iter1 findings
+- **mcp**: Gate oauth success on reconnect
+- **platform**: Harden mcp oauth and learning diagnostics
+- **db**: Address cc review follow-ups
+- **db**: Open backups with writable vacuum source
+- Address review issues (2 iterations)
+- **db**: Retry transient legacy scrubber locks
+- Address review issues across MCP dashboard control surface
+- **mcp**: Harden dashboard control surface
+- **mcp**: Apply review-loop followups
+- **backup**: Add database sidecar cleanup helper
+- **backup**: Exclude database sidecars from tar
+- **restore**: Remove database sidecars
+- **restore**: Preserve canonical database snapshot
+- **restore**: Reject tar-only database state
+- **backup**: Exclude database sidecars from destroy backups
+- **providers**: Simplify-pass: panics, prefix collision, YAML injection, ordering
+- **providers**: Iter-1 review — credential redaction, rollback logs, FAIL FAST
+- **providers**: Iter-2 review — strip collateral, argv credential, CRLF, partial failure
+- **providers**: Address review-loop iter1+iter2 findings
+- **codegen**: Emit host/port provider endpoint, not domain
+- **right**: Persist MCP headers even when the upstream is unreachable
+- **right**: Build MCP connect client before persisting headers
+- **providers**: Fold provider stanzas into every policy regen (durable across restarts)
+- **mcp**: Trim+validate edit name, tool-named param errors
+- Address rust review findings for forum topic management
+- **forum**: Address code-review findings
+- **aggregator**: Complete, name-sorted tool list
+
+### Documentation
+
+- **prompt**: Clarify identity file ownership
+- **prompt**: Teach agent to self-schedule retry crons
+- **prompt**: Downgrade mechanical subagents to sonnet, vocalize dispatch
+- **prompt**: Tell agents to re-verify dated recalled memories
+- **prompt**: Note forum-topic capability in operating instructions
+- **prompt**: Bootstrap nudge to add the agent as a group admin
+- **cron**: Teach right-cron the model-by-complexity heuristic
+- **learning**: Fix probe-writer instruction ordering after consolidation
+- **db**: Update worker db concurrency comment
+- **architecture**: Sandbox graceful-degrade + fail-closed CC invariant
+- **bot**: Clarify sandbox_runtime/current_sandbox roles (review follow-ups)
+- **cron**: Note the chat/thread 0 sentinel is attribution-only
+- **cron**: Explain empty used_skill_receipts in learning anchor
+- **memory**: Document scoped conversation search
+- **mcp**: Document dashboard control surface
+- **mcp**: List forum topic tools in aggregator + memory-server instructions
+
+### Features
+
+- **memory**: Parse Hindsight recall date fields, drop dead score
+- **memory**: Add date-annotating recall renderer
+- **prompt**: Teach agent tool delegation
+- **codegen**: Register right-composio built-in skill (stub)
+- **codegen**: Right-composio playbook content
+- **prompt**: Tighten subagent rule around intermediate-result relevance
+- **prompt**: Advertise /right-composio under Core Skills
+- **cron**: Require explicit delivery decision output
+- **codegen**: Add FORK_PROBE_SCHEMA_JSON and FORK_PROBE_PROMPT
+- **codegen**: Require used_skill_receipts in REPLY_SCHEMA, drop signal fields
+- **codegen**: Probe-writer + curator constants; drop FORK_PROBE_*
+- **codegen**: OPERATING_INSTRUCTIONS — MUST emit receipts, explicit-only /right-learn-skill
+- **codegen**: /right-learn-skill — explicit-user-intent only, drop deferred-signal section
+- **prompt**: Teach agent to route API keys through /providers dashboard
+- **codegen**: Provider-aware policy fold via apply_provider_stanzas
+- **prompt**: Require acting over promising in base Response Rules
+- **prompt**: Add haiku rung to subagent model ladder
+- **learning**: Teach probe-writer to author delegation-aware skills
+- **learning**: Teach explicit skill writer to author delegation-aware skills
+- **mcp**: Allow loopback mcp registration
+- **mcp**: Add URL-first auth detection
+- **mcp-client**: Provider_* methods on InternalClient
+- **mcp**: Add ProbeOutcome and pure probe-error classifier
+- **mcp**: Add ProxyBackend::probe_live (no-session path)
+- **mcp**: Pure status-decision and cadence policy for health reconciler
+- **mcp**: Health reconciler loop with adaptive cadence and debounce
+- **right-mcp**: Add redact_query_strings helper for safe error logging
+- **right-mcp**: Record and log every ProxyBackend connect outcome
+- **mcp**: Internal-client wire types + methods for forum topics
+- **mcp**: NetworkPolicy + private-LAN/cloud-metadata IP predicates
+- **mcp**: Validate_server_url allows operator private/LAN base URLs
+- **mcp**: Private base URL (incl CGNAT/Tailscale) recommends Headers, no OAuth for local
+- **mcp**: Resolved-host classification helper for detection gate
+- **mcp**: Resolve domain base URLs in detect; private/loopback hostnames skip OAuth discovery
+- **memory**: Add conversation transcript storage
+- **db**: Add async runs table
+- **db**: Add circuit-breaker fields to skill_nudge_state
+- **db**: Add source column to skill_nudge_signals (v27 migration)
+- **db**: V28 migration adds wall_elapsed_ms to usage_events
+- **db**: V29 migration adds curator_state singleton table
+- **lifecycle**: Add db-backed skill lifecycle crate
+- **db**: Migrate legacy fts indexes to turso
+- **mcp**: Persist multi-header credentials
+- **right-db**: Drop legacy learning_reviewer/learning_selector usage rows (v37)
+- **right-db**: V38 skill_spend + learning_skip tables
+- **db**: Add error_details table (migration v39)
+- **db**: Add forum_topics table (migration v40)
+- **db**: Forum_topics CRUD helpers with strict chat scoping
+- **db**: V41 — cron_specs.trigger_force_notify + async_runs.force_notify
+- **cron**: Add cron_specs.model column (migration v42)
+- **right-db**: Fetch_by_ids scoped message lookup by id
+- **memory**: Archive telegram transcript messages
+- **memory**: Link transcript rows to agent turns
+- **bot**: Gate background handoff
+- **bot**: Start background continuations immediately
+- **bot**: Persist typed execution events
+- **bot**: Select learning episodes
+- **bot**: Review selected learning episodes
+- **dashboard**: Scaffold mini app crate
+- **bot**: Expose dashboard routes
+- **dashboard**: Add telegram launch surface
+- **bot**: Expose learning dashboard routes
+- **bot**: Parse claude result timing
+- **bot**: Add thinking anchor helper
+- **bot**: Show working anchor after invoke start
+- **bot**: Log claude result timing
+- **dashboard**: Add v2 api types
+- **dashboard**: Add activity routes
+- **dashboard**: Add usage api
+- **dashboard**: Expose learning episodes
+- **dashboard**: Add skills inventory
+- **dashboard**: Add identity view api
+- **dashboard**: Add health api
+- **dashboard**: Wire v2 overview state
+- **bot**: Move usage command to dashboard
+- **bot**: Format telegram partial reply quotes
+- **bot**: Capture telegram partial reply quotes
+- **bot**: Wire learning-episode drain to daily-budget gate and usage events
+- **bot**: Wire worker skill review to daily-budget gate and usage events
+- **bot**: Extract alert dedup helpers and add learning circuit-open alert
+- **bot**: Fire circuit-open alert on learning failure transitions
+- **bot**: Tag reply-field-sourced nudge signals at worker ingestion site
+- **bot**: Add learning_probe module with pure gate and parse logic
+- **bot**: Spawn post-turn fork-probe and persist non-null signals
+- **bot**: Gate DrainScheduler on background_review_enabled flag
+- **bot**: Warn at startup when background learning is deprecated but legacy rows exist
+- **dashboard**: Expose learning signals_by_source_24h read model
+- **bot**: Lifecycle::usage module skeleton (UsageRecord, enums)
+- **bot**: Lifecycle::usage atomic flock-protected R/W
+- **bot**: Lifecycle::usage bump/mark/pin operations
+- **bot**: Lifecycle::transitions apply_automatic_transitions
+- **bot**: Lifecycle::snapshot tar+gz backup of skill packages
+- **bot**: Receipt rendering with visual marker + bump_use hook
+- **bot**: ProbeAnchor capture at end of foreground turn
+- **bot**: Learning_prefilter module (Haiku classifier prompt + parser)
+- **bot**: Learning_prefilter::run async Haiku call with usage tracking
+- **bot**: Rename learning_probe → learning_probe_writer; replace contents; remove legacy fork-probe spawn
+- **bot**: Wire post-turn prefilter → probe-writer pipeline in worker
+- **bot**: Learning_curator module with should_run_now gate
+- **bot**: Learning_curator::run_if_due orchestrates snapshot+transitions+LLM fork
+- **bot**: Curator ticker spawned at agent startup (60s interval)
+- **dashboard**: Drop signals_by_source, add skill_lifecycle_overview
+- **bot**: ProbeAnchor carries turn stats + used skill receipts
+- **bot**: Prefilter returns three-mode PrefilterDecision with schema validation
+- **bot**: Prefilter prompt renders baselines + receipts + skill index summary
+- **bot**: Prefilter::run computes baselines and renders skill summary
+- **bot**: Probe-writer accepts directed PrefilterHint and branches prompt
+- **curator**: CuratorState gains DB-backed load/save helpers
+- **curator**: Multi-signal gate with cost spike + skill change + time fallback
+- **cron**: Persist shutdown interruptions
+- **bot**: Type foreground background requests
+- **bot**: Flush ready deliveries on shutdown
+- **bot**: Background foreground turns on shutdown
+- **bot**: Show shutdown background banner
+- **dashboard**: Add visual analytics
+- **bot**: Register background learning invocations
+- **dashboard**: Add skill lifecycle pin API
+- **dashboard**: Add authenticated MCP routes
+- **dashboard**: Start MCP OAuth from web UI
+- **mcp**: Add oauth status store
+- **mcp**: Expose dashboard oauth status
+- **mcp**: Return dashboard oauth flow ids
+- **bot**: SandboxRuntimeHandle — lock-free sandbox health/exec/affected state
+- **bot**: Fail-closed sandbox gate decision
+- **bot**: Sandbox outage / back-online Telegram copy
+- **bot**: SandboxSupervisor — recovery backoff, monitor, back-online notice
+- **bot**: Degrade on sandbox bring-up failure; spawn supervisor; thread health handle
+- **bot**: Fail-closed sandbox gate before CC; report mid-session backend failure
+- **dashboard**: Openshell-gateway doctor card reflects live sandbox diagnosis
+- **memory**: Render observed dates in host auto-recall injection
+- **bot**: Carry cache tokens in StreamUsage
+- **bot**: Attribute per-turn cost/cache to used skills (skill_spend usage)
+- **bot**: Record learning_skip row on budget-exhausted gate
+- **bot**: Record curator maintain spend per skill
+- **bot**: Read learned-skill index from the sandbox via gRPC
+- **dashboard**: Per-skill spend aggregate + budget-skip count read models
+- **idle-compaction**: Module scaffold, gate predicates, /compact invocation builder
+- **idle-compaction**: Latest-interactive context-fullness query
+- **idle-compaction**: Run_compaction fire path under the session mutex
+- **idle-compaction**: Debounce lifecycle (cancel/arm) and on_turn_end gate
+- **idle-compaction**: Thread CompactTimers through worker control deps
+- **idle-compaction**: Arm/cancel debounce from the worker turn hooks
+- **dashboard**: DELETE /crons/{job_name} route via delete_spec
+- **supervisor**: Hot_reconcile_providers — live provider policy re-apply
+- **config-watcher**: Classify providers-only change as ProvidersReload
+- **config-watcher**: Hot-reconcile providers over mpsc instead of restart
+- **bot**: Classify CC result errors (auth/rate-limit/other)
+- **bot**: Human-friendly rate-limit and generic error copy
+- **bot**: Skip reflection on rate-limit, show human notice
+- **bot**: Error-details pure helpers (keyboard, payload, callback parse)
+- **bot**: Error_details DB helpers with TTL sweep and chat scoping
+- **bot**: Store raw error JSON and render Details button on prettified errors
+- **bot**: Errdet callback handler + dispatcher branch for Details button
+- **bot**: UDS endpoints for forum topic create/edit/close/reopen
+- **cron**: Forced-notify run — always-notify directive, silent override, delivery_required
+- **cron**: Delivery loop bypasses idle gate for force_notify runs
+- **background**: Classify failed continuations into user-facing messages
+- **cron**: Recurring runs feed the skill-learning pipeline
+- **cron**: Prefer per-cron model over global at fire time
+- **prompt**: Add per-session chat-context block builder
+- **prompt**: Build_volatile_prefix replaces format_composite_memory
+- **worker**: Edge-triggered memory-status marker
+- **attachments**: Sequence-only message YAML (drop constant author/chat)
+- **prompt**: Chat-context section; Hindsight recall leaves system prompt
+- **worker**: Volatile prefix on stdin; per-session system prompt; chat-context block
+- **attachments**: ReplyToBody.omitted emit fetch note instead of body
+- **worker**: Strip recoverable reply bodies archive-gated
+- **agent**: Add async run helpers
+- **db**: Add learning episode storage
+- **agent**: Add LEARNING_SOURCES single source of truth
+- **agent**: Record learning costs in usage_events
+- **agent**: Daily-budget gate with circuit-open skip
+- **agent**: Reset circuit state on review success
+- **agent**: Record_review_failure with circuit breaker
+- **usage**: Add learning_fork_probe source + insert helper
+- **agent**: Add NudgeSignalSource enum and persist on record_nudge_signal
+- **usage**: Replace learning_fork_probe with prefilter/probe_writer/curator sources
+- **usage**: UsageBreakdown carries wall_elapsed_ms (foreground-only)
+- **usage**: Turn_baseline module computes per-agent P50/P90/P99
+- **curator**: Cost-spike + skill-change-count helpers for multi-signal gate
+- **right-agent**: Insert_skill_spend + insert_learning_skip helpers
+- **usage**: Add insert_idle_compaction writer (source idle_compaction)
+- **doctor**: List in-flight cron runs per agent
+- **cron**: Trigger_force_notify on CronSpec + trigger_spec(force_notify)
+- **cron**: Persist force_notify on running cron run row
+- **cron**: Read model column into CronSpec (load + list)
+- **memory**: Bind mcp invocations to chat scope
+- **memory**: Expose scoped conversation search tools
+- **config**: Add learning episode settings
+- **config**: Max_daily_budget_usd and circuit knobs in LearningConfig
+- **config**: Add probe_model, fork_probe_enabled, background_review_enabled
+- **cli**: Wizard prompts for probe_model, fork_probe_enabled, background_review_enabled
+- **right**: Skill_learning_finish wires lifecycle::usage created/patch hooks
+- **cli**: Right agent skill pin/unpin/list-pins operator commands
+- **cli**: Wizard prompts for prefilter/probe_writer/curator settings
+- **bot**: Worker measures wall_elapsed_ms + accumulates rightx receipts per turn
+- **mcp**: Skill_learning_finish accepts hint_outcome; probe-writer instructs
+- **wizard**: Prompts for curator trigger + prefilter baseline knobs
+- **dashboard**: Project overview signals
+- **learning**: Add background learning invocation kinds
+- **db**: Make right database async
+- **mcp**: Inject multiple HTTP auth headers
+- **mcp**: Expose multi-header internal API
+- **bot**: Open dashboard from mcp command
+- **openshell**: Spawn_sandbox accepts --provider flags
+- **internal-api**: ProviderApiError taxonomy + validators (name, env var, slug)
+- **internal-api**: /provider-list + /provider-types routes with ProviderView/ProviderStatus DTOs
+- **internal-api**: /provider-create routes (built-in + generic) with ordered rollback
+- **internal-api**: /provider-rotate, /provider-config-update, /provider-remove + per-(agent,name) mutex
+- **right-up**: Ensure_v2_enabled at startup with conditional fatal
+- **right**: Spawn per-agent MCP health reconciler at startup
+- **right**: Expose last connect attempt/error in /mcp-list
+- **install**: Add 'right setup-path' to ensure PATH
+- **mcp**: ProgressRegistry::forum_target (foreground-only chat resolution)
+- **mcp**: Forum_topic create/edit/close/reopen/list tools
+- **mcp**: Connect to operator base URL under AllowPrivate (unblocks Tailscale/LAN)
+- **mcp**: Allow loopback for operator base URL (AllowPrivate); keep PublicOnly strict
+- **mcp**: Cron_trigger notify=true force-notify flag + guidance
+- **providers**: Full-access right-github managed profile + provisioning
+- **dashboard**: Flat provider-type list; hide built-in github
+- **cron**: Add model tier enum to cron_create/cron_update params
+- **cron**: Persist per-cron model via create/update tools
+- **right-backend**: Get_messages_by_id scope-enforced fetch tool
+- Gate get_messages_by_id foreground-only and document MCP inventory
+- **right**: [**breaking**] Start 0.3 release line
+
+### Miscellaneous
+
+- **db**: Log transient lock diagnostics
+- Clean up clippy issues introduced on this branch
+- **cron**: Fix stale repro-test comments and spec implementation notes
+- **agent**: Stub init.rs default YAML emitter for deprecated learning fields
+- Drop NudgeSignalSource enum and source field from NudgeSignalRecord
+- **model**: Point curated Opus choice at 4.8
+- **bot**: Stub deprecated learning fields to unblock build through Task 18
+- **right**: Remove unused lifecycle deps
+- **lifecycle**: Remove usage json runtime references
+
+### Performance
+
+- **aggregator**: Avoid cloning proxy tool definitions
+
+### Refactor
+
+- **prompt**: Drop four duplications already covered by base prompt
+- **prompt**: Compress six sections and tighten grammar
+- **prompt**: Drop duplicated remember-routing from base prompt
+- **mcp**: Share tool-filter helper, drop probe lock before I/O, dedup test fixtures
+- **mcp**: IPv6 ULA classification delegates to ssrf::is_user_private_lan
+- **db**: Add local libsql connection wrapper
+- **db**: Run migrations through right-db
+- **db**: Move conversation queries to libsql wrapper
+- **db**: Migrate shared storage crates to right-db
+- **db**: Port core wrappers to turso
+- **db**: Remove libsql compatibility gate
+- **db**: Explicit upsert conflict target + typed ForumTopicState
+- **cron**: Persist runs as async runs
+- **bot**: Generalize async delivery
+- **bot**: Consolidate sandbox user-local env contract
+- **bot**: Inline one-line telegram quote helper
+- **bot**: Parse cron delivery decisions
+- **bot**: Record skill receipt usage in lifecycle db
+- **bot**: Read curator lifecycle from db
+- **bot**: Remove legacy stage two learning runtime
+- **bot**: Remove legacy learning alert cleanup
+- **dashboard**: Remove legacy learning history APIs
+- **mcp**: Remove oauth telegram notification leftovers
+- **dashboard**: Simplify identity reads, state consts, async-state helpers
+- **bot**: Extract bring_up_sandbox() returning diagnosis on backend failure
+- **bot**: Dedup send_tg helpers, loop-local backoff counter, fix stale doc
+- **idle-compaction**: Extract open_and_read_fullness helper, drop redundant comment
+- **bot**: Dedup error-send helpers and measure Details payload in UTF-16
+- **dashboard**: Scope 20s skill budget to cold list scan
+- **learning**: Extract shared post-turn pipeline module
+- **learning**: Worker uses shared run_post_turn
+- **cron**: Thread learning config + session_locks into execute_job
+- **learning**: Share DEFAULT_PREFILTER_MODEL const across worker and cron
+- **bot**: Remove composite-memory.md, bg-jobs marker, repair-notice-in-prompt
+- **worker**: Group invoke_cc request context
+- **learning**: Compose probe-writer prompt from canonical constants
+- **bot**: Remove cron-backed background runtime
+- Review addressing
+- **async-runs**: Rename delivery result storage
+- Simplify circuit-breaker review gate plumbing
+- **agent**: Remove legacy learning review domain
+- **learning**: Remove stale legacy references
+- **learning**: Atomic usage skill_spend writes + drop dead prefilter trim
+- **cron**: Read run history from async runs
+- **async-runs**: Update delivery decision consumers
+- **right**: Write skill learning lifecycle to db
+- **cli**: Remove skill pin commands
+- **lifecycle**: Address review issues across 2 iterations
+- **db**: Migrate callers to right-db connection
+- **db**: Switch fresh schema to turso fts
+- **internal_api_providers**: Pass gRPC client to provider fns
+- **cli**: Name the PATH-setup write-failure exit code
+- **providers**: Address max code review — parity, helper, hardening
+- **mcp**: Thread NetworkPolicy through resolver/client/url-validator
+
+### Testing
+
+- **memory**: Require identity ownership routing
+- **codegen**: Cover right-composio in all_source_skill_files_are_installed
+- **codegen**: Update Subagents-section guard needles to match rewrite
+- **codegen**: Re-pin operating-instructions needles to compressed prompt
+- **codegen**: Assert permissive provider endpoint precedes tls:skip catch-all
+- **codegen**: Harden catch-all locator against future tls-field drift
+- **mcp**: Live-server harness; probe_live Alive refreshes tool cache
+- **mcp**: De-flake remove_server_cancels_in_flight_refresh
+- **mcp**: Guard that private token_endpoint stays rejected under PublicOnly
+- **db**: Assert libsql connection path
+- **db**: Prove local libsql sqlite features
+- **db**: Assert transaction body runs before rollback
+- **db**: Add turso fts compatibility gate
+- **db**: Cover legacy routed upsert
+- **db**: Capture bootstrap lock invariants
+- **db**: Make concurrent bootstrap lock regression red
+- **db**: Detect legacy scrubber overlap
+- **bot**: Cover learned-skill review notice success
+- **bot**: Define sandbox user-local env contract
+- **bot**: Assert sandbox env precedes prompt assembly
+- **cron**: Cover missing result stream parsing
+- **dashboard**: Cover visual analytics responses
+- **learning**: Co-locate budget-skip test with record_budget_skip
+- **cron**: Live ci-claude cron-learning skill-creation gate (stubbed drive)
+- **ci**: Fix ignored OpenShell test selection
+- **internal-api**: Sandbox_mode_none rejection for /provider-list
+- **aggregator**: Await async tools_list in remaining tests
+
+### Build
+
+- **db**: Remove rusqlite dependencies
+- **deps**: Bump the prod-deps group across 1 directory with 11 updates ([#85](https://github.com/onsails/right-agent/pull/85))
+
+### Merge
+
+- Background async runs
+
+### Style
+
+- **prompt**: Wrap observed-date recall sentence to 80 cols
+
 ## [0.2.15] - 2026-05-18
 
 - Agents can now save reusable skill packages from real work using `/right-learn-skill` — captured workflows and API discoveries are persisted as `rightx-*` packages available in future sessions.
