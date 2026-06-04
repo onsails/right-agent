@@ -388,9 +388,11 @@ export interface LearningSignalPoint {
 export interface LearningLifecycle {
   created_7d: number
   updated_7d: number
-  failed_or_aborted_7d: number
+  failed_7d: number
+  refused_7d: number
   recent_successful_events: LearningEventSummary[]
   recent_failed_events: LearningEventSummary[]
+  recent_refused_events: LearningEventSummary[]
   candidate_skill_names_7d: string[]
 }
 
