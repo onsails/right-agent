@@ -346,6 +346,7 @@ pub struct LearningSignalPoint {
     pub kind: String,
     pub label: String,
     pub severity: String,
+    pub detail: Option<String>,
     pub skill_name: Option<String>,
     pub count: i64,
 }
@@ -964,6 +965,7 @@ mod learning_tests {
                 kind: "skill_created".to_owned(),
                 label: "rightx-oauth-debugging".to_owned(),
                 severity: "info".to_owned(),
+                detail: Some("Reusable OAuth setup workflow.".to_owned()),
                 skill_name: Some("rightx-oauth-debugging".to_owned()),
                 count: 1,
             }],
@@ -981,5 +983,9 @@ mod learning_tests {
         assert_eq!(value["flow_nodes"][0]["id"], "skill_created");
         assert_eq!(value["flow_edges"][0]["count"], 1);
         assert_eq!(value["recent_learning_signals"][0]["kind"], "skill_created");
+        assert_eq!(
+            value["recent_learning_signals"][0]["detail"],
+            "Reusable OAuth setup workflow."
+        );
     }
 }
