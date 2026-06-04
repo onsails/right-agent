@@ -158,6 +158,22 @@ fn local_start_of_day(date: NaiveDate, tz: &Tz) -> Result<DateTime<Tz>, ReadMode
     match tz.with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0) {
         LocalResult::Single(start) => Ok(start),
         LocalResult::Ambiguous(earliest, _) => Ok(earliest),
-        LocalResult::None => Err(ReadModelError::InvalidStartOfDay(format!("{date} in {tz}"))),
+        LocalResult::None => first_valid_local_instant(date, tz)
+            .ok_or_else(|| ReadModelError::InvalidStartOfDay(format!("{date} in {tz}"))),
     }
+}
+
+fn first_valid_local_instant(date: NaiveDate, tz: &Tz) -> Option<DateTime<Tz>> {
+    // Some zones skip midnight during DST transitions; bucket from the first
+    // representable instant still belonging to that local calendar date.
+    for minute in 1..(24 * 60) {
+        let hour = minute / 60;
+        let minute = minute % 60;
+        match tz.with_ymd_and_hms(date.year(), date.month(), date.day(), hour, minute, 0) {
+            LocalResult::Single(start) => return Some(start),
+            LocalResult::Ambiguous(earliest, _) => return Some(earliest),
+            LocalResult::None => {}
+        }
+    }
+    None
 }
