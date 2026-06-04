@@ -3,11 +3,19 @@ name: Build binaries
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and upload assets to
+        required: true
+        type: string
 
 jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
     strategy:
       matrix:
         include:
@@ -26,6 +34,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          ref: ${{ env.RELEASE_TAG }}
           lfs: true
 
       - name: Install protoc
@@ -59,4 +68,4 @@ jobs:
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}"
+        run: gh release upload "$RELEASE_TAG" "${{ matrix.artifact }}" --clobber
