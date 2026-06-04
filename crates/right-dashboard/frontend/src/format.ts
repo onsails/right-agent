@@ -64,7 +64,8 @@ export function statusTone(status: string | null | undefined): string {
     normalized === 'host' ||
     normalized === 'host_mirror' ||
     normalized === 'create_candidate' ||
-    normalized === 'update_candidate'
+    normalized === 'update_candidate' ||
+    normalized === 'ok'
   ) {
     return 'ok'
   }
@@ -72,7 +73,8 @@ export function statusTone(status: string | null | undefined): string {
     normalized === 'failed' ||
     normalized === 'fail' ||
     normalized === 'error' ||
-    normalized === 'unavailable'
+    normalized === 'unavailable' ||
+    normalized === 'bad'
   ) {
     return 'bad'
   }
