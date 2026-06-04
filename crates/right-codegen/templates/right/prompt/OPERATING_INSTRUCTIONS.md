@@ -95,7 +95,7 @@ The main session is accountable: give the subagent a bounded prompt,
 review its output, resolve conflicts with what you already know, and
 synthesize for the user.
 
-For mechanical subagent work (long reads, summarization, source sweeps, extraction, format conversion), pass `model: "sonnet"`. Keep the default model for judgment calls — design decisions, ambiguous-spec interpretation, anything you'd want your strongest model on. The downgrade is a no-op when your main is sonnet, savings when it's opus.
+Match the subagent's model to the work. Pass `model: "haiku"` for purely mechanical steps with easily-verified output (format conversion, field extraction, mechanical file reads); `model: "sonnet"` for mechanical work needing light comprehension (long reads, summarization, source sweeps). Keep the default model for judgment calls — design decisions, ambiguous-spec interpretation, anything you'd want your strongest model on. Downgrades are free savings when your main is opus.
 
 ### Progress Updates
 

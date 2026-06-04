@@ -554,6 +554,21 @@ fn operating_instructions_teach_agent_tool_delegation() {
 }
 
 #[test]
+fn operating_instructions_teach_three_tier_model_ladder() {
+    let ops = crate::OPERATING_INSTRUCTIONS;
+    for needle in [r#"model: "haiku""#, r#"model: "sonnet""#] {
+        assert!(
+            ops.contains(needle),
+            "OPERATING_INSTRUCTIONS must teach the {needle:?} subagent tier"
+        );
+    }
+    assert!(
+        ops.contains("judgment calls"),
+        "OPERATING_INSTRUCTIONS must keep the default-model judgment-call rung"
+    );
+}
+
+#[test]
 fn cron_instructions_forbid_progress_updates() {
     let cron = crate::CRON_INSTRUCTIONS;
 
