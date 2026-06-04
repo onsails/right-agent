@@ -29,6 +29,7 @@ type EmptyArgMockFn<Resp> = Box<dyn Fn() -> Result<Resp, tonic::Status> + Send +
 pub(crate) struct MockOpenShell {
     pub(crate) get_sandbox_phase: Arc<AtomicI32>,
     pub(crate) get_sandbox_status: Option<os_proto::v1::SandboxStatus>,
+    pub(crate) get_sandbox_include_status: bool,
 
     pub(crate) mock_health: Option<EmptyArgMockFn<os_proto::v1::HealthResponse>>,
     pub(crate) mock_create_provider:
@@ -80,6 +81,7 @@ impl MockOpenShell {
     pub(crate) fn with_phase(phase: i32) -> Self {
         Self {
             get_sandbox_phase: Arc::new(AtomicI32::new(phase)),
+            get_sandbox_include_status: true,
             ..Default::default()
         }
     }
@@ -88,6 +90,14 @@ impl MockOpenShell {
         Self {
             get_sandbox_phase: Arc::new(AtomicI32::new(phase)),
             get_sandbox_status: Some(status),
+            get_sandbox_include_status: true,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn with_missing_status(phase: i32) -> Self {
+        Self {
+            get_sandbox_phase: Arc::new(AtomicI32::new(phase)),
             ..Default::default()
         }
     }
@@ -95,6 +105,7 @@ impl MockOpenShell {
     pub(crate) fn with_shared_phase(phase: Arc<AtomicI32>) -> Self {
         Self {
             get_sandbox_phase: phase,
+            get_sandbox_include_status: true,
             ..Default::default()
         }
     }
@@ -124,8 +135,11 @@ impl OpenShell for MockOpenShell {
         // OpenShell 0.0.56 carries the gateway-derived lifecycle phase in
         // `SandboxStatus.phase`, not on the top-level `Sandbox` message. Mirror
         // that: fold the configured phase into the status the gateway returns.
-        let mut status = self.get_sandbox_status.clone().unwrap_or_default();
-        status.phase = phase;
+        let status = self.get_sandbox_include_status.then(|| {
+            let mut status = self.get_sandbox_status.clone().unwrap_or_default();
+            status.phase = phase;
+            status
+        });
         Ok(tonic::Response::new(os_proto::v1::SandboxResponse {
             sandbox: Some(os_proto::v1::Sandbox {
                 metadata: Some(os_proto::datamodel::v1::ObjectMeta {
@@ -133,7 +147,7 @@ impl OpenShell for MockOpenShell {
                     name: "mock-sandbox".into(),
                     ..Default::default()
                 }),
-                status: Some(status),
+                status,
                 ..Default::default()
             }),
         }))
