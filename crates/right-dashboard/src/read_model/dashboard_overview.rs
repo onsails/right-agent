@@ -1253,13 +1253,13 @@ mod tests {
 
         assert!(response.signals.iter().any(|signal| {
             signal.kind == "learning_outcome"
-                && signal.severity == "warn"
+                && signal.severity == "info"
                 && signal.title == "Learning refused"
                 && signal.related_skill_name.as_deref() == Some("rightx-refused")
         }));
         assert!(response.cost_learning_river.markers.iter().any(|marker| {
             marker.kind == "skill_refused"
-                && marker.severity == "warn"
+                && marker.severity == "info"
                 && marker.skill_name.as_deref() == Some("rightx-refused")
         }));
     }

@@ -1092,7 +1092,7 @@ mod tests {
 
         assert_eq!(labels, vec!["rightx-offset", "rightx-normal"]);
         assert_eq!(response.recent_learning_signals[0].kind, "skill_updated");
-        assert_eq!(response.recent_learning_signals[0].severity, "info");
+        assert_eq!(response.recent_learning_signals[0].severity, "ok");
     }
 
     #[tokio::test]
