@@ -4,7 +4,9 @@
 
 **Goal:** Make the bot's `SandboxSupervisor` detect a sandbox that has entered OpenShell `Phase: Error` (gateway still reachable) and degrade the agent into a recoverable/diagnosed state, instead of silently staying "Ready" forever.
 
-**Architecture:** Replace the gateway-only reachability probe with a probe that queries the real sandbox phase over gRPC (`GetSandbox.phase`), so `monitor_step` degrades on `SANDBOX_PHASE_ERROR`. Give the long-lived sync task a `SandboxRuntimeHandle` so its repeated "sandbox is not ready" failures reach the supervisor. Add a dedicated `GatewayCause::SandboxError` so the operator-facing Telegram/CLI copy names the real cause. Gap 3 (whether an Error-phase pod can be recovered without recreation) is left as a flagged decision point with a clearly-marked default of "diagnose and stay degraded" until the parallel OpenShell-capability investigation resolves.
+**Architecture:** Replace the gateway-only reachability probe with a probe that queries the real sandbox phase over gRPC (`GetSandbox.phase`), so `monitor_step` degrades on `SANDBOX_PHASE_ERROR`. Give the long-lived sync task a `SandboxRuntimeHandle` so its repeated "sandbox is not ready" failures reach the supervisor. Add a dedicated `GatewayCause::SandboxError` so the operator-facing Telegram/CLI copy names the real cause. Gap 3 (Error-phase recovery) is **resolved, not a decision point**: OpenShell exposes no pod restart/resume (CLI and gRPC proto both confirmed), and **Right never touches the container runtime directly — OpenShell is the sole abstraction over Docker.** So recovery is detect → degrade with an honest diagnosis → keep retrying `bring_up_sandbox` with backoff, which **auto-resumes the moment OpenShell (a graceful future upgrade) or the operator restores the sandbox to Ready**. No recovery action is added; no sandbox recreation, ever.
+
+**Load-bearing invariant (do not violate):** Right must not shell out to `docker`/`podman` or use a container-runtime API. Reviving a killed/Errored pod is OpenShell's responsibility. `docker start` of the exited container *does* fully recover it with data intact (validated live), but Right deliberately does not use that path.
 
 **Tech Stack:** Rust (edition 2024), tokio, tonic gRPC (`openshell.v1`), `arc-swap`, `thiserror`/`miette`, `right-openshell`, `bot` crate, `right-ui`/`sandbox_copy` for user-facing copy.
 
@@ -29,12 +31,22 @@ Three gaps, all confirmed against current code:
   (`crates/bot/src/sync.rs:35-58`) logs `sync cycle failed: ...` every 5 min but holds
   no `SandboxRuntimeHandle`, so the clearest periodic signal never reaches the supervisor.
 
-- **Gap 3 (latent) — Error phase may be unrecoverable without recreation.**
-  `bring_up_sandbox` reuses the existing sandbox and `wait_for_ready`
-  (`crates/right-openshell/src/openshell.rs:344-399`) treats `SANDBOX_PHASE_ERROR` as
-  terminal. The project FORBIDS sandbox recreation as a recovery path (ARCHITECTURE:
-  "Never delete sandboxes for recovery"). Whether OpenShell exposes a pod restart/resume
-  RPC is under parallel investigation — this plan does NOT assume one exists.
+- **Gap 3 (resolved) — Error phase has no in-OpenShell recovery, and Right must not work around it.**
+  Investigation outcome, verified on a live v0.0.56 gateway: a gateway upgrade **SIGKILLs**
+  the sandbox container (`Exit 137`, OOM=false; the container's `RestartPolicy=unless-stopped`
+  is suppressed because the kill counts as an explicit stop), and OpenShell exposes **no**
+  restart/resume — neither in the CLI (`sandbox` has only create/get/list/delete/exec/
+  connect/upload/download) nor in the gRPC proto (only `CreateSandbox`/`GetSandbox`/
+  `ListSandboxes`/`DeleteSandbox`/`Exec`/`GetSandboxConfig`/`WatchSandbox`/token RPCs).
+  Container data survives in the stopped writable layer (`/sandbox` is **not** on a volume),
+  and `docker start` of the exited container fully recovers it (validated on both agents).
+  **Right deliberately does NOT use that path — OpenShell is the sole abstraction over the
+  container runtime.** So `bring_up_sandbox` (which reuses the existing sandbox;
+  `is_sandbox_ready` at `openshell.rs:122` returns `false` for an Error pod) keeps failing
+  and the supervisor stays degraded, **retrying with backoff and auto-resuming the instant the
+  sandbox is Ready again** — when a future graceful OpenShell upgrade, or a manual operator
+  action, restores it. Recreation remains FORBIDDEN (ARCHITECTURE: "Never delete sandboxes for
+  recovery").
 
 ## Code facts the implementer must know (read before starting)
 
@@ -253,8 +265,12 @@ closing `}`, alongside the other arms, ~line 73):
 
 ```rust
             GatewayCause::SandboxError { .. } => (
-                "my secure sandbox is in an error state",
-                vec!["I'll keep retrying. If this persists, check: openshell sandbox list"],
+                "my secure sandbox stopped responding",
+                vec![
+                    "I'll reconnect automatically as soon as the sandbox is back. \
+                     If it stays down, the sandbox container needs to be restarted \
+                     in OpenShell — your data is preserved.",
+                ],
             ),
 ```
 
@@ -650,62 +666,60 @@ git commit -m "fix(sync): report sandbox failure to supervisor on sync-cycle fai
 
 ---
 
-## Task 5: DECISION POINT — Error-phase recovery action (Gap 3)
+## Task 5: Error-phase recovery — retry-and-auto-resume (Gap 3, resolved)
 
-**This task is gated on the parallel OpenShell-capability investigation. Do NOT guess.**
+The Gap-3 decision is **already made** (see Background): OpenShell exposes no restart/resume
+(CLI + gRPC confirmed) and Right must not touch the container runtime directly. **There is no
+recovery action to add.** After Tasks 3-4 the supervisor detects Error, degrades into
+`Unavailable { SandboxError }`, aborts the sync task, and notifies affected chats. The existing
+`recovery_step` then loops `bring_up_sandbox` with backoff; because bring-up **reuses** the
+existing sandbox, it auto-resumes the instant the sandbox returns to Ready (graceful future
+OpenShell upgrade, or a manual operator restart). This is the maximal self-heal achievable
+without Right reviving the pod itself.
 
-After Tasks 3-4, an Error-phase sandbox is correctly *detected* and the agent is degraded
-into `Unavailable { SandboxError }`, the sync task is aborted, and the existing
-`unavailable_message` copy is shown to affected chats. The supervisor's `recovery_step` will
-then loop `bring_up_sandbox` with backoff. **The open question is whether that bring-up can
-actually clear an Error phase without recreation.**
+This task is **verification-only**: confirm the loop keeps retrying (never `Break`s on a
+`SandboxError` degrade) and that the copy is honest. Add no new mechanism, no
+container-runtime calls, no recreation.
 
-Current behavior (verified): `bring_up_sandbox` reuses the existing sandbox; it does NOT call
-`wait_for_ready`, but `is_sandbox_ready` (line 122) returns `false` for an Error-phase pod, so
-bring-up returns `Ok(Err(SandboxNotFound))` and the supervisor stays degraded, retrying
-forever. That is a **safe but possibly-permanent** degraded state — never a silent loop with
-no operator signal, because the diagnosis is published and chats are notified once.
+- [ ] **Step 1: Confirm the retry loop self-heals (does not hard-Break on Error)**
 
-**Resolve exactly one of the following based on the investigation result, then implement it:**
+Read `recovery_step` (lines 505-540): `Ok(Err(diag))` → `set_unavailable` + backoff (keep
+retrying); only a hard `Err(e)` returns `LoopStep::Break`. Confirm `bring_up_sandbox` returns
+`Ok(Err(_))` (not `Err(_)`) for an Error/NotFound phase, so the supervisor retries
+indefinitely and reconnects automatically once the sandbox is Ready. If a code change is
+needed to keep an `Error`-phase bring-up on the recoverable (`Ok(Err)`) path, make it; add a
+test that an Error-phase bring-up keeps the handle `Unavailable` and does **not** Break.
 
-- **Option A — OpenShell exposes a pod restart/resume RPC.**
-  Add it to `right_openshell::openshell` (gRPC only — review-blocking defect to add a CLI
-  call), and call it from `recovery_step` (or from a new pre-bring-up step) when the degrade
-  cause is `SandboxError`. Re-run `bring_up_sandbox` after the restart succeeds. Add a TDD
-  test mirroring Task 3: an `Error`-phase probe followed by a successful restart RPC →
-  `set_ready`. Live-RPC coverage uses `TestSandbox` and is NOT `#[ignore]`d
-  (ARCHITECTURE "Integration Tests Using Live Sandboxes"); pure decision logic stays in the
-  default path.
+- [ ] **Step 2: Confirm the operator copy is honest**
 
-- **Option B — recovery genuinely requires recreation (forbidden).**
-  Do NOT recreate. The correct behavior is already 90% present: detect, degrade, diagnose,
-  notify. Tighten only the operator-facing surface so the message tells the operator that
-  manual intervention is required (since auto-recovery is impossible) instead of implying
-  "I'll keep retrying" indefinitely. Adjust the `GatewayCause::SandboxError` fixes text in
-  `diagnosis.rs` (Task 2) to point at the sanctioned operator path
-  (`right agent config <name>` → sandbox migration, per the existing drift-repair help text
-  in `bring_up_sandbox` lines 196-201), and update the corresponding `diagnosis_tests.rs`
-  assertion. Keep the retry loop (it self-heals if the operator fixes OpenShell), but cap
-  log-spam if needed. **No sandbox deletion, ever.**
+The `GatewayCause::SandboxError` copy from Task 2 must say recovery is automatic once the
+sandbox returns, and that a persistent outage needs the sandbox restarted in OpenShell (data
+preserved) — never imply Right will revive the container itself. Verify the
+`diagnosis_tests.rs` assertion matches.
 
-- [ ] **Step 1: Record the investigation outcome**
+- [ ] **Step 3: No separate commit unless Step 1 required a code change**
 
-Edit this task's heading in the plan to state the chosen option and link the investigation
-finding (issue/PR). Do not proceed to implementation until the option is chosen.
-
-- [ ] **Step 2: Implement the chosen option (A or B) with a TDD red→green loop**
-
-Follow the Task-3 pattern: narrowest failing test first, verify it fails, implement, verify
-it passes. Target command: `devenv shell -- cargo test -p bot <filter>`.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add -A
-git commit -m "feat(supervisor): error-phase recovery action (decision: Option <A|B>)"
-```
+If Step 1 changed code, commit it; otherwise this task folds into Task 3's verification and
+adds nothing. **Never** add a `docker`/`podman` call or a sandbox recreation path here.
 
 ---
+
+## Out of scope (explicit) / future tracks
+
+- **Right never touches Docker/podman directly.** OpenShell is the sole abstraction over the
+  container runtime. `docker start` recovers an upgrade-killed sandbox (validated, data intact)
+  but is deliberately NOT used — reviving a killed pod is OpenShell's responsibility (a future
+  graceful upgrade or an upstream restart RPC) or a manual operator step. Do not add a
+  container-runtime dependency to Right under any task.
+- **Durability of `/sandbox` (separate spec, not this plan).** `/sandbox` lives in the
+  container's writable layer, not a volume, so `docker rm`/`prune`/disk-cleanup = permanent
+  data loss, which neither detection nor retry can help. Mitigations to decide in their own
+  spec: (a) upstream — get OpenShell's container driver to mount `/sandbox` on a named volume;
+  (b) Right-side scheduled `right agent backup --sandbox-only` as a data-loss safety net. Out
+  of scope here; flag as a follow-up.
+- **No proactive phase-poll timer.** keepalive already runs periodically; once it degrades on
+  Error (Gaps 1-2), it *is* the periodic heartbeat that catches an idle agent's dead sandbox.
+  A separate poll loop would be redundant — do not add one.
 
 ## Task 6: Update architecture docs (cite-on-touch)
 
@@ -776,8 +790,13 @@ git commit -m "test: full workspace verification for phase-aware sandbox recover
 
 ## Self-review notes
 
-- **Spec coverage:** Gap 1 → Task 3; Gap 2 → Task 4; Gap 3 → Task 5 (flagged decision point);
-  diagnosis/copy → Task 2 (+ Task 5 Option B); docs → Task 6; final verification → Task 7.
+- **Spec coverage:** Gap 1 → Task 3; Gap 2 → Task 4; Gap 3 → Task 5 (resolved:
+  retry-and-auto-resume, no recovery action, no container-runtime dependency);
+  diagnosis/copy → Task 2; out-of-scope/future tracks (durability, no docker side-channel,
+  no poll timer) → "Out of scope" section; docs → Task 6; final verification → Task 7.
+- **Load-bearing invariant:** Right never calls `docker`/`podman` or a container-runtime API;
+  OpenShell is the sole abstraction. Reviving a killed pod is OpenShell's job; Right detects,
+  degrades honestly, and auto-resumes via the existing reuse+retry loop.
 - **Type consistency:** `SandboxPhaseStatus` (Task 1) is consumed by `probe_phase` (Task 3);
   `ProbeOutcome`/`degrade_decision` names are used identically in the test (Task 3 Step 1) and
   impl (Step 3); `GatewayCause::SandboxError { sandbox: String }` is constructed identically in
