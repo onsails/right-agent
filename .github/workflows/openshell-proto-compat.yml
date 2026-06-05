@@ -4,6 +4,13 @@ name: OpenShell proto compat
 # `buf breaking` + `cargo check`, and open/update a single PR so upstream
 # wire/API drift is caught before it reaches a running gateway. It SURFACES
 # only — a human fixes any Rust decode logic and bumps version floors.
+#
+# A PR is opened ONLY when the vendored `.proto` files actually change. The
+# vendor script rewrites UPSTREAM.md's `fetched:` timestamp on every run, so
+# gating on that file alone would open a no-op PR daily even for a
+# wire-identical upstream release (e.g. v0.0.56 → v0.0.57 with no proto diff).
+# The gate below checks `proto/openshell/**` against HEAD and skips the compat
+# check + PR entirely when only the metadata moved.
 on:
   workflow_dispatch:
   schedule:
@@ -48,13 +55,31 @@ jobs:
           TAG: ${{ steps.resolve.outputs.tag }}
         run: bash scripts/vendor-openshell-proto.sh "$TAG"
 
+      # Gate on the actual vendored protos, NOT UPSTREAM.md. The vendor script
+      # rewrites UPSTREAM.md's `fetched:` timestamp every run, so a diff there is
+      # not a signal. UPSTREAM.md lives one level above proto/openshell, so this
+      # check excludes it and detects only real wire/API drift.
+      - name: Detect actual proto change
+        id: gate
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- crates/right-openshell/proto/openshell; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No .proto changes vs committed — only UPSTREAM.md metadata moved. Skipping compat check + PR."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Detected .proto changes — running compat check and opening/updating PR."
+          fi
+
       - name: Setup buf
+        if: steps.gate.outputs.changed == 'true'
         uses: bufbuild/buf-setup-action@v1
         with:
           github_token: ${{ github.token }}
 
       - name: buf breaking (PACKAGE)
         id: buf
+        if: steps.gate.outputs.changed == 'true'
         continue-on-error: true
         run: |
           set -uo pipefail
@@ -68,16 +93,20 @@ jobs:
           echo "--- buf breaking output ---"
           cat /tmp/buf-breaking.txt || true
 
-      - uses: cachix/install-nix-action@v31
+      - if: steps.gate.outputs.changed == 'true'
+        uses: cachix/install-nix-action@v31
       - name: Install devenv.sh
+        if: steps.gate.outputs.changed == 'true'
         run: nix profile add nixpkgs#devenv
-      - uses: Swatinem/rust-cache@v2
+      - if: steps.gate.outputs.changed == 'true'
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target/devenv"
           cmd-format: devenv shell -- {0}
 
       - name: cargo check (regenerates stubs from the new proto)
         id: check
+        if: steps.gate.outputs.changed == 'true'
         continue-on-error: true
         run: |
           set -uo pipefail
@@ -91,6 +120,7 @@ jobs:
           tail -60 /tmp/cargo-check.txt || true
 
       - name: Compose PR body
+        if: steps.gate.outputs.changed == 'true'
         env:
           TAG: ${{ steps.resolve.outputs.tag }}
           BUF_RESULT: ${{ steps.buf.outputs.result }}
@@ -135,6 +165,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Create or update PR
+        if: steps.gate.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           branch: automation/openshell-proto-revendor
