@@ -2,10 +2,14 @@
 //! CI-filtered tests use `#[ignore]` markers with `ci-openshell:` and
 //! `ci_openshell_` names. Manual probes stay outside that filter.
 
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+
+use futures::FutureExt;
 use right_openshell::managed_profiles::{
     EnsureOutcome, delete_profile, ensure_profiles, get_profile, github,
 };
-use right_openshell::openshell::{connect_grpc, default_mtls_dir};
+use right_openshell::openshell::{connect_grpc, default_mtls_dir, ensure_provider_policy_loaded};
 
 /// Raw-tunnel base policy mirroring production `permissive`: 443 and 80 reachable
 /// as `tls: skip`, so a provider's terminated L7 endpoint is the active policy
@@ -20,6 +24,51 @@ network_policies:
       - { host: "0.0.0.0/0", port: 80, tls: skip }
     binaries: [{ path: "**" }]
 "#;
+
+fn raw_tunnel_policy_file() -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().expect("create policy tempdir");
+    let path = tmp.path().join("policy.yaml");
+    std::fs::write(&path, RAW_TUNNEL_BASE_POLICY).expect("write test policy");
+    (tmp, path)
+}
+
+fn output_has_http_200(output: &str) -> bool {
+    output.lines().any(|line| {
+        line.starts_with("HTTP/")
+            && line
+                .split_ascii_whitespace()
+                .nth(1)
+                .is_some_and(|status| status == "200")
+    })
+}
+
+async fn cleanup_provider(provider_name: &str, sandbox_name: Option<&str>) {
+    use right_openshell::providers::{delete_provider, detach_from_sandbox};
+
+    let Ok(mut client) = connect_grpc(&default_mtls_dir()).await else {
+        return;
+    };
+    if let Some(sandbox_name) = sandbox_name {
+        let _ = detach_from_sandbox(&mut client, sandbox_name, provider_name).await;
+    }
+    let _ = delete_provider(&mut client, provider_name).await;
+    right_openshell::test_cleanup::unregister_test_provider(provider_name);
+}
+
+async fn with_provider_cleanup<Fut>(
+    provider_name: &str,
+    sandbox_name: Arc<Mutex<Option<String>>>,
+    fut: Fut,
+) where
+    Fut: Future<Output = ()>,
+{
+    let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+    let sandbox_name = sandbox_name.lock().expect("sandbox name lock").clone();
+    cleanup_provider(provider_name, sandbox_name.as_deref()).await;
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
 
 #[test]
 fn raw_tunnel_base_policy_keeps_endpoint_list_nested() {
@@ -68,6 +117,74 @@ async fn ci_openshell_github_imports_full_access_and_is_idempotent() {
     delete_profile(&mut client, "right-github")
         .await
         .expect("cleanup delete");
+}
+
+#[tokio::test]
+#[ignore = "ci-openshell: requires RIGHT_TEST_GH_TOKEN"]
+async fn ci_openshell_github_gh_api_user_succeeds() {
+    use right_openshell::providers::{ProviderSpec, attach_to_sandbox, create_provider};
+    use right_openshell::test_support::TestSandbox;
+
+    let token = match std::env::var("RIGHT_TEST_GH_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => {
+            eprintln!("skip: set RIGHT_TEST_GH_TOKEN");
+            return;
+        }
+    };
+
+    let provider_name = format!("rightprobe-{}-github-api", std::process::id());
+    let sandbox_name = Arc::new(Mutex::new(None));
+    cleanup_provider(&provider_name, None).await;
+
+    with_provider_cleanup(&provider_name, sandbox_name.clone(), async {
+        let mut client = connect_grpc(&default_mtls_dir()).await.unwrap();
+        ensure_profiles(&mut client, &[github()])
+            .await
+            .expect("ensure right-github profile");
+
+        let mut creds = std::collections::HashMap::new();
+        creds.insert("GITHUB_TOKEN".to_string(), token);
+        create_provider(
+            &mut client,
+            &ProviderSpec {
+                name: provider_name.clone(),
+                type_: "right-github".into(),
+                credentials: creds,
+                config: Default::default(),
+            },
+        )
+        .await
+        .expect("create provider");
+        right_openshell::test_cleanup::register_test_provider(&provider_name, None);
+
+        let (_policy_tmp, policy_path) = raw_tunnel_policy_file();
+        let sandbox =
+            TestSandbox::create_with_policy("ci-openshell-github-api-user", RAW_TUNNEL_BASE_POLICY)
+                .await;
+        *sandbox_name.lock().expect("sandbox name lock") = Some(sandbox.name().to_string());
+        attach_to_sandbox(&mut client, sandbox.name(), &provider_name)
+            .await
+            .expect("attach provider");
+        right_openshell::test_cleanup::register_test_provider_attachment(
+            &provider_name,
+            sandbox.name(),
+        );
+        ensure_provider_policy_loaded(sandbox.name(), &policy_path)
+            .await
+            .expect("provider policy loaded");
+
+        let (out, code) = sandbox
+            .exec_with_timeout(&["gh", "api", "/user", "--silent", "-i"], 120)
+            .await;
+
+        assert_eq!(code, 0, "gh api /user should exit successfully");
+        assert!(
+            output_has_http_200(&out),
+            "gh api /user did not return HTTP 200"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
