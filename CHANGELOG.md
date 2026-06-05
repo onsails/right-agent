@@ -1,4 +1,10 @@
 # Changelog
+## [0.3.2] - 2026-06-05
+
+- Provider credentials are now reliably injected in long-running sandboxes. Previously, the `right-github` provider's composed OpenShell policy was never confirmed loaded in the running sandbox — credentials fell through to the raw tunnel rule and were sent as the literal placeholder string, causing 401 errors from GitHub. Generic providers were also folded directly into `policy.yaml` as a separate source of truth. All providers now use OpenShell profile-backed gateway composition, and `right up` confirms the composed policy is loaded in the sandbox after every provider attach or reconcile. Existing generic providers are migrated automatically on the next `right up`; no changes to `agent.yaml` are required.
+
+- The sandbox supervisor now reads the real OpenShell sandbox phase before deciding to degrade, not just gateway reachability. A sandbox in `Phase: Error` is surfaced as unavailable to users in Telegram rather than silently failing. Starting sandboxes are classified separately from running ones so they are not prematurely treated as ready, and error state is preserved through recovery retries instead of being discarded.
+
 ## [0.3.1] - 2026-06-05
 
 
