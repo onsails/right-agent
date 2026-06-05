@@ -251,11 +251,11 @@ into `AgentSettings.model` (an `Arc<ArcSwap<...>>`) and
 `AgentSettings.debug` (an `Arc<AtomicBool>`) without restarting. A
 `sandbox.providers`-only change (Stage B of the diff) is classified
 `ProvidersReload`: it applies model/debug in-memory and signals an async
-`sandbox_supervisor::hot_reconcile_providers` (provider-aware policy
-re-apply via `openshell policy set --wait` + gateway attach/detach
-reconcile) instead of restarting. The Telegram `/model` and `/debug`
-commands exploit the hot-reload path — in-flight CC subprocesses keep
-their old flags; the next invocation in any chat picks up the new value.
+`sandbox_supervisor::hot_reconcile_providers` (ensure managed/generic
+profiles, gateway attach/detach reconcile, and OpenShell policy reload for
+provider-profile composition) instead of restarting. The Telegram `/model`
+and `/debug` commands exploit the hot-reload path — in-flight CC subprocesses
+keep their old flags; the next invocation in any chat picks up the new value.
 Adding more hot-reloadable fields requires extending the two-stage diff in
 `crates/bot/src/config_watcher.rs::diff_classify`.
 

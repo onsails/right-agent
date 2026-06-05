@@ -622,10 +622,11 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     {
         // The watcher has already advanced past this change, so there is no
         // automatic retry elsewhere: bound a few in-task attempts to ride out a
-        // transient gateway hiccup during `policy set --wait` / reconcile. The
-        // on-disk policy is durable (folded into every regen), so persistent
-        // failure only leaves the *live* sandbox stale until the next restart or
-        // another re-save of agent.yaml.
+        // transient gateway hiccup during profile ensure, attach/detach, or
+        // provider-profile policy reload. The durable state remains in
+        // agent.yaml and the gateway profiles, so persistent failure leaves the
+        // live sandbox's attachment/composition state stale until the next
+        // restart or another re-save of agent.yaml.
         const HOT_RECONCILE_BACKOFFS_MS: [u64; 2] = [500, 2000];
         let mut providers_rx = providers_rx;
         let agent = args.agent.clone();
@@ -636,7 +637,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             loop {
                 // Don't start a fresh reconcile once shutdown begins: a queued
                 // providers change is superseded by the restart's own bring_up,
-                // which re-applies the provider-aware policy from scratch.
+                // which re-ensures profiles, reconciles attachments, and reloads
+                // provider-profile composition.
                 let new_cfg = tokio::select! {
                     biased;
                     _ = shutdown.cancelled() => break,
@@ -659,7 +661,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         Ok(()) => break,
                         Err(e) if attempt >= HOT_RECONCILE_BACKOFFS_MS.len() => {
                             tracing::warn!(error = %format!("{e:#}"),
-                                "providers hot-reconcile failed after retries; live sandbox policy stays stale until next bot restart — re-edit sandbox.providers or restart to retry");
+                                "providers hot-reconcile failed after retries; live sandbox provider attachments/composition may stay stale until next bot restart — re-edit sandbox.providers or restart to retry");
                             break;
                         }
                         Err(e) => {

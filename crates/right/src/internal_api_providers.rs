@@ -756,12 +756,10 @@ pub(crate) async fn handle_provider_create(
     }
 
     if req.type_ == "generic" {
-        // Generic providers append a `- host: <upstream_host>` stanza to
-        // `network_policies.outbound.endpoints` for HTTPS interception +
-        // placeholder substitution. Restrictive mode renders only
-        // `network_policies.anthropic.endpoints` (Anthropic/Claude allowlist)
-        // and intentionally has no outbound section to extend — so generic
-        // providers are incompatible with restrictive mode.
+        // Generic providers use authored OpenShell profiles for HTTPS
+        // interception + placeholder substitution. Restrictive mode has not
+        // been validated for those composed outbound endpoints, so generic
+        // providers stay permissive-only.
         if matches!(
             cfg.network_policy,
             right_agent_config::NetworkPolicy::Restrictive
@@ -1569,7 +1567,7 @@ mod insert_tests {
 /// `agents/<agent>/agent.yaml`. Keying the lock on `agent` alone (not on
 /// `(agent, name)`) serializes those RMWs and prevents a last-write-wins
 /// race that would otherwise drop one of two concurrently-created
-/// providers from agent.yaml while leaving the gateway and policy.yaml
+/// providers from agent.yaml while leaving gateway provider/profile state
 /// already mutated for it (an orphan).
 ///
 /// Callers MUST invoke `validate_name(agent, name)` (where applicable)
@@ -1690,9 +1688,8 @@ pub(crate) async fn handle_provider_config_update(
             reason: "config-update only valid on generic providers".into(),
         });
     }
-    // Same rationale as `handle_provider_create`: generic providers cannot
-    // be edited under restrictive policy because the outbound endpoints
-    // section needed for placeholder substitution is not rendered.
+    // Same rationale as `handle_provider_create`: generic provider profiles
+    // are only supported under the permissive network policy.
     if matches!(
         cfg.network_policy,
         right_agent_config::NetworkPolicy::Restrictive
@@ -2071,9 +2068,8 @@ pub(crate) async fn handle_provider_remove(
     }
 
     // Gateway state is gone. The agent.yaml entry would now be ghost
-    // data — remove it first, then strip the policy stanza. If the
-    // policy strip fails the user sees a degraded-state error, but
-    // they don't end up with a permanently stranded agent.yaml row.
+    // data — remove it first, then run legacy folded-policy cleanup. New
+    // composition-based policies have no stanza, so the strip is a no-op.
     remove_provider_from_yaml(&state.agents_dir, &req.agent, &req.name)
         .map_err(|e| ProviderApiError::AgentYamlWrite(format!("{e:#}")))?;
 
@@ -2232,9 +2228,8 @@ mod sandbox_mode_tests {
         let tmp = tempfile::tempdir().unwrap();
         let agent_dir = tmp.path().join("agents").join("hostagent");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        // Restrictive network policy renders only the Anthropic allowlist
-        // sub-section — there is no outbound endpoints list to extend with
-        // generic provider stanzas, so creation must be refused up-front.
+        // Generic provider profile composition is only supported under the
+        // permissive network policy, so creation must be refused up-front.
         std::fs::write(
             agent_dir.join("agent.yaml"),
             "network_policy: restrictive\n\

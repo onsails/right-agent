@@ -19,9 +19,11 @@ The feature is sandbox-only. `sandbox.mode = none` agents cannot
 receive provider env vars; the bot rejects `/providers` for them.
 
 Generic providers additionally require `network_policy: permissive`.
-Restrictive mode renders only `network_policies.anthropic.endpoints`
-(the Anthropic/Claude allowlist) and has no outbound section to extend
-with `- host: <upstream_host>` stanzas for placeholder substitution.
+Right authors OpenShell provider profiles for generic upstream hosts and
+relies on those profile endpoints being composed into the sandbox's
+outbound policy for placeholder substitution. Restrictive mode has not
+been validated for generic provider-profile composition and is rejected
+up-front.
 `handle_provider_create` and `handle_provider_config_update` reject
 generic operations with `network_policy_forbids_generic` when the agent
 is in restrictive mode. Built-in providers are unaffected — they do not
@@ -78,19 +80,17 @@ credential. This is a documented OpenShell limitation (see the
 — endpoint-scoped credential injection is roadmap, not implemented);
 tracked in onsails/right-agent#92.
 
-**Endpoint ordering is load-bearing.** OpenShell evaluates
+**Endpoint ordering is load-bearing.** OpenShell evaluates the effective
 `network_policies.outbound.endpoints` in order. In permissive mode the
 hostless `tls: skip` catch-all (ports 443/80, broad `allowed_ips`) would,
-if it appeared first, IP-match and raw-tunnel every provider host —
-stranding the placeholder exactly as above. Provider host L7 endpoints
-are therefore emitted **before** the catch-all: the
-`# right-providers: insert-above` anchor sits at the **top** of the
-endpoints list in `permissive_endpoints()`
-(`crates/right-codegen/src/policy.rs`), so appended stanzas precede the
-catch-all and win the match. IP carve-out alone does not help — removing
-the covering range while the catch-all stays first turns the leak into a
-CONNECT 403. `permissive_provider_endpoint_precedes_tls_skip_catch_all`
-enforces this.
+if it appeared before provider-profile L7 endpoints, IP-match and
+raw-tunnel every provider host — stranding the placeholder exactly as
+above. Right's generated `policy.yaml` is intentionally provider-free:
+there is no `# right-providers: insert-above` anchor and no folded
+provider stanza. Ordering now comes from OpenShell's provider-profile
+composition, and Right forces that composition to reload after profile or
+attachment changes by reapplying the base policy with `openshell policy
+set --wait`.
 
 ## State of truth split
 
@@ -101,6 +101,7 @@ Two stores, both authoritative for different things:
 | Per-agent list of attached names  | `agent.yaml::sandbox::providers: [...]`    |
 | Credential bytes                  | OpenShell gateway (write-once via Right)   |
 | Non-secret provider config        | OpenShell gateway                          |
+| Managed/generic provider profiles | OpenShell gateway                          |
 | Sandbox attachment state          | OpenShell gateway (`Sandbox.providers`)    |
 
 `agent.yaml` wins on drift: the reconciler attaches anything in the
@@ -132,108 +133,65 @@ missing }` per agent which is surfaced to the dashboard.
 
 ## Policy interaction
 
-Two distinct paths into `policy.yaml`:
+Right no longer folds provider endpoints into `policy.yaml`. Every
+generation callsite renders the provider-free base policy with
+`right_codegen::policy::generate_policy(...)`; the policy tests assert
+that permissive policy output contains no `right-providers` anchor or
+managed provider stanza.
 
-**Path A — built-in providers.** Right does not mutate `policy.yaml`.
-The OpenShell gateway (v0.0.50+) contributes the profile's endpoints to
-the effective sandbox policy automatically when a provider is attached.
-Right's `policy.yaml` stays unchanged.
+Built-in providers use OpenShell's existing profiles. Generic providers
+use Right-authored OpenShell profiles whose IDs are derived from the
+gateway provider name (`right-provider-...`). The gateway provider's
+`type` is the profile ID, while the dashboard and `agent.yaml` continue
+to expose the provider as `generic`.
 
-**Path B — generic providers.** Right owns the `policy.yaml` mutation.
-On create or upstream-host change:
+On create or upstream-host/config change, Right authors/imports the
+generic provider profile, creates or updates the gateway provider against
+that profile ID, and calls `ensure_provider_policy_loaded(sandbox,
+policy_path)`. That helper reapplies the current base `policy.yaml` with
+`openshell policy set --wait`; it does not write provider stanzas. The
+reload is required because OpenShell provider-profile composition is not
+fully loaded by attach/import alone on the observed v0.0.56 behavior.
 
-1. Load current `policy.yaml`.
-
-The new stanza is inserted at the sentinel anchor
-`# right-providers: insert-above` emitted at the **top** of
-`network_policies.outbound.endpoints` by `generate_policy(Permissive)`.
-The anchor's position is load-bearing twice over: it pins generic
-provider stanzas to the outbound (permissive) section (without it, a
-naive "find first `endpoints:`" heuristic would land in whichever
-sub-section appears first under `network_policies:`), and it places them
-*before* the hostless `tls: skip` catch-all so the proxy TLS-terminates
-and substitutes (see "Endpoint ordering is load-bearing" above).
-
-2. Look for an existing `endpoints[]` entry matching `upstream_host`.
-   - Absent → append a new stanza: `host: <host>`, `port: 443`,
-     `protocol: rest`, `access: full`, optional `path: <prefix>`
-     (OpenShell rejects `domain:` as an unknown endpoint field). Tag with
-     a YAML comment
-     `# managed-by: right-providers:<provider-name>` so future strip
-     operations can find it.
-   - Present with `protocol: rest` → no-op.
-   - Present with `tls: skip` → refuse the operation with
-     `PolicyConflict { kind: "raw-tunnel" }`. Right does not
-     auto-rewrite; the user must resolve the conflict.
-   - Present with `tls: terminate` (deprecated but functional) →
-     no-op.
-3. Write `policy.yaml`.
-4. Hot-apply via `openshell policy set --wait`. This is the
-   `Regenerated(SandboxPolicyApply)` codegen category — **never**
-   `SandboxRecreate`. New endpoints are hot-reloadable.
-
-On remove: if no other generic provider on the same agent uses the
-same `upstream_host`, strip the tagged stanza and hot-apply. The strip
-is idempotent — if the tag is absent, the policy is returned
-unchanged.
-
-### Durability across full regen
-
-The Path-B on-add mutation above patches a single stanza onto the live
-policy, but a full `policy.yaml` regeneration (bot start, `right
-restart`, host reboot, the supervisor recovery loop, or a
-`config_watcher` restart) rebuilds the file from scratch. To stop
-generic-provider stanzas from being wiped on every regen — which strands
-the credential placeholder on a raw tunnel and surfaces as an upstream
-401 — **every** full regen MUST fold providers back in via
-`right_codegen::policy::apply_provider_stanzas(&generate_policy(...),
-providers)`. Callsites: `sandbox_supervisor::bring_up_sandbox`,
-`right_codegen::pipeline::run_single_agent_codegen`, and the
-`right/src/main.rs` init helpers (`write_bootstrap_right_mcp_policy`,
-`apply_exact_right_mcp_policy_for_sandbox`). `apply_provider_stanzas`
-is a no-op on a restrictive (anchorless) policy and idempotent on an
-already-folded one. The network policy is thus reconstructable from
-`agent.yaml` alone.
-
-Every regen callsite renders through
-`right_codegen::policy::generate_provider_aware_policy(...)` (the single
-`generate_policy` + `apply_provider_stanzas` composition) rather than
-calling `generate_policy` bare.
+On remove, Right detaches and deletes the gateway provider, removes the
+`agent.yaml` row, then runs the legacy folded-policy strip path. New
+composition-based policies have no tagged stanza, so this is normally a
+no-op; it exists to clean up already-deployed policies that still contain
+`# managed-by: right-providers:<provider-name>` stanzas.
 
 A `sandbox.providers`-only edit to `agent.yaml` no longer forces a
 restart: `config_watcher` classifies it `ProvidersReload` and signals
-`sandbox_supervisor::hot_reconcile_providers`, which re-renders the
-provider-aware policy with resolved host IPs, hot-applies it (`openshell
-policy set --wait`), and reconciles gateway attach/detach. The lib.rs
-consumer retries the hot path with bounded backoff. There is no periodic
-provider reconcile, so if it still fails the *live* sandbox policy stays
-stale until the next bot restart or sandbox bring-up — re-edit
-`sandbox.providers` or restart to retry. The *on-disk* policy is always
-correct (every full regen folds providers back in), so a restart fully
-self-heals.
+`sandbox_supervisor::hot_reconcile_providers`, which ensures generic
+profiles exist, reconciles gateway attach/detach, and reloads
+provider-profile composition with `openshell policy set --wait`. The
+lib.rs consumer retries the hot path with bounded backoff. There is no
+periodic provider reconcile, so persistent failure can leave the live
+sandbox's attachment/composition state stale until the next bot restart
+or sandbox bring-up — re-edit `sandbox.providers` or restart to retry.
 
 ## Lifecycle
 
-**Create.** Generic providers run: write policy.yaml (with snapshot)
-→ hot-apply → `CreateProvider` → `Sandbox.provider.attach` → write
-`agent.yaml`. Built-in providers skip the policy steps. Any failure
-triggers ordered rollback: a failed `attach` removes the freshly
+**Create.** Generic providers run: author/import profile →
+`CreateProvider` with the profile ID as gateway type →
+`Sandbox.provider.attach` → `ensure_provider_policy_loaded` → write
+`agent.yaml`. Built-in providers skip the profile-authoring step. Any
+failure triggers ordered rollback: a failed `attach` removes the freshly
 created provider; a failed `agent.yaml` write triggers best-effort
-detach + delete; a failed policy hot-apply restores the snapshotted
-policy.
+detach + delete.
 
 **Rotate.** `UpdateProvider` only. No sandbox restart. The gateway
 issues a new placeholder version; the next outbound request from the
 sandbox carries the new placeholder and resolves to the new
 credential.
 
-**Edit non-secret config.** Generic providers only. If
-`upstream_host` changed, strip the old stanza and append the new one
-(with snapshot). Then `UpdateProvider`. Then write `agent.yaml`.
+**Edit non-secret config.** Generic providers only. Re-author/import the
+profile, `UpdateProvider`, `ensure_provider_policy_loaded`, then write
+`agent.yaml`. The `env_var` is stable after creation unless a credential
+is supplied through a rotate/update path that can update gateway
+credentials consistently.
 
-**Remove.** `Sandbox.provider.detach` → `DeleteProvider` → if generic
-and no other provider on the agent uses the same host, strip the
-policy stanza and hot-apply. Then write `agent.yaml`.
+**Remove.** `Sandbox.provider.detach` → `DeleteProvider` → remove the
+`agent.yaml` row → run legacy folded-policy cleanup for generic providers.
 
 **Ghost (post-restore).** When `agent.yaml` lists a provider that the
 gateway doesn't have (typical after backup/restore to a new host),
@@ -297,8 +255,17 @@ before the reconciler attaches providers to agent sandboxes.
 - No auto-GC in v1: if `right-github` is present on the gateway but no
   agent is using it, it stays. Cleanup is a manual operator action.
 
-**Path A purity.** Like all built-in providers, `right-github` follows
-Path A: the gateway contributes its endpoints to the effective sandbox policy
-automatically on attach. `policy.yaml` for each agent is never touched.
-Git LFS is a separate sandbox-tooling concern and is out of scope for this
-subsystem.
+**`right-provider-*`** profiles are per-generic-provider authored
+profiles. The stable profile ID is derived from the gateway provider name
+with a sanitized slug plus hash suffix so two provider names that
+normalize to the same slug still get distinct profile IDs. Each profile
+contains the generic provider's L7 endpoint (`host`, port 443,
+`protocol: rest`, optional path prefix) and credential env-var shape.
+Right imports these profiles before create/update and at `right up` for
+already-configured agents.
+
+**Provider-profile purity.** Like all built-in providers, `right-github`
+relies on the gateway to contribute its endpoints to the effective sandbox
+policy automatically on attach. `policy.yaml` for each agent is never
+touched. Git LFS is a separate sandbox-tooling concern and is out of scope
+for this subsystem.
