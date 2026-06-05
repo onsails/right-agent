@@ -24,6 +24,11 @@ one Telegram bot per agent. each chat – a dm, a group, a topic inside a group 
 
 it remembers what matters, and it can act on your behalf without you handing it the keys to your machine. the choices are already made – sandboxed by default, Telegram is your only console, many agents on one Claude subscription. the box is closed; you just use it.
 
+> [!WARNING]
+> **today every agent runs on Claude Code (`claude -p`), so you need a Claude subscription.** from June 15 2026, programmatic use like this draws from your plan's separate monthly Agent SDK credit — Pro $20 · Max 5x $100 · Max 20x $200 — kept apart from your interactive chat limits; claim it once and it refreshes each billing cycle.
+>
+> **v0.4.0 is in the works: bring any provider and any model, self-hosted included** — so a Claude subscription becomes one option rather than a requirement.
+
 ## <img src="assets/section-mark.svg" height="20" alt=""> what you get
 
 **credentials stay outside the box.** in a typical agent setup the agent runs as your user – it can read your ssh keys, your aws and gcloud configs, every mcp token, every `.env` under your home. docker helps with the filesystem; it doesn't help with mcp credentials, which get forwarded into the container as environment variables the agent can read. right agent runs each agent in its own sandbox, and the secret bytes never enter it. mcp tokens and provider keys live on the host; the sandbox sees only opaque placeholders, substituted at the outbound proxy on each request. credential values are never written to host logs. this is the difference between "another agent runner" and an agent you can trust with live access.
