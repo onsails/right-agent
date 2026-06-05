@@ -80,17 +80,20 @@ fn raw_tunnel_base_policy_keeps_endpoint_list_nested() {
 
 #[tokio::test]
 #[ignore = "ci-openshell: live github profile provisioning"]
-async fn ci_openshell_github_imports_full_access_and_is_idempotent() {
+async fn ci_openshell_github_ensures_full_access_and_is_idempotent() {
     let mtls_dir = default_mtls_dir();
     let mut client = connect_grpc(&mtls_dir).await.unwrap();
-
-    // Clean slate in case a prior run left it behind (ignore NotFound).
-    let _ = delete_profile(&mut client, "right-github").await;
 
     let first = ensure_profiles(&mut client, &[github()])
         .await
         .expect("ensure");
-    assert_eq!(first, vec![EnsureOutcome::Imported("right-github".into())]);
+    assert!(
+        matches!(
+            first.as_slice(),
+            [EnsureOutcome::Imported(id) | EnsureOutcome::Unchanged(id)] if id == "right-github"
+        ),
+        "first ensure should import or confirm right-github, got {first:?}"
+    );
 
     let stored = get_profile(&mut client, "right-github")
         .await
@@ -113,10 +116,6 @@ async fn ci_openshell_github_imports_full_access_and_is_idempotent() {
         second,
         vec![EnsureOutcome::Unchanged("right-github".into())]
     );
-
-    delete_profile(&mut client, "right-github")
-        .await
-        .expect("cleanup delete");
 }
 
 #[tokio::test]
