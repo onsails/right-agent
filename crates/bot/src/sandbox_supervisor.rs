@@ -315,85 +315,48 @@ pub(crate) async fn bring_up_sandbox(
     // Reconcile attached providers with the `sandbox.providers` list in agent.yaml.
     // Attaches declared providers that exist on the gateway but are not yet attached,
     // and detaches stale `<agent>-*` entries that were removed from the config.
-    // Non-fatal: a reconcile failure is logged but never prevents the bot from starting.
     if let Some(sandbox_cfg) = config.sandbox.as_ref() {
-        let mtls_dir = right_openshell::openshell::default_mtls_dir();
-        match right_openshell::openshell::connect_grpc(&mtls_dir).await {
-            Ok(mut client) => {
-                let profile_outcomes = match ensure_generic_provider_profiles_for_config(
-                    &mut client,
-                    agent,
-                    config,
-                )
+        let profile_outcomes =
+            ensure_generic_provider_profiles_for_config(&mut grpc_client, agent, config).await?;
+        let declared: Vec<String> = sandbox_cfg
+            .providers
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        let report = right_openshell::providers::reconcile_for_sandbox(
+            &mut grpc_client,
+            &sandbox,
+            agent,
+            &declared,
+        )
+        .await
+        .map_err(|e| miette::miette!("provider reconcile failed: {e:#}"))?;
+        tracing::info!(
+            agent = %agent,
+            attached = ?report.attached,
+            detached = ?report.detached,
+            missing = ?report.missing,
+            "provider reconcile complete"
+        );
+        if !report.errors.is_empty() {
+            return Err(miette::miette!(
+                "provider reconcile had per-provider errors: {:?}",
+                report.errors
+            ));
+        }
+        if provider_policy_reload_needed(&declared, &report, &profile_outcomes) {
+            right_openshell::openshell::ensure_provider_policy_loaded(&sandbox, &policy_path)
                 .await
-                {
-                    Ok(outcomes) => outcomes,
-                    Err(e) => {
-                        tracing::warn!(
-                            agent = %agent,
-                            "generic provider profile ensure failed during startup reconcile: {e:#}"
-                        );
-                        Vec::new()
-                    }
-                };
-                let declared: Vec<String> = sandbox_cfg
-                    .providers
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .collect();
-                match right_openshell::providers::reconcile_for_sandbox(
-                    &mut client,
-                    &sandbox,
-                    agent,
-                    &declared,
-                )
-                .await
-                {
-                    Ok(report) => {
-                        tracing::info!(
-                            agent = %agent,
-                            attached = ?report.attached,
-                            detached = ?report.detached,
-                            missing = ?report.missing,
-                            "provider reconcile complete"
-                        );
-                        if !report.errors.is_empty() {
-                            tracing::warn!(
-                                agent = %agent,
-                                errors = ?report.errors,
-                                "provider reconcile had per-provider errors; will retry on next pass"
-                            );
-                        }
-                        if provider_policy_reload_needed(&declared, &report, &profile_outcomes) {
-                            match right_openshell::openshell::ensure_provider_policy_loaded(
-                                &sandbox,
-                                &policy_path,
-                            )
-                            .await
-                            {
-                                Ok(()) => tracing::info!(
-                                    agent = %agent,
-                                    sandbox = %sandbox,
-                                    "provider-profile composition loaded"
-                                ),
-                                Err(e) => tracing::warn!(
-                                    agent = %agent,
-                                    sandbox = %sandbox,
-                                    "provider-profile composition reload failed during startup reconcile: {e:#}"
-                                ),
-                            }
-                        }
-                    }
-                    Err(e) => tracing::warn!(
-                        agent = %agent,
-                        "provider reconcile failed: {e:#}"
-                    ),
-                }
-            }
-            Err(e) => tracing::warn!(
+                .map_err(|e| {
+                    miette::miette!(
+                        "provider-profile composition reload failed during startup reconcile: {e:#}"
+                    )
+                })?;
+            tracing::info!(
                 agent = %agent,
-                "could not connect to openshell gateway for provider reconcile: {e:#}"
-            ),
+                sandbox = %sandbox,
+                "provider-profile composition loaded"
+            );
         }
     }
 
@@ -480,11 +443,10 @@ pub(crate) async fn hot_reconcile_providers(
     // in `report.errors` (the call itself returned Ok). Surface them — the
     // reconcile is "complete" but some providers may not match declared state.
     if !report.errors.is_empty() {
-        tracing::warn!(
-            agent = %agent,
-            errors = ?report.errors,
-            "providers hot-reconcile had per-provider errors; re-edit sandbox.providers or restart to retry"
-        );
+        return Err(miette::miette!(
+            "providers hot-reconcile had per-provider errors: {:?}",
+            report.errors
+        ));
     }
     if provider_policy_reload_needed(&declared, &report, &profile_outcomes) {
         right_openshell::openshell::ensure_provider_policy_loaded(resolved_sandbox, &policy_path)
@@ -851,5 +813,29 @@ mod tests {
         assert!(
             format!("{err:#}").contains("generic provider right-acme is missing generic config")
         );
+    }
+
+    #[test]
+    fn provider_policy_reload_needed_when_declared_or_detached() {
+        let unchanged = Vec::new();
+        let empty = right_openshell::providers::ReconcileReport {
+            attached: Vec::new(),
+            detached: Vec::new(),
+            missing: Vec::new(),
+            errors: Vec::new(),
+        };
+        assert!(!provider_policy_reload_needed(&[], &empty, &unchanged));
+
+        assert!(provider_policy_reload_needed(
+            &[String::from("right-gh")],
+            &empty,
+            &unchanged
+        ));
+
+        let detached = right_openshell::providers::ReconcileReport {
+            detached: vec![String::from("right-gh")],
+            ..empty
+        };
+        assert!(provider_policy_reload_needed(&[], &detached, &unchanged));
     }
 }

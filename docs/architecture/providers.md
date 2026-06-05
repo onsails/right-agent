@@ -154,9 +154,11 @@ reload is required because OpenShell provider-profile composition is not
 fully loaded by attach/import alone on the observed v0.0.56 behavior.
 
 On remove, Right detaches and deletes the gateway provider, removes the
-`agent.yaml` row, then runs the legacy folded-policy strip path. New
-composition-based policies have no tagged stanza, so this is normally a
-no-op; it exists to clean up already-deployed policies that still contain
+`agent.yaml` row, and reloads provider-profile composition with
+`ensure_provider_policy_loaded`. Generic providers additionally run the
+legacy folded-policy strip path; new composition-based policies have no
+tagged stanza, so this is normally a no-op. It exists to clean up
+already-deployed policies that still contain
 `# managed-by: right-providers:<provider-name>` stanzas.
 
 A `sandbox.providers`-only edit to `agent.yaml` no longer forces a
@@ -191,7 +193,8 @@ is supplied through a rotate/update path that can update gateway
 credentials consistently.
 
 **Remove.** `Sandbox.provider.detach` → `DeleteProvider` → remove the
-`agent.yaml` row → run legacy folded-policy cleanup for generic providers.
+`agent.yaml` row → reload provider-profile composition. Generic providers
+also run legacy folded-policy cleanup.
 
 **Ghost (post-restore).** When `agent.yaml` lists a provider that the
 gateway doesn't have (typical after backup/restore to a new host),
