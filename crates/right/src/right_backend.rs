@@ -97,6 +97,10 @@ pub(crate) struct ForumTopicThreadParams {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ForumTopicListParams {}
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProviderCapabilitiesParams {}
+
 /// Connection cache keyed by agent name.
 type ConnCache = Arc<DashMap<String, Arc<tokio::sync::Mutex<right_db::Connection>>>>;
 
@@ -237,7 +241,12 @@ impl RightBackend {
             Tool::new(
                 "bootstrap_done",
                 "Signal that bootstrap onboarding is complete. Call this AFTER you have created IDENTITY.md, SOUL.md, and USER.md. The system will verify the files exist. Errors: bootstrap_files_missing (one or more identity files not yet created — see details.missing).",
-                schema_for_type::<CronListParams>(), // empty schema — no params
+                schema_for_type::<CronListParams>(), // empty schema - no params
+            ),
+            Tool::new(
+                "provider_capabilities",
+                "List providers attached to your own sandbox, showing env-var placeholder names only, allowed binaries, valid hosts, and usage hints. Scope is server-enforced, and this tool accepts no arguments. On provider/API 401/403, call this before concluding a credential is invalid because a specific binary/host may be required for gateway substitution.",
+                schema_for_type::<ProviderCapabilitiesParams>(),
             ),
         ]).clone()
     }
@@ -310,6 +319,7 @@ impl RightBackend {
             }
             "forum_topic_list" => self.call_forum_topic_list(agent_name, context, &args).await,
             "bootstrap_done" => self.call_bootstrap_done(agent_name).await,
+            "provider_capabilities" => self.call_provider_capabilities(agent_name, &args).await,
             other => bail!("unknown tool: {other}"),
         }
     }
@@ -1539,6 +1549,81 @@ impl RightBackend {
                 Some(serde_json::json!({ "missing": missing })),
             ))
         }
+    }
+
+    async fn call_provider_capabilities(
+        &self,
+        agent_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        if let Err(e) = serde_json::from_value::<ProviderCapabilitiesParams>(args.clone()) {
+            return Ok(tool_error(
+                "invalid_argument",
+                format!("invalid provider_capabilities params: {e:#}"),
+                None,
+            ));
+        }
+
+        let Some(mtls_dir) = &self.mtls_dir else {
+            let json = serde_json::json!({
+                "providers": [],
+                "note": "This agent has no sandbox; gateway providers are not available."
+            });
+            return Ok(CallToolResult::success(vec![Content::text(
+                json.to_string(),
+            )]));
+        };
+
+        let agent_dir = self.agents_dir.join(agent_name);
+        let sandbox_name = match right_agent::agent::parse_agent_config(&agent_dir)
+            .map_err(|e| anyhow::anyhow!("{e:#}"))
+            .context("provider_capabilities: failed to parse agent config")?
+        {
+            Some(config) => {
+                let explicit_sandbox_name = config.sandbox.as_ref().and_then(|s| s.name.as_deref());
+                right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name)
+            }
+            None => right_openshell::openshell::resolve_sandbox_name(agent_name, None),
+        };
+
+        let mut client = right_openshell::openshell::connect_grpc(mtls_dir)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}"))
+            .context("provider_capabilities: failed to connect to OpenShell gRPC")?;
+
+        let capabilities =
+            match right_openshell::provider_capabilities::provider_capabilities_for_sandbox(
+                &mut client,
+                &sandbox_name,
+            )
+            .await
+            {
+                Ok(capabilities) => capabilities,
+                Err(e) => {
+                    return Ok(tool_error(
+                        "provider_capabilities_failed",
+                        format!("could not read provider capabilities: {e:#}"),
+                        None,
+                    ));
+                }
+            };
+
+        let providers: Vec<serde_json::Value> = capabilities
+            .into_iter()
+            .map(|capability| {
+                serde_json::json!({
+                    "display_name": capability.display_name,
+                    "env_vars": capability.env_vars,
+                    "allowed_binaries": capability.allowed_binaries,
+                    "endpoint_hosts": capability.endpoint_hosts,
+                    "usage_hint": capability.usage_hint,
+                })
+            })
+            .collect();
+        let json = serde_json::json!({ "providers": providers });
+        Ok(CallToolResult::success(vec![Content::text(
+            json.to_string(),
+        )]))
     }
 }
 
