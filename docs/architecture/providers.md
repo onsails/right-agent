@@ -263,9 +263,11 @@ profiles. The stable profile ID is derived from the gateway provider name
 with a sanitized slug plus hash suffix so two provider names that
 normalize to the same slug still get distinct profile IDs. Each profile
 contains the generic provider's L7 endpoint (`host`, port 443,
-`protocol: rest`, optional path prefix) and credential env-var shape.
-Right imports these profiles before create/update and at `right up` for
-already-configured agents.
+`protocol: rest`, optional path prefix), credential env-var shape, and a
+`binaries` entry with `path: "**"`. Without the binary wildcard, OpenShell
+does not match sandbox commands to the provider profile and CONNECT can be
+blocked before placeholder substitution. Right imports these profiles
+before create/update and at `right up` for already-configured agents.
 
 **Provider-profile purity.** Like all built-in providers, `right-github`
 relies on the gateway to contribute its endpoints to the effective sandbox
