@@ -12,6 +12,8 @@ use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
 use thiserror::Error;
 use tonic::transport::Channel;
 
+pub type OpenShellGrpcClient = OpenShellClient<Channel>;
+
 /// All managed-profile errors — FAIL FAST, never swallowed.
 #[derive(Debug, Error)]
 pub enum ManagedProfileError {

@@ -251,7 +251,7 @@ into `AgentSettings.model` (an `Arc<ArcSwap<...>>`) and
 `AgentSettings.debug` (an `Arc<AtomicBool>`) without restarting. A
 `sandbox.providers`-only change (Stage B of the diff) is classified
 `ProvidersReload`: it applies model/debug in-memory and signals an async
-`sandbox_supervisor::hot_reconcile_providers` (ensure managed/generic
+`sandbox_supervisor::hot_reconcile_providers` (ensure generic provider
 profiles, gateway attach/detach reconcile, and OpenShell policy reload for
 provider-profile composition) instead of restarting. The Telegram `/model`
 and `/debug` commands exploit the hot-reload path — in-flight CC subprocesses
