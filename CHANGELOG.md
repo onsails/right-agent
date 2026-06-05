@@ -1,43 +1,9 @@
 # Changelog
 ## [0.3.2] - 2026-06-05
 
+- Provider credentials are now reliably injected in long-running sandboxes. Previously, the `right-github` provider's composed OpenShell policy was never confirmed loaded in the running sandbox — credentials fell through to the raw tunnel rule and were sent as the literal placeholder string, causing 401 errors from GitHub. Generic providers were also folded directly into `policy.yaml` as a separate source of truth. All providers now use OpenShell profile-backed gateway composition, and `right up` confirms the composed policy is loaded in the sandbox after every provider attach or reconcile. Existing generic providers are migrated automatically on the next `right up`; no changes to `agent.yaml` are required.
 
-### Bug Fixes
-
-- **supervisor**: Degrade on sandbox Phase: Error, not just gateway loss
-- **sync**: Report sandbox failure to supervisor on sync-cycle failure
-- **supervisor**: Preserve SandboxError during recovery retries
-- **supervisor**: Classify starting sandboxes separately
-- **providers**: Validate generic profile provisioning inputs
-- **providers**: Keep generic provider profile ids stable and unique
-- **providers**: Rollback generic profile update failures
-- **providers**: Reload composition on reconcile failures
-
-### Documentation
-
-- **providers**: Align architecture with profile composition
-
-### Features
-
-- **providers**: Reconcile profiles before composition reload
-- **providers**: Provision authored profiles for generic providers on up
-- **providers**: Create generic providers from profiles
-
-### Miscellaneous
-
-- Update Cargo.toml dependencies
-
-### Refactor
-
-- **codegen**: Remove provider policy folding
-
-### Testing
-
-- **providers**: Regen drops legacy folded stanzas
-
-### Style
-
-- **fmt**: Apply rustfmt to provider composition follow-ups
+- The sandbox supervisor now reads the real OpenShell sandbox phase before deciding to degrade, not just gateway reachability. A sandbox in `Phase: Error` is surfaced as unavailable to users in Telegram rather than silently failing. Starting sandboxes are classified separately from running ones so they are not prematurely treated as ready, and error state is preserved through recovery retries instead of being discarded.
 
 ## [0.3.1] - 2026-06-05
 
