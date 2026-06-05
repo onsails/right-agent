@@ -1,4 +1,44 @@
 # Changelog
+## [0.3.2] - 2026-06-05
+
+
+### Bug Fixes
+
+- **supervisor**: Degrade on sandbox Phase: Error, not just gateway loss
+- **sync**: Report sandbox failure to supervisor on sync-cycle failure
+- **supervisor**: Preserve SandboxError during recovery retries
+- **supervisor**: Classify starting sandboxes separately
+- **providers**: Validate generic profile provisioning inputs
+- **providers**: Keep generic provider profile ids stable and unique
+- **providers**: Rollback generic profile update failures
+- **providers**: Reload composition on reconcile failures
+
+### Documentation
+
+- **providers**: Align architecture with profile composition
+
+### Features
+
+- **providers**: Reconcile profiles before composition reload
+- **providers**: Provision authored profiles for generic providers on up
+- **providers**: Create generic providers from profiles
+
+### Miscellaneous
+
+- Update Cargo.toml dependencies
+
+### Refactor
+
+- **codegen**: Remove provider policy folding
+
+### Testing
+
+- **providers**: Regen drops legacy folded stanzas
+
+### Style
+
+- **fmt**: Apply rustfmt to provider composition follow-ups
+
 ## [0.3.1] - 2026-06-05
 
 
