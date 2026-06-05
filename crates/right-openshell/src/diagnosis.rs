@@ -27,6 +27,13 @@ pub enum GatewayCause {
     SandboxError {
         sandbox: String,
     },
+    /// The sandbox exists and the gateway is reachable, but the sandbox is not
+    /// yet READY (provisioning or another non-terminal lifecycle phase). This
+    /// is transient and self-clears; distinct from Unreachable (gateway down)
+    /// and SandboxError (pod failed).
+    SandboxNotReady {
+        sandbox: String,
+    },
     /// Connect failed but probes are inconclusive (race/transient).
     Unreachable,
 }
@@ -74,6 +81,12 @@ impl GatewayCause {
                     "I'll reconnect automatically as soon as the sandbox is back. If it stays down, the sandbox container needs to be restarted in OpenShell -- your data is preserved.",
                 ],
             ),
+            GatewayCause::SandboxNotReady { .. } => (
+                "my secure sandbox is still starting up",
+                vec![
+                    "This clears on its own once the sandbox finishes starting -- I'll connect automatically.",
+                ],
+            ),
             GatewayCause::Unreachable => (
                 "I can't reach the sandbox backend",
                 vec![
@@ -93,6 +106,9 @@ impl GatewayCause {
             }
             GatewayCause::SandboxError { sandbox } => {
                 format!("my secure sandbox '{sandbox}' is in an error state")
+            }
+            GatewayCause::SandboxNotReady { sandbox } => {
+                format!("my secure sandbox '{sandbox}' is still starting up")
             }
             _ => summary.to_owned(),
         };
