@@ -320,7 +320,10 @@ Provider credential management is owned by `right_openshell::providers`.
 Credentials never enter `agent.yaml`, backups, or host logs. Per-agent
 provider list lives in `agent.yaml::sandbox::providers: [...]`. Gateway
 holds the credential bytes. Sandbox sees opaque placeholder env vars
-substituted at the proxy on outbound HTTPS.
+substituted at the proxy on outbound HTTPS. Provider endpoints are
+OpenShell profile composition, never Right-folded `policy.yaml` stanzas;
+Right-owned built-in-derived and generic-authored profiles are provisioned
+through `right_openshell::managed_profiles`.
 
 See: `docs/architecture/providers.md` for the placeholder mechanism,
 substitution flow, reconciler walkthrough, and policy interaction.
@@ -633,7 +636,7 @@ lives in the backend; the UI optimizes for user clarity.
   host.
 - **CLI for**: file upload/download (SSH+tar under the hood), policy
   apply (`openshell policy set`).
-- **Vendored proto compatibility is load-bearing**: OpenShell `v0.0.50`
+- **Vendored proto compatibility is load-bearing**: OpenShell `v0.0.56`
   is the minimum supported version (CLI and gateway).
   `crates/right-openshell/proto/UPSTREAM.md` records the pinned tag and
   fetch date. To bump: run `scripts/vendor-openshell-proto.sh <tag>` and
@@ -657,6 +660,9 @@ lives in the backend; the UI optimizes for user clarity.
   ensure_v2_enabled) MUST go through `right_openshell::providers`. Direct
   gRPC or `openshell provider` CLI invocations from other crates are a
   review-blocking defect.
+- **All ProviderProfile operations** (Get/Lint/Import/Delete) MUST go
+  through `right_openshell::managed_profiles`; generic provider endpoints
+  are authored profiles, not hand-edited policy stanzas.
 
 ## OpenShell Policy Gotchas
 
@@ -667,7 +673,8 @@ lives in the backend; the UI optimizes for user clarity.
   for auto-detect; use `tls: skip` only to explicitly disable
   termination (raw tunnel).
 - `binaries: path: "**"` not `"/sandbox/**"`. Claude lives at
-  `/usr/local/bin/claude`.
+  `/usr/local/bin/claude`; provider profiles missing `binaries` do not
+  match sandbox commands and can block CONNECT before substitution.
 - `protocol: rest` and `access: full` are required only for endpoints
   that intentionally use L7 HTTP policy on terminated plaintext.
 - Permissive public internet endpoints are hostless public `allowed_ips`
