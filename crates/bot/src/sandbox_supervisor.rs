@@ -223,18 +223,14 @@ pub(crate) async fn bring_up_sandbox(
     // here: during recovery that reaches `recovery_step`'s `Err => Break` arm
     // and permanently stops auto-recovery; at startup it crashes the bot
     // instead of starting degraded-and-recovering.
-    let phase_status = match right_openshell::openshell::sandbox_phase_status(
-        &mut grpc_client,
-        &sandbox,
-    )
-    .await
-    {
-        Ok(status) => status,
-        Err(e) => {
-            tracing::warn!(agent = %agent, "sandbox phase query failed: {e:#}");
-            return Ok(Err(diagnose_gateway().await));
-        }
-    };
+    let phase_status =
+        match right_openshell::openshell::sandbox_phase_status(&mut grpc_client, &sandbox).await {
+            Ok(status) => status,
+            Err(e) => {
+                tracing::warn!(agent = %agent, "sandbox phase query failed: {e:#}");
+                return Ok(Err(diagnose_gateway().await));
+            }
+        };
     if let Some(diag) = bring_up_phase_diagnosis(phase_status, &sandbox) {
         return Ok(Err(diag));
     }

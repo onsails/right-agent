@@ -2141,11 +2141,7 @@ mod ensure_loaded_tests {
     use std::time::Duration;
 
     /// Poll `probe` every `interval` up to `max_attempts`; true once it returns true.
-    async fn poll_until_loaded<F, Fut>(
-        mut probe: F,
-        interval: Duration,
-        max_attempts: u32,
-    ) -> bool
+    async fn poll_until_loaded<F, Fut>(mut probe: F, interval: Duration, max_attempts: u32) -> bool
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = bool>,
