@@ -8,6 +8,8 @@
 use std::collections::HashSet;
 
 use crate::openshell_proto::openshell::sandbox::v1::{NetworkPolicyRule, SandboxPolicy};
+use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
+use tonic::transport::Channel;
 
 /// One attached provider's identity and candidate env vars, gathered from the
 /// gateway before correlation. Pure-function input keeps the join testable.
@@ -33,6 +35,16 @@ pub struct ProviderCapability {
     pub endpoint_hosts: Vec<String>,
     /// One-line, agent-readable usage guidance.
     pub usage_hint: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CapabilitiesError {
+    #[error("provider gRPC: {0}")]
+    Provider(#[from] crate::providers::ProviderError),
+    #[error("profile gRPC: {0}")]
+    Profile(#[from] crate::managed_profiles::ManagedProfileError),
+    #[error("policy read: {0}")]
+    Policy(String),
 }
 
 /// `_provider_` prefix OpenShell uses for composed provider rules.
@@ -157,6 +169,58 @@ pub fn correlate_provider_capabilities(
         .collect();
     capabilities.sort_by(|a, b| a.display_name.cmp(&b.display_name));
     capabilities
+}
+
+pub async fn provider_capabilities_for_sandbox(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+) -> Result<Vec<ProviderCapability>, CapabilitiesError> {
+    let provider_names = crate::providers::list_attached(client, sandbox_name).await?;
+    let mut inputs = Vec::with_capacity(provider_names.len());
+
+    for name in provider_names {
+        let provider = crate::providers::get_provider(client, &name).await?;
+        let provider_type = provider.type_;
+        let profile = crate::managed_profiles::get_profile(client, &provider_type).await?;
+
+        let (display_name, candidate_env_vars) = match profile {
+            Some(profile) => {
+                let display_name = if profile.display_name.is_empty() {
+                    provider_type.clone()
+                } else {
+                    profile.display_name
+                };
+                let candidate_env_vars = profile
+                    .credentials
+                    .iter()
+                    .flat_map(|credential| credential.env_vars.iter().cloned())
+                    .collect();
+                (display_name, candidate_env_vars)
+            }
+            None => (provider_type, Vec::new()),
+        };
+
+        inputs.push(ProviderCapabilityInput {
+            name,
+            display_name,
+            candidate_env_vars,
+        });
+    }
+
+    let policy = crate::openshell::get_active_policy(client, sandbox_name)
+        .await
+        .map_err(|e| CapabilitiesError::Policy(format!("{e:#}")))?
+        .unwrap_or_default();
+    let sandbox_id = crate::openshell::resolve_sandbox_id(client, sandbox_name)
+        .await
+        .map_err(|e| CapabilitiesError::Policy(format!("{e:#}")))?;
+    let env_keys: HashSet<String> =
+        crate::providers::get_sandbox_provider_environment(client, &sandbox_id)
+            .await?
+            .into_keys()
+            .collect();
+
+    Ok(correlate_provider_capabilities(&inputs, &policy, &env_keys))
 }
 
 #[cfg(test)]
