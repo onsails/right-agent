@@ -466,9 +466,18 @@ mod tests {
         assert!(p.contains("rightx-foo: bar"));
         assert!(p.contains("hint_outcome"));
         // Composed from the canonical codegen constants (drift fixed).
-        assert!(p.contains("Survey"), "must include PROBE_WRITER_INSTRUCTIONS body");
-        assert!(p.contains("disposable-intermediate"), "must include delegation directive");
-        assert!(p.contains("probe_writer_anchor"), "must include the anchor template markers");
+        assert!(
+            p.contains("Survey"),
+            "must include PROBE_WRITER_INSTRUCTIONS body"
+        );
+        assert!(
+            p.contains("disposable-intermediate"),
+            "must include delegation directive"
+        );
+        assert!(
+            p.contains("probe_writer_anchor"),
+            "must include the anchor template markers"
+        );
     }
 
     #[tokio::test]
