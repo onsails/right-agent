@@ -1030,6 +1030,23 @@ fn insert_provider_entry(original: &str, entry_yaml: &str) -> miette::Result<Str
     Ok(out)
 }
 
+fn generic_provider_profile_and_spec(
+    provider_name: &str,
+    env_var: &str,
+    credential: &str,
+) -> (String, right_openshell::providers::ProviderSpec) {
+    let profile_id = format!("right-{}", provider_name.trim_start_matches("right-"));
+    let mut credentials = std::collections::HashMap::new();
+    credentials.insert(env_var.to_string(), credential.to_string());
+    let spec = right_openshell::providers::ProviderSpec {
+        name: provider_name.to_string(),
+        type_: profile_id.clone(),
+        credentials,
+        config: Default::default(),
+    };
+    (profile_id, spec)
+}
+
 async fn create_generic_provider(
     state: crate::internal_api::InternalState,
     req: ProviderCreateReq,
@@ -1062,52 +1079,25 @@ async fn create_generic_provider(
             .unwrap_or_else(|| std::path::PathBuf::from("policy.yaml")),
     );
 
-    let prior = std::fs::read_to_string(&policy_path)
-        .map_err(|e| ProviderApiError::AgentYamlWrite(format!("read policy: {e:#}")))?;
-    let new_policy = right_codegen::policy::providers_append_checked(
-        &prior,
-        &name,
+    let mut client = open_openshell_client().await?;
+    let (profile_id, spec) =
+        generic_provider_profile_and_spec(&name, &env_var, req.credential.expose_secret());
+    let profile = right_openshell::managed_profiles::author_generic_profile(
+        &profile_id,
         &g.upstream_host,
         g.upstream_path_prefix.as_deref(),
-    )
-    .map_err(|e| match e {
-        right_codegen::policy::PolicyConflict::RawTunnel { host } => {
-            ProviderApiError::PolicyConflict {
-                host,
-                kind: "raw-tunnel".into(),
-            }
-        }
-    })?;
-    let snapshot =
-        right_codegen::contract::write_apply_with_snapshot(&sandbox_name, &policy_path, new_policy)
-            .await
-            .map_err(|e| ProviderApiError::Gateway(format!("policy apply: {e:#}")))?;
+        &header_name,
+        &env_var,
+    );
+    let managed_profile =
+        right_openshell::managed_profiles::ManagedProfile::Authored(Box::new(profile));
+    right_openshell::managed_profiles::ensure_profiles(&mut client, &[managed_profile])
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("profile import: {e:#}")))?;
 
-    let mut client = open_openshell_client().await?;
-    let mut creds = std::collections::HashMap::new();
-    creds.insert(env_var.clone(), req.credential.expose_secret().to_string());
-    let mut config = std::collections::HashMap::new();
-    config.insert("header_name".into(), header_name.clone());
-    if let Some(prefix) = &g.upstream_path_prefix {
-        config.insert("upstream_path_prefix".into(), prefix.clone());
-    }
-    config.insert("upstream_host".into(), g.upstream_host.clone());
-    let spec = right_openshell::providers::ProviderSpec {
-        name: name.clone(),
-        type_: "generic".into(),
-        credentials: creds,
-        config,
-    };
-    if let Err(e) = right_openshell::providers::create_provider(&mut client, &spec).await {
-        if let Err(rollback_err) = snapshot.restore().await {
-            tracing::warn!(
-                provider = %name,
-                original_err = %e,
-                "provider rollback failed: could not restore policy snapshot after create_provider failure: {rollback_err:#}"
-            );
-        }
-        return Err(ProviderApiError::Gateway(format!("{e:#}")));
-    }
+    right_openshell::providers::create_provider(&mut client, &spec)
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
 
     if let Err(attach_err) =
         right_openshell::providers::attach_to_sandbox(&mut client, &sandbox_name, &name).await
@@ -1121,14 +1111,33 @@ async fn create_generic_provider(
                 "provider rollback failed: could not delete provider after attach failure: {rollback_err:#}"
             );
         }
-        if let Err(rollback_err) = snapshot.restore().await {
+        return Err(ProviderApiError::Gateway(format!("{attach_err:#}")));
+    }
+
+    if let Err(ensure_err) =
+        right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path).await
+    {
+        if let Err(rollback_err) =
+            right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
+        {
             tracing::warn!(
                 provider = %name,
-                original_err = %attach_err,
-                "provider rollback failed: could not restore policy snapshot after attach failure: {rollback_err:#}"
+                original_err = %ensure_err,
+                "provider rollback failed: could not detach provider after policy-load failure: {rollback_err:#}"
             );
         }
-        return Err(ProviderApiError::Gateway(format!("{attach_err:#}")));
+        if let Err(rollback_err) =
+            right_openshell::providers::delete_provider(&mut client, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %ensure_err,
+                "provider rollback failed: could not delete provider after policy-load failure: {rollback_err:#}"
+            );
+        }
+        return Err(ProviderApiError::Gateway(format!(
+            "policy load: {ensure_err:#}"
+        )));
     }
 
     let generic_entry = right_agent_config::GenericProvider {
@@ -1162,13 +1171,6 @@ async fn create_generic_provider(
                 "provider rollback failed: could not delete provider after yaml-write failure: {rollback_err:#}"
             );
         }
-        if let Err(rollback_err) = snapshot.restore().await {
-            tracing::warn!(
-                provider = %name,
-                original_err = %e,
-                "provider rollback failed: could not restore policy snapshot after yaml-write failure: {rollback_err:#}"
-            );
-        }
         return Err(ProviderApiError::AgentYamlWrite(format!("{e:#}")));
     }
 
@@ -1181,6 +1183,35 @@ async fn create_generic_provider(
         updated_at: None,
         status: ProviderStatus::Healthy,
     }))
+}
+
+#[cfg(test)]
+mod generic_provider_spec_tests {
+    use super::*;
+
+    #[test]
+    fn generic_provider_spec_uses_profile_id() {
+        let (profile_id, spec) =
+            generic_provider_profile_and_spec("right-acme", "MY_API_KEY", "secret-value");
+
+        assert_eq!(profile_id, "right-acme");
+        assert_eq!(spec.name, "right-acme");
+        assert_eq!(spec.type_, "right-acme");
+        assert_eq!(
+            spec.credentials.get("MY_API_KEY").map(String::as_str),
+            Some("secret-value")
+        );
+        assert!(
+            spec.config.is_empty(),
+            "generic provider record should not carry profile config"
+        );
+
+        let (profile_id, spec) =
+            generic_provider_profile_and_spec("acme", "MY_API_KEY", "secret-value");
+        assert_eq!(profile_id, "right-acme");
+        assert_eq!(spec.name, "acme");
+        assert_eq!(spec.type_, "right-acme");
+    }
 }
 
 #[cfg(test)]
