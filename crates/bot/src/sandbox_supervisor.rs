@@ -79,7 +79,16 @@ fn bring_up_phase_diagnosis(status: SandboxPhaseStatus, sandbox: &str) -> Option
             }
             .diagnose(),
         ),
-        SandboxPhaseStatus::Other { .. } => Some(GatewayCause::Unreachable.diagnose()),
+        // Non-terminal phases (PROVISIONING etc.): the gateway is reachable and
+        // the sandbox exists, it just is not READY yet. Report a recoverable
+        // "still starting up" diagnosis rather than the misleading Unreachable
+        // ("can't reach the backend / check Docker / restart the gateway").
+        SandboxPhaseStatus::Other { .. } => Some(
+            GatewayCause::SandboxNotReady {
+                sandbox: sandbox.to_owned(),
+            }
+            .diagnose(),
+        ),
     }
 }
 
@@ -208,8 +217,24 @@ pub(crate) async fn bring_up_sandbox(
     }
     tracing::info!("OpenShell version preflight passed");
 
-    let phase_status =
-        right_openshell::openshell::sandbox_phase_status(&mut grpc_client, &sandbox).await?;
+    // A phase-query RPC error after a successful connect is transient/
+    // inconclusive (gateway blip, status-shape skew). Degrade recoverably like
+    // the connect_grpc/preflight failures above — never propagate a hard `Err`
+    // here: during recovery that reaches `recovery_step`'s `Err => Break` arm
+    // and permanently stops auto-recovery; at startup it crashes the bot
+    // instead of starting degraded-and-recovering.
+    let phase_status = match right_openshell::openshell::sandbox_phase_status(
+        &mut grpc_client,
+        &sandbox,
+    )
+    .await
+    {
+        Ok(status) => status,
+        Err(e) => {
+            tracing::warn!(agent = %agent, "sandbox phase query failed: {e:#}");
+            return Ok(Err(diagnose_gateway().await));
+        }
+    };
     if let Some(diag) = bring_up_phase_diagnosis(phase_status, &sandbox) {
         return Ok(Err(diag));
     }

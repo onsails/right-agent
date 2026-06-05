@@ -14,9 +14,10 @@ Bot startup:
   ├─ openshell_preflight (right_openshell::preflight::openshell_preflight)
   │   ├─ Spawn `openshell --version` — fail with CliTooOld if < MIN_OPENSHELL_VERSION
   │   └─ gRPC Health → fail with GatewayTooOld if reported version is too old
-  ├─ gRPC GetSandbox → READY?
-  │   ├─ YES: resolve sandbox id + all sandbox-visible host IPs
-  │   └─ NO: startup exits; creating a missing sandbox is an init/migration job
+  ├─ gRPC GetSandbox → sandbox phase
+  │   ├─ READY: resolve sandbox id + all sandbox-visible host IPs
+  │   ├─ ERROR / missing / non-ready: start degraded with a cause-specific diagnosis
+  │   └─ phase-query RPC error: start degraded with a gateway diagnosis
   ├─ Regenerate policy with exact host IPs
   │   ├─ host.openshell.internal resolved inside sandbox via getent ahosts
   │   ├─ IPv4 entries become /32; IPv6 entries become /128
@@ -109,11 +110,12 @@ When the OpenShell gateway is unreachable at bot startup, `bring_up_sandbox` (in
 `crates/bot/src/sandbox_supervisor.rs`) classifies the failure into a
 cause-specific `GatewayDiagnosis` (summary + ordered fixes) via
 `right_openshell::diagnosis::diagnose_gateway()`, which probes `openshell doctor
-check` and `openshell status`. Operator-fixable failures — Docker down, gateway not
-started, broken certs, version too old, sandbox not found, or an inconclusive
-connect failure — return `Ok(Err(diagnosis))` instead of crashing. Genuine
-non-self-healing config errors (e.g. filesystem-policy drift that requires sandbox
-migration) still propagate as hard failures.
+check` and `openshell status`. Recoverable backend/sandbox availability failures —
+Docker down, gateway not started, broken certs, version too old, sandbox not found,
+OpenShell `Phase: Error`, a sandbox that exists but is still starting, or an
+inconclusive connect/phase-query failure — return `Ok(Err(diagnosis))` instead of
+crashing. Genuine non-self-healing config errors (e.g. filesystem-policy drift that
+requires sandbox migration) still propagate as hard failures.
 
 On a degraded start, `lib.rs` logs the diagnosis at ERROR, constructs the
 `SandboxRuntimeHandle` with health `Unavailable`, and continues booting Telegram —

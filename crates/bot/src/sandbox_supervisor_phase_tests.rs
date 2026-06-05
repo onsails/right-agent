@@ -91,7 +91,7 @@ mod bring_up_phase_diagnosis {
     }
 
     #[test]
-    fn other_phase_does_not_claim_sandbox_missing() {
+    fn other_phase_reports_not_ready_not_missing_or_unreachable() {
         let diag = bring_up_phase_diagnosis(
             SandboxPhaseStatus::Other {
                 phase: "PROVISIONING".to_owned(),
@@ -101,12 +101,14 @@ mod bring_up_phase_diagnosis {
         )
         .expect("Other phase must degrade bring-up recoverably");
 
-        assert_ne!(
+        // A provisioning sandbox is neither missing nor unreachable: it exists
+        // and the gateway answered. Asserting SandboxNotReady pins that the copy
+        // is "still starting up", not "create it with right init" / "check Docker".
+        assert_eq!(
             diag.cause,
-            GatewayCause::SandboxNotFound {
+            GatewayCause::SandboxNotReady {
                 sandbox: "test-sandbox-1".to_owned()
             }
         );
-        assert_eq!(diag.cause, GatewayCause::Unreachable);
     }
 }
