@@ -2675,22 +2675,22 @@ fn generic_provider_profiles(
                             entry.name
                         )
                     })?;
-                    providers.push(right_openshell::managed_profiles::GenericProviderProfileInput {
-                        name: &entry.name,
-                        upstream_host: &generic.upstream_host,
-                        upstream_path_prefix: generic.upstream_path_prefix.as_deref(),
-                        header_name: &generic.header_name,
-                        env_var: &generic.env_var,
-                    });
+                    providers.push(
+                        right_openshell::managed_profiles::GenericProviderProfileInput {
+                            name: &entry.name,
+                            upstream_host: &generic.upstream_host,
+                            upstream_path_prefix: generic.upstream_path_prefix.as_deref(),
+                            header_name: &generic.header_name,
+                            env_var: &generic.env_var,
+                        },
+                    );
                 }
                 right_agent_config::ProviderType::BuiltIn(_) => {}
             }
         }
     }
 
-    Ok(right_openshell::managed_profiles::generic_provider_profiles(
-        providers,
-    ))
+    Ok(right_openshell::managed_profiles::generic_provider_profiles(providers))
 }
 
 async fn cmd_up(
@@ -4750,7 +4750,10 @@ mod tests {
         let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)]).unwrap();
 
         assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].id(), "right-acme");
+        assert_eq!(
+            profiles[0].id(),
+            right_openshell::managed_profiles::generic_provider_profile_id("right-acme")
+        );
     }
 
     #[test]
@@ -4769,7 +4772,10 @@ mod tests {
         let profiles = generic_provider_profiles(&configs).unwrap();
 
         assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].id(), "right-acme");
+        assert_eq!(
+            profiles[0].id(),
+            right_openshell::managed_profiles::generic_provider_profile_id("right-acme")
+        );
     }
 
     #[test]
