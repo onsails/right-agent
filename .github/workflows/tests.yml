@@ -190,7 +190,7 @@ jobs:
         env:
           RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "2"
         run: |
-          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked ci_openshell -- --ignored"
+          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --features right-openshell/test-support --lib --bins --tests --no-fail-fast --locked ci_openshell -- --ignored"
 
       - name: Dump OpenShell diagnostics
         if: ${{ failure() || steps.claude_tests.outcome == 'failure' || steps.openshell_tests.outcome == 'failure' }}
