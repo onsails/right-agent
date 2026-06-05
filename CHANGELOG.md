@@ -1,4 +1,16 @@
 # Changelog
+## [0.3.1] - 2026-06-05
+
+
+### Bug Fixes
+
+- **openshell**: Read sandbox phase from SandboxStatus (0.0.56 relocation)
+
+### Features
+
+- **dashboard**: Compute usage windows in viewer timezone
+- **dashboard**: Accept usage timezone query
+
 ## [0.3.0] - 2026-06-04
 
 ### Learning & Skills
