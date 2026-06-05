@@ -5,6 +5,7 @@
 pub mod diagnosis;
 pub mod managed_profiles;
 pub mod openshell;
+pub mod provider_capabilities;
 pub mod providers;
 // Generated tonic/prost code: `large_enum_variant` is inherent to the proto
 // shape, and `doc_lazy_continuation` fires on upstream proto comments whose
