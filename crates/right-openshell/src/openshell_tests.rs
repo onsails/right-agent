@@ -1381,3 +1381,41 @@ fn control_master_directives_block_content() {
         "missing ControlPersist: {block}"
     );
 }
+
+/// Upstream-compatibility canary against the LIVE OpenShell gateway.
+///
+/// Asserts the two things most likely to silently break on an OpenShell
+/// upgrade: (1) the running gateway satisfies `MIN_OPENSHELL_VERSION` via
+/// `openshell_preflight`, and (2) a sandbox the gateway reports Ready actually
+/// decodes as ready through `is_sandbox_ready`. Health-only checks pass even
+/// when the readiness/proto layout drifts (e.g. 0.0.56 moved the lifecycle
+/// phase from `Sandbox.phase` to `SandboxStatus.phase`, decoding every Ready
+/// sandbox as UNSPECIFIED and wedging the supervisor). CI runs this against the
+/// newest OpenShell release (the `openshell-latest` job in
+/// `.github/workflows/tests.yml`) so upstream drift surfaces here, not in
+/// production.
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
+#[tokio::test]
+async fn ci_openshell_readiness_and_preflight_compat() {
+    let sandbox = TestSandbox::create("readiness-compat").await;
+
+    let mtls_dir = default_mtls_dir();
+    let mut client = connect_grpc(&mtls_dir)
+        .await
+        .expect("connect to live OpenShell gateway");
+
+    crate::preflight::openshell_preflight(&mut client)
+        .await
+        .expect("openshell_preflight must pass against the live gateway (CLI + gateway >= MIN)");
+
+    let ready = is_sandbox_ready(&mut client, sandbox.name())
+        .await
+        .expect("is_sandbox_ready RPC must succeed");
+    assert!(
+        ready,
+        "live OpenShell gateway accepted sandbox '{}' as Ready (TestSandbox::create waited for \
+         READY), but Right's is_sandbox_ready decoded it as not-ready — an OpenShell proto/API \
+         drift in the readiness path. Re-vendor the proto and update SandboxReadiness.",
+        sandbox.name()
+    );
+}
