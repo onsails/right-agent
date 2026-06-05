@@ -5,6 +5,13 @@ on:
   push:
     branches: ["master"]
   workflow_dispatch:
+  # Daily OpenShell-latest compatibility run. PR/push keep the pinned
+  # OPENSHELL_VERSION for reproducible gating; on `schedule` the ignored job
+  # resolves the newest OpenShell release instead, so upstream proto/API drift
+  # (e.g. the 0.0.56 Sandbox.phase -> SandboxStatus.phase move) surfaces in CI
+  # within a day rather than in production.
+  schedule:
+    - cron: "17 6 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -72,7 +79,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      OPENSHELL_VERSION: "v0.0.50"
+      # Pinned floor for PR/push gating. Must be >= MIN_OPENSHELL_VERSION
+      # (crates/right-openshell/src/preflight.rs). The `schedule` run overrides
+      # this with the latest release (see "Resolve OpenShell version" below).
+      OPENSHELL_VERSION: "v0.0.56"
       OPENSHELL_DRIVERS: "docker"
       RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS: "360"
       RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS: "120"
@@ -123,6 +133,18 @@ jobs:
         run: |
           docker version
           docker info
+
+      - name: Resolve OpenShell version (latest on schedule)
+        if: github.event_name == 'schedule'
+        run: |
+          set -euo pipefail
+          latest="$(curl -fsSL https://api.github.com/repos/NVIDIA/OpenShell/releases/latest | jq -r '.tag_name')"
+          if [ -n "$latest" ] && [ "$latest" != "null" ]; then
+            echo "OPENSHELL_VERSION=$latest" >> "$GITHUB_ENV"
+            echo "OpenShell-latest compat run: tracking $latest"
+          else
+            echo "::warning::could not resolve latest OpenShell tag; falling back to pinned $OPENSHELL_VERSION"
+          fi
 
       - name: Install OpenShell
         run: |
