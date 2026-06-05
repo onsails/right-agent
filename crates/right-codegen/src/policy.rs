@@ -581,6 +581,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn existing_folded_generic_regens_provider_free_policy() {
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
+
+        assert!(
+            !policy.contains("managed-by: right-providers"),
+            "legacy folded provider tags must drop out on regen"
+        );
+        assert!(
+            !policy.contains("api.acme.com"),
+            "legacy generic provider host must not be regenerated"
+        );
+        assert!(
+            !policy.contains("right-providers: insert-above"),
+            "legacy insertion anchor must not be regenerated"
+        );
+    }
+
     /// Regression: OpenShell v0.0.30 deprecated `tls: terminate` and
     /// `tls: passthrough`. Restrictive L7 endpoints rely on auto-detect and
     /// must not emit `tls`; permissive public-web endpoints intentionally use
