@@ -88,3 +88,36 @@ jobs:
           claude_args: |
             --model sonnet
             --allowedTools Edit,Read,Write,Bash
+
+      - name: Signal completion
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # GitHub has no checkmark reaction; +1 is the conventional "done" mark.
+          gh api -X POST \
+            "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content=+1 >/dev/null || true
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" \
+            --body "✅ \`/humanize\` complete — changelog humanized and pushed to this PR. ([run](${RUN_URL}))" \
+            || true
+
+      - name: Signal failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api -X POST \
+            "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content=confused >/dev/null || true
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" \
+            --body "⚠️ \`/humanize\` failed — see the [workflow run](${RUN_URL}) logs." \
+            || true
