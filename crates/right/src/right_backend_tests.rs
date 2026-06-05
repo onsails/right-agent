@@ -176,11 +176,12 @@ async fn insert_async_run(
 fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
-    // 7 cron + 1 mcp + 1 progress + 2 learning + 3 conversation + 5 forum + 1 bootstrap = 20
+    // 7 cron + 1 mcp + 1 progress + 2 learning + 3 conversation + 5 forum
+    // + 1 bootstrap + 1 provider capabilities = 21
     assert_eq!(
         tools.len(),
-        20,
-        "expected 20 tools, got {}: {:?}",
+        21,
+        "expected 21 tools, got {}: {:?}",
         tools.len(),
         tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
     );
@@ -247,6 +248,56 @@ fn tools_list_includes_conversation_search_tools_without_scope_params() {
 }
 
 #[test]
+fn tools_list_includes_provider_capabilities_as_no_arg_scoped_tool() {
+    let (backend, _, _tmp) = make_backend();
+    let tools = backend.tools_list();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "provider_capabilities")
+        .expect("provider_capabilities tool must be registered");
+
+    let description = tool
+        .description
+        .as_ref()
+        .expect("provider_capabilities must describe safe usage");
+    for required in [
+        "providers attached to your own sandbox",
+        "env-var placeholder names",
+        "allowed binaries",
+        "valid hosts",
+        "server-enforced",
+        "no arguments",
+        "401/403",
+        "specific binary/host may be required",
+    ] {
+        assert!(
+            description.contains(required),
+            "provider_capabilities description missing {required:?}: {description}"
+        );
+    }
+
+    let schema = serde_json::Value::Object((*tool.input_schema).clone());
+    assert_eq!(
+        schema.pointer("/type").and_then(|v| v.as_str()),
+        Some("object")
+    );
+    assert!(
+        schema
+            .pointer("/properties")
+            .and_then(|v| v.as_object())
+            .is_none_or(serde_json::Map::is_empty),
+        "provider_capabilities must not expose caller-controlled params: {schema}"
+    );
+    assert_eq!(
+        schema
+            .pointer("/additionalProperties")
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "provider_capabilities params must deny unknown fields: {schema}"
+    );
+}
+
+#[test]
 fn tools_list_has_unique_names() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
@@ -268,6 +319,57 @@ fn tools_list_all_have_descriptions() {
             tool.name
         );
     }
+}
+
+#[tokio::test]
+async fn provider_capabilities_rejects_agent_supplied_scope_params() {
+    let (backend, _agents_dir, _tmp) = make_backend();
+    let result = backend
+        .tools_call(
+            "test-agent",
+            Path::new("/tmp/unused"),
+            "provider_capabilities",
+            json!({ "sandbox_name": "other-sandbox" }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+}
+
+#[tokio::test]
+async fn provider_capabilities_propagates_invalid_agent_config() {
+    let mtls_dir = tempfile::tempdir().expect("mtls tempdir");
+    let tmp = TempDir::new().expect("tempdir");
+    let agents_dir = tmp.path().join("agents");
+    let agent_dir = agents_dir.join("test-agent");
+    std::fs::create_dir_all(&agent_dir).expect("create agent dir");
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox: [").expect("write invalid agent yaml");
+    let backend = RightBackend::new(agents_dir, Some(mtls_dir.path().to_path_buf()));
+
+    let err = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "provider_capabilities",
+            json!({}),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect_err("invalid agent.yaml must propagate instead of falling back to another sandbox");
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("provider_capabilities: failed to parse agent config"),
+        "error should identify provider_capabilities config parsing: {message}"
+    );
+    assert!(
+        message.contains("agent.yaml"),
+        "error should preserve agent.yaml parse context: {message}"
+    );
 }
 
 #[tokio::test]
