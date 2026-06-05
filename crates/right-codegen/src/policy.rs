@@ -153,26 +153,8 @@ fn public_web_allowed_ips_yaml(indent: usize) -> String {
 
 fn permissive_endpoints() -> String {
     let allowed_ips = public_web_allowed_ips_yaml(10);
-    // The `# right-providers: insert-above` line is the anchor used by
-    // `providers_append`/`providers_append_checked` to locate the insertion
-    // point; appended stanzas land immediately ABOVE it. It sits at the TOP of
-    // the endpoints list so generic-provider host endpoints (`protocol: rest`,
-    // TLS-terminated) are emitted BEFORE the hostless `tls: skip` catch-all.
-    //
-    // Ordering is load-bearing: OpenShell evaluates `outbound.endpoints` in
-    // order. A leading hostless `tls: skip` catch-all whose `allowed_ips` cover
-    // a provider host's IP raw-tunnels the connection (no TLS termination, no
-    // credential substitution), so the literal `openshell:resolve:env:...`
-    // placeholder leaks upstream and the API returns 401. Provider host
-    // endpoints MUST precede the catch-all to win the match and terminate TLS.
-    //
-    // The anchor also keeps generic stanzas inside `outbound.endpoints` rather
-    // than the first-rendered `anthropic` section in restrictive mode (the
-    // `policy.find("endpoints:")` fallback would otherwise smuggle them into
-    // the Anthropic-gated allowlist).
     format!(
-        r#"      # right-providers: insert-above
-      - port: 443
+        r#"      - port: 443
         allowed_ips:
 {allowed_ips}
         tls: skip
@@ -580,6 +562,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn permissive_policy_has_no_provider_stanza_or_anchor() {
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
+
+        assert!(!policy.contains("right-providers"), "anchor removed");
+        assert!(
+            !policy.contains("managed-by: right-providers"),
+            "no folded provider stanza"
+        );
+        assert!(
+            policy.contains("tls: skip"),
+            "permissive catch-all still present"
+        );
+    }
+
     /// Regression: OpenShell v0.0.30 deprecated `tls: terminate` and
     /// `tls: passthrough`. Restrictive L7 endpoints rely on auto-detect and
     /// must not emit `tls`; permissive public-web endpoints intentionally use
@@ -931,16 +932,8 @@ network_policies:
 }
 
 // ---------------------------------------------------------------------------
-// Provider-managed endpoint append/strip
+// Provider-managed endpoint strip
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, thiserror::Error)]
-pub enum PolicyConflict {
-    #[error(
-        "host {host} is configured as raw tunnel (tls: skip) — cannot terminate for substitution"
-    )]
-    RawTunnel { host: String },
-}
 
 /// Returns `true` when `line` opens a YAML key at the same indentation as
 /// `endpoints:` (4 spaces) or a shallower outer level (2 spaces, 0 spaces),
@@ -957,12 +950,10 @@ pub enum PolicyConflict {
 ///   `      # comment`      — comment line (not a YAML key)
 ///   `    - host: ...`      — list item at 4-space indent (legacy stanza form)
 ///
-/// This is the load-bearing stop condition for legacy policies that pre-date
-/// the `# right-providers: insert-above` anchor. Without it, both
-/// `providers_append`'s fallback (looking for end-of-list) and
-/// `providers_strip`'s walker (consuming the stanza) would treat sibling
-/// keys like `    binaries:` as continuation of the endpoints list and
-/// corrupt the surrounding YAML structure.
+/// This is the load-bearing stop condition for `providers_strip` on policies
+/// that still contain legacy provider stanzas. Without it, the strip walker
+/// would treat sibling keys like `    binaries:` as continuation of the
+/// endpoints list and corrupt the surrounding YAML structure.
 fn is_endpoints_sibling_or_shallower_key(line: &str) -> bool {
     let body = line.trim_end_matches(['\r', '\n']);
     if body.is_empty() {
@@ -993,196 +984,6 @@ fn is_endpoints_sibling_or_shallower_key(line: &str) -> bool {
         return false;
     }
     rest[id_end..].starts_with(':')
-}
-
-/// Append a TLS-terminated endpoint for `host` tagged with the provider name,
-/// unless an entry for the same domain already exists.
-///
-/// Panics on conflict — use [`providers_append_checked`] when you need to
-/// handle conflicts explicitly.
-pub fn providers_append(
-    policy: &str,
-    provider_name: &str,
-    host: &str,
-    path_prefix: Option<&str>,
-) -> String {
-    providers_append_checked(policy, provider_name, host, path_prefix)
-        .unwrap_or_else(|e| panic!("policy conflict: {e:#}"))
-}
-
-/// Fold an agent's generic-provider host stanzas onto a rendered policy.
-///
-/// For each `ProviderType::Generic` entry with a `generic` config, inserts a
-/// TLS-terminating REST endpoint above the `# right-providers: insert-above`
-/// anchor via [`providers_append_checked`]. Idempotent; a no-op when the policy
-/// has no anchor (restrictive mode) or the list is empty. This is what makes
-/// every full policy regeneration provider-aware so the network policy is
-/// reconstructable from `agent.yaml` on every regen.
-pub fn apply_provider_stanzas(
-    policy: &str,
-    providers: &[right_agent_config::ProviderEntry],
-) -> Result<String, PolicyConflict> {
-    // Restrictive policies have no anchor — folding is a no-op there.
-    // The provider API already rejects generic + restrictive
-    // (`NetworkPolicyForbidsGeneric`), so nothing to insert.
-    const PROVIDERS_ANCHOR: &str = "# right-providers: insert-above";
-    if !policy.contains(PROVIDERS_ANCHOR) {
-        return Ok(policy.to_string());
-    }
-    let mut out = policy.to_string();
-    for entry in providers {
-        if !matches!(entry.type_, right_agent_config::ProviderType::Generic) {
-            continue;
-        }
-        let Some(g) = entry.generic.as_ref() else {
-            continue;
-        };
-        out = providers_append_checked(
-            &out,
-            &entry.name,
-            &g.upstream_host,
-            g.upstream_path_prefix.as_deref(),
-        )?;
-    }
-    Ok(out)
-}
-
-/// Render a provider-aware policy: [`generate_policy`] followed by
-/// [`apply_provider_stanzas`]. Every full policy regeneration MUST go through
-/// this (not bare `generate_policy`) so generic-provider stanzas survive the
-/// regen and the network policy stays reconstructable from `agent.yaml`. A
-/// no-op fold on restrictive (anchorless) policies; idempotent.
-pub fn generate_provider_aware_policy(
-    right_mcp_port: u16,
-    network_policy: &NetworkPolicy,
-    host_mcp_access: HostMcpAccess,
-    providers: &[right_agent_config::ProviderEntry],
-) -> Result<String, PolicyConflict> {
-    apply_provider_stanzas(
-        &generate_policy(right_mcp_port, network_policy, host_mcp_access),
-        providers,
-    )
-}
-
-/// Like [`providers_append`] but returns `Err(PolicyConflict)` instead of
-/// panicking when the host is already configured as a raw tunnel.
-pub fn providers_append_checked(
-    policy: &str,
-    provider_name: &str,
-    host: &str,
-    path_prefix: Option<&str>,
-) -> Result<String, PolicyConflict> {
-    // Line-anchored match so a prefix-collision host (e.g. existing
-    // "api.openai.com.evil.tld") doesn't satisfy the idempotency check
-    // for "api.openai.com" and cause us to silently skip the real add.
-    let host_marker = format!("- host: {host}");
-    let found_match = policy.match_indices(&host_marker).find(|(idx, marker)| {
-        let after = idx + marker.len();
-        after == policy.len() || matches!(policy.as_bytes().get(after), Some(b'\n' | b'\r'))
-    });
-    if let Some((idx, _)) = found_match {
-        let window_end = (idx + 400).min(policy.len());
-        let window = &policy[idx..window_end];
-        if window.contains("tls: skip") {
-            return Err(PolicyConflict::RawTunnel {
-                host: host.to_string(),
-            });
-        }
-        // Domain already present as a TLS-terminated endpoint — idempotent.
-        return Ok(policy.to_string());
-    }
-
-    let path_line = path_prefix
-        .map(|p| format!("      path: {p}\n"))
-        .unwrap_or_default();
-    let stanza = format!(
-        "    # managed-by: right-providers:{provider_name}\n    - host: {host}\n      port: 443\n      protocol: rest\n      access: full\n{path_line}"
-    );
-
-    // Preferred path: insert immediately above the sentinel anchor emitted
-    // by `generate_policy` inside `network_policies.outbound.endpoints`.
-    // Generic providers are only ever appended to permissive policies — the
-    // provider API rejects generic + restrictive (`NetworkPolicyForbidsGeneric`),
-    // and restrictive mode renders no anchor, so this branch is the production
-    // path. The anchor line's leading whitespace defines the marker column;
-    // YAML list items ("- host: ...") share that column, value lines sit two
-    // columns deeper, matching the real policy's 6-space-indented list-item
-    // style. Endpoints use OpenShell's `host`/`port` keys (not `domain`, which
-    // v0.0.50 rejects as an unknown field).
-    const PROVIDERS_ANCHOR: &str = "# right-providers: insert-above";
-    if let Some(anchor_idx) = policy.find(PROVIDERS_ANCHOR) {
-        let line_start = policy[..anchor_idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let marker_indent_len = anchor_idx - line_start;
-        let marker_indent = " ".repeat(marker_indent_len);
-        let value_indent = " ".repeat(marker_indent_len + 2);
-        let path_line_anchored = path_prefix
-            .map(|p| format!("{value_indent}path: {p}\n"))
-            .unwrap_or_default();
-        let stanza_anchored = format!(
-            "{marker_indent}# managed-by: right-providers:{provider_name}\n\
-             {marker_indent}- host: {host}\n\
-             {value_indent}port: 443\n\
-             {value_indent}protocol: rest\n\
-             {value_indent}access: full\n\
-             {path_line_anchored}"
-        );
-        let mut out = String::with_capacity(policy.len() + stanza_anchored.len());
-        out.push_str(&policy[..line_start]);
-        out.push_str(&stanza_anchored);
-        out.push_str(&policy[line_start..]);
-        return Ok(out);
-    }
-
-    let Some(endpoints_idx) = policy.find("endpoints:") else {
-        // No endpoints section at all — synthesise a minimal network block.
-        return Ok(format!("{policy}\nnetwork:\n  endpoints:\n{stanza}"));
-    };
-
-    // Find the byte offset of the end of the endpoints list so we can append
-    // inside it rather than after the whole section. For legacy policies on
-    // disk that pre-date the `# right-providers: insert-above` anchor, we
-    // must stop at a sibling key (e.g. `    binaries:`) or any shallower
-    // top-level key — otherwise the stanza is appended at end-of-file (or
-    // worse, the end-of-list marker is conflated with non-endpoint content).
-    // Use split_inclusive('\n') so each chunk includes its actual terminator
-    // ('\n' or '\r\n'), giving correct byte lengths for both LF and CRLF files.
-    let after_endpoints = &policy[endpoints_idx..];
-    let list_end_line = after_endpoints
-        .split_inclusive('\n')
-        .enumerate()
-        .skip(1) // skip the "endpoints:" line itself
-        .find(|(_, l)| {
-            let body = l.trim_end_matches(['\r', '\n']);
-            if body.is_empty() {
-                return false;
-            }
-            if !body.starts_with(' ') {
-                // Un-indented line — left the network section entirely.
-                return true;
-            }
-            // A line that opens a sibling/shallower YAML key (e.g.
-            // `    binaries:` next to `    endpoints:`, or `  right:` next
-            // to `  outbound:`) marks the end of the endpoints list.
-            is_endpoints_sibling_or_shallower_key(body)
-        })
-        .map(|(i, _)| i)
-        .unwrap_or_else(|| after_endpoints.split_inclusive('\n').count());
-
-    let mut byte_offset = endpoints_idx;
-    let mut i = 0;
-    for line in after_endpoints.split_inclusive('\n') {
-        if i == list_end_line {
-            break;
-        }
-        byte_offset += line.len();
-        i += 1;
-    }
-
-    let mut out = String::with_capacity(policy.len() + stanza.len());
-    out.push_str(&policy[..byte_offset]);
-    out.push_str(&stanza);
-    out.push_str(&policy[byte_offset..]);
-    Ok(out)
 }
 
 /// Remove the managed-by tag comment and its associated endpoint stanza for
@@ -1223,9 +1024,8 @@ pub fn providers_strip(policy: &str, provider_name: &str, _host: &str) -> String
         if next_line.trim_start().starts_with("# managed-by:") {
             break;
         }
-        // The sentinel anchor emitted by `generate_policy` must not be
-        // consumed as part of a provider stanza, otherwise future appends
-        // lose their insertion point.
+        // Legacy policies may still contain the old sentinel anchor; it is not
+        // part of any provider stanza.
         if next_line.trim_start().starts_with("# right-providers:") {
             break;
         }
