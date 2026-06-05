@@ -605,6 +605,9 @@ impl rmcp::ServerHandler for Aggregator {
                  - mcp__right__forum_topic_close / mcp__right__forum_topic_reopen: Archive / restore a topic (reversible; never deletes).\n\
                  - mcp__right__forum_topic_list: List topics this agent tracks in the CURRENT chat only (server-scoped).\n\
                  You cannot delete topics. Requires the bot's 'Manage Topics' admin right; errors surface as forum_op_failed with an actionable message.\n\n\
+                 ## Providers\n\
+                 - mcp__right__provider_capabilities: List the sandbox's attached providers, including injected env-var placeholder names only, which binaries may use each credential, and valid hosts. Scope is server-enforced to this sandbox; takes no args.\n\
+                 On provider 401/403, call this before concluding the credential is invalid; the gateway substitutes the secret only for listed binaries and hosts.\n\n\
                  ## Learning\n\
                  - mcp__right__skill_learning_start: Stage 1 foreground metadata/progress for learned skill create/update. Call before writing or patching skill package files. action=create and action=update both require rightx-* skill names. Accepts skill names only, never paths.\n\
                  - mcp__right__skill_learning_finish: Stage 1 foreground metadata/receipt for skill create/update completion. Successful statuses require a non-empty LLM-authored message argument, verify the skill package exists at .claude/skills/<skill_name>/SKILL.md, and send learned/updated receipts. Does not move files. Optional field hint_outcome: \"applied_as_hinted\" | \"applied_differently\" | \"refused\" — probe-writer must include this when a prefilter hint was provided.\n\n\
@@ -953,6 +956,18 @@ mod tests {
         assert!(
             instructions.contains("scope server-enforced"),
             "aggregator instructions should mention server-enforced scope: {instructions}"
+        );
+        assert!(
+            instructions.contains("mcp__right__provider_capabilities"),
+            "aggregator instructions should include provider_capabilities inventory: {instructions}"
+        );
+        assert!(
+            instructions.contains("env-var placeholder names only"),
+            "aggregator instructions should clarify provider_capabilities returns env var names only: {instructions}"
+        );
+        assert!(
+            instructions.contains("401/403"),
+            "aggregator instructions should mention provider auth failure triage: {instructions}"
         );
     }
 
