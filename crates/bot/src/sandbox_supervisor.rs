@@ -83,6 +83,76 @@ fn bring_up_phase_diagnosis(status: SandboxPhaseStatus, sandbox: &str) -> Option
     }
 }
 
+fn generic_provider_profiles_for_config(
+    agent_name: &str,
+    config: &AgentConfig,
+) -> miette::Result<Vec<right_openshell::managed_profiles::ManagedProfile>> {
+    if !config.is_sandboxed() {
+        return Ok(Vec::new());
+    }
+
+    let mut providers = Vec::new();
+    for entry in config.providers() {
+        match &entry.type_ {
+            right_agent_config::ProviderType::Generic => {
+                let generic = entry.generic.as_ref().ok_or_else(|| {
+                    miette::miette!(
+                        "agent {agent_name} generic provider {} is missing generic config",
+                        entry.name
+                    )
+                })?;
+                providers.push(
+                    right_openshell::managed_profiles::GenericProviderProfileInput {
+                        name: &entry.name,
+                        upstream_host: &generic.upstream_host,
+                        upstream_path_prefix: generic.upstream_path_prefix.as_deref(),
+                        header_name: &generic.header_name,
+                        env_var: &generic.env_var,
+                    },
+                );
+            }
+            right_agent_config::ProviderType::BuiltIn(_) => {}
+        }
+    }
+
+    Ok(right_openshell::managed_profiles::generic_provider_profiles(providers))
+}
+
+async fn ensure_generic_provider_profiles_for_config(
+    client: &mut right_openshell::managed_profiles::OpenShellGrpcClient,
+    agent_name: &str,
+    config: &AgentConfig,
+) -> miette::Result<Vec<right_openshell::managed_profiles::EnsureOutcome>> {
+    let profiles = generic_provider_profiles_for_config(agent_name, config)?;
+    if profiles.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let outcomes = right_openshell::managed_profiles::ensure_profiles(client, &profiles)
+        .await
+        .map_err(|e| miette::miette!("ensure generic provider profiles failed: {e:#}"))?;
+    tracing::info!(agent = %agent_name, outcomes = ?outcomes, "generic provider profiles ensured");
+    Ok(outcomes)
+}
+
+fn provider_policy_reload_needed(
+    declared: &[String],
+    report: &right_openshell::providers::ReconcileReport,
+    profile_outcomes: &[right_openshell::managed_profiles::EnsureOutcome],
+) -> bool {
+    // One reload refreshes composition for the whole sandbox. A providers-only
+    // re-save should still retry the loaded signal even when attach state is
+    // already converged, so any declared provider triggers a reload.
+    !declared.is_empty()
+        || !report.detached.is_empty()
+        || profile_outcomes.iter().any(|outcome| {
+            matches!(
+                outcome,
+                right_openshell::managed_profiles::EnsureOutcome::Imported(_)
+            )
+        })
+}
+
 /// Bring the OpenShell sandbox backend up for an agent.
 ///
 /// Returns:
@@ -250,6 +320,22 @@ pub(crate) async fn bring_up_sandbox(
         let mtls_dir = right_openshell::openshell::default_mtls_dir();
         match right_openshell::openshell::connect_grpc(&mtls_dir).await {
             Ok(mut client) => {
+                let profile_outcomes = match ensure_generic_provider_profiles_for_config(
+                    &mut client,
+                    agent,
+                    config,
+                )
+                .await
+                {
+                    Ok(outcomes) => outcomes,
+                    Err(e) => {
+                        tracing::warn!(
+                            agent = %agent,
+                            "generic provider profile ensure failed during startup reconcile: {e:#}"
+                        );
+                        Vec::new()
+                    }
+                };
                 let declared: Vec<String> = sandbox_cfg
                     .providers
                     .iter()
@@ -277,6 +363,25 @@ pub(crate) async fn bring_up_sandbox(
                                 errors = ?report.errors,
                                 "provider reconcile had per-provider errors; will retry on next pass"
                             );
+                        }
+                        if provider_policy_reload_needed(&declared, &report, &profile_outcomes) {
+                            match right_openshell::openshell::ensure_provider_policy_loaded(
+                                &sandbox,
+                                &policy_path,
+                            )
+                            .await
+                            {
+                                Ok(()) => tracing::info!(
+                                    agent = %agent,
+                                    sandbox = %sandbox,
+                                    "provider-profile composition loaded"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    agent = %agent,
+                                    sandbox = %sandbox,
+                                    "provider-profile composition reload failed during startup reconcile: {e:#}"
+                                ),
+                            }
                         }
                     }
                     Err(e) => tracing::warn!(
@@ -327,11 +432,12 @@ pub(crate) async fn bring_up_sandbox(
 
 /// Hot-apply a `sandbox.providers` change to a live sandbox without a restart.
 ///
-/// Re-renders the base provider-free policy (network-only, via
-/// `openshell policy set --wait`) and reconciles gateway attach/detach. Used by
-/// the config-watcher providers hot path; on failure the lib.rs consumer retries
-/// with backoff. There is no periodic provider reconcile, so persistent failure
-/// leaves the live sandbox attachment state stale until the next bot restart.
+/// Ensures generic provider profiles, reconciles gateway attach/detach, then
+/// reloads OpenShell's provider-profile composition with `openshell policy set
+/// --wait`. Used by the config-watcher providers hot path; on failure the
+/// lib.rs consumer retries with backoff. There is no periodic provider
+/// reconcile, so persistent failure leaves live sandbox attachment/composition
+/// state stale until the next bot restart.
 pub(crate) async fn hot_reconcile_providers(
     agent: &str,
     agent_dir: &std::path::Path,
@@ -348,23 +454,10 @@ pub(crate) async fn hot_reconcile_providers(
 
     let mtls_dir = right_openshell::openshell::default_mtls_dir();
     let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
-    let sandbox_id =
-        right_openshell::openshell::resolve_sandbox_id(&mut client, resolved_sandbox).await?;
-    let host_ips = right_openshell::openshell::resolve_host_ips(&mut client, &sandbox_id).await?;
 
     let providers = config.providers();
-    let policy_content = right_codegen::policy::generate_policy(
-        right_runtime_state::MCP_HTTP_PORT,
-        &config.network_policy,
-        right_codegen::policy::HostMcpAccess::Resolved(host_ips),
-    );
-
-    right_codegen::contract::write_and_apply_sandbox_policy(
-        resolved_sandbox,
-        &policy_path,
-        &policy_content,
-    )
-    .await?;
+    let profile_outcomes =
+        ensure_generic_provider_profiles_for_config(&mut client, agent, config).await?;
 
     let declared: Vec<String> = providers.iter().map(|p| p.name.clone()).collect();
     let report = right_openshell::providers::reconcile_for_sandbox(
@@ -380,6 +473,7 @@ pub(crate) async fn hot_reconcile_providers(
         attached = ?report.attached,
         detached = ?report.detached,
         missing = ?report.missing,
+        profile_outcomes = ?profile_outcomes,
         "providers hot-reconcile complete"
     );
     // Mirror `bring_up_sandbox`: per-provider attach/detach errors are reported
@@ -391,6 +485,11 @@ pub(crate) async fn hot_reconcile_providers(
             errors = ?report.errors,
             "providers hot-reconcile had per-provider errors; re-edit sandbox.providers or restart to retry"
         );
+    }
+    if provider_policy_reload_needed(&declared, &report, &profile_outcomes) {
+        right_openshell::openshell::ensure_provider_policy_loaded(resolved_sandbox, &policy_path)
+            .await
+            .map_err(|e| miette::miette!("provider-profile composition reload failed: {e:#}"))?;
     }
     Ok(())
 }
@@ -690,3 +789,67 @@ async fn notify_back_online(handle: &Arc<SandboxRuntimeHandle>, bot: &crate::tel
 #[cfg(test)]
 #[path = "sandbox_supervisor_phase_tests.rs"]
 mod phase_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_profile_inputs_skip_builtins_and_author_generic_profiles() {
+        let config = AgentConfig {
+            sandbox: Some(right_agent_config::SandboxConfig {
+                providers: vec![
+                    right_agent_config::ProviderEntry {
+                        name: "right-gh".into(),
+                        type_: right_agent_config::ProviderType::BuiltIn("right-github".into()),
+                        label: None,
+                        generic: None,
+                    },
+                    right_agent_config::ProviderEntry {
+                        name: "right-acme".into(),
+                        type_: right_agent_config::ProviderType::Generic,
+                        label: None,
+                        generic: Some(right_agent_config::GenericProvider {
+                            env_var: "ACME_TOKEN".into(),
+                            header_name: "X-Api-Key".into(),
+                            upstream_host: "api.acme.test".into(),
+                            upstream_path_prefix: Some("/v1".into()),
+                        }),
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let profiles = generic_provider_profiles_for_config("right", &config).unwrap();
+
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(
+            profiles[0].id(),
+            right_openshell::managed_profiles::generic_provider_profile_id("right-acme")
+        );
+    }
+
+    #[test]
+    fn generic_profile_inputs_fail_on_missing_generic_block() {
+        let config = AgentConfig {
+            sandbox: Some(right_agent_config::SandboxConfig {
+                providers: vec![right_agent_config::ProviderEntry {
+                    name: "right-acme".into(),
+                    type_: right_agent_config::ProviderType::Generic,
+                    label: None,
+                    generic: None,
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let err = generic_provider_profiles_for_config("right", &config).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("generic provider right-acme is missing generic config")
+        );
+    }
+}
