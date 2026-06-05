@@ -1758,19 +1758,49 @@ pub(crate) async fn handle_provider_config_update(
     let (_, profile, spec) = generic_provider_update_profile_and_spec(&req.name, &updated_generic);
     let managed_profile =
         right_openshell::managed_profiles::ManagedProfile::Authored(Box::new(profile));
-    right_openshell::managed_profiles::ensure_profiles(&mut client, &[managed_profile])
-        .await
-        .map_err(|e| ProviderApiError::Gateway(format!("profile import: {e:#}")))?;
-
-    if let Err(e) = right_openshell::providers::update_provider(&mut client, &spec).await {
+    if let Err(e) =
+        right_openshell::managed_profiles::ensure_profiles(&mut client, &[managed_profile]).await
+    {
         let rollback_errors = reensure_generic_profile_after_rollback(
             &mut client,
             &req.name,
             &current,
             format!("{e:#}"),
-            "update_provider failure",
+            "profile import failure",
         )
         .await;
+        let mut msg = format!("profile import: {e:#}");
+        if !rollback_errors.is_empty() {
+            msg.push_str(" (rollback also failed: ");
+            msg.push_str(&rollback_errors.join("; "));
+            msg.push(')');
+        }
+        return Err(ProviderApiError::Gateway(msg));
+    }
+
+    if let Err(e) = right_openshell::providers::update_provider(&mut client, &spec).await {
+        let mut rollback_errors = Vec::new();
+        let rollback_spec = build_gateway_rollback_spec(&gateway_snapshot);
+        if let Err(rollback_err) =
+            right_openshell::providers::update_provider(&mut client, &rollback_spec).await
+        {
+            tracing::error!(
+                provider = %req.name,
+                original_err = %e,
+                "provider rollback failed: could not restore gateway state after update_provider failure: {rollback_err:#}"
+            );
+            rollback_errors.push(format!("gateway: {rollback_err:#}"));
+        }
+        rollback_errors.extend(
+            reensure_generic_profile_after_rollback(
+                &mut client,
+                &req.name,
+                &current,
+                format!("{e:#}"),
+                "update_provider failure",
+            )
+            .await,
+        );
         ensure_provider_policy_loaded_after_rollback(
             &req.name,
             &sandbox_name,
