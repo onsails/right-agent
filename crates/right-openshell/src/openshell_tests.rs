@@ -199,7 +199,7 @@ fn parse_getent_ahosts_ips_returns_empty_for_no_valid_ips() {
 }
 
 #[test]
-fn sandbox_response_decodes_openshell_0_0_42_metadata_layout() {
+fn sandbox_response_decodes_openshell_0_0_56_status_nested_phase() {
     fn push_varint(buf: &mut Vec<u8>, mut value: u64) {
         while value >= 0x80 {
             buf.push((value as u8) | 0x80);
@@ -230,21 +230,47 @@ fn sandbox_response_decodes_openshell_0_0_42_metadata_layout() {
     push_key(&mut metadata, 3, 0);
     push_varint(&mut metadata, 1_765_000_000_000);
 
+    // OpenShell 0.0.56 carries the gateway-derived lifecycle phase inside
+    // `SandboxStatus.phase` (status field 6) alongside a "Ready"/"True"
+    // condition (field 5). The top-level `Sandbox.phase` (field 4) is reserved
+    // and never sent. Reading the old location decodes phase as UNSPECIFIED and
+    // wedges the supervisor in a permanent SandboxNotFound recovery loop.
+    let mut condition = Vec::new();
+    push_string(&mut condition, 1, "Ready");
+    push_string(&mut condition, 2, "True");
+    push_string(&mut condition, 3, "SupervisorConnected");
+
+    let mut status = Vec::new();
+    push_string(&mut status, 1, "right-probe-sandbox");
+    push_message(&mut status, 5, &condition);
+    push_key(&mut status, 6, 0);
+    push_varint(&mut status, SANDBOX_PHASE_READY as u64);
+
     let mut sandbox = Vec::new();
     push_message(&mut sandbox, 1, &metadata);
-    push_key(&mut sandbox, 4, 0);
-    push_varint(&mut sandbox, SANDBOX_PHASE_READY as u64);
+    push_message(&mut sandbox, 3, &status);
 
     let mut response = Vec::new();
     push_message(&mut response, 1, &sandbox);
 
     let decoded = proto::SandboxResponse::decode(response.as_slice())
-        .expect("must decode OpenShell v0.0.42 SandboxResponse metadata layout");
+        .expect("must decode OpenShell v0.0.56 SandboxResponse layout");
     let sandbox = decoded.sandbox.expect("response must contain sandbox");
-    let metadata = sandbox.metadata.expect("sandbox must contain metadata");
+    let metadata = sandbox
+        .metadata
+        .as_ref()
+        .expect("sandbox must contain metadata");
     assert_eq!(metadata.id, "sandbox-id");
     assert_eq!(metadata.name, "right-probe");
-    assert_eq!(sandbox.phase, SANDBOX_PHASE_READY);
+    assert_eq!(
+        sandbox.status.as_ref().expect("status present").phase,
+        SANDBOX_PHASE_READY,
+        "phase must be read from SandboxStatus, not the reserved top-level field"
+    );
+    assert!(
+        SandboxReadiness::from_sandbox(sandbox).is_ready(),
+        "status-nested READY phase must drive readiness"
+    );
 }
 
 #[test]

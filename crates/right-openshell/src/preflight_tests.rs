@@ -6,8 +6,8 @@ use crate::test_mock_server::{MockOpenShell, mock_client, start_mock_server};
 use semver::Version;
 
 #[test]
-fn min_openshell_version_is_v0_0_50() {
-    assert_eq!(MIN_OPENSHELL_VERSION, Version::new(0, 0, 50));
+fn min_openshell_version_is_v0_0_56() {
+    assert_eq!(MIN_OPENSHELL_VERSION, Version::new(0, 0, 56));
 }
 
 #[test]
@@ -33,28 +33,28 @@ fn parse_openshell_cli_version_ignores_trailing_whitespace_and_lines() {
 
 #[test]
 fn cli_version_check_passes_on_exact_min() {
-    let result = cli_version_check_str("openshell 0.0.50\n");
+    let result = cli_version_check_str("openshell 0.0.56\n");
     assert!(result.is_ok(), "expected Ok, got: {result:?}");
 }
 
 #[test]
 fn cli_version_check_passes_on_newer() {
-    let result = cli_version_check_str("openshell 0.0.51\n");
+    let result = cli_version_check_str("openshell 0.0.57\n");
     assert!(result.is_ok(), "expected Ok, got: {result:?}");
 }
 
 #[test]
 fn cli_version_check_fails_on_too_old() {
-    let result = cli_version_check_str("openshell 0.0.42\n");
+    let result = cli_version_check_str("openshell 0.0.55\n");
     let err = result.unwrap_err();
     let found = match err {
         PreflightError::CliTooOld { found, required } => {
-            assert_eq!(required, semver::Version::new(0, 0, 50));
+            assert_eq!(required, semver::Version::new(0, 0, 56));
             found
         }
         other => panic!("expected CliTooOld, got: {other:?}"),
     };
-    assert_eq!(found, semver::Version::new(0, 0, 42));
+    assert_eq!(found, semver::Version::new(0, 0, 55));
 }
 
 #[test]
@@ -76,7 +76,7 @@ async fn gateway_version_check_passes_on_exact_min() {
         mock_health: Some(Box::new(|| {
             Ok(proto_v1::HealthResponse {
                 status: 0,
-                version: "0.0.50".into(),
+                version: "0.0.56".into(),
             })
         })),
         ..Default::default()
@@ -93,7 +93,7 @@ async fn gateway_version_check_fails_on_too_old() {
         mock_health: Some(Box::new(|| {
             Ok(proto_v1::HealthResponse {
                 status: 0,
-                version: "0.0.49".into(),
+                version: "0.0.55".into(),
             })
         })),
         ..Default::default()
@@ -103,8 +103,8 @@ async fn gateway_version_check_fails_on_too_old() {
     let err = super::gateway_version_check(&mut client).await.unwrap_err();
     match err {
         PreflightError::GatewayTooOld { found, required } => {
-            assert_eq!(found, semver::Version::new(0, 0, 49));
-            assert_eq!(required, semver::Version::new(0, 0, 50));
+            assert_eq!(found, semver::Version::new(0, 0, 55));
+            assert_eq!(required, semver::Version::new(0, 0, 56));
         }
         other => panic!("expected GatewayTooOld, got: {other:?}"),
     }
@@ -161,7 +161,7 @@ async fn openshell_preflight_with_succeeds_when_both_ok() {
         mock_health: Some(Box::new(|| {
             Ok(proto_v1::HealthResponse {
                 status: 0,
-                version: "0.0.50".into(),
+                version: "0.0.56".into(),
             })
         })),
         ..Default::default()
@@ -170,7 +170,7 @@ async fn openshell_preflight_with_succeeds_when_both_ok() {
     let mut client = mock_client(addr).await;
 
     let result = super::openshell_preflight_with(
-        || async { Ok("openshell 0.0.50\n".to_string()) },
+        || async { Ok("openshell 0.0.56\n".to_string()) },
         &mut client,
     )
     .await;
@@ -183,7 +183,7 @@ async fn openshell_preflight_with_fails_fast_on_cli_too_old() {
         mock_health: Some(Box::new(|| {
             Ok(proto_v1::HealthResponse {
                 status: 0,
-                version: "0.0.50".into(),
+                version: "0.0.56".into(),
             })
         })),
         ..Default::default()
@@ -205,7 +205,7 @@ async fn openshell_preflight_with_fails_on_gateway_too_old() {
         mock_health: Some(Box::new(|| {
             Ok(proto_v1::HealthResponse {
                 status: 0,
-                version: "0.0.49".into(),
+                version: "0.0.55".into(),
             })
         })),
         ..Default::default()
@@ -214,7 +214,7 @@ async fn openshell_preflight_with_fails_on_gateway_too_old() {
     let mut client = mock_client(addr).await;
 
     let result = super::openshell_preflight_with(
-        || async { Ok("openshell 0.0.50\n".to_string()) },
+        || async { Ok("openshell 0.0.56\n".to_string()) },
         &mut client,
     )
     .await;

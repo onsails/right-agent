@@ -406,8 +406,18 @@ struct SandboxReadiness {
 
 impl SandboxReadiness {
     fn from_sandbox(sandbox: Sandbox) -> Self {
+        // OpenShell 0.0.56 moved the gateway-derived lifecycle phase out of the
+        // top-level `Sandbox` message (reserved field 4) into
+        // `SandboxStatus.phase` (field 6). Absent status — or an unset phase —
+        // reads as UNSPECIFIED, which `is_ready()`/`is_error()` treat as
+        // "not ready, not terminal".
+        let phase = sandbox
+            .status
+            .as_ref()
+            .map(|status| status.phase)
+            .unwrap_or(SandboxPhase::Unspecified as i32);
         Self {
-            phase: sandbox.phase,
+            phase,
             status_summary: summarize_sandbox_status(sandbox.status.as_ref()),
         }
     }

@@ -121,6 +121,11 @@ impl OpenShell for MockOpenShell {
         if phase < 0 {
             return Err(tonic::Status::not_found("sandbox not found"));
         }
+        // OpenShell 0.0.56 carries the gateway-derived lifecycle phase in
+        // `SandboxStatus.phase`, not on the top-level `Sandbox` message. Mirror
+        // that: fold the configured phase into the status the gateway returns.
+        let mut status = self.get_sandbox_status.clone().unwrap_or_default();
+        status.phase = phase;
         Ok(tonic::Response::new(os_proto::v1::SandboxResponse {
             sandbox: Some(os_proto::v1::Sandbox {
                 metadata: Some(os_proto::datamodel::v1::ObjectMeta {
@@ -128,8 +133,7 @@ impl OpenShell for MockOpenShell {
                     name: "mock-sandbox".into(),
                     ..Default::default()
                 }),
-                phase,
-                status: self.get_sandbox_status.clone(),
+                status: Some(status),
                 ..Default::default()
             }),
         }))

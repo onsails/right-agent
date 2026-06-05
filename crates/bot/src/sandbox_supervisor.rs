@@ -522,6 +522,18 @@ async fn recovery_step(
             return LoopStep::Continue;
         }
         Ok(Err(diag)) => {
+            // Surface the diagnosis on every recovery failure. Without this the
+            // loop retries silently and a persistent bring-up failure (e.g. a
+            // proto/phase mismatch that decodes a Ready sandbox as not-ready)
+            // is invisible — only the per-iteration "preflight passed" INFO
+            // shows, with no hint why recovery never completes.
+            tracing::warn!(
+                agent = %deps.agent,
+                cause = ?diag.cause,
+                attempt = *attempt,
+                "sandbox bring-up failed; staying degraded and retrying: {}",
+                diag.summary
+            );
             handle.set_unavailable(Arc::new(diag));
         }
         Err(e) => {
