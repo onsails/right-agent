@@ -1,0 +1,150 @@
+name: OpenShell proto compat
+
+# Daily: re-vendor the latest OpenShell proto, surface breaking changes via
+# `buf breaking` + `cargo check`, and open/update a single PR so upstream
+# wire/API drift is caught before it reaches a running gateway. It SURFACES
+# only — a human fixes any Rust decode logic and bumps version floors.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 5 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: openshell-proto-compat
+  cancel-in-progress: false
+
+jobs:
+  revendor:
+    name: re-vendor + compat check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve latest OpenShell release tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/NVIDIA/OpenShell/releases/latest \
+            | jq -r '.tag_name')"
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "::error::could not resolve latest OpenShell release tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Latest OpenShell release: $tag"
+
+      - name: Snapshot currently vendored protos
+        run: cp -r crates/right-openshell/proto/openshell /tmp/openshell-proto-old
+
+      - name: Re-vendor latest proto
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: bash scripts/vendor-openshell-proto.sh "$TAG"
+
+      - name: Setup buf
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ github.token }}
+
+      - name: buf breaking (PACKAGE)
+        id: buf
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if buf breaking crates/right-openshell/proto/openshell \
+              --against /tmp/openshell-proto-old --error-format=text \
+              > /tmp/buf-breaking.txt 2>&1; then
+            echo "result=clean" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=BREAKING" >> "$GITHUB_OUTPUT"
+          fi
+          echo "--- buf breaking output ---"
+          cat /tmp/buf-breaking.txt || true
+
+      - uses: cachix/install-nix-action@v31
+      - name: Install devenv.sh
+        run: nix profile add nixpkgs#devenv
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/devenv"
+          cmd-format: devenv shell -- {0}
+
+      - name: cargo check (regenerates stubs from the new proto)
+        id: check
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if devenv shell -- cargo check -p right-openshell --tests \
+              > /tmp/cargo-check.txt 2>&1; then
+            echo "result=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAILED" >> "$GITHUB_OUTPUT"
+          fi
+          echo "--- cargo check tail ---"
+          tail -60 /tmp/cargo-check.txt || true
+
+      - name: Compose PR body
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          BUF_RESULT: ${{ steps.buf.outputs.result }}
+          CHECK_RESULT: ${{ steps.check.outputs.result }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Automated re-vendor of the OpenShell protos to **$TAG**."
+            echo
+            echo "| static check | result |"
+            echo "|---|---|"
+            echo "| \`buf breaking\` (PACKAGE) | ${BUF_RESULT:-?} |"
+            echo "| \`cargo check -p right-openshell\` | ${CHECK_RESULT:-?} |"
+            echo
+            echo "<details><summary>buf breaking output</summary>"
+            echo
+            echo '```'
+            sed -n '1,200p' /tmp/buf-breaking.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+            echo
+            echo "</details>"
+            echo
+            echo "<details><summary>cargo check (tail)</summary>"
+            echo
+            echo '```'
+            tail -80 /tmp/cargo-check.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+            echo
+            echo "</details>"
+            echo
+            echo "---"
+            echo "A **BREAKING** or **FAILED** result means upstream changed the wire/API shape."
+            echo "Audit \`SandboxReadiness\` and any code decoding moved/removed fields, then bump"
+            echo "\`MIN_OPENSHELL_VERSION\` and the CI \`OPENSHELL_VERSION\` pin as needed."
+            echo "This bot surfaces drift only — it does not fix Rust. Full CI does not auto-run on"
+            echo "bot-authored PRs; push a commit (or re-run the Tests workflow) to trigger it."
+          } > /tmp/pr-body.md
+          {
+            echo "PR_BODY<<PRBODY_EOF"
+            cat /tmp/pr-body.md
+            echo "PRBODY_EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Create or update PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: automation/openshell-proto-revendor
+          base: master
+          title: "chore(openshell): re-vendor proto to ${{ steps.resolve.outputs.tag }}"
+          body: ${{ env.PR_BODY }}
+          labels: |
+            openshell-proto
+            automated
+          add-paths: |
+            crates/right-openshell/proto/**
+          commit-message: "chore(openshell): re-vendor proto to ${{ steps.resolve.outputs.tag }}"
+          delete-branch: false
