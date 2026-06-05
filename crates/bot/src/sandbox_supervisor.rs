@@ -159,13 +159,11 @@ pub(crate) async fn bring_up_sandbox(
 
     // Regenerate policy with resolved host IPs and apply.
     let network_policy = config.network_policy;
-    let policy_content = right_codegen::policy::generate_provider_aware_policy(
+    let policy_content = right_codegen::policy::generate_policy(
         right_runtime_state::MCP_HTTP_PORT,
         &network_policy,
         right_codegen::policy::HostMcpAccess::Resolved(host_ips.clone()),
-        config.providers(),
-    )
-    .map_err(|e| miette::miette!("provider policy fold failed: {e:#}"))?;
+    );
     // Drift check BEFORE write+apply: `openshell policy set --wait` rejects
     // landlock changes on a live sandbox with InvalidArgument, so applying
     // a drifted filesystem policy cannot safely repair the sandbox. Fail
@@ -329,12 +327,11 @@ pub(crate) async fn bring_up_sandbox(
 
 /// Hot-apply a `sandbox.providers` change to a live sandbox without a restart.
 ///
-/// Re-renders the provider-aware policy (network-only, via
+/// Re-renders the base provider-free policy (network-only, via
 /// `openshell policy set --wait`) and reconciles gateway attach/detach. Used by
 /// the config-watcher providers hot path; on failure the lib.rs consumer retries
 /// with backoff. There is no periodic provider reconcile, so persistent failure
-/// leaves the live sandbox policy stale until the next bot restart — the on-disk
-/// policy is already correct because every full regen folds providers back in.
+/// leaves the live sandbox attachment state stale until the next bot restart.
 pub(crate) async fn hot_reconcile_providers(
     agent: &str,
     agent_dir: &std::path::Path,
@@ -356,13 +353,11 @@ pub(crate) async fn hot_reconcile_providers(
     let host_ips = right_openshell::openshell::resolve_host_ips(&mut client, &sandbox_id).await?;
 
     let providers = config.providers();
-    let policy_content = right_codegen::policy::generate_provider_aware_policy(
+    let policy_content = right_codegen::policy::generate_policy(
         right_runtime_state::MCP_HTTP_PORT,
         &config.network_policy,
         right_codegen::policy::HostMcpAccess::Resolved(host_ips),
-        providers,
-    )
-    .map_err(|e| miette::miette!("provider policy fold failed: {e:#}"))?;
+    );
 
     right_codegen::contract::write_and_apply_sandbox_policy(
         resolved_sandbox,

@@ -1,12 +1,4 @@
-use super::policy::*;
-
-const POLICY_WITHOUT_PROVIDERS: &str = r#"
-network:
-  endpoints:
-    - host: api.anthropic.com
-      protocol: rest
-      access: full
-"#;
+use super::policy::providers_strip;
 
 const POLICY_WITH_ONE_PROVIDER: &str = r#"
 network:
@@ -21,505 +13,105 @@ network:
       access: full
 "#;
 
-#[test]
-fn append_provider_endpoint_inserts_tagged_stanza() {
-    let after = providers_append(
-        POLICY_WITHOUT_PROVIDERS,
-        "myagent-acme",
-        "api.acme.com",
-        None,
-    );
-    assert!(after.contains("managed-by: right-providers:myagent-acme"));
-    assert!(after.contains("- host: api.acme.com"));
-}
-
-#[test]
-fn append_provider_endpoint_existing_rest_is_noop() {
-    let already = "network:\n  endpoints:\n    - host: api.acme.com\n      protocol: rest\n      access: full\n";
-    let after = providers_append(already, "myagent-acme", "api.acme.com", None);
-    assert_eq!(after, already);
-}
-
-#[test]
-fn append_provider_endpoint_raw_tunnel_conflict() {
-    let raw = "network:\n  endpoints:\n    - allowed_ips: [1.2.3.4/32]\n      tls: skip\n      ports: [443]\n";
-    // tls:skip is a raw tunnel; with no domain we can't conflict — that's OK.
-    let after = providers_append(raw, "myagent-acme", "api.acme.com", None);
-    assert!(after.contains("managed-by: right-providers:myagent-acme"));
-}
-
-#[test]
-fn append_provider_endpoint_conflicting_domain_raw_tunnel_returns_err() {
-    let raw = "network:\n  endpoints:\n    - host: api.acme.com\n      tls: skip\n";
-    let err = providers_append_checked(raw, "myagent-acme", "api.acme.com", None);
-    assert!(matches!(err, Err(PolicyConflict::RawTunnel { .. })));
-}
-
-#[test]
-fn append_provider_endpoint_prefix_collision_is_not_idempotent() {
-    // Regression: a substring host-marker match used to treat
-    // "api.acme.com.evil.tld" as collision-matching "api.acme.com",
-    // causing the real endpoint to be silently skipped.
-    let policy = "network:\n  endpoints:\n    - host: api.acme.com.evil.tld\n      protocol: rest\n      access: full\n";
-    let after = providers_append(policy, "myagent-acme", "api.acme.com", None);
-    assert!(after.contains("- host: api.acme.com\n"));
-    assert!(after.contains("managed-by: right-providers:myagent-acme"));
-}
-
-#[test]
-fn strip_provider_endpoint_removes_tagged() {
-    let after = providers_strip(POLICY_WITH_ONE_PROVIDER, "myagent-acme", "api.acme.com");
-    assert!(!after.contains("managed-by: right-providers:myagent-acme"));
-    assert!(!after.contains("api.acme.com"));
-}
-
-#[test]
-fn append_provider_endpoint_handles_crlf_policy() {
-    let policy = "network:\r\n  endpoints:\r\n    - host: api.anthropic.com\r\n      protocol: rest\r\n      access: full\r\n";
-    let after = providers_append(policy, "myagent-acme", "api.acme.com", None);
-    // The new stanza must be present.
-    assert!(after.contains("- host: api.acme.com"));
-    assert!(after.contains("managed-by: right-providers:myagent-acme"));
-    // The original CRLF content must not be mid-line corrupted: existing
-    // endpoint still present.
-    assert!(after.contains("- host: api.anthropic.com"));
-}
-
-/// Regression: prior to the anchor fix, `providers_append` used
-/// `policy.find("endpoints:")` which lands on whichever sub-section
-/// is rendered first under `network_policies:` in the real output of
-/// `generate_policy`. In restrictive mode that is `anthropic.endpoints`
-/// (the Anthropic-gated allowlist), so generic provider stanzas were
-/// silently smuggled inside it. The synthetic `network:\n  endpoints:`
-/// fixtures above never exercised this path. This test runs against the
-/// real `generate_policy` output to keep that gap closed.
-#[test]
-fn append_targets_outbound_endpoints_in_permissive_real_policy() {
-    let base = generate_policy(
-        8100,
-        &right_agent_config::NetworkPolicy::Permissive,
-        HostMcpAccess::BootstrapUnresolved,
-    );
-
-    let appended = providers_append(&base, "myagent-acme", "api.acme.invalid", None);
-
-    let parsed: serde_json::Value =
-        serde_saphyr::from_str(&appended).expect("appended policy must be valid YAML");
-    let outbound_endpoints = parsed["network_policies"]["outbound"]["endpoints"]
-        .as_array()
-        .expect("outbound endpoints must be a list");
-
-    let in_outbound = outbound_endpoints
-        .iter()
-        .any(|e| e.get("host").and_then(|h| h.as_str()) == Some("api.acme.invalid"));
-    assert!(
-        in_outbound,
-        "generic provider stanza must land in network_policies.outbound.endpoints, not elsewhere"
-    );
-
-    // And it must NOT live in any other section (e.g. right or a stray block).
-    let other_sections = ["right", "anthropic"];
-    for section in other_sections {
-        let endpoints = &parsed["network_policies"][section]["endpoints"];
-        if let Some(arr) = endpoints.as_array() {
-            assert!(
-                !arr.iter()
-                    .any(|e| e.get("host").and_then(|h| h.as_str()) == Some("api.acme.invalid")),
-                "provider stanza leaked into network_policies.{section}.endpoints"
-            );
-        }
-    }
-}
-
-/// Round-trip: append then strip a provider against a real
-/// `generate_policy` output and confirm the policy is byte-identical
-/// to the original. This guards both the anchor-aware append and
-/// strip-stops-at-anchor logic.
-#[test]
-fn append_then_strip_round_trips_against_real_policy() {
-    let base = generate_policy(
-        8100,
-        &right_agent_config::NetworkPolicy::Permissive,
-        HostMcpAccess::BootstrapUnresolved,
-    );
-
-    let appended = providers_append(&base, "myagent-acme", "api.acme.invalid", None);
-    assert_ne!(appended, base, "append must change the policy");
-    assert!(
-        appended.contains("# right-providers: insert-above"),
-        "anchor must survive append"
-    );
-
-    let stripped = providers_strip(&appended, "myagent-acme", "api.acme.invalid");
-    assert_eq!(
-        stripped, base,
-        "strip after append must restore the byte-for-byte original policy"
-    );
-}
-
-/// Bug regression: the appended provider endpoint must use OpenShell's real
-/// endpoint keys (`host` + `port`), not the legacy `domain` key that OpenShell
-/// v0.0.50 rejects as an unknown field. Generic providers are only ever
-/// appended to permissive policies (the API rejects generic + restrictive via
-/// `NetworkPolicyForbidsGeneric`), so this asserts the production path against
-/// the real permissive `generate_policy` output. Shipped broken because no live
-/// test ever applied a successfully-appended policy.
-#[test]
-fn appended_provider_endpoint_uses_host_and_port_not_domain() {
-    let base = generate_policy(
-        8100,
-        &right_agent_config::NetworkPolicy::Permissive,
-        HostMcpAccess::BootstrapUnresolved,
-    );
-
-    let appended = providers_append(&base, "myagent-acme", "api.acme.invalid", None);
-    let parsed: serde_json::Value =
-        serde_saphyr::from_str(&appended).expect("appended policy must be valid YAML");
-
-    let stanza = parsed["network_policies"]["outbound"]["endpoints"]
-        .as_array()
-        .expect("outbound endpoints must be a list")
-        .iter()
-        .find(|e| e.get("host").and_then(|h| h.as_str()) == Some("api.acme.invalid"))
-        .expect("provider stanza must carry a `host` key (OpenShell rejects `domain`)");
-    assert!(
-        stanza.get("port").is_some(),
-        "provider endpoint must carry a `port` (OpenShell expects it)"
-    );
-    assert!(
-        !appended.contains("- domain: api.acme.invalid"),
-        "the legacy `domain:` key must not be emitted"
-    );
-}
-
-/// A faithful reproduction of a permissive `generate_policy` output as it
-/// existed BEFORE the `# right-providers: insert-above` anchor was added.
-/// Per AGENTS.md "Upgrade-friendly design", agents deployed against that
-/// version still have on-disk policies in this exact shape, and any new
-/// append/strip code must handle them without sandbox recreation.
-fn legacy_permissive_policy_without_anchor() -> String {
-    // Mirrors generate_policy(NetworkPolicy::Permissive, BootstrapUnresolved)
-    // with the anchor line stripped from permissive_endpoints(). All other
-    // indentation and surrounding structure is preserved verbatim, including
-    // the sibling `binaries:` key and the trailing `right:` block.
-    r#"version: 1
-
-filesystem_policy:
-  include_workdir: true
-  read_only:
-    - /usr
-    - /lib
-    - /lib64
-    - /etc
-    - /proc
-    - /dev/urandom
-    - /var/log
-  read_write:
-    - /dev/null
-    - /tmp
-    - /sandbox
-    - /platform
-
-landlock:
-  compatibility: best_effort
-
-process:
-  run_as_user: sandbox
-  run_as_group: sandbox
-
-network_policies:
+const LEGACY_POLICY_WITH_PROVIDER_BEFORE_BINARIES: &str = r#"network_policies:
   outbound:
     endpoints:
       - port: 443
         allowed_ips:
           - "1.0.0.0/8"
-          - "2000::/3"
         tls: skip
-      - port: 80
-        allowed_ips:
-          - "1.0.0.0/8"
-          - "2000::/3"
-        tls: skip
-    binaries:
-      - path: "**"
-
-  right:
-    endpoints:
-      - host: "host.openshell.internal"
-        port: 8100
+      # managed-by: right-providers:myagent-acme
+      - host: api.acme.invalid
+        port: 443
         protocol: rest
         access: full
     binaries:
       - path: "**"
-"#
-    .to_string()
+"#;
+
+const LEGACY_POLICY_WITHOUT_PROVIDER_BEFORE_BINARIES: &str = r#"network_policies:
+  outbound:
+    endpoints:
+      - port: 443
+        allowed_ips:
+          - "1.0.0.0/8"
+        tls: skip
+    binaries:
+      - path: "**"
+"#;
+
+#[test]
+fn providers_strip_absent_provider_is_noop() {
+    let after = providers_strip(POLICY_WITH_ONE_PROVIDER, "myagent-other", "api.other.com");
+    assert_eq!(after, POLICY_WITH_ONE_PROVIDER);
 }
 
-/// Regression for the upgrade-path bug described in
-/// `Fix: providers_strip over-eats on legacy policy`:
-///
-/// Legacy permissive policies on disk do NOT contain the
-/// `# right-providers: insert-above` anchor that `generate_policy` now emits.
-/// When `providers_append` falls back to the no-anchor path on such a policy
-/// and then `providers_strip` removes the stanza, the walker MUST stop at
-/// `    binaries:` (the sibling key of `endpoints:`). Otherwise it consumes
-/// the `outbound.binaries` block, which OpenShell then rejects (or worse,
-/// silently restricts all egress).
+#[test]
+fn providers_strip_removes_tagged_endpoint() {
+    let after = providers_strip(POLICY_WITH_ONE_PROVIDER, "myagent-acme", "api.acme.com");
+    assert!(!after.contains("managed-by: right-providers:myagent-acme"));
+    assert!(!after.contains("api.acme.com"));
+    assert!(after.contains("api.anthropic.com"));
+}
+
 #[test]
 fn providers_strip_does_not_consume_outbound_binaries_in_legacy_policy() {
-    let legacy = legacy_permissive_policy_without_anchor();
-    assert!(
-        !legacy.contains("# right-providers:"),
-        "legacy fixture must not contain the anchor sentinel"
+    let stripped = providers_strip(
+        LEGACY_POLICY_WITH_PROVIDER_BEFORE_BINARIES,
+        "myagent-acme",
+        "api.acme.invalid",
     );
 
-    let appended = providers_append(&legacy, "myagent-acme", "api.acme.invalid", None);
-    assert!(
-        appended.contains("managed-by: right-providers:myagent-acme"),
-        "append must produce a tagged stanza even without the anchor"
-    );
-
-    let stripped = providers_strip(&appended, "myagent-acme", "api.acme.invalid");
-
-    // The post-strip policy must remain valid YAML and must preserve both
-    // `outbound.endpoints` and `outbound.binaries` exactly. The bug was that
-    // `binaries:` was being walked as a continuation of the endpoints list
-    // and removed from the document.
     let parsed: serde_json::Value =
         serde_saphyr::from_str(&stripped).expect("stripped legacy policy must be valid YAML");
     let outbound = &parsed["network_policies"]["outbound"];
     assert!(
         outbound.get("binaries").is_some(),
-        "outbound.binaries must survive strip (was eaten by walker pre-fix)"
+        "outbound.binaries must survive strip"
     );
-    let binaries = outbound["binaries"]
-        .as_array()
-        .expect("outbound.binaries must be a list");
-    assert_eq!(
-        binaries.len(),
-        1,
-        "outbound.binaries must still contain its single `**` entry"
-    );
-    assert_eq!(
-        binaries[0]["path"].as_str(),
-        Some("**"),
-        "outbound.binaries[0].path must be the unchanged `**` wildcard"
-    );
+    assert_eq!(outbound["binaries"][0]["path"].as_str(), Some("**"));
 
     let endpoints = outbound["endpoints"]
         .as_array()
         .expect("outbound.endpoints must remain a list");
-    let ports: Vec<u64> = endpoints
-        .iter()
-        .filter_map(|e| e["port"].as_u64())
-        .collect();
     assert!(
-        ports.contains(&443) && ports.contains(&80),
-        "both original public-web endpoints (ports 80 + 443) must survive strip, got {ports:?}"
+        endpoints.iter().any(|e| e["port"].as_u64() == Some(443)),
+        "original public-web endpoint must survive strip"
     );
-
-    // And the provider stanza itself must be gone.
     assert!(!stripped.contains("api.acme.invalid"));
     assert!(!stripped.contains("right-providers:myagent-acme"));
 }
 
-/// Stronger guarantee: appending into a legacy (no-anchor) policy and then
-/// stripping that same provider must yield a byte-identical original. If
-/// any whitespace, sibling key, or trailing block is disturbed, this test
-/// fails.
 #[test]
-fn providers_append_into_legacy_policy_then_strip_yields_byte_identical_original() {
-    let legacy = legacy_permissive_policy_without_anchor();
-
-    let appended = providers_append(&legacy, "myagent-acme", "api.acme.invalid", None);
-    assert_ne!(appended, legacy, "append must change the policy");
-
-    let stripped = providers_strip(&appended, "myagent-acme", "api.acme.invalid");
-    assert_eq!(
-        stripped, legacy,
-        "strip after append on a legacy (no-anchor) policy must restore byte-for-byte"
+fn providers_strip_from_legacy_policy_yields_expected_base() {
+    let stripped = providers_strip(
+        LEGACY_POLICY_WITH_PROVIDER_BEFORE_BINARIES,
+        "myagent-acme",
+        "api.acme.invalid",
     );
+    assert_eq!(stripped, LEGACY_POLICY_WITHOUT_PROVIDER_BEFORE_BINARIES);
 }
 
 #[test]
-fn strip_one_of_two_adjacent_providers_does_not_touch_neighbor() {
-    let policy = providers_append("network:\n  endpoints:\n", "myagent-a", "api.a.com", None);
-    let policy = providers_append(&policy, "myagent-b", "api.b.com", None);
-    let stripped = providers_strip(&policy, "myagent-a", "api.a.com");
-    // A is gone
+fn providers_strip_one_of_two_adjacent_providers_does_not_touch_neighbor() {
+    let policy = r#"network:
+  endpoints:
+    # managed-by: right-providers:myagent-a
+    - host: api.a.com
+      port: 443
+      protocol: rest
+      access: full
+    # managed-by: right-providers:myagent-b
+    - host: api.b.com
+      port: 443
+      protocol: rest
+      access: full
+"#;
+
+    let stripped = providers_strip(policy, "myagent-a", "api.a.com");
     assert!(!stripped.contains("right-providers:myagent-a"));
     assert!(!stripped.contains("- host: api.a.com"));
-    // B survives intact
     assert!(stripped.contains("right-providers:myagent-b"));
     assert!(stripped.contains("- host: api.b.com"));
     assert!(stripped.contains("protocol: rest"));
-}
-
-// --- apply_provider_stanzas tests ---
-
-use right_agent_config::{GenericProvider, NetworkPolicy, ProviderEntry, ProviderType};
-
-fn generic_entry(name: &str, host: &str, path: Option<&str>) -> ProviderEntry {
-    ProviderEntry {
-        name: name.to_string(),
-        type_: ProviderType::Generic,
-        label: Some("lbl".to_string()),
-        generic: Some(GenericProvider {
-            env_var: "API_KEY".to_string(),
-            header_name: "Authorization".to_string(),
-            upstream_host: host.to_string(),
-            upstream_path_prefix: path.map(str::to_string),
-        }),
-    }
-}
-
-#[test]
-fn apply_provider_stanzas_folds_generic_above_anchor() {
-    let base = generate_policy(
-        8100,
-        &NetworkPolicy::Permissive,
-        HostMcpAccess::BootstrapUnresolved,
-    );
-    let out = apply_provider_stanzas(
-        &base,
-        &[generic_entry("right-typefully", "api.typefully.com", None)],
-    )
-    .unwrap();
-    assert!(out.contains("# managed-by: right-providers:right-typefully"));
-    assert!(out.contains("- host: api.typefully.com"));
-    assert!(out.contains("protocol: rest"));
-    assert!(
-        out.find("api.typefully.com").unwrap()
-            < out.find("# right-providers: insert-above").unwrap()
-    );
-}
-
-/// Regression for the permissive provider-shadowing bug: a generic provider's
-/// host L7 endpoint MUST be emitted BEFORE the hostless `tls: skip` catch-all
-/// in `network_policies.outbound.endpoints`. OpenShell evaluates endpoints in
-/// order; a leading hostless `tls: skip` catch-all whose `allowed_ips` cover
-/// the provider host's IP raw-tunnels the connection (no TLS termination, no
-/// credential substitution → the placeholder leaks upstream → 401). Proven on
-/// a throwaway sandbox: host-first terminates TLS and substitutes; catch-all
-/// first leaks. See docs/architecture/providers.md.
-#[test]
-fn permissive_provider_endpoint_precedes_tls_skip_catch_all() {
-    let base = generate_policy(
-        8100,
-        &NetworkPolicy::Permissive,
-        HostMcpAccess::BootstrapUnresolved,
-    );
-    let out = apply_provider_stanzas(
-        &base,
-        &[generic_entry("right-twitterapi", "api.twitterapi.io", None)],
-    )
-    .unwrap();
-
-    let host_idx = out
-        .find("- host: api.twitterapi.io")
-        .expect("provider host endpoint must be present");
-    // Locate the catch-all by its list-item port line. Provider stanzas render
-    // `port: 443` as an indented value line (no leading dash), so `- port: 443`
-    // uniquely matches the hostless catch-all and cannot be shadowed by a
-    // provider stanza that might one day carry a `tls` field.
-    let catch_all_idx = out
-        .find("- port: 443")
-        .expect("permissive policy must contain a hostless catch-all on port 443");
-    assert!(
-        out[catch_all_idx..].contains("tls: skip"),
-        "the located catch-all must be a tls: skip raw tunnel"
-    );
-
-    assert!(
-        host_idx < catch_all_idx,
-        "provider host endpoint must precede the tls: skip catch-all so the \
-         proxy terminates TLS and substitutes the credential; otherwise the \
-         catch-all shadows it and the placeholder leaks upstream.\n\
-         host_idx={host_idx} catch_all_idx={catch_all_idx}\npolicy:\n{out}"
-    );
-}
-
-#[test]
-fn apply_provider_stanzas_is_idempotent_and_keeps_path() {
-    let base = generate_policy(
-        8100,
-        &NetworkPolicy::Permissive,
-        HostMcpAccess::BootstrapUnresolved,
-    );
-    let providers = [generic_entry("right-acme", "api.acme.com", Some("/v1"))];
-    let once = apply_provider_stanzas(&base, &providers).unwrap();
-    let twice = apply_provider_stanzas(&once, &providers).unwrap();
-    assert_eq!(once, twice);
-    assert!(once.contains("path: /v1"));
-}
-
-#[test]
-fn apply_provider_stanzas_skips_builtin_and_none() {
-    let base = generate_policy(
-        8100,
-        &NetworkPolicy::Permissive,
-        HostMcpAccess::BootstrapUnresolved,
-    );
-    let providers = [ProviderEntry {
-        name: "right-anthropic".to_string(),
-        type_: ProviderType::BuiltIn("anthropic".to_string()),
-        label: None,
-        generic: None,
-    }];
-    assert_eq!(apply_provider_stanzas(&base, &providers).unwrap(), base);
-}
-
-#[test]
-fn apply_provider_stanzas_noop_restrictive() {
-    let base = generate_policy(
-        8100,
-        &NetworkPolicy::Restrictive,
-        HostMcpAccess::BootstrapUnresolved,
-    );
-    let out = apply_provider_stanzas(&base, &[generic_entry("right-acme", "api.acme.com", None)])
-        .unwrap();
-    assert_eq!(
-        out, base,
-        "restrictive policy has no anchor; fold is a no-op"
-    );
-}
-
-#[test]
-fn full_regen_then_fold_reconstructs_host_stanza() {
-    let providers = [generic_entry("right-typefully", "api.typefully.com", None)];
-    let regen = generate_policy(
-        8100,
-        &NetworkPolicy::Permissive,
-        HostMcpAccess::Resolved(vec!["10.0.0.5".parse().unwrap()]),
-    );
-    assert!(
-        !regen.contains("api.typefully.com"),
-        "bare regen must be stanza-less"
-    );
-    let folded = apply_provider_stanzas(&regen, &providers).unwrap();
-    assert!(folded.contains("- host: api.typefully.com"));
-    assert!(folded.contains("protocol: rest"));
-}
-
-#[test]
-fn generate_provider_aware_policy_matches_manual_fold() {
-    let providers = [generic_entry("right-typefully", "api.typefully.com", None)];
-    let manual = apply_provider_stanzas(
-        &generate_policy(
-            8100,
-            &NetworkPolicy::Permissive,
-            HostMcpAccess::BootstrapUnresolved,
-        ),
-        &providers,
-    )
-    .unwrap();
-    let helper = generate_provider_aware_policy(
-        8100,
-        &NetworkPolicy::Permissive,
-        HostMcpAccess::BootstrapUnresolved,
-        &providers,
-    )
-    .unwrap();
-    assert_eq!(helper, manual);
-    assert!(helper.contains("- host: api.typefully.com"));
 }

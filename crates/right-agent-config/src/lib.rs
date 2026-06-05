@@ -718,9 +718,8 @@ impl AgentConfig {
     }
 
     /// Declared `sandbox.providers`, or an empty slice when the `sandbox`
-    /// section is absent. The single source for the provider list that every
-    /// policy regen folds back in via
-    /// `right_codegen::policy::generate_provider_aware_policy`.
+    /// section is absent. This is the agent-local source for gateway provider
+    /// attach reconciliation; provider endpoints are composed by OpenShell.
     pub fn providers(&self) -> &[ProviderEntry] {
         self.sandbox
             .as_ref()

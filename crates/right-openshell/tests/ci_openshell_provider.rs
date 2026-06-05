@@ -233,66 +233,6 @@ async fn ci_openshell_provider_rotate_no_restart() {
 
 #[tokio::test]
 #[ignore = "ci-openshell: requires a live OpenShell gateway"]
-async fn ci_openshell_provider_policy_hot_apply() {
-    use right_codegen::contract::write_apply_with_snapshot;
-    use right_codegen::policy::providers_append;
-    use right_openshell::test_support::TestSandbox;
-
-    // Generic providers are only ever appended to permissive policies: the
-    // provider API rejects generic + restrictive (`NetworkPolicyForbidsGeneric`,
-    // enforced by `provider_create_generic_rejected_in_restrictive_mode`), and
-    // restrictive mode renders no `# right-providers: insert-above` anchor. Use
-    // the permissive base — the real production shape — so this exercises the
-    // live `policy set` apply of an appended provider endpoint.
-    let base = right_codegen::policy::generate_policy(
-        8100,
-        &right_agent_config::NetworkPolicy::Permissive,
-        right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
-    );
-
-    let appended = providers_append(&base, "ci-myagent-acme", "api.acme.invalid", None);
-    assert!(
-        appended.contains("managed-by: right-providers:ci-myagent-acme"),
-        "appended policy must contain provider tag"
-    );
-    assert!(
-        appended.contains("api.acme.invalid"),
-        "appended policy must contain new domain"
-    );
-
-    // Boot the sandbox WITH `base` so its startup landlock/filesystem policy
-    // matches what we hot-apply next. `providers_append` touches only the
-    // network section, so `policy set` of `appended` is a network-only change —
-    // OpenShell rejects landlock changes on a live sandbox, exactly as the
-    // production provider-add path relies on.
-    let sandbox =
-        TestSandbox::create_with_policy("ci-openshell-provider-policy-hot-apply", &base).await;
-
-    let tmp = tempfile::TempDir::new().unwrap();
-    let policy_path = tmp.path().join("policy.yaml");
-    std::fs::write(&policy_path, &base).unwrap();
-
-    let snap = write_apply_with_snapshot(sandbox.name(), &policy_path, appended)
-        .await
-        .unwrap();
-
-    let on_disk = std::fs::read_to_string(&policy_path).unwrap();
-    assert!(
-        on_disk.contains("api.acme.invalid"),
-        "on-disk policy must contain new domain after hot-apply"
-    );
-
-    snap.restore().await.unwrap();
-
-    let restored = std::fs::read_to_string(&policy_path).unwrap();
-    assert_eq!(
-        restored, base,
-        "restored policy must be byte-for-byte identical to base"
-    );
-}
-
-#[tokio::test]
-#[ignore = "ci-openshell: requires a live OpenShell gateway"]
 async fn ci_openshell_provider_destroy_cascade() {
     use right_openshell::providers::*;
     let mtls_dir = right_openshell::openshell::default_mtls_dir();

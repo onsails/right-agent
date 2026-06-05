@@ -1823,7 +1823,6 @@ async fn cmd_init(
                 &sb_name,
                 &policy_path,
                 network_policy_val,
-                &[],
             )?;
             println!(
                 "{}",
@@ -2286,13 +2285,10 @@ async fn cmd_agent_init(
                 .await
             })
         })?;
-        let init_config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
-        let init_providers = init_config.as_ref().map(|c| c.providers()).unwrap_or(&[]);
         apply_exact_right_mcp_policy_for_sandbox_sync(
             &sb_name,
             &policy_path,
             overrides.network_policy,
-            init_providers,
         )?;
 
         println!("  Sandbox '{sb_name}' ready");
@@ -2401,15 +2397,12 @@ async fn check_sandbox_exists_async(sandbox_name: &str) -> miette::Result<bool> 
 fn write_bootstrap_right_mcp_policy(
     policy_path: &Path,
     network_policy: right_agent::agent::types::NetworkPolicy,
-    providers: &[right_agent_config::ProviderEntry],
 ) -> miette::Result<()> {
-    let policy_content = right_codegen::policy::generate_provider_aware_policy(
+    let policy_content = right_codegen::policy::generate_policy(
         right_runtime_state::MCP_HTTP_PORT,
         &network_policy,
         right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
-        providers,
-    )
-    .map_err(|e| miette::miette!("provider policy fold failed: {e:#}"))?;
+    );
     right_codegen::contract::write_regenerated(policy_path, &policy_content)
 }
 
@@ -2417,14 +2410,12 @@ fn apply_exact_right_mcp_policy_for_sandbox_sync(
     sandbox_name: &str,
     policy_path: &Path,
     network_policy: right_agent::agent::types::NetworkPolicy,
-    providers: &[right_agent_config::ProviderEntry],
 ) -> miette::Result<Vec<std::net::IpAddr>> {
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(apply_exact_right_mcp_policy_for_sandbox(
             sandbox_name,
             policy_path,
             network_policy,
-            providers,
         ))
     })
 }
@@ -2433,7 +2424,6 @@ async fn apply_exact_right_mcp_policy_for_sandbox(
     sandbox_name: &str,
     policy_path: &Path,
     network_policy: right_agent::agent::types::NetworkPolicy,
-    providers: &[right_agent_config::ProviderEntry],
 ) -> miette::Result<Vec<std::net::IpAddr>> {
     let mtls_dir = match right_openshell::openshell::preflight_check() {
         right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
@@ -2444,13 +2434,11 @@ async fn apply_exact_right_mcp_policy_for_sandbox(
     let sandbox_id =
         right_openshell::openshell::resolve_sandbox_id(&mut grpc, sandbox_name).await?;
     let host_ips = right_openshell::openshell::resolve_host_ips(&mut grpc, &sandbox_id).await?;
-    let policy_content = right_codegen::policy::generate_provider_aware_policy(
+    let policy_content = right_codegen::policy::generate_policy(
         right_runtime_state::MCP_HTTP_PORT,
         &network_policy,
         right_codegen::policy::HostMcpAccess::Resolved(host_ips.clone()),
-        providers,
-    )
-    .map_err(|e| miette::miette!("provider policy fold failed: {e:#}"))?;
+    );
     right_codegen::contract::write_and_apply_sandbox_policy(
         sandbox_name,
         policy_path,
@@ -3435,7 +3423,6 @@ async fn cmd_agent_restore(
             write_bootstrap_right_mcp_policy(
                 &policy_path,
                 config.as_ref().map(|c| c.network_policy).unwrap_or_default(),
-                config.as_ref().map(|c| c.providers()).unwrap_or(&[]),
             )?;
 
             // Verify OpenShell is reachable.
@@ -3502,7 +3489,6 @@ async fn cmd_agent_restore(
                 &new_sandbox_name,
                 &policy_path,
                 config.as_ref().map(|c| c.network_policy).unwrap_or_default(),
-                config.as_ref().map(|c| c.providers()).unwrap_or(&[]),
             )
             .await?;
 
@@ -5130,7 +5116,6 @@ network_policies:
         write_bootstrap_right_mcp_policy(
             &policy_path,
             right_agent::agent::types::NetworkPolicy::Permissive,
-            &[],
         )
         .unwrap();
 
@@ -6434,10 +6419,6 @@ async fn perform_migration(
             .as_ref()
             .map(|config| config.network_policy)
             .unwrap_or_default(),
-        migration_config
-            .as_ref()
-            .map(|c| c.providers())
-            .unwrap_or(&[]),
     )
     .await?;
     println!("  Exact Right MCP policy applied.");
