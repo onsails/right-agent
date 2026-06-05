@@ -35,7 +35,16 @@ const UPSTREAM_HOST: &str = "postman-echo.com";
 const HEADER_NAME: &str = "x-api-key";
 const ENV_VAR: &str = "MY_API_KEY";
 const FAKE_CREDENTIAL: &str = "right-test-fake-api-key";
+/// Success path: retries transient upstream failures (postman-echo is a public
+/// service prone to 5xx/429/timeout) so the gate measures gateway substitution,
+/// not third-party uptime. A proxy CONNECT rejection is not transient and still
+/// surfaces deterministically.
 const CURL_ECHO_HEADER: &str = "curl -sS --fail-with-body --max-time 30 \
+--retry 3 --retry-delay 2 --retry-all-errors \
+https://postman-echo.com/get -H \"x-api-key: ${MY_API_KEY}\" 2>&1";
+/// Block path: no retries — the test asserts the proxy rejects CONNECT, which is
+/// immediate and deterministic; retrying would only add latency.
+const CURL_ECHO_HEADER_NORETRY: &str = "curl -sS --fail-with-body --max-time 30 \
 https://postman-echo.com/get -H \"x-api-key: ${MY_API_KEY}\" 2>&1";
 
 fn raw_tunnel_policy_file() -> (tempfile::TempDir, PathBuf) {
@@ -177,12 +186,15 @@ async fn ci_openshell_generic_profile_substitutes_custom_header() {
             .exec_with_timeout(&["sh", "-lc", CURL_ECHO_HEADER], 60)
             .await;
 
-        assert_eq!(code, 0, "curl command should exit successfully");
-        let echoed =
-            echoed_header(&out, HEADER_NAME).expect("echo response must contain x-api-key");
+        assert_eq!(
+            code, 0,
+            "curl command should exit successfully (code {code}); output: {out}"
+        );
+        let echoed = echoed_header(&out, HEADER_NAME)
+            .unwrap_or_else(|| panic!("echo response must contain x-api-key; output: {out}"));
         assert!(
             echoed == FAKE_CREDENTIAL,
-            "echoed x-api-key did not match fake credential"
+            "echoed x-api-key did not match fake credential (got {echoed:?})"
         );
     })
     .await;
@@ -228,12 +240,12 @@ async fn ci_openshell_profile_without_binaries_blocks_connect() {
         wait_for_provider_placeholder(&sandbox).await;
 
         let (out, code) = sandbox
-            .exec_with_timeout(&["sh", "-lc", CURL_ECHO_HEADER], 60)
+            .exec_with_timeout(&["sh", "-lc", CURL_ECHO_HEADER_NORETRY], 60)
             .await;
 
         assert_ne!(
             code, 0,
-            "profile without binaries must reject CONNECT; command unexpectedly succeeded"
+            "profile without binaries must reject CONNECT; command unexpectedly succeeded; output: {out}"
         );
         assert!(
             out.contains("CONNECT") && out.contains("403"),
