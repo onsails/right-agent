@@ -2049,6 +2049,12 @@ pub(crate) async fn handle_provider_remove(
         .clone();
     let mut client = open_openshell_client().await?;
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
+    let policy_path = state.agents_dir.join(&req.agent).join(
+        sandbox
+            .policy_file
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("policy.yaml")),
+    );
 
     match right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &req.name)
         .await
@@ -2068,18 +2074,14 @@ pub(crate) async fn handle_provider_remove(
     }
 
     // Gateway state is gone. The agent.yaml entry would now be ghost
-    // data — remove it first, then run legacy folded-policy cleanup. New
-    // composition-based policies have no stanza, so the strip is a no-op.
+    // data — remove it first, then reload provider-profile composition.
+    // Generic providers additionally run legacy folded-policy cleanup; new
+    // composition-based policies have no stanza, so that strip is a no-op.
     remove_provider_from_yaml(&state.agents_dir, &req.agent, &req.name)
         .map_err(|e| ProviderApiError::AgentYamlWrite(format!("{e:#}")))?;
 
+    let mut composition_reloaded = false;
     if let Some(g) = &entry.generic {
-        let policy_path = state.agents_dir.join(&req.agent).join(
-            sandbox
-                .policy_file
-                .clone()
-                .unwrap_or_else(|| std::path::PathBuf::from("policy.yaml")),
-        );
         let used_by_other = sandbox.providers.iter().any(|p| {
             p.name != req.name
                 && p.generic
@@ -2099,7 +2101,13 @@ pub(crate) async fn handle_provider_remove(
             )
             .await
             .map_err(|e| ProviderApiError::Gateway(format!("policy apply: {e:#}")))?;
+            composition_reloaded = true;
         }
+    }
+    if !composition_reloaded {
+        right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path)
+            .await
+            .map_err(|e| ProviderApiError::Gateway(format!("policy apply: {e:#}")))?;
     }
 
     Ok(axum::Json(ProviderRemoveResp { removed: true }))
