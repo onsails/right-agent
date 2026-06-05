@@ -139,6 +139,8 @@ async fn wait_for_provider_placeholder(sandbox: &TestSandbox) {
 #[tokio::test]
 #[ignore = "ci-openshell: live sandbox + gateway"]
 async fn ci_openshell_generic_profile_substitutes_custom_header() {
+    let _generic_provider_lock =
+        right_openshell::openshell::acquire_test_name_lock("ci-openshell-generic-provider");
     let profile_id = unique_profile_id("generic-header");
     let provider_name = unique_name("generic-header");
     let sandbox_name = Arc::new(Mutex::new(None));
@@ -177,7 +179,10 @@ async fn ci_openshell_generic_profile_substitutes_custom_header() {
             .exec_with_timeout(&["sh", "-lc", CURL_ECHO_HEADER], 60)
             .await;
 
-        assert_eq!(code, 0, "curl command should exit successfully");
+        assert_eq!(
+            code, 0,
+            "curl command should exit successfully; output:\n{out}"
+        );
         let echoed =
             echoed_header(&out, HEADER_NAME).expect("echo response must contain x-api-key");
         assert!(
@@ -191,6 +196,8 @@ async fn ci_openshell_generic_profile_substitutes_custom_header() {
 #[tokio::test]
 #[ignore = "ci-openshell: live sandbox + gateway"]
 async fn ci_openshell_profile_without_binaries_blocks_connect() {
+    let _generic_provider_lock =
+        right_openshell::openshell::acquire_test_name_lock("ci-openshell-generic-provider");
     let profile_id = unique_profile_id("generic-no-binaries");
     let provider_name = unique_name("generic-no-binaries");
     let sandbox_name = Arc::new(Mutex::new(None));
