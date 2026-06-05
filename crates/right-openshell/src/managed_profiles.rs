@@ -73,6 +73,56 @@ pub fn github() -> ManagedProfile {
     ManagedProfile::Github
 }
 
+pub fn generic_provider_profile_id(provider_name: &str) -> String {
+    const PREFIX: &str = "right-provider-";
+    const HASH_HEX_LEN: usize = 16;
+    const MAX_ID_LEN: usize = 64;
+    let max_slug_len = MAX_ID_LEN - PREFIX.len() - 1 - HASH_HEX_LEN;
+
+    let mut slug = String::with_capacity(provider_name.len().min(max_slug_len));
+    let mut last_was_dash = false;
+    for byte in provider_name.bytes() {
+        let ch = match byte {
+            b'a'..=b'z' | b'0'..=b'9' => byte as char,
+            b'A'..=b'Z' => (byte + (b'a' - b'A')) as char,
+            b'-' => '-',
+            _ => '-',
+        };
+        if ch == '-' {
+            if !slug.is_empty() && !last_was_dash {
+                slug.push('-');
+            }
+            last_was_dash = true;
+        } else {
+            slug.push(ch);
+            last_was_dash = false;
+        }
+        if slug.len() >= max_slug_len {
+            break;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        slug.push_str("provider");
+    }
+
+    format!(
+        "{PREFIX}{slug}-{hash:016x}",
+        hash = fnv1a64(provider_name.as_bytes())
+    )
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// Author a self-contained OpenShell profile for a generic provider.
 pub fn author_generic_profile(
     id: &str,
@@ -138,7 +188,7 @@ where
     let mut profiles = Vec::new();
 
     for provider in providers {
-        let id = format!("right-{}", provider.name.trim_start_matches("right-"));
+        let id = generic_provider_profile_id(provider.name);
         if !seen.insert(id.clone()) {
             continue;
         }
@@ -527,7 +577,48 @@ mod tests {
     }
 
     #[test]
-    fn generic_provider_profiles_dedupes_by_authored_profile_id() {
+    fn generic_provider_profile_id_is_valid_bounded_and_collision_resistant() {
+        let names = [
+            "foo-bar",
+            "right-foo-bar",
+            "agent_01-acme",
+            "Agent_01-acme",
+            "RIGHT__ODD Provider",
+        ];
+        let ids: Vec<_> = names
+            .iter()
+            .map(|name| generic_provider_profile_id(name))
+            .collect();
+        let unique: std::collections::HashSet<_> = ids.iter().cloned().collect();
+
+        assert_eq!(unique.len(), ids.len(), "ids must include a raw-name hash");
+        for (name, id) in names.iter().zip(ids.iter()) {
+            assert_eq!(
+                generic_provider_profile_id(name),
+                *id,
+                "profile id must be deterministic"
+            );
+            assert!(
+                id.len() <= 64,
+                "profile id {id:?} for {name:?} exceeds the length bound"
+            );
+            assert!(id.starts_with("right-provider-"));
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "profile id {id:?} contains invalid characters"
+            );
+            let hash = id.rsplit('-').next().expect("hash suffix");
+            assert_eq!(hash.len(), 16, "profile id {id:?} must end in u64 hex");
+            assert!(
+                hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "profile id {id:?} must end in hex"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_provider_profiles_uses_collision_resistant_profile_ids() {
         let profiles = generic_provider_profiles([
             GenericProviderProfileInput {
                 name: "right-acme",
@@ -545,8 +636,32 @@ mod tests {
             },
         ]);
 
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0].id(), generic_provider_profile_id("right-acme"));
+        assert_eq!(profiles[1].id(), generic_provider_profile_id("acme"));
+    }
+
+    #[test]
+    fn generic_provider_profiles_dedupes_duplicate_provider_names() {
+        let profiles = generic_provider_profiles([
+            GenericProviderProfileInput {
+                name: "right-acme",
+                upstream_host: "api.acme.com",
+                upstream_path_prefix: None,
+                header_name: "x-api-key",
+                env_var: "ACME_API_KEY",
+            },
+            GenericProviderProfileInput {
+                name: "right-acme",
+                upstream_host: "api.acme.com",
+                upstream_path_prefix: None,
+                header_name: "x-api-key",
+                env_var: "ACME_API_KEY",
+            },
+        ]);
+
         assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].id(), "right-acme");
+        assert_eq!(profiles[0].id(), generic_provider_profile_id("right-acme"));
     }
 
     #[test]
