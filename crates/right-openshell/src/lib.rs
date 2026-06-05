@@ -6,7 +6,10 @@ pub mod diagnosis;
 pub mod managed_profiles;
 pub mod openshell;
 pub mod providers;
-#[allow(clippy::large_enum_variant)]
+// Generated tonic/prost code: `large_enum_variant` is inherent to the proto
+// shape, and `doc_lazy_continuation` fires on upstream proto comments whose
+// list formatting we don't control.
+#[allow(clippy::large_enum_variant, clippy::doc_lazy_continuation)]
 pub mod openshell_proto {
     pub mod openshell {
         pub mod v1 {
