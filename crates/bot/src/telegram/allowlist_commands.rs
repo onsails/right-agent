@@ -88,7 +88,7 @@ pub(crate) async fn persist_new(
 }
 
 /// Read, mutate, and write `allowlist.yaml` while holding the allowlist file
-/// lock, then swap the persisted state into memory.
+/// lock, then swap the persisted state into memory before releasing the lock.
 pub(crate) async fn update_locked<R, F>(
     handle: &AllowlistHandle,
     agent_dir: &std::path::Path,
@@ -99,18 +99,19 @@ where
     F: FnOnce(&mut AllowlistState) -> R + Send + 'static,
 {
     let dir = agent_dir.to_path_buf();
-    let (result, new_state) = tokio::task::spawn_blocking(move || {
+    let handle = handle.clone();
+    let result = tokio::task::spawn_blocking(move || {
         allowlist::with_lock(&dir, |d| {
             let file = allowlist::read_file(d)?.unwrap_or_default();
             let mut state = AllowlistState::from_file(file);
             let result = f(&mut state);
             allowlist::write_file_inner(d, &state.to_file())?;
-            Ok((result, state))
+            *handle.0.write().expect("allowlist lock poisoned") = state;
+            Ok(result)
         })
     })
     .await
     .map_err(|e| format!("join: {e:#}"))??;
-    *handle.0.write().expect("allowlist lock poisoned") = new_state;
     Ok(result)
 }
 
@@ -432,6 +433,7 @@ pub async fn handle_deny_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use right_agent::agent::allowlist::AllowlistFile;
     use teloxide::types::Message;
 
     fn dm_msg(from_id: u64, text: &str) -> Message {
@@ -443,6 +445,20 @@ mod tests {
             "text": text
         }))
         .unwrap()
+    }
+
+    fn opened_state(chat_id: i64, mode: ResponseMode) -> AllowlistState {
+        AllowlistState::from_file(AllowlistFile {
+            groups: vec![AllowedGroup {
+                id: chat_id,
+                label: Some("group".to_string()),
+                opened_by: Some(1),
+                opened_at: Utc::now(),
+                mode,
+                topics: Vec::new(),
+            }],
+            ..Default::default()
+        })
     }
 
     #[tokio::test]
@@ -464,5 +480,70 @@ mod tests {
             UserTarget::UnresolvableUsername(u) => assert_eq!(u, "someone"),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_locked_keeps_file_lock_until_memory_publish() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let chat_id = -100;
+        let initial = opened_state(chat_id, ResponseMode::Addressed);
+        allowlist::write_file(dir.path(), &initial.to_file()).unwrap();
+        let handle = AllowlistHandle::new(initial);
+
+        let memory_guard = handle.0.write().expect("allowlist lock poisoned");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let update_handle = handle.clone();
+        let update_dir = dir.path().to_path_buf();
+        let update = tokio::spawn(async move {
+            update_locked(&update_handle, &update_dir, move |state| {
+                entered_tx.send(()).unwrap();
+                continue_rx.recv().expect("test released update");
+                state.set_group_mode(chat_id, ResponseMode::All)
+            })
+            .await
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("update entered locked mutation");
+
+        let (lock_acquired_tx, lock_acquired_rx) = mpsc::channel();
+        let probe_dir = dir.path().to_path_buf();
+        let probe = std::thread::spawn(move || {
+            allowlist::with_lock(&probe_dir, |_| {
+                lock_acquired_tx.send(()).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        });
+
+        continue_tx.send(()).unwrap();
+        assert!(
+            lock_acquired_rx
+                .recv_timeout(Duration::from_millis(200))
+                .is_err(),
+            "allowlist file lock released before in-memory publish completed"
+        );
+
+        drop(memory_guard);
+        assert!(update.await.unwrap().unwrap());
+        lock_acquired_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("probe acquired lock after memory publish completed");
+        probe.join().unwrap();
+
+        let state = handle.0.read().expect("allowlist lock poisoned");
+        assert_eq!(
+            state
+                .groups()
+                .iter()
+                .find(|g| g.id == chat_id)
+                .map(|g| g.mode),
+            Some(ResponseMode::All)
+        );
     }
 }
