@@ -6,6 +6,7 @@ use std::{
     collections::HashSet,
     io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use futures::StreamExt;
@@ -55,14 +56,25 @@ async fn write_then_rename(partial: &Path, dest: &Path, bytes: &[u8]) -> io::Res
     tokio::fs::rename(partial, dest).await
 }
 
-/// Returns the partial-download path for `dest`: `<dest>.partial` (full
-/// filename + `.partial` suffix, regardless of what extension `dest` has).
+/// Process-wide counter making each partial-download filename unique, so
+/// concurrent downloads of the same `dest` never share a partial file.
+static PARTIAL_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Returns a unique partial-download path for `dest` in the same directory:
+/// `<dest-filename>.<pid>.<seq>.partial`. Uniqueness (per-process atomic seq
+/// plus pid across processes) is load-bearing: a deterministic `<dest>.partial`
+/// let concurrent downloads of one model interleave into a single partial, and
+/// the first rename removed it out from under the others, which then failed
+/// with `NotFound`. Keeping the partial in `dest`'s directory keeps the final
+/// rename atomic (same filesystem).
 fn partial_path_for(dest: &Path) -> PathBuf {
+    let seq = PARTIAL_SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
     let mut name = dest
         .file_name()
         .expect("dest must have a filename")
         .to_os_string();
-    name.push(".partial");
+    name.push(format!(".{pid}.{seq}.partial"));
     dest.with_file_name(name)
 }
 
@@ -207,16 +219,66 @@ mod tests {
     }
 
     #[test]
-    fn partial_path_appends_dot_partial() {
-        assert_eq!(
-            partial_path_for(Path::new("/tmp/cache/ggml-tiny.bin")),
-            Path::new("/tmp/cache/ggml-tiny.bin.partial"),
-        );
+    fn partial_path_is_unique_and_suffixed() {
+        let dest = Path::new("/tmp/cache/ggml-tiny.bin");
+        let a = partial_path_for(dest);
+        let b = partial_path_for(dest);
+
+        // Same parent directory as dest (so rename stays on one filesystem).
+        assert_eq!(a.parent(), dest.parent());
+        // Encodes the dest filename and ends with `.partial`.
+        let a_name = a.file_name().unwrap().to_string_lossy();
+        assert!(a_name.starts_with("ggml-tiny.bin."), "got {a_name}");
+        assert!(a_name.ends_with(".partial"), "got {a_name}");
+        // Distinct calls never collide — this is what prevents concurrent
+        // downloads of the same model from racing on a shared partial file.
+        assert_ne!(a, b);
+
         // Edge case: dest without an extension still works.
-        assert_eq!(
-            partial_path_for(Path::new("/tmp/cache/no-ext")),
-            Path::new("/tmp/cache/no-ext.partial"),
+        let no_ext = partial_path_for(Path::new("/tmp/cache/no-ext"));
+        assert!(
+            no_ext
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("no-ext.")
         );
+    }
+
+    /// Regression: three STT tests download the same model into one shared
+    /// cache path concurrently (cold CI cache). With a deterministic
+    /// `<dest>.partial`, the first rename removed the shared partial and the
+    /// others' rename failed with `NotFound`. Unique per-call partials let
+    /// every writer rename its own file (last write to `dest` wins).
+    #[tokio::test]
+    async fn concurrent_downloads_to_same_dest_do_not_race_on_partial() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("cache/whisper/ggml-tiny.bin");
+
+        let mut handles = Vec::new();
+        for i in 0..6u8 {
+            let dest = dest.clone();
+            handles.push(tokio::spawn(async move {
+                let partial = partial_path_for(&dest);
+                write_then_rename(&partial, &dest, &[i; 64]).await
+            }));
+        }
+        for h in handles {
+            h.await
+                .unwrap()
+                .expect("concurrent write_then_rename must not race on the partial");
+        }
+
+        assert!(dest.exists(), "final file should exist after the race");
+        // No `.partial` leftovers — every writer renamed its own file away.
+        let mut entries = tokio::fs::read_dir(dest.parent().unwrap()).await.unwrap();
+        while let Some(e) = entries.next_entry().await.unwrap() {
+            let name = e.file_name();
+            assert!(
+                !name.to_string_lossy().contains(".partial"),
+                "leftover partial: {name:?}"
+            );
+        }
     }
 
     #[tokio::test]
