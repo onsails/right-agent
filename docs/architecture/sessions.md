@@ -69,6 +69,13 @@ Telegram transcript archiving is separate from Hindsight memory:
 - Successful assistant replies are archived as assistant rows after Telegram
   delivery succeeds.
 
+Group response routing is switchable between `addressed` (default: respond only
+when addressed) and `all` (respond to every non-bot message in an open group),
+with per-topic overrides taking precedence in forum groups. Trusted users change
+the group default with `/mode_group` and topic overrides with `/mode`; topic
+scope uses the effective thread id, where General and no topic normalize to `0`,
+so root-topic overrides apply consistently.
+
 Telegram user turns sent to Claude are formatted as YAML with one `messages:`
 entry per debounced Telegram message. Reply metadata is split by meaning:
 `reply_to_id` identifies the Telegram message being replied to; `reply_to:`
