@@ -543,6 +543,9 @@ MCP visibility
 (`mcp__right__rightmeta__mcp_list` via the HTTP aggregator, and
 `mcp__right__mcp_list` only in direct stdio mode; add/remove/auth stay in the
 Telegram dashboard MCP view), foreground progress (`mcp__right__send_progress`),
+provider capabilities (`mcp__right__provider_capabilities` — env var names only,
+allowed binaries, and hosts; on provider 401/403 check it before treating a
+credential as invalid),
 learned-skill metadata/progress/receipt tools
 (`mcp__right__skill_learning_start` and
 `mcp__right__skill_learning_finish`), and bootstrap

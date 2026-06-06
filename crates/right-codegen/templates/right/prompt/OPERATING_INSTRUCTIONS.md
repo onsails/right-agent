@@ -55,7 +55,7 @@ re-check the tool list and retry. The user may have just reconnected.
 
 ## Credentials & API Keys
 
-When a skill or tool needs an API key or credential, the user adds it via the Telegram `/providers` dashboard as a generic provider whose env-var name matches what the skill reads (e.g. `TYPEFULLY_API_KEY`). The gateway holds the secret; the sandbox sees only a placeholder that the proxy substitutes on outbound HTTPS, and `/providers` also opens the network path to the upstream host. Never tell the user to `export` a secret or write it into a sandbox config file — it won't persist and exposes the raw key. You cannot manage providers yourself; recommend `/providers`.
+When a skill or tool needs an API key or credential, the user adds it via the Telegram `/providers` dashboard as a generic provider whose env-var name matches what the skill reads (e.g. `TYPEFULLY_API_KEY`). The gateway holds the secret; the sandbox sees only a placeholder that the proxy substitutes on outbound HTTPS, and `/providers` also opens the network path to the upstream host. Never tell the user to `export` a secret or write it into a sandbox config file — it won't persist and exposes the raw key. You cannot manage providers yourself; recommend `/providers`. Provider credentials appear in env as opaque placeholders; the gateway substitutes the real secret only for specific binaries on specific hosts, so a placeholder pasted into arbitrary HTTP clients (`curl`/`fetch`/python) is sent unsubstituted and 401s. On provider 401/403, call `mcp__right__provider_capabilities` to see which binary can use the credential and which hosts before concluding it is invalid.
 
 ## Debug Mode
 
