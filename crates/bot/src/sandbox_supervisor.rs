@@ -373,6 +373,19 @@ pub(crate) async fn bring_up_sandbox(
                         "provider-profile composition reload failed during startup reconcile: {e:#}"
                     )
                 })?;
+            for name in declared.iter().filter(|d| !report.missing.contains(*d)) {
+                right_openshell::openshell::wait_for_provider_composed(
+                    &mut grpc_client,
+                    &sandbox,
+                    name,
+                )
+                .await
+                .map_err(|e| {
+                    miette::miette!(
+                        "provider composition not confirmed during startup reconcile: {e:#}"
+                    )
+                })?;
+            }
             tracing::info!(
                 agent = %agent,
                 sandbox = %sandbox,
@@ -473,6 +486,15 @@ pub(crate) async fn hot_reconcile_providers(
         right_openshell::openshell::ensure_provider_policy_loaded(resolved_sandbox, &policy_path)
             .await
             .map_err(|e| miette::miette!("provider-profile composition reload failed: {e:#}"))?;
+        for name in declared.iter().filter(|d| !report.missing.contains(*d)) {
+            right_openshell::openshell::wait_for_provider_composed(
+                &mut client,
+                resolved_sandbox,
+                name,
+            )
+            .await
+            .map_err(|e| miette::miette!("provider composition not confirmed: {e:#}"))?;
+        }
     }
     Ok(())
 }
