@@ -1,4 +1,4 @@
-use right_agent::agent::allowlist::AllowlistHandle;
+use right_agent::agent::allowlist::{AllowlistHandle, ResponseMode};
 use teloxide::types::{ChatKind, Message};
 
 use super::mention::{AddressKind, BotIdentity, is_bot_addressed};
@@ -30,6 +30,7 @@ pub fn make_routing_filter(
         let state = allowlist.0.read().expect("allowlist lock poisoned");
         let sender_trusted = state.is_user_trusted(sender_id);
         let group_open = state.is_group_open(chat_id);
+        let response_mode = state.response_mode(chat_id, super::session::effective_thread_id(&msg));
         drop(state);
 
         let addressed = is_bot_addressed(&msg, &identity);
@@ -46,6 +47,15 @@ pub fn make_routing_filter(
                 })
             }
             _ => {
+                // `All` mode in an open group answers everyone, no addressing,
+                // but never another bot (loop guard) and never the bot itself.
+                if response_mode == ResponseMode::All && group_open && !sender.is_bot {
+                    return Some(RoutingDecision {
+                        address: addressed,
+                        sender_trusted,
+                        group_open,
+                    });
+                }
                 if !sender_trusted && !group_open {
                     return None;
                 }
@@ -109,6 +119,25 @@ mod tests {
         ))))
     }
 
+    fn open_group_with_mode(chat_id: i64, mode: ResponseMode) -> AllowlistHandle {
+        let g = AllowedGroup {
+            id: chat_id,
+            label: None,
+            opened_by: None,
+            opened_at: Utc::now(),
+            mode,
+            topics: vec![],
+        };
+        let file = AllowlistFile {
+            version: right_agent::agent::allowlist::CURRENT_VERSION,
+            users: vec![],
+            groups: vec![g],
+        };
+        AllowlistHandle(Arc::new(std::sync::RwLock::new(AllowlistState::from_file(
+            file,
+        ))))
+    }
+
     fn group_msg_with_media_group(
         chat_id: i64,
         sender_id: i64,
@@ -140,6 +169,17 @@ mod tests {
             }]);
         }
         serde_json::from_value(payload).unwrap()
+    }
+
+    fn plain_group_text(chat_id: i64, sender_id: i64, text: &str) -> teloxide::types::Message {
+        serde_json::from_value(serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
+            "from": {"id": sender_id, "is_bot": false, "first_name": "U"},
+            "text": text
+        }))
+        .unwrap()
     }
 
     fn private_text_msg(chat_id: i64, sender_id: i64, text: &str) -> teloxide::types::Message {
@@ -249,6 +289,54 @@ mod tests {
         assert_eq!(decision.address, Some(AddressKind::DirectMessage));
         assert!(decision.sender_trusted);
         assert!(!decision.group_open);
+    }
+
+    #[tokio::test]
+    async fn all_mode_admits_untrusted_unaddressed_text() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -1001;
+        let allowlist = open_group_with_mode(chat_id, ResponseMode::All);
+        let msg = plain_group_text(chat_id, 42, "какие у нас кроны есть?");
+        let f = make_routing_filter(allowlist, identity);
+        let d = f(msg).expect("All mode admits plain text");
+        assert!(d.address.is_none());
+        assert!(d.group_open);
+    }
+
+    #[tokio::test]
+    async fn addressed_mode_drops_unaddressed_text_even_when_open() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -1001;
+        let allowlist = open_group_with_mode(chat_id, ResponseMode::Addressed);
+        let msg = plain_group_text(chat_id, 42, "just chatting");
+        let f = make_routing_filter(allowlist, identity);
+        assert!(f(msg).is_none());
+    }
+
+    #[tokio::test]
+    async fn all_mode_ignores_other_bots() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -1001;
+        let allowlist = open_group_with_mode(chat_id, ResponseMode::All);
+        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
+            "from": {"id": 5000, "is_bot": true, "first_name": "OtherBot"},
+            "text": "loop bait"
+        }))
+        .unwrap();
+        let f = make_routing_filter(allowlist, identity);
+        assert!(f(msg).is_none(), "All mode must not answer other bots");
     }
 
     #[tokio::test]
