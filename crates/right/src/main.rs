@@ -983,7 +983,7 @@ async fn main() -> miette::Result<()> {
                     } else if let Some(m) = mode {
                         state.set_topic_mode(chat_id, thread_id, m)
                     } else {
-                        state.clear_topic_mode(chat_id, thread_id) || state.is_chat_allowed(chat_id)
+                        state.clear_topic_mode(chat_id, thread_id) || state.is_group_open(chat_id)
                     };
                     if ok {
                         allowlist::write_file_inner(d, &state.to_file())?;
