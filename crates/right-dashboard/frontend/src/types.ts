@@ -545,6 +545,7 @@ export interface ProviderView {
   env_var: string
   generic: ProviderGenericBody | null
   updated_at: string | null
+  composed: boolean
   status:
     | { kind: 'healthy' }
     | { kind: 'missing' }

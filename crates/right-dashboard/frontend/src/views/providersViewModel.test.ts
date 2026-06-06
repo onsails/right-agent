@@ -3,9 +3,26 @@ import { describe, expect, it } from 'vitest'
 import {
   detectCredentialPrefix,
   evaluateCredentialSubmit,
+  providerCompositionClass,
+  providerCompositionLabel,
   CREDENTIAL_HINT,
   HEADER_NAME_HINT,
 } from './providersViewModel'
+import type { ProviderView } from '../types'
+
+function providerView(overrides: Partial<ProviderView> = {}): ProviderView {
+  return {
+    name: 'hostagent-acme',
+    type: 'generic',
+    label: 'acme',
+    env_var: 'ACME_API_KEY',
+    generic: null,
+    updated_at: null,
+    composed: false,
+    status: { kind: 'healthy' },
+    ...overrides,
+  }
+}
 
 describe('detectCredentialPrefix', () => {
   it('flags known auth-scheme prefixes (case-insensitive, returns canonical case)', () => {
@@ -45,6 +62,23 @@ describe('evaluateCredentialSubmit', () => {
 
   it('proceeds on the second submit (already warned) of the same prefixed value', () => {
     expect(evaluateCredentialSubmit('Bearer sk-abc', true)).toEqual({ proceed: true, warning: null })
+  })
+})
+
+describe('provider composition labels', () => {
+  it('shows composed state independently from provider health status', () => {
+    expect(providerCompositionLabel(providerView({ composed: true }))).toBe('Composed')
+    expect(providerCompositionClass(providerView({ composed: true }))).toBe('ok')
+
+    expect(providerCompositionLabel(providerView({ composed: false }))).toBe('Not composed')
+    expect(providerCompositionClass(providerView({ composed: false }))).toBe('bad')
+
+    const degradedButComposed = providerView({
+      composed: true,
+      status: { kind: 'gateway_error', message: 'temporary lookup failure' },
+    })
+    expect(providerCompositionLabel(degradedButComposed)).toBe('Composed')
+    expect(providerCompositionClass(degradedButComposed)).toBe('ok')
   })
 })
 
