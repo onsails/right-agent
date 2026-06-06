@@ -211,3 +211,23 @@ fn attached_but_uncomposed_provider_is_inactive() {
     assert!(capabilities[0].endpoint_hosts.is_empty());
     assert!(capabilities[0].usage_hint.contains("not currently active"));
 }
+
+#[test]
+fn provider_is_composed_true_when_rule_present() {
+    // Provider gateway name `right-example` composes under rule key
+    // `_provider_right_example` (the `_provider_` prefix + sanitized name).
+    let policy = policy_with("_provider_right_example", &["**"], &["api.example.com"]);
+    assert!(crate::provider_capabilities::provider_is_composed(
+        &policy,
+        "right-example"
+    ));
+}
+
+#[test]
+fn provider_is_composed_false_on_empty_policy() {
+    let policy = crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy::default();
+    assert!(!crate::provider_capabilities::provider_is_composed(
+        &policy,
+        "right-example"
+    ));
+}
