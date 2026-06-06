@@ -12,7 +12,7 @@ mod parse_serialize_tests {
     fn parses_empty_allowlist() {
         let text = "version: 1\nusers: []\ngroups: []\n";
         let parsed = parse_yaml(text).unwrap();
-        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.version, CURRENT_VERSION);
         assert!(parsed.users.is_empty());
         assert!(parsed.groups.is_empty());
     }
@@ -42,10 +42,10 @@ groups:
     }
 
     #[test]
-    fn missing_version_defaults_to_1() {
+    fn missing_version_upgrades_to_current() {
         let text = "users: []\ngroups: []\n";
         let parsed = parse_yaml(text).unwrap();
-        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.version, CURRENT_VERSION);
     }
 
     #[test]
@@ -56,9 +56,69 @@ groups:
     }
 
     #[test]
+    fn response_mode_defaults_to_addressed() {
+        assert_eq!(ResponseMode::default(), ResponseMode::Addressed);
+    }
+
+    #[test]
+    fn parse_v1_file_upgrades_to_v2_addressed() {
+        let yaml = "version: 1\nusers: []\ngroups:\n  - id: -100\n    label: null\n    opened_by: null\n    opened_at: 2026-06-06T00:00:00Z\n";
+        let file = parse_yaml(yaml).expect("v1 must parse");
+        assert_eq!(file.version, CURRENT_VERSION);
+        assert_eq!(file.groups[0].mode, ResponseMode::Addressed);
+        assert!(file.groups[0].topics.is_empty());
+    }
+
+    #[test]
+    fn parse_v2_roundtrip_preserves_modes() {
+        let mut file = AllowlistFile::default();
+        file.groups.push(AllowedGroup {
+            id: -100,
+            label: None,
+            opened_by: None,
+            opened_at: chrono::DateTime::parse_from_rfc3339("2026-06-06T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            mode: ResponseMode::All,
+            topics: vec![TopicMode {
+                thread_id: 8,
+                mode: ResponseMode::Addressed,
+            }],
+        });
+        let text = serialize_yaml(&file);
+        let reparsed = parse_yaml(&text).expect("v2 roundtrip");
+        assert_eq!(reparsed.groups[0].mode, ResponseMode::All);
+        assert_eq!(
+            reparsed.groups[0].topics,
+            vec![TopicMode {
+                thread_id: 8,
+                mode: ResponseMode::Addressed
+            }]
+        );
+    }
+
+    #[test]
+    fn serialize_omits_mode_for_addressed_group_without_topics() {
+        let mut file = AllowlistFile::default();
+        file.groups.push(AllowedGroup {
+            id: -100,
+            label: None,
+            opened_by: None,
+            opened_at: chrono::DateTime::parse_from_rfc3339("2026-06-06T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            mode: ResponseMode::Addressed,
+            topics: vec![],
+        });
+        let text = serialize_yaml(&file);
+        assert!(!text.contains("mode:"), "no mode line:\n{text}");
+        assert!(!text.contains("topics:"), "no topics line:\n{text}");
+    }
+
+    #[test]
     fn serialize_roundtrip() {
         let file = AllowlistFile {
-            version: 1,
+            version: CURRENT_VERSION,
             users: vec![AllowedUser {
                 id: 42,
                 label: Some("andrey".into()),
@@ -70,6 +130,8 @@ groups:
                 label: Some("Dev Team".into()),
                 opened_by: Some(42),
                 opened_at: "2026-04-16T12:30:00Z".parse().unwrap(),
+                mode: ResponseMode::Addressed,
+                topics: Vec::new(),
             }],
         };
         let yaml = serialize_yaml(&file);
@@ -185,6 +247,8 @@ groups: []
                 label: None,
                 opened_by: None,
                 opened_at: "2026-04-16T12:30:00Z".parse().unwrap(),
+                mode: ResponseMode::Addressed,
+                topics: Vec::new(),
             }],
         };
         let yaml = serialize_yaml(&file);
@@ -247,6 +311,8 @@ mod state_tests {
             label: None,
             opened_by: Some(1),
             opened_at: t(),
+            mode: ResponseMode::Addressed,
+            topics: Vec::new(),
         });
         assert!(s.is_group_open(-1));
     }
@@ -284,7 +350,7 @@ mod io_tests {
     fn write_then_read_roundtrip() {
         let dir = TempDir::new().unwrap();
         let file = AllowlistFile {
-            version: 1,
+            version: CURRENT_VERSION,
             users: vec![AllowedUser {
                 id: 1,
                 label: Some("u".into()),
@@ -296,6 +362,8 @@ mod io_tests {
                 label: None,
                 opened_by: Some(1),
                 opened_at: t(),
+                mode: ResponseMode::Addressed,
+                topics: Vec::new(),
             }],
         };
         write_file(dir.path(), &file).unwrap();
@@ -416,6 +484,8 @@ fn is_chat_allowed_matches_user_or_group() {
         label: None,
         opened_by: None,
         opened_at: now,
+        mode: ResponseMode::Addressed,
+        topics: Vec::new(),
     });
 
     assert!(state.is_chat_allowed(100), "trusted user must match");

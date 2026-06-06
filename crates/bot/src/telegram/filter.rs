@@ -72,7 +72,9 @@ pub fn make_routing_filter(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use right_agent::agent::allowlist::{AllowedGroup, AllowedUser, AllowlistFile, AllowlistState};
+    use right_agent::agent::allowlist::{
+        AllowedGroup, AllowedUser, AllowlistFile, AllowlistState, ResponseMode,
+    };
     use std::sync::Arc;
 
     fn allowlist_with(users: Vec<i64>, groups: Vec<i64>) -> AllowlistHandle {
@@ -93,6 +95,8 @@ mod tests {
                 label: None,
                 opened_by: None,
                 opened_at: now,
+                mode: ResponseMode::Addressed,
+                topics: Vec::new(),
             })
             .collect();
         let file = AllowlistFile {
