@@ -78,6 +78,13 @@ fn rule_for_provider<'a>(
     })
 }
 
+/// True when the provider's composed `_provider_<name>` rule is present in the
+/// sandbox's active policy. This is the direct composition signal: use it to
+/// confirm composition actually happened, never the `policy set` return value.
+pub fn provider_is_composed(policy: &SandboxPolicy, provider_name: &str) -> bool {
+    rule_for_provider(policy, provider_name).is_some()
+}
+
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
