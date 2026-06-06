@@ -533,6 +533,11 @@ pub enum Commands {
     },
     /// Stop all agents
     Down,
+    /// Speech-to-text model management
+    Stt {
+        #[command(subcommand)]
+        command: SttCommands,
+    },
     /// Re-sync agent codegen and hot-update running process-compose
     Reload {
         /// Only re-run codegen for specific agents (comma-separated).
@@ -594,6 +599,40 @@ pub enum Commands {
         #[arg(long)]
         debug: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum SttCommands {
+    /// Pre-download whisper model(s) into the home cache. Idempotent: skips
+    /// any model already present. Bypasses the ffmpeg check (downloading the
+    /// model and running transcription are separate concerns) and fails loudly
+    /// on download error. Useful for warming a CI or host cache before the STT
+    /// integration tests, so they don't each download the model concurrently.
+    Preload {
+        /// Models to download (comma-separated): tiny, base, small, medium,
+        /// large-v3. Defaults to `tiny`.
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "tiny",
+            value_parser = parse_whisper_model,
+        )]
+        model: Vec<right_agent_config::WhisperModel>,
+    },
+}
+
+fn parse_whisper_model(s: &str) -> Result<right_agent_config::WhisperModel, String> {
+    use right_agent_config::WhisperModel;
+    match s.trim() {
+        "tiny" => Ok(WhisperModel::Tiny),
+        "base" => Ok(WhisperModel::Base),
+        "small" => Ok(WhisperModel::Small),
+        "medium" => Ok(WhisperModel::Medium),
+        "large-v3" => Ok(WhisperModel::LargeV3),
+        other => Err(format!(
+            "unknown whisper model '{other}' (expected: tiny, base, small, medium, large-v3)"
+        )),
+    }
 }
 
 fn non_empty_arg(value: &str) -> Result<String, String> {
@@ -789,6 +828,9 @@ async fn main() -> miette::Result<()> {
             debug,
         } => cmd_up(&home, agents, detach, debug).await,
         Commands::Down => cmd_down(&home).await,
+        Commands::Stt { command } => match command {
+            SttCommands::Preload { model } => cmd_stt_preload(&home, &model).await,
+        },
         Commands::Reload { agents } => cmd_reload(&home, agents).await,
         Commands::Status => cmd_status(&home).await,
         Commands::Restart { agent } => cmd_restart(&home, &agent).await,
@@ -3160,6 +3202,47 @@ async fn check_port_available(port: u16) -> miette::Result<()> {
             "port {port} is already in use"
         )),
     }
+}
+
+async fn cmd_stt_preload(
+    home: &Path,
+    models: &[right_agent_config::WhisperModel],
+) -> miette::Result<()> {
+    use std::collections::HashSet;
+
+    let theme = right_ui::detect();
+    println!("{}", right_ui::section(theme, "whisper preload"));
+    println!("{}", right_ui::Rail::blank(theme));
+
+    // Dedup while preserving the order given on the command line.
+    let mut seen: HashSet<right_agent_config::WhisperModel> = HashSet::new();
+    let unique: Vec<right_agent_config::WhisperModel> =
+        models.iter().copied().filter(|m| seen.insert(*m)).collect();
+
+    let mut block = right_ui::Block::new();
+    for model in unique {
+        let dest = right_stt::model_cache_path(home, model);
+        if right_stt::is_model_cached(&dest) {
+            block.push(
+                right_ui::status(right_ui::Glyph::Ok)
+                    .noun(model.filename())
+                    .verb("already cached"),
+            );
+            continue;
+        }
+        right_stt::download_model(model, &dest)
+            .await
+            .map_err(|e| miette::miette!("download {} failed: {e:#}", model.filename()))?;
+        block.push(
+            right_ui::status(right_ui::Glyph::Ok)
+                .noun(model.filename())
+                .verb("downloaded"),
+        );
+    }
+
+    println!("{}", block.render(theme));
+    println!("{}", right_ui::Rail::blank(theme));
+    Ok(())
 }
 
 async fn cmd_down(home: &Path) -> miette::Result<()> {
