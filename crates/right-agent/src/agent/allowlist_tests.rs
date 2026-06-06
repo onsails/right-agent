@@ -261,6 +261,17 @@ groups: []
 mod state_tests {
     use super::*;
 
+    fn group(id: i64, mode: ResponseMode, topics: Vec<TopicMode>) -> AllowedGroup {
+        AllowedGroup {
+            id,
+            label: None,
+            opened_by: None,
+            opened_at: chrono::Utc::now(),
+            mode,
+            topics,
+        }
+    }
+
     #[test]
     fn add_user_inserted_then_already_present() {
         let mut s = AllowlistState::default();
@@ -315,6 +326,48 @@ mod state_tests {
             topics: Vec::new(),
         });
         assert!(s.is_group_open(-1));
+    }
+
+    #[test]
+    fn response_mode_precedence_topic_over_group_over_default() {
+        let mut file = AllowlistFile::default();
+        file.groups.push(group(
+            -100,
+            ResponseMode::All,
+            vec![TopicMode {
+                thread_id: 8,
+                mode: ResponseMode::Addressed,
+            }],
+        ));
+        let s = AllowlistState::from_file(file);
+        assert_eq!(s.response_mode(-100, 8), ResponseMode::Addressed);
+        assert_eq!(s.response_mode(-100, 0), ResponseMode::All);
+        assert_eq!(s.response_mode(-999, 0), ResponseMode::Addressed);
+    }
+
+    #[test]
+    fn set_group_mode_requires_open_group() {
+        let mut s = AllowlistState::from_file(AllowlistFile::default());
+        assert!(
+            !s.set_group_mode(-100, ResponseMode::All),
+            "closed group returns false"
+        );
+        s.add_group(group(-100, ResponseMode::Addressed, vec![]));
+        assert!(s.set_group_mode(-100, ResponseMode::All));
+        assert_eq!(s.response_mode(-100, 0), ResponseMode::All);
+    }
+
+    #[test]
+    fn set_and_clear_topic_mode() {
+        let mut s = AllowlistState::from_file(AllowlistFile::default());
+        s.add_group(group(-100, ResponseMode::Addressed, vec![]));
+        assert!(s.set_topic_mode(-100, 0, ResponseMode::All));
+        assert_eq!(s.response_mode(-100, 0), ResponseMode::All);
+        assert!(s.set_topic_mode(-100, 0, ResponseMode::Addressed));
+        assert_eq!(s.response_mode(-100, 0), ResponseMode::Addressed);
+        assert!(s.clear_topic_mode(-100, 0));
+        assert_eq!(s.response_mode(-100, 0), ResponseMode::Addressed);
+        assert!(!s.clear_topic_mode(-100, 0));
     }
 
     #[tokio::test]
