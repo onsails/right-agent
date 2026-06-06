@@ -145,35 +145,6 @@ async fn wait_for_provider_placeholder(sandbox: &TestSandbox) {
     }
 }
 
-/// Poll the end-to-end success curl until the proxy actually allows CONNECT and
-/// substitutes the header, returning the first successful `(out, code)` or the
-/// last attempt at the deadline.
-///
-/// The provider placeholder env var appearing (see [`wait_for_provider_placeholder`])
-/// proves the provider is attached, but provider-profile composition (the
-/// terminated upstream endpoint **and** its matching `binaries` rule) can
-/// converge a few seconds later. On a slow CI runner the terminated endpoint
-/// may be active before its binaries land, so a CONNECT is rejected with a
-/// transient `403 CONNECT tunnel failed` until the binary rule composes —
-/// indistinguishable from the genuine no-binaries block. curl's own
-/// `--retry` only spans a few seconds; waiting on the real signal here closes
-/// that composition window without masking a persistent rejection (which still
-/// surfaces deterministically once the deadline elapses).
-async fn wait_for_header_substitution(sandbox: &TestSandbox) -> (String, i32) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-    loop {
-        let (out, code) = sandbox
-            .exec_with_timeout(&["sh", "-lc", CURL_ECHO_HEADER], 60)
-            .await;
-        let substituted =
-            code == 0 && echoed_header(&out, HEADER_NAME).as_deref() == Some(FAKE_CREDENTIAL);
-        if substituted || std::time::Instant::now() >= deadline {
-            return (out, code);
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    }
-}
-
 #[tokio::test]
 #[ignore = "ci-openshell: live sandbox + gateway"]
 async fn ci_openshell_generic_profile_substitutes_custom_header() {
@@ -211,7 +182,9 @@ async fn ci_openshell_generic_profile_substitutes_custom_header() {
             .expect("provider policy loaded");
         wait_for_provider_placeholder(&sandbox).await;
 
-        let (out, code) = wait_for_header_substitution(&sandbox).await;
+        let (out, code) = sandbox
+            .exec_with_timeout(&["sh", "-lc", CURL_ECHO_HEADER], 60)
+            .await;
 
         assert_eq!(
             code, 0,
