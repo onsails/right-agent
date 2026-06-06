@@ -27,8 +27,13 @@ pub fn is_bot_addressed(msg: &Message, identity: &BotIdentity) -> Option<Address
     match &msg.chat.kind {
         ChatKind::Private(_) => Some(AddressKind::DirectMessage),
         _ => {
-            // 1) reply to bot's message
+            // 1) reply to bot's message -- but NOT the forum-topic-root service
+            //    message. Telegram threads topic membership via a reply to the
+            //    `forum_topic_created` message, whose author is the topic
+            //    creator; when the bot created the topic this would otherwise
+            //    make every message look like a reply to the bot.
             if let Some(reply) = msg.reply_to_message()
+                && reply.forum_topic_created().is_none()
                 && let Some(from) = reply.from.as_ref()
                 && from.id.0 == identity.user_id
             {
@@ -195,5 +200,59 @@ mod tests {
             user_id: 999,
         };
         assert_eq!(is_bot_addressed(&msg, &identity), None);
+    }
+
+    #[tokio::test]
+    async fn topic_root_reply_is_not_addressing() {
+        // A plain message in a bot-created topic: reply_to_message is the
+        // forum_topic_created service message whose `from` is the bot.
+        // It must NOT count as addressing. (teloxide-core fixture shape.)
+        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+            "message_id": 5, "date": 0,
+            "chat": {"id": -1001, "is_forum": true, "type": "supergroup", "title": "g"},
+            "from": {"id": 42, "is_bot": false, "first_name": "U"},
+            "is_topic_message": true,
+            "message_thread_id": 4,
+            "text": "привет",
+            "reply_to_message": {
+                "message_id": 4, "date": 0,
+                "chat": {"id": -1001, "is_forum": true, "type": "supergroup", "title": "g"},
+                "from": {"id": 999, "is_bot": true, "first_name": "Bot"},
+                "is_topic_message": true,
+                "message_thread_id": 4,
+                "forum_topic_created": {"name": "Socials", "icon_color": 9367192}
+            }
+        }))
+        .unwrap();
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        assert_eq!(is_bot_addressed(&msg, &identity), None);
+    }
+
+    #[tokio::test]
+    async fn real_reply_to_bot_is_addressing() {
+        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+            "message_id": 6, "date": 0,
+            "chat": {"id": -1001, "type": "supergroup", "title": "g"},
+            "from": {"id": 42, "is_bot": false, "first_name": "U"},
+            "text": "thanks",
+            "reply_to_message": {
+                "message_id": 4, "date": 0,
+                "chat": {"id": -1001, "type": "supergroup", "title": "g"},
+                "from": {"id": 999, "is_bot": true, "first_name": "Bot"},
+                "text": "here you go"
+            }
+        }))
+        .unwrap();
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        assert_eq!(
+            is_bot_addressed(&msg, &identity),
+            Some(AddressKind::GroupReplyToBot)
+        );
     }
 }
