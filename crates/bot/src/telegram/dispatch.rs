@@ -648,7 +648,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicI64};
 
     use right_agent::agent::allowlist::{
-        AllowedGroup, AllowedUser, AllowlistFile, AllowlistHandle, AllowlistState,
+        AllowedGroup, AllowedUser, AllowlistFile, AllowlistHandle, AllowlistState, ResponseMode,
     };
     use right_mcp::internal_client::InternalClient;
     use right_memory::prefetch::PrefetchCache;
@@ -768,6 +768,8 @@ mod tests {
                 label: None,
                 opened_by: None,
                 opened_at: now,
+                mode: ResponseMode::Addressed,
+                topics: Vec::new(),
             }],
         }));
 

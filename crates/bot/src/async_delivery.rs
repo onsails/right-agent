@@ -2083,7 +2083,9 @@ mod tests {
         users: &[i64],
         groups: &[i64],
     ) -> right_agent::agent::allowlist::AllowlistState {
-        use right_agent::agent::allowlist::{AllowedGroup, AllowedUser, AllowlistState};
+        use right_agent::agent::allowlist::{
+            AllowedGroup, AllowedUser, AllowlistState, ResponseMode,
+        };
         let now = chrono::Utc::now();
         let mut state = AllowlistState::default();
         for &id in users {
@@ -2100,6 +2102,8 @@ mod tests {
                 label: None,
                 opened_by: None,
                 opened_at: now,
+                mode: ResponseMode::Addressed,
+                topics: Vec::new(),
             });
         }
         state

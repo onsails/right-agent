@@ -8,6 +8,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use right_agent::agent::allowlist::{
     self, AddOutcome, AllowedGroup, AllowedUser, AllowlistHandle, AllowlistState, RemoveOutcome,
+    ResponseMode,
 };
 use teloxide::RequestError;
 use teloxide::prelude::*;
@@ -337,6 +338,8 @@ pub async fn handle_allow_all(
             label: label.clone(),
             opened_by: msg.from.as_ref().map(|u| u.id.0 as i64),
             opened_at: Utc::now(),
+            mode: ResponseMode::Addressed,
+            topics: Vec::new(),
         });
         (outcome, next)
     };

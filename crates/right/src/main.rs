@@ -882,7 +882,7 @@ async fn main() -> miette::Result<()> {
                     return Err(miette::miette!("agent not found: {}", dir.display()));
                 }
                 use right_agent::agent::allowlist::{
-                    self, AddOutcome, AllowedGroup, AllowlistState,
+                    self, AddOutcome, AllowedGroup, AllowlistState, ResponseMode,
                 };
                 let outcome = allowlist::with_lock(&dir, |d| -> Result<AddOutcome, String> {
                     let file = allowlist::read_file(d)?.unwrap_or_default();
@@ -892,6 +892,8 @@ async fn main() -> miette::Result<()> {
                         label: label.clone(),
                         opened_by: None,
                         opened_at: chrono::Utc::now(),
+                        mode: ResponseMode::Addressed,
+                        topics: Vec::new(),
                     });
                     allowlist::write_file_inner(d, &state.to_file())?;
                     Ok(outcome)

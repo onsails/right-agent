@@ -1,9 +1,9 @@
 //! Bot-managed allowlist — trusted users (DM + anywhere) + opened groups (per-chat-id open gate).
 //!
-//! On-disk format (version 1):
+//! On-disk format (version 2):
 //!
 //! ```yaml
-//! version: 1
+//! version: 2
 //! users:
 //!   - id: 123
 //!     label: andrey
@@ -14,6 +14,10 @@
 //!     label: Dev Team
 //!     opened_by: null
 //!     opened_at: 2026-04-16T12:00:00Z
+//!     mode: all
+//!     topics:
+//!       - thread_id: 8
+//!         mode: addressed
 //! ```
 
 use std::sync::{Arc, RwLock};
@@ -32,6 +36,27 @@ pub struct AllowedUser {
     pub added_at: DateTime<Utc>,
 }
 
+/// Per-scope response mode. Default `Addressed` preserves the historical
+/// "must address the bot" behaviour.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponseMode {
+    /// Respond only when addressed (mention / reply-to-bot / command).
+    #[default]
+    Addressed,
+    /// Respond to every message in the scope, from any participant.
+    All,
+}
+
+/// A per-topic override of the group's default mode. `thread_id` is the
+/// normalised effective thread id (General = 0).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TopicMode {
+    pub thread_id: i64,
+    pub mode: ResponseMode,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AllowedGroup {
@@ -41,6 +66,10 @@ pub struct AllowedGroup {
     #[serde(default)]
     pub opened_by: Option<i64>,
     pub opened_at: DateTime<Utc>,
+    #[serde(default)]
+    pub mode: ResponseMode,
+    #[serde(default)]
+    pub topics: Vec<TopicMode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -58,7 +87,7 @@ fn default_version() -> u32 {
     1
 }
 
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 impl Default for AllowlistFile {
     fn default() -> Self {
@@ -72,14 +101,15 @@ impl Default for AllowlistFile {
 
 /// Parse YAML text into `AllowlistFile`. Rejects unknown future `version`.
 pub fn parse_yaml(text: &str) -> Result<AllowlistFile, String> {
-    let parsed: AllowlistFile =
+    let mut parsed: AllowlistFile =
         serde_saphyr::from_str(text).map_err(|e| format!("allowlist.yaml parse error: {e:#}"))?;
-    if parsed.version != CURRENT_VERSION {
+    if parsed.version != 1 && parsed.version != CURRENT_VERSION {
         return Err(format!(
-            "allowlist.yaml version {} is not supported (expected {})",
+            "allowlist.yaml version {} is not supported (expected 1 or {})",
             parsed.version, CURRENT_VERSION
         ));
     }
+    parsed.version = CURRENT_VERSION;
     Ok(parsed)
 }
 
@@ -122,6 +152,16 @@ pub fn serialize_yaml(file: &AllowlistFile) -> String {
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
             )
             .unwrap();
+            if g.mode != ResponseMode::default() {
+                writeln!(out, "    mode: {}", response_mode_str(g.mode)).unwrap();
+            }
+            if !g.topics.is_empty() {
+                out.push_str("    topics:\n");
+                for t in &g.topics {
+                    writeln!(out, "      - thread_id: {}", t.thread_id).unwrap();
+                    writeln!(out, "        mode: {}", response_mode_str(t.mode)).unwrap();
+                }
+            }
         }
     }
     out
@@ -171,6 +211,13 @@ fn write_opt_i64(out: &mut String, key: &str, val: Option<i64>, indent: usize) {
     match val {
         Some(n) => writeln!(out, "{spaces}{key}: {n}").unwrap(),
         None => writeln!(out, "{spaces}{key}: null").unwrap(),
+    }
+}
+
+fn response_mode_str(m: ResponseMode) -> &'static str {
+    match m {
+        ResponseMode::Addressed => "addressed",
+        ResponseMode::All => "all",
     }
 }
 
@@ -398,6 +445,8 @@ pub fn migrate_from_legacy(
                 label: None,
                 opened_by: None,
                 opened_at: now,
+                mode: ResponseMode::Addressed,
+                topics: Vec::new(),
             });
             mg += 1;
         }
