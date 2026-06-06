@@ -2994,6 +2994,34 @@ async fn cmd_up(
         let mut client = connect_grpc(&mtls_dir)
             .await
             .map_err(|e| miette::miette!("provision profiles: connect gateway: {e:#}"))?;
+
+        // Enable the gateway-global `providers_v2_enabled` setting before any
+        // sandbox or provider work. Fresh Linux gateways default it to false,
+        // which silently breaks generic-provider credential substitution
+        // (the proxy denies CONNECT because the terminated endpoint is never
+        // composed). FATAL when any agent declares providers (the feature is
+        // load-bearing for them); WARNING-only otherwise so a gateway that
+        // does not yet support the setting cannot gate `right up`.
+        let any_providers = agents.iter().any(|a| {
+            a.config
+                .as_ref()
+                .and_then(|c| c.sandbox.as_ref())
+                .map(|s| !s.providers.is_empty())
+                .unwrap_or(false)
+        });
+        match right_openshell::providers::ensure_v2_enabled(&mut client).await {
+            Ok(()) => tracing::info!("up: providers_v2_enabled"),
+            Err(e) if any_providers => {
+                return Err(miette::miette!("enable providers_v2_enabled failed: {e:#}"));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = format!("{e:#}"),
+                    "up: enable providers_v2_enabled failed (no agent declares providers — continuing)"
+                );
+            }
+        }
+
         let mut profiles = right_openshell::managed_profiles::managed_profiles();
         let loaded_agent_configs: Vec<(String, right_agent_config::AgentConfig)> = agents
             .iter()

@@ -92,6 +92,20 @@ composition, and Right forces that composition to reload after profile or
 attachment changes by reapplying the base policy with `openshell policy
 set --wait`.
 
+That composition is itself gated by the gateway-global runtime setting
+`providers_v2_enabled`, which fresh OpenShell gateways default to `false`.
+While off, the gateway silently skips merging provider-profile endpoints —
+the placeholder env var is still injected, but the proxy denies CONNECT to
+the upstream because the terminated endpoint never appears in the effective
+policy. `right up` sets it once per gateway via
+`right_openshell::providers::ensure_v2_enabled` (a global `UpdateConfig`
+upsert), fatal only when an agent declares providers. The flag persists in
+the gateway's settings store, so a long-lived dev gateway that was enabled
+once keeps working — which is why the regression that removed this call
+surfaced only on fresh Linux gateways (CI and new production hosts), not on
+developer machines. Integration tests that exercise composition must call
+`ensure_v2_enabled` themselves because they bypass `right up`.
+
 ## State of truth split
 
 Two stores, both authoritative for different things:

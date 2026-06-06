@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::openshell_proto::openshell::datamodel::v1 as datamodel;
+use crate::openshell_proto::openshell::sandbox::v1 as sandbox_v1;
 use crate::openshell_proto::openshell::v1 as proto_v1;
 use crate::providers::{
-    ProviderError, ProviderSpec, attach_to_sandbox, create_provider, delete_provider,
-    detach_from_sandbox, get_provider, get_sandbox_provider_environment, list_attached,
-    list_providers_by_prefix, update_provider,
+    PROVIDERS_V2_ENABLED_KEY, ProviderError, ProviderSpec, attach_to_sandbox, create_provider,
+    delete_provider, detach_from_sandbox, ensure_v2_enabled, get_provider,
+    get_sandbox_provider_environment, list_attached, list_providers_by_prefix, update_provider,
 };
 use crate::test_mock_server::{MockOpenShell, mock_client, start_mock_server};
 
@@ -299,6 +300,55 @@ async fn list_attached_returns_names() {
     let mut names = list_attached(&mut client, "sbox1").await.unwrap();
     names.sort();
     assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+}
+
+#[tokio::test]
+async fn ensure_v2_enabled_upserts_global_bool_setting() {
+    let seen: Arc<Mutex<Option<proto_v1::UpdateConfigRequest>>> = Arc::new(Mutex::new(None));
+    let seen_clone = Arc::clone(&seen);
+    let mock = MockOpenShell {
+        mock_update_config: Some(Box::new(move |req| {
+            *seen_clone.lock().unwrap() = Some(req.clone());
+            Ok(proto_v1::UpdateConfigResponse {
+                version: 0,
+                policy_hash: String::new(),
+                settings_revision: 1,
+                deleted: false,
+            })
+        })),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    ensure_v2_enabled(&mut client).await.unwrap();
+
+    let req = seen.lock().unwrap().clone().unwrap();
+    assert!(req.global, "must apply at gateway-global scope");
+    assert_eq!(req.setting_key, PROVIDERS_V2_ENABLED_KEY);
+    let value = req
+        .setting_value
+        .expect("setting_value present")
+        .value
+        .expect("oneof value present");
+    assert_eq!(value, sandbox_v1::setting_value::Value::BoolValue(true));
+}
+
+#[tokio::test]
+async fn ensure_v2_enabled_propagates_grpc_error() {
+    let mock = MockOpenShell {
+        mock_update_config: Some(Box::new(|_| Err(tonic::Status::internal("boom")))),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+    let err = ensure_v2_enabled(&mut client).await.unwrap_err();
+    match err {
+        ProviderError::Grpc(msg) => {
+            assert!(msg.contains("boom"), "{msg}");
+        }
+        other => panic!("expected Grpc, got: {other:?}"),
+    }
 }
 
 #[tokio::test]
