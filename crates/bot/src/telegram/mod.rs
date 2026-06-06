@@ -14,6 +14,7 @@ pub(crate) mod idle;
 pub mod markdown;
 pub mod memory_alerts;
 pub mod mention;
+pub(crate) mod mode_command;
 pub(crate) mod model_command;
 pub mod oauth_callback;
 pub(crate) mod oauth_status;

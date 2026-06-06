@@ -33,6 +33,7 @@ use super::handler::{
     handle_usage,
 };
 use super::mention::BotIdentity;
+use super::mode_command::{handle_mode, handle_mode_callback, handle_mode_group};
 use super::model_command::{handle_model, handle_model_callback};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
@@ -56,6 +57,13 @@ enum BotCommand {
     Doctor,
     #[command(description = "Switch Claude model (menu)")]
     Model,
+    #[command(description = "Set response mode for this topic")]
+    Mode,
+    #[command(
+        description = "Set response mode for this group",
+        rename = "mode_group"
+    )]
+    ModeGroup,
     #[command(description = "Open dashboard")]
     Dashboard,
     /// Toggle hot-reloadable debug mode. Use `/debug` for status, `/debug on`,
@@ -532,6 +540,8 @@ fn build_dispatcher(
         .branch(dptree::case![BotCommand::Providers(args)].endpoint(handle_providers))
         .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor))
         .branch(dptree::case![BotCommand::Model].endpoint(handle_model))
+        .branch(dptree::case![BotCommand::Mode].endpoint(handle_mode))
+        .branch(dptree::case![BotCommand::ModeGroup].endpoint(handle_mode_group))
         .branch(dptree::case![BotCommand::Dashboard].endpoint(handle_dashboard))
         .branch(dptree::case![BotCommand::Debug(args)].endpoint(super::debug_command::handle_debug))
         .branch(dptree::case![BotCommand::Cron(args)].endpoint(handle_cron))
@@ -596,6 +606,14 @@ fn build_dispatcher(
                 q.data.as_deref().is_some_and(|d| d.starts_with("model:"))
             })
             .endpoint(handle_model_callback),
+        )
+        .branch(
+            dptree::filter(|q: CallbackQuery| {
+                q.data
+                    .as_deref()
+                    .is_some_and(|d| d.starts_with("mode:") || d.starts_with("modegroup:"))
+            })
+            .endpoint(handle_mode_callback),
         )
         .branch(
             dptree::filter(|q: CallbackQuery| {

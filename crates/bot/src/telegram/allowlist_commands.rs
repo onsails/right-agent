@@ -73,7 +73,7 @@ pub fn resolve_user_target(msg: &Message, args: &str) -> UserTarget {
 /// Order matters: if we mutated the in-memory state first and the disk write
 /// failed, the filter would honor an entry that is not on disk until the
 /// watcher reload fires — a security-relevant consistency hole.
-async fn persist_new(
+pub(crate) async fn persist_new(
     handle: &AllowlistHandle,
     agent_dir: &std::path::Path,
     new_state: AllowlistState,
