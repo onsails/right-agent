@@ -310,6 +310,7 @@ pub async fn handle_message(
         reply_to_id,
         quoted_text,
         address: decision.address.clone(),
+        response_mode: decision.response_mode,
         group_open: decision.group_open,
         chat: chat_ctx,
         reply_to_body,

@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use right_agent::agent::allowlist::ResponseMode;
 use teloxide::prelude::*;
 use teloxide::types::{ChatAction, MessageId, ReplyParameters, ThreadId};
 use tokio::sync::mpsc;
@@ -235,6 +236,7 @@ pub struct DebounceMsg {
     pub reply_to_id: Option<i32>,
     pub quoted_text: Option<String>,
     pub address: Option<super::mention::AddressKind>,
+    pub response_mode: ResponseMode,
     pub group_open: bool,
     pub chat: super::attachments::ChatContext,
     pub reply_to_body: Option<super::attachments::ReplyToBody>,
@@ -979,13 +981,15 @@ async fn collect_batch(
     batch
 }
 
-/// Post-debounce addressedness gate. Returns `true` if at least one message
-/// in the batch was addressed to the bot. In groups this is the predicate
-/// the worker uses to decide whether to invoke CC; if `false`, the batch is
-/// dropped silently. DM batches always have `address: Some(DirectMessage)`
-/// so the predicate trivially holds for them.
-fn batch_is_addressed(batch: &[DebounceMsg]) -> bool {
-    batch.iter().any(|m| m.address.is_some())
+/// Post-debounce invocation gate. Returns `true` if at least one message in
+/// the batch was addressed to the bot, or if the batch came from an All-mode
+/// group. In groups this is the predicate the worker uses to decide whether to
+/// invoke CC; if `false`, the batch is dropped silently. DM batches always have
+/// `address: Some(DirectMessage)` so the predicate trivially holds for them.
+fn batch_should_invoke_cc(batch: &[DebounceMsg]) -> bool {
+    batch
+        .iter()
+        .any(|m| m.address.is_some() || m.response_mode == ResponseMode::All)
 }
 
 fn build_input_message_from_debounce(
@@ -1268,11 +1272,11 @@ pub fn spawn_worker(
                 batch.first().map(|m| &m.chat),
                 Some(super::attachments::ChatContext::Group { .. })
             );
-            if is_group && !batch_is_addressed(&batch) {
+            if is_group && !batch_should_invoke_cc(&batch) {
                 tracing::debug!(
                     ?key,
                     batch_size = batch.len(),
-                    "media-group batch had no addressed sibling — dropping without CC"
+                    "group batch did not pass worker invocation gate -- dropping without CC"
                 );
                 continue;
             }
@@ -5269,6 +5273,7 @@ esac
             reply_to_id: None,
             quoted_text: None,
             address: None,
+            response_mode: ResponseMode::Addressed,
             group_open: true,
             chat: super::super::attachments::ChatContext::Group {
                 id: -1001,
@@ -5618,23 +5623,31 @@ esac
     }
 
     #[tokio::test]
-    async fn batch_is_addressed_drops_all_none_group_batch() {
+    async fn batch_should_invoke_cc_drops_all_none_addressed_mode_group_batch() {
         let batch = vec![debug_msg(1, Some("alb")), debug_msg(2, Some("alb"))];
-        assert!(!batch_is_addressed(&batch));
+        assert!(!batch_should_invoke_cc(&batch));
     }
 
     #[tokio::test]
-    async fn batch_is_addressed_passes_when_one_sibling_addressed() {
+    async fn batch_should_invoke_cc_passes_all_mode_unaddressed_group_batch() {
+        let mut msg = debug_msg(1, None);
+        msg.response_mode = ResponseMode::All;
+
+        assert!(batch_should_invoke_cc(&[msg]));
+    }
+
+    #[tokio::test]
+    async fn batch_should_invoke_cc_passes_when_one_sibling_addressed() {
         let mut a = debug_msg(1, Some("alb"));
         a.address = Some(super::super::mention::AddressKind::GroupMentionText);
         let batch = vec![a, debug_msg(2, Some("alb"))];
-        assert!(batch_is_addressed(&batch));
+        assert!(batch_should_invoke_cc(&batch));
     }
 
     #[tokio::test]
-    async fn batch_is_addressed_drops_lone_forward() {
+    async fn batch_should_invoke_cc_drops_lone_addressed_mode_forward() {
         // A forward admitted by the routing filter (address: None) on its own
-        // must NOT pass the worker-level addressed gate.
+        // must NOT pass the worker-level invocation gate in Addressed mode.
         let mut fwd = debug_msg(1, None);
         fwd.forward_info = Some(super::super::attachments::ForwardInfo {
             from: super::super::attachments::MessageAuthor {
@@ -5644,11 +5657,11 @@ esac
             },
             date: Utc::now(),
         });
-        assert!(!batch_is_addressed(&[fwd]));
+        assert!(!batch_should_invoke_cc(&[fwd]));
     }
 
     #[tokio::test]
-    async fn batch_is_addressed_admits_addressed_plus_forward() {
+    async fn batch_should_invoke_cc_admits_addressed_plus_forward() {
         // Mixed batch — an addressed comment alongside an admitted forward —
         // passes the gate because at least one sibling carries an address.
         let mut comment = debug_msg(1, None);
@@ -5664,7 +5677,7 @@ esac
             date: Utc::now(),
         });
 
-        assert!(batch_is_addressed(&[comment, forward]));
+        assert!(batch_should_invoke_cc(&[comment, forward]));
     }
 }
 
