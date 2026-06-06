@@ -49,9 +49,13 @@ pub fn make_routing_filter(
                 })
             }
             _ => {
-                // `All` mode in an open group answers everyone, no addressing,
-                // but never another bot (loop guard) and never the bot itself.
-                if response_mode == ResponseMode::All && group_open && !sender.is_bot {
+                // Group contexts never route bot senders; this loop guard
+                // applies before both All-mode and addressed fallbacks.
+                if sender.is_bot {
+                    return None;
+                }
+                // `All` mode in an open group answers everyone, no addressing.
+                if response_mode == ResponseMode::All && group_open {
                     return Some(RoutingDecision {
                         address: addressed,
                         response_mode,
@@ -62,9 +66,10 @@ pub fn make_routing_filter(
                 if !sender_trusted && !group_open {
                     return None;
                 }
-                // Non-album group messages still require an explicit address.
-                // Album siblings are admitted unaddressed; the worker aggregates
-                // them and applies a final addressed-batch gate before invoking CC.
+                // Non-album/non-forward group messages still require an explicit
+                // address. Album siblings and forwards are admitted unaddressed;
+                // the worker aggregates them and applies the post-debounce
+                // invocation gate before invoking CC.
                 if addressed.is_none()
                     && msg.media_group_id().is_none()
                     && msg.forward_origin().is_none()
@@ -345,6 +350,34 @@ mod tests {
         .unwrap();
         let f = make_routing_filter(allowlist, identity);
         assert!(f(msg).is_none(), "All mode must not answer other bots");
+    }
+
+    #[tokio::test]
+    async fn all_mode_ignores_addressed_other_bots() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -1001;
+        let allowlist = open_group_with_mode(chat_id, ResponseMode::All);
+        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
+            "from": {"id": 5000, "is_bot": true, "first_name": "OtherBot"},
+            "text": "@rightaww_bot loop bait",
+            "entities": [{
+                "type": "mention",
+                "offset": 0,
+                "length": 13
+            }]
+        }))
+        .unwrap();
+        let f = make_routing_filter(allowlist, identity);
+        assert!(
+            f(msg).is_none(),
+            "All mode must not answer addressed messages from other bots"
+        );
     }
 
     #[tokio::test]
