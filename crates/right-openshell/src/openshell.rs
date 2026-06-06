@@ -4,7 +4,7 @@
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::process::Command;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
@@ -2078,6 +2078,44 @@ pub async fn get_active_policy(
         .ok_or_else(|| miette::miette!("GetSandboxPolicyStatus returned no revision"))?;
 
     Ok(revision.policy)
+}
+
+/// Poll interval while waiting for provider-profile composition to appear.
+const PROVIDER_COMPOSE_POLL: Duration = Duration::from_millis(250);
+/// Upper bound for composition to appear after a policy reload. Composition is
+/// sub-second empirically (see docs/architecture/providers.md); the margin
+/// tolerates a cold gateway. Tune against the live container if flaky.
+const PROVIDER_COMPOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Wait until `provider_name` is composed into `sandbox_name`'s active policy.
+///
+/// This is the success signal for provider composition: it reads the composed
+/// `_provider_<name>` rule directly via `get_active_policy`, rather than trusting
+/// the `policy set --wait` return (which no-ops on an unchanged policy hash).
+/// A timeout here means the provider attached but never composed: the loud
+/// signal that `providers_v2_enabled` is off on the gateway, or that composition
+/// otherwise failed. Errors propagate (FAIL FAST).
+pub async fn wait_for_provider_composed(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+    provider_name: &str,
+) -> miette::Result<()> {
+    let deadline = Instant::now() + PROVIDER_COMPOSE_TIMEOUT;
+    loop {
+        let policy = get_active_policy(client, sandbox_name)
+            .await?
+            .unwrap_or_default();
+        if crate::provider_capabilities::provider_is_composed(&policy, provider_name) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(miette::miette!(
+                "provider {provider_name} attached but not composed into sandbox {sandbox_name} \
+                 within {PROVIDER_COMPOSE_TIMEOUT:?}: providers_v2_enabled may be off on the gateway"
+            ));
+        }
+        tokio::time::sleep(PROVIDER_COMPOSE_POLL).await;
+    }
 }
 
 /// Parse a policy YAML string and extract the filesystem-relevant fields into a `SandboxPolicy`.
