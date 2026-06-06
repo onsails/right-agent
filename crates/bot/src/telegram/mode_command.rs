@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use right_agent::agent::allowlist::{AllowlistHandle, AllowlistState, ResponseMode};
 use teloxide::prelude::*;
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, Message};
+use teloxide::types::{
+    InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage, Message,
+};
 
 use super::BotType;
 use super::handler::AgentDir;
@@ -135,6 +137,81 @@ fn topic_mode_state(
         .find(|topic| topic.thread_id == thread_id)
         .map(|topic| topic.mode);
     Some((topic_mode.unwrap_or(group.mode), topic_mode.is_some()))
+}
+
+fn apply_mode_action(
+    state: &mut AllowlistState,
+    chat_id: i64,
+    thread_id: i64,
+    scope: ModeScope,
+    action: ModeAction,
+) -> bool {
+    match (scope, action) {
+        (ModeScope::Group, ModeAction::Set(mode)) => state.set_group_mode(chat_id, mode),
+        (ModeScope::Topic, ModeAction::Set(mode)) => state.set_topic_mode(chat_id, thread_id, mode),
+        (ModeScope::Topic, ModeAction::ClearTopic) => {
+            if !state.is_group_open(chat_id) {
+                return false;
+            }
+            let _removed = state.clear_topic_mode(chat_id, thread_id);
+            true
+        }
+        (ModeScope::Group, ModeAction::ClearTopic) => false,
+    }
+}
+
+fn render_scope_state(
+    state: &AllowlistState,
+    chat_id: i64,
+    thread_id: i64,
+    scope: ModeScope,
+) -> Option<(String, InlineKeyboardMarkup)> {
+    match scope {
+        ModeScope::Topic => {
+            topic_mode_state(state, chat_id, thread_id).map(|(effective, has_override)| {
+                (
+                    topic_body(effective, has_override),
+                    topic_keyboard(effective, has_override),
+                )
+            })
+        }
+        ModeScope::Group => {
+            group_mode(state, chat_id).map(|current| (group_body(current), group_keyboard(current)))
+        }
+    }
+}
+
+fn callback_target_from_regular_message(
+    scope: ModeScope,
+    message: Option<&Message>,
+    group_chat_id: i64,
+) -> Result<(i64, i64), &'static str> {
+    match scope {
+        ModeScope::Group => Ok((group_chat_id, 0)),
+        ModeScope::Topic => {
+            let message = message.ok_or("Mode menu unavailable")?;
+            Ok((
+                message.chat.id.0,
+                super::session::effective_thread_id(message),
+            ))
+        }
+    }
+}
+
+fn callback_target(
+    scope: ModeScope,
+    message: &MaybeInaccessibleMessage,
+) -> Result<(i64, i64), &'static str> {
+    match scope {
+        ModeScope::Group => callback_target_from_regular_message(
+            scope,
+            message.regular_message(),
+            message.chat().id.0,
+        ),
+        ModeScope::Topic => {
+            callback_target_from_regular_message(scope, message.regular_message(), 0)
+        }
+    }
 }
 
 async fn send_in_thread(
@@ -278,64 +355,40 @@ pub(crate) async fn handle_mode_callback(
             .await?;
         return Ok(());
     };
-    let chat_id = message.chat().id.0;
-    let thread_id = message
-        .regular_message()
-        .map(super::session::effective_thread_id)
-        .unwrap_or(0);
-
-    let update_ok = {
-        let current = allowlist.0.read().expect("allowlist lock poisoned").clone();
-        let mut next = current;
-        let updated = match (scope, action) {
-            (ModeScope::Group, ModeAction::Set(mode)) => next.set_group_mode(chat_id, mode),
-            (ModeScope::Topic, ModeAction::Set(mode)) => {
-                next.set_topic_mode(chat_id, thread_id, mode)
-            }
-            (ModeScope::Topic, ModeAction::ClearTopic) => {
-                if !next.is_group_open(chat_id) {
-                    false
-                } else {
-                    let _removed = next.clear_topic_mode(chat_id, thread_id);
-                    true
-                }
-            }
-            (ModeScope::Group, ModeAction::ClearTopic) => false,
-        };
-        if updated { Some(next) } else { None }
+    let (chat_id, thread_id) = match callback_target(scope, message) {
+        Ok(target) => target,
+        Err(text) => {
+            bot.answer_callback_query(q.id).text(text).await?;
+            return Ok(());
+        }
     };
 
-    let Some(new_state) = update_ok else {
+    let updated =
+        match super::allowlist_commands::update_locked(&allowlist, &agent_dir.0, move |state| {
+            apply_mode_action(state, chat_id, thread_id, scope, action)
+        })
+        .await
+        {
+            Ok(updated) => updated,
+            Err(e) => {
+                tracing::error!(error = %e, "/mode: failed to persist allowlist");
+                bot.answer_callback_query(q.id)
+                    .text("Failed to save — see bot logs")
+                    .await?;
+                return Ok(());
+            }
+        };
+
+    if !updated {
         bot.answer_callback_query(q.id)
             .text("Open the group first with /allow_all, then set a mode")
-            .await?;
-        return Ok(());
-    };
-
-    if let Err(e) =
-        super::allowlist_commands::persist_new(&allowlist, &agent_dir.0, new_state).await
-    {
-        tracing::error!(error = %e, "/mode: failed to persist allowlist");
-        bot.answer_callback_query(q.id)
-            .text("Failed to save — see bot logs")
             .await?;
         return Ok(());
     }
 
     let rendered = {
         let state = allowlist.0.read().expect("allowlist lock poisoned");
-        match scope {
-            ModeScope::Topic => {
-                topic_mode_state(&state, chat_id, thread_id).map(|(effective, has_override)| {
-                    (
-                        topic_body(effective, has_override),
-                        topic_keyboard(effective, has_override),
-                    )
-                })
-            }
-            ModeScope::Group => group_mode(&state, chat_id)
-                .map(|current| (group_body(current), group_keyboard(current))),
-        }
+        render_scope_state(&state, chat_id, thread_id, scope)
     };
 
     let Some((body, keyboard)) = rendered else {
@@ -360,7 +413,36 @@ pub(crate) async fn handle_mode_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use right_agent::agent::allowlist::{AllowedGroup, AllowlistFile};
     use teloxide::types::InlineKeyboardButtonKind;
+
+    fn opened_state(chat_id: i64, mode: ResponseMode) -> AllowlistState {
+        AllowlistState::from_file(AllowlistFile {
+            groups: vec![AllowedGroup {
+                id: chat_id,
+                label: Some("group".to_string()),
+                opened_by: Some(1),
+                opened_at: Utc::now(),
+                mode,
+                topics: Vec::new(),
+            }],
+            ..Default::default()
+        })
+    }
+
+    fn topic_message(chat_id: i64, thread_id: i32) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "message_id": 10,
+            "date": 0,
+            "chat": {"id": chat_id, "type": "supergroup", "title": "Group"},
+            "message_thread_id": thread_id,
+            "is_topic_message": true,
+            "from": {"id": 1, "is_bot": false, "first_name": "User"},
+            "text": "/mode"
+        }))
+        .unwrap()
+    }
 
     fn callback_data(keyboard: &InlineKeyboardMarkup) -> Vec<String> {
         keyboard
@@ -420,6 +502,73 @@ mod tests {
         assert_eq!(parse_callback("model:all"), None);
         assert_eq!(parse_callback("modegroup:clear"), None);
         assert_eq!(parse_callback("mode:nonsense"), None);
+    }
+
+    #[tokio::test]
+    async fn apply_mode_action_mutates_only_open_scopes() {
+        let chat_id = -100;
+        let thread_id = 42;
+        let mut state = opened_state(chat_id, ResponseMode::Addressed);
+
+        assert!(apply_mode_action(
+            &mut state,
+            chat_id,
+            thread_id,
+            ModeScope::Group,
+            ModeAction::Set(ResponseMode::All)
+        ));
+        assert_eq!(group_mode(&state, chat_id), Some(ResponseMode::All));
+
+        assert!(apply_mode_action(
+            &mut state,
+            chat_id,
+            thread_id,
+            ModeScope::Topic,
+            ModeAction::Set(ResponseMode::Addressed)
+        ));
+        assert_eq!(
+            topic_mode_state(&state, chat_id, thread_id),
+            Some((ResponseMode::Addressed, true))
+        );
+
+        assert!(apply_mode_action(
+            &mut state,
+            chat_id,
+            thread_id,
+            ModeScope::Topic,
+            ModeAction::ClearTopic
+        ));
+        assert_eq!(
+            topic_mode_state(&state, chat_id, thread_id),
+            Some((ResponseMode::All, false))
+        );
+
+        let mut closed = AllowlistState::default();
+        assert!(!apply_mode_action(
+            &mut closed,
+            chat_id,
+            thread_id,
+            ModeScope::Group,
+            ModeAction::Set(ResponseMode::All)
+        ));
+    }
+
+    #[tokio::test]
+    async fn callback_target_requires_accessible_message_for_topic_scope() {
+        let msg = topic_message(-100, 42);
+
+        assert_eq!(
+            callback_target_from_regular_message(ModeScope::Topic, Some(&msg), -100),
+            Ok((-100, 42))
+        );
+        assert_eq!(
+            callback_target_from_regular_message(ModeScope::Group, None, -100),
+            Ok((-100, 0))
+        );
+        assert_eq!(
+            callback_target_from_regular_message(ModeScope::Topic, None, -100),
+            Err("Mode menu unavailable")
+        );
     }
 
     #[tokio::test]

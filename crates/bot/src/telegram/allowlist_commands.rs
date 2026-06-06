@@ -87,6 +87,33 @@ pub(crate) async fn persist_new(
     Ok(())
 }
 
+/// Read, mutate, and write `allowlist.yaml` while holding the allowlist file
+/// lock, then swap the persisted state into memory.
+pub(crate) async fn update_locked<R, F>(
+    handle: &AllowlistHandle,
+    agent_dir: &std::path::Path,
+    f: F,
+) -> Result<R, String>
+where
+    R: Send + 'static,
+    F: FnOnce(&mut AllowlistState) -> R + Send + 'static,
+{
+    let dir = agent_dir.to_path_buf();
+    let (result, new_state) = tokio::task::spawn_blocking(move || {
+        allowlist::with_lock(&dir, |d| {
+            let file = allowlist::read_file(d)?.unwrap_or_default();
+            let mut state = AllowlistState::from_file(file);
+            let result = f(&mut state);
+            allowlist::write_file_inner(d, &state.to_file())?;
+            Ok((result, state))
+        })
+    })
+    .await
+    .map_err(|e| format!("join: {e:#}"))??;
+    *handle.0.write().expect("allowlist lock poisoned") = new_state;
+    Ok(result)
+}
+
 /// Trusted-only gate. Returns true when the sender is in the trusted-users allowlist.
 pub(crate) fn sender_is_trusted(msg: &Message, allowlist: &AllowlistHandle) -> bool {
     let Some(sender) = msg.from.as_ref() else {
