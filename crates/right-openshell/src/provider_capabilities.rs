@@ -226,7 +226,13 @@ pub async fn provider_capabilities_for_sandbox(
     let mut inputs = Vec::with_capacity(provider_names.len());
 
     for name in provider_names {
-        let provider = crate::providers::get_provider(client, &name).await?;
+        let provider = match crate::providers::get_provider(client, &name).await {
+            Ok(provider) => provider,
+            // Detached between list_attached and now — drop it rather than fail
+            // the whole call and hide every still-attached provider.
+            Err(crate::providers::ProviderError::NotFound(_)) => continue,
+            Err(e) => return Err(e.into()),
+        };
         let provider_type = provider.type_;
         let profile = crate::managed_profiles::get_profile(client, &provider_type).await?;
 
