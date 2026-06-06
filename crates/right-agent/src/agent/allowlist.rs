@@ -266,6 +266,52 @@ impl AllowlistState {
         self.is_user_trusted(chat_id) || self.is_group_open(chat_id)
     }
 
+    /// Effective response mode for a scope. Precedence: explicit topic entry →
+    /// group default → built-in `Addressed`. Unknown (closed) group → `Addressed`.
+    pub fn response_mode(&self, chat_id: i64, thread_id: i64) -> ResponseMode {
+        let Some(g) = self.inner.groups.iter().find(|g| g.id == chat_id) else {
+            return ResponseMode::Addressed;
+        };
+        if let Some(t) = g.topics.iter().find(|t| t.thread_id == thread_id) {
+            return t.mode;
+        }
+        g.mode
+    }
+
+    /// Set the group-level default mode. Returns false if the group is not open.
+    pub fn set_group_mode(&mut self, chat_id: i64, mode: ResponseMode) -> bool {
+        match self.inner.groups.iter_mut().find(|g| g.id == chat_id) {
+            Some(g) => {
+                g.mode = mode;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Set (or overwrite) a per-topic mode override. Returns false if the group
+    /// is not open.
+    pub fn set_topic_mode(&mut self, chat_id: i64, thread_id: i64, mode: ResponseMode) -> bool {
+        let Some(g) = self.inner.groups.iter_mut().find(|g| g.id == chat_id) else {
+            return false;
+        };
+        match g.topics.iter_mut().find(|t| t.thread_id == thread_id) {
+            Some(t) => t.mode = mode,
+            None => g.topics.push(TopicMode { thread_id, mode }),
+        }
+        true
+    }
+
+    /// Remove a per-topic override. Returns true iff an override was removed.
+    pub fn clear_topic_mode(&mut self, chat_id: i64, thread_id: i64) -> bool {
+        let Some(g) = self.inner.groups.iter_mut().find(|g| g.id == chat_id) else {
+            return false;
+        };
+        let before = g.topics.len();
+        g.topics.retain(|t| t.thread_id != thread_id);
+        g.topics.len() != before
+    }
+
     pub fn users(&self) -> &[AllowedUser] {
         &self.inner.users
     }
