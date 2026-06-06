@@ -101,6 +101,25 @@ async fn ensure_generic_profile(
         .expect("ensure generic profile");
 }
 
+/// Set the gateway-global providers_v2_enabled flag (test helper).
+async fn set_providers_v2(
+    client: &mut right_openshell::managed_profiles::OpenShellGrpcClient,
+    on: bool,
+) {
+    use right_openshell::openshell_proto::openshell::{sandbox::v1 as sandbox_v1, v1 as proto_v1};
+    client
+        .update_config(proto_v1::UpdateConfigRequest {
+            global: true,
+            setting_key: right_openshell::providers::PROVIDERS_V2_ENABLED_KEY.to_string(),
+            setting_value: Some(sandbox_v1::SettingValue {
+                value: Some(sandbox_v1::setting_value::Value::BoolValue(on)),
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("set providers_v2");
+}
+
 async fn cleanup_generic_resources(
     provider_name: &str,
     profile_id: &str,
@@ -225,6 +244,13 @@ async fn ci_openshell_generic_profile_substitutes_custom_header() {
         ensure_provider_policy_loaded(sandbox.name(), &policy_path)
             .await
             .expect("provider policy loaded");
+        right_openshell::openshell::wait_for_provider_composed(
+            &mut client,
+            sandbox.name(),
+            &provider_name,
+        )
+        .await
+        .expect("provider composed into active policy");
         wait_for_provider_placeholder(&sandbox).await;
 
         let (out, code) = sandbox
@@ -240,6 +266,79 @@ async fn ci_openshell_generic_profile_substitutes_custom_header() {
         assert!(
             echoed == FAKE_CREDENTIAL,
             "echoed x-api-key did not match fake credential (got {echoed:?})"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "ci-openshell: live sandbox + gateway"]
+async fn ci_openshell_reconcile_self_enables_v2_on_fresh_gateway() {
+    let profile_id = unique_profile_id("generic-selfenable");
+    let provider_name = unique_name("generic-selfenable");
+    let sandbox_name = Arc::new(Mutex::new(None));
+    cleanup_generic_resources(&provider_name, &profile_id, None).await;
+
+    with_generic_cleanup(&provider_name, &profile_id, sandbox_name.clone(), async {
+        let mut client = connect_grpc(&default_mtls_dir()).await.unwrap();
+
+        ensure_generic_profile(&mut client, &profile_id, true).await;
+        right_openshell::test_cleanup::register_test_provider(&provider_name, Some(&profile_id));
+        create_provider(
+            &mut client,
+            &fake_provider_spec(&provider_name, &profile_id),
+        )
+        .await
+        .expect("create provider");
+
+        let (_policy_tmp, policy_path) = raw_tunnel_policy_file();
+        let sandbox =
+            TestSandbox::create_with_policy("ci-openshell-selfenable", RAW_TUNNEL_BASE_POLICY)
+                .await;
+        *sandbox_name.lock().expect("sandbox name lock") = Some(sandbox.name().to_string());
+
+        set_providers_v2(&mut client, false).await;
+        let reconcile_result = right_openshell::providers::reconcile_for_sandbox(
+            &mut client,
+            sandbox.name(),
+            "agent",
+            &[provider_name.clone()],
+        )
+        .await;
+        if reconcile_result.is_ok() {
+            right_openshell::test_cleanup::register_test_provider_attachment(
+                &provider_name,
+                sandbox.name(),
+            );
+        }
+        let compose_result: Result<(), String> = async {
+            reconcile_result.map_err(|e| format!("reconcile: {e:#}"))?;
+            ensure_provider_policy_loaded(sandbox.name(), &policy_path)
+                .await
+                .map_err(|e| format!("provider policy loaded: {e:#}"))?;
+            right_openshell::openshell::wait_for_provider_composed(
+                &mut client,
+                sandbox.name(),
+                &provider_name,
+            )
+            .await
+            .map_err(|e| format!("provider composed into active policy: {e:#}"))?;
+            Ok(())
+        }
+        .await;
+        set_providers_v2(&mut client, true).await;
+        compose_result.expect("reconcile self-enabled v2 and composed provider");
+        wait_for_provider_placeholder(&sandbox).await;
+
+        let (out, code) = sandbox
+            .exec_with_timeout(&["sh", "-lc", CURL_ECHO_HEADER], 60)
+            .await;
+        assert_eq!(code, 0, "curl command should exit successfully: {out}");
+        let echoed = echoed_header(&out, HEADER_NAME)
+            .unwrap_or_else(|| panic!("echo response must contain x-api-key; output: {out}"));
+        assert_eq!(
+            echoed, FAKE_CREDENTIAL,
+            "echoed x-api-key did not match fake credential"
         );
     })
     .await;

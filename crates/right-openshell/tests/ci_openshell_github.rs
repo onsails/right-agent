@@ -175,6 +175,13 @@ async fn ci_openshell_github_gh_api_user_succeeds() {
         ensure_provider_policy_loaded(sandbox.name(), &policy_path)
             .await
             .expect("provider policy loaded");
+        right_openshell::openshell::wait_for_provider_composed(
+            &mut client,
+            sandbox.name(),
+            &provider_name,
+        )
+        .await
+        .expect("built-in right-github composed into active policy");
 
         let (out, code) = sandbox
             .exec_with_timeout(&["gh", "api", "/user", "--silent", "-i"], 120)
