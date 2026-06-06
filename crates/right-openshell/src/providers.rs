@@ -447,12 +447,14 @@ pub struct ReconcileReport {
 ///   in `missing` (not an error — they may be created later by the user).
 ///
 /// The function is idempotent: calling it when everything is already in sync
-/// produces an empty report with no gateway calls beyond `list_attached`.
+/// produces an empty report after checking the current sandbox attachments and,
+/// when declarations are non-empty, ensuring provider v2 is enabled.
 ///
 /// **Partial-failure semantics**: transient attach/detach/get errors for
 /// individual providers are collected into `ReconcileReport::errors` and the
-/// loop continues. Only `list_attached` failure returns `Err` — without the
-/// attached set we cannot make any safe decisions. Callers should log
+/// loop continues. `ensure_v2_enabled` failure for a non-empty declaration and
+/// `list_attached` failure return `Err`: without the global composition flag
+/// and attached set we cannot make safe decisions. Callers should log
 /// `report.errors` and schedule a retry so the bot converges on the next
 /// reconcile tick.
 pub async fn reconcile_for_sandbox(
@@ -461,6 +463,14 @@ pub async fn reconcile_for_sandbox(
     agent_prefix: &str,
     declared: &[String],
 ) -> Result<ReconcileReport, ProviderError> {
+    // Provider composition is gated by the gateway-global providers_v2_enabled
+    // flag (default false on fresh gateways). Guarantee it before any attach so
+    // composition is not silently skipped. Skip when nothing is declared: a
+    // detach-only reconcile needs no composition and must not fail on this.
+    if !declared.is_empty() {
+        ensure_v2_enabled(client).await?;
+    }
+
     let attached = list_attached(client, sandbox_name).await?;
     let declared_set: std::collections::HashSet<&String> = declared.iter().collect();
     let attached_set: std::collections::HashSet<&String> = attached.iter().collect();

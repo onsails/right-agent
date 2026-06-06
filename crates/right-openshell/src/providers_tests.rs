@@ -7,7 +7,8 @@ use crate::openshell_proto::openshell::v1 as proto_v1;
 use crate::providers::{
     PROVIDERS_V2_ENABLED_KEY, ProviderError, ProviderSpec, attach_to_sandbox, create_provider,
     delete_provider, detach_from_sandbox, ensure_v2_enabled, get_provider,
-    get_sandbox_provider_environment, list_attached, list_providers_by_prefix, update_provider,
+    get_sandbox_provider_environment, list_attached, list_providers_by_prefix,
+    reconcile_for_sandbox, update_provider,
 };
 use crate::test_mock_server::{MockOpenShell, mock_client, start_mock_server};
 
@@ -349,6 +350,51 @@ async fn ensure_v2_enabled_propagates_grpc_error() {
         }
         other => panic!("expected Grpc, got: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn reconcile_ensures_v2_before_touching_providers_when_declared() {
+    // update_config (ensure_v2) errors -> reconcile must surface that error,
+    // proving ensure_v2 runs at the very top before list/attach.
+    let mock = MockOpenShell {
+        mock_update_config: Some(Box::new(|_| Err(tonic::Status::internal("v2-boom")))),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    let err = reconcile_for_sandbox(&mut client, "sbx", "agent", &["agent-x".to_string()])
+        .await
+        .err()
+        .expect("expected reconcile to fail before provider list/attach");
+    match err {
+        ProviderError::Grpc(msg) => assert!(msg.contains("v2-boom"), "{msg}"),
+        other => panic!("expected Grpc from ensure_v2, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn reconcile_skips_v2_when_nothing_declared() {
+    let mock = MockOpenShell {
+        mock_update_config: Some(Box::new(|_| Err(tonic::Status::internal("v2-boom")))),
+        mock_list_sandbox_providers: Some(Box::new(|_| {
+            Ok(proto_v1::ListSandboxProvidersResponse {
+                providers: Vec::new(),
+            })
+        })),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    let report = reconcile_for_sandbox(&mut client, "sbx", "agent", &[])
+        .await
+        .expect("empty declared reconcile must not require v2 enable");
+
+    assert!(report.attached.is_empty());
+    assert!(report.detached.is_empty());
+    assert!(report.missing.is_empty());
+    assert!(report.errors.is_empty());
 }
 
 #[tokio::test]
