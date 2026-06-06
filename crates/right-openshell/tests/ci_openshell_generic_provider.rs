@@ -299,6 +299,16 @@ async fn ci_openshell_provider_capabilities_reports_attached_provider() {
         .await
         .expect("gather provider capabilities");
 
+        let rendered_caps = format!("{caps:?}");
+        assert!(
+            !rendered_caps.contains(FAKE_CREDENTIAL),
+            "capabilities must not include credential values"
+        );
+        assert!(
+            !rendered_caps.contains("openshell:resolve:env:"),
+            "capabilities must not include provider placeholder values"
+        );
+
         let cap = caps
             .iter()
             .find(|c| c.env_vars.iter().any(|v| v == ENV_VAR))

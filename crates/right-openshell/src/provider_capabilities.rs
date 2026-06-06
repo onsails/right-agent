@@ -1,9 +1,9 @@
 //! Agent-facing provider capability records.
 //!
-//! Joins the live effective sandbox policy, the sandbox's injected placeholder
-//! env vars, and each attached provider's profile into a description the agent
-//! can read to learn which binary can spend which credential on which host.
-//! Read-only; never returns credential or placeholder values.
+//! Joins the live sandbox policy, the sandbox's injected placeholder env vars,
+//! and each attached provider's profile into a description the agent can read
+//! to learn which binary can spend which credential on which host. Read-only;
+//! never returns credential or placeholder values.
 
 use std::collections::HashSet;
 
@@ -21,6 +21,10 @@ pub struct ProviderCapabilityInput {
     pub display_name: String,
     /// Env vars the profile declares for this credential.
     pub candidate_env_vars: Vec<String>,
+    /// Binary paths declared by the provider profile.
+    pub profile_binaries: Vec<String>,
+    /// Endpoint hosts declared by the provider profile.
+    pub profile_endpoint_hosts: Vec<String>,
 }
 
 /// Agent-facing capability record for one provider.
@@ -29,9 +33,9 @@ pub struct ProviderCapability {
     pub display_name: String,
     /// Env var names actually injected into this sandbox for the provider.
     pub env_vars: Vec<String>,
-    /// Binary paths allowed to use the credential by the effective policy.
+    /// Binary paths allowed to use the credential by policy or provider profile.
     pub allowed_binaries: Vec<String>,
-    /// Hosts the credential is valid for by the effective policy.
+    /// Hosts the credential is valid for by policy or provider profile.
     pub endpoint_hosts: Vec<String>,
     /// One-line, agent-readable usage guidance.
     pub usage_hint: String,
@@ -115,8 +119,8 @@ fn build_usage_hint(allowed_binaries: &[String], hosts: &[String], active: bool)
     )
 }
 
-/// Join provider inputs with the effective policy and sandbox env keys. Pure
-/// and sorted deterministically for stable output.
+/// Join provider inputs with policy/profile constraints and sandbox env keys.
+/// Pure and sorted deterministically for stable output.
 pub fn correlate_provider_capabilities(
     inputs: &[ProviderCapabilityInput],
     policy: &SandboxPolicy,
@@ -136,32 +140,38 @@ pub fn correlate_provider_capabilities(
             env_vars.sort_unstable();
             env_vars.dedup();
 
-            let mut allowed_binaries: Vec<String> = rule
-                .map(|rule| {
-                    rule.binaries
-                        .iter()
-                        .map(|binary| binary.path.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
+            let materialized_profile = !env_vars.is_empty()
+                && (!input.profile_binaries.is_empty() || !input.profile_endpoint_hosts.is_empty());
+            let active = rule.is_some() || materialized_profile;
+
+            let mut allowed_binaries: Vec<String> = match rule {
+                Some(rule) => rule
+                    .binaries
+                    .iter()
+                    .map(|binary| binary.path.clone())
+                    .collect(),
+                None if materialized_profile => input.profile_binaries.clone(),
+                None => Vec::new(),
+            };
             allowed_binaries.sort_unstable();
             allowed_binaries.dedup();
 
-            let mut endpoint_hosts: Vec<String> = rule
-                .map(|rule| {
-                    rule.endpoints
-                        .iter()
-                        .map(|endpoint| endpoint.host.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
+            let mut endpoint_hosts: Vec<String> = match rule {
+                Some(rule) => rule
+                    .endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.host.clone())
+                    .collect(),
+                None if materialized_profile => input.profile_endpoint_hosts.clone(),
+                None => Vec::new(),
+            };
             endpoint_hosts.sort_unstable();
             endpoint_hosts.dedup();
 
             ProviderCapability {
                 display_name: input.display_name.clone(),
                 env_vars,
-                usage_hint: build_usage_hint(&allowed_binaries, &endpoint_hosts, rule.is_some()),
+                usage_hint: build_usage_hint(&allowed_binaries, &endpoint_hosts, active),
                 allowed_binaries,
                 endpoint_hosts,
             }
@@ -169,6 +179,43 @@ pub fn correlate_provider_capabilities(
         .collect();
     capabilities.sort_by(|a, b| a.display_name.cmp(&b.display_name));
     capabilities
+}
+
+fn env_keys_from_stdout(stdout: &str) -> HashSet<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+async fn sandbox_env_keys(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_id: &str,
+) -> Result<HashSet<String>, CapabilitiesError> {
+    // Run inside the sandbox so OpenShell exposes provider placeholder vars,
+    // but print only names to keep placeholder values out of logs and results.
+    let (stdout, exit_code) = crate::openshell::exec_in_sandbox(
+        client,
+        sandbox_id,
+        &[
+            "sh",
+            "-lc",
+            "env_output=$(env) || exit $?; printf '%s\\n' \"$env_output\" | sed 's/=.*//'",
+        ],
+        crate::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+    )
+    .await
+    .map_err(|e| CapabilitiesError::Policy(format!("{e:#}")))?;
+
+    if exit_code != 0 {
+        return Err(CapabilitiesError::Policy(format!(
+            "sandbox env key scan exited with status {exit_code}"
+        )));
+    }
+
+    Ok(env_keys_from_stdout(&stdout))
 }
 
 pub async fn provider_capabilities_for_sandbox(
@@ -183,27 +230,47 @@ pub async fn provider_capabilities_for_sandbox(
         let provider_type = provider.type_;
         let profile = crate::managed_profiles::get_profile(client, &provider_type).await?;
 
-        let (display_name, candidate_env_vars) = match profile {
-            Some(profile) => {
-                let display_name = if profile.display_name.is_empty() {
-                    provider_type.clone()
-                } else {
-                    profile.display_name
-                };
-                let candidate_env_vars = profile
-                    .credentials
-                    .iter()
-                    .flat_map(|credential| credential.env_vars.iter().cloned())
-                    .collect();
-                (display_name, candidate_env_vars)
-            }
-            None => (provider_type, Vec::new()),
-        };
+        let (display_name, candidate_env_vars, profile_binaries, profile_endpoint_hosts) =
+            match profile {
+                Some(profile) => {
+                    let display_name = if profile.display_name.is_empty() {
+                        provider_type.clone()
+                    } else {
+                        profile.display_name
+                    };
+                    let candidate_env_vars = profile
+                        .credentials
+                        .iter()
+                        .flat_map(|credential| credential.env_vars.iter().cloned())
+                        .collect();
+                    let profile_binaries = profile
+                        .binaries
+                        .iter()
+                        .map(|binary| binary.path.clone())
+                        .filter(|path| !path.is_empty())
+                        .collect();
+                    let profile_endpoint_hosts = profile
+                        .endpoints
+                        .iter()
+                        .map(|endpoint| endpoint.host.clone())
+                        .filter(|host| !host.is_empty())
+                        .collect();
+                    (
+                        display_name,
+                        candidate_env_vars,
+                        profile_binaries,
+                        profile_endpoint_hosts,
+                    )
+                }
+                None => (provider_type, Vec::new(), Vec::new(), Vec::new()),
+            };
 
         inputs.push(ProviderCapabilityInput {
             name,
             display_name,
             candidate_env_vars,
+            profile_binaries,
+            profile_endpoint_hosts,
         });
     }
 
@@ -214,11 +281,7 @@ pub async fn provider_capabilities_for_sandbox(
     let sandbox_id = crate::openshell::resolve_sandbox_id(client, sandbox_name)
         .await
         .map_err(|e| CapabilitiesError::Policy(format!("{e:#}")))?;
-    let env_keys: HashSet<String> =
-        crate::providers::get_sandbox_provider_environment(client, &sandbox_id)
-            .await?
-            .into_keys()
-            .collect();
+    let env_keys = sandbox_env_keys(client, &sandbox_id).await?;
 
     Ok(correlate_provider_capabilities(&inputs, &policy, &env_keys))
 }
