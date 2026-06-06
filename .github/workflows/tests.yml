@@ -118,6 +118,13 @@ jobs:
           df -h
           du -sh target/devenv ~/.cargo ~/.right ~/.right/cache/whisper /nix /tmp /home/runner/work 2>/dev/null || true
 
+      # Warm the cache once, sequentially, on a cache miss. On a cache hit this
+      # is a no-op ("already cached"). Without it the three ci_stt tests each
+      # download the model concurrently on a cold cache.
+      - name: Prefetch whisper model
+        run: |
+          devenv shell -- cargo run --bin right --locked -- stt preload --model tiny
+
       - name: Run STT ignored tests
         id: stt_tests
         continue-on-error: true
