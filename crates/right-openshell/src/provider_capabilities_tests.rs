@@ -37,11 +37,36 @@ fn input(name: &str, display_name: &str, env_vars: &[&str]) -> ProviderCapabilit
         name: name.into(),
         display_name: display_name.into(),
         candidate_env_vars: env_vars.iter().map(|v| (*v).into()).collect(),
+        profile_binaries: Vec::new(),
+        profile_endpoint_hosts: Vec::new(),
+    }
+}
+
+fn input_with_profile(
+    name: &str,
+    display_name: &str,
+    env_vars: &[&str],
+    binaries: &[&str],
+    hosts: &[&str],
+) -> ProviderCapabilityInput {
+    ProviderCapabilityInput {
+        name: name.into(),
+        display_name: display_name.into(),
+        candidate_env_vars: env_vars.iter().map(|v| (*v).into()).collect(),
+        profile_binaries: binaries.iter().map(|path| (*path).into()).collect(),
+        profile_endpoint_hosts: hosts.iter().map(|host| (*host).into()).collect(),
     }
 }
 
 fn env_keys(keys: &[&str]) -> HashSet<String> {
     keys.iter().map(|key| (*key).into()).collect()
+}
+
+#[test]
+fn env_keys_from_stdout_trims_empty_lines_and_dedupes() {
+    let keys = env_keys_from_stdout("\nGITHUB_TOKEN\n  ANTHROPIC_API_KEY  \nGITHUB_TOKEN\n");
+
+    assert_eq!(keys, env_keys(&["ANTHROPIC_API_KEY", "GITHUB_TOKEN"]));
 }
 
 #[test]
@@ -100,6 +125,42 @@ fn wildcard_binary_yields_any_binary_usage_hint() {
     assert_eq!(capabilities[0].allowed_binaries, ["**"]);
     assert!(capabilities[0].usage_hint.contains("Any binary"));
     assert!(capabilities[0].usage_hint.contains("api.example.com"));
+}
+
+#[test]
+fn provider_profile_constraints_apply_when_placeholder_materialized_and_policy_exposes_no_rule() {
+    let inputs = [input_with_profile(
+        "right-example",
+        "Example",
+        &["EXAMPLE_API_KEY"],
+        &["**"],
+        &["api.example.com"],
+    )];
+    let env = env_keys(&["EXAMPLE_API_KEY"]);
+
+    let capabilities = correlate_provider_capabilities(&inputs, &SandboxPolicy::default(), &env);
+
+    assert_eq!(capabilities[0].allowed_binaries, ["**"]);
+    assert_eq!(capabilities[0].endpoint_hosts, ["api.example.com"]);
+    assert!(capabilities[0].usage_hint.contains("Any binary"));
+}
+
+#[test]
+fn provider_profile_constraints_do_not_apply_without_materialized_placeholder() {
+    let inputs = [input_with_profile(
+        "right-example",
+        "Example",
+        &["EXAMPLE_API_KEY"],
+        &["**"],
+        &["api.example.com"],
+    )];
+
+    let capabilities =
+        correlate_provider_capabilities(&inputs, &SandboxPolicy::default(), &HashSet::new());
+
+    assert!(capabilities[0].allowed_binaries.is_empty());
+    assert!(capabilities[0].endpoint_hosts.is_empty());
+    assert!(capabilities[0].usage_hint.contains("not currently active"));
 }
 
 #[test]
