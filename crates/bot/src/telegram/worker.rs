@@ -982,14 +982,14 @@ async fn collect_batch(
 }
 
 /// Post-debounce invocation gate. Returns `true` if at least one message in
-/// the batch was addressed to the bot, or if the batch came from an All-mode
-/// group. In groups this is the predicate the worker uses to decide whether to
-/// invoke CC; if `false`, the batch is dropped silently. DM batches always have
-/// `address: Some(DirectMessage)` so the predicate trivially holds for them.
+/// the batch was addressed to the bot, or if every message in a nonempty batch
+/// came from an All-mode group. In groups this is the predicate the worker uses
+/// to decide whether to invoke CC; if `false`, the batch is dropped silently. DM
+/// batches always have `address: Some(DirectMessage)` so the predicate
+/// trivially holds for them.
 fn batch_should_invoke_cc(batch: &[DebounceMsg]) -> bool {
-    batch
-        .iter()
-        .any(|m| m.address.is_some() || m.response_mode == ResponseMode::All)
+    batch.iter().any(|m| m.address.is_some())
+        || (!batch.is_empty() && batch.iter().all(|m| m.response_mode == ResponseMode::All))
 }
 
 fn build_input_message_from_debounce(
@@ -5634,6 +5634,16 @@ esac
         msg.response_mode = ResponseMode::All;
 
         assert!(batch_should_invoke_cc(&[msg]));
+    }
+
+    #[tokio::test]
+    async fn batch_should_invoke_cc_drops_mixed_all_and_addressed_unaddressed_batch() {
+        let mut all_mode = debug_msg(1, None);
+        all_mode.response_mode = ResponseMode::All;
+
+        let addressed_mode = debug_msg(2, None);
+
+        assert!(!batch_should_invoke_cc(&[all_mode, addressed_mode]));
     }
 
     #[tokio::test]
