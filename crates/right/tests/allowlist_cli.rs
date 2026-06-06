@@ -106,3 +106,29 @@ fn mode_clear_requires_open_group_not_trusted_user() {
         .success()
         .stdout(contains("group 42 is not opened"));
 }
+
+#[test]
+fn mode_invalid_value_is_rejected_by_runtime() {
+    let home = TempDir::new().unwrap();
+    init_agent(home.path(), "testbot");
+
+    run(home.path())
+        .args(["agent", "mode", "testbot", "-100123", "bogus"])
+        .assert()
+        .failure()
+        .stderr(contains("invalid mode 'bogus' (addressed|all|clear)"));
+}
+
+#[test]
+fn mode_group_clear_is_rejected() {
+    let home = TempDir::new().unwrap();
+    init_agent(home.path(), "testbot");
+
+    run(home.path())
+        .args(["agent", "mode", "testbot", "-100123", "--group", "clear"])
+        .assert()
+        .failure()
+        .stderr(contains(
+            "`clear` is topic-only; --group needs addressed|all",
+        ));
+}

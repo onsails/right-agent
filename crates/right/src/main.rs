@@ -182,6 +182,29 @@ mod cli_parse_tests {
         ])
         .expect("agent mode must accept group form with negative group chat ID");
     }
+
+    #[test]
+    fn agent_mode_accepts_value_for_runtime_validation() {
+        Cli::try_parse_from(["right", "agent", "mode", "clone", "-100123", "bogus"])
+            .expect("agent mode value validation is handled by runtime code");
+    }
+
+    #[test]
+    fn agent_mode_help_lists_topic_group_and_value() {
+        let mut command = Cli::command();
+        let err = command
+            .try_get_matches_from_mut(["right", "agent", "mode", "--help"])
+            .expect_err("agent mode --help must render clap help");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert_eq!(err.exit_code(), 0);
+
+        let help = err.to_string();
+        assert!(help.contains("--thread-id"));
+        assert!(help.contains("--group"));
+        assert!(help.contains("<VALUE>"));
+        assert!(help.contains("One of: addressed | all | clear"));
+    }
 }
 
 #[derive(Parser)]
