@@ -331,10 +331,10 @@ async fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
                 )
             })
             .unwrap_or(true); // default sandbox mode is openshell
-        if is_openshell {
-            if let Some(check) = check_sandbox_for_agent(&name, agent_config.as_ref()).await {
-                checks.push(check);
-            }
+        if is_openshell
+            && let Some(check) = check_sandbox_for_agent(&name, agent_config.as_ref()).await
+        {
+            checks.push(check);
         }
 
         // Memory layer health (queue size, oldest-row age, long-standing alerts).

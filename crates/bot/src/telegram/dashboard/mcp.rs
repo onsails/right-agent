@@ -474,6 +474,8 @@ fn detection_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
+// large-Err allow: Err is axum `Response`, intentionally returned by value; boxing would ripple through callers.
+#[allow(clippy::result_large_err)]
 pub(super) fn parse_json_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, Response> {
     serde_json::from_slice(body).map_err(|error| {
         tracing::warn!("dashboard MCP request rejected malformed body: {error:#}");

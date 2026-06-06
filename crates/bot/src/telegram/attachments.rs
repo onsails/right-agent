@@ -265,7 +265,7 @@ pub(crate) fn partition_sends(
                         let mut caps: Vec<Option<String>> =
                             items.iter().map(|it| it.caption.clone()).collect();
                         merge_group_captions(&mut caps);
-                        for (it, c) in items.iter_mut().zip(caps.into_iter()) {
+                        for (it, c) in items.iter_mut().zip(caps) {
                             it.caption = c;
                         }
                         sends.push(OutboundSend::Group {
@@ -299,7 +299,7 @@ pub(crate) fn partition_sends(
                                 let mut caps: Vec<Option<String>> =
                                     items.iter().map(|it| it.caption.clone()).collect();
                                 merge_group_captions(&mut caps);
-                                for (it, c) in items.iter_mut().zip(caps.into_iter()) {
+                                for (it, c) in items.iter_mut().zip(caps) {
                                     it.caption = c;
                                 }
                                 sends.push(OutboundSend::Group {

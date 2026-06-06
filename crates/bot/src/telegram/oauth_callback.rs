@@ -132,21 +132,17 @@ async fn handle_oauth_callback(
             description = %desc,
             "OAuth callback error from provider"
         );
-        if let Some(state_param) = params.state.as_deref() {
-            if consume_pending_auth(&state.pending_auth, state_param)
+        if let Some(state_param) = params.state.as_deref()
+            && consume_pending_auth(&state.pending_auth, state_param)
                 .await
                 .is_some()
-            {
-                let provider_detail = format!("{err} -- {desc}");
-                let safe_detail = super::oauth_status::compact_dashboard_error(&provider_detail);
-                state
-                    .oauth_status
-                    .mark_failed_if_pending(
-                        state_param,
-                        format!("OAuth provider error: {safe_detail}"),
-                    )
-                    .await;
-            }
+        {
+            let provider_detail = format!("{err} -- {desc}");
+            let safe_detail = super::oauth_status::compact_dashboard_error(&provider_detail);
+            state
+                .oauth_status
+                .mark_failed_if_pending(state_param, format!("OAuth provider error: {safe_detail}"))
+                .await;
         }
         return (
             axum::http::StatusCode::BAD_REQUEST,

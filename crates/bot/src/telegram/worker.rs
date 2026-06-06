@@ -4141,17 +4141,16 @@ async fn invoke_cc(
     match parse_reply_output(&stdout_str) {
         Ok((reply_output, session_id_from_cc)) => {
             // D-15: verify session_id at debug level only
-            if let (Some(cc_sid), true) = (session_id_from_cc, is_first_call) {
-                if let Ok(Some(active)) = get_active_session(&conn, chat_id, eff_thread_id).await
-                    && cc_sid != active.root_session_id
-                {
-                    tracing::warn!(
-                        ?chat_id,
-                        cc_session_id = %cc_sid,
-                        stored_session_id = %active.root_session_id,
-                        "session_id mismatch between CC and stored — not blocking"
-                    );
-                }
+            if let (Some(cc_sid), true) = (session_id_from_cc, is_first_call)
+                && let Ok(Some(active)) = get_active_session(&conn, chat_id, eff_thread_id).await
+                && cc_sid != active.root_session_id
+            {
+                tracing::warn!(
+                    ?chat_id,
+                    cc_session_id = %cc_sid,
+                    stored_session_id = %active.root_session_id,
+                    "session_id mismatch between CC and stored — not blocking"
+                );
             }
             // Update last_used_at (non-fatal: log error but do not fail the reply)
             if let Ok(Some(active)) = get_active_session(&conn, chat_id, eff_thread_id).await {

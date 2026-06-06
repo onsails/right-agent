@@ -1071,22 +1071,22 @@ async fn handle_reload(State(state): State<InternalState>) -> axum::response::Re
                 .iter()
                 .find(|(_, info)| info.name == *agent_name)
                 .map(|(tok, _)| tok.clone());
-            if let Some(current) = current_token {
-                if current != *token {
-                    let dir = map
-                        .get(&current)
-                        .map(|info| info.dir.clone())
-                        .unwrap_or_else(|| state.agents_dir.join(agent_name));
-                    map.remove(&current);
-                    map.insert(
-                        token.clone(),
-                        AgentInfo {
-                            name: agent_name.clone(),
-                            dir,
-                        },
-                    );
-                    tracing::info!(agent = %agent_name, "reload: rotated token");
-                }
+            if let Some(current) = current_token
+                && current != *token
+            {
+                let dir = map
+                    .get(&current)
+                    .map(|info| info.dir.clone())
+                    .unwrap_or_else(|| state.agents_dir.join(agent_name));
+                map.remove(&current);
+                map.insert(
+                    token.clone(),
+                    AgentInfo {
+                        name: agent_name.clone(),
+                        dir,
+                    },
+                );
+                tracing::info!(agent = %agent_name, "reload: rotated token");
             }
             continue;
         }

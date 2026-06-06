@@ -166,10 +166,8 @@ pub fn md_to_telegram_html(md: &str) -> String {
                         }
                     }
                 }
-                TagEnd::Item => {
-                    if !out.ends_with('\n') {
-                        out.push('\n');
-                    }
+                TagEnd::Item if !out.ends_with('\n') => {
+                    out.push('\n');
                 }
                 _ => {}
             },
