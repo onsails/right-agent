@@ -31,7 +31,14 @@ pub fn make_routing_filter(
         let state = allowlist.0.read().expect("allowlist lock poisoned");
         let sender_trusted = state.is_user_trusted(sender_id);
         let group_open = state.is_group_open(chat_id);
-        let response_mode = state.response_mode(chat_id, super::session::effective_thread_id(&msg));
+        // Response mode is a group/topic concept; DMs are always `Addressed`, so
+        // skip the per-message group lookup for private chats (the routing filter
+        // runs on every update).
+        let response_mode = if matches!(msg.chat.kind, ChatKind::Private(_)) {
+            ResponseMode::Addressed
+        } else {
+            state.response_mode(chat_id, super::session::effective_thread_id(&msg))
+        };
         drop(state);
 
         let addressed = is_bot_addressed(&msg, &identity);
