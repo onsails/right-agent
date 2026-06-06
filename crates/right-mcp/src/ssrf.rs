@@ -192,7 +192,7 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
 
 pub fn is_public_ipv4(ip: Ipv4Addr) -> bool {
     let ip = u32::from(ip);
-    !([0, 10, 127].iter().any(|octet| ip >> 24 == *octet)
+    !([0, 10, 127].contains(&(ip >> 24))
         || in_ipv4_cidr(ip, Ipv4Addr::new(100, 64, 0, 0), 10)
         || in_ipv4_cidr(ip, Ipv4Addr::new(169, 254, 0, 0), 16)
         || in_ipv4_cidr(ip, Ipv4Addr::new(172, 16, 0, 0), 12)

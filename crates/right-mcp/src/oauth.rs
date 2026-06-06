@@ -880,6 +880,7 @@ pub fn build_auth_url(
 ///
 /// Sends a form-encoded POST to `token_endpoint`.
 /// Includes `client_secret` in the form body when `Some`.
+#[allow(clippy::too_many_arguments)]
 pub async fn exchange_token(
     client: &reqwest::Client,
     token_endpoint: &str,

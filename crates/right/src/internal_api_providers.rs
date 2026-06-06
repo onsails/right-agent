@@ -994,11 +994,15 @@ fn insert_provider_entry(original: &str, entry_yaml: &str) -> miette::Result<Str
     let mut sandbox_end = lines.len();
     for (i, line) in lines.iter().enumerate().skip(sandbox_start + 1) {
         let ch = line.chars().next();
-        if let Some(c) = ch {
-            if c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '#' {
-                sandbox_end = i;
-                break;
-            }
+        if let Some(c) = ch
+            && c != ' '
+            && c != '\t'
+            && c != '\n'
+            && c != '\r'
+            && c != '#'
+        {
+            sandbox_end = i;
+            break;
         }
     }
 
@@ -2780,7 +2784,7 @@ pub(crate) async fn handle_provider_types() -> axum::Json<Vec<ProviderProfileVie
     let catalog = right_openshell::providers::profile_catalog();
     let views: Vec<_> = catalog
         .into_iter()
-        .filter(|p| !hidden.iter().any(|h| *h == p.type_slug.as_str()))
+        .filter(|p| !hidden.contains(&p.type_slug.as_str()))
         .map(|p| ProviderProfileView {
             type_slug: p.type_slug,
             env_var: p.env_var,

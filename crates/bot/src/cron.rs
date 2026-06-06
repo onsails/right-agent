@@ -255,7 +255,7 @@ async fn cleanup_old_logs(
                 Some((path, mtime))
             })
             .collect();
-        files.sort_by(|a, b| b.1.cmp(&a.1));
+        files.sort_by_key(|f| std::cmp::Reverse(f.1));
         for (old, _) in files.into_iter().skip(keep) {
             if let Err(e) = std::fs::remove_file(&old) {
                 tracing::warn!(job = %job_name, path = %old.display(), "failed to delete old log: {e:#}");
