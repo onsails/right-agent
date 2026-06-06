@@ -138,6 +138,9 @@ async fn ci_openshell_github_gh_api_user_succeeds() {
 
     with_provider_cleanup(&provider_name, sandbox_name.clone(), async {
         let mut client = connect_grpc(&default_mtls_dir()).await.unwrap();
+        right_openshell::providers::ensure_v2_enabled(&mut client)
+            .await
+            .expect("enable providers_v2");
         ensure_profiles(&mut client, &[github()])
             .await
             .expect("ensure right-github profile");

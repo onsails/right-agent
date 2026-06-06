@@ -197,6 +197,9 @@ async fn ci_openshell_generic_profile_substitutes_custom_header() {
 
     with_generic_cleanup(&provider_name, &profile_id, sandbox_name.clone(), async {
         let mut client = connect_grpc(&default_mtls_dir()).await.unwrap();
+        right_openshell::providers::ensure_v2_enabled(&mut client)
+            .await
+            .expect("enable providers_v2");
 
         ensure_generic_profile(&mut client, &profile_id, true).await;
         right_openshell::test_cleanup::register_test_provider(&provider_name, Some(&profile_id));
@@ -252,6 +255,9 @@ async fn ci_openshell_profile_without_binaries_blocks_connect() {
 
     with_generic_cleanup(&provider_name, &profile_id, sandbox_name.clone(), async {
         let mut client = connect_grpc(&default_mtls_dir()).await.unwrap();
+        right_openshell::providers::ensure_v2_enabled(&mut client)
+            .await
+            .expect("enable providers_v2");
 
         ensure_generic_profile(&mut client, &profile_id, false).await;
         right_openshell::test_cleanup::register_test_provider(&provider_name, Some(&profile_id));
@@ -307,6 +313,9 @@ async fn ci_openshell_provider_capabilities_reports_attached_provider() {
 
     with_generic_cleanup(&provider_name, &profile_id, sandbox_name.clone(), async {
         let mut client = connect_grpc(&default_mtls_dir()).await.unwrap();
+        right_openshell::providers::ensure_v2_enabled(&mut client)
+            .await
+            .expect("enable providers_v2");
 
         ensure_generic_profile(&mut client, &profile_id, true).await;
         right_openshell::test_cleanup::register_test_provider(&provider_name, Some(&profile_id));

@@ -9,8 +9,15 @@ use thiserror::Error;
 use tonic::transport::Channel;
 
 use crate::openshell_proto::openshell::datamodel::v1 as datamodel;
+use crate::openshell_proto::openshell::sandbox::v1 as sandbox_v1;
 use crate::openshell_proto::openshell::v1 as proto_v1;
 use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
+
+/// Gateway-global setting key that gates provider-profile network-endpoint
+/// composition. Fresh Linux gateways default this to `false`; without it set
+/// to `true`, generic-provider credential substitution silently fails (the
+/// proxy denies CONNECT because the terminated endpoint is never composed).
+pub const PROVIDERS_V2_ENABLED_KEY: &str = "providers_v2_enabled";
 
 /// All provider operation errors. Each is FAIL FAST — never swallowed.
 #[derive(Debug, Error)]
@@ -386,6 +393,29 @@ pub async fn get_sandbox_provider_environment(
         .map_err(|s| classify_status(s, sandbox_id))?
         .into_inner();
     Ok(resp.environment)
+}
+
+/// Enable the gateway-global `providers_v2_enabled` setting so
+/// provider-profile network-endpoint composition (and therefore generic
+/// credential substitution) works.
+///
+/// Idempotent: unconditionally upserts `true` via `UpdateConfig` at global
+/// scope. Safe to call on every `right up`. FAIL FAST — any RPC error
+/// propagates with its chain preserved.
+pub async fn ensure_v2_enabled(client: &mut OpenShellClient<Channel>) -> Result<(), ProviderError> {
+    let req = proto_v1::UpdateConfigRequest {
+        global: true,
+        setting_key: PROVIDERS_V2_ENABLED_KEY.to_string(),
+        setting_value: Some(sandbox_v1::SettingValue {
+            value: Some(sandbox_v1::setting_value::Value::BoolValue(true)),
+        }),
+        ..Default::default()
+    };
+    client
+        .update_config(req)
+        .await
+        .map_err(|s| classify_status(s, PROVIDERS_V2_ENABLED_KEY))?;
+    Ok(())
 }
 
 // ────────────────────────────────────────────────────────────────────────────
