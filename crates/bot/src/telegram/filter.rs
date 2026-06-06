@@ -6,6 +6,7 @@ use super::mention::{AddressKind, BotIdentity, is_bot_addressed};
 #[derive(Debug, Clone)]
 pub struct RoutingDecision {
     pub address: Option<AddressKind>,
+    pub response_mode: ResponseMode,
     /// True iff the sender is in the global trusted-users list.
     pub sender_trusted: bool,
     /// Set to `true` for group messages when the group is opened. `false` for DM.
@@ -42,6 +43,7 @@ pub fn make_routing_filter(
                 }
                 Some(RoutingDecision {
                     address: Some(AddressKind::DirectMessage),
+                    response_mode: ResponseMode::Addressed,
                     sender_trusted: true,
                     group_open: false,
                 })
@@ -52,6 +54,7 @@ pub fn make_routing_filter(
                 if response_mode == ResponseMode::All && group_open && !sender.is_bot {
                     return Some(RoutingDecision {
                         address: addressed,
+                        response_mode,
                         sender_trusted,
                         group_open,
                     });
@@ -70,6 +73,7 @@ pub fn make_routing_filter(
                 }
                 Some(RoutingDecision {
                     address: addressed,
+                    response_mode,
                     sender_trusted,
                     group_open,
                 })
@@ -218,6 +222,7 @@ mod tests {
     async fn routing_decision_constructs() {
         let d = RoutingDecision {
             address: Some(AddressKind::DirectMessage),
+            response_mode: ResponseMode::Addressed,
             sender_trusted: true,
             group_open: false,
         };
@@ -269,6 +274,7 @@ mod tests {
         let decision = f(msg).expect("trusted private text should route");
 
         assert_eq!(decision.address, Some(AddressKind::DirectMessage));
+        assert_eq!(decision.response_mode, ResponseMode::Addressed);
         assert!(decision.sender_trusted);
         assert!(!decision.group_open);
     }
@@ -287,6 +293,7 @@ mod tests {
         let decision = f(msg).expect("trusted private media should route");
 
         assert_eq!(decision.address, Some(AddressKind::DirectMessage));
+        assert_eq!(decision.response_mode, ResponseMode::Addressed);
         assert!(decision.sender_trusted);
         assert!(!decision.group_open);
     }
@@ -303,6 +310,7 @@ mod tests {
         let f = make_routing_filter(allowlist, identity);
         let d = f(msg).expect("All mode admits plain text");
         assert!(d.address.is_none());
+        assert_eq!(d.response_mode, ResponseMode::All);
         assert!(d.group_open);
     }
 
