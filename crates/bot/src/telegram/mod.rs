@@ -19,6 +19,7 @@ pub(crate) mod model_command;
 pub mod oauth_callback;
 pub(crate) mod oauth_status;
 pub(crate) mod progress;
+pub(crate) mod reply_context;
 pub mod session;
 pub mod shutdown_listener;
 pub mod webhook;
