@@ -254,3 +254,65 @@ async fn ci_openshell_profile_without_binaries_blocks_connect() {
     })
     .await;
 }
+
+#[tokio::test]
+#[ignore = "ci-openshell: live sandbox + gateway"]
+async fn ci_openshell_provider_capabilities_reports_attached_provider() {
+    let profile_id = unique_profile_id("generic-caps");
+    let provider_name = unique_name("generic-caps");
+    let sandbox_name = Arc::new(Mutex::new(None));
+    cleanup_generic_resources(&provider_name, &profile_id, None).await;
+
+    with_generic_cleanup(&provider_name, &profile_id, sandbox_name.clone(), async {
+        let mut client = connect_grpc(&default_mtls_dir()).await.unwrap();
+
+        ensure_generic_profile(&mut client, &profile_id, true).await;
+        right_openshell::test_cleanup::register_test_provider(&provider_name, Some(&profile_id));
+        create_provider(
+            &mut client,
+            &fake_provider_spec(&provider_name, &profile_id),
+        )
+        .await
+        .expect("create provider");
+
+        let (_policy_tmp, policy_path) = raw_tunnel_policy_file();
+        let sandbox =
+            TestSandbox::create_with_policy("ci-openshell-generic-caps", RAW_TUNNEL_BASE_POLICY)
+                .await;
+        *sandbox_name.lock().expect("sandbox name lock") = Some(sandbox.name().to_string());
+        attach_to_sandbox(&mut client, sandbox.name(), &provider_name)
+            .await
+            .expect("attach provider");
+        right_openshell::test_cleanup::register_test_provider_attachment(
+            &provider_name,
+            sandbox.name(),
+        );
+        ensure_provider_policy_loaded(sandbox.name(), &policy_path)
+            .await
+            .expect("provider policy loaded");
+        wait_for_provider_placeholder(&sandbox).await;
+
+        let caps = right_openshell::provider_capabilities::provider_capabilities_for_sandbox(
+            &mut client,
+            sandbox.name(),
+        )
+        .await
+        .expect("gather provider capabilities");
+
+        let cap = caps
+            .iter()
+            .find(|c| c.env_vars.iter().any(|v| v == ENV_VAR))
+            .unwrap_or_else(|| panic!("capabilities must include {ENV_VAR}; got {caps:?}"));
+        assert!(
+            cap.allowed_binaries.iter().any(|b| b == "**"),
+            "generic profile uses binaries ** ; got {:?}",
+            cap.allowed_binaries
+        );
+        assert!(
+            cap.endpoint_hosts.iter().any(|h| h == UPSTREAM_HOST),
+            "endpoint host must include {UPSTREAM_HOST}; got {:?}",
+            cap.endpoint_hosts
+        );
+    })
+    .await;
+}
