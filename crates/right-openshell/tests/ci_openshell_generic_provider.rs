@@ -50,6 +50,15 @@ https://postman-echo.com/get -H \"x-api-key: ${MY_API_KEY}\" 2>&1";
 /// denial line and any reason body) is captured when the success curl fails.
 const CURL_ECHO_HEADER_VERBOSE: &str = "curl -sS -v --max-time 30 \
 https://postman-echo.com/get -H \"x-api-key: ${MY_API_KEY}\" 2>&1";
+/// Diagnostics path: speak HTTP CONNECT to the proxy by hand and print the full
+/// response **including the body**. curl discards the proxy's CONNECT-failure
+/// body; the OpenShell proxy returns its denial reason there (e.g. no matching
+/// terminated endpoint vs. binary not allowed), which is what distinguishes the
+/// composition-failure cause from the enforcement cause.
+const RAW_CONNECT_PROBE: &str = "timeout 10 bash -c '\
+exec 3<>/dev/tcp/10.200.0.1/3128 || exit 7; \
+printf \"CONNECT postman-echo.com:443 HTTP/1.1\\r\\nHost: postman-echo.com:443\\r\\n\\r\\n\" >&3; \
+cat <&3' 2>&1 | head -c 1000";
 
 fn raw_tunnel_policy_file() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("create policy tempdir");
@@ -163,13 +172,18 @@ async fn connect_failure_diagnostics(
     let (verbose, vcode) = sandbox
         .exec_with_timeout(&["sh", "-lc", CURL_ECHO_HEADER_VERBOSE], 60)
         .await;
+    let (raw_connect, rcode) = sandbox
+        .exec_with_timeout(&["sh", "-lc", RAW_CONNECT_PROBE], 30)
+        .await;
     let policy = match right_openshell::openshell::get_active_policy(client, sandbox.name()).await {
         Ok(Some(policy)) => format!("{policy:#?}"),
         Ok(None) => "<no composed policy returned>".to_string(),
         Err(e) => format!("<get_active_policy failed: {e:#}>"),
     };
     format!(
-        "\n--- curl -v (exit {vcode}) ---\n{verbose}\n--- composed sandbox policy ---\n{policy}"
+        "\n--- curl -v (exit {vcode}) ---\n{verbose}\n\
+         --- raw proxy CONNECT response (exit {rcode}) ---\n{raw_connect}\n\
+         --- composed sandbox policy ---\n{policy}"
     )
 }
 
