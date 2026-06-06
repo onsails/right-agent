@@ -274,6 +274,64 @@ pub async fn fetch_by_ids(
     conn.query_all(&sql, params, fetched_from_row).await
 }
 
+pub async fn is_recent_routed_target(
+    conn: &Connection,
+    platform: &str,
+    chat_id: i64,
+    thread_id: i64,
+    message_id: i32,
+    root_session_id: &str,
+    window: i64,
+    current_turn_id: i64,
+) -> Result<bool> {
+    let min_turn = current_turn_id.saturating_sub(window);
+    let rows: Vec<i64> = conn
+        .query_all(
+            "SELECT 1
+             FROM conversation_messages
+             WHERE platform = ?
+               AND chat_id = ?
+               AND thread_id = ?
+               AND message_id = ?
+               AND root_session_id = ?
+               AND routed_to_agent = 1
+               AND turn_id > ?
+             LIMIT 1",
+            crate::params![
+                platform,
+                chat_id,
+                thread_id,
+                i64::from(message_id),
+                root_session_id,
+                min_turn
+            ],
+            |r| r.get(0),
+        )
+        .await?;
+
+    Ok(!rows.is_empty())
+}
+
+pub async fn latest_assistant_text(
+    conn: &Connection,
+    root_session_id: &str,
+) -> Result<Option<String>> {
+    let mut rows = conn
+        .query_all(
+            "SELECT content
+             FROM conversation_messages
+             WHERE root_session_id = ?
+               AND role = 'assistant'
+             ORDER BY turn_id DESC, id DESC
+             LIMIT 1",
+            crate::params![root_session_id],
+            |r| r.get(0),
+        )
+        .await?;
+
+    Ok(rows.pop())
+}
+
 fn fetched_from_row(row: &crate::row::Row<'_>) -> Result<FetchedMessage> {
     Ok(FetchedMessage {
         message_id: row.get(0)?,
@@ -445,6 +503,28 @@ mod tests {
         }
     }
 
+    async fn archive_assistant_row(conn: &Connection, session: &str, turn: u64, content: &str) {
+        archive_message(
+            conn,
+            ConversationMessage {
+                platform: "telegram",
+                chat_id: 100,
+                thread_id: 10,
+                message_id: None,
+                sender_user_id: None,
+                sender_name: None,
+                addressed_to_bot: false,
+                routed_to_agent: false,
+                root_session_id: Some(session),
+                turn_id: Some(turn),
+                role: ConversationRole::Assistant,
+                content,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn fetch_by_ids_returns_matching_scoped_messages() {
         let conn = migrated_connection().await;
@@ -491,6 +571,98 @@ mod tests {
         let conn = migrated_connection().await;
         let rows = fetch_by_ids(&conn, "telegram", 100, 10, &[]).await.unwrap();
         assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn is_recent_routed_target_true_for_routed_in_window() {
+        let conn = migrated_connection().await;
+        mark_routed(&conn, "telegram", 100, 7, 50, "S", 5)
+            .await
+            .unwrap();
+
+        let routed = is_recent_routed_target(&conn, "telegram", 100, 7, 50, "S", 30, 5)
+            .await
+            .unwrap();
+
+        assert!(routed);
+    }
+
+    #[tokio::test]
+    async fn is_recent_routed_target_false_when_not_routed() {
+        let conn = migrated_connection().await;
+        archive_message(&conn, user_message(100, 7, 50, "Сравни по времени в море"))
+            .await
+            .unwrap();
+
+        let routed = is_recent_routed_target(&conn, "telegram", 100, 7, 50, "S", 30, 5)
+            .await
+            .unwrap();
+
+        assert!(!routed);
+    }
+
+    #[tokio::test]
+    async fn is_recent_routed_target_false_when_outside_window() {
+        let conn = migrated_connection().await;
+        mark_routed(&conn, "telegram", 100, 7, 50, "S", 2)
+            .await
+            .unwrap();
+
+        let routed = is_recent_routed_target(&conn, "telegram", 100, 7, 50, "S", 30, 40)
+            .await
+            .unwrap();
+
+        assert!(!routed);
+    }
+
+    #[tokio::test]
+    async fn is_recent_routed_target_false_for_other_root_session() {
+        let conn = migrated_connection().await;
+        mark_routed(&conn, "telegram", 100, 7, 50, "other-session", 5)
+            .await
+            .unwrap();
+
+        let routed = is_recent_routed_target(&conn, "telegram", 100, 7, 50, "S", 30, 5)
+            .await
+            .unwrap();
+
+        assert!(!routed);
+    }
+
+    #[tokio::test]
+    async fn latest_assistant_text_returns_most_recent() {
+        let conn = migrated_connection().await;
+        archive_assistant_row(&conn, "S", 1, "older answer").await;
+        archive_assistant_row(&conn, "S", 2, "freshest answer").await;
+        archive_assistant_row(&conn, "session-other", 43, "other session").await;
+
+        let text = latest_assistant_text(&conn, "S").await.unwrap();
+
+        assert_eq!(text, Some("freshest answer".to_string()));
+    }
+
+    #[tokio::test]
+    async fn latest_assistant_text_uses_id_tiebreaker_for_same_turn() {
+        let conn = migrated_connection().await;
+        archive_assistant_row(&conn, "S", 2, "first same-turn answer").await;
+        archive_assistant_row(&conn, "S", 2, "later same-turn answer").await;
+
+        let text = latest_assistant_text(&conn, "S").await.unwrap();
+
+        assert_eq!(text, Some("later same-turn answer".to_string()));
+    }
+
+    #[tokio::test]
+    async fn latest_assistant_text_none_when_no_assistant_rows() {
+        let conn = migrated_connection().await;
+        let mut message = user_message(100, 10, 25, "user only");
+        message.root_session_id = Some("session-abc");
+        message.turn_id = Some(42);
+        archive_message(&conn, message).await.unwrap();
+
+        let text = latest_assistant_text(&conn, "session-abc").await.unwrap();
+
+        assert_eq!(text, None);
     }
 
     #[tokio::test]
