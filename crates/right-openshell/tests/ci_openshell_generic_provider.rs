@@ -46,6 +46,10 @@ https://postman-echo.com/get -H \"x-api-key: ${MY_API_KEY}\" 2>&1";
 /// immediate and deterministic; retrying would only add latency.
 const CURL_ECHO_HEADER_NORETRY: &str = "curl -sS --fail-with-body --max-time 30 \
 https://postman-echo.com/get -H \"x-api-key: ${MY_API_KEY}\" 2>&1";
+/// Diagnostics path: verbose curl so the proxy CONNECT exchange (the `403`
+/// denial line and any reason body) is captured when the success curl fails.
+const CURL_ECHO_HEADER_VERBOSE: &str = "curl -sS -v --max-time 30 \
+https://postman-echo.com/get -H \"x-api-key: ${MY_API_KEY}\" 2>&1";
 
 fn raw_tunnel_policy_file() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("create policy tempdir");
@@ -145,6 +149,30 @@ async fn wait_for_provider_placeholder(sandbox: &TestSandbox) {
     }
 }
 
+/// On a CONNECT failure, gather the data needed to tell apart the two causes of
+/// a `403 CONNECT tunnel failed`: provider-profile composition never landing the
+/// terminated `postman-echo.com` endpoint with its `binaries: **` rule on the
+/// gateway (visible in the composed policy), vs. the gateway enforcing a denial
+/// despite the rule being present. The success path passes locally, so this only
+/// fires on the CI-only regression and makes the next run self-diagnosing instead
+/// of opaque. Best-effort: never panics itself.
+async fn connect_failure_diagnostics(
+    client: &mut right_openshell::managed_profiles::OpenShellGrpcClient,
+    sandbox: &TestSandbox,
+) -> String {
+    let (verbose, vcode) = sandbox
+        .exec_with_timeout(&["sh", "-lc", CURL_ECHO_HEADER_VERBOSE], 60)
+        .await;
+    let policy = match right_openshell::openshell::get_active_policy(client, sandbox.name()).await {
+        Ok(Some(policy)) => format!("{policy:#?}"),
+        Ok(None) => "<no composed policy returned>".to_string(),
+        Err(e) => format!("<get_active_policy failed: {e:#}>"),
+    };
+    format!(
+        "\n--- curl -v (exit {vcode}) ---\n{verbose}\n--- composed sandbox policy ---\n{policy}"
+    )
+}
+
 #[tokio::test]
 #[ignore = "ci-openshell: live sandbox + gateway"]
 async fn ci_openshell_generic_profile_substitutes_custom_header() {
@@ -186,10 +214,10 @@ async fn ci_openshell_generic_profile_substitutes_custom_header() {
             .exec_with_timeout(&["sh", "-lc", CURL_ECHO_HEADER], 60)
             .await;
 
-        assert_eq!(
-            code, 0,
-            "curl command should exit successfully (code {code}); output: {out}"
-        );
+        if code != 0 {
+            let diag = connect_failure_diagnostics(&mut client, &sandbox).await;
+            panic!("curl command should exit successfully (code {code}); output: {out}{diag}");
+        }
         let echoed = echoed_header(&out, HEADER_NAME)
             .unwrap_or_else(|| panic!("echo response must contain x-api-key; output: {out}"));
         assert!(
