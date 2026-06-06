@@ -80,3 +80,29 @@ fn allow_all_opens_group() {
         .stdout(contains("-1001234"))
         .stdout(contains("Dev"));
 }
+
+#[test]
+fn mode_clear_requires_open_group_not_trusted_user() {
+    let home = TempDir::new().unwrap();
+    init_agent(home.path(), "testbot");
+
+    run(home.path())
+        .args(["agent", "allow", "testbot", "42"])
+        .assert()
+        .success()
+        .stdout(contains("added user 42"));
+
+    run(home.path())
+        .args([
+            "agent",
+            "mode",
+            "testbot",
+            "42",
+            "--thread-id",
+            "8",
+            "clear",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("group 42 is not opened"));
+}
