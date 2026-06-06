@@ -1,3 +1,5 @@
+import type { ProviderView } from '../types'
+
 export function validateSlug(s: string): string | null {
   if (!s) return 'required'
   if (s.length > 32) return 'too long'
@@ -50,6 +52,14 @@ export function evaluateCredentialSubmit(
     }
   }
   return { proceed: true, warning: null }
+}
+
+export function providerCompositionClass(provider: ProviderView): string {
+  return provider.composed ? 'ok' : 'bad'
+}
+
+export function providerCompositionLabel(provider: ProviderView): string {
+  return provider.composed ? 'Composed' : 'Not composed'
 }
 
 /** Microcopy shown under the Credential field (add/rotate). */

@@ -15,7 +15,15 @@ import type {
 } from '../types'
 import SecretInput from '../components/SecretInput.vue'
 import ProviderTypeList from './ProviderTypeList.vue'
-import { validateSlug, validateEnvVar, evaluateCredentialSubmit, CREDENTIAL_HINT, HEADER_NAME_HINT } from './providersViewModel'
+import {
+  validateSlug,
+  validateEnvVar,
+  evaluateCredentialSubmit,
+  providerCompositionClass,
+  providerCompositionLabel,
+  CREDENTIAL_HINT,
+  HEADER_NAME_HINT,
+} from './providersViewModel'
 
 const providers = ref<ProviderView[]>([])
 const types = ref<ProviderProfileView[]>([])
@@ -473,6 +481,9 @@ watch(rotateCredential, () => {
         <div class="row-side">
           <span class="status-pill" :class="statusClass(provider)">
             {{ statusLabel(provider) }}
+          </span>
+          <span class="status-pill" :class="providerCompositionClass(provider)">
+            {{ providerCompositionLabel(provider) }}
           </span>
           <small>{{ provider.updated_at ? new Date(provider.updated_at).toLocaleDateString() : '—' }}</small>
         </div>

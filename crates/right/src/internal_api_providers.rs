@@ -78,6 +78,15 @@ async fn open_openshell_client() -> Result<OpenShellClient, ProviderApiError> {
         .map_err(|e| ProviderApiError::Gateway(format!("connect: {e:#}")))
 }
 
+/// Ensure providers_v2 is enabled before a dashboard mutation that attaches or
+/// recomposes a provider. The dashboard is an explicit user action, so a failure
+/// here is a hard, surfaced error: the operation cannot work with the flag off.
+async fn ensure_v2_for_mutation(client: &mut OpenShellClient) -> Result<(), ProviderApiError> {
+    right_openshell::providers::ensure_v2_enabled(client)
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))
+}
+
 pub fn validate_name(agent: &str, name: &str) -> Result<(), ProviderApiError> {
     let expected_prefix = format!("{agent}-");
     if !name.starts_with(&expected_prefix) {
@@ -569,6 +578,10 @@ pub struct ProviderView {
     pub generic: Option<right_agent_config::GenericProvider>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
     pub status: ProviderStatus,
+    /// Whether this provider's endpoints are composed into the sandbox's active
+    /// policy. `false` means attached but not substituting.
+    #[serde(default)]
+    pub composed: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -586,6 +599,31 @@ pub enum ProviderStatus {
     UnknownBuiltin {
         slug: String,
     },
+}
+
+#[cfg(test)]
+mod provider_view_tests {
+    use super::*;
+
+    #[test]
+    fn provider_view_serializes_composed_field() {
+        for composed in [false, true] {
+            let view = ProviderView {
+                name: "hostagent-acme".into(),
+                type_: "generic".into(),
+                label: Some("acme".into()),
+                env_var: "ACME_API_KEY".into(),
+                generic: None,
+                updated_at: None,
+                status: ProviderStatus::Healthy,
+                composed,
+            };
+
+            let json = serde_json::to_value(view).unwrap();
+
+            assert_eq!(json["composed"], composed);
+        }
+    }
 }
 
 /// Load and parse `agent.yaml` for the given agent name from `agents_dir`.
@@ -616,8 +654,34 @@ pub(crate) async fn handle_provider_list(
         return Err(ProviderApiError::SandboxModeNone);
     }
     let mut client = open_openshell_client().await?;
+    let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
+    let active_policy =
+        match right_openshell::openshell::get_active_policy(&mut client, &sandbox_name).await {
+            Ok(Some(policy)) => policy,
+            Ok(None) => {
+                tracing::warn!(
+                    agent = %req.agent,
+                    sandbox = %sandbox_name,
+                    "provider composition state unavailable: active policy response omitted payload"
+                );
+                Default::default()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent = %req.agent,
+                    sandbox = %sandbox_name,
+                    error = %format_args!("{e:#}"),
+                    "provider composition state unavailable: active policy read failed"
+                );
+                Default::default()
+            }
+        };
     let mut views = Vec::with_capacity(sandbox.providers.len());
     for entry in &sandbox.providers {
+        let composed = right_openshell::provider_capabilities::provider_is_composed(
+            &active_policy,
+            &entry.name,
+        );
         let (mut status, updated_at) =
             match right_openshell::providers::get_provider(&mut client, &entry.name).await {
                 Ok(p) => (ProviderStatus::Healthy, p.updated_at),
@@ -657,6 +721,7 @@ pub(crate) async fn handle_provider_list(
             generic: entry.generic.clone(),
             updated_at,
             status,
+            composed,
         });
     }
     Ok(axum::Json(views))
@@ -771,6 +836,7 @@ pub(crate) async fn handle_provider_create(
 
     // Built-in flow: OpenShell manages endpoints; no policy mutation needed.
     let mut client = open_openshell_client().await?;
+    ensure_v2_for_mutation(&mut client).await?;
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
 
     let mut creds = std::collections::HashMap::new();
@@ -835,6 +901,7 @@ pub(crate) async fn handle_provider_create(
         generic: None,
         updated_at: None,
         status: ProviderStatus::Healthy,
+        composed: false,
     }))
 }
 
@@ -1181,6 +1248,7 @@ async fn create_generic_provider(
     );
 
     let mut client = open_openshell_client().await?;
+    ensure_v2_for_mutation(&mut client).await?;
     let (profile_id, spec) =
         generic_provider_profile_and_spec(&name, &env_var, req.credential.expose_secret());
     let profile = right_openshell::managed_profiles::author_generic_profile(
@@ -1251,6 +1319,39 @@ async fn create_generic_provider(
         )));
     }
 
+    if let Err(compose_err) =
+        right_openshell::openshell::wait_for_provider_composed(&mut client, &sandbox_name, &name)
+            .await
+    {
+        if let Err(rollback_err) =
+            right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %compose_err,
+                "provider rollback failed: could not detach provider after composition failure: {rollback_err:#}"
+            );
+        }
+        if let Err(rollback_err) =
+            right_openshell::providers::delete_provider(&mut client, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %compose_err,
+                "provider rollback failed: could not delete provider after composition failure: {rollback_err:#}"
+            );
+        }
+        ensure_provider_policy_loaded_after_rollback(
+            &name,
+            &sandbox_name,
+            &policy_path,
+            format!("{compose_err:#}"),
+            "composition not confirmed",
+        )
+        .await;
+        return Err(ProviderApiError::Gateway(format!("{compose_err:#}")));
+    }
+
     let generic_entry = right_agent_config::GenericProvider {
         env_var: env_var.clone(),
         header_name: header_name.clone(),
@@ -1301,6 +1402,7 @@ async fn create_generic_provider(
         generic: Some(generic_entry),
         updated_at: None,
         status: ProviderStatus::Healthy,
+        composed: true,
     }))
 }
 
@@ -1646,6 +1748,7 @@ pub(crate) async fn handle_provider_rotate(
         generic: entry.generic.clone(),
         updated_at: Some(chrono::Utc::now()),
         status: ProviderStatus::Healthy,
+        composed: false,
     }))
 }
 
@@ -1735,6 +1838,7 @@ pub(crate) async fn handle_provider_config_update(
     }
 
     let mut client = open_openshell_client().await?;
+    ensure_v2_for_mutation(&mut client).await?;
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
     let policy_path = state.agents_dir.join(&req.agent).join(
         sandbox
@@ -1917,6 +2021,7 @@ pub(crate) async fn handle_provider_config_update(
         generic: updated.generic,
         updated_at: Some(chrono::Utc::now()),
         status: ProviderStatus::Healthy,
+        composed: false,
     }))
 }
 
