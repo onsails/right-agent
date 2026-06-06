@@ -156,6 +156,32 @@ mod cli_parse_tests {
         Cli::try_parse_from(["right", "agent", "skill", "list"])
             .expect("agent skill list must remain available");
     }
+
+    #[test]
+    fn agent_mode_accepts_topic_and_group_forms() {
+        Cli::try_parse_from([
+            "right",
+            "agent",
+            "mode",
+            "clone",
+            "-100123",
+            "--thread-id",
+            "8",
+            "all",
+        ])
+        .expect("agent mode must accept topic form with negative group chat ID");
+
+        Cli::try_parse_from([
+            "right",
+            "agent",
+            "mode",
+            "clone",
+            "-100123",
+            "--group",
+            "addressed",
+        ])
+        .expect("agent mode must accept group form with negative group chat ID");
+    }
 }
 
 #[derive(Parser)]
@@ -324,6 +350,23 @@ pub enum AgentCommands {
         /// Optional label (group title)
         #[arg(long)]
         label: Option<String>,
+    },
+    /// Set the response mode for a topic (or the group default with --group)
+    #[command(name = "mode")]
+    Mode {
+        /// Agent name
+        name: String,
+        /// Telegram group chat ID
+        #[arg(allow_hyphen_values = true)]
+        chat_id: i64,
+        /// Effective thread id (0 = General). Ignored with --group.
+        #[arg(long, default_value_t = 0)]
+        thread_id: i64,
+        /// Set the group-level default instead of a topic
+        #[arg(long)]
+        group: bool,
+        /// One of: addressed | all | clear (clear is topic-only)
+        value: String,
     },
     /// Close an opened group
     #[command(name = "deny_all")]
@@ -902,6 +945,56 @@ async fn main() -> miette::Result<()> {
                 match outcome {
                     AddOutcome::Inserted => println!("opened group {chat_id}"),
                     AddOutcome::AlreadyPresent => println!("group {chat_id} already opened"),
+                }
+                Ok(())
+            }
+            AgentCommands::Mode {
+                name,
+                chat_id,
+                thread_id,
+                group,
+                value,
+            } => {
+                let dir = right_config::agents_dir(&home).join(&name);
+                if !dir.exists() {
+                    return Err(miette::miette!("agent not found: {}", dir.display()));
+                }
+                use right_agent::agent::allowlist::{self, AllowlistState, ResponseMode};
+                let mode = match value.as_str() {
+                    "addressed" => Some(ResponseMode::Addressed),
+                    "all" => Some(ResponseMode::All),
+                    "clear" => None,
+                    other => {
+                        return Err(miette::miette!(
+                            "invalid mode '{other}' (addressed|all|clear)"
+                        ));
+                    }
+                };
+                if group && mode.is_none() {
+                    return Err(miette::miette!(
+                        "`clear` is topic-only; --group needs addressed|all"
+                    ));
+                }
+                let applied = allowlist::with_lock(&dir, |d| -> Result<bool, String> {
+                    let file = allowlist::read_file(d)?.unwrap_or_default();
+                    let mut state = AllowlistState::from_file(file);
+                    let ok = if group {
+                        state.set_group_mode(chat_id, mode.expect("checked above"))
+                    } else if let Some(m) = mode {
+                        state.set_topic_mode(chat_id, thread_id, m)
+                    } else {
+                        state.clear_topic_mode(chat_id, thread_id) || state.is_chat_allowed(chat_id)
+                    };
+                    if ok {
+                        allowlist::write_file_inner(d, &state.to_file())?;
+                    }
+                    Ok(ok)
+                })
+                .map_err(|e| miette::miette!("{e}"))?;
+                if applied {
+                    println!("mode updated for {chat_id}");
+                } else {
+                    println!("group {chat_id} is not opened; run `right agent allow_all` first");
                 }
                 Ok(())
             }
