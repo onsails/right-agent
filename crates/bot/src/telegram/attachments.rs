@@ -401,16 +401,21 @@ pub enum ChatContext {
     },
 }
 
-/// Body of the replied-to message — populated only when the user's message is
-/// a Telegram reply AND the reply target is not the bot's own message.
+/// Replied-to message captured by the handler before session-context gating.
 #[derive(Debug, Clone)]
-pub struct ReplyToBody {
+pub struct RawReply {
     pub author: MessageAuthor,
     pub text: Option<String>,
     pub attachments: Vec<ResolvedAttachment>,
-    /// True when text-only body content was stripped from YAML because it is
-    /// recoverable from the archive; resolved attachments stay inline.
-    pub omitted: bool,
+    pub is_bot_target: bool,
+}
+
+/// Replied-to message after the worker gate decides how to render it.
+#[derive(Debug, Clone)]
+pub struct ReplyToBody {
+    pub author: MessageAuthor,
+    pub attachments: Vec<ResolvedAttachment>,
+    pub(crate) render: super::reply_context::ReplyRender,
 }
 
 /// Message in a debounce batch -- text and/or attachments.
@@ -439,11 +444,12 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
         return None;
     }
 
-    // Check if all messages have no text and no attachments
-    if msgs
-        .iter()
-        .all(|m| m.text.is_none() && m.attachments.is_empty())
-    {
+    // Check if all messages have no renderable content.
+    if msgs.iter().all(|m| {
+        m.text.as_deref().is_none_or(|text| text.trim().is_empty())
+            && m.attachments.is_empty()
+            && m.reply_to_body.is_none()
+    }) {
         return None;
     }
 
@@ -512,7 +518,7 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
             writeln!(out, "    quoted_text: \"{escaped}\"").expect("infallible");
         }
 
-        // Reply-to body: present only when the user replied to a non-bot message.
+        // Reply-to body: rendered from the session-context gate decision.
         if let Some(ref r) = m.reply_to_body {
             out.push_str("    reply_to:\n");
             out.push_str("      author:\n");
@@ -529,33 +535,55 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
             if let Some(uid) = r.author.user_id {
                 writeln!(out, "        user_id: {uid}").expect("infallible");
             }
-            if r.omitted {
-                out.push_str(
-                    "      note: \"body omitted - fetch with mcp__right__get_messages_by_id if not in your context\"\n",
-                );
-            } else {
-                if let Some(ref t) = r.text {
-                    writeln!(out, "      text: \"{}\"", yaml_escape_string(t)).expect("infallible");
+            match &r.render {
+                super::reply_context::ReplyRender::OwnPrevious => {
+                    out.push_str("      note: \"your own previous message\"\n");
                 }
-                if !r.attachments.is_empty() {
-                    out.push_str("      attachments:\n");
-                    for att in &r.attachments {
-                        writeln!(out, "        - type: {}", att.kind.as_str()).expect("infallible");
-                        writeln!(out, "          path: {}", att.path.display())
-                            .expect("infallible");
-                        writeln!(out, "          mime_type: {}", att.mime_type)
-                            .expect("infallible");
-                        if let Some(ref fname) = att.filename {
-                            let escaped = yaml_escape_string(fname);
-                            writeln!(out, "          filename: \"{escaped}\"").expect("infallible");
-                        }
+                super::reply_context::ReplyRender::Locator { text } => {
+                    writeln!(
+                        out,
+                        "      truncated_text: \"{}\"",
+                        yaml_escape_string(text)
+                    )
+                    .expect("infallible");
+                }
+                super::reply_context::ReplyRender::Full { text } => {
+                    writeln!(out, "      text: \"{}\"", yaml_escape_string(text))
+                        .expect("infallible");
+                }
+                super::reply_context::ReplyRender::Truncated { text, reply_to_id } => {
+                    writeln!(
+                        out,
+                        "      truncated_text: \"{}\"",
+                        yaml_escape_string(text)
+                    )
+                    .expect("infallible");
+                    writeln!(
+                        out,
+                        "      note: \"full: mcp__right__get_messages_by_id({reply_to_id})\""
+                    )
+                    .expect("infallible");
+                }
+                super::reply_context::ReplyRender::NoText => {}
+            }
+            if !r.attachments.is_empty() {
+                out.push_str("      attachments:\n");
+                for att in &r.attachments {
+                    writeln!(out, "        - type: {}", att.kind.as_str()).expect("infallible");
+                    writeln!(out, "          path: {}", att.path.display()).expect("infallible");
+                    writeln!(out, "          mime_type: {}", att.mime_type).expect("infallible");
+                    if let Some(ref fname) = att.filename {
+                        let escaped = yaml_escape_string(fname);
+                        writeln!(out, "          filename: \"{escaped}\"").expect("infallible");
                     }
                 }
             }
         }
 
         // Text
-        if let Some(ref text) = m.text {
+        if let Some(ref text) = m.text
+            && !text.trim().is_empty()
+        {
             let escaped = yaml_escape_string(text);
             writeln!(out, "    text: \"{escaped}\"").expect("infallible");
         }
@@ -2174,9 +2202,10 @@ mod tests {
                     username: None,
                     user_id: Some(42),
                 },
-                text: Some("first sentence. only this sentence. last sentence.".into()),
                 attachments: vec![],
-                omitted: false,
+                render: super::super::reply_context::ReplyRender::Full {
+                    text: "first sentence. only this sentence. last sentence.".into(),
+                },
             }),
         }];
 
@@ -2193,7 +2222,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn format_cc_input_omitted_reply_emits_note_not_body() {
+    async fn format_cc_input_truncated_reply_emits_fetch_note_not_full_body() {
         let m = InputMessage {
             message_id: 2,
             text: Some("and this?".into()),
@@ -2218,14 +2247,16 @@ mod tests {
                     username: Some("@alice".into()),
                     user_id: Some(9),
                 },
-                text: Some("SECRET BODY".into()),
                 attachments: vec![ResolvedAttachment {
                     kind: AttachmentKind::Document,
                     path: std::path::PathBuf::from("/sandbox/inbox/secret.pdf"),
                     mime_type: "application/pdf".into(),
                     filename: Some("secret.pdf".into()),
                 }],
-                omitted: true,
+                render: super::super::reply_context::ReplyRender::Truncated {
+                    text: "SECRET".into(),
+                    reply_to_id: 41,
+                },
             }),
         };
         let yaml = format_cc_input(&[m]).unwrap();
@@ -2240,21 +2271,150 @@ mod tests {
             "stripped body must not appear"
         );
         assert!(
-            !yaml.contains("attachments:"),
-            "omitted reply attachments must not appear:\n{yaml}"
+            yaml.contains("attachments:"),
+            "truncated reply attachments must appear:\n{yaml}"
         );
         assert!(
-            !yaml.contains("/sandbox/inbox/secret.pdf"),
-            "omitted reply attachment path must not appear"
+            yaml.contains("/sandbox/inbox/secret.pdf"),
+            "truncated reply attachment path must appear"
         );
         assert!(
-            !yaml.contains("application/pdf"),
-            "omitted reply attachment MIME type must not appear"
+            yaml.contains("application/pdf"),
+            "truncated reply attachment MIME type must appear"
         );
         assert!(
-            !yaml.contains("secret.pdf"),
-            "omitted reply attachment filename must not appear"
+            yaml.contains("secret.pdf"),
+            "truncated reply attachment filename must appear"
         );
+    }
+
+    #[test]
+    fn empty_text_is_omitted_not_rendered() {
+        let msgs = vec![input_message_group_no_text_with_reply(
+            4570,
+            ReplyToBody {
+                author: MessageAuthor {
+                    name: "Andrey".into(),
+                    username: Some("@brainsmith".into()),
+                    user_id: Some(85743491),
+                },
+                attachments: vec![],
+                render: super::super::reply_context::ReplyRender::Full {
+                    text: "Сравни по времени в море".into(),
+                },
+            },
+        )];
+
+        let out = format_cc_input(&msgs).unwrap();
+
+        assert!(
+            !out.contains("text: \"\""),
+            "must never emit empty text:\n{out}"
+        );
+        assert!(
+            out.contains("text: \"Сравни по времени в море\""),
+            "full reply body inlined:\n{out}"
+        );
+    }
+
+    #[test]
+    fn truncated_locator_uses_truncated_text_key() {
+        let msgs = vec![input_message_group_no_text_with_reply(
+            4570,
+            ReplyToBody {
+                author: MessageAuthor {
+                    name: "Andrey".into(),
+                    username: Some("@brainsmith".into()),
+                    user_id: Some(85743491),
+                },
+                attachments: vec![],
+                render: super::super::reply_context::ReplyRender::Locator {
+                    text: "recent q…".into(),
+                },
+            },
+        )];
+
+        let out = format_cc_input(&msgs).unwrap();
+
+        assert!(out.contains("truncated_text: \"recent q…\""), "{out}");
+        assert!(
+            !out.contains("\n      text:"),
+            "locator must not use the `text` key:\n{out}"
+        );
+    }
+
+    #[test]
+    fn own_previous_emits_note_no_text() {
+        let msgs = vec![input_message_group_no_text_with_reply(
+            4570,
+            ReplyToBody {
+                author: MessageAuthor {
+                    name: "bot".into(),
+                    username: None,
+                    user_id: Some(42),
+                },
+                attachments: vec![],
+                render: super::super::reply_context::ReplyRender::OwnPrevious,
+            },
+        )];
+
+        let out = format_cc_input(&msgs).unwrap();
+
+        assert!(out.contains("note: \"your own previous message\""), "{out}");
+        assert!(
+            !out.contains("text:"),
+            "own-previous carries no quoted text:\n{out}"
+        );
+    }
+
+    #[test]
+    fn truncated_not_in_context_emits_fetch_note() {
+        let msgs = vec![input_message_group_no_text_with_reply(
+            4570,
+            ReplyToBody {
+                author: MessageAuthor {
+                    name: "Andrey".into(),
+                    username: Some("@brainsmith".into()),
+                    user_id: Some(85743491),
+                },
+                attachments: vec![],
+                render: super::super::reply_context::ReplyRender::Truncated {
+                    text: "long…".into(),
+                    reply_to_id: 4569,
+                },
+            },
+        )];
+
+        let out = format_cc_input(&msgs).unwrap();
+
+        assert!(out.contains("truncated_text: \"long…\""), "{out}");
+        assert!(
+            out.contains("get_messages_by_id(4569)"),
+            "fetch note for the long tail:\n{out}"
+        );
+    }
+
+    fn input_message_group_no_text_with_reply(id: i32, reply: ReplyToBody) -> InputMessage {
+        InputMessage {
+            message_id: id,
+            text: None,
+            timestamp: chrono::Utc::now(),
+            attachments: vec![],
+            author: MessageAuthor {
+                name: "Andrey".into(),
+                username: Some("@brainsmith".into()),
+                user_id: Some(85743491),
+            },
+            forward_info: None,
+            reply_to_id: Some(4569),
+            quoted_text: None,
+            chat: ChatContext::Group {
+                id: -100,
+                title: Some("aibots".into()),
+                topic_id: Some(458),
+            },
+            reply_to_body: Some(reply),
+        }
     }
 
     #[tokio::test]
@@ -2297,14 +2457,15 @@ mod tests {
                     username: None,
                     user_id: Some(42),
                 },
-                text: Some("Votre document edf.pdf".into()),
                 attachments: vec![ResolvedAttachment {
                     kind: AttachmentKind::Document,
                     path: std::path::PathBuf::from("/sandbox/inbox/document_3_0.pdf"),
                     mime_type: "application/pdf".into(),
                     filename: Some("edf.pdf".into()),
                 }],
-                omitted: false,
+                render: super::super::reply_context::ReplyRender::Full {
+                    text: "Votre document edf.pdf".into(),
+                },
             }),
         }];
         let result = format_cc_input(&msgs).unwrap();
@@ -2740,9 +2901,10 @@ mod group_format_tests {
                     username: Some("@alice".into()),
                     user_id: Some(42),
                 },
-                text: Some("here is the function: foo()".into()),
                 attachments: vec![],
-                omitted: false,
+                render: super::super::reply_context::ReplyRender::Full {
+                    text: "here is the function: foo()".into(),
+                },
             }),
         };
         let yaml = format_cc_input(&[m]).unwrap();

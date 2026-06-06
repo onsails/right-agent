@@ -239,7 +239,7 @@ pub struct DebounceMsg {
     pub response_mode: ResponseMode,
     pub group_open: bool,
     pub chat: super::attachments::ChatContext,
-    pub reply_to_body: Option<super::attachments::ReplyToBody>,
+    pub reply_to_body: Option<super::attachments::RawReply>,
     /// Inbound attachments from the replied-to message, downloaded in the
     /// worker pipeline alongside primary attachments. Always empty if the
     /// user did not reply to a non-bot message.
@@ -1012,63 +1012,167 @@ fn build_input_message_from_debounce(
     }
 }
 
-/// Drop the inline reply body when its text is faithfully recoverable from the
-/// local archive, so the agent can fetch it on demand instead of paying for it
-/// in every turn.
-///
-/// `had_voice_markers` is true when the reply target was a voice/video-note
-/// whose body text carries an STT success or failure marker. The archive stores
-/// those messages only as a `[voice]` placeholder, so the marker is NOT
-/// recoverable -- such bodies are kept inline regardless of archive presence.
-async fn strip_recoverable_reply_to_body(
+async fn gate_reply_to_body(
     agent_dir: &Path,
+    platform: &str,
     chat_id: i64,
     eff_thread_id: i64,
     reply_to_id: Option<i32>,
-    had_voice_markers: bool,
-    reply_to_body: Option<super::attachments::ReplyToBody>,
+    current_turn_id: u64,
+    root_session_id: &str,
+    raw: super::attachments::RawReply,
+    reply_to_had_voice_markers: bool,
 ) -> Option<super::attachments::ReplyToBody> {
-    match (reply_to_id, reply_to_body) {
-        (Some(reply_to_id), Some(mut body)) if !body.omitted && !had_voice_markers => {
-            if !body.attachments.is_empty() {
-                return Some(body);
-            }
-            let recoverable = match right_db::open_connection(agent_dir, false).await {
-                Ok(conn) => match right_db::conversation::fetch_by_ids(
-                    &conn,
-                    "telegram",
-                    chat_id,
-                    eff_thread_id,
-                    &[reply_to_id],
-                )
-                .await
-                {
-                    Ok(rows) => !rows.is_empty(),
-                    Err(e) => {
-                        tracing::warn!(
-                            ?chat_id,
-                            ?eff_thread_id,
-                            ?reply_to_id,
-                            "reply strip: fetch_by_ids failed: {e:#}"
-                        );
-                        false
+    use super::reply_context::{
+        IN_CONTEXT_WINDOW, REPLY_BODY_INLINE_MAX, ReplyRender, decide_reply_render,
+    };
+
+    let reply_to_id = reply_to_id?;
+    let current_turn_id = i64::try_from(current_turn_id).unwrap_or(i64::MAX);
+    let target_text = raw.text.as_deref().map(str::trim);
+    let target_has_text = target_text.is_some_and(|text| !text.is_empty());
+    let target_is_long =
+        target_text.is_some_and(|text| text.chars().count() > REPLY_BODY_INLINE_MAX);
+
+    let (is_latest_assistant, is_recent_routed_user, long_target_recoverable) =
+        match right_db::open_connection(agent_dir, false).await {
+            Ok(conn) => {
+                let target = target_text.unwrap_or("");
+                let is_latest = if raw.is_bot_target && !target.is_empty() {
+                    match latest_assistant_target_is_unique_exact(&conn, root_session_id, target)
+                        .await
+                    {
+                        Ok(is_unique_exact) => is_unique_exact,
+                        Err(e) => {
+                            tracing::warn!(
+                                ?chat_id,
+                                ?eff_thread_id,
+                                ?reply_to_id,
+                                "reply gate: latest assistant exact uniqueness check failed: {e:#}"
+                            );
+                            false
+                        }
                     }
-                },
-                Err(e) => {
-                    tracing::warn!(?chat_id, "reply strip: open_connection failed: {e:#}");
+                } else {
                     false
-                }
-            };
-            if recoverable {
-                // attachments are already empty here (the guard above returns
-                // early when they are not), so only text needs clearing.
-                body.text = None;
-                body.omitted = true;
+                };
+
+                let is_routed = if raw.is_bot_target {
+                    false
+                } else {
+                    match right_db::conversation::is_recent_routed_target(
+                        &conn,
+                        platform,
+                        chat_id,
+                        eff_thread_id,
+                        reply_to_id,
+                        root_session_id,
+                        IN_CONTEXT_WINDOW,
+                        current_turn_id,
+                    )
+                    .await
+                    {
+                        Ok(routed) => routed,
+                        Err(e) => {
+                            tracing::warn!(
+                                ?chat_id,
+                                ?eff_thread_id,
+                                ?reply_to_id,
+                                "reply gate: is_recent_routed_target failed: {e:#}"
+                            );
+                            false
+                        }
+                    }
+                };
+                let is_recoverable = if target_is_long && !reply_to_had_voice_markers {
+                    match right_db::conversation::fetch_by_ids(
+                        &conn,
+                        platform,
+                        chat_id,
+                        eff_thread_id,
+                        &[reply_to_id],
+                    )
+                    .await
+                    {
+                        Ok(rows) => rows.iter().any(|row| row.message_id == Some(reply_to_id)),
+                        Err(e) => {
+                            tracing::warn!(
+                                ?chat_id,
+                                ?eff_thread_id,
+                                ?reply_to_id,
+                                "reply gate: fetch_by_ids recoverability check failed: {e:#}"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+                (is_latest, is_routed, is_recoverable)
             }
-            Some(body)
-        }
-        (_, other) => other,
+            Err(e) => {
+                tracing::warn!(
+                    ?chat_id,
+                    ?eff_thread_id,
+                    ?reply_to_id,
+                    "reply gate: open_connection failed: {e:#}"
+                );
+                (false, false, false)
+            }
+        };
+
+    let mut render = decide_reply_render(
+        reply_to_id,
+        raw.text.as_deref(),
+        raw.is_bot_target,
+        is_latest_assistant,
+        is_recent_routed_user,
+    );
+    if reply_to_had_voice_markers && target_has_text {
+        render = ReplyRender::Full {
+            text: target_text.unwrap().to_owned(),
+        };
+    } else if matches!(render, ReplyRender::Truncated { .. }) && !long_target_recoverable {
+        render = ReplyRender::Full {
+            text: target_text.unwrap_or("").to_owned(),
+        };
     }
+
+    Some(super::attachments::ReplyToBody {
+        author: raw.author,
+        attachments: raw.attachments,
+        render,
+    })
+}
+
+async fn latest_assistant_target_is_unique_exact(
+    conn: &right_db::Connection,
+    root_session_id: &str,
+    target: &str,
+) -> Result<bool, right_db::DbError> {
+    if target.is_empty() {
+        return Ok(false);
+    }
+    let Some(latest) = right_db::conversation::latest_assistant_text(conn, root_session_id).await?
+    else {
+        return Ok(false);
+    };
+    if latest.trim() != target {
+        return Ok(false);
+    }
+
+    let matches = conn
+        .query_all(
+            "SELECT 1
+             FROM conversation_messages
+             WHERE root_session_id = ?1 AND role = 'assistant'
+               AND TRIM(content) = ?2
+             LIMIT 2",
+            right_db::params![root_session_id, target],
+            |_row: &right_db::row::Row<'_>| Ok(()),
+        )
+        .await?;
+    Ok(matches.len() == 1)
 }
 
 fn routed_message_ids(batch: &[DebounceMsg]) -> Vec<i32> {
@@ -1173,20 +1277,41 @@ fn log_result_timing(ctx: &InvocationLogContext, timing: &crate::cc::stream::Res
     );
 }
 
-async fn cleanup_unspawned_first_call_session(
+async fn deactivate_session_if_active(
+    conn: &right_db::Connection,
+    chat_id: i64,
+    eff_thread_id: i64,
+    root_session_id: &str,
+) -> Result<(), right_db::DbError> {
+    conn.execute(
+        "UPDATE sessions
+         SET is_active = 0
+         WHERE chat_id = ?1 AND thread_id = ?2
+           AND root_session_id = ?3 AND is_active = 1",
+        right_db::params![chat_id, eff_thread_id, root_session_id],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn cleanup_prepared_first_call_session(
     conn: &right_db::Connection,
     chat_id: i64,
     eff_thread_id: i64,
     is_first_call: bool,
+    root_session_id: &str,
 ) {
     if !is_first_call {
         return;
     }
-    if let Err(e) = deactivate_current(conn, chat_id, eff_thread_id).await {
+    if let Err(e) =
+        deactivate_session_if_active(conn, chat_id, eff_thread_id, root_session_id).await
+    {
         tracing::warn!(
             chat_id,
             eff_thread_id,
-            "failed to deactivate unspawned first-call session during shutdown: {e:#}"
+            root_session_id,
+            "failed to deactivate prepared first-call session: {e:#}"
         );
     }
 }
@@ -1284,8 +1409,16 @@ pub fn spawn_worker(
                 tracing::debug!(?key, "show_thinking suppressed in group");
             }
 
-            // Download attachments for all messages in batch
-            let mut input_messages = Vec::with_capacity(batch.len());
+            struct PendingInput<'a> {
+                msg: &'a DebounceMsg,
+                resolved: Vec<super::attachments::ResolvedAttachment>,
+                voice_markers: Vec<String>,
+                resolved_reply_to: Vec<super::attachments::ResolvedAttachment>,
+                reply_to_voice_markers: Vec<String>,
+            }
+
+            // Download attachments for all messages in batch.
+            let mut pending_inputs = Vec::with_capacity(batch.len());
             let mut skip_batch = false;
             for msg in &batch {
                 let (resolved, voice_markers) = if msg.attachments.is_empty() {
@@ -1355,53 +1488,34 @@ pub fn spawn_worker(
                     }
                 };
 
-                let reply_to_body = msg.reply_to_body.clone().map(|mut body| {
-                    body.attachments = resolved_reply_to;
-                    body.text = crate::stt::combine_markers_with_text(
-                        &reply_to_voice_markers,
-                        body.text.as_deref(),
-                    );
-                    body
-                });
-
-                // Strip the inlined reply body when it is recoverable from the
-                // archive. If the target is not archived, keep the inline copy.
-                // Voice/video-note targets carry an STT marker the archive does
-                // not store, so they are never stripped.
-                let reply_to_body = strip_recoverable_reply_to_body(
-                    &ctx.agent_dir,
-                    chat_id,
-                    eff_thread_id,
-                    msg.reply_to_id,
-                    !reply_to_voice_markers.is_empty(),
-                    reply_to_body,
-                )
-                .await;
-
-                input_messages.push(build_input_message_from_debounce(
+                pending_inputs.push(PendingInput {
                     msg,
                     resolved,
-                    &voice_markers,
-                    reply_to_body,
-                ));
+                    voice_markers,
+                    resolved_reply_to,
+                    reply_to_voice_markers,
+                });
             }
             if skip_batch {
                 continue;
             }
 
-            let Some(input) = super::attachments::format_cc_input(&input_messages) else {
+            let has_renderable_input = pending_inputs.iter().any(|pending| {
+                pending
+                    .msg
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty())
+                    || !pending.resolved.is_empty()
+                    || pending.msg.reply_to_body.is_some()
+            });
+            if !has_renderable_input {
                 tracing::warn!(
                     ?key,
-                    "empty input after formatting -- skipping CC invocation"
+                    "empty input before reply gating -- skipping CC invocation"
                 );
                 continue;
-            };
-            let (trigger_chat, trigger_author) = {
-                let m = input_messages
-                    .first()
-                    .expect("format_cc_input returned Some so input_messages is non-empty");
-                (m.chat.clone(), m.author.clone())
-            };
+            }
             if ctx.shutdown.is_cancelled() {
                 tracing::warn!(
                     ?key,
@@ -1484,9 +1598,94 @@ pub fn spawn_worker(
             // pending compaction so it cannot fire during this turn.
             crate::idle_compaction::cancel(&ctx.compact_timers, chat_id, eff_thread_id);
 
-            // Invoke claude -p (D-13, D-14)
             // Pass first message text for session label (truncated 60 chars).
             let first_text = batch.first().and_then(|m| m.text.as_deref());
+            let prepared =
+                match prepare_cc_invocation(&ctx.agent_dir, chat_id, eff_thread_id, first_text)
+                    .await
+                {
+                    Ok(prepared) => prepared,
+                    Err(e) => {
+                        let message = match e {
+                            InvokeCcFailure::NonReflectable { message } => message,
+                            other => {
+                                tracing::warn!(
+                                    ?key,
+                                    "prepare_cc_invocation returned unexpected failure: {other:?}"
+                                );
+                                "⚠️ Agent error: failed to prepare invocation".to_owned()
+                            }
+                        };
+                        cancel_token.cancel();
+                        typing_task.await.ok();
+                        let _ = send_tg(&ctx.bot, tg_chat_id, eff_thread_id, &message).await;
+                        continue;
+                    }
+                };
+
+            let mut input_messages = Vec::with_capacity(pending_inputs.len());
+            for pending in pending_inputs {
+                let raw_reply = pending.msg.reply_to_body.clone().map(|mut raw| {
+                    raw.attachments = pending.resolved_reply_to;
+                    raw.text = crate::stt::combine_markers_with_text(
+                        &pending.reply_to_voice_markers,
+                        raw.text.as_deref(),
+                    );
+                    raw
+                });
+                let reply_to_body = match raw_reply {
+                    Some(raw) => {
+                        gate_reply_to_body(
+                            &ctx.agent_dir,
+                            "telegram",
+                            chat_id,
+                            eff_thread_id,
+                            pending.msg.reply_to_id,
+                            prepared.turn_id,
+                            &prepared.session_uuid,
+                            raw,
+                            !pending.reply_to_voice_markers.is_empty(),
+                        )
+                        .await
+                    }
+                    None => None,
+                };
+
+                input_messages.push(build_input_message_from_debounce(
+                    pending.msg,
+                    pending.resolved,
+                    &pending.voice_markers,
+                    reply_to_body,
+                ));
+            }
+
+            let Some(input) = super::attachments::format_cc_input(&input_messages) else {
+                tracing::warn!(
+                    ?key,
+                    "empty input after formatting -- skipping CC invocation"
+                );
+                cancel_token.cancel();
+                typing_task.await.ok();
+                if prepared.is_first_call {
+                    cleanup_prepared_first_call_session(
+                        &prepared.conn,
+                        chat_id,
+                        eff_thread_id,
+                        prepared.is_first_call,
+                        &prepared.session_uuid,
+                    )
+                    .await;
+                }
+                continue;
+            };
+            let (trigger_chat, trigger_author) = {
+                let m = input_messages
+                    .first()
+                    .expect("format_cc_input returned Some so input_messages is non-empty");
+                (m.chat.clone(), m.author.clone())
+            };
+
+            // Invoke claude -p (D-13, D-14)
             let routed_message_ids = routed_message_ids(&batch);
             let (
                 reply_result,
@@ -1498,14 +1697,17 @@ pub fn spawn_worker(
                 cc_wall_elapsed_ms,
             ) = match invoke_cc(
                 InvokeCcRequest {
+                    conn: &prepared.conn,
                     input: &input,
-                    first_text,
                     chat_id,
                     eff_thread_id,
                     is_group,
                     routed_message_ids: &routed_message_ids,
                     chat: &trigger_chat,
                     author: &trigger_author,
+                    session_uuid: &prepared.session_uuid,
+                    turn_id: prepared.turn_id,
+                    is_first_call: prepared.is_first_call,
                 },
                 &ctx,
             )
@@ -2493,15 +2695,62 @@ pub(crate) struct CcReply {
     pub(crate) wall_elapsed_ms: u64,
 }
 
+#[derive(Debug)]
+struct PreparedCcInvocation {
+    conn: right_db::Connection,
+    session_uuid: String,
+    turn_id: u64,
+    is_first_call: bool,
+}
+
 struct InvokeCcRequest<'a> {
+    conn: &'a right_db::Connection,
     input: &'a str,
-    first_text: Option<&'a str>,
     chat_id: i64,
     eff_thread_id: i64,
     is_group: bool,
     routed_message_ids: &'a [i32],
     chat: &'a super::attachments::ChatContext,
     author: &'a super::attachments::MessageAuthor,
+    session_uuid: &'a str,
+    turn_id: u64,
+    is_first_call: bool,
+}
+
+async fn prepare_cc_invocation(
+    agent_dir: &Path,
+    chat_id: i64,
+    eff_thread_id: i64,
+    first_text: Option<&str>,
+) -> Result<PreparedCcInvocation, InvokeCcFailure> {
+    let conn = right_db::open_connection(agent_dir, false)
+        .await
+        .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
+
+    let (session_uuid, is_first_call) =
+        match get_active_session(&conn, chat_id, eff_thread_id).await {
+            Ok(Some(SessionRow {
+                root_session_id, ..
+            })) => (root_session_id, false),
+            Ok(None) => {
+                let session_uuid = Uuid::new_v4().to_string();
+                let label = first_text.map(truncate_label);
+                create_session(&conn, chat_id, eff_thread_id, &session_uuid, label)
+                    .await
+                    .map_err(|e| format!("⚠️ Agent error: session create failed: {:#}", e))?;
+                (session_uuid, true)
+            }
+            Err(e) => {
+                return Err(format!("⚠️ Agent error: session lookup failed: {:#}", e).into());
+            }
+        };
+
+    Ok(PreparedCcInvocation {
+        conn,
+        session_uuid,
+        turn_id: super::next_turn_id(),
+        is_first_call,
+    })
 }
 
 #[derive(Debug)]
@@ -2769,44 +3018,25 @@ async fn invoke_cc(
     ctx: &WorkerContext,
 ) -> Result<CcReply, InvokeCcFailure> {
     let InvokeCcRequest {
+        conn,
         input,
-        first_text,
         chat_id,
         eff_thread_id,
         is_group,
         routed_message_ids,
         chat,
         author,
+        session_uuid,
+        turn_id,
+        is_first_call,
     } = req;
+    let session_uuid = session_uuid.to_owned();
 
-    let conn = right_db::open_connection(&ctx.agent_dir, false)
-        .await
-        .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
-
-    // Session lookup / create (SES-02, SES-03)
-    let (cmd_args, is_first_call, session_uuid) =
-        match get_active_session(&conn, chat_id, eff_thread_id).await {
-            Ok(Some(SessionRow {
-                root_session_id, ..
-            })) => {
-                // Resume: --resume <root_session_id>
-                let uuid = root_session_id.clone();
-                (vec!["--resume".to_string(), root_session_id], false, uuid)
-            }
-            Ok(None) => {
-                // First message: generate UUID, --session-id <uuid>
-                let new_uuid = Uuid::new_v4().to_string();
-                let label = first_text.map(truncate_label);
-                create_session(&conn, chat_id, eff_thread_id, &new_uuid, label)
-                    .await
-                    .map_err(|e| format!("⚠️ Agent error: session create failed: {:#}", e))?;
-                let uuid = new_uuid.clone();
-                (vec!["--session-id".to_string(), new_uuid], true, uuid)
-            }
-            Err(e) => {
-                return Err(format!("⚠️ Agent error: session lookup failed: {:#}", e).into());
-            }
-        };
+    let cmd_args = if is_first_call {
+        vec!["--session-id".to_string(), session_uuid.clone()]
+    } else {
+        vec!["--resume".to_string(), session_uuid.clone()]
+    };
 
     // Bootstrap mode detection: check if BOOTSTRAP.md exists in agent dir.
     let bootstrap_mode = ctx.agent_dir.join("BOOTSTRAP.md").exists();
@@ -2829,8 +3059,22 @@ async fn invoke_cc(
         "reply-schema.json"
     };
     let reply_schema_path = ctx.agent_dir.join(".claude").join(schema_filename);
-    let reply_schema = std::fs::read_to_string(&reply_schema_path)
-        .map_err(|e| format_error_reply(-1, &format!("{schema_filename} read failed: {:#}", e)))?;
+    let reply_schema = match std::fs::read_to_string(&reply_schema_path) {
+        Ok(schema) => schema,
+        Err(e) => {
+            cleanup_prepared_first_call_session(
+                conn,
+                chat_id,
+                eff_thread_id,
+                is_first_call,
+                &session_uuid,
+            )
+            .await;
+            return Err(
+                format_error_reply(-1, &format!("{schema_filename} read failed: {:#}", e)).into(),
+            );
+        }
+    };
 
     let mcp_path =
         crate::cc::invocation::mcp_config_path(ctx.ssh_config_path.as_deref(), &ctx.agent_dir);
@@ -3019,7 +3263,7 @@ async fn invoke_cc(
                 topic_id,
             } => {
                 let topic_name = match topic_id {
-                    Some(tid) => match right_db::forum_topics::list(&conn, *id).await {
+                    Some(tid) => match right_db::forum_topics::list(conn, *id).await {
                         Ok(rows) => rows
                             .into_iter()
                             .find(|r| r.message_thread_id == *tid)
@@ -3070,11 +3314,23 @@ async fn invoke_cc(
         entry.lock_owned().await
     };
 
-    crate::cc::invocation::guard_no_sandboxed_host_exec(
+    if let Err(e) = crate::cc::invocation::guard_no_sandboxed_host_exec(
         ctx.resolved_sandbox.as_deref(),
         ctx.ssh_config_path.as_deref(),
-    )
-    .map_err(|e| format!("{e:#}"))?;
+    ) {
+        cleanup_prepared_first_call_session(
+            conn,
+            chat_id,
+            eff_thread_id,
+            is_first_call,
+            &session_uuid,
+        )
+        .await;
+        if let Some(active) = active_progress.take() {
+            finish_progress_invocation(ctx, active).await;
+        }
+        return Err(format!("{e:#}").into());
+    }
 
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         // OpenShell sandbox: composite system prompt assembled IN the sandbox
@@ -3151,7 +3407,6 @@ async fn invoke_cc(
     cmd.stderr(Stdio::piped());
 
     let sandboxed = ctx.ssh_config_path.is_some();
-    let turn_id = super::next_turn_id();
     let log_ctx = InvocationLogContext::new(chat_id, eff_thread_id, session_uuid.clone(), turn_id);
     let stop_token =
         register_stop_token_for_foreground(&ctx.stop_tokens, (chat_id, eff_thread_id), turn_id);
@@ -3174,7 +3429,14 @@ async fn invoke_cc(
         // Remove the stop_token regardless of which path we take below — stale
         // entries would confuse subsequent batches.
         ctx.stop_tokens.remove(&(chat_id, eff_thread_id));
-        cleanup_unspawned_first_call_session(&conn, chat_id, eff_thread_id, is_first_call).await;
+        cleanup_prepared_first_call_session(
+            conn,
+            chat_id,
+            eff_thread_id,
+            is_first_call,
+            &session_uuid,
+        )
+        .await;
         if let Some(active) = active_progress.take() {
             finish_progress_invocation(ctx, active).await;
         }
@@ -3186,7 +3448,7 @@ async fn invoke_cc(
         // on `pending_bg` would silently drop the turn in that race window.
         // For first-call turns we cannot fork — the session UUID was just
         // minted, no .jsonl exists on disk — so fall through to Ok(None) +
-        // cleanup_unspawned_first_call_session below.
+        // cleanup_prepared_first_call_session below.
         let should_background = !is_first_call
             && (ctx.shutdown.is_cancelled() || matches!(pending_bg, Some(BgReason::Shutdown)));
         if should_background {
@@ -3284,6 +3546,14 @@ async fn invoke_cc(
             if let Some(active) = active_progress.take() {
                 finish_progress_invocation(ctx, active).await;
             }
+            cleanup_prepared_first_call_session(
+                conn,
+                chat_id,
+                eff_thread_id,
+                is_first_call,
+                &session_uuid,
+            )
+            .await;
             return Err(format_error_reply(-1, &format!("spawn failed: {:#}", e)).into());
         }
     };
@@ -3332,6 +3602,14 @@ async fn invoke_cc(
                     if let Some(active) = active_progress.take() {
                         finish_progress_invocation(ctx, active).await;
                     }
+                    cleanup_prepared_first_call_session(
+                        conn,
+                        chat_id,
+                        eff_thread_id,
+                        is_first_call,
+                        &session_uuid,
+                    )
+                    .await;
                     return Err(format_error_reply(-1, &format!("stdin write failed: {:#}", e)).into());
                 }
                 input_delivered = true;
@@ -3384,6 +3662,14 @@ async fn invoke_cc(
             if let Some(active) = active_progress.take() {
                 finish_progress_invocation(ctx, active).await;
             }
+            cleanup_prepared_first_call_session(
+                conn,
+                chat_id,
+                eff_thread_id,
+                is_first_call,
+                &session_uuid,
+            )
+            .await;
             return Err(format_error_reply(-1, "no stdout handle").into());
         }
     };
@@ -3496,7 +3782,7 @@ async fn invoke_cc(
                                             Some(turn_started_at.elapsed().as_millis() as u64);
                                         if let Err(e) =
                                             right_agent::usage::insert::insert_interactive(
-                                                &conn,
+                                                conn,
                                                 &breakdown,
                                                 chat_id,
                                                 eff_thread_id,
@@ -3938,9 +4224,9 @@ async fn invoke_cc(
                 turn_id = log_ctx.turn_id,
                 "detected auth error from CC"
             );
-            // Deactivate the session created before invoke_cc — it's from a failed auth
-            // attempt and must not be resumed. Next message will start fresh.
-            deactivate_current(&conn, chat_id, eff_thread_id)
+            // Deactivate only this invocation's session; another worker may
+            // have made a replacement session active before auth recovery runs.
+            deactivate_session_if_active(conn, chat_id, eff_thread_id, &session_uuid)
                 .await
                 .map_err(|e| {
                     tracing::error!(
@@ -3949,7 +4235,7 @@ async fn invoke_cc(
                         key = ?log_ctx.key(),
                         session_uuid = %log_ctx.session_uuid,
                         turn_id = log_ctx.turn_id,
-                        "deactivate_current on auth error: {:#}",
+                        "deactivate_session_if_active on auth error: {:#}",
                         e
                     )
                 })
@@ -4048,7 +4334,7 @@ async fn invoke_cc(
         // the DB record so the next message starts fresh instead of trying to
         // --resume a session that doesn't exist on the CC side.
         if is_first_call {
-            deactivate_current(&conn, chat_id, eff_thread_id)
+            deactivate_session_if_active(conn, chat_id, eff_thread_id, &session_uuid)
                 .await
                 .map_err(|e| {
                     tracing::error!(
@@ -4057,7 +4343,7 @@ async fn invoke_cc(
                         key = ?log_ctx.key(),
                         session_uuid = %log_ctx.session_uuid,
                         turn_id = log_ctx.turn_id,
-                        "deactivate_current on first-call failure: {:#}",
+                        "deactivate_session_if_active on first-call failure: {:#}",
                         e
                     )
                 })
@@ -4083,7 +4369,7 @@ async fn invoke_cc(
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             match super::error_details::insert_error_detail(
-                &conn,
+                conn,
                 chat_id,
                 eff_thread_id,
                 &raw_details,
@@ -4142,7 +4428,7 @@ async fn invoke_cc(
         Ok((reply_output, session_id_from_cc)) => {
             // D-15: verify session_id at debug level only
             if let (Some(cc_sid), true) = (session_id_from_cc, is_first_call)
-                && let Ok(Some(active)) = get_active_session(&conn, chat_id, eff_thread_id).await
+                && let Ok(Some(active)) = get_active_session(conn, chat_id, eff_thread_id).await
                 && cc_sid != active.root_session_id
             {
                 tracing::warn!(
@@ -4153,8 +4439,8 @@ async fn invoke_cc(
                 );
             }
             // Update last_used_at (non-fatal: log error but do not fail the reply)
-            if let Ok(Some(active)) = get_active_session(&conn, chat_id, eff_thread_id).await {
-                touch_session(&conn, active.id)
+            if let Ok(Some(active)) = get_active_session(conn, chat_id, eff_thread_id).await {
+                touch_session(conn, active.id)
                     .await
                     .map_err(|e| tracing::error!(?chat_id, "touch_session failed: {:#}", e))
                     .ok();
@@ -4415,18 +4701,193 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_unspawned_first_call_session_only_deactivates_new_session() {
+    async fn cleanup_prepared_first_call_session_only_deactivates_first_call_session() {
         let temp = tempfile::tempdir().unwrap();
         let conn = right_db::open_connection(temp.path(), true).await.unwrap();
         create_session(&conn, 42, 0, "session-1", Some("hello"))
             .await
             .unwrap();
 
-        cleanup_unspawned_first_call_session(&conn, 42, 0, false).await;
+        cleanup_prepared_first_call_session(&conn, 42, 0, false, "session-1").await;
         assert!(get_active_session(&conn, 42, 0).await.unwrap().is_some());
 
-        cleanup_unspawned_first_call_session(&conn, 42, 0, true).await;
+        cleanup_prepared_first_call_session(&conn, 42, 0, true, "session-1").await;
         assert!(get_active_session(&conn, 42, 0).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cleanup_prepared_first_call_session_does_not_deactivate_different_active_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+        create_session(&conn, 42, 0, "prepared-session-b", Some("prepared"))
+            .await
+            .unwrap();
+        deactivate_current(&conn, 42, 0).await.unwrap();
+        create_session(&conn, 42, 0, "replacement-session-a", Some("replacement"))
+            .await
+            .unwrap();
+
+        cleanup_prepared_first_call_session(&conn, 42, 0, true, "prepared-session-b").await;
+
+        let active = get_active_session(&conn, 42, 0).await.unwrap().unwrap();
+        assert_eq!(active.root_session_id, "replacement-session-a");
+    }
+
+    #[tokio::test]
+    async fn cleanup_scoped_session_does_not_deactivate_replacement_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+        create_session(&conn, 42, 0, "prepared-session-s", Some("prepared"))
+            .await
+            .unwrap();
+        deactivate_current(&conn, 42, 0).await.unwrap();
+        create_session(&conn, 42, 0, "replacement-session-r", Some("replacement"))
+            .await
+            .unwrap();
+
+        deactivate_session_if_active(&conn, 42, 0, "prepared-session-s")
+            .await
+            .unwrap();
+
+        let active = get_active_session(&conn, 42, 0).await.unwrap().unwrap();
+        assert_eq!(active.root_session_id, "replacement-session-r");
+    }
+
+    #[tokio::test]
+    async fn prepare_cc_invocation_creates_session_and_allocates_turn_before_render() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+        drop(conn);
+
+        let prepared = prepare_cc_invocation(temp.path(), 42, 0, Some("hello"))
+            .await
+            .unwrap();
+
+        assert!(prepared.is_first_call);
+        assert!(prepared.turn_id > 0);
+        let conn = right_db::open_connection(temp.path(), false).await.unwrap();
+        let active = get_active_session(&conn, 42, 0).await.unwrap().unwrap();
+        assert_eq!(active.root_session_id, prepared.session_uuid);
+    }
+
+    #[tokio::test]
+    async fn prepare_cc_invocation_carries_connection_for_invoke_reuse() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+        drop(conn);
+
+        let prepared = prepare_cc_invocation(temp.path(), 42, 0, Some("hello"))
+            .await
+            .unwrap();
+
+        let active = get_active_session(&prepared.conn, 42, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.root_session_id, prepared.session_uuid);
+    }
+
+    #[tokio::test]
+    async fn invoke_cc_schema_read_failure_deactivates_prepared_first_call_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent_dir = temp.path().join("agent");
+        std::fs::create_dir(&agent_dir).unwrap();
+        std::fs::create_dir(agent_dir.join(".claude")).unwrap();
+        let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
+        drop(conn);
+        let prepared = prepare_cc_invocation(&agent_dir, 42, 0, Some("hello"))
+            .await
+            .unwrap();
+
+        let ctx = worker_context_for_invoke_test(&agent_dir);
+        let chat = super::super::attachments::ChatContext::Private { id: 42 };
+        let author = super::super::attachments::MessageAuthor {
+            name: "Alice".into(),
+            username: Some("@alice".into()),
+            user_id: Some(9001),
+        };
+
+        let err = match invoke_cc(
+            InvokeCcRequest {
+                conn: &prepared.conn,
+                input: "hello",
+                chat_id: 42,
+                eff_thread_id: 0,
+                is_group: false,
+                routed_message_ids: &[],
+                chat: &chat,
+                author: &author,
+                session_uuid: &prepared.session_uuid,
+                turn_id: prepared.turn_id,
+                is_first_call: prepared.is_first_call,
+            },
+            &ctx,
+        )
+        .await
+        {
+            Ok(_) => panic!("missing reply schema should fail before CC spawn"),
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, InvokeCcFailure::NonReflectable { .. }),
+            "unexpected failure: {err:?}"
+        );
+        assert!(
+            get_active_session(&prepared.conn, 42, 0)
+                .await
+                .unwrap()
+                .is_none(),
+            "pre-spawn first-call failure must not leave an active prepared session"
+        );
+    }
+
+    fn worker_context_for_invoke_test(agent_dir: &Path) -> WorkerContext {
+        let (sandbox_runtime, _sandbox_rx) = crate::sandbox_runtime::SandboxRuntimeHandle::new(
+            crate::sandbox_runtime::SandboxHealth::Ready,
+        );
+        WorkerContext {
+            chat_id: teloxide::types::ChatId(42),
+            effective_thread_id: 0,
+            agent_dir: agent_dir.to_path_buf(),
+            agent_name: "test-agent".into(),
+            bot: super::super::bot::build_bot("0:fake_token_for_tests".into()),
+            agent_db_dir: agent_dir.to_path_buf(),
+            debug: Arc::new(AtomicBool::new(false)),
+            ssh_config_path: None,
+            auth_watcher_active: Arc::new(AtomicBool::new(false)),
+            auth_code_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            resolved_sandbox: None,
+            show_thinking: false,
+            model: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
+            stop_tokens: Arc::new(DashMap::new()),
+            session_locks: Arc::new(DashMap::new()),
+            compact_timers: Arc::new(DashMap::new()),
+            bg_requests: Arc::new(DashMap::new()),
+            bg_handoff_gates: Arc::new(DashMap::new()),
+            thinking_visibility: Arc::new(DashMap::new()),
+            idle_timestamp: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            internal_client: Arc::new(right_mcp::internal_client::InternalClient::new(
+                agent_dir.join("fake-internal.sock"),
+            )),
+            progress_state: super::super::progress::ProgressState::default(),
+            hindsight: None,
+            prefetch_cache: None,
+            memory_status_last: Arc::new(DashMap::new()),
+            upgrade_lock: Arc::new(tokio::sync::RwLock::new(())),
+            stt: None,
+            learning: right_agent::agent::types::LearningConfig::default(),
+            claude_health: crate::keepalive::ClaudeHealth::new(
+                "test-agent".into(),
+                agent_dir.to_path_buf(),
+                None,
+                None,
+                None,
+                Some(Arc::clone(&sandbox_runtime)),
+            ),
+            shutdown: CancellationToken::new(),
+            sandbox_runtime,
+        }
     }
 
     #[tokio::test]
@@ -5298,49 +5759,59 @@ esac
         assert_eq!(input.quoted_text.as_deref(), Some("selected fragment"));
     }
 
-    fn reply_body(
-        text: &str,
-        omitted: bool,
-        attachments: Vec<super::super::attachments::ResolvedAttachment>,
-    ) -> super::super::attachments::ReplyToBody {
-        super::super::attachments::ReplyToBody {
+    fn raw_reply(text: Option<&str>, is_bot_target: bool) -> super::super::attachments::RawReply {
+        super::super::attachments::RawReply {
             author: super::super::attachments::MessageAuthor {
-                name: "Alice".into(),
-                username: Some("alice".into()),
-                user_id: Some(9001),
+                name: "Andrey".into(),
+                username: Some("@brainsmith".into()),
+                user_id: Some(85743491),
             },
-            text: Some(text.into()),
-            attachments,
-            omitted,
+            text: text.map(str::to_owned),
+            attachments: vec![],
+            is_bot_target,
         }
     }
 
-    fn reply_attachment() -> super::super::attachments::ResolvedAttachment {
-        super::super::attachments::ResolvedAttachment {
-            kind: super::super::attachments::AttachmentKind::Document,
-            path: PathBuf::from("/sandbox/inbox/reply.pdf"),
-            mime_type: "application/pdf".into(),
-            filename: Some("reply.pdf".into()),
-        }
-    }
-
-    async fn archive_reply_target(agent_dir: &Path, chat_id: i64, thread_id: i64, message_id: i32) {
+    async fn archive_assistant_reply(agent_dir: &Path, session: &str, turn: u64, content: &str) {
         let conn = right_db::open_connection(agent_dir, true).await.unwrap();
         right_db::conversation::archive_message(
             &conn,
             right_db::conversation::ConversationMessage {
                 platform: "telegram",
-                chat_id,
-                thread_id,
+                chat_id: 100,
+                thread_id: 7,
+                message_id: None,
+                sender_user_id: None,
+                sender_name: None,
+                addressed_to_bot: false,
+                routed_to_agent: true,
+                root_session_id: Some(session),
+                turn_id: Some(turn),
+                role: right_db::conversation::ConversationRole::Assistant,
+                content,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn archive_user_reply(agent_dir: &Path, message_id: i32, content: &str) {
+        let conn = right_db::open_connection(agent_dir, true).await.unwrap();
+        right_db::conversation::archive_message(
+            &conn,
+            right_db::conversation::ConversationMessage {
+                platform: "telegram",
+                chat_id: 100,
+                thread_id: 7,
                 message_id: Some(message_id),
-                sender_user_id: Some(9001),
-                sender_name: Some("Alice"),
-                addressed_to_bot: true,
+                sender_user_id: Some(85743491),
+                sender_name: Some("Andrey"),
+                addressed_to_bot: false,
                 routed_to_agent: false,
                 root_session_id: None,
                 turn_id: None,
                 role: right_db::conversation::ConversationRole::User,
-                content: "archived body",
+                content,
             },
         )
         .await
@@ -5348,154 +5819,287 @@ esac
     }
 
     #[tokio::test]
-    async fn strip_recoverable_reply_body_omits_archived_target() {
+    async fn gate_bot_exact_latest_assistant_target_is_own_previous() {
         let temp = tempfile::tempdir().unwrap();
-        archive_reply_target(temp.path(), 100, 7, 41).await;
+        archive_assistant_reply(temp.path(), "S", 6, "hello world from latest").await;
 
-        let stripped = strip_recoverable_reply_to_body(
+        let body = gate_reply_to_body(
             temp.path(),
+            "telegram",
             100,
             7,
-            Some(41),
+            Some(45),
+            7,
+            "S",
+            raw_reply(Some("hello world from latest"), true),
             false,
-            Some(reply_body("SECRET INLINE", false, vec![])),
         )
         .await
         .unwrap();
 
-        assert!(stripped.omitted);
-        assert_eq!(stripped.text, None);
-        assert!(stripped.attachments.is_empty());
-        assert_eq!(stripped.author.name, "Alice");
-        assert_eq!(stripped.author.username.as_deref(), Some("alice"));
-        assert_eq!(stripped.author.user_id, Some(9001));
+        assert_eq!(
+            body.render,
+            super::super::reply_context::ReplyRender::OwnPrevious
+        );
     }
 
     #[tokio::test]
-    async fn strip_recoverable_reply_body_keeps_archived_target_with_attachment_inline() {
+    async fn gate_bot_substring_of_latest_assistant_target_is_locator() {
         let temp = tempfile::tempdir().unwrap();
-        archive_reply_target(temp.path(), 100, 7, 41).await;
+        archive_assistant_reply(temp.path(), "S", 6, "hello world from latest").await;
 
-        let kept = strip_recoverable_reply_to_body(
+        let body = gate_reply_to_body(
             temp.path(),
+            "telegram",
             100,
             7,
-            Some(41),
+            Some(45),
+            7,
+            "S",
+            raw_reply(Some("hello"), true),
             false,
-            Some(reply_body("SECRET INLINE", false, vec![reply_attachment()])),
         )
         .await
         .unwrap();
 
-        assert!(!kept.omitted);
-        assert_eq!(kept.text.as_deref(), Some("SECRET INLINE"));
-        assert_eq!(kept.attachments.len(), 1);
-        assert_eq!(kept.attachments[0].filename.as_deref(), Some("reply.pdf"));
-        assert_eq!(kept.author.name, "Alice");
+        assert_eq!(
+            body.render,
+            super::super::reply_context::ReplyRender::Locator {
+                text: "hello".into()
+            }
+        );
     }
 
     #[tokio::test]
-    async fn strip_recoverable_reply_body_keeps_unarchived_target_inline() {
+    async fn gate_bot_duplicate_exact_assistant_target_is_locator() {
         let temp = tempfile::tempdir().unwrap();
-        archive_reply_target(temp.path(), 100, 99, 41).await;
+        archive_assistant_reply(temp.path(), "S", 5, "same answer").await;
+        archive_assistant_reply(temp.path(), "S", 6, "same answer").await;
 
-        let kept = strip_recoverable_reply_to_body(
+        let body = gate_reply_to_body(
             temp.path(),
+            "telegram",
             100,
             7,
-            Some(41),
+            Some(45),
+            7,
+            "S",
+            raw_reply(Some("same answer"), true),
             false,
-            Some(reply_body("SECRET INLINE", false, vec![reply_attachment()])),
         )
         .await
         .unwrap();
 
-        assert!(!kept.omitted);
-        assert_eq!(kept.text.as_deref(), Some("SECRET INLINE"));
-        assert_eq!(kept.attachments.len(), 1);
-        assert_eq!(kept.attachments[0].filename.as_deref(), Some("reply.pdf"));
-        assert_eq!(kept.author.name, "Alice");
+        assert_eq!(
+            body.render,
+            super::super::reply_context::ReplyRender::Locator {
+                text: "same answer".into()
+            }
+        );
     }
 
     #[tokio::test]
-    async fn strip_recoverable_reply_body_keeps_mark_routed_stub_inline() {
+    async fn gate_inlines_full_text_for_non_routed_user_target() {
         let temp = tempfile::tempdir().unwrap();
         let conn = right_db::open_connection(temp.path(), true).await.unwrap();
-        right_db::conversation::mark_routed(&conn, "telegram", 100, 7, 41, "session-abc", 42)
-            .await
-            .unwrap();
-
-        // Text-only body (no attachments) so the DB recoverability check runs:
-        // a mark_routed stub carries content='' and is not archived content, so
-        // fetch_by_ids returns nothing and the body must stay inline.
-        let kept = strip_recoverable_reply_to_body(
-            temp.path(),
-            100,
-            7,
-            Some(41),
-            false,
-            Some(reply_body("SECRET INLINE", false, vec![])),
+        right_db::conversation::archive_message(
+            &conn,
+            right_db::conversation::ConversationMessage {
+                platform: "telegram",
+                chat_id: 100,
+                thread_id: 7,
+                message_id: Some(4569),
+                sender_user_id: Some(1),
+                sender_name: Some("Andrey"),
+                addressed_to_bot: false,
+                routed_to_agent: false,
+                root_session_id: None,
+                turn_id: None,
+                role: right_db::conversation::ConversationRole::User,
+                content: "Сравни по времени в море",
+            },
         )
         .await
         .unwrap();
 
-        assert!(!kept.omitted);
-        assert_eq!(kept.text.as_deref(), Some("SECRET INLINE"));
-        assert!(kept.attachments.is_empty());
-        assert_eq!(kept.author.name, "Alice");
+        let body = gate_reply_to_body(
+            temp.path(),
+            "telegram",
+            100,
+            7,
+            Some(4569),
+            6,
+            "S",
+            raw_reply(Some("Сравни по времени в море"), false),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            body.render,
+            super::super::reply_context::ReplyRender::Full {
+                text: "Сравни по времени в море".into()
+            }
+        );
     }
 
     #[tokio::test]
-    async fn strip_recoverable_reply_body_keeps_already_omitted_body() {
+    async fn gate_long_unarchived_user_target_inlines_full_text() {
         let temp = tempfile::tempdir().unwrap();
-        archive_reply_target(temp.path(), 100, 7, 41).await;
+        let text = "a".repeat(super::super::reply_context::REPLY_BODY_INLINE_MAX + 1);
 
-        let kept = strip_recoverable_reply_to_body(
+        let body = gate_reply_to_body(
             temp.path(),
+            "telegram",
             100,
             7,
-            Some(41),
+            Some(9123),
+            6,
+            "S",
+            raw_reply(Some(&text), false),
             false,
-            Some(reply_body(
-                "already omitted",
-                true,
-                vec![reply_attachment()],
-            )),
         )
         .await
         .unwrap();
 
-        assert!(kept.omitted);
-        assert_eq!(kept.text.as_deref(), Some("already omitted"));
-        assert_eq!(kept.attachments.len(), 1);
-        assert_eq!(kept.author.name, "Alice");
+        assert_eq!(
+            body.render,
+            super::super::reply_context::ReplyRender::Full {
+                text: text.trim().to_owned()
+            }
+        );
     }
 
     #[tokio::test]
-    async fn strip_recoverable_reply_body_keeps_voice_transcription_inline() {
-        // A replied-to voice/video-note message is archived only as a `[voice]`
-        // placeholder, while the inline body text is the STT transcription. Even
-        // though the target is archived (recoverable), the transcription is not,
-        // so the body must stay inline rather than be replaced with a fetch note
-        // that would resolve to `[voice]`.
+    async fn gate_long_archived_user_target_can_render_truncated_fetch_note() {
         let temp = tempfile::tempdir().unwrap();
-        archive_reply_target(temp.path(), 100, 7, 41).await;
+        let text = "a".repeat(super::super::reply_context::REPLY_BODY_INLINE_MAX + 1);
+        archive_user_reply(temp.path(), 9124, &text).await;
 
-        let kept = strip_recoverable_reply_to_body(
+        let body = gate_reply_to_body(
             temp.path(),
+            "telegram",
             100,
             7,
-            Some(41),
-            true, // had_voice_markers: body text is an STT transcription
-            Some(reply_body("[transcription: hello there]", false, vec![])),
+            Some(9124),
+            6,
+            "S",
+            raw_reply(Some(&text), false),
+            false,
         )
         .await
         .unwrap();
 
-        assert!(!kept.omitted, "voice transcription must not be stripped");
-        assert_eq!(kept.text.as_deref(), Some("[transcription: hello there]"));
-        assert!(kept.attachments.is_empty());
-        assert_eq!(kept.author.name, "Alice");
+        assert_eq!(
+            body.render,
+            super::super::reply_context::ReplyRender::Truncated {
+                text: format!(
+                    "{}…",
+                    "a".repeat(super::super::reply_context::REPLY_BODY_INLINE_MAX)
+                ),
+                reply_to_id: 9124,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_reply_to_voice_marker_target_inlines_full_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let text = "voice transcript ".repeat(40);
+        archive_user_reply(temp.path(), 9125, "[voice message]").await;
+
+        let body = gate_reply_to_body(
+            temp.path(),
+            "telegram",
+            100,
+            7,
+            Some(9125),
+            6,
+            "S",
+            raw_reply(Some(&text), false),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            body.render,
+            super::super::reply_context::ReplyRender::Full {
+                text: text.trim().to_owned()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_bare_mention_reply_to_nonrouted_inlines_body_no_empty_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+        right_db::conversation::archive_message(
+            &conn,
+            right_db::conversation::ConversationMessage {
+                platform: "telegram",
+                chat_id: 100,
+                thread_id: 458,
+                message_id: Some(4569),
+                sender_user_id: Some(85743491),
+                sender_name: Some("Andrey Kuznetsov"),
+                addressed_to_bot: false,
+                routed_to_agent: false,
+                root_session_id: None,
+                turn_id: None,
+                role: right_db::conversation::ConversationRole::User,
+                content: "Сравни по времени в море",
+            },
+        )
+        .await
+        .unwrap();
+
+        let body = gate_reply_to_body(
+            temp.path(),
+            "telegram",
+            100,
+            458,
+            Some(4569),
+            6,
+            "S",
+            raw_reply(Some("Сравни по времени в море"), false),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let msg = super::super::attachments::InputMessage {
+            message_id: 4570,
+            text: None,
+            timestamp: chrono::Utc::now(),
+            attachments: vec![],
+            author: super::super::attachments::MessageAuthor {
+                name: "Andrey Kuznetsov".into(),
+                username: Some("@brainsmith".into()),
+                user_id: Some(85743491),
+            },
+            forward_info: None,
+            reply_to_id: Some(4569),
+            quoted_text: None,
+            chat: super::super::attachments::ChatContext::Group {
+                id: 100,
+                title: Some("aibots".into()),
+                topic_id: Some(458),
+            },
+            reply_to_body: Some(body),
+        };
+
+        let out = super::super::attachments::format_cc_input(&[msg]).unwrap();
+        assert!(!out.contains("text: \"\""), "no empty text:\n{out}");
+        assert!(
+            out.contains("text: \"Сравни по времени в море\""),
+            "body inlined:\n{out}"
+        );
+        assert!(
+            !out.contains("body omitted"),
+            "no stale fetch-note path:\n{out}"
+        );
     }
 
     #[tokio::test]

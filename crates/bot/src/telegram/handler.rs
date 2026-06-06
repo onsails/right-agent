@@ -270,35 +270,43 @@ pub async fn handle_message(
         },
     };
 
-    // Populate reply_to_body only when the user replied to a non-bot message.
-    // When they reply to our own bot message, the context is already in the CC
-    // session history — emitting it again would be noisy and duplicative.
-    // `reply_to_attachments` mirrors `reply_to_body`: empty when the body is
-    // None, otherwise the inbound attachments of the replied-to message.
+    // Capture the replied-to message for all targets. The worker gate decides
+    // whether to render full text, a locator, or a note.
     let (reply_to_body, reply_to_attachments) = match msg.reply_to_message() {
-        Some(r) => match r.from.as_ref() {
-            Some(from) if !(from.is_bot && from.id.0 == identity.user_id) => {
-                let body = super::attachments::ReplyToBody {
-                    author: super::attachments::MessageAuthor {
-                        name: from.full_name(),
-                        username: from.username.as_ref().map(|u| format!("@{u}")),
-                        user_id: Some(from.id.0 as i64),
-                    },
-                    text: r.text().or(r.caption()).map(|t| t.to_string()),
-                    attachments: vec![], // populated post-debounce in worker
-                    omitted: false,
-                };
-                let inbound = super::attachments::extract_attachments(r);
-                (Some(body), inbound)
-            }
-            _ => (None, vec![]),
-        },
+        Some(r) => {
+            let from = r.from.as_ref();
+            let is_bot_target = from
+                .map(|f| f.is_bot && f.id.0 == identity.user_id)
+                .unwrap_or(false);
+            let author = match from {
+                Some(f) => super::attachments::MessageAuthor {
+                    name: f.full_name(),
+                    username: f.username.as_ref().map(|u| format!("@{u}")),
+                    user_id: Some(f.id.0 as i64),
+                },
+                None => super::attachments::MessageAuthor {
+                    name: String::new(),
+                    username: None,
+                    user_id: None,
+                },
+            };
+            let body = super::attachments::RawReply {
+                author,
+                text: r.text().or(r.caption()).map(|t| t.to_string()),
+                attachments: vec![],
+                is_bot_target,
+            };
+            let inbound = super::attachments::extract_attachments(r);
+            (Some(body), inbound)
+        }
         None => (None, vec![]),
     };
 
     // Strip `@botname` mentions from text AFTER interceptors (auth code / MCP
     // token) have seen the raw string. No-op when the pattern isn't present.
-    let text = text.map(|t| super::mention::strip_bot_mentions(&t, &identity.username));
+    let text = text
+        .map(|t| super::mention::strip_bot_mentions(&t, &identity.username))
+        .filter(|t| !t.trim().is_empty());
 
     let debounce_msg = DebounceMsg {
         message_id: msg.id.0,
