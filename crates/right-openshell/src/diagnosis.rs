@@ -34,6 +34,12 @@ pub enum GatewayCause {
     SandboxNotReady {
         sandbox: String,
     },
+    /// The sandbox and gateway are reachable, but OpenShell has not composed
+    /// one or more attached provider profiles into the sandbox effective policy.
+    ProviderComposition {
+        sandbox: String,
+        detail: String,
+    },
     /// Connect failed but probes are inconclusive (race/transient).
     Unreachable,
 }
@@ -87,6 +93,10 @@ impl GatewayCause {
                     "This clears on its own once the sandbox finishes starting -- I'll connect automatically.",
                 ],
             ),
+            GatewayCause::ProviderComposition { .. } => (
+                "provider access is not loaded into my sandbox",
+                vec!["I'll retry provider setup automatically until OpenShell reports it loaded."],
+            ),
             GatewayCause::Unreachable => (
                 "I can't reach the sandbox backend",
                 vec![
@@ -109,6 +119,9 @@ impl GatewayCause {
             }
             GatewayCause::SandboxNotReady { sandbox } => {
                 format!("my secure sandbox '{sandbox}' is still starting up")
+            }
+            GatewayCause::ProviderComposition { sandbox, detail } => {
+                format!("provider access for sandbox '{sandbox}' is not loaded: {detail}")
             }
             _ => summary.to_owned(),
         };
