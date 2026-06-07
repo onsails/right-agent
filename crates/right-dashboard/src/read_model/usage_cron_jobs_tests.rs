@@ -10,8 +10,39 @@ async fn insert_usage(
     cost: f64,
     model: &str,
 ) {
+    insert_usage_with_tokens(
+        conn,
+        ts,
+        source,
+        job_name,
+        cost,
+        model,
+        (10, 20, 5, 40),
+        (10, 20, 5, 40),
+    )
+    .await;
+}
+
+async fn insert_usage_with_tokens(
+    conn: &right_db::Connection,
+    ts: &str,
+    source: &str,
+    job_name: Option<&str>,
+    cost: f64,
+    model: &str,
+    row_tokens: (i64, i64, i64, i64),
+    model_tokens: (u64, u64, u64, u64),
+) {
+    let (row_input_tokens, row_output_tokens, row_cache_creation_tokens, row_cache_read_tokens) =
+        row_tokens;
+    let (
+        model_input_tokens,
+        model_output_tokens,
+        model_cache_creation_tokens,
+        model_cache_read_tokens,
+    ) = model_tokens;
     let model_json = format!(
-        r#"{{"{model}":{{"costUSD":{cost},"inputTokens":10,"outputTokens":20,"cacheCreationInputTokens":5,"cacheReadInputTokens":40}}}}"#
+        r#"{{"{model}":{{"costUSD":{cost},"inputTokens":{model_input_tokens},"outputTokens":{model_output_tokens},"cacheCreationInputTokens":{model_cache_creation_tokens},"cacheReadInputTokens":{model_cache_read_tokens}}}}}"#
     );
     conn.execute(
         "INSERT INTO usage_events (
@@ -19,13 +50,17 @@ async fn insert_usage(
             total_cost_usd, num_turns, input_tokens, output_tokens,
             cache_creation_tokens, cache_read_tokens, web_search_requests,
             web_fetch_requests, model_usage_json, api_key_source
-         ) VALUES (?1, ?2, 1, 0, ?3, ?4, ?5, 1, 10, 20, 5, 40, 1, 2, ?6, 'none')",
+         ) VALUES (?1, ?2, 1, 0, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, 1, 2, ?10, 'none')",
         params![
             ts,
             source,
             job_name,
             format!("{source}-{model}-{ts}"),
             cost,
+            row_input_tokens,
+            row_output_tokens,
+            row_cache_creation_tokens,
+            row_cache_read_tokens,
             model_json
         ],
     )
@@ -55,22 +90,26 @@ async fn usage_overview_groups_cron_jobs_for_selected_range() {
         "opus",
     )
     .await;
-    insert_usage(
+    insert_usage_with_tokens(
         &conn,
         "2026-06-02T08:00:00Z",
         "cron",
         Some("daily"),
         0.10,
         "sonnet",
+        (10, 20, 5, 40),
+        (1, 2, 3, 4),
     )
     .await;
-    insert_usage(
+    insert_usage_with_tokens(
         &conn,
         "2026-06-03T08:00:00Z",
         "cron",
         Some("daily"),
         0.40,
         "sonnet",
+        (10, 20, 5, 40),
+        (11, 22, 33, 44),
     )
     .await;
     insert_usage(
@@ -100,6 +139,15 @@ async fn usage_overview_groups_cron_jobs_for_selected_range() {
         "sonnet",
     )
     .await;
+    insert_usage(
+        &conn,
+        "2026-06-04T12:00:00.001Z",
+        "cron",
+        Some("after_range"),
+        5.00,
+        "opus",
+    )
+    .await;
 
     let response = usage_overview(
         &conn,
@@ -121,6 +169,8 @@ async fn usage_overview_groups_cron_jobs_for_selected_range() {
             .collect::<Vec<_>>(),
         vec!["daily", "weekly"]
     );
+    let cron_cost: f64 = response.cron_jobs.iter().map(|job| job.cost_usd).sum();
+    assert!((cron_cost - 0.70).abs() < 1e-9);
     let daily = &response.cron_jobs[0];
     assert!((daily.cost_usd - 0.50).abs() < 1e-9);
     assert_eq!(daily.invocations, 2);
@@ -134,10 +184,10 @@ async fn usage_overview_groups_cron_jobs_for_selected_range() {
     assert_eq!(daily.per_model.len(), 1);
     assert_eq!(daily.per_model[0].model, "sonnet");
     assert!((daily.per_model[0].cost_usd - 0.50).abs() < 1e-9);
-    assert_eq!(daily.per_model[0].input_tokens, 20);
-    assert_eq!(daily.per_model[0].output_tokens, 40);
-    assert_eq!(daily.per_model[0].cache_creation_tokens, 10);
-    assert_eq!(daily.per_model[0].cache_read_tokens, 80);
+    assert_eq!(daily.per_model[0].input_tokens, 12);
+    assert_eq!(daily.per_model[0].output_tokens, 24);
+    assert_eq!(daily.per_model[0].cache_creation_tokens, 36);
+    assert_eq!(daily.per_model[0].cache_read_tokens, 48);
 }
 
 #[tokio::test]
