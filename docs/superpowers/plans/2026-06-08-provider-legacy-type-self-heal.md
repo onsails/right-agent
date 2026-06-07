@@ -487,7 +487,7 @@ In `crates/right-openshell/src/diagnosis.rs`, add this arm in the summary enrich
 Run:
 
 ```bash
-devenv shell -- cargo test -p right-openshell diagnosis_tests
+devenv shell -- cargo test -p right-openshell diagnosis::tests
 ```
 
 Expected: PASS.
@@ -727,7 +727,7 @@ Run:
 
 ```bash
 devenv shell -- cargo test -p right-openshell providers_tests
-devenv shell -- cargo test -p right-openshell diagnosis_tests
+devenv shell -- cargo test -p right-openshell diagnosis::tests
 ```
 
 Expected: PASS.
