@@ -79,3 +79,33 @@ fn sandbox_not_ready_diagnosis_names_the_sandbox_and_is_starting_oriented() {
     assert!(!fixes.contains("docker"));
     assert!(!fixes.contains("gateway"));
 }
+
+#[test]
+fn provider_composition_diagnosis_names_provider_without_startup_copy() {
+    let detail =
+        "provider right-typefully attached but not composed into sandbox right-right-1 with endpoint api.typefully.com"
+            .to_owned();
+    let d = GatewayCause::ProviderComposition {
+        sandbox: "right-right-1".to_owned(),
+        detail: detail.clone(),
+    }
+    .diagnose();
+
+    assert_eq!(
+        d.cause,
+        GatewayCause::ProviderComposition {
+            sandbox: "right-right-1".to_owned(),
+            detail
+        }
+    );
+    assert!(d.summary.contains("right-right-1"));
+    assert!(d.summary.contains("provider access"));
+    assert!(d.summary.contains("right-typefully"));
+    assert!(
+        !d.summary.contains("starting up"),
+        "provider composition failure must not reuse sandbox startup copy"
+    );
+    let fixes = d.fixes.join(" ").to_lowercase();
+    assert!(!fixes.contains("docker"));
+    assert!(!fixes.contains("gateway start"));
+}
