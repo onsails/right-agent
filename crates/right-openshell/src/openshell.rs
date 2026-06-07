@@ -2100,18 +2100,63 @@ pub async fn wait_for_provider_composed(
     sandbox_name: &str,
     provider_name: &str,
 ) -> miette::Result<()> {
+    wait_for_provider_composed_where(
+        client,
+        sandbox_name,
+        provider_name,
+        "rule present".to_string(),
+        |policy| crate::provider_capabilities::provider_is_composed(policy, provider_name),
+    )
+    .await
+}
+
+/// Wait until a generic provider's composed rule contains the expected
+/// endpoint host/path. Use this after generic profile updates where an older
+/// `_provider_<name>` rule may already exist in the active policy.
+pub async fn wait_for_provider_composed_with_endpoint(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+    provider_name: &str,
+    expected_host: &str,
+    expected_path: &str,
+) -> miette::Result<()> {
+    wait_for_provider_composed_where(
+        client,
+        sandbox_name,
+        provider_name,
+        format!("endpoint {expected_host}{expected_path}"),
+        |policy| {
+            crate::provider_capabilities::provider_is_composed_with_endpoint(
+                policy,
+                provider_name,
+                expected_host,
+                expected_path,
+            )
+        },
+    )
+    .await
+}
+
+async fn wait_for_provider_composed_where(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+    provider_name: &str,
+    expected: String,
+    matches: impl Fn(&crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy) -> bool,
+) -> miette::Result<()> {
     let deadline = Instant::now() + PROVIDER_COMPOSE_TIMEOUT;
     loop {
         let policy = get_active_policy(client, sandbox_name)
             .await?
             .unwrap_or_default();
-        if crate::provider_capabilities::provider_is_composed(&policy, provider_name) {
+        if matches(&policy) {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(miette::miette!(
                 "provider {provider_name} attached but not composed into sandbox {sandbox_name} \
-                 within {PROVIDER_COMPOSE_TIMEOUT:?}: providers_v2_enabled may be off on the gateway"
+                 with {expected} within {PROVIDER_COMPOSE_TIMEOUT:?}: providers_v2_enabled may be \
+                 off on the gateway or provider-profile composition may be stale"
             ));
         }
         tokio::time::sleep(PROVIDER_COMPOSE_POLL).await;

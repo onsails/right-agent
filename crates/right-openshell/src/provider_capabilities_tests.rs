@@ -231,3 +231,51 @@ fn provider_is_composed_false_on_empty_policy() {
         "right-example"
     ));
 }
+
+#[test]
+fn provider_is_composed_with_endpoint_matches_host_and_path() {
+    let mut policy = policy_with("_provider_right_example", &["**"], &["api.example.com"]);
+    policy
+        .network_policies
+        .get_mut("_provider_right_example")
+        .unwrap()
+        .endpoints[0]
+        .path = "/v1".into();
+
+    assert!(
+        crate::provider_capabilities::provider_is_composed_with_endpoint(
+            &policy,
+            "right-example",
+            "api.example.com",
+            "/v1"
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_endpoint_rejects_stale_host_or_path() {
+    let mut policy = policy_with("_provider_right_example", &["**"], &["old.example.com"]);
+    policy
+        .network_policies
+        .get_mut("_provider_right_example")
+        .unwrap()
+        .endpoints[0]
+        .path = "/old".into();
+
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_endpoint(
+            &policy,
+            "right-example",
+            "api.example.com",
+            "/old"
+        )
+    );
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_endpoint(
+            &policy,
+            "right-example",
+            "old.example.com",
+            "/v1"
+        )
+    );
+}

@@ -144,6 +144,62 @@ async fn ensure_generic_provider_profiles_for_config(
     Ok(outcomes)
 }
 
+enum ProviderCompositionExpectation<'a> {
+    RuleOnly,
+    Endpoint { host: &'a str, path: &'a str },
+}
+
+fn provider_composition_expectation<'a>(
+    agent_name: &str,
+    entry: &'a right_agent_config::ProviderEntry,
+) -> miette::Result<ProviderCompositionExpectation<'a>> {
+    match &entry.type_ {
+        right_agent_config::ProviderType::BuiltIn(_) => {
+            Ok(ProviderCompositionExpectation::RuleOnly)
+        }
+        right_agent_config::ProviderType::Generic => {
+            let generic = entry.generic.as_ref().ok_or_else(|| {
+                miette::miette!(
+                    "agent {agent_name} generic provider {} is missing generic config",
+                    entry.name
+                )
+            })?;
+            Ok(ProviderCompositionExpectation::Endpoint {
+                host: &generic.upstream_host,
+                path: generic.upstream_path_prefix.as_deref().unwrap_or(""),
+            })
+        }
+    }
+}
+
+async fn wait_for_provider_entry_composed(
+    client: &mut right_openshell::managed_profiles::OpenShellGrpcClient,
+    sandbox_name: &str,
+    agent_name: &str,
+    entry: &right_agent_config::ProviderEntry,
+) -> miette::Result<()> {
+    match provider_composition_expectation(agent_name, entry)? {
+        ProviderCompositionExpectation::RuleOnly => {
+            right_openshell::openshell::wait_for_provider_composed(
+                client,
+                sandbox_name,
+                &entry.name,
+            )
+            .await
+        }
+        ProviderCompositionExpectation::Endpoint { host, path } => {
+            right_openshell::openshell::wait_for_provider_composed_with_endpoint(
+                client,
+                sandbox_name,
+                &entry.name,
+                host,
+                path,
+            )
+            .await
+        }
+    }
+}
+
 fn provider_policy_reload_needed(
     declared: &[String],
     report: &right_openshell::providers::ReconcileReport,
@@ -373,18 +429,18 @@ pub(crate) async fn bring_up_sandbox(
                         "provider-profile composition reload failed during startup reconcile: {e:#}"
                     )
                 })?;
-            for name in declared.iter().filter(|d| !report.missing.contains(*d)) {
-                right_openshell::openshell::wait_for_provider_composed(
-                    &mut grpc_client,
-                    &sandbox,
-                    name,
-                )
-                .await
-                .map_err(|e| {
-                    miette::miette!(
-                        "provider composition not confirmed during startup reconcile: {e:#}"
-                    )
-                })?;
+            for entry in sandbox_cfg
+                .providers
+                .iter()
+                .filter(|entry| !report.missing.contains(&entry.name))
+            {
+                wait_for_provider_entry_composed(&mut grpc_client, &sandbox, agent, entry)
+                    .await
+                    .map_err(|e| {
+                        miette::miette!(
+                            "provider composition not confirmed during startup reconcile: {e:#}"
+                        )
+                    })?;
             }
             tracing::info!(
                 agent = %agent,
@@ -486,14 +542,13 @@ pub(crate) async fn hot_reconcile_providers(
         right_openshell::openshell::ensure_provider_policy_loaded(resolved_sandbox, &policy_path)
             .await
             .map_err(|e| miette::miette!("provider-profile composition reload failed: {e:#}"))?;
-        for name in declared.iter().filter(|d| !report.missing.contains(*d)) {
-            right_openshell::openshell::wait_for_provider_composed(
-                &mut client,
-                resolved_sandbox,
-                name,
-            )
-            .await
-            .map_err(|e| miette::miette!("provider composition not confirmed: {e:#}"))?;
+        for entry in providers
+            .iter()
+            .filter(|entry| !report.missing.contains(&entry.name))
+        {
+            wait_for_provider_entry_composed(&mut client, resolved_sandbox, agent, entry)
+                .await
+                .map_err(|e| miette::miette!("provider composition not confirmed: {e:#}"))?;
         }
     }
     Ok(())
@@ -856,6 +911,46 @@ mod tests {
         assert!(
             format!("{err:#}").contains("generic provider right-acme is missing generic config")
         );
+    }
+
+    #[test]
+    fn provider_composition_expectation_uses_endpoint_for_generic() {
+        let entry = right_agent_config::ProviderEntry {
+            name: "right-acme".into(),
+            type_: right_agent_config::ProviderType::Generic,
+            label: None,
+            generic: Some(right_agent_config::GenericProvider {
+                env_var: "ACME_TOKEN".into(),
+                header_name: "X-Api-Key".into(),
+                upstream_host: "api.acme.test".into(),
+                upstream_path_prefix: Some("/v1".into()),
+            }),
+        };
+
+        match provider_composition_expectation("right", &entry).unwrap() {
+            ProviderCompositionExpectation::Endpoint { host, path } => {
+                assert_eq!(host, "api.acme.test");
+                assert_eq!(path, "/v1");
+            }
+            ProviderCompositionExpectation::RuleOnly => {
+                panic!("generic provider must use endpoint-aware composition")
+            }
+        }
+    }
+
+    #[test]
+    fn provider_composition_expectation_uses_rule_only_for_builtins() {
+        let entry = right_agent_config::ProviderEntry {
+            name: "right-gh".into(),
+            type_: right_agent_config::ProviderType::BuiltIn("right-github".into()),
+            label: None,
+            generic: None,
+        };
+
+        assert!(matches!(
+            provider_composition_expectation("right", &entry).unwrap(),
+            ProviderCompositionExpectation::RuleOnly
+        ));
     }
 
     #[test]
