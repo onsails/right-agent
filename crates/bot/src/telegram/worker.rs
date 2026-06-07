@@ -1012,20 +1012,33 @@ fn build_input_message_from_debounce(
     }
 }
 
-async fn gate_reply_to_body(
-    agent_dir: &Path,
-    platform: &str,
+struct ReplyGateRequest<'a> {
+    agent_dir: &'a Path,
+    platform: &'a str,
     chat_id: i64,
     eff_thread_id: i64,
     reply_to_id: Option<i32>,
     current_turn_id: u64,
-    root_session_id: &str,
+    root_session_id: &'a str,
     raw: super::attachments::RawReply,
     reply_to_had_voice_markers: bool,
-) -> Option<super::attachments::ReplyToBody> {
+}
+
+async fn gate_reply_to_body(req: ReplyGateRequest<'_>) -> Option<super::attachments::ReplyToBody> {
     use super::reply_context::{
         IN_CONTEXT_WINDOW, REPLY_BODY_INLINE_MAX, ReplyRender, decide_reply_render,
     };
+    let ReplyGateRequest {
+        agent_dir,
+        platform,
+        chat_id,
+        eff_thread_id,
+        reply_to_id,
+        current_turn_id,
+        root_session_id,
+        raw,
+        reply_to_had_voice_markers,
+    } = req;
 
     let reply_to_id = reply_to_id?;
     let current_turn_id = i64::try_from(current_turn_id).unwrap_or(i64::MAX);
@@ -1062,13 +1075,15 @@ async fn gate_reply_to_body(
                 } else {
                     match right_db::conversation::is_recent_routed_target(
                         &conn,
-                        platform,
-                        chat_id,
-                        eff_thread_id,
-                        reply_to_id,
-                        root_session_id,
-                        IN_CONTEXT_WINDOW,
-                        current_turn_id,
+                        right_db::conversation::RecentRoutedTargetQuery {
+                            platform,
+                            chat_id,
+                            thread_id: eff_thread_id,
+                            message_id: reply_to_id,
+                            root_session_id,
+                            window: IN_CONTEXT_WINDOW,
+                            current_turn_id,
+                        },
                     )
                     .await
                     {
@@ -1635,17 +1650,17 @@ pub fn spawn_worker(
                 });
                 let reply_to_body = match raw_reply {
                     Some(raw) => {
-                        gate_reply_to_body(
-                            &ctx.agent_dir,
-                            "telegram",
+                        gate_reply_to_body(ReplyGateRequest {
+                            agent_dir: &ctx.agent_dir,
+                            platform: "telegram",
                             chat_id,
                             eff_thread_id,
-                            pending.msg.reply_to_id,
-                            prepared.turn_id,
-                            &prepared.session_uuid,
+                            reply_to_id: pending.msg.reply_to_id,
+                            current_turn_id: prepared.turn_id,
+                            root_session_id: &prepared.session_uuid,
                             raw,
-                            !pending.reply_to_voice_markers.is_empty(),
-                        )
+                            reply_to_had_voice_markers: !pending.reply_to_voice_markers.is_empty(),
+                        })
                         .await
                     }
                     None => None,
@@ -5823,17 +5838,17 @@ esac
         let temp = tempfile::tempdir().unwrap();
         archive_assistant_reply(temp.path(), "S", 6, "hello world from latest").await;
 
-        let body = gate_reply_to_body(
-            temp.path(),
-            "telegram",
-            100,
-            7,
-            Some(45),
-            7,
-            "S",
-            raw_reply(Some("hello world from latest"), true),
-            false,
-        )
+        let body = gate_reply_to_body(ReplyGateRequest {
+            agent_dir: temp.path(),
+            platform: "telegram",
+            chat_id: 100,
+            eff_thread_id: 7,
+            reply_to_id: Some(45),
+            current_turn_id: 7,
+            root_session_id: "S",
+            raw: raw_reply(Some("hello world from latest"), true),
+            reply_to_had_voice_markers: false,
+        })
         .await
         .unwrap();
 
@@ -5848,17 +5863,17 @@ esac
         let temp = tempfile::tempdir().unwrap();
         archive_assistant_reply(temp.path(), "S", 6, "hello world from latest").await;
 
-        let body = gate_reply_to_body(
-            temp.path(),
-            "telegram",
-            100,
-            7,
-            Some(45),
-            7,
-            "S",
-            raw_reply(Some("hello"), true),
-            false,
-        )
+        let body = gate_reply_to_body(ReplyGateRequest {
+            agent_dir: temp.path(),
+            platform: "telegram",
+            chat_id: 100,
+            eff_thread_id: 7,
+            reply_to_id: Some(45),
+            current_turn_id: 7,
+            root_session_id: "S",
+            raw: raw_reply(Some("hello"), true),
+            reply_to_had_voice_markers: false,
+        })
         .await
         .unwrap();
 
@@ -5876,17 +5891,17 @@ esac
         archive_assistant_reply(temp.path(), "S", 5, "same answer").await;
         archive_assistant_reply(temp.path(), "S", 6, "same answer").await;
 
-        let body = gate_reply_to_body(
-            temp.path(),
-            "telegram",
-            100,
-            7,
-            Some(45),
-            7,
-            "S",
-            raw_reply(Some("same answer"), true),
-            false,
-        )
+        let body = gate_reply_to_body(ReplyGateRequest {
+            agent_dir: temp.path(),
+            platform: "telegram",
+            chat_id: 100,
+            eff_thread_id: 7,
+            reply_to_id: Some(45),
+            current_turn_id: 7,
+            root_session_id: "S",
+            raw: raw_reply(Some("same answer"), true),
+            reply_to_had_voice_markers: false,
+        })
         .await
         .unwrap();
 
@@ -5922,17 +5937,17 @@ esac
         .await
         .unwrap();
 
-        let body = gate_reply_to_body(
-            temp.path(),
-            "telegram",
-            100,
-            7,
-            Some(4569),
-            6,
-            "S",
-            raw_reply(Some("Сравни по времени в море"), false),
-            false,
-        )
+        let body = gate_reply_to_body(ReplyGateRequest {
+            agent_dir: temp.path(),
+            platform: "telegram",
+            chat_id: 100,
+            eff_thread_id: 7,
+            reply_to_id: Some(4569),
+            current_turn_id: 6,
+            root_session_id: "S",
+            raw: raw_reply(Some("Сравни по времени в море"), false),
+            reply_to_had_voice_markers: false,
+        })
         .await
         .unwrap();
 
@@ -5949,17 +5964,17 @@ esac
         let temp = tempfile::tempdir().unwrap();
         let text = "a".repeat(super::super::reply_context::REPLY_BODY_INLINE_MAX + 1);
 
-        let body = gate_reply_to_body(
-            temp.path(),
-            "telegram",
-            100,
-            7,
-            Some(9123),
-            6,
-            "S",
-            raw_reply(Some(&text), false),
-            false,
-        )
+        let body = gate_reply_to_body(ReplyGateRequest {
+            agent_dir: temp.path(),
+            platform: "telegram",
+            chat_id: 100,
+            eff_thread_id: 7,
+            reply_to_id: Some(9123),
+            current_turn_id: 6,
+            root_session_id: "S",
+            raw: raw_reply(Some(&text), false),
+            reply_to_had_voice_markers: false,
+        })
         .await
         .unwrap();
 
@@ -5977,17 +5992,17 @@ esac
         let text = "a".repeat(super::super::reply_context::REPLY_BODY_INLINE_MAX + 1);
         archive_user_reply(temp.path(), 9124, &text).await;
 
-        let body = gate_reply_to_body(
-            temp.path(),
-            "telegram",
-            100,
-            7,
-            Some(9124),
-            6,
-            "S",
-            raw_reply(Some(&text), false),
-            false,
-        )
+        let body = gate_reply_to_body(ReplyGateRequest {
+            agent_dir: temp.path(),
+            platform: "telegram",
+            chat_id: 100,
+            eff_thread_id: 7,
+            reply_to_id: Some(9124),
+            current_turn_id: 6,
+            root_session_id: "S",
+            raw: raw_reply(Some(&text), false),
+            reply_to_had_voice_markers: false,
+        })
         .await
         .unwrap();
 
@@ -6009,17 +6024,17 @@ esac
         let text = "voice transcript ".repeat(40);
         archive_user_reply(temp.path(), 9125, "[voice message]").await;
 
-        let body = gate_reply_to_body(
-            temp.path(),
-            "telegram",
-            100,
-            7,
-            Some(9125),
-            6,
-            "S",
-            raw_reply(Some(&text), false),
-            true,
-        )
+        let body = gate_reply_to_body(ReplyGateRequest {
+            agent_dir: temp.path(),
+            platform: "telegram",
+            chat_id: 100,
+            eff_thread_id: 7,
+            reply_to_id: Some(9125),
+            current_turn_id: 6,
+            root_session_id: "S",
+            raw: raw_reply(Some(&text), false),
+            reply_to_had_voice_markers: true,
+        })
         .await
         .unwrap();
 
@@ -6055,17 +6070,17 @@ esac
         .await
         .unwrap();
 
-        let body = gate_reply_to_body(
-            temp.path(),
-            "telegram",
-            100,
-            458,
-            Some(4569),
-            6,
-            "S",
-            raw_reply(Some("Сравни по времени в море"), false),
-            false,
-        )
+        let body = gate_reply_to_body(ReplyGateRequest {
+            agent_dir: temp.path(),
+            platform: "telegram",
+            chat_id: 100,
+            eff_thread_id: 458,
+            reply_to_id: Some(4569),
+            current_turn_id: 6,
+            root_session_id: "S",
+            raw: raw_reply(Some("Сравни по времени в море"), false),
+            reply_to_had_voice_markers: false,
+        })
         .await
         .unwrap();
 

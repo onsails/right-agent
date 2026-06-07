@@ -274,17 +274,21 @@ pub async fn fetch_by_ids(
     conn.query_all(&sql, params, fetched_from_row).await
 }
 
+pub struct RecentRoutedTargetQuery<'a> {
+    pub platform: &'a str,
+    pub chat_id: i64,
+    pub thread_id: i64,
+    pub message_id: i32,
+    pub root_session_id: &'a str,
+    pub window: i64,
+    pub current_turn_id: i64,
+}
+
 pub async fn is_recent_routed_target(
     conn: &Connection,
-    platform: &str,
-    chat_id: i64,
-    thread_id: i64,
-    message_id: i32,
-    root_session_id: &str,
-    window: i64,
-    current_turn_id: i64,
+    query: RecentRoutedTargetQuery<'_>,
 ) -> Result<bool> {
-    let min_turn = current_turn_id.saturating_sub(window);
+    let min_turn = query.current_turn_id.saturating_sub(query.window);
     let rows: Vec<i64> = conn
         .query_all(
             "SELECT 1
@@ -298,11 +302,11 @@ pub async fn is_recent_routed_target(
                AND turn_id > ?
              LIMIT 1",
             crate::params![
-                platform,
-                chat_id,
-                thread_id,
-                i64::from(message_id),
-                root_session_id,
+                query.platform,
+                query.chat_id,
+                query.thread_id,
+                i64::from(query.message_id),
+                query.root_session_id,
                 min_turn
             ],
             |r| r.get(0),
@@ -580,9 +584,20 @@ mod tests {
             .await
             .unwrap();
 
-        let routed = is_recent_routed_target(&conn, "telegram", 100, 7, 50, "S", 30, 5)
-            .await
-            .unwrap();
+        let routed = is_recent_routed_target(
+            &conn,
+            RecentRoutedTargetQuery {
+                platform: "telegram",
+                chat_id: 100,
+                thread_id: 7,
+                message_id: 50,
+                root_session_id: "S",
+                window: 30,
+                current_turn_id: 5,
+            },
+        )
+        .await
+        .unwrap();
 
         assert!(routed);
     }
@@ -594,9 +609,20 @@ mod tests {
             .await
             .unwrap();
 
-        let routed = is_recent_routed_target(&conn, "telegram", 100, 7, 50, "S", 30, 5)
-            .await
-            .unwrap();
+        let routed = is_recent_routed_target(
+            &conn,
+            RecentRoutedTargetQuery {
+                platform: "telegram",
+                chat_id: 100,
+                thread_id: 7,
+                message_id: 50,
+                root_session_id: "S",
+                window: 30,
+                current_turn_id: 5,
+            },
+        )
+        .await
+        .unwrap();
 
         assert!(!routed);
     }
@@ -608,9 +634,20 @@ mod tests {
             .await
             .unwrap();
 
-        let routed = is_recent_routed_target(&conn, "telegram", 100, 7, 50, "S", 30, 40)
-            .await
-            .unwrap();
+        let routed = is_recent_routed_target(
+            &conn,
+            RecentRoutedTargetQuery {
+                platform: "telegram",
+                chat_id: 100,
+                thread_id: 7,
+                message_id: 50,
+                root_session_id: "S",
+                window: 30,
+                current_turn_id: 40,
+            },
+        )
+        .await
+        .unwrap();
 
         assert!(!routed);
     }
@@ -622,9 +659,20 @@ mod tests {
             .await
             .unwrap();
 
-        let routed = is_recent_routed_target(&conn, "telegram", 100, 7, 50, "S", 30, 5)
-            .await
-            .unwrap();
+        let routed = is_recent_routed_target(
+            &conn,
+            RecentRoutedTargetQuery {
+                platform: "telegram",
+                chat_id: 100,
+                thread_id: 7,
+                message_id: 50,
+                root_session_id: "S",
+                window: 30,
+                current_turn_id: 5,
+            },
+        )
+        .await
+        .unwrap();
 
         assert!(!routed);
     }
