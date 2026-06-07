@@ -95,9 +95,13 @@ pub fn provider_is_composed_with_endpoint(
     expected_path: &str,
 ) -> bool {
     rule_for_provider(policy, provider_name).is_some_and(|rule| {
-        rule.endpoints
-            .iter()
-            .any(|endpoint| endpoint.host == expected_host && endpoint.path == expected_path)
+        rule.endpoints.iter().any(|endpoint| {
+            // Hosts are DNS names: compare case-insensitively so a gateway that
+            // normalizes the composed host's case is not mistaken for a stale
+            // (uncomposed) rule. Path stays an exact match — it is a literal
+            // upstream prefix, not case-folded.
+            endpoint.host.eq_ignore_ascii_case(expected_host) && endpoint.path == expected_path
+        })
     })
 }
 

@@ -951,29 +951,12 @@ pub(crate) async fn handle_provider_create(
     if let Err(ensure_err) =
         right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path).await
     {
-        if let Err(rollback_err) =
-            right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
-        {
-            tracing::warn!(
-                provider = %name,
-                original_err = %ensure_err,
-                "provider rollback failed: could not detach provider after policy-load failure: {rollback_err:#}"
-            );
-        }
-        if let Err(rollback_err) =
-            right_openshell::providers::delete_provider(&mut client, &name).await
-        {
-            tracing::warn!(
-                provider = %name,
-                original_err = %ensure_err,
-                "provider rollback failed: could not delete provider after policy-load failure: {rollback_err:#}"
-            );
-        }
-        ensure_provider_policy_loaded_after_rollback(
+        rollback_attached_provider(
+            &mut client,
             &name,
             &sandbox_name,
             &policy_path,
-            format!("{ensure_err:#}"),
+            &format!("{ensure_err:#}"),
             "policy-load failure",
         )
         .await;
@@ -986,29 +969,12 @@ pub(crate) async fn handle_provider_create(
         right_openshell::openshell::wait_for_provider_composed(&mut client, &sandbox_name, &name)
             .await
     {
-        if let Err(rollback_err) =
-            right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
-        {
-            tracing::warn!(
-                provider = %name,
-                original_err = %compose_err,
-                "provider rollback failed: could not detach provider after composition failure: {rollback_err:#}"
-            );
-        }
-        if let Err(rollback_err) =
-            right_openshell::providers::delete_provider(&mut client, &name).await
-        {
-            tracing::warn!(
-                provider = %name,
-                original_err = %compose_err,
-                "provider rollback failed: could not delete provider after composition failure: {rollback_err:#}"
-            );
-        }
-        ensure_provider_policy_loaded_after_rollback(
+        rollback_attached_provider(
+            &mut client,
             &name,
             &sandbox_name,
             &policy_path,
-            format!("{compose_err:#}"),
+            &format!("{compose_err:#}"),
             "composition not confirmed",
         )
         .await;
@@ -1022,29 +988,12 @@ pub(crate) async fn handle_provider_create(
         generic: None,
     };
     if let Err(e) = append_provider_to_yaml(&state.agents_dir, &req.agent, &entry) {
-        if let Err(rollback_err) =
-            right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
-        {
-            tracing::warn!(
-                provider = %name,
-                original_err = %e,
-                "provider rollback failed: could not detach provider after yaml-write failure: {rollback_err:#}"
-            );
-        }
-        if let Err(rollback_err) =
-            right_openshell::providers::delete_provider(&mut client, &name).await
-        {
-            tracing::warn!(
-                provider = %name,
-                original_err = %e,
-                "provider rollback failed: could not delete provider after yaml-write failure: {rollback_err:#}"
-            );
-        }
-        ensure_provider_policy_loaded_after_rollback(
+        rollback_attached_provider(
+            &mut client,
             &name,
             &sandbox_name,
             &policy_path,
-            format!("{e:#}"),
+            &format!("{e:#}"),
             "yaml-write failure",
         )
         .await;
@@ -1370,6 +1319,50 @@ async fn ensure_provider_policy_loaded_after_rollback(
     }
 }
 
+/// Best-effort rollback of a provider that was already attached to the sandbox
+/// before a later create step failed: detach, delete, then reload composition so
+/// the active policy no longer references it. Each step is best-effort and
+/// logged; the caller still returns the original error. The authored generic
+/// profile is intentionally left for reconcile to refresh (see
+/// `create_generic_provider`).
+async fn rollback_attached_provider(
+    client: &mut OpenShellClient,
+    provider_name: &str,
+    sandbox_name: &str,
+    policy_path: &std::path::Path,
+    original_err: &str,
+    rollback_reason: &str,
+) {
+    if let Err(rollback_err) =
+        right_openshell::providers::detach_from_sandbox(client, sandbox_name, provider_name).await
+    {
+        tracing::warn!(
+            provider = %provider_name,
+            original_err,
+            rollback_reason,
+            "provider rollback failed: could not detach provider: {rollback_err:#}"
+        );
+    }
+    if let Err(rollback_err) =
+        right_openshell::providers::delete_provider(client, provider_name).await
+    {
+        tracing::warn!(
+            provider = %provider_name,
+            original_err,
+            rollback_reason,
+            "provider rollback failed: could not delete provider: {rollback_err:#}"
+        );
+    }
+    ensure_provider_policy_loaded_after_rollback(
+        provider_name,
+        sandbox_name,
+        policy_path,
+        original_err.to_string(),
+        rollback_reason,
+    )
+    .await;
+}
+
 async fn reensure_generic_profile_after_rollback(
     client: &mut OpenShellClient,
     provider_name: &str,
@@ -1467,29 +1460,12 @@ async fn create_generic_provider(
     if let Err(ensure_err) =
         right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path).await
     {
-        if let Err(rollback_err) =
-            right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
-        {
-            tracing::warn!(
-                provider = %name,
-                original_err = %ensure_err,
-                "provider rollback failed: could not detach provider after policy-load failure: {rollback_err:#}"
-            );
-        }
-        if let Err(rollback_err) =
-            right_openshell::providers::delete_provider(&mut client, &name).await
-        {
-            tracing::warn!(
-                provider = %name,
-                original_err = %ensure_err,
-                "provider rollback failed: could not delete provider after policy-load failure: {rollback_err:#}"
-            );
-        }
-        ensure_provider_policy_loaded_after_rollback(
+        rollback_attached_provider(
+            &mut client,
             &name,
             &sandbox_name,
             &policy_path,
-            format!("{ensure_err:#}"),
+            &format!("{ensure_err:#}"),
             "policy-load failure",
         )
         .await;
@@ -1507,29 +1483,12 @@ async fn create_generic_provider(
     )
     .await
     {
-        if let Err(rollback_err) =
-            right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
-        {
-            tracing::warn!(
-                provider = %name,
-                original_err = %compose_err,
-                "provider rollback failed: could not detach provider after composition failure: {rollback_err:#}"
-            );
-        }
-        if let Err(rollback_err) =
-            right_openshell::providers::delete_provider(&mut client, &name).await
-        {
-            tracing::warn!(
-                provider = %name,
-                original_err = %compose_err,
-                "provider rollback failed: could not delete provider after composition failure: {rollback_err:#}"
-            );
-        }
-        ensure_provider_policy_loaded_after_rollback(
+        rollback_attached_provider(
+            &mut client,
             &name,
             &sandbox_name,
             &policy_path,
-            format!("{compose_err:#}"),
+            &format!("{compose_err:#}"),
             "composition not confirmed",
         )
         .await;
@@ -1549,29 +1508,12 @@ async fn create_generic_provider(
         generic: Some(generic_entry.clone()),
     };
     if let Err(e) = append_provider_to_yaml(&state.agents_dir, &req.agent, &entry) {
-        if let Err(rollback_err) =
-            right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
-        {
-            tracing::warn!(
-                provider = %name,
-                original_err = %e,
-                "provider rollback failed: could not detach provider after yaml-write failure: {rollback_err:#}"
-            );
-        }
-        if let Err(rollback_err) =
-            right_openshell::providers::delete_provider(&mut client, &name).await
-        {
-            tracing::warn!(
-                provider = %name,
-                original_err = %e,
-                "provider rollback failed: could not delete provider after yaml-write failure: {rollback_err:#}"
-            );
-        }
-        ensure_provider_policy_loaded_after_rollback(
+        rollback_attached_provider(
+            &mut client,
             &name,
             &sandbox_name,
             &policy_path,
-            format!("{e:#}"),
+            &format!("{e:#}"),
             "yaml-write failure",
         )
         .await;
@@ -1924,6 +1866,26 @@ pub(crate) async fn handle_provider_rotate(
         .await
         .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
 
+    // Rotation changes only the credential, not composition. Report the live
+    // composed state so the dashboard doesn't flash "Unknown" after a rotate;
+    // degrade to None only when the active policy can't be read.
+    let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
+    let composed =
+        match right_openshell::openshell::get_active_policy(&mut client, &sandbox_name).await {
+            Ok(policy) => policy
+                .as_ref()
+                .map(|policy| provider_entry_is_composed(policy, entry)),
+            Err(e) => {
+                tracing::warn!(
+                    agent = %req.agent,
+                    sandbox = %sandbox_name,
+                    error = %format_args!("{e:#}"),
+                    "provider composition state unavailable after rotate: active policy read failed"
+                );
+                None
+            }
+        };
+
     Ok(axum::Json(ProviderView {
         name: req.name,
         type_: view_type,
@@ -1932,7 +1894,7 @@ pub(crate) async fn handle_provider_rotate(
         generic: entry.generic.clone(),
         updated_at: Some(chrono::Utc::now()),
         status: ProviderStatus::Healthy,
-        composed: None,
+        composed,
     }))
 }
 

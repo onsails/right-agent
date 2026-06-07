@@ -218,6 +218,77 @@ fn provider_policy_reload_needed(
         })
 }
 
+/// Reconcile attached providers against `agent.yaml` and confirm composition.
+///
+/// Every step here is gateway-RPC interaction — generic-profile ensure, gateway
+/// attach/detach, the `policy set --wait` reload, and active-policy composition
+/// polling. The caller MUST degrade any error to a recoverable
+/// `Ok(Err(diagnosis))`, never a hard `Err`: a transient gateway blip or slow
+/// composition on a cold gateway is self-healing, and a hard `Err` from
+/// `bring_up_sandbox` lands on `recovery_step`'s `Err => Break` arm and
+/// permanently stops auto-recovery (see the contract on [`bring_up_sandbox`]).
+async fn reconcile_and_confirm_providers(
+    client: &mut right_openshell::managed_profiles::OpenShellGrpcClient,
+    agent: &str,
+    sandbox: &str,
+    policy_path: &std::path::Path,
+    config: &AgentConfig,
+    sandbox_cfg: &right_agent_config::SandboxConfig,
+) -> miette::Result<()> {
+    let profile_outcomes =
+        ensure_generic_provider_profiles_for_config(client, agent, config).await?;
+    let declared: Vec<String> = sandbox_cfg
+        .providers
+        .iter()
+        .map(|p| p.name.clone())
+        .collect();
+    let report =
+        right_openshell::providers::reconcile_for_sandbox(client, sandbox, agent, &declared)
+            .await
+            .map_err(|e| miette::miette!("provider reconcile failed: {e:#}"))?;
+    tracing::info!(
+        agent = %agent,
+        attached = ?report.attached,
+        detached = ?report.detached,
+        missing = ?report.missing,
+        "provider reconcile complete"
+    );
+    if !report.errors.is_empty() {
+        return Err(miette::miette!(
+            "provider reconcile had per-provider errors: {:?}",
+            report.errors
+        ));
+    }
+    if provider_policy_reload_needed(&declared, &report, &profile_outcomes) {
+        right_openshell::openshell::ensure_provider_policy_loaded(sandbox, policy_path)
+            .await
+            .map_err(|e| {
+                miette::miette!(
+                    "provider-profile composition reload failed during startup reconcile: {e:#}"
+                )
+            })?;
+        for entry in sandbox_cfg
+            .providers
+            .iter()
+            .filter(|entry| !report.missing.contains(&entry.name))
+        {
+            wait_for_provider_entry_composed(client, sandbox, agent, entry)
+                .await
+                .map_err(|e| {
+                    miette::miette!(
+                        "provider composition not confirmed during startup reconcile: {e:#}"
+                    )
+                })?;
+        }
+        tracing::info!(
+            agent = %agent,
+            sandbox = %sandbox,
+            "provider-profile composition loaded"
+        );
+    }
+    Ok(())
+}
+
 /// Bring the OpenShell sandbox backend up for an agent.
 ///
 /// Returns:
@@ -392,62 +463,30 @@ pub(crate) async fn bring_up_sandbox(
     // Reconcile attached providers with the `sandbox.providers` list in agent.yaml.
     // Attaches declared providers that exist on the gateway but are not yet attached,
     // and detaches stale `<agent>-*` entries that were removed from the config.
-    if let Some(sandbox_cfg) = config.sandbox.as_ref() {
-        let profile_outcomes =
-            ensure_generic_provider_profiles_for_config(&mut grpc_client, agent, config).await?;
-        let declared: Vec<String> = sandbox_cfg
-            .providers
-            .iter()
-            .map(|p| p.name.clone())
-            .collect();
-        let report = right_openshell::providers::reconcile_for_sandbox(
+    if let Some(sandbox_cfg) = config.sandbox.as_ref()
+        && let Err(e) = reconcile_and_confirm_providers(
             &mut grpc_client,
-            &sandbox,
             agent,
-            &declared,
+            &sandbox,
+            &policy_path,
+            config,
+            sandbox_cfg,
         )
         .await
-        .map_err(|e| miette::miette!("provider reconcile failed: {e:#}"))?;
-        tracing::info!(
+    {
+        // Provider reconcile + composition is all gateway-RPC work: a transient
+        // failure or slow composition on a cold gateway is recoverable, not a
+        // hard config error. Degrade like the phase/drift checks above so
+        // `recovery_step` retries with backoff instead of hitting its
+        // `Err => Break` arm and permanently stopping auto-recovery.
+        tracing::warn!(
             agent = %agent,
-            attached = ?report.attached,
-            detached = ?report.detached,
-            missing = ?report.missing,
-            "provider reconcile complete"
+            "provider reconcile/composition not confirmed; staying degraded and retrying: {e:#}"
         );
-        if !report.errors.is_empty() {
-            return Err(miette::miette!(
-                "provider reconcile had per-provider errors: {:?}",
-                report.errors
-            ));
+        return Ok(Err(GatewayCause::SandboxNotReady {
+            sandbox: sandbox.clone(),
         }
-        if provider_policy_reload_needed(&declared, &report, &profile_outcomes) {
-            right_openshell::openshell::ensure_provider_policy_loaded(&sandbox, &policy_path)
-                .await
-                .map_err(|e| {
-                    miette::miette!(
-                        "provider-profile composition reload failed during startup reconcile: {e:#}"
-                    )
-                })?;
-            for entry in sandbox_cfg
-                .providers
-                .iter()
-                .filter(|entry| !report.missing.contains(&entry.name))
-            {
-                wait_for_provider_entry_composed(&mut grpc_client, &sandbox, agent, entry)
-                    .await
-                    .map_err(|e| {
-                        miette::miette!(
-                            "provider composition not confirmed during startup reconcile: {e:#}"
-                        )
-                    })?;
-            }
-            tracing::info!(
-                agent = %agent,
-                sandbox = %sandbox,
-                "provider-profile composition loaded"
-            );
-        }
+        .diagnose()));
     }
 
     // Create inbox/outbox inside sandbox for attachment handling.

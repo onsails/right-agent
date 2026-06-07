@@ -250,6 +250,14 @@ fn provider_is_composed_with_endpoint_matches_host_and_path() {
             "/v1"
         )
     );
+    assert!(
+        crate::provider_capabilities::provider_is_composed_with_endpoint(
+            &policy,
+            "right-example",
+            "API.EXAMPLE.COM",
+            "/v1"
+        )
+    );
 }
 
 #[test]
