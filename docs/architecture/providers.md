@@ -8,9 +8,13 @@
 
 Providers are typed credential bundles stored on the NVIDIA OpenShell
 gateway and attached to sandboxed agents. Each provider has a
-gateway-unique name, a type slug (`anthropic`, `openai`, `github`,
-`gitlab`, `nvidia`, `codex`, `copilot`, `opencode`, or `generic`), a
-credentials map, and an optional non-secret config map. Right Agent
+gateway-unique name, a gateway type, a credentials map, and an optional
+non-secret config map. Non-generic providers use explicit profile slugs,
+including upstream slugs such as `anthropic`, `openai`, or `gitlab` and
+Right-managed slugs such as `right-github`; generic providers are
+displayed as `generic` in Right's dashboard and `agent.yaml`, but the
+gateway provider `type` is the Right-authored profile ID
+(`right-provider-*`). Right Agent
 exposes provider management exclusively through the Telegram Mini App
 dashboard route `/providers`; credentials never enter `agent.yaml`,
 backups, or logs on the host.
@@ -153,7 +157,14 @@ For each entry in `agent.yaml::sandbox::providers`:
    - **NotFound** → mark the entry as `Status::Missing` (a "ghost"
      provider). Do not auto-heal: Right does not have the credential
      bytes. The dashboard surfaces these with a *Resolve* action.
-2. If not currently attached to the sandbox, call
+2. If the provider exists with the legacy generic gateway type
+   `type = "generic"`, call `UpdateProvider` with
+   `type = right_openshell::managed_profiles::generic_provider_profile_id(name)`,
+   empty credentials, and empty config. This preserves the gateway-held
+   credential bytes while moving already-deployed agents to the current
+   provider-profile shape. Built-in providers and already-migrated generic
+   providers are left unchanged.
+3. If not currently attached to the sandbox, call
    `Sandbox.provider.attach`.
 
 Then for each provider currently attached to the sandbox whose name
@@ -161,7 +172,8 @@ starts with `<agent>-` but is absent from `agent.yaml`: call
 `Sandbox.provider.detach`.
 
 The reconciler returns a `ReconcileReport { attached, detached,
-missing }` per agent which is surfaced to the dashboard.
+repaired, missing, errors }` per agent which is surfaced in logs and to
+callers.
 
 ## Policy interaction
 
