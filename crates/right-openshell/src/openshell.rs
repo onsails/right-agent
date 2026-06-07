@@ -2145,19 +2145,29 @@ async fn wait_for_provider_composed_where(
     matches: impl Fn(&crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy) -> bool,
 ) -> miette::Result<()> {
     let deadline = Instant::now() + PROVIDER_COMPOSE_TIMEOUT;
+    // A transient active-policy read error (gateway blip, restart) or a revision
+    // with no policy payload yet (cold gateway) is NOT a composition failure:
+    // composition may still be in flight. Treat both as "not yet composed" and
+    // keep polling until the deadline so a single hiccup cannot abort the wait
+    // and trigger a rollback / recovery break on an otherwise-healthy provider.
+    // The last read error is kept for the timeout diagnosis.
+    let mut last_read_err: Option<miette::Report> = None;
     loop {
-        let policy = get_active_policy(client, sandbox_name)
-            .await?
-            .unwrap_or_default();
-        if matches(&policy) {
-            return Ok(());
+        match get_active_policy(client, sandbox_name).await {
+            Ok(Some(policy)) if matches(&policy) => return Ok(()),
+            Ok(_) => {}
+            Err(e) => last_read_err = Some(e),
         }
         if Instant::now() >= deadline {
-            return Err(miette::miette!(
+            let mut msg = format!(
                 "provider {provider_name} attached but not composed into sandbox {sandbox_name} \
                  with {expected} within {PROVIDER_COMPOSE_TIMEOUT:?}: providers_v2_enabled may be \
                  off on the gateway or provider-profile composition may be stale"
-            ));
+            );
+            if let Some(e) = last_read_err {
+                msg.push_str(&format!(" (last active-policy read error: {e:#})"));
+            }
+            return Err(miette::miette!(msg));
         }
         tokio::time::sleep(PROVIDER_COMPOSE_POLL).await;
     }

@@ -70,6 +70,12 @@ pub(crate) struct MockOpenShell {
     >,
     pub(crate) mock_update_config:
         Option<UnaryMockFn<os_proto::v1::UpdateConfigRequest, os_proto::v1::UpdateConfigResponse>>,
+    pub(crate) mock_get_sandbox_policy_status: Option<
+        UnaryMockFn<
+            os_proto::v1::GetSandboxPolicyStatusRequest,
+            os_proto::v1::GetSandboxPolicyStatusResponse,
+        >,
+    >,
 }
 
 impl MockOpenShell {
@@ -481,9 +487,12 @@ impl OpenShell for MockOpenShell {
 
     async fn get_sandbox_policy_status(
         &self,
-        _: tonic::Request<os_proto::v1::GetSandboxPolicyStatusRequest>,
+        req: tonic::Request<os_proto::v1::GetSandboxPolicyStatusRequest>,
     ) -> Result<tonic::Response<os_proto::v1::GetSandboxPolicyStatusResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("stub"))
+        match &self.mock_get_sandbox_policy_status {
+            Some(f) => f(req.into_inner()).map(tonic::Response::new),
+            None => Err(tonic::Status::unimplemented("stub")),
+        }
     }
 
     async fn list_sandbox_policies(
