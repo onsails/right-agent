@@ -27,7 +27,9 @@ import type {
   SkillsResponse,
   SandboxStatsResponse,
   UsageOverviewResponse,
+  UsageRange,
 } from './types'
+import { DEFAULT_USAGE_RANGE } from './views/usageRanges'
 
 export class DashboardApiError extends Error {
   readonly status: number
@@ -120,8 +122,16 @@ export function browserUsageTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 }
 
-export function usageOverview(timezone: string = browserUsageTimezone()): Promise<UsageOverviewResponse> {
-  const params = new URLSearchParams({ timezone })
+export interface UsageOverviewOptions {
+  timezone?: string
+  range?: UsageRange | string
+}
+
+export function usageOverview(options: UsageOverviewOptions = {}): Promise<UsageOverviewResponse> {
+  const params = new URLSearchParams({
+    timezone: options.timezone ?? browserUsageTimezone(),
+    range: options.range ?? DEFAULT_USAGE_RANGE,
+  })
   return requestJson<UsageOverviewResponse>(`api/v1/usage?${params.toString()}`)
 }
 
