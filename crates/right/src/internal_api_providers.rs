@@ -624,6 +624,65 @@ mod provider_view_tests {
             assert_eq!(json["composed"], composed);
         }
     }
+
+    fn policy_with_provider_endpoint(
+        provider_name: &str,
+        host: &str,
+        path: &str,
+    ) -> right_openshell::openshell_proto::openshell::sandbox::v1::SandboxPolicy {
+        use right_openshell::openshell_proto::openshell::sandbox::v1::{
+            NetworkEndpoint, NetworkPolicyRule,
+        };
+
+        let rule_key = format!("_provider_{}", provider_name.replace('-', "_"));
+        let rule = NetworkPolicyRule {
+            name: rule_key.clone(),
+            endpoints: vec![NetworkEndpoint {
+                host: host.into(),
+                path: path.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut policy =
+            right_openshell::openshell_proto::openshell::sandbox::v1::SandboxPolicy::default();
+        policy.network_policies.insert(rule_key, rule);
+        policy
+    }
+
+    #[test]
+    fn provider_entry_is_composed_uses_rule_presence_for_builtins() {
+        let entry = right_agent_config::ProviderEntry {
+            name: "hostagent-gh".into(),
+            type_: right_agent_config::ProviderType::BuiltIn("right-github".into()),
+            label: None,
+            generic: None,
+        };
+        let policy = policy_with_provider_endpoint("hostagent-gh", "api.github.com", "");
+
+        assert!(provider_entry_is_composed(&policy, &entry));
+    }
+
+    #[test]
+    fn provider_entry_is_composed_rejects_stale_generic_endpoint() {
+        let entry = right_agent_config::ProviderEntry {
+            name: "hostagent-acme".into(),
+            type_: right_agent_config::ProviderType::Generic,
+            label: None,
+            generic: Some(right_agent_config::GenericProvider {
+                env_var: "ACME_TOKEN".into(),
+                header_name: "X-Api-Key".into(),
+                upstream_host: "api.acme.test".into(),
+                upstream_path_prefix: Some("/v1".into()),
+            }),
+        };
+        let policy = policy_with_provider_endpoint("hostagent-acme", "old.acme.test", "/v1");
+
+        assert!(
+            !provider_entry_is_composed(&policy, &entry),
+            "generic list status must not accept a stale pre-update provider rule"
+        );
+    }
 }
 
 /// Load and parse `agent.yaml` for the given agent name from `agents_dir`.
@@ -678,10 +737,7 @@ pub(crate) async fn handle_provider_list(
         };
     let mut views = Vec::with_capacity(sandbox.providers.len());
     for entry in &sandbox.providers {
-        let composed = right_openshell::provider_capabilities::provider_is_composed(
-            &active_policy,
-            &entry.name,
-        );
+        let composed = provider_entry_is_composed(&active_policy, entry);
         let (mut status, updated_at) =
             match right_openshell::providers::get_provider(&mut client, &entry.name).await {
                 Ok(p) => (ProviderStatus::Healthy, p.updated_at),
@@ -1051,6 +1107,27 @@ fn provider_view_type(entry: &right_agent_config::ProviderEntry) -> String {
     match &entry.type_ {
         right_agent_config::ProviderType::Generic => "generic".to_string(),
         right_agent_config::ProviderType::BuiltIn(slug) => slug.clone(),
+    }
+}
+
+fn provider_entry_is_composed(
+    policy: &right_openshell::openshell_proto::openshell::sandbox::v1::SandboxPolicy,
+    entry: &right_agent_config::ProviderEntry,
+) -> bool {
+    match &entry.type_ {
+        right_agent_config::ProviderType::BuiltIn(_) => {
+            right_openshell::provider_capabilities::provider_is_composed(policy, &entry.name)
+        }
+        right_agent_config::ProviderType::Generic => {
+            entry.generic.as_ref().is_some_and(|generic| {
+                right_openshell::provider_capabilities::provider_is_composed_with_endpoint(
+                    policy,
+                    &entry.name,
+                    &generic.upstream_host,
+                    generic.upstream_path_prefix.as_deref().unwrap_or(""),
+                )
+            })
+        }
     }
 }
 

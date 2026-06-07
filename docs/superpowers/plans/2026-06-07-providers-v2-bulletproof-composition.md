@@ -4,7 +4,7 @@
 
 **Goal:** Guarantee `providers_v2_enabled` on every provider-attach path and confirm composition success by reading the active sandbox policy, so the "flag off / composition silently skipped → upstream 401" class fails loudly instead of shipping.
 
-**Architecture:** Composition stays the only mechanism (folding is NOT restored). `ensure_v2_enabled` is invoked at the two real attach funnels (`reconcile_for_sandbox` in `right-openshell`, and the dashboard create/config-update handlers in `right`). After each composition reload, a new `wait_for_provider_composed` polls `get_active_policy` until the composed `_provider_<name>` rule appears — this both fixes the fragile `policy set --wait` "loaded signal" and acts as a loud backstop for any future path that forgets to enable v2.
+**Architecture:** Composition stays the only mechanism (folding is NOT restored). `ensure_v2_enabled` is invoked at the two real attach funnels (`reconcile_for_sandbox` in `right-openshell`, and the dashboard create/config-update handlers in `right`). After each composition reload, `wait_for_provider_composed*` polls `get_active_policy` until the composed `_provider_<name>` rule appears; generic paths use the endpoint-aware variant that also matches the expected upstream host/path, so stale pre-update rules cannot pass. This fixes the fragile `policy set --wait` "loaded signal" and acts as a loud backstop for any future path that forgets to enable v2.
 
 **Tech Stack:** Rust (edition 2024), tonic gRPC (`OpenShellClient`), tokio, thiserror/miette, axum (dashboard internal API). Tests: `devenv shell -- cargo test -p <crate>`; live tests are `#[ignore = "ci-openshell: ..."]` with `ci_openshell_` prefix.
 
@@ -580,10 +580,10 @@ In the `### Providers` section of `ARCHITECTURE.md`, add (keep it to the rule �
 Every provider-attach path MUST guarantee `providers_v2_enabled` (via
 `right_openshell::providers::ensure_v2_enabled`): `reconcile_for_sandbox`
 (supervisor) and the dashboard create/config-update handlers. Composition
-success MUST be confirmed by `openshell::wait_for_provider_composed` (reads the
-composed `_provider_<name>` rule from the active policy), never inferred from the
-`policy set --wait` return. Covers built-in and generic providers — both ride
-composition.
+success MUST be confirmed by `openshell::wait_for_provider_composed*` (reads the
+composed `_provider_<name>` rule from the active policy; generic paths also
+match expected upstream host/path), never inferred from the `policy set --wait`
+return. Covers built-in and generic providers — both ride composition.
 ```
 
 - [ ] **Step 2: Update `docs/architecture/providers.md`**
