@@ -110,10 +110,16 @@ once keeps working — which is why missed enablement tends to surface only
 on fresh gateways.
 
 `openshell::wait_for_provider_composed` is the success signal after the
-reload. It polls the sandbox's active policy and requires the composed
-`_provider_<name>` rule to appear. If a future attach path misses the v2
-enable step, this wait times out and fails loudly instead of silently
-letting users discover upstream 401/CONNECT failures later.
+reload. It polls the sandbox's **effective** policy (`get_effective_policy`,
+backed by `GetSandboxConfig` — the policy the in-sandbox supervisor pulls)
+and requires the composed `_provider_<name>` rule to appear. This is
+deliberately *not* the stored policy revision (`get_active_policy` /
+`GetSandboxPolicyStatus`): authored generic provider rules are merged only
+into the effective policy and never appear in the stored revision, so reading
+the stored revision would time out for every generic provider even though
+substitution works. If a future attach path misses the v2 enable step, this
+wait times out and fails loudly instead of silently letting users discover
+upstream 401/CONNECT failures later.
 Generic provider create/config-update and supervisor reconciles use the
 stricter endpoint-aware variant, requiring the composed rule to contain the
 expected upstream host/path so a stale pre-update rule cannot pass.
@@ -178,9 +184,9 @@ policy_path)`. That helper reapplies the current base `policy.yaml` with
 `openshell policy set --wait`; it does not write provider stanzas. The
 reload is required because OpenShell provider-profile composition is not
 fully loaded by attach/import alone on the observed v0.0.56 behavior, but
-composition is confirmed only by active-policy polling for the composed
-provider rule. This scope covers built-in and generic providers; both rely
-on OpenShell profile composition.
+composition is confirmed only by effective-policy polling (`GetSandboxConfig`)
+for the composed provider rule. This scope covers built-in and generic
+providers; both rely on OpenShell profile composition.
 Built-in creates skip profile authoring but still attach, reload
 composition, and wait for their composed provider rule before `agent.yaml`
 is updated.
