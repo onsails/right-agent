@@ -834,10 +834,17 @@ pub(crate) async fn handle_provider_create(
         return create_generic_provider(state, req, name, env_var).await;
     }
 
-    // Built-in flow: OpenShell manages endpoints; no policy mutation needed.
+    // Built-in flow: OpenShell owns the profile endpoints, but Right must still
+    // trigger and confirm provider-profile composition after attachment.
     let mut client = open_openshell_client().await?;
     ensure_v2_for_mutation(&mut client).await?;
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
+    let policy_path = state.agents_dir.join(&req.agent).join(
+        sandbox
+            .policy_file
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("policy.yaml")),
+    );
 
     let mut creds = std::collections::HashMap::new();
     creds.insert(env_var.clone(), req.credential.expose_secret().to_string());
@@ -865,6 +872,73 @@ pub(crate) async fn handle_provider_create(
         return Err(ProviderApiError::Gateway(format!("{attach_err:#}")));
     }
 
+    if let Err(ensure_err) =
+        right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path).await
+    {
+        if let Err(rollback_err) =
+            right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %ensure_err,
+                "provider rollback failed: could not detach provider after policy-load failure: {rollback_err:#}"
+            );
+        }
+        if let Err(rollback_err) =
+            right_openshell::providers::delete_provider(&mut client, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %ensure_err,
+                "provider rollback failed: could not delete provider after policy-load failure: {rollback_err:#}"
+            );
+        }
+        ensure_provider_policy_loaded_after_rollback(
+            &name,
+            &sandbox_name,
+            &policy_path,
+            format!("{ensure_err:#}"),
+            "policy-load failure",
+        )
+        .await;
+        return Err(ProviderApiError::Gateway(format!(
+            "policy load: {ensure_err:#}"
+        )));
+    }
+
+    if let Err(compose_err) =
+        right_openshell::openshell::wait_for_provider_composed(&mut client, &sandbox_name, &name)
+            .await
+    {
+        if let Err(rollback_err) =
+            right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %compose_err,
+                "provider rollback failed: could not detach provider after composition failure: {rollback_err:#}"
+            );
+        }
+        if let Err(rollback_err) =
+            right_openshell::providers::delete_provider(&mut client, &name).await
+        {
+            tracing::warn!(
+                provider = %name,
+                original_err = %compose_err,
+                "provider rollback failed: could not delete provider after composition failure: {rollback_err:#}"
+            );
+        }
+        ensure_provider_policy_loaded_after_rollback(
+            &name,
+            &sandbox_name,
+            &policy_path,
+            format!("{compose_err:#}"),
+            "composition not confirmed",
+        )
+        .await;
+        return Err(ProviderApiError::Gateway(format!("{compose_err:#}")));
+    }
+
     let entry = right_agent_config::ProviderEntry {
         name: name.clone(),
         type_: right_agent_config::ProviderType::BuiltIn(req.type_.clone()),
@@ -890,6 +964,14 @@ pub(crate) async fn handle_provider_create(
                 "provider rollback failed: could not delete provider after yaml-write failure: {rollback_err:#}"
             );
         }
+        ensure_provider_policy_loaded_after_rollback(
+            &name,
+            &sandbox_name,
+            &policy_path,
+            format!("{e:#}"),
+            "yaml-write failure",
+        )
+        .await;
         return Err(ProviderApiError::AgentYamlWrite(format!("{e:#}")));
     }
 
@@ -901,7 +983,7 @@ pub(crate) async fn handle_provider_create(
         generic: None,
         updated_at: None,
         status: ProviderStatus::Healthy,
-        composed: false,
+        composed: true,
     }))
 }
 
@@ -2572,6 +2654,33 @@ mod sandbox_mode_tests {
             status,
             StatusCode::BAD_GATEWAY,
             "expected 502 once collision check is tolerant; got {status} body={json}"
+        );
+    }
+
+    #[test]
+    fn built_in_create_confirms_composition_before_yaml_write() {
+        // The built-in dashboard create path opens the real gateway client and
+        // shell policy loader directly, so unit tests cannot drive the happy
+        // path without a live OpenShell gateway. Pin the load-bearing ordering:
+        // after attach and before agent.yaml is updated, built-ins must trigger
+        // policy reload and confirm the composed provider rule from the active
+        // policy just like generic providers do.
+        let src = include_str!("internal_api_providers.rs");
+        let start = src
+            .find("// Built-in flow:")
+            .expect("built-in provider create flow comment must exist");
+        let end = src[start..]
+            .find("let entry = right_agent_config::ProviderEntry")
+            .expect("built-in provider entry construction must exist")
+            + start;
+        let built_in_flow = &src[start..end];
+        assert!(
+            built_in_flow.contains("ensure_provider_policy_loaded"),
+            "built-in create must reload provider-profile composition before writing agent.yaml"
+        );
+        assert!(
+            built_in_flow.contains("wait_for_provider_composed"),
+            "built-in create must confirm composition from active policy before writing agent.yaml"
         );
     }
 

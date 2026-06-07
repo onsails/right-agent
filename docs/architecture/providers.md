@@ -178,6 +178,9 @@ fully loaded by attach/import alone on the observed v0.0.56 behavior, but
 composition is confirmed only by active-policy polling for the composed
 provider rule. This scope covers built-in and generic providers; both rely
 on OpenShell profile composition.
+Built-in creates skip profile authoring but still attach, reload
+composition, and wait for their composed provider rule before `agent.yaml`
+is updated.
 
 On remove, Right detaches and deletes the gateway provider, removes the
 `agent.yaml` row, and reloads provider-profile composition with
@@ -204,11 +207,12 @@ retry.
 
 **Create.** Generic providers run: author/import profile →
 `CreateProvider` with the profile ID as gateway type →
-`Sandbox.provider.attach` → `ensure_provider_policy_loaded` → write
-`agent.yaml`. Built-in providers skip the profile-authoring step. Any
-failure triggers ordered rollback: a failed `attach` removes the freshly
-created provider; a failed `agent.yaml` write triggers best-effort
-detach + delete.
+`Sandbox.provider.attach` → `ensure_provider_policy_loaded` →
+`wait_for_provider_composed` → write `agent.yaml`. Built-in providers skip
+only the profile-authoring step. Any failure triggers ordered rollback: a
+failed `attach` removes the freshly created provider; a failed
+policy-load, composition-confirmation, or `agent.yaml` write triggers
+best-effort detach + delete, then a rollback reload.
 
 **Rotate.** `UpdateProvider` only. No sandbox restart. The gateway
 issues a new placeholder version; the next outbound request from the
