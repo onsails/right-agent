@@ -19,6 +19,7 @@ async fn insert_usage(
         model,
         (10, 20, 5, 40),
         (10, 20, 5, 40),
+        "none",
     )
     .await;
 }
@@ -32,6 +33,7 @@ async fn insert_usage_with_tokens(
     model: &str,
     row_tokens: (i64, i64, i64, i64),
     model_tokens: (u64, u64, u64, u64),
+    api_key_source: &str,
 ) {
     let (row_input_tokens, row_output_tokens, row_cache_creation_tokens, row_cache_read_tokens) =
         row_tokens;
@@ -50,7 +52,7 @@ async fn insert_usage_with_tokens(
             total_cost_usd, num_turns, input_tokens, output_tokens,
             cache_creation_tokens, cache_read_tokens, web_search_requests,
             web_fetch_requests, model_usage_json, api_key_source
-         ) VALUES (?1, ?2, 1, 0, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, 1, 2, ?10, 'none')",
+         ) VALUES (?1, ?2, 1, 0, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, 1, 2, ?10, ?11)",
         params![
             ts,
             source,
@@ -61,7 +63,8 @@ async fn insert_usage_with_tokens(
             row_output_tokens,
             row_cache_creation_tokens,
             row_cache_read_tokens,
-            model_json
+            model_json,
+            api_key_source
         ],
     )
     .await
@@ -99,6 +102,7 @@ async fn usage_overview_groups_cron_jobs_for_selected_range() {
         "sonnet",
         (10, 20, 5, 40),
         (1, 2, 3, 4),
+        "none",
     )
     .await;
     insert_usage_with_tokens(
@@ -110,6 +114,7 @@ async fn usage_overview_groups_cron_jobs_for_selected_range() {
         "sonnet",
         (10, 20, 5, 40),
         (11, 22, 33, 44),
+        "workspace_api_key",
     )
     .await;
     insert_usage(
@@ -173,6 +178,8 @@ async fn usage_overview_groups_cron_jobs_for_selected_range() {
     assert!((cron_cost - 0.70).abs() < 1e-9);
     let daily = &response.cron_jobs[0];
     assert!((daily.cost_usd - 0.50).abs() < 1e-9);
+    assert!((daily.subscription_cost_usd - 0.10).abs() < 1e-9);
+    assert!((daily.api_cost_usd - 0.40).abs() < 1e-9);
     assert_eq!(daily.invocations, 2);
     assert_eq!(daily.turns, 2);
     assert_eq!(daily.input_tokens, 20);
