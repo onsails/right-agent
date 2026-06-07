@@ -2080,6 +2080,27 @@ pub async fn get_active_policy(
     Ok(revision.policy)
 }
 
+/// Fetch the EFFECTIVE composed policy for a sandbox via `GetSandboxConfig`.
+///
+/// Unlike [`get_active_policy`] (`GetSandboxPolicyStatus`, which returns the
+/// submitted base policy revision), this returns the policy the in-sandbox
+/// supervisor actually pulls — including the composed `_provider_<name>` rules
+/// merged from attached provider profiles. Authored generic provider rules only
+/// ever appear here, never in the stored revision, so composition detection MUST
+/// use this. Returns `None` when the response carries no policy payload.
+pub async fn get_effective_policy(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+) -> miette::Result<Option<crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy>> {
+    use crate::openshell_proto::openshell::sandbox::v1::GetSandboxConfigRequest;
+    let sandbox_id = resolve_sandbox_id(client, sandbox_name).await?;
+    let resp = client
+        .get_sandbox_config(GetSandboxConfigRequest { sandbox_id })
+        .await
+        .map_err(|e| miette::miette!("GetSandboxConfig RPC failed for '{sandbox_name}': {e:#}"))?;
+    Ok(resp.into_inner().policy)
+}
+
 /// Poll interval while waiting for provider-profile composition to appear.
 const PROVIDER_COMPOSE_POLL: Duration = Duration::from_millis(250);
 /// Upper bound for composition to appear after a policy reload. Composition is
@@ -2090,8 +2111,11 @@ const PROVIDER_COMPOSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Wait until `provider_name` is composed into `sandbox_name`'s active policy.
 ///
 /// This is the success signal for provider composition: it reads the composed
-/// `_provider_<name>` rule directly via `get_active_policy`, rather than trusting
-/// the `policy set --wait` return (which no-ops on an unchanged policy hash).
+/// `_provider_<name>` rule directly from the effective policy via
+/// `get_effective_policy` (`GetSandboxConfig`), rather than trusting the
+/// `policy set --wait` return (which no-ops on an unchanged policy hash). The
+/// stored revision (`get_active_policy`) never contains authored generic
+/// provider rules, so it cannot be used here.
 /// A timeout here means the provider attached but never composed: the loud
 /// signal that `providers_v2_enabled` is off on the gateway, or that composition
 /// otherwise failed. Errors propagate (FAIL FAST).
@@ -2153,7 +2177,7 @@ async fn wait_for_provider_composed_where(
     // The last read error is kept for the timeout diagnosis.
     let mut last_read_err: Option<miette::Report> = None;
     loop {
-        match get_active_policy(client, sandbox_name).await {
+        match get_effective_policy(client, sandbox_name).await {
             Ok(Some(policy)) if matches(&policy) => return Ok(()),
             Ok(_) => {}
             Err(e) => last_read_err = Some(e),

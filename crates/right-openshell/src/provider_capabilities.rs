@@ -307,7 +307,7 @@ pub async fn provider_capabilities_for_sandbox(
         });
     }
 
-    let policy = crate::openshell::get_active_policy(client, sandbox_name)
+    let policy = crate::openshell::get_effective_policy(client, sandbox_name)
         .await
         .map_err(|e| CapabilitiesError::Policy(format!("{e:#}")))?
         .unwrap_or_default();
