@@ -73,6 +73,9 @@ describe('provider composition labels', () => {
     expect(providerCompositionLabel(providerView({ composed: false }))).toBe('Not composed')
     expect(providerCompositionClass(providerView({ composed: false }))).toBe('bad')
 
+    expect(providerCompositionLabel(providerView({ composed: null }))).toBe('Unknown')
+    expect(providerCompositionClass(providerView({ composed: null }))).toBe('warn')
+
     const degradedButComposed = providerView({
       composed: true,
       status: { kind: 'gateway_error', message: 'temporary lookup failure' },

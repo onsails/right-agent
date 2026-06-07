@@ -55,10 +55,12 @@ export function evaluateCredentialSubmit(
 }
 
 export function providerCompositionClass(provider: ProviderView): string {
+  if (provider.composed === null) return 'warn'
   return provider.composed ? 'ok' : 'bad'
 }
 
 export function providerCompositionLabel(provider: ProviderView): string {
+  if (provider.composed === null) return 'Unknown'
   return provider.composed ? 'Composed' : 'Not composed'
 }
 
