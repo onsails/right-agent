@@ -428,12 +428,27 @@ pub struct ReconcileReport {
     pub attached: Vec<String>,
     /// Providers that were detached during this pass (were attached but not declared).
     pub detached: Vec<String>,
+    /// Declared existing providers whose legacy gateway type was repaired.
+    pub repaired: Vec<String>,
     /// Declared providers that do not exist on the gateway (not yet created).
     pub missing: Vec<String>,
-    /// Per-provider errors encountered during attach/detach. Each entry is
+    /// Per-provider errors encountered during attach/detach/update. Each entry is
     /// `(provider_name, formatted_error)`. Reconcile continues past these so
     /// a single transient failure does not sink the whole pass.
     pub errors: Vec<(String, String)>,
+}
+
+fn legacy_generic_provider_repair_spec(provider: &Provider) -> Option<ProviderSpec> {
+    if provider.type_ != "generic" {
+        return None;
+    }
+
+    Some(ProviderSpec {
+        name: provider.name.clone(),
+        type_: crate::managed_profiles::generic_provider_profile_id(&provider.name),
+        credentials: HashMap::new(),
+        config: HashMap::new(),
+    })
 }
 
 /// Reconcile the set of providers attached to `sandbox_name` with the
@@ -450,7 +465,7 @@ pub struct ReconcileReport {
 /// produces an empty report after checking the current sandbox attachments and,
 /// when declarations are non-empty, ensuring provider v2 is enabled.
 ///
-/// **Partial-failure semantics**: transient attach/detach/get errors for
+/// **Partial-failure semantics**: transient attach/detach/get/update errors for
 /// individual providers are collected into `ReconcileReport::errors` and the
 /// loop continues. `ensure_v2_enabled` failure for a non-empty declaration and
 /// `list_attached` failure return `Err`: without the global composition flag
@@ -477,13 +492,24 @@ pub async fn reconcile_for_sandbox(
     let mut report = ReconcileReport {
         attached: vec![],
         detached: vec![],
+        repaired: vec![],
         missing: vec![],
         errors: vec![],
     };
     // Attach declared providers that exist on the gateway but are not yet attached.
     for name in declared {
         match get_provider(client, name).await {
-            Ok(_) => {
+            Ok(provider) => {
+                if let Some(repair_spec) = legacy_generic_provider_repair_spec(&provider) {
+                    match update_provider(client, &repair_spec).await {
+                        Ok(_) => report.repaired.push(name.clone()),
+                        Err(e) => {
+                            report.errors.push((name.clone(), format!("update: {e:#}")));
+                            continue;
+                        }
+                    }
+                }
+
                 if !attached_set.contains(name) {
                     match attach_to_sandbox(client, sandbox_name, name).await {
                         Ok(()) => report.attached.push(name.clone()),
