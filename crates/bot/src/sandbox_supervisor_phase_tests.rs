@@ -112,3 +112,27 @@ mod bring_up_phase_diagnosis {
         );
     }
 }
+
+mod provider_reconcile_diagnosis {
+    use super::super::provider_reconcile_diagnosis;
+    use right_openshell::diagnosis::GatewayCause;
+
+    #[test]
+    fn reports_provider_failure_not_sandbox_startup() {
+        let diag = provider_reconcile_diagnosis(
+            "right-right-1",
+            "provider right-typefully attached but not composed".to_owned(),
+        );
+
+        assert_eq!(
+            diag.cause,
+            GatewayCause::ProviderComposition {
+                sandbox: "right-right-1".to_owned(),
+                detail: "provider right-typefully attached but not composed".to_owned()
+            }
+        );
+        assert!(diag.summary.contains("provider access"));
+        assert!(diag.summary.contains("right-typefully"));
+        assert!(!diag.summary.contains("starting up"));
+    }
+}

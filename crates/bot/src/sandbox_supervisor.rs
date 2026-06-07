@@ -92,6 +92,14 @@ fn bring_up_phase_diagnosis(status: SandboxPhaseStatus, sandbox: &str) -> Option
     }
 }
 
+fn provider_reconcile_diagnosis(sandbox: &str, detail: String) -> GatewayDiagnosis {
+    GatewayCause::ProviderComposition {
+        sandbox: sandbox.to_owned(),
+        detail,
+    }
+    .diagnose()
+}
+
 fn generic_provider_profiles_for_config(
     agent_name: &str,
     config: &AgentConfig,
@@ -250,6 +258,7 @@ async fn reconcile_and_confirm_providers(
         agent = %agent,
         attached = ?report.attached,
         detached = ?report.detached,
+        repaired = ?report.repaired,
         missing = ?report.missing,
         "provider reconcile complete"
     );
@@ -483,10 +492,10 @@ pub(crate) async fn bring_up_sandbox(
             agent = %agent,
             "provider reconcile/composition not confirmed; staying degraded and retrying: {e:#}"
         );
-        return Ok(Err(GatewayCause::SandboxNotReady {
-            sandbox: sandbox.clone(),
-        }
-        .diagnose()));
+        return Ok(Err(provider_reconcile_diagnosis(
+            &sandbox,
+            format!("{e:#}"),
+        )));
     }
 
     // Create inbox/outbox inside sandbox for attachment handling.
@@ -564,6 +573,7 @@ pub(crate) async fn hot_reconcile_providers(
         agent = %agent,
         attached = ?report.attached,
         detached = ?report.detached,
+        repaired = ?report.repaired,
         missing = ?report.missing,
         profile_outcomes = ?profile_outcomes,
         "providers hot-reconcile complete"
