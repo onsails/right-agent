@@ -44,6 +44,7 @@ async fn usage_overview_uses_requested_timezone_for_today() {
             agent: "right".to_owned(),
             generated_at: "2026-06-04T16:47:36Z".to_owned(),
             timezone: Some("Asia/Dubai".to_owned()),
+            range: Some("today".to_owned()),
         },
     )
     .await
@@ -81,6 +82,7 @@ async fn usage_overview_uses_local_calendar_windows_not_rolling_hours() {
             agent: "right".to_owned(),
             generated_at: "2026-06-04T16:47:36Z".to_owned(),
             timezone: Some("Asia/Dubai".to_owned()),
+            range: None,
         },
     )
     .await
@@ -116,6 +118,7 @@ async fn usage_overview_invalid_timezone_falls_back_to_utc_with_warning() {
             agent: "right".to_owned(),
             generated_at: "2026-06-04T12:00:00Z".to_owned(),
             timezone: Some("Not/AZone".to_owned()),
+            range: Some("today".to_owned()),
         },
     )
     .await
@@ -144,6 +147,7 @@ async fn usage_overview_missing_timezone_falls_back_to_utc_with_warning() {
             agent: "right".to_owned(),
             generated_at: "2026-06-04T12:00:00Z".to_owned(),
             timezone: None,
+            range: None,
         },
     )
     .await
@@ -170,6 +174,7 @@ async fn usage_overview_uses_first_valid_local_instant_when_midnight_is_skipped(
             agent: "right".to_owned(),
             generated_at: "2026-09-06T05:30:00Z".to_owned(),
             timezone: Some("America/Santiago".to_owned()),
+            range: Some("today".to_owned()),
         },
     )
     .await

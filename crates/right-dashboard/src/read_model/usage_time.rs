@@ -22,6 +22,39 @@ pub(super) struct UsageWindowRange {
     pub(super) range_label: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum UsageRangeKey {
+    Today,
+    Last3Days,
+    Last7Days,
+    Last30Days,
+    AllTime,
+}
+
+impl UsageRangeKey {
+    pub(super) fn key(self) -> &'static str {
+        match self {
+            Self::Today => "today",
+            Self::Last3Days => "last_3_days",
+            Self::Last7Days => "last_7_days",
+            Self::Last30Days => "last_30_days",
+            Self::AllTime => "all_time",
+        }
+    }
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Today => "Today",
+            Self::Last3Days => "Last 3 days",
+            Self::Last7Days => "Last 7 days",
+            Self::Last30Days => "Last 30 days",
+            Self::AllTime => "All time",
+        }
+    }
+}
+
+pub(super) const DEFAULT_USAGE_RANGE: UsageRangeKey = UsageRangeKey::Last7Days;
+
 pub(super) fn resolve_usage_clock(
     generated_at: &str,
     requested_timezone: Option<&str>,
@@ -64,28 +97,53 @@ pub(super) fn resolve_usage_clock(
     })
 }
 
-pub(super) fn usage_window_ranges(
-    clock: &UsageClock,
-) -> Result<Vec<UsageWindowRange>, ReadModelError> {
-    let today = clock.now_local.date_naive();
-    let today_start = local_start_of_day(today, &clock.tz)?;
-    let last_7_start = local_start_of_day(today - Duration::days(6), &clock.tz)?;
-    let last_30_start = local_start_of_day(today - Duration::days(29), &clock.tz)?;
+pub(super) fn resolve_usage_range(
+    requested_range: Option<&str>,
+) -> (UsageRangeKey, Vec<DashboardDataWarning>) {
+    let Some(raw) = requested_range.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return (DEFAULT_USAGE_RANGE, Vec::new());
+    };
 
-    Ok(vec![
-        window_range(clock, "today", "Today", Some(today_start)),
-        window_range(clock, "last_7_days", "Last 7 days", Some(last_7_start)),
-        window_range(clock, "last_30_days", "Last 30 days", Some(last_30_start)),
-        window_range(clock, "all_time", "All time", None),
-    ])
+    match raw {
+        "today" => (UsageRangeKey::Today, Vec::new()),
+        "last_3_days" => (UsageRangeKey::Last3Days, Vec::new()),
+        "last_7_days" => (UsageRangeKey::Last7Days, Vec::new()),
+        "last_30_days" => (UsageRangeKey::Last30Days, Vec::new()),
+        "all_time" => (UsageRangeKey::AllTime, Vec::new()),
+        invalid => (
+            DEFAULT_USAGE_RANGE,
+            vec![DashboardDataWarning {
+                source: "usage.range".to_owned(),
+                kind: "invalid_range".to_owned(),
+                message: format!("invalid usage range `{invalid}`; falling back to last_7_days"),
+            }],
+        ),
+    }
 }
 
-pub(super) fn chart_start_utc(
+pub(super) fn usage_window_range(
     clock: &UsageClock,
-    days: i64,
+    range: UsageRangeKey,
+) -> Result<UsageWindowRange, ReadModelError> {
+    let today = clock.now_local.date_naive();
+    let since_local = match range {
+        UsageRangeKey::Today => Some(local_start_of_day(today, &clock.tz)?),
+        UsageRangeKey::Last3Days => Some(local_start_of_day(today - Duration::days(2), &clock.tz)?),
+        UsageRangeKey::Last7Days => Some(local_start_of_day(today - Duration::days(6), &clock.tz)?),
+        UsageRangeKey::Last30Days => {
+            Some(local_start_of_day(today - Duration::days(29), &clock.tz)?)
+        }
+        UsageRangeKey::AllTime => None,
+    };
+
+    Ok(window_range(clock, range.key(), range.label(), since_local))
+}
+
+pub(super) fn local_date_start_utc(
+    date: NaiveDate,
+    tz: &Tz,
 ) -> Result<DateTime<Utc>, ReadModelError> {
-    let start_date = clock.now_local.date_naive() - Duration::days(days - 1);
-    Ok(local_start_of_day(start_date, &clock.tz)?.with_timezone(&Utc))
+    Ok(local_start_of_day(date, tz)?.with_timezone(&Utc))
 }
 
 pub(super) fn local_date_label(ts: &DateTime<Utc>, tz: &Tz) -> String {
@@ -95,12 +153,18 @@ pub(super) fn local_date_label(ts: &DateTime<Utc>, tz: &Tz) -> String {
         .to_string()
 }
 
-pub(super) fn local_chart_dates(
+pub(super) fn local_chart_dates_from(
     clock: &UsageClock,
-    days: i64,
+    chart_start_utc: DateTime<Utc>,
 ) -> Result<Vec<String>, ReadModelError> {
-    let start_date = clock.now_local.date_naive() - Duration::days(days - 1);
-    (0..days)
+    let start_date = chart_start_utc.with_timezone(&clock.tz).date_naive();
+    let end_date = clock.now_local.date_naive();
+    let day_count = (end_date - start_date).num_days();
+    if day_count < 0 {
+        return Ok(Vec::new());
+    }
+
+    (0..=day_count)
         .map(|offset| {
             let date = start_date + Duration::days(offset);
             local_start_of_day(date, &clock.tz)?;
