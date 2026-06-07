@@ -44,6 +44,7 @@ const MAX_LOG_LINES: usize = 80;
 #[derive(Debug, Deserialize)]
 struct UsageOverviewQuery {
     timezone: Option<String>,
+    range: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -372,6 +373,7 @@ async fn handle_usage_overview(
         agent: state.agent_name.clone(),
         generated_at: chrono::Utc::now().to_rfc3339(),
         timezone: query.timezone,
+        range: query.range,
     };
 
     let agent_name = state.agent_name.clone();
@@ -2269,7 +2271,11 @@ mod tests {
         assert_eq!(body["agent"], "alpha");
         assert_eq!(body["timezone"], "UTC");
         assert!(body["windows"].is_array());
-        assert_eq!(body["windows"][0]["key"], "today");
+        assert_eq!(body["selected_range"], "last_7_days");
+        assert_eq!(body["selected_window"], "last_7_days");
+        assert_eq!(body["window"]["key"], "last_7_days");
+        assert_eq!(body["windows"].as_array().unwrap().len(), 1);
+        assert_eq!(body["windows"][0]["key"], "last_7_days");
         assert!(body["windows"][0]["range_start"].is_string());
         assert!(body["windows"][0]["range_end"].is_string());
         assert!(
@@ -2278,7 +2284,6 @@ mod tests {
                 .unwrap()
                 .contains("UTC")
         );
-        assert_eq!(body["selected_window"], "last_30_days");
         assert!(
             body.get("daily_series").is_some(),
             "usage must expose daily_series"
@@ -2287,6 +2292,7 @@ mod tests {
             body.get("source_series").is_some(),
             "usage must expose source_series"
         );
+        assert!(body["cron_jobs"].is_array());
     }
 
     #[tokio::test]
@@ -2312,7 +2318,7 @@ mod tests {
         .unwrap();
 
         let (status, body) = get_json(
-            "/dashboard/alpha/api/v1/usage?timezone=Asia%2FDubai",
+            "/dashboard/alpha/api/v1/usage?timezone=Asia%2FDubai&range=today",
             Some(signed_init_data(42)),
             temp.path().to_path_buf(),
         )
@@ -2320,6 +2326,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["timezone"], "Asia/Dubai");
+        assert_eq!(body["selected_range"], "today");
         assert!(
             body["windows"][0]["range_label"]
                 .as_str()

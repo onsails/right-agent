@@ -78,10 +78,13 @@ pub struct UsageOverviewResponse {
     pub agent: String,
     pub generated_at: String,
     pub timezone: String,
+    pub selected_range: String,
+    pub window: UsageWindow,
     pub windows: Vec<UsageWindow>,
     pub selected_window: String,
     pub daily_series: Vec<UsageDailyPoint>,
     pub source_series: Vec<UsageSourceSeries>,
+    pub cron_jobs: Vec<UsageCronJobSummary>,
     pub warnings: Vec<DashboardDataWarning>,
 }
 
@@ -112,6 +115,23 @@ pub struct UsageWindow {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct UsageSourceSummary {
     pub source: String,
+    pub cost_usd: f64,
+    pub subscription_cost_usd: f64,
+    pub api_cost_usd: f64,
+    pub turns: u64,
+    pub invocations: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub web_search_requests: u64,
+    pub web_fetch_requests: u64,
+    pub per_model: Vec<UsageModelSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct UsageCronJobSummary {
+    pub job_name: String,
     pub cost_usd: f64,
     pub subscription_cost_usd: f64,
     pub api_cost_usd: f64,
@@ -866,12 +886,35 @@ mod dashboard_v2_tests {
 
     #[test]
     fn usage_visual_series_serializes_expected_shape() {
+        let window = UsageWindow {
+            key: "last_7_days".to_owned(),
+            label: "Last 7 days".to_owned(),
+            range_start: Some("2026-05-17T00:00:00+00:00".to_owned()),
+            range_end: "2026-05-23T10:00:00+00:00".to_owned(),
+            range_label: "UTC · May 17 00:00-May 23 10:00".to_owned(),
+            sources: vec![],
+            total_cost_usd: 1.25,
+            subscription_cost_usd: 1.00,
+            api_cost_usd: 0.25,
+            turns: 2,
+            invocations: 2,
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_creation_tokens: 5,
+            cache_read_tokens: 40,
+            web_search_requests: 1,
+            web_fetch_requests: 2,
+            per_model: vec![],
+            budget_skip_count: 0,
+        };
         let response = UsageOverviewResponse {
             agent: "alpha".to_owned(),
             generated_at: "2026-05-23T10:00:00Z".to_owned(),
             timezone: "UTC".to_owned(),
-            windows: vec![],
-            selected_window: "last_30_days".to_owned(),
+            selected_range: "last_7_days".to_owned(),
+            window: window.clone(),
+            windows: vec![window],
+            selected_window: "last_7_days".to_owned(),
             daily_series: vec![UsageDailyPoint {
                 date: "2026-05-23".to_owned(),
                 total_cost_usd: 1.25,
@@ -913,11 +956,36 @@ mod dashboard_v2_tests {
                     cost_usd: 1.25,
                 }],
             }],
+            cron_jobs: vec![UsageCronJobSummary {
+                job_name: "daily-report".to_owned(),
+                cost_usd: 0.25,
+                subscription_cost_usd: 0.0,
+                api_cost_usd: 0.25,
+                turns: 1,
+                invocations: 1,
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_creation_tokens: 5,
+                cache_read_tokens: 40,
+                web_search_requests: 1,
+                web_fetch_requests: 2,
+                per_model: vec![UsageModelSummary {
+                    model: "sonnet".to_owned(),
+                    cost_usd: 0.25,
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    cache_creation_tokens: 5,
+                    cache_read_tokens: 40,
+                }],
+            }],
             warnings: vec![],
         };
 
         let value = serde_json::to_value(&response).unwrap();
-        assert_eq!(value["selected_window"], "last_30_days");
+        assert_eq!(value["selected_range"], "last_7_days");
+        assert_eq!(value["selected_window"], "last_7_days");
+        assert_eq!(value["window"]["key"], "last_7_days");
+        assert_eq!(value["cron_jobs"][0]["job_name"], "daily-report");
         assert_eq!(
             value["daily_series"][0]["sources"][0]["source"],
             "interactive"
