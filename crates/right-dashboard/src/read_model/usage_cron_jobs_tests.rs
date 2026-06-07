@@ -39,6 +39,24 @@ async fn usage_overview_groups_cron_jobs_for_selected_range() {
     let conn = open_connection(dir.path(), true).await.unwrap();
     insert_usage(
         &conn,
+        "2026-06-02T03:59:59+04:00",
+        "cron",
+        Some("daily"),
+        7.00,
+        "sonnet",
+    )
+    .await;
+    insert_usage(
+        &conn,
+        "2026-06-02T03:59:59+04:00",
+        "cron",
+        Some("out_of_range"),
+        6.00,
+        "opus",
+    )
+    .await;
+    insert_usage(
+        &conn,
         "2026-06-02T08:00:00Z",
         "cron",
         Some("daily"),
@@ -116,6 +134,55 @@ async fn usage_overview_groups_cron_jobs_for_selected_range() {
     assert_eq!(daily.per_model.len(), 1);
     assert_eq!(daily.per_model[0].model, "sonnet");
     assert!((daily.per_model[0].cost_usd - 0.50).abs() < 1e-9);
+    assert_eq!(daily.per_model[0].input_tokens, 20);
+    assert_eq!(daily.per_model[0].output_tokens, 40);
+    assert_eq!(daily.per_model[0].cache_creation_tokens, 10);
+    assert_eq!(daily.per_model[0].cache_read_tokens, 80);
+}
+
+#[tokio::test]
+async fn usage_overview_sorts_equal_cost_cron_jobs_by_name() {
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), true).await.unwrap();
+    insert_usage(
+        &conn,
+        "2026-06-04T08:00:00Z",
+        "cron",
+        Some("beta"),
+        0.10,
+        "sonnet",
+    )
+    .await;
+    insert_usage(
+        &conn,
+        "2026-06-04T09:00:00Z",
+        "cron",
+        Some("alpha"),
+        0.10,
+        "opus",
+    )
+    .await;
+
+    let response = usage_overview(
+        &conn,
+        UsageOverviewInput {
+            agent: "alpha".to_owned(),
+            generated_at: "2026-06-04T12:00:00Z".to_owned(),
+            timezone: Some("UTC".to_owned()),
+            range: Some("today".to_owned()),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        response
+            .cron_jobs
+            .iter()
+            .map(|job| job.job_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"]
+    );
 }
 
 #[tokio::test]
