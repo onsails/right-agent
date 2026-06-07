@@ -152,3 +152,57 @@ async fn usage_overview_all_time_buckets_from_first_recorded_usage() {
     );
     assert!((response.window.total_cost_usd - 0.30).abs() < 1e-9);
 }
+
+#[tokio::test]
+async fn usage_overview_all_time_start_uses_earliest_parsed_instant_not_raw_order() {
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), true).await.unwrap();
+    insert_usage(&conn, "2026-05-01T00:30:00Z", "interactive", 1.00).await;
+    insert_usage(&conn, "2026-05-01T01:00:00+03:00", "cron", 2.00).await;
+
+    let response = usage_overview(
+        &conn,
+        UsageOverviewInput {
+            agent: "alpha".to_owned(),
+            generated_at: "2026-05-03T12:00:00Z".to_owned(),
+            timezone: Some("UTC".to_owned()),
+            range: Some("all_time".to_owned()),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.daily_series.first().unwrap().date, "2026-04-30");
+    assert!((response.window.total_cost_usd - 3.00).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn usage_overview_today_ignores_unknown_sources_outside_selected_range() {
+    let dir = tempdir().unwrap();
+    let conn = open_connection(dir.path(), true).await.unwrap();
+    insert_usage(&conn, "2026-06-03T12:00:00Z", "external_tool", 9.99).await;
+    insert_usage(&conn, "2026-06-04T12:00:00Z", "interactive", 1.00).await;
+
+    let response = usage_overview(
+        &conn,
+        UsageOverviewInput {
+            agent: "alpha".to_owned(),
+            generated_at: "2026-06-04T18:00:00Z".to_owned(),
+            timezone: Some("UTC".to_owned()),
+            range: Some("today".to_owned()),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(!response.warnings.iter().any(|warning| {
+        warning.source == "usage_events.source" && warning.kind == "unknown_source"
+    }));
+    assert!(
+        response
+            .source_series
+            .iter()
+            .all(|series| series.source != "external_tool")
+    );
+    assert!((response.window.total_cost_usd - 1.00).abs() < 1e-9);
+}
