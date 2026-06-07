@@ -136,14 +136,19 @@ export interface OverviewSandboxStatus {
   detail: string | null
 }
 
+export type UsageRange = 'today' | 'last_3_days' | 'last_7_days' | 'last_30_days' | 'all_time'
+
 export interface UsageOverviewResponse {
   agent: string
   generated_at: string
   timezone: string
+  selected_range: UsageRange
+  window: UsageWindow
   windows: UsageWindow[]
   selected_window: string
   daily_series: UsageDailyPoint[]
   source_series: UsageSourceSeries[]
+  cron_jobs: UsageCronJobSummary[]
   warnings: DashboardDataWarning[]
 }
 
@@ -171,6 +176,22 @@ export interface UsageWindow {
 
 export interface UsageSourceSummary {
   source: string
+  cost_usd: number
+  subscription_cost_usd: number
+  api_cost_usd: number
+  turns: number
+  invocations: number
+  input_tokens: number
+  output_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
+  web_search_requests: number
+  web_fetch_requests: number
+  per_model: UsageModelSummary[]
+}
+
+export interface UsageCronJobSummary {
+  job_name: string
   cost_usd: number
   subscription_cost_usd: number
   api_cost_usd: number

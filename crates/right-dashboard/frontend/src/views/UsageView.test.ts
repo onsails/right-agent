@@ -54,10 +54,13 @@ function usageStub(overrides: Partial<UsageOverviewResponse> = {}): UsageOvervie
     agent: 'test-agent',
     generated_at: '2026-01-01T00:00:00Z',
     timezone: 'Asia/Dubai',
+    selected_range: 'last_7_days',
+    window: windowStub(),
     windows: [windowStub()],
     selected_window: '7d',
     daily_series: [],
     source_series: [],
+    cron_jobs: [],
     warnings: [],
     ...overrides,
   }
