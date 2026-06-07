@@ -379,7 +379,7 @@ git commit -m "feat(dashboard): confirm composition after generic provider creat
 
 ### Task 7: Surface composed state in the dashboard provider list
 
-The operator must see composed/not-composed so a divergence is visible, not silent. The provider list handler fetches the active policy once and tags each provider via `provider_is_composed`.
+The operator must see composed/not-composed so a divergence is visible, not silent. The provider list handler fetches the active policy once and tags each provider via rule presence for built-ins and endpoint-aware matching for generic providers.
 
 **Files:**
 - Modify: `crates/right/src/internal_api_providers.rs` — the provider list handler (`handle_provider_list`) and its `ProviderView`/list-item struct.
@@ -406,13 +406,18 @@ In `handle_provider_list`, after resolving `sandbox_name` and opening the client
         .flatten()
         .unwrap_or_default();
     // ...when building each row:
-    let composed = right_openshell::provider_capabilities::provider_is_composed(
-        &active_policy,
-        &gateway_provider_name,
-    );
+    let composed = match provider_entry.type_ {
+        ProviderType::BuiltIn(_) => provider_is_composed(&active_policy, &provider_entry.name),
+        ProviderType::Generic => provider_is_composed_with_endpoint(
+            &active_policy,
+            &provider_entry.name,
+            &provider_entry.generic.upstream_host,
+            provider_entry.generic.upstream_path_prefix.as_deref().unwrap_or(""),
+        ),
+    };
 ```
 
-Use the gateway provider name (the same name passed to `attach_to_sandbox`), not the user label. If the list handler does not currently open a client (read-only list from `agent.yaml`), guard the policy fetch so a gateway error degrades to `composed: false` rather than failing the list (use `.ok().flatten()` as above — never `unwrap`).
+Use the gateway provider name (the same name passed to `attach_to_sandbox`), not the user label. Generic rows must also match the expected upstream host/path so a stale pre-update rule does not display as composed. If the list handler does not currently open a client (read-only list from `agent.yaml`), guard the policy fetch so a gateway error degrades to `composed: false` rather than failing the list (use `.ok().flatten()` as above — never `unwrap`).
 
 - [ ] **Step 3: Verify it compiles and existing list tests pass**
 

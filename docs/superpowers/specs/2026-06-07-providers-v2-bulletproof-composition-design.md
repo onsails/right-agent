@@ -134,11 +134,11 @@ bulletproof without a global memo or a structural invariant inside
 
 ### Component 4 — Observability
 
-The composed/not-composed state is already computed as the `active` flag in
-`provider_capabilities::correlate_provider_capabilities` (and surfaced in
-`usage_hint`). Expose it:
+Expose composed/not-composed status from the active policy:
 
-- In the dashboard per-provider status (composed: yes/no).
+- In the dashboard per-provider status (composed: yes/no). Built-ins can use
+  `_provider_<name>` rule presence; generic rows must use endpoint-aware
+  host/path matching so stale pre-update rules do not display as composed.
 - Log it at attach time (host log; never log placeholder/credential values).
 
 ### Component 5 — Docs and invariants
