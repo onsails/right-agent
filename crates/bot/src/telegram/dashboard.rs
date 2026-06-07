@@ -40,6 +40,8 @@ pub(super) const DASHBOARD_SANDBOX_TIMEOUT_SECS: u64 = 4;
 pub(super) const DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS: u64 = 20;
 const INIT_DATA_MAX_AGE_SECS: i64 = 86_400;
 const MAX_LOG_LINES: usize = 80;
+#[cfg(test)]
+const TEST_USAGE_GENERATED_AT: &str = "2026-06-04T12:00:00Z";
 
 #[derive(Debug, Deserialize)]
 struct UsageOverviewQuery {
@@ -369,9 +371,20 @@ async fn handle_usage_overview(
         return error.into_response();
     }
 
+    let generated_at = {
+        #[cfg(test)]
+        {
+            TEST_USAGE_GENERATED_AT.to_string()
+        }
+        #[cfg(not(test))]
+        {
+            chrono::Utc::now().to_rfc3339()
+        }
+    };
+
     let input = UsageOverviewInput {
         agent: state.agent_name.clone(),
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at,
         timezone: query.timezone,
         range: query.range,
     };
@@ -2333,6 +2346,41 @@ mod tests {
                 .unwrap()
                 .starts_with("Asia/Dubai")
         );
+    }
+
+    #[tokio::test]
+    async fn usage_accepts_range_query_for_authorized_user() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        conn.execute(
+            "INSERT INTO usage_events (
+                ts, source, chat_id, thread_id, job_name, session_uuid,
+                total_cost_usd, num_turns, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, web_search_requests,
+                web_fetch_requests, model_usage_json, api_key_source
+             ) VALUES (
+                '2026-06-03T20:00:00Z', 'cron', 1, 0, 'daily', 's1',
+                0.15, 1, 10, 20, 0, 0, 0, 0,
+                '{\"sonnet\":{\"costUSD\":0.15}}', 'none'
+             )",
+            [],
+        )
+        .await
+        .unwrap();
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/usage?timezone=Asia%2FDubai&range=last_3_days",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["selected_range"], "last_3_days");
+        assert_eq!(body["window"]["key"], "last_3_days");
+        assert_eq!(body["cron_jobs"][0]["job_name"], "daily");
     }
 
     #[tokio::test]
