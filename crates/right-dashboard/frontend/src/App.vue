@@ -223,6 +223,11 @@ h3 {
   background: #fff0c2;
 }
 
+.status-pill.warn {
+  color: #8a5a00;
+  background: #fff0c2;
+}
+
 .status-pill.bad {
   color: #a42323;
   background: #ffe1de;

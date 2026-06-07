@@ -579,9 +579,9 @@ pub struct ProviderView {
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
     pub status: ProviderStatus,
     /// Whether this provider's endpoints are composed into the sandbox's active
-    /// policy. `false` means attached but not substituting.
+    /// policy. `None` means the active policy could not be read.
     #[serde(default)]
-    pub composed: bool,
+    pub composed: Option<bool>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -616,13 +616,31 @@ mod provider_view_tests {
                 generic: None,
                 updated_at: None,
                 status: ProviderStatus::Healthy,
-                composed,
+                composed: Some(composed),
             };
 
             let json = serde_json::to_value(view).unwrap();
 
             assert_eq!(json["composed"], composed);
         }
+    }
+
+    #[test]
+    fn provider_view_serializes_unknown_composed_as_null() {
+        let view = ProviderView {
+            name: "hostagent-acme".into(),
+            type_: "generic".into(),
+            label: Some("acme".into()),
+            env_var: "ACME_API_KEY".into(),
+            generic: None,
+            updated_at: None,
+            status: ProviderStatus::Healthy,
+            composed: None,
+        };
+
+        let json = serde_json::to_value(view).unwrap();
+
+        assert!(json["composed"].is_null());
     }
 
     fn policy_with_provider_endpoint(
@@ -716,14 +734,14 @@ pub(crate) async fn handle_provider_list(
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
     let active_policy =
         match right_openshell::openshell::get_active_policy(&mut client, &sandbox_name).await {
-            Ok(Some(policy)) => policy,
+            Ok(Some(policy)) => Some(policy),
             Ok(None) => {
                 tracing::warn!(
                     agent = %req.agent,
                     sandbox = %sandbox_name,
                     "provider composition state unavailable: active policy response omitted payload"
                 );
-                Default::default()
+                None
             }
             Err(e) => {
                 tracing::warn!(
@@ -732,12 +750,14 @@ pub(crate) async fn handle_provider_list(
                     error = %format_args!("{e:#}"),
                     "provider composition state unavailable: active policy read failed"
                 );
-                Default::default()
+                None
             }
         };
     let mut views = Vec::with_capacity(sandbox.providers.len());
     for entry in &sandbox.providers {
-        let composed = provider_entry_is_composed(&active_policy, entry);
+        let composed = active_policy
+            .as_ref()
+            .map(|policy| provider_entry_is_composed(policy, entry));
         let (mut status, updated_at) =
             match right_openshell::providers::get_provider(&mut client, &entry.name).await {
                 Ok(p) => (ProviderStatus::Healthy, p.updated_at),
@@ -1039,7 +1059,7 @@ pub(crate) async fn handle_provider_create(
         generic: None,
         updated_at: None,
         status: ProviderStatus::Healthy,
-        composed: true,
+        composed: Some(true),
     }))
 }
 
@@ -1566,7 +1586,7 @@ async fn create_generic_provider(
         generic: Some(generic_entry),
         updated_at: None,
         status: ProviderStatus::Healthy,
-        composed: true,
+        composed: Some(true),
     }))
 }
 
@@ -1912,7 +1932,7 @@ pub(crate) async fn handle_provider_rotate(
         generic: entry.generic.clone(),
         updated_at: Some(chrono::Utc::now()),
         status: ProviderStatus::Healthy,
-        composed: false,
+        composed: None,
     }))
 }
 
@@ -2233,7 +2253,7 @@ pub(crate) async fn handle_provider_config_update(
         generic: updated.generic,
         updated_at: Some(chrono::Utc::now()),
         status: ProviderStatus::Healthy,
-        composed: true,
+        composed: Some(true),
     }))
 }
 
