@@ -1,4 +1,62 @@
 # Changelog
+## [0.3.3] - 2026-06-07
+
+
+### Bug Fixes
+
+- **worker**: Let all-mode group batches reach cc
+- **filter**: Keep all-mode bot loop guard through addressed fallback
+- **mention**: Topic-root service message is not a reply-to-bot
+- **bot**: Make response-mode callbacks scope-safe
+- **bot**: Publish locked allowlist updates in order
+- **bot**: Reuse prepared connection for reply gate
+- **cli**: Require opened group for mode clear
+- **providers**: Re-enable providers_v2_enabled at startup
+- **dashboard**: Confirm built-in provider composition before yaml write
+- **dashboard**: Confirm config-update provider composition
+- **providers**: Require generic endpoint content when confirming composition
+- **dashboard**: Report generic composition by endpoint content
+- **dashboard**: Distinguish unknown provider composition state
+- **providers**: Keep composition waits recoverable
+- **providers**: Detect composition via effective policy (GetSandboxConfig)
+
+### Documentation
+
+- **prompt**: Teach agent provider placeholder/binary model + 401 trigger
+- Document text vs truncated_text and reply context tiers
+- **mcp**: Advertise provider_capabilities in server instructions
+
+### Features
+
+- **right-db**: Session-context gate queries for reply rendering
+- **filter**: Respond-to-all mode gating per scope
+- **bot**: /mode and /mode_group inline-keyboard handlers
+- **bot**: Reply-render decision logic and constants
+- **bot**: Gate reply context before rendering
+- **supervisor**: Confirm provider composition after reload (bring-up + hot-reconcile)
+- **allowlist**: Effective response-mode lookup and setters
+- **mcp**: Add provider_capabilities built-in tool
+- **allowlist**: Response-mode schema v2 (addressed/all) with backward-compatible parse
+- **cli**: Right agent mode allowlist mirror
+- **stt**: Add `right stt preload` and prefetch model in CI
+- **dashboard**: Ensure and surface provider composition state
+
+### Performance
+
+- **filter**: Skip response-mode lookup for private chats
+
+### Refactor
+
+- **bot**: Group reply gate parameters
+
+### Testing
+
+- **cli**: Cover response mode validation
+
+### Style
+
+- **clippy**: Clear workspace clippy gate under clippy 1.96
+
 ## [0.3.2] - 2026-06-05
 
 - Provider credentials are now reliably injected in long-running sandboxes. Previously, the `right-github` provider's composed OpenShell policy was never confirmed loaded in the running sandbox — credentials fell through to the raw tunnel rule and were sent as the literal placeholder string, causing 401 errors from GitHub. Generic providers were also folded directly into `policy.yaml` as a separate source of truth. All providers now use OpenShell profile-backed gateway composition, and `right up` confirms the composed policy is loaded in the sandbox after every provider attach or reconcile. Existing generic providers are migrated automatically on the next `right up`; no changes to `agent.yaml` are required.
