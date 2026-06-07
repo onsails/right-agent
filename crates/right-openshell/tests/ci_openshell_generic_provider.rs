@@ -302,7 +302,7 @@ async fn ci_openshell_reconcile_self_enables_v2_on_fresh_gateway() {
             &mut client,
             sandbox.name(),
             "agent",
-            &[provider_name.clone()],
+            std::slice::from_ref(&provider_name),
         )
         .await;
         if reconcile_result.is_ok() {
