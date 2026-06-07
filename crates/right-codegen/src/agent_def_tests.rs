@@ -255,14 +255,29 @@ fn operating_instructions_document_inbound_reply_metadata() {
         "`quoted_text`",
         "user-selected partial-quote substring",
         "`reply_to_id` is the target id",
-        "`reply_to` includes author",
-        "inline text/attachments",
-        "inline text/attachments/STT voice markers",
-        "fetch note when archived/recoverable body content is omitted",
+        "`reply_to.author` is who you are replying to",
+        "The body renders one of",
+        "`text`",
+        "`truncated_text`",
+        "a preview/locator",
+        "fetch the rest only if you need it via `mcp__right__get_messages_by_id(<id>)`",
+        "when a `note` says so",
+        "`note: \"your own previous message\"`",
     ] {
         assert!(
             ops.contains(needle),
             "OPERATING_INSTRUCTIONS must document inbound reply metadata: missing {needle:?}"
+        );
+    }
+
+    for forbidden in [
+        "`reply_to` includes author",
+        "inline text/attachments",
+        "fetch note when archived/recoverable body content is omitted",
+    ] {
+        assert!(
+            !ops.contains(forbidden),
+            "OPERATING_INSTRUCTIONS must not document stale inbound reply metadata: found {forbidden:?}"
         );
     }
 }

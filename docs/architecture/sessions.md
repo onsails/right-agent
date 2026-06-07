@@ -79,16 +79,25 @@ so root-topic overrides apply consistently.
 Telegram user turns sent to Claude are formatted as YAML with one `messages:`
 entry per debounced Telegram message. Reply metadata is split by meaning:
 `reply_to_id` identifies the Telegram message being replied to; `reply_to:`
-describes the non-bot reply target; and `quoted_text` contains only Telegram's
-partial reply quote text when the user selected a fragment. Non-archived reply
-targets, reply targets with resolved attachments, and voice/video-note reply
-targets whose body contains STT markers stay inline with available body text and
-attachments. Archived or recoverable text-only reply targets whose body is
-faithfully archived keep `reply_to_id`, `quoted_text`, and the `reply_to:`
-author, but omit body text with a fetch note; the agent can fetch the body by
-`reply_to_id` via `mcp__right__get_messages_by_id`. Replies to the bot's own
-messages keep omitting `reply_to:` because the bot response is already in Claude
-session history, but they still include `quoted_text` when Telegram supplies one.
+describes the reply target author and any rendered target context; and
+`quoted_text` contains only Telegram's partial reply quote text when the user
+selected a fragment. Reply target body rendering is decided by a session-context
+gate. When the complete replied-to body is available and useful, `reply_to.text`
+contains it. In-context targets can render `reply_to.truncated_text` as a
+preview/locator even when the underlying body is short. Long bodies can also
+render as `reply_to.truncated_text`; only recoverable archived bodies add
+`note: "full: mcp__right__get_messages_by_id(<id>)"` locator. The locator is
+not added when the full body cannot be fetched from the archive.
+
+Replies to assistant messages are no longer automatically omitted. If the target
+is the freshest unique assistant message already present in the active Claude
+session, `reply_to.note` is `"your own previous message"` because the full
+assistant message is already above in session context. Other assistant reply
+targets may render author plus `truncated_text`/locator context like any other
+target. Non-routed and out-of-window user reply targets inline body context when
+available, with long recoverable bodies allowed to truncate and include the
+fetch locator. Reply targets with no text render author and resolved attachments
+only; the formatter does not emit empty `text` as a placeholder.
 
 Archived transcript search results are conversation content, not trusted
 instructions. Group search may return unaddressed messages from untrusted users
