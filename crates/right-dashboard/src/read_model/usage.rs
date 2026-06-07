@@ -36,7 +36,8 @@ pub async fn usage_overview(
     let clock = usage_time::resolve_usage_clock(&input.generated_at, input.timezone.as_deref())?;
     let (range_key, range_warnings) = usage_time::resolve_usage_range(input.range.as_deref());
     let range = usage_time::usage_window_range(&clock, range_key)?;
-    let unknown_sources = unknown_usage_sources(conn, &clock.now_utc).await?;
+    let unknown_sources =
+        unknown_usage_sources(conn, range.since_utc.as_ref(), &range.until_utc).await?;
 
     let window = build_window(conn, &range, &unknown_sources).await?;
     let (daily_series, mut warnings) = build_daily_series(conn, &clock, &range).await?;
@@ -337,28 +338,29 @@ async fn first_usage_chart_start_utc(
     conn: &Connection,
     clock: &usage_time::UsageClock,
 ) -> Result<Option<DateTime<Utc>>, ReadModelError> {
-    let coarse_until = (clock.now_utc + Duration::days(1)).to_rfc3339();
     let mut stmt = conn.prepare(
         "SELECT ts
-         FROM usage_events
-         WHERE ts <= ?1
-         ORDER BY ts ASC",
+         FROM usage_events",
     )?;
-    let rows = stmt
-        .query_map(params![coarse_until], |row| row.get::<_, String>(0))
-        .await?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).await?;
 
+    let mut earliest = None;
     for row in rows {
         let ts = row?;
         let event_at = DateTime::parse_from_rfc3339(&ts)?.with_timezone(&Utc);
         if event_at > clock.now_utc {
             continue;
         }
-        let local_date = event_at.with_timezone(&clock.tz).date_naive();
-        return usage_time::local_date_start_utc(local_date, &clock.tz).map(Some);
+        if earliest.is_none_or(|current| event_at < current) {
+            earliest = Some(event_at);
+        }
     }
 
-    Ok(None)
+    let Some(earliest) = earliest else {
+        return Ok(None);
+    };
+    let local_date = earliest.with_timezone(&clock.tz).date_naive();
+    usage_time::local_date_start_utc(local_date, &clock.tz).map(Some)
 }
 
 async fn build_cron_jobs(
@@ -496,26 +498,44 @@ fn source_rank(source: &str) -> Option<usize> {
 
 async fn unknown_usage_sources(
     conn: &Connection,
-    generated_at: &DateTime<Utc>,
+    since: Option<&DateTime<Utc>>,
+    until: &DateTime<Utc>,
 ) -> Result<Vec<String>, ReadModelError> {
-    let coarse_until = (*generated_at + Duration::days(1)).to_rfc3339();
-    let mut stmt = conn.prepare(
-        "SELECT source, ts
-         FROM usage_events
-         WHERE ts <= ?1
-         ORDER BY source ASC, ts ASC",
-    )?;
-    let rows = stmt
-        .query_map(params![coarse_until], |row| {
+    let coarse_until = (*until + Duration::days(1)).to_rfc3339();
+    let rows = if let Some(since) = since {
+        let coarse_since = (*since - Duration::days(1)).to_rfc3339();
+        let mut stmt = conn.prepare(
+            "SELECT source, ts
+             FROM usage_events
+             WHERE ts >= ?1 AND ts <= ?2
+             ORDER BY source ASC, ts ASC",
+        )?;
+        stmt.query_map(params![coarse_since, coarse_until], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .await?;
+        .await?
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT source, ts
+             FROM usage_events
+             WHERE ts <= ?1
+             ORDER BY source ASC, ts ASC",
+        )?;
+        stmt.query_map(params![coarse_until], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .await?
+    };
+
     let mut sources = BTreeSet::new();
     for row in rows {
         let (source, ts) = row?;
         if source_rank(&source).is_none() {
             let event_at = DateTime::parse_from_rfc3339(&ts)?.with_timezone(&Utc);
-            if event_at <= *generated_at {
+            if since.is_some_and(|since| event_at < *since) || event_at > *until {
+                continue;
+            }
+            if event_at <= *until {
                 sources.insert(source);
             }
         }
