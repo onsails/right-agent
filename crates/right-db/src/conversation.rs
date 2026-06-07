@@ -288,7 +288,10 @@ pub async fn is_recent_routed_target(
     conn: &Connection,
     query: RecentRoutedTargetQuery<'_>,
 ) -> Result<bool> {
-    let min_turn = query.current_turn_id.saturating_sub(query.window);
+    let stored_turn =
+        checked_turn_id(latest_turn_id(conn, query.root_session_id).await?)?.unwrap_or(0);
+    let effective_current_turn = query.current_turn_id.max(stored_turn);
+    let min_turn = effective_current_turn.saturating_sub(query.window);
     let rows: Vec<i64> = conn
         .query_all(
             "SELECT 1
@@ -316,6 +319,27 @@ pub async fn is_recent_routed_target(
     Ok(!rows.is_empty())
 }
 
+/// Highest persisted turn id for a session, or `None` when the session has no
+/// archived turn-scoped rows yet.
+pub async fn latest_turn_id(conn: &Connection, root_session_id: &str) -> Result<Option<u64>> {
+    let mut rows: Vec<i64> = conn
+        .query_all(
+            "SELECT turn_id
+             FROM conversation_messages
+             WHERE root_session_id = ?
+               AND turn_id IS NOT NULL
+             ORDER BY turn_id DESC
+             LIMIT 1",
+            crate::params![root_session_id],
+            |r| r.get(0),
+        )
+        .await?;
+
+    rows.pop()
+        .map(|turn| u64::try_from(turn).map_err(|_| invalid_parameter("turn_id out of range")))
+        .transpose()
+}
+
 pub async fn latest_assistant_text(
     conn: &Connection,
     root_session_id: &str,
@@ -334,6 +358,39 @@ pub async fn latest_assistant_text(
         .await?;
 
     Ok(rows.pop())
+}
+
+/// Returns true iff the freshest assistant message in `root_session_id` is an
+/// exact (trimmed) match for `target` AND no other assistant message in the
+/// session shares that exact text; i.e. the reply target is unambiguously the
+/// agent's latest turn. `target` must already be trimmed by the caller.
+pub async fn latest_assistant_is_unique_exact(
+    conn: &Connection,
+    root_session_id: &str,
+    target: &str,
+) -> Result<bool> {
+    if target.is_empty() {
+        return Ok(false);
+    }
+    let Some(latest) = latest_assistant_text(conn, root_session_id).await? else {
+        return Ok(false);
+    };
+    if latest.trim() != target {
+        return Ok(false);
+    }
+
+    let matches: Vec<()> = conn
+        .query_all(
+            "SELECT 1
+             FROM conversation_messages
+             WHERE root_session_id = ?1 AND role = 'assistant'
+               AND TRIM(content) = ?2
+             LIMIT 2",
+            crate::params![root_session_id, target],
+            |_row: &crate::row::Row<'_>| Ok(()),
+        )
+        .await?;
+    Ok(matches.len() == 1)
 }
 
 fn fetched_from_row(row: &crate::row::Row<'_>) -> Result<FetchedMessage> {
@@ -653,6 +710,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn is_recent_routed_target_false_after_turn_counter_reset() {
+        let conn = migrated_connection().await;
+        mark_routed(&conn, "telegram", 100, 7, 50, "S", 5)
+            .await
+            .unwrap();
+        mark_routed(&conn, "telegram", 100, 7, 51, "S", 100)
+            .await
+            .unwrap();
+
+        let routed = is_recent_routed_target(
+            &conn,
+            RecentRoutedTargetQuery {
+                platform: "telegram",
+                chat_id: 100,
+                thread_id: 7,
+                message_id: 50,
+                root_session_id: "S",
+                window: 30,
+                current_turn_id: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!routed);
+    }
+
+    #[tokio::test]
     async fn is_recent_routed_target_false_for_other_root_session() {
         let conn = migrated_connection().await;
         mark_routed(&conn, "telegram", 100, 7, 50, "other-session", 5)
@@ -711,6 +796,63 @@ mod tests {
         let text = latest_assistant_text(&conn, "session-abc").await.unwrap();
 
         assert_eq!(text, None);
+    }
+
+    #[tokio::test]
+    async fn latest_assistant_is_unique_exact_true_for_sole_exact_latest() {
+        let conn = migrated_connection().await;
+        archive_assistant_row(&conn, "S", 1, "older answer").await;
+        archive_assistant_row(&conn, "S", 2, "freshest answer").await;
+
+        assert!(
+            latest_assistant_is_unique_exact(&conn, "S", "freshest answer")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_assistant_is_unique_exact_false_when_target_not_latest() {
+        let conn = migrated_connection().await;
+        archive_assistant_row(&conn, "S", 1, "older answer").await;
+        archive_assistant_row(&conn, "S", 2, "freshest answer").await;
+
+        // Substring or a non-latest message is not the freshest exact match.
+        assert!(
+            !latest_assistant_is_unique_exact(&conn, "S", "older answer")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !latest_assistant_is_unique_exact(&conn, "S", "fresh")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_assistant_is_unique_exact_false_for_duplicated_text() {
+        let conn = migrated_connection().await;
+        archive_assistant_row(&conn, "S", 1, "same answer").await;
+        archive_assistant_row(&conn, "S", 2, "same answer").await;
+
+        assert!(
+            !latest_assistant_is_unique_exact(&conn, "S", "same answer")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_assistant_is_unique_exact_false_for_empty_target() {
+        let conn = migrated_connection().await;
+        archive_assistant_row(&conn, "S", 1, "answer").await;
+
+        assert!(
+            !latest_assistant_is_unique_exact(&conn, "S", "")
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

@@ -1013,7 +1013,7 @@ fn build_input_message_from_debounce(
 }
 
 struct ReplyGateRequest<'a> {
-    agent_dir: &'a Path,
+    conn: &'a right_db::Connection,
     platform: &'a str,
     chat_id: i64,
     eff_thread_id: i64,
@@ -1029,7 +1029,7 @@ async fn gate_reply_to_body(req: ReplyGateRequest<'_>) -> Option<super::attachme
         IN_CONTEXT_WINDOW, REPLY_BODY_INLINE_MAX, ReplyRender, decide_reply_render,
     };
     let ReplyGateRequest {
-        agent_dir,
+        conn,
         platform,
         chat_id,
         eff_thread_id,
@@ -1046,95 +1046,88 @@ async fn gate_reply_to_body(req: ReplyGateRequest<'_>) -> Option<super::attachme
     let target_has_text = target_text.is_some_and(|text| !text.is_empty());
     let target_is_long =
         target_text.is_some_and(|text| text.chars().count() > REPLY_BODY_INLINE_MAX);
+    let target = target_text.unwrap_or("");
 
-    let (is_latest_assistant, is_recent_routed_user, long_target_recoverable) =
-        match right_db::open_connection(agent_dir, false).await {
-            Ok(conn) => {
-                let target = target_text.unwrap_or("");
-                let is_latest = if raw.is_bot_target && !target.is_empty() {
-                    match latest_assistant_target_is_unique_exact(&conn, root_session_id, target)
-                        .await
-                    {
-                        Ok(is_unique_exact) => is_unique_exact,
-                        Err(e) => {
-                            tracing::warn!(
-                                ?chat_id,
-                                ?eff_thread_id,
-                                ?reply_to_id,
-                                "reply gate: latest assistant exact uniqueness check failed: {e:#}"
-                            );
-                            false
-                        }
-                    }
-                } else {
-                    false
-                };
-
-                let is_routed = if raw.is_bot_target {
-                    false
-                } else {
-                    match right_db::conversation::is_recent_routed_target(
-                        &conn,
-                        right_db::conversation::RecentRoutedTargetQuery {
-                            platform,
-                            chat_id,
-                            thread_id: eff_thread_id,
-                            message_id: reply_to_id,
-                            root_session_id,
-                            window: IN_CONTEXT_WINDOW,
-                            current_turn_id,
-                        },
-                    )
-                    .await
-                    {
-                        Ok(routed) => routed,
-                        Err(e) => {
-                            tracing::warn!(
-                                ?chat_id,
-                                ?eff_thread_id,
-                                ?reply_to_id,
-                                "reply gate: is_recent_routed_target failed: {e:#}"
-                            );
-                            false
-                        }
-                    }
-                };
-                let is_recoverable = if target_is_long && !reply_to_had_voice_markers {
-                    match right_db::conversation::fetch_by_ids(
-                        &conn,
-                        platform,
-                        chat_id,
-                        eff_thread_id,
-                        &[reply_to_id],
-                    )
-                    .await
-                    {
-                        Ok(rows) => rows.iter().any(|row| row.message_id == Some(reply_to_id)),
-                        Err(e) => {
-                            tracing::warn!(
-                                ?chat_id,
-                                ?eff_thread_id,
-                                ?reply_to_id,
-                                "reply gate: fetch_by_ids recoverability check failed: {e:#}"
-                            );
-                            false
-                        }
-                    }
-                } else {
-                    false
-                };
-                (is_latest, is_routed, is_recoverable)
-            }
+    // Reuse the invocation's prepared connection; the per-reply gate runs inside
+    // the worker batch loop, sequentially, so there is no need to open a fresh
+    // connection for each replied-to message.
+    let is_latest_assistant = if raw.is_bot_target && !target.is_empty() {
+        match right_db::conversation::latest_assistant_is_unique_exact(
+            conn,
+            root_session_id,
+            target,
+        )
+        .await
+        {
+            Ok(is_unique_exact) => is_unique_exact,
             Err(e) => {
                 tracing::warn!(
                     ?chat_id,
                     ?eff_thread_id,
                     ?reply_to_id,
-                    "reply gate: open_connection failed: {e:#}"
+                    "reply gate: latest assistant exact uniqueness check failed: {e:#}"
                 );
-                (false, false, false)
+                false
             }
-        };
+        }
+    } else {
+        false
+    };
+
+    let is_recent_routed_user = if raw.is_bot_target {
+        false
+    } else {
+        match right_db::conversation::is_recent_routed_target(
+            conn,
+            right_db::conversation::RecentRoutedTargetQuery {
+                platform,
+                chat_id,
+                thread_id: eff_thread_id,
+                message_id: reply_to_id,
+                root_session_id,
+                window: IN_CONTEXT_WINDOW,
+                current_turn_id,
+            },
+        )
+        .await
+        {
+            Ok(routed) => routed,
+            Err(e) => {
+                tracing::warn!(
+                    ?chat_id,
+                    ?eff_thread_id,
+                    ?reply_to_id,
+                    "reply gate: is_recent_routed_target failed: {e:#}"
+                );
+                false
+            }
+        }
+    };
+
+    let long_target_recoverable = if target_is_long && !reply_to_had_voice_markers {
+        match right_db::conversation::fetch_by_ids(
+            conn,
+            platform,
+            chat_id,
+            eff_thread_id,
+            &[reply_to_id],
+        )
+        .await
+        {
+            Ok(rows) => rows.iter().any(|row| row.message_id == Some(reply_to_id)),
+            Err(e) => {
+                tracing::warn!(
+                    ?chat_id,
+                    ?eff_thread_id,
+                    ?reply_to_id,
+                    "reply gate: fetch_by_ids recoverability check failed: {e:#}"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
 
     let mut render = decide_reply_render(
         reply_to_id,
@@ -1158,36 +1151,6 @@ async fn gate_reply_to_body(req: ReplyGateRequest<'_>) -> Option<super::attachme
         attachments: raw.attachments,
         render,
     })
-}
-
-async fn latest_assistant_target_is_unique_exact(
-    conn: &right_db::Connection,
-    root_session_id: &str,
-    target: &str,
-) -> Result<bool, right_db::DbError> {
-    if target.is_empty() {
-        return Ok(false);
-    }
-    let Some(latest) = right_db::conversation::latest_assistant_text(conn, root_session_id).await?
-    else {
-        return Ok(false);
-    };
-    if latest.trim() != target {
-        return Ok(false);
-    }
-
-    let matches = conn
-        .query_all(
-            "SELECT 1
-             FROM conversation_messages
-             WHERE root_session_id = ?1 AND role = 'assistant'
-               AND TRIM(content) = ?2
-             LIMIT 2",
-            right_db::params![root_session_id, target],
-            |_row: &right_db::row::Row<'_>| Ok(()),
-        )
-        .await?;
-    Ok(matches.len() == 1)
 }
 
 fn routed_message_ids(batch: &[DebounceMsg]) -> Vec<i32> {
@@ -1651,7 +1614,7 @@ pub fn spawn_worker(
                 let reply_to_body = match raw_reply {
                     Some(raw) => {
                         gate_reply_to_body(ReplyGateRequest {
-                            agent_dir: &ctx.agent_dir,
+                            conn: &prepared.conn,
                             platform: "telegram",
                             chat_id,
                             eff_thread_id,
@@ -2760,10 +2723,14 @@ async fn prepare_cc_invocation(
             }
         };
 
+    let stored_max_turn_id = right_db::conversation::latest_turn_id(&conn, &session_uuid)
+        .await
+        .map_err(|e| format!("⚠️ Agent error: turn-id lookup failed: {:#}", e))?;
+
     Ok(PreparedCcInvocation {
         conn,
         session_uuid,
-        turn_id: super::next_turn_id(),
+        turn_id: super::next_turn_id_after(stored_max_turn_id),
         is_first_call,
     })
 }
@@ -4803,6 +4770,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepare_cc_invocation_seeds_turn_from_active_session_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
+        create_session(&conn, 42, 0, "session-restart", Some("hello"))
+            .await
+            .unwrap();
+        right_db::conversation::archive_message(
+            &conn,
+            right_db::conversation::ConversationMessage {
+                platform: "telegram",
+                chat_id: 42,
+                thread_id: 0,
+                message_id: None,
+                sender_user_id: None,
+                sender_name: None,
+                addressed_to_bot: false,
+                routed_to_agent: true,
+                root_session_id: Some("session-restart"),
+                turn_id: Some(9_000_000),
+                role: right_db::conversation::ConversationRole::Assistant,
+                content: "old assistant reply",
+            },
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        let prepared = prepare_cc_invocation(temp.path(), 42, 0, Some("after restart"))
+            .await
+            .unwrap();
+
+        assert_eq!(prepared.session_uuid, "session-restart");
+        assert!(prepared.turn_id > 9_000_000);
+    }
+
+    #[tokio::test]
     async fn invoke_cc_schema_read_failure_deactivates_prepared_first_call_session() {
         let temp = tempfile::tempdir().unwrap();
         let agent_dir = temp.path().join("agent");
@@ -5837,9 +5840,10 @@ esac
     async fn gate_bot_exact_latest_assistant_target_is_own_previous() {
         let temp = tempfile::tempdir().unwrap();
         archive_assistant_reply(temp.path(), "S", 6, "hello world from latest").await;
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
 
         let body = gate_reply_to_body(ReplyGateRequest {
-            agent_dir: temp.path(),
+            conn: &conn,
             platform: "telegram",
             chat_id: 100,
             eff_thread_id: 7,
@@ -5862,9 +5866,10 @@ esac
     async fn gate_bot_substring_of_latest_assistant_target_is_locator() {
         let temp = tempfile::tempdir().unwrap();
         archive_assistant_reply(temp.path(), "S", 6, "hello world from latest").await;
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
 
         let body = gate_reply_to_body(ReplyGateRequest {
-            agent_dir: temp.path(),
+            conn: &conn,
             platform: "telegram",
             chat_id: 100,
             eff_thread_id: 7,
@@ -5890,9 +5895,10 @@ esac
         let temp = tempfile::tempdir().unwrap();
         archive_assistant_reply(temp.path(), "S", 5, "same answer").await;
         archive_assistant_reply(temp.path(), "S", 6, "same answer").await;
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
 
         let body = gate_reply_to_body(ReplyGateRequest {
-            agent_dir: temp.path(),
+            conn: &conn,
             platform: "telegram",
             chat_id: 100,
             eff_thread_id: 7,
@@ -5938,7 +5944,7 @@ esac
         .unwrap();
 
         let body = gate_reply_to_body(ReplyGateRequest {
-            agent_dir: temp.path(),
+            conn: &conn,
             platform: "telegram",
             chat_id: 100,
             eff_thread_id: 7,
@@ -5963,9 +5969,10 @@ esac
     async fn gate_long_unarchived_user_target_inlines_full_text() {
         let temp = tempfile::tempdir().unwrap();
         let text = "a".repeat(super::super::reply_context::REPLY_BODY_INLINE_MAX + 1);
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
 
         let body = gate_reply_to_body(ReplyGateRequest {
-            agent_dir: temp.path(),
+            conn: &conn,
             platform: "telegram",
             chat_id: 100,
             eff_thread_id: 7,
@@ -5991,9 +5998,10 @@ esac
         let temp = tempfile::tempdir().unwrap();
         let text = "a".repeat(super::super::reply_context::REPLY_BODY_INLINE_MAX + 1);
         archive_user_reply(temp.path(), 9124, &text).await;
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
 
         let body = gate_reply_to_body(ReplyGateRequest {
-            agent_dir: temp.path(),
+            conn: &conn,
             platform: "telegram",
             chat_id: 100,
             eff_thread_id: 7,
@@ -6023,9 +6031,10 @@ esac
         let temp = tempfile::tempdir().unwrap();
         let text = "voice transcript ".repeat(40);
         archive_user_reply(temp.path(), 9125, "[voice message]").await;
+        let conn = right_db::open_connection(temp.path(), true).await.unwrap();
 
         let body = gate_reply_to_body(ReplyGateRequest {
-            agent_dir: temp.path(),
+            conn: &conn,
             platform: "telegram",
             chat_id: 100,
             eff_thread_id: 7,
@@ -6071,7 +6080,7 @@ esac
         .unwrap();
 
         let body = gate_reply_to_body(ReplyGateRequest {
-            agent_dir: temp.path(),
+            conn: &conn,
             platform: "telegram",
             chat_id: 100,
             eff_thread_id: 458,
@@ -6534,9 +6543,9 @@ mod bg_request_race_tests {
 
     #[tokio::test]
     async fn next_turn_id_is_monotonic() {
-        let a = super::super::next_turn_id();
-        let b = super::super::next_turn_id();
-        let c = super::super::next_turn_id();
+        let a = super::super::next_turn_id_after(None);
+        let b = super::super::next_turn_id_after(None);
+        let c = super::super::next_turn_id_after(None);
         assert!(a < b && b < c, "turn ids must be strictly increasing");
     }
 
