@@ -51,7 +51,7 @@ Expected: PASS.
 Run:
 
 ```bash
-devenv shell -- cargo test -p right-bot sandbox_supervisor_phase_tests
+devenv shell -- cargo test -p right-bot phase_tests
 ```
 
 Expected: PASS.
@@ -618,7 +618,7 @@ tracing::info!(
 Run:
 
 ```bash
-devenv shell -- cargo test -p right-bot sandbox_supervisor_phase_tests
+devenv shell -- cargo test -p right-bot phase_tests
 ```
 
 Expected: PASS.
@@ -737,7 +737,7 @@ Expected: PASS.
 Run:
 
 ```bash
-devenv shell -- cargo test -p right-bot sandbox_supervisor_phase_tests
+devenv shell -- cargo test -p right-bot phase_tests
 ```
 
 Expected: PASS.
