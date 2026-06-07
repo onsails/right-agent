@@ -124,7 +124,7 @@ export function browserUsageTimezone(): string {
 
 export interface UsageOverviewOptions {
   timezone?: string
-  range?: UsageRange | string
+  range?: UsageRange
 }
 
 export function usageOverview(options: UsageOverviewOptions = {}): Promise<UsageOverviewResponse> {

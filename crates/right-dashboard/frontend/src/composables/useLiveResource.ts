@@ -13,6 +13,10 @@ export function shouldTick(state: { hidden: boolean, inFlight: boolean, pauseWhe
   return true
 }
 
+export function settledBlockingGeneration(blockingGeneration: number | null, settledGeneration: number): number | null {
+  return blockingGeneration === settledGeneration ? null : blockingGeneration
+}
+
 export interface LiveResourceOptions {
   intervalMs?: number
   immediate?: boolean
@@ -21,12 +25,17 @@ export interface LiveResourceOptions {
   key?: string
 }
 
+export interface LiveResourceRefreshOptions {
+  force?: boolean
+  reset?: boolean
+}
+
 export interface LiveResource<T> {
   data: Ref<T | null>
   error: Ref<string | null>
   loading: Ref<boolean>
   lastUpdatedAt: Ref<string | null>
-  refresh: () => Promise<void>
+  refresh: (options?: LiveResourceRefreshOptions) => Promise<void>
 }
 
 let keySeq = 0
@@ -46,16 +55,25 @@ export function useLiveResource<T>(fetcher: () => Promise<T>, options: LiveResou
 
   const status = reportConnection ? registerLiveResource(key) : null
   let disposed = false
-  let inFlight = false
+  let blockingGeneration: number | null = null
   let generation = 0
   let timer: ReturnType<typeof window.setInterval> | undefined
   let stopIntervalWatch: (() => void) | undefined
 
-  async function refresh(): Promise<void> {
-    if (disposed || inFlight) {
+  function hasInFlight(): boolean {
+    return blockingGeneration !== null
+  }
+
+  async function refresh(options: LiveResourceRefreshOptions = {}): Promise<void> {
+    if (disposed || (hasInFlight() && !options.force)) {
       return
     }
-    inFlight = true
+    if (options.reset) {
+      data.value = null
+      error.value = null
+    }
+    const gen = ++generation
+    blockingGeneration = gen
     // Only surface `loading` on the initial fetch (no data yet). Background
     // polls must not toggle it: views gate content behind `loading` via
     // AsyncState, and flipping it every interval would unmount the content
@@ -63,7 +81,6 @@ export function useLiveResource<T>(fetcher: () => Promise<T>, options: LiveResou
     if (data.value === null) {
       loading.value = true
     }
-    const gen = ++generation
     try {
       const result = await fetcher()
       if (disposed || gen !== generation) {
@@ -87,7 +104,7 @@ export function useLiveResource<T>(fetcher: () => Promise<T>, options: LiveResou
       if (!disposed && gen === generation) {
         loading.value = false
       }
-      inFlight = false
+      blockingGeneration = settledBlockingGeneration(blockingGeneration, gen)
     }
   }
 
@@ -104,7 +121,7 @@ export function useLiveResource<T>(fetcher: () => Promise<T>, options: LiveResou
     }
     if (intervalMs.value > 0) {
       timer = window.setInterval(() => {
-        if (shouldTick({ hidden: document.hidden, inFlight, pauseWhenHidden })) {
+        if (shouldTick({ hidden: document.hidden, inFlight: hasInFlight(), pauseWhenHidden })) {
           void refresh()
         }
       }, intervalMs.value)

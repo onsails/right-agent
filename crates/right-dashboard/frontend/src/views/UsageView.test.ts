@@ -3,7 +3,7 @@ import { createSSRApp, h } from 'vue'
 import { describe, expect, it } from 'vitest'
 
 import UsageView from './UsageView.vue'
-import type { UsageOverviewResponse, UsageSourceSummary, UsageWindow } from '../types'
+import type { UsageCronJobSummary, UsageOverviewResponse, UsageRange, UsageSourceSummary, UsageWindow } from '../types'
 
 function sourceSummaryStub(overrides: Partial<UsageSourceSummary> = {}): UsageSourceSummary {
   return {
@@ -49,6 +49,25 @@ function windowStub(overrides: Partial<UsageWindow> = {}): UsageWindow {
   }
 }
 
+function cronJobStub(overrides: Partial<UsageCronJobSummary> = {}): UsageCronJobSummary {
+  return {
+    job_name: 'nightly-report',
+    cost_usd: 2.5,
+    subscription_cost_usd: 1.5,
+    api_cost_usd: 1.0,
+    turns: 3,
+    invocations: 3,
+    input_tokens: 1100,
+    output_tokens: 600,
+    cache_creation_tokens: 100,
+    cache_read_tokens: 900,
+    web_search_requests: 0,
+    web_fetch_requests: 0,
+    per_model: [],
+    ...overrides,
+  }
+}
+
 function usageStub(overrides: Partial<UsageOverviewResponse> = {}): UsageOverviewResponse {
   return {
     agent: 'test-agent',
@@ -66,18 +85,36 @@ function usageStub(overrides: Partial<UsageOverviewResponse> = {}): UsageOvervie
   }
 }
 
-async function render(props: Record<string, unknown>) {
+async function render(props: Record<string, unknown>, selectedRange: UsageRange = 'last_7_days') {
   const app = createSSRApp({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    render: () => h(UsageView, props as any),
+    render: () => h(UsageView, { selectedRange, ...props } as any),
   })
   return renderToString(app)
 }
 
+describe('UsageView range selector', () => {
+  it('renders one active selectable usage range', async () => {
+    const html = await render({
+      usage: usageStub(),
+      loading: false,
+      error: null,
+    }, 'last_3_days')
+
+    expect(html).toContain('aria-label="Usage range"')
+    expect(html).toContain('Today')
+    expect(html).toContain('3 days')
+    expect(html).toContain('7 days')
+    expect(html).toContain('30 days')
+    expect(html).toContain('All time')
+    expect((html.match(/aria-pressed="true"/g) ?? []).length).toBe(1)
+  })
+})
+
 describe('UsageView budget_skip_count', () => {
   it('renders budget-skip line when count > 0', async () => {
     const html = await render({
-      usage: usageStub({ windows: [windowStub({ budget_skip_count: 3 })] }),
+      usage: usageStub({ window: windowStub({ budget_skip_count: 3 }) }),
       loading: false,
       error: null,
     })
@@ -87,7 +124,7 @@ describe('UsageView budget_skip_count', () => {
 
   it('does not render budget-skip line when count is 0', async () => {
     const html = await render({
-      usage: usageStub({ windows: [windowStub({ budget_skip_count: 0 })] }),
+      usage: usageStub({ window: windowStub({ budget_skip_count: 0 }) }),
       loading: false,
       error: null,
     })
@@ -99,9 +136,9 @@ describe('UsageView token legend and per-source TokenLine', () => {
   it('renders the token legend and a per-source token line', async () => {
     const html = await render({
       usage: usageStub({
-        windows: [windowStub({
+        window: windowStub({
           sources: [sourceSummaryStub({ source: 'interactive', cache_read_tokens: 300, cache_creation_tokens: 50 })],
-        })],
+        }),
       }),
       loading: false,
       error: null,
@@ -143,5 +180,57 @@ describe('UsageView token legend and per-source TokenLine', () => {
     })
 
     expect(html).toContain('Asia/Dubai · Jun 4 00:00-20:47')
+  })
+
+  it('renders only the selected usage window, not every compatibility window', async () => {
+    const html = await render({
+      usage: usageStub({
+        window: windowStub({ label: 'Selected window only', total_cost_usd: 7 }),
+        windows: [windowStub({ key: 'unused', label: 'Unused compatibility window', total_cost_usd: 30 })],
+      }),
+      loading: false,
+      error: null,
+    })
+
+    expect(html).toContain('Selected window only')
+    expect(html).not.toContain('Unused compatibility window')
+  })
+})
+
+describe('UsageView cron jobs', () => {
+  it('renders cron job usage breakdown for the selected range', async () => {
+    const html = await render({
+      usage: usageStub({
+        cron_jobs: [cronJobStub({
+          job_name: 'nightly-usage-rollup',
+          cost_usd: 2.5,
+          per_model: [{
+            model: 'claude-sonnet',
+            cost_usd: 1.75,
+            input_tokens: 700,
+            output_tokens: 300,
+            cache_creation_tokens: 50,
+            cache_read_tokens: 400,
+          }],
+        })],
+      }),
+      loading: false,
+      error: null,
+    })
+
+    expect(html).toContain('Cron jobs')
+    expect(html).toContain('nightly-usage-rollup')
+    expect(html).toContain('$2.50')
+    expect(html).toContain('claude-sonnet')
+  })
+
+  it('renders an empty cron jobs state when no cron usage exists in the range', async () => {
+    const html = await render({
+      usage: usageStub({ cron_jobs: [] }),
+      loading: false,
+      error: null,
+    })
+
+    expect(html).toContain('No cron usage for period')
   })
 })

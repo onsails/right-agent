@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { shouldTick } from './useLiveResource'
+import { settledBlockingGeneration, shouldTick } from './useLiveResource'
 
 describe('shouldTick', () => {
   it('ticks when visible, idle, and not paused', () => {
@@ -17,5 +17,16 @@ describe('shouldTick', () => {
 
   it('keeps ticking while hidden when pause-when-hidden is off', () => {
     expect(shouldTick({ hidden: true, inFlight: false, pauseWhenHidden: false })).toBe(true)
+  })
+
+  it('clears blocking state when the latest forced refresh settles while a superseded request is pending', () => {
+    const staleGeneration = 1
+    const latestGeneration = 2
+
+    let blockingGeneration: number | null = latestGeneration
+    blockingGeneration = settledBlockingGeneration(blockingGeneration, latestGeneration)
+
+    expect(blockingGeneration).toBeNull()
+    expect(settledBlockingGeneration(blockingGeneration, staleGeneration)).toBeNull()
   })
 })
