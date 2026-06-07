@@ -2047,6 +2047,52 @@ pub(crate) async fn handle_provider_config_update(
         return Err(ProviderApiError::Gateway(msg));
     }
 
+    if let Err(e) = right_openshell::openshell::wait_for_provider_composed(
+        &mut client,
+        &sandbox_name,
+        &req.name,
+    )
+    .await
+    {
+        let mut rollback_errors: Vec<String> = Vec::new();
+        let rollback_spec = build_gateway_rollback_spec(&gateway_snapshot);
+        if let Err(rollback_err) =
+            right_openshell::providers::update_provider(&mut client, &rollback_spec).await
+        {
+            tracing::error!(
+                provider = %req.name,
+                original_err = %e,
+                "provider rollback failed: could not restore gateway state after composition failure: {rollback_err:#}"
+            );
+            rollback_errors.push(format!("gateway: {rollback_err:#}"));
+        }
+        rollback_errors.extend(
+            reensure_generic_profile_after_rollback(
+                &mut client,
+                &req.name,
+                &current,
+                format!("{e:#}"),
+                "composition failure",
+            )
+            .await,
+        );
+        ensure_provider_policy_loaded_after_rollback(
+            &req.name,
+            &sandbox_name,
+            &policy_path,
+            format!("{e:#}"),
+            "composition not confirmed",
+        )
+        .await;
+        let mut msg = format!("{e:#}");
+        if !rollback_errors.is_empty() {
+            msg.push_str(" (rollback also failed: ");
+            msg.push_str(&rollback_errors.join("; "));
+            msg.push(')');
+        }
+        return Err(ProviderApiError::Gateway(msg));
+    }
+
     let updated = right_agent_config::ProviderEntry {
         name: req.name.clone(),
         type_: right_agent_config::ProviderType::Generic,
@@ -2103,7 +2149,7 @@ pub(crate) async fn handle_provider_config_update(
         generic: updated.generic,
         updated_at: Some(chrono::Utc::now()),
         status: ProviderStatus::Healthy,
-        composed: false,
+        composed: true,
     }))
 }
 
@@ -2657,30 +2703,66 @@ mod sandbox_mode_tests {
         );
     }
 
+    fn assert_markers_in_order(src: &str, markers: &[&str]) {
+        let mut offset = 0;
+        for marker in markers {
+            let rel = src[offset..]
+                .find(*marker)
+                .unwrap_or_else(|| panic!("marker {marker:?} missing or out of order"));
+            offset += rel + (*marker).len();
+        }
+    }
+
     #[test]
     fn built_in_create_confirms_composition_before_yaml_write() {
         // The built-in dashboard create path opens the real gateway client and
-        // shell policy loader directly, so unit tests cannot drive the happy
-        // path without a live OpenShell gateway. Pin the load-bearing ordering:
-        // after attach and before agent.yaml is updated, built-ins must trigger
-        // policy reload and confirm the composed provider rule from the active
-        // policy just like generic providers do.
+        // shell policy loader directly. Pin the ordering so a built-in add
+        // cannot update agent.yaml until the gateway's active policy includes
+        // the composed provider rule.
         let src = include_str!("internal_api_providers.rs");
         let start = src
             .find("// Built-in flow:")
             .expect("built-in provider create flow comment must exist");
         let end = src[start..]
-            .find("let entry = right_agent_config::ProviderEntry")
-            .expect("built-in provider entry construction must exist")
+            .find("Ok(axum::Json(ProviderView {")
+            .expect("built-in provider create response must exist")
             + start;
-        let built_in_flow = &src[start..end];
-        assert!(
-            built_in_flow.contains("ensure_provider_policy_loaded"),
-            "built-in create must reload provider-profile composition before writing agent.yaml"
+        assert_markers_in_order(
+            &src[start..end],
+            &[
+                "right_openshell::providers::create_provider(&mut client, &spec)",
+                "right_openshell::providers::attach_to_sandbox(&mut client, &sandbox_name, &name)",
+                "right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path)",
+                "right_openshell::openshell::wait_for_provider_composed(",
+                "&name,",
+                "append_provider_to_yaml(&state.agents_dir, &req.agent, &entry)",
+            ],
         );
-        assert!(
-            built_in_flow.contains("wait_for_provider_composed"),
-            "built-in create must confirm composition from active policy before writing agent.yaml"
+    }
+
+    #[test]
+    fn config_update_confirms_composition_before_yaml_write() {
+        // Like create, config-update talks to the real gateway and shell policy
+        // loader directly. Pin the ordering so a generic profile/config change
+        // cannot update agent.yaml until the gateway's active policy includes
+        // the recomposed provider rule.
+        let src = include_str!("internal_api_providers.rs");
+        let start = src
+            .find("pub(crate) async fn handle_provider_config_update")
+            .expect("provider config update handler must exist");
+        let end = src[start..]
+            .find("Ok(axum::Json(ProviderView {")
+            .expect("provider config update response must exist")
+            + start;
+        assert_markers_in_order(
+            &src[start..end],
+            &[
+                "right_openshell::providers::update_provider(&mut client, &spec)",
+                "right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path)",
+                "right_openshell::openshell::wait_for_provider_composed(",
+                "&req.name,",
+                "replace_provider_in_yaml(&state.agents_dir, &req.agent, &updated)",
+            ],
         );
     }
 
