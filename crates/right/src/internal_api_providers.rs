@@ -1401,9 +1401,14 @@ async fn create_generic_provider(
         )));
     }
 
-    if let Err(compose_err) =
-        right_openshell::openshell::wait_for_provider_composed(&mut client, &sandbox_name, &name)
-            .await
+    if let Err(compose_err) = right_openshell::openshell::wait_for_provider_composed_with_endpoint(
+        &mut client,
+        &sandbox_name,
+        &name,
+        &g.upstream_host,
+        g.upstream_path_prefix.as_deref().unwrap_or(""),
+    )
+    .await
     {
         if let Err(rollback_err) =
             right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &name).await
@@ -2047,10 +2052,12 @@ pub(crate) async fn handle_provider_config_update(
         return Err(ProviderApiError::Gateway(msg));
     }
 
-    if let Err(e) = right_openshell::openshell::wait_for_provider_composed(
+    if let Err(e) = right_openshell::openshell::wait_for_provider_composed_with_endpoint(
         &mut client,
         &sandbox_name,
         &req.name,
+        &new_host,
+        new_path.as_deref().unwrap_or(""),
     )
     .await
     {
@@ -2741,6 +2748,33 @@ mod sandbox_mode_tests {
     }
 
     #[test]
+    fn generic_create_confirms_endpoint_composition_before_yaml_write() {
+        // Generic create must not just see a provider rule; it must see the
+        // endpoint content from the authored generic profile before agent.yaml
+        // becomes the source of truth.
+        let src = include_str!("internal_api_providers.rs");
+        let start = src
+            .find("async fn create_generic_provider")
+            .expect("generic provider create handler must exist");
+        let end = src[start..]
+            .find("Ok(axum::Json(ProviderView {")
+            .expect("generic provider create response must exist")
+            + start;
+        assert_markers_in_order(
+            &src[start..end],
+            &[
+                "right_openshell::providers::create_provider(&mut client, &spec)",
+                "right_openshell::providers::attach_to_sandbox(&mut client, &sandbox_name, &name)",
+                "right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path)",
+                "right_openshell::openshell::wait_for_provider_composed_with_endpoint(",
+                "&g.upstream_host,",
+                "g.upstream_path_prefix.as_deref().unwrap_or(\"\")",
+                "append_provider_to_yaml(&state.agents_dir, &req.agent, &entry)",
+            ],
+        );
+    }
+
+    #[test]
     fn config_update_confirms_composition_before_yaml_write() {
         // Like create, config-update talks to the real gateway and shell policy
         // loader directly. Pin the ordering so a generic profile/config change
@@ -2759,8 +2793,9 @@ mod sandbox_mode_tests {
             &[
                 "right_openshell::providers::update_provider(&mut client, &spec)",
                 "right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path)",
-                "right_openshell::openshell::wait_for_provider_composed(",
-                "&req.name,",
+                "right_openshell::openshell::wait_for_provider_composed_with_endpoint(",
+                "&new_host,",
+                "new_path.as_deref().unwrap_or(\"\")",
                 "replace_provider_in_yaml(&state.agents_dir, &req.agent, &updated)",
             ],
         );

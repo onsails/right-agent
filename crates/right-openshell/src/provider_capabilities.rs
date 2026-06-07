@@ -85,6 +85,22 @@ pub fn provider_is_composed(policy: &SandboxPolicy, provider_name: &str) -> bool
     rule_for_provider(policy, provider_name).is_some()
 }
 
+/// True when the provider's composed rule is present and contains the expected
+/// endpoint host/path. Generic provider config updates use this stricter signal
+/// so an already-present stale rule cannot satisfy composition confirmation.
+pub fn provider_is_composed_with_endpoint(
+    policy: &SandboxPolicy,
+    provider_name: &str,
+    expected_host: &str,
+    expected_path: &str,
+) -> bool {
+    rule_for_provider(policy, provider_name).is_some_and(|rule| {
+        rule.endpoints
+            .iter()
+            .any(|endpoint| endpoint.host == expected_host && endpoint.path == expected_path)
+    })
+}
+
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }

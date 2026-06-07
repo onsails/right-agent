@@ -114,6 +114,9 @@ reload. It polls the sandbox's active policy and requires the composed
 `_provider_<name>` rule to appear. If a future attach path misses the v2
 enable step, this wait times out and fails loudly instead of silently
 letting users discover upstream 401/CONNECT failures later.
+Generic provider create/config-update and supervisor reconciles use the
+stricter endpoint-aware variant, requiring the composed rule to contain the
+expected upstream host/path so a stale pre-update rule cannot pass.
 
 ## State of truth split
 
@@ -220,10 +223,13 @@ sandbox carries the new placeholder and resolves to the new
 credential.
 
 **Edit non-secret config.** Generic providers only. Re-author/import the
-profile, `UpdateProvider`, `ensure_provider_policy_loaded`, then write
-`agent.yaml`. The `env_var` is stable after creation unless a credential
-is supplied through a rotate/update path that can update gateway
-credentials consistently.
+profile, `UpdateProvider`, `ensure_provider_policy_loaded`,
+`wait_for_provider_composed` with the expected endpoint host/path, then
+write `agent.yaml`. A failed profile import, gateway update, policy-load,
+composition confirmation, or YAML write triggers rollback of the gateway
+provider/profile as applicable plus a rollback reload. The `env_var` is
+stable after creation unless a credential is supplied through a
+rotate/update path that can update gateway credentials consistently.
 
 **Remove.** `Sandbox.provider.detach` → `DeleteProvider` → remove the
 `agent.yaml` row → reload provider-profile composition. Generic providers
