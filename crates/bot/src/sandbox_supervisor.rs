@@ -998,6 +998,7 @@ mod tests {
         let empty = right_openshell::providers::ReconcileReport {
             attached: Vec::new(),
             detached: Vec::new(),
+            repaired: vec![],
             missing: Vec::new(),
             errors: Vec::new(),
         };
@@ -1011,6 +1012,7 @@ mod tests {
 
         let detached = right_openshell::providers::ReconcileReport {
             detached: vec![String::from("right-gh")],
+            repaired: vec![],
             ..empty
         };
         assert!(provider_policy_reload_needed(&[], &detached, &unchanged));
