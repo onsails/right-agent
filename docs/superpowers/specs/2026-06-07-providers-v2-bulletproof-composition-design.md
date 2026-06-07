@@ -100,32 +100,37 @@ overengineering given Component 2 is the universal backstop).
 
 ### Component 2 — Direct composition confirmation (the centerpiece)
 
-A new helper, `wait_for_provider_composed(client, sandbox_name, provider_name)`
-in `right_openshell`:
+New helpers, `wait_for_provider_composed(client, sandbox_name, provider_name)`
+and the generic-specific endpoint-aware variant in `right_openshell`:
 
 - After `attach_to_sandbox` + `ensure_provider_policy_loaded`, poll
   `get_active_policy` (host-callable via `GetSandboxPolicyStatus`) until the
   composed rule `_provider_<sanitized-name>` appears in
   `SandboxPolicy.network_policies`.
+- For generic provider create/config-update and supervisor reconciles, also
+  require the composed rule to contain the expected upstream host/path from the
+  authored generic profile. A pre-update rule for the same provider name is not
+  a fresh composition signal.
 - Reuse the existing matcher `provider_capabilities::rule_for_provider` (the
   `_provider_` prefix + `sanitize` logic already lives there).
 - Bounded timeout; on timeout return an error (FAIL FAST) with diagnostics (the
   attached-but-uncomposed state).
 - `policy set --wait` (`ensure_provider_policy_loaded`) stays as the recompose
-  **trigger**; the **success signal** becomes rule presence in the active
-  policy, not the policy-set return value. This closes the "no-op on unchanged
-  hash → no notify → composition not re-pulled" hole.
+  **trigger**; the **success signal** becomes active-policy rule/content
+  presence, not the policy-set return value. This closes the "no-op on
+  unchanged hash → no notify → composition not re-pulled" hole.
 
 This aligns with the project convention "debuggability over convenience: use the
 direct signal, do not infer status from side effects."
 
 ### Component 3 — Universal backstop (falls out of Component 2)
 
-Because every attach is followed by `wait_for_provider_composed`, a future
+Because every attach is followed by `wait_for_provider_composed*`, a future
 attach path that forgets `ensure_v2_enabled` fails loudly: the `_provider_` rule
-never appears, the poll times out, and the operation errors — instead of a
-silent upstream 401. This is what makes Option A bulletproof without a global
-memo or a structural invariant inside `attach_to_sandbox`.
+or expected generic endpoint never appears, the poll times out, and the
+operation errors — instead of a silent upstream 401. This is what makes Option A
+bulletproof without a global memo or a structural invariant inside
+`attach_to_sandbox`.
 
 ### Component 4 — Observability
 

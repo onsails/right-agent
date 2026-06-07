@@ -211,11 +211,12 @@ retry.
 **Create.** Generic providers run: author/import profile →
 `CreateProvider` with the profile ID as gateway type →
 `Sandbox.provider.attach` → `ensure_provider_policy_loaded` →
-`wait_for_provider_composed` → write `agent.yaml`. Built-in providers skip
-only the profile-authoring step. Any failure triggers ordered rollback: a
-failed `attach` removes the freshly created provider; a failed
-policy-load, composition-confirmation, or `agent.yaml` write triggers
-best-effort detach + delete, then a rollback reload.
+endpoint-aware `wait_for_provider_composed` → write `agent.yaml`. Built-in
+providers skip the profile-authoring step and use rule-presence
+composition confirmation. Any failure triggers ordered rollback: a failed
+`attach` removes the freshly created provider; a failed policy-load,
+composition-confirmation, or `agent.yaml` write triggers best-effort detach
+and delete, then a rollback reload.
 
 **Rotate.** `UpdateProvider` only. No sandbox restart. The gateway
 issues a new placeholder version; the next outbound request from the
