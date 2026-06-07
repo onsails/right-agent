@@ -22,6 +22,8 @@ const SOURCES: [&str; 7] = [
     "learning_curator",
 ];
 
+const UNKNOWN_CRON_JOB: &str = "(unknown job)";
+
 pub struct UsageOverviewInput {
     pub agent: String,
     pub generated_at: String,
@@ -364,11 +366,174 @@ async fn first_usage_chart_start_utc(
 }
 
 async fn build_cron_jobs(
-    _conn: &Connection,
-    _since: Option<&DateTime<Utc>>,
-    _until: &DateTime<Utc>,
+    conn: &Connection,
+    since: Option<&DateTime<Utc>>,
+    until: &DateTime<Utc>,
 ) -> Result<Vec<UsageCronJobSummary>, ReadModelError> {
-    Ok(Vec::new())
+    let coarse_since = since.map(|since| (*since - Duration::days(1)).to_rfc3339());
+    let coarse_until = (*until + Duration::days(1)).to_rfc3339();
+    let rows = aggregate_cron_job_rows(conn, coarse_since.as_deref(), &coarse_until).await?;
+
+    let mut totals = BTreeMap::<String, CronJobAccumulator>::new();
+    for row in rows {
+        let CronJobAggregateRow {
+            ts,
+            job_name,
+            cost,
+            turns,
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+            web_search_requests,
+            web_fetch_requests,
+            model_usage_json,
+            api_key_source,
+        } = row;
+        let event_at = DateTime::parse_from_rfc3339(&ts)?.with_timezone(&Utc);
+        if since.is_some_and(|since| event_at < *since) || event_at > *until {
+            continue;
+        }
+
+        let job_name = job_name.unwrap_or_else(|| UNKNOWN_CRON_JOB.to_owned());
+        let entry = totals
+            .entry(job_name.clone())
+            .or_insert_with(|| CronJobAccumulator::new(job_name));
+        entry.summary.cost_usd += cost;
+        if api_key_source == "none" {
+            entry.summary.subscription_cost_usd += cost;
+        } else {
+            entry.summary.api_cost_usd += cost;
+        }
+        entry.summary.turns += turns.max(0) as u64;
+        entry.summary.invocations += 1;
+        entry.summary.input_tokens += input_tokens.max(0) as u64;
+        entry.summary.output_tokens += output_tokens.max(0) as u64;
+        entry.summary.cache_creation_tokens += cache_creation_tokens.max(0) as u64;
+        entry.summary.cache_read_tokens += cache_read_tokens.max(0) as u64;
+        entry.summary.web_search_requests += web_search_requests.max(0) as u64;
+        entry.summary.web_fetch_requests += web_fetch_requests.max(0) as u64;
+
+        aggregate_model_usage_for_window(&mut entry.models, "cron", &model_usage_json);
+    }
+
+    let mut rows = totals
+        .into_values()
+        .map(|mut accumulator| {
+            accumulator.summary.per_model = accumulator.models.into_values().collect::<Vec<_>>();
+            sort_models(&mut accumulator.summary.per_model);
+            accumulator.summary
+        })
+        .collect::<Vec<_>>();
+    sort_cron_jobs(&mut rows);
+    Ok(rows)
+}
+
+struct CronJobAggregateRow {
+    ts: String,
+    job_name: Option<String>,
+    cost: f64,
+    turns: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_creation_tokens: i64,
+    cache_read_tokens: i64,
+    web_search_requests: i64,
+    web_fetch_requests: i64,
+    model_usage_json: String,
+    api_key_source: String,
+}
+
+struct CronJobAccumulator {
+    summary: UsageCronJobSummary,
+    models: BTreeMap<String, UsageModelSummary>,
+}
+
+impl CronJobAccumulator {
+    fn new(job_name: String) -> Self {
+        Self {
+            summary: UsageCronJobSummary {
+                job_name,
+                cost_usd: 0.0,
+                subscription_cost_usd: 0.0,
+                api_cost_usd: 0.0,
+                turns: 0,
+                invocations: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                web_search_requests: 0,
+                web_fetch_requests: 0,
+                per_model: Vec::new(),
+            },
+            models: BTreeMap::new(),
+        }
+    }
+}
+
+async fn aggregate_cron_job_rows(
+    conn: &Connection,
+    coarse_since: Option<&str>,
+    coarse_until: &str,
+) -> Result<Vec<CronJobAggregateRow>, ReadModelError> {
+    if let Some(coarse_since) = coarse_since {
+        let mut stmt = conn.prepare(
+            "SELECT ts, job_name, total_cost_usd, num_turns, input_tokens, output_tokens,
+                    cache_creation_tokens, cache_read_tokens, web_search_requests,
+                    web_fetch_requests, model_usage_json, api_key_source
+             FROM usage_events
+             WHERE source = 'cron' AND ts >= ?1 AND ts <= ?2
+             ORDER BY ts ASC",
+        )?;
+        return stmt
+            .query_map(params![coarse_since, coarse_until], cron_job_aggregate_row)
+            .await?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into);
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT ts, job_name, total_cost_usd, num_turns, input_tokens, output_tokens,
+                cache_creation_tokens, cache_read_tokens, web_search_requests,
+                web_fetch_requests, model_usage_json, api_key_source
+         FROM usage_events
+         WHERE source = 'cron' AND ts <= ?1
+         ORDER BY ts ASC",
+    )?;
+    stmt.query_map(params![coarse_until], cron_job_aggregate_row)
+        .await?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn cron_job_aggregate_row(
+    row: &right_db::row::Row<'_>,
+) -> Result<CronJobAggregateRow, right_db::DbError> {
+    Ok(CronJobAggregateRow {
+        ts: row.get(0)?,
+        job_name: row.get(1)?,
+        cost: row.get(2)?,
+        turns: row.get(3)?,
+        input_tokens: row.get(4)?,
+        output_tokens: row.get(5)?,
+        cache_creation_tokens: row.get(6)?,
+        cache_read_tokens: row.get(7)?,
+        web_search_requests: row.get(8)?,
+        web_fetch_requests: row.get(9)?,
+        model_usage_json: row.get(10)?,
+        api_key_source: row.get(11)?,
+    })
+}
+
+fn sort_cron_jobs(rows: &mut [UsageCronJobSummary]) {
+    rows.sort_by(|left, right| {
+        right
+            .cost_usd
+            .partial_cmp(&left.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.job_name.cmp(&right.job_name))
+    });
 }
 
 fn build_source_series(
@@ -1343,3 +1508,7 @@ mod usage_local_time_tests;
 #[cfg(test)]
 #[path = "usage_range_tests.rs"]
 mod usage_range_tests;
+
+#[cfg(test)]
+#[path = "usage_cron_jobs_tests.rs"]
+mod usage_cron_jobs_tests;
