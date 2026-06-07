@@ -733,7 +733,7 @@ pub(crate) async fn handle_provider_list(
     let mut client = open_openshell_client().await?;
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
     let active_policy =
-        match right_openshell::openshell::get_active_policy(&mut client, &sandbox_name).await {
+        match right_openshell::openshell::get_effective_policy(&mut client, &sandbox_name).await {
             Ok(Some(policy)) => Some(policy),
             Ok(None) => {
                 tracing::warn!(
@@ -1871,7 +1871,7 @@ pub(crate) async fn handle_provider_rotate(
     // degrade to None only when the active policy can't be read.
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
     let composed =
-        match right_openshell::openshell::get_active_policy(&mut client, &sandbox_name).await {
+        match right_openshell::openshell::get_effective_policy(&mut client, &sandbox_name).await {
             Ok(policy) => policy
                 .as_ref()
                 .map(|policy| provider_entry_is_composed(policy, entry)),
