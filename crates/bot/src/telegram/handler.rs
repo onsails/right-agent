@@ -284,9 +284,12 @@ pub async fn handle_message(
                     username: f.username.as_ref().map(|u| format!("@{u}")),
                     user_id: Some(f.id.0 as i64),
                 },
+                // No `from` (channel auto-forward / anonymous admin): attribute
+                // to the sending chat, mirroring the primary-message author path
+                // rather than emitting an empty name.
                 None => super::attachments::MessageAuthor {
-                    name: String::new(),
-                    username: None,
+                    name: r.chat.title().unwrap_or("unknown").to_owned(),
+                    username: r.chat.username().map(|u| format!("@{u}")),
                     user_id: None,
                 },
             };

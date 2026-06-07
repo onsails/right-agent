@@ -55,14 +55,25 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
 
-/// Process-local monotonic turn id. Allocated by `next_turn_id()` at the start
-/// of every `invoke_cc` call so the worker can match concurrent bg-callback
-/// inserts to the *current* turn (not a previous one).
+/// Process-local monotonic turn id. Allocated at the start of every `invoke_cc`
+/// call so the worker can match concurrent bg-callback inserts to the *current*
+/// turn (not a previous one).
 static NEXT_TURN_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Allocate a fresh per-turn id. Monotonic across the bot process.
-pub(crate) fn next_turn_id() -> u64 {
-    NEXT_TURN_ID.fetch_add(1, Ordering::Relaxed)
+/// Allocate a fresh per-turn id above any already-persisted session turn.
+pub(crate) fn next_turn_id_after(stored_max_turn_id: Option<u64>) -> u64 {
+    let floor = stored_max_turn_id.unwrap_or(0).saturating_add(1);
+    loop {
+        let current = NEXT_TURN_ID.load(Ordering::Relaxed);
+        let allocated = current.max(floor);
+        let next = allocated.saturating_add(1);
+        if NEXT_TURN_ID
+            .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return allocated;
+        }
+    }
 }
 
 /// Shared map of active CC sessions that can be stopped via inline button.
