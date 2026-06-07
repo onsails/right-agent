@@ -1440,20 +1440,23 @@ async fn ci_openshell_readiness_and_preflight_compat() {
 
 #[tokio::test]
 async fn wait_for_provider_composed_tolerates_transient_read_errors() {
-    use crate::openshell_proto::openshell::sandbox::v1::{NetworkPolicyRule, SandboxPolicy};
-    use crate::openshell_proto::openshell::v1 as proto_v1;
+    use crate::openshell_proto::openshell::sandbox::v1::{
+        GetSandboxConfigResponse, NetworkPolicyRule, SandboxPolicy,
+    };
     use crate::test_mock_server::{MockOpenShell, mock_client, start_mock_server};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // First poll errors (transient gateway blip), second returns the composed
-    // rule. The wait must ride through the transient error and succeed — a
-    // single read error must not abort the wait and cascade into a rollback /
-    // recovery break on an otherwise-healthy provider.
+    // Composition detection reads the EFFECTIVE policy via GetSandboxConfig (the
+    // stored revision never carries authored generic provider rules). First poll
+    // errors (transient gateway blip), second returns the composed rule. The wait
+    // must ride through the transient error and succeed — a single read error
+    // must not abort the wait and cascade into a rollback / recovery break on an
+    // otherwise-healthy provider.
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_for_mock = Arc::clone(&calls);
     let mock = MockOpenShell {
-        mock_get_sandbox_policy_status: Some(Box::new(move |_req| {
+        mock_get_sandbox_config: Some(Box::new(move |_req| {
             if calls_for_mock.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(tonic::Status::unavailable("transient blip"));
             }
@@ -1465,12 +1468,9 @@ async fn wait_for_provider_composed_tolerates_transient_read_errors() {
                     ..Default::default()
                 },
             );
-            Ok(proto_v1::GetSandboxPolicyStatusResponse {
-                revision: Some(proto_v1::SandboxPolicyRevision {
-                    policy: Some(policy),
-                    ..Default::default()
-                }),
-                active_version: 1,
+            Ok(GetSandboxConfigResponse {
+                policy: Some(policy),
+                ..Default::default()
             })
         })),
         ..Default::default()

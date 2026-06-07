@@ -76,6 +76,12 @@ pub(crate) struct MockOpenShell {
             os_proto::v1::GetSandboxPolicyStatusResponse,
         >,
     >,
+    pub(crate) mock_get_sandbox_config: Option<
+        UnaryMockFn<
+            os_proto::sandbox::v1::GetSandboxConfigRequest,
+            os_proto::sandbox::v1::GetSandboxConfigResponse,
+        >,
+    >,
 }
 
 impl MockOpenShell {
@@ -457,12 +463,17 @@ impl OpenShell for MockOpenShell {
     // --- Config / policy / logs stubs ---
     async fn get_sandbox_config(
         &self,
-        _: tonic::Request<crate::openshell_proto::openshell::sandbox::v1::GetSandboxConfigRequest>,
+        req: tonic::Request<
+            crate::openshell_proto::openshell::sandbox::v1::GetSandboxConfigRequest,
+        >,
     ) -> Result<
         tonic::Response<crate::openshell_proto::openshell::sandbox::v1::GetSandboxConfigResponse>,
         tonic::Status,
     > {
-        Err(tonic::Status::unimplemented("stub"))
+        match &self.mock_get_sandbox_config {
+            Some(f) => f(req.into_inner()).map(tonic::Response::new),
+            None => Err(tonic::Status::unimplemented("stub")),
+        }
     }
 
     async fn get_gateway_config(

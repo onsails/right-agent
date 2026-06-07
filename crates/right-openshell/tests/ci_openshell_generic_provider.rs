@@ -175,11 +175,12 @@ async fn connect_failure_diagnostics(
     let (raw_connect, rcode) = sandbox
         .exec_with_timeout(&["sh", "-lc", RAW_CONNECT_PROBE], 30)
         .await;
-    let policy = match right_openshell::openshell::get_active_policy(client, sandbox.name()).await {
-        Ok(Some(policy)) => format!("{policy:#?}"),
-        Ok(None) => "<no composed policy returned>".to_string(),
-        Err(e) => format!("<get_active_policy failed: {e:#}>"),
-    };
+    let policy =
+        match right_openshell::openshell::get_effective_policy(client, sandbox.name()).await {
+            Ok(Some(policy)) => format!("{policy:#?}"),
+            Ok(None) => "<no composed policy returned>".to_string(),
+            Err(e) => format!("<get_active_policy failed: {e:#}>"),
+        };
     format!(
         "\n--- curl -v (exit {vcode}) ---\n{verbose}\n\
          --- raw proxy CONNECT response (exit {rcode}) ---\n{raw_connect}\n\
