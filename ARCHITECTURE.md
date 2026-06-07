@@ -325,6 +325,14 @@ OpenShell profile composition, never Right-folded `policy.yaml` stanzas;
 Right-owned built-in-derived and generic-authored profiles are provisioned
 through `right_openshell::managed_profiles`.
 
+Every provider attach path MUST guarantee `providers_v2_enabled` via
+`right_openshell::providers::ensure_v2_enabled`: the funnels are
+`reconcile_for_sandbox` (supervisor) and the dashboard create/config-update
+handlers. Composition success MUST be confirmed by
+`openshell::wait_for_provider_composed`, which reads the active policy for the
+composed `_provider_<name>` rule, never inferred from `policy set --wait`.
+This applies to built-in and generic providers.
+
 See: `docs/architecture/providers.md` for the placeholder mechanism,
 substitution flow, reconciler walkthrough, and policy interaction.
 

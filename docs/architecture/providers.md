@@ -90,21 +90,30 @@ there is no `# right-providers: insert-above` anchor and no folded
 provider stanza. Ordering now comes from OpenShell's provider-profile
 composition, and Right forces that composition to reload after profile or
 attachment changes by reapplying the base policy with `openshell policy
-set --wait`.
+set --wait`. That command is only a reload trigger: OpenShell can no-op
+when the policy hash is unchanged, so its return is not the composition
+success signal.
 
 That composition is itself gated by the gateway-global runtime setting
 `providers_v2_enabled`, which fresh OpenShell gateways default to `false`.
 While off, the gateway silently skips merging provider-profile endpoints —
 the placeholder env var is still injected, but the proxy denies CONNECT to
 the upstream because the terminated endpoint never appears in the effective
-policy. `right up` sets it once per gateway via
+policy. Right guarantees the flag through two funnels:
+`right_openshell::providers::reconcile_for_sandbox` for supervisor bring-up
+and hot-reconcile, and the dashboard create/config-update handlers for
+explicit user mutations. Both call
 `right_openshell::providers::ensure_v2_enabled` (a global `UpdateConfig`
-upsert), fatal only when an agent declares providers. The flag persists in
+upsert) before attaching or recomposing a provider. The flag persists in
 the gateway's settings store, so a long-lived dev gateway that was enabled
-once keeps working — which is why the regression that removed this call
-surfaced only on fresh Linux gateways (CI and new production hosts), not on
-developer machines. Integration tests that exercise composition must call
-`ensure_v2_enabled` themselves because they bypass `right up`.
+once keeps working — which is why missed enablement tends to surface only
+on fresh gateways.
+
+`openshell::wait_for_provider_composed` is the success signal after the
+reload. It polls the sandbox's active policy and requires the composed
+`_provider_<name>` rule to appear. If a future attach path misses the v2
+enable step, this wait times out and fails loudly instead of silently
+letting users discover upstream 401/CONNECT failures later.
 
 ## State of truth split
 
@@ -165,7 +174,10 @@ that profile ID, and calls `ensure_provider_policy_loaded(sandbox,
 policy_path)`. That helper reapplies the current base `policy.yaml` with
 `openshell policy set --wait`; it does not write provider stanzas. The
 reload is required because OpenShell provider-profile composition is not
-fully loaded by attach/import alone on the observed v0.0.56 behavior.
+fully loaded by attach/import alone on the observed v0.0.56 behavior, but
+composition is confirmed only by active-policy polling for the composed
+provider rule. This scope covers built-in and generic providers; both rely
+on OpenShell profile composition.
 
 On remove, Right detaches and deletes the gateway provider, removes the
 `agent.yaml` row, and reloads provider-profile composition with
@@ -174,16 +186,19 @@ legacy folded-policy strip path; new composition-based policies have no
 tagged stanza, so this is normally a no-op. It exists to clean up
 already-deployed policies that still contain
 `# managed-by: right-providers:<provider-name>` stanzas.
+Folding stays removed; the legacy strip path is cleanup-only.
 
 A `sandbox.providers`-only edit to `agent.yaml` no longer forces a
 restart: `config_watcher` classifies it `ProvidersReload` and signals
 `sandbox_supervisor::hot_reconcile_providers`, which ensures generic
 profiles exist, reconciles gateway attach/detach, and reloads
-provider-profile composition with `openshell policy set --wait`. The
-lib.rs consumer retries the hot path with bounded backoff. There is no
-periodic provider reconcile, so persistent failure can leave the live
-sandbox's attachment/composition state stale until the next bot restart
-or sandbox bring-up — re-edit `sandbox.providers` or restart to retry.
+provider-profile composition with `openshell policy set --wait`, then
+relies on active-policy composition checks where a provider attach must be
+confirmed. The lib.rs consumer retries the hot path with bounded backoff.
+There is no periodic provider reconcile, so persistent failure can leave
+the live sandbox's attachment/composition state stale until the next bot
+restart or sandbox bring-up — re-edit `sandbox.providers` or restart to
+retry.
 
 ## Lifecycle
 
