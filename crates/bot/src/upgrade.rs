@@ -94,23 +94,6 @@ async fn run_upgrade_loop(
 async fn run_upgrade(ssh_config_path: &Path, ssh_host: &str, agent_name: &str) {
     tracing::info!(agent = %agent_name, "checking for claude upgrade");
 
-    // Ensure native install metadata is registered. The sandbox image ships
-    // claude via npm (/usr/local/bin/claude), but `claude upgrade` installs a
-    // native build to .local/bin/. Without `claude install` first, upgrade
-    // warns "config install method is 'unknown'". Idempotent — no-ops if
-    // already installed.
-    if let Err(e) = right_openshell::openshell::ssh_exec(
-        ssh_config_path,
-        ssh_host,
-        &["claude", "install"],
-        UPGRADE_TIMEOUT_SECS,
-    )
-    .await
-    {
-        tracing::error!(agent = %agent_name, "claude install failed: {e:#}");
-        return;
-    }
-
     let result = right_openshell::openshell::ssh_exec(
         ssh_config_path,
         ssh_host,
@@ -184,6 +167,19 @@ mod tests {
     async fn upgrade_runs_when_idle() {
         let lock = Arc::new(RwLock::new(()));
         assert!(lock.try_write().is_ok());
+    }
+
+    #[tokio::test]
+    async fn upgrade_does_not_run_claude_install_before_upgrade() {
+        let src = include_str!("upgrade.rs");
+        let bad_pattern = ["[\"", "claude", "\", \"", "install", "\"]"].concat();
+
+        assert!(
+            !src.contains(&bad_pattern),
+            "upgrade.rs must not run `claude install` before `claude upgrade`; \
+             current Claude Code treats install as a slow native-build install, \
+             while upgrade already repairs install metadata when needed."
+        );
     }
 
     #[tokio::test]
