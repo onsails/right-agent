@@ -4,7 +4,9 @@
 
 **Goal:** Existing agents with pre-profile generic OpenShell providers (`type = "generic"`) self-heal to the current Right-managed profile type (`right-provider-*`) during startup and hot provider reconcile, and the bot reports provider composition failures instead of saying the sandbox is still starting.
 
-**Architecture:** Keep the migration in `right_openshell::providers::reconcile_for_sandbox`, the single gateway provider reconcile path used by bot startup and hot-reconcile. The reconciler repairs only declared providers that already exist and still have the legacy generic type, using a sparse `UpdateProvider` request with empty credentials so gateway-held secret bytes are preserved. Bot bring-up keeps the same recoverable degraded retry behavior, but maps provider reconcile/composition failures to a provider-specific `GatewayCause`.
+**Architecture:** Keep the migration in `right_openshell::providers::reconcile_for_sandbox`, the single gateway provider reconcile path used by bot startup and hot-reconcile. The reconciler repairs only declared providers that already exist and still have the legacy generic type, using a sparse `UpdateProvider` request with empty credentials/config so gateway-held fields are preserved. Bot bring-up keeps the same recoverable degraded retry behavior, but maps provider reconcile/composition failures to a provider-specific `GatewayCause`.
+
+**Post-CC Review correction:** Live OpenShell probing confirmed the sparse-update assumption for empty provider credentials/config. The final implementation must include an ignored live regression test for that gateway behavior, and already-attached repaired providers must be detached and reattached so OpenShell recomposes the sandbox under the new provider profile.
 
 **Tech Stack:** Rust 2024, tonic OpenShell gRPC wrappers, Tokio tests, `devenv shell -- cargo test`, descriptive architecture docs in `docs/architecture/providers.md`.
 
@@ -15,7 +17,7 @@
 - Do not manually edit `~/.right/agents/*/agent.yaml`, OpenShell provider records, or sandboxes while implementing this. The platform must repair already-deployed agents by code.
 - All commands run from repo root and use `devenv shell --`.
 - The Rust-specific local instruction asks for `rust-dev:rust-dev`, but that skill is not available in the current skills list. Record that in the execution notes and continue with repo tests.
-- OpenShell `UpdateProvider` with an empty credentials map is treated as sparse credential update by existing dashboard code paths; this plan relies on that established behavior and keeps credentials out of logs/tests.
+- OpenShell `UpdateProvider` with empty credentials/config maps is sparse for existing provider fields; this is pinned by ignored live test `ci_openshell_provider_update_empty_maps_preserves_existing_fields`.
 - `ARCHITECTURE.md` does not need a contract change unless implementation discovers a new review-blocking invariant. `docs/architecture/providers.md` must be updated because this subsystem is being touched and currently omits the legacy type repair.
 
 ## File Structure

@@ -160,20 +160,21 @@ For each entry in `agent.yaml::sandbox::providers`:
 2. If the provider exists with the legacy generic gateway type
    `type = "generic"`, call `UpdateProvider` with
    `type = right_openshell::managed_profiles::generic_provider_profile_id(name)`,
-   empty credentials, and empty config. This preserves the gateway-held
-   credential bytes while moving already-deployed agents to the current
-   provider-profile shape. Built-in providers and already-migrated generic
-   providers are left unchanged.
-3. If not currently attached to the sandbox, call
+   empty credentials, and empty config. Live OpenShell probing confirms empty
+   maps are sparse for existing provider credentials/config, so this preserves
+   gateway-held fields while moving already-deployed agents to the current
+   provider-profile shape.
+3. If a legacy generic provider was already attached, call
+   `Sandbox.provider.detach` and then reattach it so the gateway recomposes the
+   sandbox under the new provider profile. If not currently attached, call
    `Sandbox.provider.attach`.
 
 Then for each provider currently attached to the sandbox whose name
 starts with `<agent>-` but is absent from `agent.yaml`: call
 `Sandbox.provider.detach`.
 
-The reconciler returns a `ReconcileReport { attached, detached,
-repaired, missing, errors }` per agent which is surfaced in logs and to
-callers.
+The reconciler returns a `ReconcileReport { attached, detached, repaired,
+missing, errors }` per agent which is surfaced in logs and to callers.
 
 ## Policy interaction
 
@@ -242,13 +243,13 @@ sandbox carries the new placeholder and resolves to the new
 credential.
 
 **Edit non-secret config.** Generic providers only. Re-author/import the
-profile, `UpdateProvider`, `ensure_provider_policy_loaded`,
-`wait_for_provider_composed` with the expected endpoint host/path, then
-write `agent.yaml`. A failed profile import, gateway update, policy-load,
-composition confirmation, or YAML write triggers rollback of the gateway
-provider/profile as applicable plus a rollback reload. The `env_var` is
-stable after creation unless a credential is supplied through a
-rotate/update path that can update gateway credentials consistently.
+profile, `ensure_provider_policy_loaded`, `wait_for_provider_composed` with
+the expected endpoint host/path, then write `agent.yaml`. This path does not
+call `UpdateProvider` because the provider record does not change. A failed
+profile import, policy-load, composition confirmation, or YAML write triggers
+profile rollback plus a rollback reload. The `env_var` is stable after
+creation unless a credential is supplied through a rotate/update path that can
+update gateway credentials consistently.
 
 **Remove.** `Sandbox.provider.detach` → `DeleteProvider` → remove the
 `agent.yaml` row → reload provider-profile composition. Generic providers

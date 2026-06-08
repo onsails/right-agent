@@ -399,12 +399,6 @@ async fn reconcile_skips_v2_when_nothing_declared() {
 
 #[tokio::test]
 async fn reconcile_repairs_legacy_generic_provider_type_before_attaching() {
-    let seen_update: Arc<Mutex<Option<proto_v1::UpdateProviderRequest>>> =
-        Arc::new(Mutex::new(None));
-    let seen_update_clone = Arc::clone(&seen_update);
-    let seen_attach: Arc<Mutex<Option<proto_v1::AttachSandboxProviderRequest>>> =
-        Arc::new(Mutex::new(None));
-    let seen_attach_clone = Arc::clone(&seen_attach);
     let calls: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
     let calls_for_update = Arc::clone(&calls);
     let calls_for_attach = Arc::clone(&calls);
@@ -428,8 +422,6 @@ async fn reconcile_repairs_legacy_generic_provider_type_before_attaching() {
         })),
         mock_get_provider: Some(Box::new(|req| {
             assert_eq!(req.name, "agent-acme");
-            let mut legacy_config = HashMap::new();
-            legacy_config.insert("upstream_host".into(), "api.acme.test".into());
             Ok(proto_v1::ProviderResponse {
                 provider: Some(datamodel::Provider {
                     metadata: Some(datamodel::ObjectMeta {
@@ -437,7 +429,7 @@ async fn reconcile_repairs_legacy_generic_provider_type_before_attaching() {
                         ..Default::default()
                     }),
                     r#type: "generic".into(),
-                    config: legacy_config,
+                    config: HashMap::new(),
                     credentials: HashMap::new(),
                     credential_expires_at_ms: HashMap::new(),
                 }),
@@ -446,15 +438,23 @@ async fn reconcile_repairs_legacy_generic_provider_type_before_attaching() {
         mock_update_provider: Some(Box::new(move |req| {
             let provider = req.provider.clone().expect("provider update payload");
             assert_eq!(provider.r#type, expected_type_for_update);
+            assert!(
+                provider.credentials.is_empty(),
+                "repair relies on OpenShell sparse credential update semantics"
+            );
+            assert!(
+                provider.config.is_empty(),
+                "repair relies on OpenShell sparse config update semantics"
+            );
             calls_for_update.lock().unwrap().push("update");
-            *seen_update_clone.lock().unwrap() = Some(req);
             Ok(proto_v1::ProviderResponse {
                 provider: Some(provider),
             })
         })),
         mock_attach_sandbox_provider: Some(Box::new(move |req| {
+            assert_eq!(req.sandbox_name, "sbx");
+            assert_eq!(req.provider_name, "agent-acme");
             calls_for_attach.lock().unwrap().push("attach");
-            *seen_attach_clone.lock().unwrap() = Some(req);
             Ok(proto_v1::AttachSandboxProviderResponse {
                 sandbox: None,
                 attached: true,
@@ -479,35 +479,95 @@ async fn reconcile_repairs_legacy_generic_provider_type_before_attaching() {
         vec!["update", "attach"],
         "legacy generic provider must be repaired before it is attached"
     );
+}
 
-    let update_req = seen_update
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("legacy generic provider must be updated");
-    let updated_provider = update_req.provider.expect("provider update payload");
+#[tokio::test]
+async fn reconcile_repairs_already_attached_legacy_generic_provider_via_detach_reattach() {
+    let calls: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+    let calls_for_update = Arc::clone(&calls);
+    let calls_for_detach = Arc::clone(&calls);
+    let calls_for_attach = Arc::clone(&calls);
+
+    let expected_type = crate::managed_profiles::generic_provider_profile_id("agent-acme");
+    let expected_type_for_update = expected_type.clone();
+
+    let mock = MockOpenShell {
+        mock_update_config: Some(Box::new(|_| {
+            Ok(proto_v1::UpdateConfigResponse {
+                version: 0,
+                policy_hash: String::new(),
+                settings_revision: 1,
+                deleted: false,
+            })
+        })),
+        mock_list_sandbox_providers: Some(Box::new(|_| {
+            Ok(proto_v1::ListSandboxProvidersResponse {
+                providers: vec![datamodel::Provider {
+                    metadata: Some(datamodel::ObjectMeta {
+                        name: "agent-acme".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            })
+        })),
+        mock_get_provider: Some(Box::new(|req| {
+            Ok(proto_v1::ProviderResponse {
+                provider: Some(datamodel::Provider {
+                    metadata: Some(datamodel::ObjectMeta {
+                        name: req.name,
+                        ..Default::default()
+                    }),
+                    r#type: "generic".into(),
+                    config: HashMap::new(),
+                    credentials: HashMap::new(),
+                    credential_expires_at_ms: HashMap::new(),
+                }),
+            })
+        })),
+        mock_update_provider: Some(Box::new(move |req| {
+            let provider = req.provider.clone().expect("provider update payload");
+            assert_eq!(provider.r#type, expected_type_for_update);
+            assert!(provider.credentials.is_empty());
+            assert!(provider.config.is_empty());
+            calls_for_update.lock().unwrap().push("update");
+            Ok(proto_v1::ProviderResponse {
+                provider: Some(provider),
+            })
+        })),
+        mock_detach_sandbox_provider: Some(Box::new(move |_| {
+            calls_for_detach.lock().unwrap().push("detach");
+            Ok(proto_v1::DetachSandboxProviderResponse {
+                sandbox: None,
+                detached: true,
+            })
+        })),
+        mock_attach_sandbox_provider: Some(Box::new(move |_| {
+            calls_for_attach.lock().unwrap().push("attach");
+            Ok(proto_v1::AttachSandboxProviderResponse {
+                sandbox: None,
+                attached: true,
+            })
+        })),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    let report = reconcile_for_sandbox(&mut client, "sbx", "agent", &["agent-acme".to_string()])
+        .await
+        .unwrap();
+
+    assert_eq!(report.repaired, vec!["agent-acme".to_string()]);
+    assert_eq!(report.attached, vec!["agent-acme".to_string()]);
+    assert!(report.detached.is_empty());
+    assert!(report.missing.is_empty());
+    assert!(report.errors.is_empty());
     assert_eq!(
-        updated_provider.metadata.unwrap().name,
-        "agent-acme",
-        "repair must update the existing gateway provider, not create a new one"
+        *calls.lock().unwrap(),
+        vec!["update", "detach", "attach"],
+        "already-attached legacy provider must be repaired then cycled detach+attach for recomposition"
     );
-    assert_eq!(updated_provider.r#type, expected_type);
-    assert!(
-        updated_provider.credentials.is_empty(),
-        "repair must preserve existing gateway credential bytes via sparse credential update"
-    );
-    assert!(
-        updated_provider.config.is_empty(),
-        "new generic provider shape keeps upstream config in the authored profile, not Provider.config"
-    );
-
-    let attach_req = seen_attach
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("repaired provider must still be attached");
-    assert_eq!(attach_req.sandbox_name, "sbx");
-    assert_eq!(attach_req.provider_name, "agent-acme");
 }
 
 #[tokio::test]
