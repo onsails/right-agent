@@ -158,6 +158,81 @@ async fn ci_openshell_provider_update_empty_maps_preserves_existing_fields() {
 
 #[tokio::test]
 #[ignore = "ci-openshell: requires a live OpenShell gateway"]
+async fn ci_openshell_provider_update_rejects_type_change() {
+    use right_openshell::managed_profiles::{
+        author_generic_profile, delete_profile, generic_provider_profile_id, lint_and_import,
+    };
+    use right_openshell::openshell_proto::openshell::datamodel::v1 as datamodel;
+    use right_openshell::openshell_proto::openshell::v1 as proto_v1;
+    use right_openshell::providers::*;
+
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
+        .await
+        .unwrap();
+
+    let name = format!("rightprobe-{}-type-change", std::process::id());
+    let profile_id = generic_provider_profile_id(&name);
+    let _ = delete_provider(&mut client, &name).await;
+    let _ = delete_profile(&mut client, &profile_id).await;
+
+    lint_and_import(
+        &mut client,
+        author_generic_profile(
+            &profile_id,
+            "example.invalid",
+            None,
+            "Authorization",
+            "TYPECHANGE_TOKEN",
+        ),
+    )
+    .await
+    .expect("import throwaway target profile");
+
+    let mut creds = std::collections::HashMap::new();
+    creds.insert("TYPECHANGE_TOKEN".to_string(), "first".to_string());
+    create_provider(
+        &mut client,
+        &ProviderSpec {
+            name: name.clone(),
+            type_: "generic".into(),
+            credentials: creds,
+            config: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let err = client
+        .update_provider(proto_v1::UpdateProviderRequest {
+            provider: Some(datamodel::Provider {
+                metadata: Some(datamodel::ObjectMeta {
+                    name: name.clone(),
+                    ..Default::default()
+                }),
+                r#type: profile_id.clone(),
+                credentials: Default::default(),
+                config: Default::default(),
+                credential_expires_at_ms: Default::default(),
+            }),
+            credential_expires_at_ms: Default::default(),
+        })
+        .await
+        .err()
+        .expect("OpenShell must reject provider type changes through UpdateProvider");
+
+    delete_provider(&mut client, &name).await.unwrap();
+    let _ = delete_profile(&mut client, &profile_id).await;
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message().contains("provider type cannot be changed"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "ci-openshell: requires a live OpenShell gateway"]
 async fn ci_openshell_provider_attach_detach() {
     use right_openshell::providers::*;
     use right_openshell::test_support::TestSandbox;

@@ -158,16 +158,16 @@ For each entry in `agent.yaml::sandbox::providers`:
      provider). Do not auto-heal: Right does not have the credential
      bytes. The dashboard surfaces these with a *Resolve* action.
 2. If the provider exists with the legacy generic gateway type
-   `type = "generic"`, call `UpdateProvider` with
-   `type = right_openshell::managed_profiles::generic_provider_profile_id(name)`,
-   empty credentials, and empty config. Live OpenShell probing confirms empty
-   maps are sparse for existing provider credentials/config, so this preserves
-   gateway-held fields while moving already-deployed agents to the current
-   provider-profile shape.
-3. If a legacy generic provider was already attached, call
-   `Sandbox.provider.detach` and then reattach it so the gateway recomposes the
-   sandbox under the new provider profile. If not currently attached, call
-   `Sandbox.provider.attach`.
+   `type = "generic"`, recreate it with the same gateway name and
+   `type = right_openshell::managed_profiles::generic_provider_profile_id(name)`.
+   OpenShell rejects provider type changes through `UpdateProvider`, so the
+   reconciler uses `GetProvider` → optional detach → `DeleteProvider` →
+   `CreateProvider`, preserving the gateway-held credentials/config returned
+   by `GetProvider` and stripping gateway-owned metadata before create.
+3. After recreating a legacy generic provider, call `Sandbox.provider.attach`
+   so the gateway composes the sandbox under the new provider profile. If the
+   provider was already attached, it is detached before delete and reattached
+   after create.
 
 Then for each provider currently attached to the sandbox whose name
 starts with `<agent>-` but is absent from `agent.yaml`: call
