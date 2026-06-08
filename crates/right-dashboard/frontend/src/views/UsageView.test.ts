@@ -197,6 +197,52 @@ describe('UsageView token legend and per-source TokenLine', () => {
   })
 })
 
+describe('UsageView window model breakdown', () => {
+  it('renders per-model rows for the selected window', async () => {
+    const html = await render({
+      usage: usageStub({
+        window: windowStub({
+          per_model: [
+            {
+              model: 'claude-sonnet-4-6',
+              cost_usd: 61.47,
+              input_tokens: 700,
+              output_tokens: 300,
+              cache_creation_tokens: 50,
+              cache_read_tokens: 400,
+            },
+            {
+              model: 'claude-opus-4-7',
+              cost_usd: 305.42,
+              input_tokens: 9000,
+              output_tokens: 4000,
+              cache_creation_tokens: 500,
+              cache_read_tokens: 8000,
+            },
+          ],
+        }),
+      }),
+      loading: false,
+      error: null,
+    })
+
+    expect(html).toContain('claude-sonnet-4-6')
+    expect(html).toContain('$61.47')
+    expect(html).toContain('claude-opus-4-7')
+    expect(html).toContain('$305.42')
+  })
+
+  it('renders an empty model state when the window has no model spend', async () => {
+    const html = await render({
+      usage: usageStub({ window: windowStub({ per_model: [] }) }),
+      loading: false,
+      error: null,
+    })
+
+    expect(html).toContain('No model spend')
+  })
+})
+
 describe('UsageView cron jobs', () => {
   it('renders cron job usage breakdown for the selected range', async () => {
     const html = await render({
