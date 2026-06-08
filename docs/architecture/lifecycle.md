@@ -60,7 +60,7 @@ right bot --agent <name>  (spawned by process-compose)
   ├─ Start Claude health loop:
   │   ├─ immediate startup Haiku probe with strict MCP config
   │   ├─ hourly Haiku probe for Claude OAuth keepalive + agent-facing MCP init
-  │   └─ stale `right` MCP needs-auth cache repair when `system/init` is unhealthy
+  │   └─ stale `right` MCP needs-auth cache repair for terminal unhealthy `system/init` statuses
   ├─ Start cron engine and refresh scheduler
   ├─ Start bot-owned UDS server with OAuth callback, progress, healthz,
   │   dashboard, and nested Telegram webhook routes; dashboard serves
@@ -101,8 +101,9 @@ Per message:
   │   ├─ First message: --session-id <uuid> (new session)
   │   ├─ Subsequent: --resume <root_session_id> (persistent session)
   │   └─ Sessions persist across messages — agent retains full CC context
-  ├─ Observe Claude Code `system/init`; if `right` MCP is unhealthy, schedule
-  │   cache repair asynchronously without interrupting or retrying the turn
+  ├─ Observe Claude Code `system/init`; if `right` MCP reports a terminal
+  │   unhealthy status, schedule cache repair asynchronously without
+  │   interrupting or retrying the turn. `pending` is a deferred MCP state.
   ├─ If foreground exits via 600s timeout or 🌙 Background button:
   │   ├─ Insert async_runs row with kind='background', source_session_id =
   │   │   <main_session_id>, run_session_id = <run_id>

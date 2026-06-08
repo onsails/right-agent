@@ -31,6 +31,9 @@ enum HealthProbeOutcome {
 fn classify_init_status(status: crate::cc::stream::RightMcpInitStatus) -> HealthProbeOutcome {
     match status {
         crate::cc::stream::RightMcpInitStatus::Connected => HealthProbeOutcome::Healthy,
+        crate::cc::stream::RightMcpInitStatus::Unhealthy {
+            status: Some(status),
+        } if status == "pending" => HealthProbeOutcome::Healthy,
         crate::cc::stream::RightMcpInitStatus::Unhealthy { status } => {
             HealthProbeOutcome::NeedsRepair { status }
         }
@@ -430,7 +433,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_status_decision_maps_only_connected_to_health_probe_outcome() {
+    async fn pending_right_mcp_status_is_deferred_not_repairable() {
+        let status = crate::cc::stream::RightMcpInitStatus::Unhealthy {
+            status: Some("pending".to_owned()),
+        };
+
+        assert_eq!(classify_init_status(status), HealthProbeOutcome::Healthy);
+    }
+
+    #[tokio::test]
+    async fn init_status_decision_repairs_terminal_unhealthy_states() {
         assert_eq!(
             classify_init_status(crate::cc::stream::RightMcpInitStatus::Connected),
             HealthProbeOutcome::Healthy
