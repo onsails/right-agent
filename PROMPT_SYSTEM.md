@@ -118,9 +118,11 @@ marker, and a one-shot repair notice as `<system-notification>`. These blocks
 are current-turn context, not durable system prompt content.
 
 Operating instructions include a `### Subagents` section that teaches use of the
-built-in Claude Code `Agent` tool for bounded independent workstreams. This is
-prompt guidance only; Right Agent does not create separate subagent definition
-files.
+built-in Claude Code `Agent` tool for bounded independent workstreams. It makes
+an explicit `model:` mandatory on every dispatch (omission silently inherits the
+caller's expensive model) and sets `sonnet`/`haiku` as the default for mechanical
+delegation, reserving the strongest model for judgment calls. This is prompt
+guidance only; Right Agent does not create separate subagent definition files.
 They also document stdin user-turn formats, including Telegram YAML reply
 metadata (`reply_to_id`, `reply_to`, and `quoted_text`).
 
