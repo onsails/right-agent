@@ -218,13 +218,26 @@ pub async fn create_provider(
     client: &mut OpenShellClient<Channel>,
     spec: &ProviderSpec,
 ) -> Result<Provider, ProviderError> {
+    create_provider_proto(client, proto_provider_from_spec(spec)).await
+}
+
+async fn create_provider_proto(
+    client: &mut OpenShellClient<Channel>,
+    provider: datamodel::Provider,
+) -> Result<Provider, ProviderError> {
+    let name = provider
+        .metadata
+        .as_ref()
+        .map(|m| m.name.clone())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "<unnamed-provider>".to_string());
     let req = proto_v1::CreateProviderRequest {
-        provider: Some(proto_provider_from_spec(spec)),
+        provider: Some(provider),
     };
     let resp = client
         .create_provider(req)
         .await
-        .map_err(|s| classify_status(s, &spec.name))?
+        .map_err(|s| classify_status(s, &name))?
         .into_inner();
     let p = resp.provider.ok_or_else(|| {
         ProviderError::Grpc("CreateProvider: missing provider in response".into())
@@ -445,27 +458,128 @@ pub struct ReconcileReport {
     pub errors: Vec<(String, String)>,
 }
 
-/// Returns a repair spec for a provider whose gateway `type` is still the
+/// Returns a recreate payload for a provider whose gateway `type` is still the
 /// legacy `"generic"` built-in slug instead of the Right-managed profile ID.
 ///
-/// The spec intentionally sends empty `credentials` and `config` maps. Live
-/// OpenShell probing confirms `UpdateProvider` treats empty maps as sparse for
-/// existing fields, so the gateway-held credential and config bytes are
-/// preserved while only `type` changes.
-fn legacy_generic_provider_repair_spec(
+/// OpenShell rejects `UpdateProvider` type changes, so repair must delete and
+/// recreate the provider. The recreate payload carries the gateway-held
+/// credentials/config returned by `GetProvider` and strips gateway-owned
+/// metadata (`id`, timestamps, resource_version) before `CreateProvider`.
+fn legacy_generic_provider_recreate_payload(
     name: &str,
     provider: &datamodel::Provider,
-) -> Option<ProviderSpec> {
+) -> Option<datamodel::Provider> {
     if provider.r#type != "generic" {
         return None;
     }
 
-    Some(ProviderSpec {
-        name: name.to_string(),
-        type_: crate::managed_profiles::generic_provider_profile_id(name),
-        credentials: HashMap::new(),
-        config: HashMap::new(),
-    })
+    Some(provider_recreate_payload_with_type(
+        name,
+        provider,
+        crate::managed_profiles::generic_provider_profile_id(name),
+    ))
+}
+
+fn provider_recreate_payload_with_type(
+    name: &str,
+    provider: &datamodel::Provider,
+    type_: String,
+) -> datamodel::Provider {
+    let labels = provider
+        .metadata
+        .as_ref()
+        .map(|m| m.labels.clone())
+        .unwrap_or_default();
+    datamodel::Provider {
+        metadata: Some(datamodel::ObjectMeta {
+            name: name.to_string(),
+            labels,
+            ..Default::default()
+        }),
+        r#type: type_,
+        credentials: provider.credentials.clone(),
+        config: provider.config.clone(),
+        credential_expires_at_ms: provider.credential_expires_at_ms.clone(),
+    }
+}
+
+async fn restore_legacy_provider_after_failed_recreate(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+    name: &str,
+    original: &datamodel::Provider,
+    was_attached: bool,
+) -> String {
+    let original_payload =
+        provider_recreate_payload_with_type(name, original, original.r#type.clone());
+    match create_provider_proto(client, original_payload).await {
+        Ok(_) => {
+            if was_attached {
+                match attach_to_sandbox(client, sandbox_name, name).await {
+                    Ok(()) => "; rollback restored original provider and attachment".to_string(),
+                    Err(e) => format!(
+                        "; rollback restored original provider but failed to reattach: {e:#}"
+                    ),
+                }
+            } else {
+                "; rollback restored original provider".to_string()
+            }
+        }
+        Err(e) => format!("; rollback failed to restore original provider: {e:#}"),
+    }
+}
+
+async fn reattach_after_failed_repair_delete(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+    name: &str,
+    was_attached: bool,
+) -> String {
+    if !was_attached {
+        return String::new();
+    }
+
+    match attach_to_sandbox(client, sandbox_name, name).await {
+        Ok(()) => "; rollback restored original attachment".to_string(),
+        Err(e) => format!("; rollback failed to restore original attachment: {e:#}"),
+    }
+}
+
+async fn recreate_legacy_generic_provider(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+    name: &str,
+    original: &datamodel::Provider,
+    was_attached: bool,
+) -> Result<(), String> {
+    let repaired = legacy_generic_provider_recreate_payload(name, original)
+        .expect("caller must pass a legacy generic provider");
+
+    if was_attached {
+        detach_from_sandbox(client, sandbox_name, name)
+            .await
+            .map_err(|e| format!("repair-detach: {e:#}"))?;
+    }
+
+    if let Err(e) = delete_provider(client, name).await {
+        let rollback =
+            reattach_after_failed_repair_delete(client, sandbox_name, name, was_attached).await;
+        return Err(format!("repair-delete: {e:#}{rollback}"));
+    }
+
+    if let Err(e) = create_provider_proto(client, repaired).await {
+        let rollback = restore_legacy_provider_after_failed_recreate(
+            client,
+            sandbox_name,
+            name,
+            original,
+            was_attached,
+        )
+        .await;
+        return Err(format!("repair-create: {e:#}{rollback}"));
+    }
+
+    Ok(())
 }
 
 /// Reconcile the set of providers attached to `sandbox_name` with the
@@ -519,27 +633,22 @@ pub async fn reconcile_for_sandbox(
             Ok(provider) => {
                 let already_attached = attached_set.contains(name);
                 let mut needs_reattach = false;
-                if let Some(repair_spec) = legacy_generic_provider_repair_spec(name, &provider) {
-                    match update_provider(client, &repair_spec).await {
-                        Ok(_) => {
+                if legacy_generic_provider_recreate_payload(name, &provider).is_some() {
+                    match recreate_legacy_generic_provider(
+                        client,
+                        sandbox_name,
+                        name,
+                        &provider,
+                        already_attached,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
                             report.repaired.push(name.clone());
-                            // Force a full attachment cycle for already-attached
-                            // legacy providers so the gateway recomposes the
-                            // effective policy under the new profile type.
-                            if already_attached {
-                                match detach_from_sandbox(client, sandbox_name, name).await {
-                                    Ok(()) => needs_reattach = true,
-                                    Err(e) => {
-                                        report
-                                            .errors
-                                            .push((name.clone(), format!("repair-detach: {e:#}")));
-                                        continue;
-                                    }
-                                }
-                            }
+                            needs_reattach = already_attached;
                         }
                         Err(e) => {
-                            report.errors.push((name.clone(), format!("update: {e:#}")));
+                            report.errors.push((name.clone(), e));
                             continue;
                         }
                     }
