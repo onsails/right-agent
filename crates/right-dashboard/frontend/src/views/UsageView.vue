@@ -51,6 +51,10 @@ function windowRows(window: UsageWindow | null | undefined) {
   return window?.sources ?? []
 }
 
+function windowModels(window: UsageWindow | null | undefined) {
+  return window?.per_model ?? []
+}
+
 function cronJobModels(job: UsageCronJobSummary) {
   return job.per_model ?? []
 }
@@ -104,15 +108,29 @@ function cronJobModels(job: UsageCronJobSummary) {
           Budget-blocked learning attempts: {{ selectedWindow.budget_skip_count }}
         </p>
 
-        <div class="model-grid">
-          <div v-for="source in windowRows(selectedWindow)" :key="source.source" class="usage-source">
-            <div class="model-row">
-              <span>{{ source.source }}</span>
-              <strong>{{ money(source.cost_usd) }}</strong>
+        <section class="text-block">
+          <h3>Sources</h3>
+          <div class="model-grid">
+            <div v-for="source in windowRows(selectedWindow)" :key="source.source" class="usage-source">
+              <div class="model-row">
+                <span>{{ source.source }}</span>
+                <strong>{{ money(source.cost_usd) }}</strong>
+              </div>
+              <TokenLine :tokens="source" compact />
             </div>
-            <TokenLine :tokens="source" compact />
           </div>
-        </div>
+        </section>
+
+        <section class="text-block">
+          <h3>Models</h3>
+          <div class="row-list">
+            <div v-for="model in windowModels(selectedWindow)" :key="model.model" class="model-row">
+              <span>{{ model.model }}</span>
+              <strong>{{ money(model.cost_usd) }}</strong>
+            </div>
+            <p v-if="windowModels(selectedWindow).length === 0" class="muted-line">No model spend</p>
+          </div>
+        </section>
       </article>
 
       <article v-if="!selectedWindow" class="empty-panel">No usage data for period</article>
