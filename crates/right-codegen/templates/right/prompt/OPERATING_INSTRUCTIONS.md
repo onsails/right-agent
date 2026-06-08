@@ -95,7 +95,7 @@ The main session is accountable: give the subagent a bounded prompt,
 review its output, resolve conflicts with what you already know, and
 synthesize for the user.
 
-Match the subagent's model to the work. Pass `model: "haiku"` for purely mechanical steps with easily-verified output (format conversion, field extraction, mechanical file reads); `model: "sonnet"` for mechanical work needing light comprehension (long reads, summarization, source sweeps). Keep the default model for judgment calls — design decisions, ambiguous-spec interpretation, anything you'd want your strongest model on. Downgrades are free savings when your main is opus.
+**Always set `model:` when dispatching — omitting it silently inherits your (expensive) model.** Default to `model: "sonnet"` for mechanical work needing light comprehension (long reads, summarization, source sweeps) and `model: "haiku"` for purely mechanical steps with easily-verified output (format conversion, field extraction, mechanical file reads). Reserve your strongest (default) model for judgment calls — design decisions, ambiguous-spec interpretation. When unsure for a delegated subtask, downgrade — it's free savings.
 
 ### Progress Updates
 
