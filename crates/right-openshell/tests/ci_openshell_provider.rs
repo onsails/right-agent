@@ -70,6 +70,94 @@ async fn ci_openshell_provider_create_get_delete_roundtrip() {
 
 #[tokio::test]
 #[ignore = "ci-openshell: requires a live OpenShell gateway"]
+async fn ci_openshell_provider_update_empty_maps_preserves_existing_fields() {
+    use right_openshell::openshell_proto::openshell::v1 as proto_v1;
+    use right_openshell::providers::*;
+
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
+        .await
+        .unwrap();
+
+    let name = format!("rightprobe-{}-sparse-update", std::process::id());
+    let _ = delete_provider(&mut client, &name).await;
+
+    let mut creds = std::collections::HashMap::new();
+    creds.insert("SPARSE_TOKEN".to_string(), "first".to_string());
+    let mut config = std::collections::HashMap::new();
+    config.insert("origin".to_string(), "https://example.invalid".to_string());
+    create_provider(
+        &mut client,
+        &ProviderSpec {
+            name: name.clone(),
+            type_: "generic".into(),
+            credentials: creds,
+            config,
+        },
+    )
+    .await
+    .unwrap();
+
+    let raw = client
+        .get_provider(proto_v1::GetProviderRequest { name: name.clone() })
+        .await
+        .unwrap()
+        .into_inner()
+        .provider
+        .expect("provider response");
+    let credential_available = !raw.credentials.is_empty();
+    let config_available = raw
+        .config
+        .get("origin")
+        .is_some_and(|value| value == "https://example.invalid");
+
+    update_provider(
+        &mut client,
+        &ProviderSpec {
+            name: name.clone(),
+            type_: "generic".into(),
+            credentials: Default::default(),
+            config: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let after_empty_update = client
+        .get_provider(proto_v1::GetProviderRequest { name: name.clone() })
+        .await
+        .unwrap()
+        .into_inner()
+        .provider
+        .expect("provider response after empty update");
+    let credential_preserved = !after_empty_update.credentials.is_empty();
+    let config_preserved = after_empty_update
+        .config
+        .get("origin")
+        .is_some_and(|value| value == "https://example.invalid");
+
+    delete_provider(&mut client, &name).await.unwrap();
+
+    assert!(
+        credential_available,
+        "raw GetProvider must expose existing credentials for repair echo"
+    );
+    assert!(
+        config_available,
+        "raw GetProvider must expose existing config for repair echo"
+    );
+    assert!(
+        credential_preserved,
+        "UpdateProvider with empty credentials must preserve existing gateway credentials"
+    );
+    assert!(
+        config_preserved,
+        "UpdateProvider with empty config must preserve existing gateway config"
+    );
+}
+
+#[tokio::test]
+#[ignore = "ci-openshell: requires a live OpenShell gateway"]
 async fn ci_openshell_provider_attach_detach() {
     use right_openshell::providers::*;
     use right_openshell::test_support::TestSandbox;

@@ -236,6 +236,15 @@ pub async fn get_provider(
     client: &mut OpenShellClient<Channel>,
     name: &str,
 ) -> Result<Provider, ProviderError> {
+    get_provider_proto(client, name)
+        .await
+        .map(provider_from_proto)
+}
+
+async fn get_provider_proto(
+    client: &mut OpenShellClient<Channel>,
+    name: &str,
+) -> Result<datamodel::Provider, ProviderError> {
     let req = proto_v1::GetProviderRequest {
         name: name.to_string(),
     };
@@ -244,10 +253,8 @@ pub async fn get_provider(
         .await
         .map_err(|s| classify_status(s, name))?
         .into_inner();
-    let p = resp
-        .provider
-        .ok_or_else(|| ProviderError::Grpc("GetProvider: missing provider in response".into()))?;
-    Ok(provider_from_proto(p))
+    resp.provider
+        .ok_or_else(|| ProviderError::Grpc("GetProvider: missing provider in response".into()))
 }
 
 pub async fn update_provider(
@@ -432,20 +439,30 @@ pub struct ReconcileReport {
     pub repaired: Vec<String>,
     /// Declared providers that do not exist on the gateway (not yet created).
     pub missing: Vec<String>,
-    /// Per-provider errors encountered during attach/detach/update. Each entry is
+    /// Per-provider errors encountered during attach/detach/get/update. Each entry is
     /// `(provider_name, formatted_error)`. Reconcile continues past these so
     /// a single transient failure does not sink the whole pass.
     pub errors: Vec<(String, String)>,
 }
 
-fn legacy_generic_provider_repair_spec(provider: &Provider) -> Option<ProviderSpec> {
-    if provider.type_ != "generic" {
+/// Returns a repair spec for a provider whose gateway `type` is still the
+/// legacy `"generic"` built-in slug instead of the Right-managed profile ID.
+///
+/// The spec intentionally sends empty `credentials` and `config` maps. Live
+/// OpenShell probing confirms `UpdateProvider` treats empty maps as sparse for
+/// existing fields, so the gateway-held credential and config bytes are
+/// preserved while only `type` changes.
+fn legacy_generic_provider_repair_spec(
+    name: &str,
+    provider: &datamodel::Provider,
+) -> Option<ProviderSpec> {
+    if provider.r#type != "generic" {
         return None;
     }
 
     Some(ProviderSpec {
-        name: provider.name.clone(),
-        type_: crate::managed_profiles::generic_provider_profile_id(&provider.name),
+        name: name.to_string(),
+        type_: crate::managed_profiles::generic_provider_profile_id(name),
         credentials: HashMap::new(),
         config: HashMap::new(),
     })
@@ -498,11 +515,29 @@ pub async fn reconcile_for_sandbox(
     };
     // Attach declared providers that exist on the gateway but are not yet attached.
     for name in declared {
-        match get_provider(client, name).await {
+        match get_provider_proto(client, name).await {
             Ok(provider) => {
-                if let Some(repair_spec) = legacy_generic_provider_repair_spec(&provider) {
+                let already_attached = attached_set.contains(name);
+                let mut needs_reattach = false;
+                if let Some(repair_spec) = legacy_generic_provider_repair_spec(name, &provider) {
                     match update_provider(client, &repair_spec).await {
-                        Ok(_) => report.repaired.push(name.clone()),
+                        Ok(_) => {
+                            report.repaired.push(name.clone());
+                            // Force a full attachment cycle for already-attached
+                            // legacy providers so the gateway recomposes the
+                            // effective policy under the new profile type.
+                            if already_attached {
+                                match detach_from_sandbox(client, sandbox_name, name).await {
+                                    Ok(()) => needs_reattach = true,
+                                    Err(e) => {
+                                        report
+                                            .errors
+                                            .push((name.clone(), format!("repair-detach: {e:#}")));
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         Err(e) => {
                             report.errors.push((name.clone(), format!("update: {e:#}")));
                             continue;
@@ -510,7 +545,7 @@ pub async fn reconcile_for_sandbox(
                     }
                 }
 
-                if !attached_set.contains(name) {
+                if needs_reattach || !attached_set.contains(name) {
                     match attach_to_sandbox(client, sandbox_name, name).await {
                         Ok(()) => report.attached.push(name.clone()),
                         Err(e) => report.errors.push((name.clone(), format!("attach: {e:#}"))),

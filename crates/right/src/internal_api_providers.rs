@@ -1275,13 +1275,12 @@ fn generic_provider_profile_and_spec(
     (profile_id, spec)
 }
 
-fn generic_provider_update_profile_and_spec(
+fn generic_provider_update_profile(
     provider_name: &str,
     generic: &right_agent_config::GenericProvider,
 ) -> (
     String,
     right_openshell::openshell_proto::openshell::v1::ProviderProfile,
-    right_openshell::providers::ProviderSpec,
 ) {
     let profile_id = right_openshell::managed_profiles::generic_provider_profile_id(provider_name);
     let profile = right_openshell::managed_profiles::author_generic_profile(
@@ -1291,13 +1290,7 @@ fn generic_provider_update_profile_and_spec(
         &generic.header_name,
         &generic.env_var,
     );
-    let spec = right_openshell::providers::ProviderSpec {
-        name: provider_name.to_string(),
-        type_: profile_id.clone(),
-        credentials: Default::default(),
-        config: Default::default(),
-    };
-    (profile_id, profile, spec)
+    (profile_id, profile)
 }
 
 async fn ensure_provider_policy_loaded_after_rollback(
@@ -1370,7 +1363,7 @@ async fn reensure_generic_profile_after_rollback(
     original_err: String,
     rollback_reason: &str,
 ) -> Vec<String> {
-    let (_, profile, _) = generic_provider_update_profile_and_spec(provider_name, generic);
+    let (_, profile) = generic_provider_update_profile(provider_name, generic);
     let managed_profile =
         right_openshell::managed_profiles::ManagedProfile::Authored(Box::new(profile));
     match right_openshell::managed_profiles::ensure_profiles(client, &[managed_profile]).await {
@@ -1586,7 +1579,7 @@ mod generic_provider_spec_tests {
     }
 
     #[test]
-    fn generic_provider_config_update_spec_authors_profile_backed_provider() {
+    fn generic_provider_config_update_authors_profile_only() {
         let generic = right_agent_config::GenericProvider {
             env_var: "ACME_API_KEY".into(),
             header_name: "x-api-key".into(),
@@ -1594,8 +1587,7 @@ mod generic_provider_spec_tests {
             upstream_path_prefix: Some("/v2".into()),
         };
 
-        let (profile_id, profile, spec) =
-            generic_provider_update_profile_and_spec("hostagent-acme", &generic);
+        let (profile_id, profile) = generic_provider_update_profile("hostagent-acme", &generic);
 
         assert_eq!(
             profile_id,
@@ -1605,16 +1597,6 @@ mod generic_provider_spec_tests {
         assert_eq!(profile.endpoints[0].host, "api.acme.invalid");
         assert_eq!(profile.endpoints[0].path, "/v2");
         assert_eq!(profile.credentials[0].env_vars, vec!["ACME_API_KEY"]);
-        assert_eq!(spec.name, "hostagent-acme");
-        assert_eq!(spec.type_, profile_id);
-        assert!(
-            spec.credentials.is_empty(),
-            "config update has no credential value; update_provider must preserve credentials sparsely"
-        );
-        assert!(
-            spec.config.is_empty(),
-            "generic provider config belongs in the authored profile, not provider.config"
-        );
     }
 
     #[test]
@@ -1993,20 +1975,13 @@ pub(crate) async fn handle_provider_config_update(
             .unwrap_or_else(|| std::path::PathBuf::from("policy.yaml")),
     );
 
-    // Capture the CURRENT gateway state BEFORE any profile/provider mutation,
-    // so a later policy-load or yaml-write failure can restore the provider
-    // record to match the still-current agent.yaml.
-    let gateway_snapshot = right_openshell::providers::get_provider(&mut client, &req.name)
-        .await
-        .map_err(|e| ProviderApiError::Gateway(format!("get_provider snapshot: {e:#}")))?;
-
     let updated_generic = right_agent_config::GenericProvider {
         env_var: new_env_var.clone(),
         header_name: new_header.clone(),
         upstream_host: new_host.clone(),
         upstream_path_prefix: new_path.clone(),
     };
-    let (_, profile, spec) = generic_provider_update_profile_and_spec(&req.name, &updated_generic);
+    let (_, profile) = generic_provider_update_profile(&req.name, &updated_generic);
     let managed_profile =
         right_openshell::managed_profiles::ManagedProfile::Authored(Box::new(profile));
     if let Err(e) =
@@ -2029,71 +2004,17 @@ pub(crate) async fn handle_provider_config_update(
         return Err(ProviderApiError::Gateway(msg));
     }
 
-    if let Err(e) = right_openshell::providers::update_provider(&mut client, &spec).await {
-        let mut rollback_errors = Vec::new();
-        let rollback_spec = build_gateway_rollback_spec(&gateway_snapshot);
-        if let Err(rollback_err) =
-            right_openshell::providers::update_provider(&mut client, &rollback_spec).await
-        {
-            tracing::error!(
-                provider = %req.name,
-                original_err = %e,
-                "provider rollback failed: could not restore gateway state after update_provider failure: {rollback_err:#}"
-            );
-            rollback_errors.push(format!("gateway: {rollback_err:#}"));
-        }
-        rollback_errors.extend(
-            reensure_generic_profile_after_rollback(
-                &mut client,
-                &req.name,
-                &current,
-                format!("{e:#}"),
-                "update_provider failure",
-            )
-            .await,
-        );
-        ensure_provider_policy_loaded_after_rollback(
-            &req.name,
-            &sandbox_name,
-            &policy_path,
-            format!("{e:#}"),
-            "update_provider failure",
-        )
-        .await;
-        let mut msg = format!("{e:#}");
-        if !rollback_errors.is_empty() {
-            msg.push_str(" (rollback also failed: ");
-            msg.push_str(&rollback_errors.join("; "));
-            msg.push(')');
-        }
-        return Err(ProviderApiError::Gateway(msg));
-    }
-
     if let Err(e) =
         right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path).await
     {
-        let mut rollback_errors: Vec<String> = Vec::new();
-        let rollback_spec = build_gateway_rollback_spec(&gateway_snapshot);
-        if let Err(rollback_err) =
-            right_openshell::providers::update_provider(&mut client, &rollback_spec).await
-        {
-            tracing::error!(
-                provider = %req.name,
-                original_err = %e,
-                "provider rollback failed: could not restore gateway state after policy-load failure: {rollback_err:#}"
-            );
-            rollback_errors.push(format!("gateway: {rollback_err:#}"));
-        }
-        rollback_errors.extend(
-            reensure_generic_profile_after_rollback(
-                &mut client,
-                &req.name,
-                &current,
-                format!("{e:#}"),
-                "policy-load failure",
-            )
-            .await,
-        );
+        let rollback_errors = reensure_generic_profile_after_rollback(
+            &mut client,
+            &req.name,
+            &current,
+            format!("{e:#}"),
+            "policy-load failure",
+        )
+        .await;
         ensure_provider_policy_loaded_after_rollback(
             &req.name,
             &sandbox_name,
@@ -2120,28 +2041,14 @@ pub(crate) async fn handle_provider_config_update(
     )
     .await
     {
-        let mut rollback_errors: Vec<String> = Vec::new();
-        let rollback_spec = build_gateway_rollback_spec(&gateway_snapshot);
-        if let Err(rollback_err) =
-            right_openshell::providers::update_provider(&mut client, &rollback_spec).await
-        {
-            tracing::error!(
-                provider = %req.name,
-                original_err = %e,
-                "provider rollback failed: could not restore gateway state after composition failure: {rollback_err:#}"
-            );
-            rollback_errors.push(format!("gateway: {rollback_err:#}"));
-        }
-        rollback_errors.extend(
-            reensure_generic_profile_after_rollback(
-                &mut client,
-                &req.name,
-                &current,
-                format!("{e:#}"),
-                "composition failure",
-            )
-            .await,
-        );
+        let rollback_errors = reensure_generic_profile_after_rollback(
+            &mut client,
+            &req.name,
+            &current,
+            format!("{e:#}"),
+            "composition failure",
+        )
+        .await;
         ensure_provider_policy_loaded_after_rollback(
             &req.name,
             &sandbox_name,
@@ -2166,30 +2073,16 @@ pub(crate) async fn handle_provider_config_update(
         generic: Some(updated_generic.clone()),
     };
     if let Err(e) = replace_provider_in_yaml(&state.agents_dir, &req.agent, &updated) {
-        // Gateway/profile accepted the new config but agent.yaml is now stale.
-        // Roll both gateway and profile back so the proxy matches the file.
-        let mut rollback_errors: Vec<String> = Vec::new();
-        let rollback_spec = build_gateway_rollback_spec(&gateway_snapshot);
-        if let Err(rollback_err) =
-            right_openshell::providers::update_provider(&mut client, &rollback_spec).await
-        {
-            tracing::error!(
-                provider = %req.name,
-                original_err = %e,
-                "provider rollback failed: could not restore gateway state after yaml-write failure: {rollback_err:#}"
-            );
-            rollback_errors.push(format!("gateway: {rollback_err:#}"));
-        }
-        rollback_errors.extend(
-            reensure_generic_profile_after_rollback(
-                &mut client,
-                &req.name,
-                &current,
-                format!("{e:#}"),
-                "yaml-write failure",
-            )
-            .await,
-        );
+        // Gateway profile accepted the new config but agent.yaml is now stale.
+        // Roll the profile back so the proxy matches the file.
+        let rollback_errors = reensure_generic_profile_after_rollback(
+            &mut client,
+            &req.name,
+            &current,
+            format!("{e:#}"),
+            "yaml-write failure",
+        )
+        .await;
         ensure_provider_policy_loaded_after_rollback(
             &req.name,
             &sandbox_name,
@@ -2217,25 +2110,6 @@ pub(crate) async fn handle_provider_config_update(
         status: ProviderStatus::Healthy,
         composed: Some(true),
     }))
-}
-
-/// Build the `ProviderSpec` used to roll the gateway back to a captured
-/// snapshot. `credentials` is left empty on purpose: `get_provider` never
-/// returns credential bytes, and the OpenShell `UpdateProvider` RPC treats
-/// the `credentials` map as a sparse merge — an empty map preserves
-/// existing credentials rather than wiping them.
-///
-/// Extracted so the rollback shape can be unit-tested without spinning up
-/// a real gateway (see `provider_config_update_rollback_spec_*` tests).
-fn build_gateway_rollback_spec(
-    snapshot: &right_openshell::providers::Provider,
-) -> right_openshell::providers::ProviderSpec {
-    right_openshell::providers::ProviderSpec {
-        name: snapshot.name.clone(),
-        type_: snapshot.type_.clone(),
-        credentials: Default::default(),
-        config: snapshot.config.clone(),
-    }
 }
 
 /// Replace an existing provider entry by name. Line-walking YAML mutator.
@@ -2850,13 +2724,29 @@ mod sandbox_mode_tests {
         assert_markers_in_order(
             &src[start..end],
             &[
-                "right_openshell::providers::update_provider(&mut client, &spec)",
+                "right_openshell::managed_profiles::ensure_profiles(&mut client, &[managed_profile])",
                 "right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path)",
                 "right_openshell::openshell::wait_for_provider_composed_with_endpoint(",
                 "&new_host,",
                 "new_path.as_deref().unwrap_or(\"\")",
                 "replace_provider_in_yaml(&state.agents_dir, &req.agent, &updated)",
             ],
+        );
+    }
+
+    #[test]
+    fn config_update_does_not_update_provider_without_fresh_credential() {
+        let src = include_str!("internal_api_providers.rs");
+        let start = src
+            .find("pub(crate) async fn handle_provider_config_update")
+            .expect("provider config update handler must exist");
+        let end = src[start..]
+            .find("Ok(axum::Json(ProviderView {")
+            .expect("provider config update response must exist")
+            + start;
+        assert!(
+            !src[start..end].contains("right_openshell::providers::update_provider"),
+            "generic config update is profile-only; provider record mutation is unnecessary"
         );
     }
 
@@ -2910,50 +2800,6 @@ mod sandbox_mode_tests {
         assert_eq!(
             json["code"], "invalid_name",
             "expected code=invalid_name, got: {json}"
-        );
-    }
-
-    /// `handle_provider_config_update` must capture the gateway's
-    /// pre-mutation config so it can roll the gateway back when a later
-    /// step (notably `replace_provider_in_yaml`) fails. The rollback spec
-    /// must round-trip the original `name`, `type_`, and `config`, and
-    /// must NOT carry credentials — `get_provider` does not return them,
-    /// and OpenShell's `UpdateProvider` treats `credentials` as a sparse
-    /// merge so an empty map preserves existing credentials.
-    ///
-    /// Live-gateway end-to-end coverage of the failure path requires a
-    /// real OpenShell gateway plus a yaml-write fault, which the unit
-    /// suite can't provide without major plumbing. This test pins the
-    /// rollback shape (the load-bearing invariant) directly via the
-    /// extracted helper — the same shape the handler sends when yaml
-    /// write fails.
-    #[test]
-    fn config_update_rollback_on_yaml_failure_restores_gateway() {
-        use std::collections::HashMap;
-
-        let mut config = HashMap::new();
-        config.insert("header_name".into(), "x-api-key".into());
-        config.insert("upstream_host".into(), "api.acme.invalid".into());
-        config.insert("upstream_path_prefix".into(), "/v1".into());
-        let snapshot = right_openshell::providers::Provider {
-            name: "hostagent-acme".into(),
-            type_: "generic".into(),
-            config: config.clone(),
-            updated_at: None,
-        };
-
-        let spec = super::build_gateway_rollback_spec(&snapshot);
-
-        assert_eq!(spec.name, "hostagent-acme");
-        assert_eq!(spec.type_, "generic");
-        assert_eq!(
-            spec.config, config,
-            "rollback must restore every captured config field"
-        );
-        assert!(
-            spec.credentials.is_empty(),
-            "rollback must NOT carry credentials — an empty map is a sparse merge that \
-             preserves existing credentials; sending a populated map would risk wiping them"
         );
     }
 
