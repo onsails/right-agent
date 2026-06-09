@@ -95,8 +95,6 @@ jobs:
 
       - if: steps.gate.outputs.changed == 'true'
         uses: onsails/nix-action@v2.2.0
-        with:
-          additionalProfiles: 'nixpkgs#devenv'
       - if: steps.gate.outputs.changed == 'true'
         uses: Swatinem/rust-cache@v2
         with:
