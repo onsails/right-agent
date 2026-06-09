@@ -24,9 +24,13 @@ jobs:
       - uses: actions/checkout@v6
         with:
           lfs: true
-      - uses: cachix/install-nix-action@v31
-      - name: Install devenv.sh
-        run: nix profile add nixpkgs#devenv
+      # onsails/nix-action installs Determinate Nix + Devenv + FlakeHub Cache
+      # in one step, with impatient-networking defaults (faster CI substituter
+      # retries) and parallel substitution. Replaces cachix/install-nix-action
+      # + a manual `nix profile add nixpkgs#devenv` step.
+      - uses: onsails/nix-action@v2.2.0
+        with:
+          additionalProfiles: 'nixpkgs#devenv'
       # Free ~25 GB on ubuntu-latest runners (default ~14 GB free, not enough
       # for Nix + Cargo registry + restored target/devenv (~5 GB) + an
       # incremental rebuild on top). Targets are pre-installed tooling we
@@ -119,9 +123,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           lfs: true
-      - uses: cachix/install-nix-action@v31
-      - name: Install devenv.sh
-        run: nix profile add nixpkgs#devenv
+      # Same Determinate Nix + Devenv + FlakeHub Cache combo as the workspace
+      # job. Replaces cachix/install-nix-action + manual devenv install.
+      - uses: onsails/nix-action@v2.2.0
+        with:
+          additionalProfiles: 'nixpkgs#devenv'
       # Free ~25 GB on ubuntu-latest runners — same rationale as workspace job.
       # The ignored job also installs OpenShell + Docker images later, so disk
       # pressure is even higher here.
