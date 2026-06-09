@@ -94,10 +94,9 @@ jobs:
           cat /tmp/buf-breaking.txt || true
 
       - if: steps.gate.outputs.changed == 'true'
-        uses: cachix/install-nix-action@v31
-      - name: Install devenv.sh
-        if: steps.gate.outputs.changed == 'true'
-        run: nix profile add nixpkgs#devenv
+        uses: onsails/nix-action@v2.2.0
+        with:
+          additionalProfiles: 'nixpkgs#devenv'
       - if: steps.gate.outputs.changed == 'true'
         uses: Swatinem/rust-cache@v2
         with:
