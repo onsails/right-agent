@@ -27,10 +27,39 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - name: Install devenv.sh
         run: nix profile add nixpkgs#devenv
+      # Free ~25 GB on ubuntu-latest runners (default ~14 GB free, not enough
+      # for Nix + Cargo registry + restored target/devenv (~5 GB) + an
+      # incremental rebuild on top). Targets are pre-installed tooling we
+      # never use here (dotnet, Android SDK, GHC). Without this the cargo
+      # build hits ENOSPC partway through.
+      - name: Free up runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL \
+                      /usr/local/.ghcup
+          df -h /
+      - name: Disk usage before Rust cache
+        if: always()
+        run: |
+          df -h
+          du -sh target/devenv ~/.cargo /nix /tmp /home/runner/work 2>/dev/null || true
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target/devenv"
           cmd-format: devenv shell -- {0}
+          # Stable per-job key (drops the auto-appended job suffix) so the
+          # cache entry is reused across PRs/pushes for the same lockfile.
+          # NOT shared with `ignored` — that job builds with
+          # `--features right-openshell/test-support`, so a shared target/
+          # would double-build many crates.
+          shared-key: "tests-workspace"
+      - name: Disk usage after Rust cache
+        if: always()
+        run: |
+          df -h
+          du -sh target/devenv ~/.cargo /nix /tmp /home/runner/work 2>/dev/null || true
 
       - name: Provide external-tool test stubs
         run: |
@@ -93,6 +122,17 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - name: Install devenv.sh
         run: nix profile add nixpkgs#devenv
+      # Free ~25 GB on ubuntu-latest runners — same rationale as workspace job.
+      # The ignored job also installs OpenShell + Docker images later, so disk
+      # pressure is even higher here.
+      - name: Free up runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL \
+                      /usr/local/.ghcup
+          df -h /
       - name: Disk usage before Rust cache
         if: always()
         run: |
@@ -102,6 +142,10 @@ jobs:
         with:
           workspaces: ". -> target/devenv"
           cmd-format: devenv shell -- {0}
+          # Stable per-job key (drops the auto-appended job suffix) so the
+          # cache entry is reused across PRs/pushes for the same lockfile.
+          # NOT shared with `workspace` — see that job's shared-key comment.
+          shared-key: "tests-ignored"
       - name: Disk usage after Rust cache
         if: always()
         run: |
