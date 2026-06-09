@@ -336,9 +336,51 @@ pub fn tunnel_setup(
     }
 
     Ok(TunnelConfig {
-        tunnel_uuid: uuid,
-        credentials_file,
         hostname,
+        provider: right_config::TunnelProvider::Cloudflared {
+            tunnel_uuid: uuid,
+            credentials_file,
+        },
+    })
+}
+
+/// Configure the tunnel for `provider: external` — the operator owns the
+/// public TLS front (e.g. their own caddy/nginx). The only thing we need
+/// from them is the public hostname; cloudflared is never touched.
+pub fn external_tunnel_setup(
+    tunnel_hostname: Option<&str>,
+    interactive: bool,
+) -> miette::Result<TunnelConfig> {
+    let hostname = if let Some(h) = tunnel_hostname {
+        h.trim().to_string()
+    } else if interactive {
+        let input = inquire::Text::new("tunnel hostname (e.g. right.example.com):")
+            .with_help_message(
+                "hostname the bot tells Telegram for webhooks; your reverse proxy \
+                 must terminate TLS here and forward to bot.sock per agent",
+            )
+            .prompt()
+            .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+        input.trim().to_string()
+    } else {
+        return Err(miette::miette!(
+            "tunnel hostname is required in non-interactive mode (use --tunnel-hostname)"
+        ));
+    };
+
+    if hostname.starts_with("https://") || hostname.starts_with("http://") {
+        return Err(miette::miette!(
+            help = "use just the domain, e.g. right.example.com",
+            "hostname must be a bare domain, not a url"
+        ));
+    }
+    if hostname.is_empty() {
+        return Err(miette::miette!("tunnel hostname cannot be empty"));
+    }
+
+    Ok(TunnelConfig {
+        hostname,
+        provider: right_config::TunnelProvider::External,
     })
 }
 
@@ -620,11 +662,15 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
     loop {
         let config = read_global_config(home)?;
 
-        let tunnel_label = format!(
-            "tunnel: {} ({})",
-            config.tunnel.hostname,
-            &config.tunnel.tunnel_uuid[..8.min(config.tunnel.tunnel_uuid.len())]
-        );
+        let tunnel_label = match &config.tunnel.provider {
+            right_config::TunnelProvider::Cloudflared { tunnel_uuid, .. } => {
+                let short = &tunnel_uuid[..8.min(tunnel_uuid.len())];
+                format!("tunnel: {} (cloudflared {short})", config.tunnel.hostname)
+            }
+            right_config::TunnelProvider::External => {
+                format!("tunnel: {} (external)", config.tunnel.hostname)
+            }
+        };
 
         let agents_dir = right_config::agents_dir(home);
         let agents = if agents_dir.exists() {

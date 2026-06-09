@@ -287,64 +287,78 @@ pub fn run_agent_codegen(
         }
     }
 
-    // Generate cloudflared config and wrapper script. Tunnel is always configured.
+    // Generate cloudflared config and wrapper script — only when the operator
+    // selected `provider: cloudflared`. For `provider: external`, the operator
+    // owns the public HTTPS front (e.g. their own caddy/nginx), so we skip
+    // codegen and never add a cloudflared process to process-compose.
     let tunnel_cfg = &global_cfg.tunnel;
-    which::which("cloudflared").map_err(|_| {
-        miette::miette!(
-            "TunnelConfig is present but `cloudflared` is not in PATH -- install cloudflared first"
-        )
-    })?;
-    if !tunnel_cfg.credentials_file.exists() {
-        return Err(miette::miette!(
-            help = "Run `right config set` and select Tunnel -- choose \"Delete and recreate\" to generate new credentials on this machine",
-            "Tunnel credentials file not found: {}\n\n  \
-             This usually means the tunnel was created on a different machine,\n  \
-             or `right init` was re-run after the credentials file was removed.",
-            tunnel_cfg.credentials_file.display()
-        ));
-    }
+    let cloudflared_script_path: Option<std::path::PathBuf> = match &tunnel_cfg.provider {
+        right_config::TunnelProvider::Cloudflared {
+            tunnel_uuid,
+            credentials_file,
+        } => {
+            which::which("cloudflared").map_err(|_| {
+                miette::miette!(
+                    "TunnelConfig is present but `cloudflared` is not in PATH -- install cloudflared first, or set `tunnel.provider: external` to bring your own reverse proxy"
+                )
+            })?;
+            if !credentials_file.exists() {
+                return Err(miette::miette!(
+                    help = "Run `right config set` and select Tunnel -- choose \"Delete and recreate\" to generate new credentials on this machine",
+                    "Tunnel credentials file not found: {}\n\n  \
+                     This usually means the tunnel was created on a different machine,\n  \
+                     or `right init` was re-run after the credentials file was removed.",
+                    credentials_file.display()
+                ));
+            }
 
-    let cloudflared_script_path: std::path::PathBuf = {
-        let agent_pairs: Vec<(String, std::path::PathBuf)> = all_agents
-            .iter()
-            .map(|a| (a.name.clone(), a.path.clone()))
-            .collect();
+            let agent_pairs: Vec<(String, std::path::PathBuf)> = all_agents
+                .iter()
+                .map(|a| (a.name.clone(), a.path.clone()))
+                .collect();
 
-        let creds = CloudflaredCredentials {
-            tunnel_uuid: tunnel_cfg.tunnel_uuid.clone(),
-            credentials_file: tunnel_cfg.credentials_file.clone(),
-        };
+            let creds = CloudflaredCredentials {
+                tunnel_uuid: tunnel_uuid.clone(),
+                credentials_file: credentials_file.clone(),
+            };
 
-        let cf_config = crate::cloudflared::generate_cloudflared_config(
-            &agent_pairs,
-            &tunnel_cfg.hostname,
-            &creds,
-        )?;
-        let cf_config_path = home.join("cloudflared-config.yml");
-        outcome.cloudflared_config_changed =
-            write_regenerated_detect_change(&cf_config_path, &cf_config)?;
-        tracing::info!(path = %cf_config_path.display(), "cloudflared config written");
+            let cf_config = crate::cloudflared::generate_cloudflared_config(
+                &agent_pairs,
+                &tunnel_cfg.hostname,
+                &creds,
+            )?;
+            let cf_config_path = home.join("cloudflared-config.yml");
+            outcome.cloudflared_config_changed =
+                write_regenerated_detect_change(&cf_config_path, &cf_config)?;
+            tracing::info!(path = %cf_config_path.display(), "cloudflared config written");
 
-        // Write DNS routing wrapper script.
-        let scripts_dir = home.join("scripts");
-        std::fs::create_dir_all(&scripts_dir)
-            .map_err(|e| miette::miette!("create scripts dir: {e:#}"))?;
-        let uuid = &tunnel_cfg.tunnel_uuid;
-        let hostname = &tunnel_cfg.hostname;
-        let cf_config_path_str = cf_config_path.display();
-        let script_content = format!(
-            "#!/bin/sh\ncloudflared tunnel route dns --overwrite-dns {uuid} {hostname} || true\nexec cloudflared tunnel --config {cf_config_path_str} run\n"
-        );
-        let script_path = scripts_dir.join("cloudflared-start.sh");
-        write_regenerated(&script_path, &script_content)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| miette::miette!("chmod cloudflared-start.sh: {e:#}"))?;
+            // Write DNS routing wrapper script.
+            let scripts_dir = home.join("scripts");
+            std::fs::create_dir_all(&scripts_dir)
+                .map_err(|e| miette::miette!("create scripts dir: {e:#}"))?;
+            let hostname = &tunnel_cfg.hostname;
+            let cf_config_path_str = cf_config_path.display();
+            let script_content = format!(
+                "#!/bin/sh\ncloudflared tunnel route dns --overwrite-dns {tunnel_uuid} {hostname} || true\nexec cloudflared tunnel --config {cf_config_path_str} run\n"
+            );
+            let script_path = scripts_dir.join("cloudflared-start.sh");
+            write_regenerated(&script_path, &script_content)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|e| miette::miette!("chmod cloudflared-start.sh: {e:#}"))?;
+            }
+            tracing::info!(path = %script_path.display(), "cloudflared wrapper script written");
+            Some(script_path)
         }
-        tracing::info!(path = %script_path.display(), "cloudflared wrapper script written");
-        script_path
+        right_config::TunnelProvider::External => {
+            tracing::info!(
+                hostname = %tunnel_cfg.hostname,
+                "tunnel provider is `external` — skipping cloudflared codegen"
+            );
+            None
+        }
     };
 
     // Generate process-compose.yaml.
@@ -354,7 +368,7 @@ pub fn run_agent_codegen(
         &crate::ProcessComposeConfig {
             debug,
             home,
-            cloudflared_script: &cloudflared_script_path,
+            cloudflared_script: cloudflared_script_path.as_deref(),
             token_map_path: Some(&token_map_path),
         },
     )?;
@@ -403,15 +417,26 @@ pub(crate) mod tests {
     use right_agent_config::AgentConfig;
 
     /// Write a minimal valid `config.yaml` (with tunnel block) into the given
-    /// home directory. Required because Tasks 1+2 made tunnel config mandatory:
-    /// `read_global_config` errors on a missing file, and `run_agent_codegen`
-    /// also checks that `tunnel.credentials_file` exists on disk.
+    /// home directory. Defaults to `tunnel.provider: external` so tests do not
+    /// require a `cloudflared` binary in `PATH` and exercise the no-cloudflared
+    /// codegen path. Tests that specifically need the cloudflared path call
+    /// [`write_minimal_global_config_cloudflared`] instead.
     pub(crate) fn write_minimal_global_config(home: &std::path::Path) {
+        use std::fs;
+        let yaml = "tunnel:\n  provider: \"external\"\n  hostname: \"test.example.com\"\n";
+        fs::write(home.join("config.yaml"), yaml).unwrap();
+    }
+
+    /// Like [`write_minimal_global_config`], but writes a cloudflared-mode
+    /// config. Tests using this helper must be skipped or no-op when
+    /// `cloudflared` is not on `PATH` — otherwise codegen will error out.
+    #[allow(dead_code)]
+    pub(crate) fn write_minimal_global_config_cloudflared(home: &std::path::Path) {
         use std::fs;
         let creds_path = home.join("test-creds.json");
         fs::write(&creds_path, "{}").unwrap();
         let yaml = format!(
-            "tunnel:\n  tunnel_uuid: \"00000000-0000-0000-0000-000000000000\"\n  credentials_file: \"{}\"\n  hostname: \"test.example.com\"\n",
+            "tunnel:\n  provider: \"cloudflared\"\n  tunnel_uuid: \"00000000-0000-0000-0000-000000000000\"\n  credentials_file: \"{}\"\n  hostname: \"test.example.com\"\n",
             creds_path.display()
         );
         fs::write(home.join("config.yaml"), yaml).unwrap();
@@ -588,9 +613,13 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn run_agent_codegen_reports_new_cloudflared_config_changed() {
+        if which::which("cloudflared").is_err() {
+            eprintln!("skip: cloudflared not on PATH");
+            return;
+        }
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
-        write_minimal_global_config(home);
+        write_minimal_global_config_cloudflared(home);
 
         let agent_dir = home.join("agents").join("test");
         std::fs::create_dir_all(agent_dir.join(".claude")).unwrap();
@@ -615,9 +644,13 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn run_agent_codegen_reports_unchanged_cloudflared_config() {
+        if which::which("cloudflared").is_err() {
+            eprintln!("skip: cloudflared not on PATH");
+            return;
+        }
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
-        write_minimal_global_config(home);
+        write_minimal_global_config_cloudflared(home);
 
         let agent_dir = home.join("agents").join("test");
         std::fs::create_dir_all(agent_dir.join(".claude")).unwrap();
@@ -640,6 +673,48 @@ pub(crate) mod tests {
         assert!(
             !second.cloudflared_config_changed,
             "second identical cloudflared config write must not be reported as changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_agent_codegen_external_provider_skips_cloudflared_codegen() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+        // External provider needs no cloudflared in PATH.
+        write_minimal_global_config(home);
+
+        let agent_dir = home.join("agents").join("test");
+        std::fs::create_dir_all(agent_dir.join(".claude")).unwrap();
+        std::fs::write(agent_dir.join("IDENTITY.md"), "# Test").unwrap();
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            "restart: never\nnetwork_policy: permissive\nsandbox:\n  mode: none\n",
+        )
+        .unwrap();
+
+        let agent = agent_fixture(&agent_dir);
+        let self_exe = std::path::PathBuf::from("/usr/bin/right");
+
+        let outcome =
+            run_agent_codegen(home, std::slice::from_ref(&agent), &self_exe, false).unwrap();
+
+        assert!(
+            !outcome.cloudflared_config_changed,
+            "external provider must not report a cloudflared config change"
+        );
+        assert!(
+            !home.join("cloudflared-config.yml").exists(),
+            "external provider must not write cloudflared-config.yml"
+        );
+        assert!(
+            !home.join("scripts").join("cloudflared-start.sh").exists(),
+            "external provider must not write cloudflared-start.sh"
+        );
+
+        let pc_yaml = std::fs::read_to_string(home.join("run/process-compose.yaml")).unwrap();
+        assert!(
+            !pc_yaml.contains("cloudflared:"),
+            "process-compose.yaml must not contain cloudflared process: {pc_yaml}"
         );
     }
 
