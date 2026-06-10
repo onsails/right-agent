@@ -16,6 +16,16 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# id-token: write is required for DeterminateSystems/flakehub-cache-action
+# (transitively included by onsails/nix-action) to obtain a GitHub Actions
+# OIDC token and authenticate against FlakeHub Cache. Without it the cache
+# action prints "not authenticated" and falls back to degraded mode.
+# contents: read is the standard default — listed explicitly because
+# adding any permission narrows the implicit set to what is enumerated.
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   workspace:
     name: workspace tests
@@ -24,13 +34,71 @@ jobs:
       - uses: actions/checkout@v6
         with:
           lfs: true
-      - uses: cachix/install-nix-action@v31
-      - name: Install devenv.sh
-        run: nix profile add nixpkgs#devenv
+      # onsails/nix-action installs Determinate Nix + Devenv + FlakeHub Cache
+      # in one step, with impatient-networking defaults (faster CI substituter
+      # retries) and parallel substitution. Replaces cachix/install-nix-action
+      # + a manual `nix profile add nixpkgs#devenv` step.
+      - uses: onsails/nix-action@v2.2.0
+      # Free ~25 GB on ubuntu-latest runners (default ~14 GB free, not enough
+      # for Nix + Cargo registry + restored target/devenv (~5 GB) + an
+      # incremental rebuild on top). Targets are pre-installed tooling we
+      # never use here (dotnet, Android SDK, GHC). Without this the cargo
+      # build hits ENOSPC partway through.
+      - name: Free up runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL \
+                      /usr/local/.ghcup
+          df -h /
+      - name: Disk usage before Rust cache
+        if: always()
+        run: |
+          df -h
+          du -sh target/devenv ~/.cargo /nix /tmp /home/runner/work 2>/dev/null || true
+      # The ~12 min of silence in the rust-cache step is the FIRST `devenv
+      # shell` in the job: fetching the flake inputs (cachix/devenv-nixpkgs
+      # rolling tarball + oxalica/rust-overlay) and the first full Nix
+      # evaluation. Neither FlakeHub nor magic-nix-cache (store caches) touch
+      # this — the cost is the eval layer, which lives in ~/.cache/nix (nix
+      # eval cache + fetched flake inputs) and .devenv (devenv's own eval DB +
+      # profile). Persist both, keyed on the lockfiles that pin the inputs.
+      # NOTE: .devenv here is devenv state, distinct from target/devenv (the
+      # cargo target dir cached by Swatinem/rust-cache) — do not conflate.
+      - name: Cache devenv eval layer
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/nix
+            .devenv
+          key: devenv-eval-${{ runner.os }}-${{ hashFiles('devenv.lock', 'devenv.nix', 'devenv.yaml') }}
+          restore-keys: |
+            devenv-eval-${{ runner.os }}-
+      # Warm the devenv environment once so the rust-cache step's first
+      # `devenv shell -- cargo …` is not the one paying the realize cost.
+      # With the eval cache restored above, the eval + flake-input fetch are
+      # skipped; the devenv closure (~4.3 GiB) still substitutes from
+      # cache.nixos.org on a fresh runner — an accepted cost (persisting the
+      # Nix store would need WarpBuild or exceed the 10 GB GHA cache budget
+      # already used by rust-cache).
+      - name: Warm devenv shell
+        run: devenv shell -- true
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target/devenv"
           cmd-format: devenv shell -- {0}
+          # Stable per-job key (drops the auto-appended job suffix) so the
+          # cache entry is reused across PRs/pushes for the same lockfile.
+          # NOT shared with `ignored` — that job builds with
+          # `--features right-openshell/test-support`, so a shared target/
+          # would double-build many crates.
+          shared-key: "tests-workspace"
+      - name: Disk usage after Rust cache
+        if: always()
+        run: |
+          df -h
+          du -sh target/devenv ~/.cargo /nix /tmp /home/runner/work 2>/dev/null || true
 
       - name: Provide external-tool test stubs
         run: |
@@ -90,9 +158,38 @@ jobs:
       - uses: actions/checkout@v6
         with:
           lfs: true
-      - uses: cachix/install-nix-action@v31
-      - name: Install devenv.sh
-        run: nix profile add nixpkgs#devenv
+      # Same Determinate Nix + Devenv + FlakeHub Cache combo as the workspace
+      # job. Replaces cachix/install-nix-action + manual devenv install.
+      - uses: onsails/nix-action@v2.2.0
+      # Free ~25 GB on ubuntu-latest runners — same rationale as workspace job.
+      # The ignored job also installs OpenShell + Docker images later, so disk
+      # pressure is even higher here.
+      - name: Free up runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet \
+                      /usr/local/lib/android \
+                      /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL \
+                      /usr/local/.ghcup
+          df -h /
+      # Persist the devenv eval layer (nix eval cache + fetched flake inputs +
+      # devenv state) — same rationale as the workspace job. Without it the
+      # first devenv shell re-fetches inputs and re-evaluates from scratch on
+      # every run (~12 min). Keyed on the lockfiles that pin the inputs.
+      - name: Cache devenv eval layer
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/nix
+            .devenv
+          key: devenv-eval-${{ runner.os }}-${{ hashFiles('devenv.lock', 'devenv.nix', 'devenv.yaml') }}
+          restore-keys: |
+            devenv-eval-${{ runner.os }}-
+      # Warm the devenv environment once (cold on a cache miss, fast on a hit)
+      # so the rust-cache step's first `devenv shell -- cargo …` is not the one
+      # paying the realize cost.
+      - name: Warm devenv shell
+        run: devenv shell -- true
       - name: Disk usage before Rust cache
         if: always()
         run: |
@@ -102,6 +199,10 @@ jobs:
         with:
           workspaces: ". -> target/devenv"
           cmd-format: devenv shell -- {0}
+          # Stable per-job key (drops the auto-appended job suffix) so the
+          # cache entry is reused across PRs/pushes for the same lockfile.
+          # NOT shared with `workspace` — see that job's shared-key comment.
+          shared-key: "tests-ignored"
       - name: Disk usage after Rust cache
         if: always()
         run: |

@@ -153,6 +153,7 @@ pub fn author_generic_profile(
             header_name: header_name.to_string(),
             query_param: String::new(),
             refresh: None,
+            path_template: String::new(),
         }],
         endpoints: vec![sandbox_v1::NetworkEndpoint {
             host: upstream_host.to_string(),
