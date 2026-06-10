@@ -19,6 +19,10 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # Required for DeterminateSystems/flakehub-cache-action (transitively
+  # included by onsails/nix-action) to obtain a GitHub Actions OIDC token
+  # and authenticate against FlakeHub Cache.
+  id-token: write
 
 concurrency:
   group: openshell-proto-compat

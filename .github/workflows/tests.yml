@@ -16,6 +16,16 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# id-token: write is required for DeterminateSystems/flakehub-cache-action
+# (transitively included by onsails/nix-action) to obtain a GitHub Actions
+# OIDC token and authenticate against FlakeHub Cache. Without it the cache
+# action prints "not authenticated" and falls back to degraded mode.
+# contents: read is the standard default — listed explicitly because
+# adding any permission narrows the implicit set to what is enumerated.
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   workspace:
     name: workspace tests
