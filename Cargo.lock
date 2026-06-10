@@ -5325,7 +5325,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -5777,9 +5777,9 @@ dependencies = [
 
 [[package]]
 name = "turso_core"
-version = "0.7.0-pre.5"
+version = "0.7.0-pre.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7b906bec0715386aabefdddc5032f1952396551e8b98726fa76f8e469478aa1"
+checksum = "a496622ce267d8066ed7f1c913ef898665b9f6f6f1a8663d8322672fb0191335"
 dependencies = [
  "aegis",
  "aes",
@@ -5846,9 +5846,9 @@ dependencies = [
 
 [[package]]
 name = "turso_ext"
-version = "0.7.0-pre.5"
+version = "0.7.0-pre.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52a8611ceed9fc73d041b7c61ba6b7b295de1be9133897c0c4f4506d4fda1798"
+checksum = "44c207741c8eefd41cd5c36fb9cccd66783e6b0c6c44b8f3e810f9a70b71307f"
 dependencies = [
  "chrono",
  "getrandom 0.4.2",
@@ -5857,9 +5857,9 @@ dependencies = [
 
 [[package]]
 name = "turso_macros"
-version = "0.7.0-pre.5"
+version = "0.7.0-pre.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5839509862e9bee93b84e769f522a5acd3746f47d9f6cd86ed6adcca3f520535"
+checksum = "5307f05b27607bdc85cde7697533cdde60aec63d5ca898b5fa495168d4e50b68"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5868,9 +5868,9 @@ dependencies = [
 
 [[package]]
 name = "turso_parser"
-version = "0.7.0-pre.5"
+version = "0.7.0-pre.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "764f8babe1fb2103b89c7155dbb78b8a322500ea9582e79632bf5096a28055a4"
+checksum = "8d99e7aa89f916029676268b6187bddeb0cd984c388bed8193f25de8f2bec2e0"
 dependencies = [
  "bitflags 2.11.0",
  "memchr",
@@ -6100,9 +6100,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.23.2"
+version = "1.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d258b83ceec21034727ecee8c382cfa6c3e133699b0742c64571814fb420c9f7"
+checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
