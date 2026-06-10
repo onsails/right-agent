@@ -75,39 +75,15 @@ jobs:
           key: devenv-eval-${{ runner.os }}-${{ hashFiles('devenv.lock', 'devenv.nix', 'devenv.yaml') }}
           restore-keys: |
             devenv-eval-${{ runner.os }}-
-      # TEMPORARY DIAGNOSTIC (remove after analysis): decomposes the first
-      # devenv-shell cost into COLD (fresh eval + realize) vs EVAL-ONLY vs
-      # WARM, and surfaces download ("copying path") vs source build
-      # ("building"). Also serves as the warm-up: after this step the env is
-      # realized, so the rust-cache step's devenv calls are fast.
-      - name: "DIAG decompose devenv shell cost"
-        run: |
-          set +e
-          nix --version
-          echo "::group::COLD devenv shell (fresh eval + realize)"
-          t=$SECONDS
-          devenv shell -- true > /tmp/cold.log 2>&1
-          echo "==> COLD: $((SECONDS - t))s"
-          tail -10 /tmp/cold.log
-          echo "::endgroup::"
-          echo "copying-path lines: $(grep -c 'copying path' /tmp/cold.log)"
-          echo "building lines:      $(grep -c 'building' /tmp/cold.log)"
-          echo "--- first downloads ---"
-          grep 'copying path' /tmp/cold.log | head -8
-          echo "--- builds (if any) ---"
-          grep 'building' /tmp/cold.log | head -20
-          echo "::group::EVAL-ONLY devenv shell (drop eval cache, store warm)"
-          rm -f .devenv/nix-eval-cache.db
-          t=$SECONDS
-          devenv shell -- true > /tmp/eval.log 2>&1
-          echo "==> EVAL-ONLY: $((SECONDS - t))s"
-          tail -5 /tmp/eval.log
-          echo "::endgroup::"
-          echo "::group::WARM devenv shell (eval cache + store warm)"
-          t=$SECONDS
-          devenv shell -- true > /tmp/warm.log 2>&1
-          echo "==> WARM: $((SECONDS - t))s"
-          echo "::endgroup::"
+      # Warm the devenv environment once so the rust-cache step's first
+      # `devenv shell -- cargo …` is not the one paying the realize cost.
+      # With the eval cache restored above, the eval + flake-input fetch are
+      # skipped; the devenv closure (~4.3 GiB) still substitutes from
+      # cache.nixos.org on a fresh runner — an accepted cost (persisting the
+      # Nix store would need WarpBuild or exceed the 10 GB GHA cache budget
+      # already used by rust-cache).
+      - name: Warm devenv shell
+        run: devenv shell -- true
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target/devenv"
