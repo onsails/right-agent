@@ -57,6 +57,42 @@ jobs:
         run: |
           df -h
           du -sh target/devenv ~/.cargo /nix /tmp /home/runner/work 2>/dev/null || true
+      # TEMPORARY DIAGNOSTIC (remove after analysis): the rust-cache step below
+      # sits silent for ~12 min because its first `devenv shell -- cargo …`
+      # call is the first time the devenv environment is realized in the job.
+      # This step decomposes that cost: COLD (fresh eval + realize) vs
+      # EVAL-ONLY (eval cache dropped, store already realized) vs WARM (both
+      # cached). It also surfaces whether realize is download ("copying path")
+      # or source build ("building"). Side effect: warms the env so the
+      # rust-cache step that follows is fast.
+      - name: "DIAG decompose devenv shell cost"
+        run: |
+          set +e
+          nix --version
+          echo "::group::COLD devenv shell (fresh eval + realize)"
+          t=$SECONDS
+          devenv shell -- true > /tmp/cold.log 2>&1
+          echo "==> COLD: $((SECONDS - t))s"
+          tail -10 /tmp/cold.log
+          echo "::endgroup::"
+          echo "copying-path lines: $(grep -c 'copying path' /tmp/cold.log)"
+          echo "building lines:      $(grep -c 'building' /tmp/cold.log)"
+          echo "--- first downloads ---"
+          grep 'copying path' /tmp/cold.log | head -8
+          echo "--- builds (if any) ---"
+          grep 'building' /tmp/cold.log | head -20
+          echo "::group::EVAL-ONLY devenv shell (drop eval cache, store warm)"
+          rm -f .devenv/nix-eval-cache.db
+          t=$SECONDS
+          devenv shell -- true > /tmp/eval.log 2>&1
+          echo "==> EVAL-ONLY: $((SECONDS - t))s"
+          tail -5 /tmp/eval.log
+          echo "::endgroup::"
+          echo "::group::WARM devenv shell (eval cache + store warm)"
+          t=$SECONDS
+          devenv shell -- true > /tmp/warm.log 2>&1
+          echo "==> WARM: $((SECONDS - t))s"
+          echo "::endgroup::"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target/devenv"
