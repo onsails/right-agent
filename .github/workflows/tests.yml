@@ -57,14 +57,29 @@ jobs:
         run: |
           df -h
           du -sh target/devenv ~/.cargo /nix /tmp /home/runner/work 2>/dev/null || true
-      # TEMPORARY DIAGNOSTIC (remove after analysis): the rust-cache step below
-      # sits silent for ~12 min because its first `devenv shell -- cargo …`
-      # call is the first time the devenv environment is realized in the job.
-      # This step decomposes that cost: COLD (fresh eval + realize) vs
-      # EVAL-ONLY (eval cache dropped, store already realized) vs WARM (both
-      # cached). It also surfaces whether realize is download ("copying path")
-      # or source build ("building"). Side effect: warms the env so the
-      # rust-cache step that follows is fast.
+      # The ~12 min of silence in the rust-cache step is the FIRST `devenv
+      # shell` in the job: fetching the flake inputs (cachix/devenv-nixpkgs
+      # rolling tarball + oxalica/rust-overlay) and the first full Nix
+      # evaluation. Neither FlakeHub nor magic-nix-cache (store caches) touch
+      # this — the cost is the eval layer, which lives in ~/.cache/nix (nix
+      # eval cache + fetched flake inputs) and .devenv (devenv's own eval DB +
+      # profile). Persist both, keyed on the lockfiles that pin the inputs.
+      # NOTE: .devenv here is devenv state, distinct from target/devenv (the
+      # cargo target dir cached by Swatinem/rust-cache) — do not conflate.
+      - name: Cache devenv eval layer
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/nix
+            .devenv
+          key: devenv-eval-${{ runner.os }}-${{ hashFiles('devenv.lock', 'devenv.nix', 'devenv.yaml') }}
+          restore-keys: |
+            devenv-eval-${{ runner.os }}-
+      # TEMPORARY DIAGNOSTIC (remove after analysis): decomposes the first
+      # devenv-shell cost into COLD (fresh eval + realize) vs EVAL-ONLY vs
+      # WARM, and surfaces download ("copying path") vs source build
+      # ("building"). Also serves as the warm-up: after this step the env is
+      # realized, so the rust-cache step's devenv calls are fast.
       - name: "DIAG decompose devenv shell cost"
         run: |
           set +e
@@ -181,6 +196,24 @@ jobs:
                       /opt/hostedtoolcache/CodeQL \
                       /usr/local/.ghcup
           df -h /
+      # Persist the devenv eval layer (nix eval cache + fetched flake inputs +
+      # devenv state) — same rationale as the workspace job. Without it the
+      # first devenv shell re-fetches inputs and re-evaluates from scratch on
+      # every run (~12 min). Keyed on the lockfiles that pin the inputs.
+      - name: Cache devenv eval layer
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/nix
+            .devenv
+          key: devenv-eval-${{ runner.os }}-${{ hashFiles('devenv.lock', 'devenv.nix', 'devenv.yaml') }}
+          restore-keys: |
+            devenv-eval-${{ runner.os }}-
+      # Warm the devenv environment once (cold on a cache miss, fast on a hit)
+      # so the rust-cache step's first `devenv shell -- cargo …` is not the one
+      # paying the realize cost.
+      - name: Warm devenv shell
+        run: devenv shell -- true
       - name: Disk usage before Rust cache
         if: always()
         run: |
