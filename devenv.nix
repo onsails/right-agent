@@ -7,7 +7,12 @@
     ripgrep          # SBOX-04: CC sandbox rg check; must be in agent launch PATH
     grpcurl
     protobuf
-    ffmpeg
+    # CLI-only ffmpeg for STT audio decode. right-stt only shells out to the
+    # `ffmpeg` binary to decode audio (crates/right-stt/src/lib.rs), so the
+    # GUI/X11/SDL/pango deps in the full `ffmpeg` are dead weight. Headless
+    # drops the closure from ~1.0 GiB / 307 paths to ~299 MiB / 115 paths,
+    # ~700 MiB less to download on every fresh CI runner.
+    ffmpeg-headless
     pkg-config
     openssl
     cmake            # required by whisper-rs-sys build script
