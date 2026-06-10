@@ -19,6 +19,10 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # Required for DeterminateSystems/flakehub-cache-action (transitively
+  # included by onsails/nix-action) to obtain a GitHub Actions OIDC token
+  # and authenticate against FlakeHub Cache.
+  id-token: write
 
 concurrency:
   group: openshell-proto-compat
@@ -94,10 +98,7 @@ jobs:
           cat /tmp/buf-breaking.txt || true
 
       - if: steps.gate.outputs.changed == 'true'
-        uses: cachix/install-nix-action@v31
-      - name: Install devenv.sh
-        if: steps.gate.outputs.changed == 'true'
-        run: nix profile add nixpkgs#devenv
+        uses: onsails/nix-action@v2.2.0
       - if: steps.gate.outputs.changed == 'true'
         uses: Swatinem/rust-cache@v2
         with:
@@ -155,8 +156,11 @@ jobs:
             echo "A **BREAKING** or **FAILED** result means upstream changed the wire/API shape."
             echo "Audit \`SandboxReadiness\` and any code decoding moved/removed fields, then bump"
             echo "\`MIN_OPENSHELL_VERSION\` and the CI \`OPENSHELL_VERSION\` pin as needed."
-            echo "This bot surfaces drift only — it does not fix Rust. Full CI does not auto-run on"
-            echo "bot-authored PRs; push a commit (or re-run the Tests workflow) to trigger it."
+            echo "This bot surfaces drift only — it does not fix Rust. Full CI runs on this PR only"
+            echo "when \`BOT_PR_TOKEN\` (a fine-grained PAT) is configured as a repo secret;"
+            echo "otherwise bot-authored PRs don't trigger downstream workflows. Either way, the"
+            echo "\`openshell-proto-compat\` workflow run itself goes RED when \`cargo check\` fails,"
+            echo "so a failing proto bump is visible in the Actions tab even without full CI."
           } > /tmp/pr-body.md
           {
             echo "PR_BODY<<PRBODY_EOF"
@@ -168,6 +172,14 @@ jobs:
         if: steps.gate.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
+          # Prefer a fine-grained PAT so the PR is authored by a real account and
+          # the Tests workflow actually triggers on it (GitHub deliberately
+          # suppresses downstream workflow runs when an action is performed by
+          # GITHUB_TOKEN, to prevent loops). Falls back to GITHUB_TOKEN when the
+          # secret is not configured — in that case the PR is created but full
+          # CI must be triggered manually (or rely on the post-create gate
+          # below + the workflow's own RED status from a failing cargo check).
+          token: ${{ secrets.BOT_PR_TOKEN || github.token }}
           branch: automation/openshell-proto-revendor
           base: master
           title: "chore(openshell): re-vendor proto to ${{ steps.resolve.outputs.tag }}"
@@ -179,3 +191,15 @@ jobs:
             crates/right-openshell/proto/**
           commit-message: "chore(openshell): re-vendor proto to ${{ steps.resolve.outputs.tag }}"
           delete-branch: false
+
+      # Belt-and-suspenders: if cargo check failed against the new proto, fail
+      # the workflow run AFTER the PR has been created. This makes the failure
+      # visible in the Actions tab + via GitHub notifications, so a bot PR with
+      # a broken proto cannot quietly slip through (as v0.0.58 → master did).
+      # The PR itself stays open with the FAILED note in its body so the
+      # required Rust migration is obvious to a reviewer.
+      - name: Fail workflow if cargo check failed
+        if: steps.gate.outputs.changed == 'true' && steps.check.outputs.result == 'FAILED'
+        run: |
+          echo "::error::cargo check failed against the new proto — fix proto consumers (e.g. new fields on regenerated structs) before merging this PR."
+          exit 1
