@@ -1,7 +1,7 @@
 name: Claude Code Review
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, ready_for_review, reopened]
     # Optional: Only run on specific file changes
     # paths:
@@ -22,6 +22,11 @@ jobs:
       github.event.sender.login != 'claude[bot]'
 
     runs-on: ubuntu-latest
+    # Gate fork PRs behind manual approval. pull_request_target runs in the
+    # base-repo context with full GITHUB_TOKEN (incl. id-token: write), which
+    # the action needs for OIDC. The environment's required reviewers force
+    # a maintainer to approve before any fork code is checked out.
+    environment: claude-review
     permissions:
       contents: read
       pull-requests: read
@@ -32,6 +37,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          # pull_request_target defaults to the base ref; explicitly check
+          # out the PR head so Claude reviews the actual proposed changes.
+          # Safe because no untrusted code is executed before the action.
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
 
       - name: Run Claude Code Review
@@ -44,4 +53,3 @@ jobs:
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
-
