@@ -40,14 +40,19 @@ processes:
     shutdown:
       signal: 15
       timeout_seconds: 70
+{% if right_mcp_server or cloudflared %}
     depends_on:
 {% if right_mcp_server %}
       right-mcp-server:
         condition: process_started
 {% endif %}
+{% if cloudflared %}
       cloudflared:
         condition: process_started
+{% endif %}
+{% endif %}
 {% endfor %}
+{% if cloudflared %}
 
   cloudflared:
     command: "{{ cloudflared.command }}"
@@ -59,3 +64,4 @@ processes:
     shutdown:
       signal: 15
       timeout_seconds: 30
+{% endif %}

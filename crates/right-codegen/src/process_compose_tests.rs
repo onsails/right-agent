@@ -13,7 +13,16 @@ fn default_config() -> ProcessComposeConfig<'static> {
     ProcessComposeConfig {
         debug: false,
         home: Path::new("/home/user/.right"),
-        cloudflared_script: Path::new(CLOUDFLARED_SCRIPT),
+        cloudflared_script: Some(Path::new(CLOUDFLARED_SCRIPT)),
+        token_map_path: None,
+    }
+}
+
+fn external_provider_config() -> ProcessComposeConfig<'static> {
+    ProcessComposeConfig {
+        debug: false,
+        home: Path::new("/home/user/.right"),
+        cloudflared_script: None,
         token_map_path: None,
     }
 }
@@ -516,6 +525,27 @@ fn bot_process_has_rc_pc_port_env() {
     assert!(
         output.contains("RC_PC_PORT="),
         "expected RC_PC_PORT env var on bot process:\n{output}"
+    );
+}
+
+// ── external tunnel provider ────────────────────────────────────────────────
+
+#[test]
+fn external_provider_omits_cloudflared_process_and_dependency() {
+    let agents = vec![make_bot_agent("test", "123:tok")];
+    let yaml = generate_process_compose(&agents, Path::new(EXE_PATH), &external_provider_config())
+        .unwrap();
+    assert!(
+        !yaml.contains("cloudflared:"),
+        "external provider must not emit cloudflared process:\n{yaml}"
+    );
+    assert!(
+        !yaml.contains("cloudflared-start.sh"),
+        "external provider must not reference cloudflared wrapper script:\n{yaml}"
+    );
+    assert!(
+        yaml.contains("test-bot:"),
+        "bot processes must still be emitted:\n{yaml}"
     );
 }
 
