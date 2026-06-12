@@ -18,6 +18,7 @@ pub mod params;
 pub mod row;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod thread_focus;
 pub mod transaction;
 
 pub use connection::Connection;

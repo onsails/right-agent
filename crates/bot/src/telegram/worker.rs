@@ -3135,6 +3135,20 @@ async fn invoke_cc(
         right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
 
     let session_key: SessionKey = (chat_id, eff_thread_id);
+    let (operator_focus, agent_focus) =
+        match right_db::thread_focus::get(conn, chat_id, eff_thread_id).await {
+            Ok(Some(f)) => (f.operator_focus, f.agent_focus),
+            Ok(None) => (None, None),
+            // Best-effort: focus is supplementary context, never fail the turn.
+            Err(e) => {
+                tracing::warn!(
+                    chat_id,
+                    eff_thread_id,
+                    "thread_focus: get failed, omitting focus: {e:#}"
+                );
+                (None, None)
+            }
+        };
     // The edge-triggered memory-status state is committed only after the marker
     // is actually written to the agent's stdin (see below). Committing here, at
     // computation time, would silently drop the marker on any pre-delivery
@@ -3211,12 +3225,18 @@ async fn invoke_cc(
                 recall_content.as_deref(),
                 emit_marker.as_deref(),
                 repair_notice,
+                agent_focus.as_deref(),
             ),
         )
     } else {
         (
             Some(crate::cc::prompt::MemoryMode::File),
-            crate::cc::prompt::build_volatile_prefix(None, None, repair_notice),
+            crate::cc::prompt::build_volatile_prefix(
+                None,
+                None,
+                repair_notice,
+                agent_focus.as_deref(),
+            ),
         )
     };
 
@@ -3277,6 +3297,21 @@ async fn invoke_cc(
         }
     };
 
+    let operator_focus_section = operator_focus
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|f| {
+            use super::attachments::ChatContext as CC;
+            let label = match chat {
+                CC::Private { .. } => "Chat",
+                CC::Group {
+                    topic_id: Some(_), ..
+                } => "Topic",
+                CC::Group { topic_id: None, .. } => "Group",
+            };
+            crate::cc::prompt::format_operator_focus_block(label, f)
+        });
+
     // Per-session mutex on `--resume` AND `--session-id` — also held on
     // first-call turns to prevent cron-delivery's `--resume <new_uuid>` from
     // racing the JSONL write. `async_delivery::run_delivery_loop` reads the
@@ -3330,6 +3365,7 @@ async fn invoke_cc(
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
             Some(chat_context_block.as_str()),
+            operator_focus_section.as_deref(),
         );
         // Inject auth token as env var in the remote shell
         if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
@@ -3371,6 +3407,7 @@ async fn invoke_cc(
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
             Some(chat_context_block.as_str()),
+            operator_focus_section.as_deref(),
         );
 
         let mut c = tokio::process::Command::new("bash");

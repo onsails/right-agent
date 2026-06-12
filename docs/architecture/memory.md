@@ -66,17 +66,23 @@ No MCP memory tools.
 Session-bearing invocations assemble a composite system prompt with stable
 content: base prompt, operating/bootstrap/cron instructions, identity files,
 TOOLS, optional foreground-worker `## Current Conversation`, MCP instructions,
-and file-mode `MEMORY.md` only. Foreground worker prompt files are per session
-because the chat-context block is per session. Other session-bearing composite
-callers may omit chat context and use their existing prompt paths. The system
-prompt is not the home for Hindsight recall, memory-status markers, repair
-notices, or background-job status.
+optional foreground-worker operator focus, and file-mode `MEMORY.md` only.
+Operator focus is placed after MCP instructions and before file-mode
+`MEMORY.md`. Foreground worker prompt files are per session because the
+chat-context block and operator focus are per session. Other session-bearing
+composite callers may omit chat context and use their existing prompt paths.
+The system prompt is not the home for Hindsight recall, agent-saved focus,
+memory-status markers, repair notices, or background-job status.
 
 In Hindsight mode, foreground worker recall is rendered by
 `render_recall_with_dates`, ironclaw-wrapped by `build_volatile_prefix`, and
 prepended to the stdin user message before the `messages:` YAML. The volatile
 prefix label says the recalled memory is not new user input and tells the agent
 not to call memory tools for information already present in the block.
+
+Agent-saved focus is independent of memory mode: foreground worker turns pass
+it through `build_volatile_prefix` in both Hindsight and file-memory modes,
+after `sanitize_external_content` and `wrap_external("thread_focus", ...)`.
 
 `<memory-status>` markers are also prepended through the volatile stdin prefix.
 They are edge-triggered per `(chat_id, effective_thread_id)`: entering or

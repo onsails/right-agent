@@ -177,11 +177,11 @@ fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
     // 7 cron + 1 mcp + 1 progress + 2 learning + 3 conversation + 5 forum
-    // + 1 bootstrap + 1 provider capabilities = 21
+    // + 1 conversation focus + 1 bootstrap + 1 provider capabilities = 22
     assert_eq!(
         tools.len(),
-        21,
-        "expected 21 tools, got {}: {:?}",
+        22,
+        "expected 22 tools, got {}: {:?}",
         tools.len(),
         tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
     );
@@ -245,6 +245,67 @@ fn tools_list_includes_conversation_search_tools_without_scope_params() {
             );
         }
     }
+}
+
+#[test]
+fn thread_focus_set_tool_is_registered() {
+    let (backend, _, _tmp) = make_backend();
+    let tools = backend.tools_list();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "thread_focus_set")
+        .expect("thread_focus_set tool must be registered");
+
+    let description = tool
+        .description
+        .as_ref()
+        .expect("thread_focus_set must describe safe usage");
+    for required in [
+        "CURRENT Telegram conversation",
+        "shown to you on every future turn",
+        "empty string clears it",
+        "Scope is server-enforced",
+        "not agent-controlled",
+    ] {
+        assert!(
+            description.contains(required),
+            "thread_focus_set description missing {required:?}: {description}"
+        );
+    }
+
+    let schema = serde_json::Value::Object((*tool.input_schema).clone());
+    assert!(
+        !json_contains_forbidden_scope_name(&schema),
+        "thread_focus_set schema exposes forbidden scope fields: {schema}"
+    );
+    let properties = schema
+        .pointer("/properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("thread_focus_set schema must expose object properties");
+    let property_names: Vec<&str> = properties.keys().map(String::as_str).collect();
+    assert_eq!(
+        property_names,
+        vec!["focus"],
+        "thread_focus_set schema must expose only focus for agent input: {schema}"
+    );
+    assert!(
+        properties
+            .get("focus")
+            .is_some_and(serde_json::Value::is_object),
+        "thread_focus_set schema must expose focus only for agent input: {schema}"
+    );
+    assert_eq!(
+        schema.pointer("/properties/focus/maxLength"),
+        Some(&serde_json::json!(2000)),
+        "thread_focus_set focus schema must cap persistent prompt text: {schema}"
+    );
+    assert_eq!(
+        schema
+            .pointer("/additionalProperties")
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "thread_focus_set params must deny unknown fields: {schema}"
+    );
 }
 
 #[test]
@@ -609,6 +670,170 @@ async fn get_messages_by_id_rejects_agent_supplied_scope_params() {
             "error should identify rejected field {field_name}: {body}"
         );
     }
+}
+
+#[tokio::test]
+async fn thread_focus_set_rejects_agent_supplied_scope_params() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+
+    for (field_name, args) in [
+        (
+            "chat_id",
+            json!({ "focus": "stay focused", "chat_id": 100 }),
+        ),
+        (
+            "thread_id",
+            json!({ "focus": "stay focused", "thread_id": 7 }),
+        ),
+    ] {
+        let result = backend
+            .tools_call(
+                "test-agent",
+                &agent_dir,
+                "thread_focus_set",
+                args,
+                crate::progress::ToolCallContext::default(),
+            )
+            .await
+            .expect("tool errors should be returned as CallToolResult");
+
+        assert_eq!(result.is_error, Some(true));
+        let body = extract_error_body(&result);
+        assert_eq!(body["error"]["code"], "invalid_argument");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .expect("error message")
+                .contains(field_name),
+            "error should identify rejected field {field_name}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn thread_focus_set_without_invocation_scope_returns_tool_error() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "thread_focus_set",
+            json!({ "focus": "stay focused" }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "conversation_scope_unavailable");
+}
+
+#[tokio::test]
+async fn thread_focus_set_writes_and_clears_current_scope() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    register_foreground_scope(&backend, &agent_dir).await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "thread_focus_set",
+            json!({ "focus": "  stay on invoices  " }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-search".to_owned()),
+            },
+        )
+        .await
+        .expect("thread_focus_set should succeed");
+
+    assert_ne!(result.is_error, Some(true));
+    let body = extract_json_body(&result);
+    assert_eq!(body["status"].as_str(), Some("ok"));
+    assert_eq!(body["cleared"].as_bool(), Some(false));
+    let conn = right_db::open_connection(&agent_dir, false)
+        .await
+        .expect("open db");
+    let row = right_db::thread_focus::get(&conn, 100, 7)
+        .await
+        .expect("get thread focus")
+        .expect("current scope focus row");
+    assert_eq!(row.agent_focus.as_deref(), Some("stay on invoices"));
+    assert!(
+        right_db::thread_focus::get(&conn, 100, 0)
+            .await
+            .expect("get general scope")
+            .is_none(),
+        "thread_focus_set must not write outside the current thread"
+    );
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "thread_focus_set",
+            json!({ "focus": "   " }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-search".to_owned()),
+            },
+        )
+        .await
+        .expect("thread_focus_set clear should succeed");
+
+    assert_ne!(result.is_error, Some(true));
+    let body = extract_json_body(&result);
+    assert_eq!(body["status"].as_str(), Some("ok"));
+    assert_eq!(body["cleared"].as_bool(), Some(true));
+    let row = right_db::thread_focus::get(&conn, 100, 7)
+        .await
+        .expect("get thread focus")
+        .expect("current scope focus row");
+    assert_eq!(row.agent_focus, None);
+}
+
+#[tokio::test]
+async fn thread_focus_set_rejects_overlong_focus_without_writing() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    register_foreground_scope(&backend, &agent_dir).await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "thread_focus_set",
+            json!({ "focus": "x".repeat(2001) }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-search".to_owned()),
+            },
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("at most 2000 characters"),
+        "unexpected error body: {body}"
+    );
+    let conn = right_db::open_connection(&agent_dir, false)
+        .await
+        .expect("open db");
+    assert!(
+        right_db::thread_focus::get(&conn, 100, 7)
+            .await
+            .expect("get thread focus")
+            .is_none(),
+        "overlong thread_focus_set must not persist focus text"
+    );
 }
 
 #[tokio::test]

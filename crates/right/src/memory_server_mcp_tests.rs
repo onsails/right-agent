@@ -427,6 +427,21 @@ async fn stdio_conversation_search_returns_scope_unavailable() {
     let get_body: serde_json::Value =
         serde_json::from_str(&get_text).expect("body must be valid JSON");
     assert_eq!(get_body["error"]["code"], "conversation_scope_unavailable");
+
+    let focus_result = server
+        .thread_focus_set(Parameters(crate::right_backend::ThreadFocusSetParams {
+            focus: "stay focused".to_string(),
+        }))
+        .await
+        .expect("thread_focus_set dispatch should be Ok with operation error");
+    assert_eq!(focus_result.is_error, Some(true));
+    let focus_text = call_result_text(focus_result);
+    let focus_body: serde_json::Value =
+        serde_json::from_str(&focus_text).expect("body must be valid JSON");
+    assert_eq!(
+        focus_body["error"]["code"],
+        "conversation_scope_unavailable"
+    );
 }
 
 #[tokio::test]
