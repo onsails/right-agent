@@ -27,7 +27,7 @@ it remembers what matters, and it can act on your behalf without you handing it 
 > [!WARNING]
 > **today every agent runs on Claude Code (`claude -p`), so you need a Claude subscription.** from June 15 2026, programmatic use like this draws from your plan's separate monthly Agent SDK credit — Pro $20 · Max 5x $100 · Max 20x $200 — kept apart from your interactive chat limits; claim it once and it refreshes each billing cycle.
 >
-> **v0.4.0 is in the works: bring any provider and any model, self-hosted included** — so a Claude subscription becomes one option rather than a requirement.
+> **multi-provider support is in the works: bring any provider and any model, self-hosted included** — so a Claude subscription becomes one option rather than a requirement.
 
 ## <img src="assets/section-mark.svg" height="20" alt=""> what you get
 
