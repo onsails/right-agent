@@ -859,10 +859,17 @@ pub async fn handle_set_focus(
     let eff_thread_id = effective_thread_id(&msg);
     let mut url = super::dashboard::dashboard_url(&global_config.tunnel.hostname, agent_name)
         .map_err(|e| to_request_err(format!("set_focus dashboard: invalid URL: {e:#}")))?;
-    url.set_query(Some(&format!(
-        "view=focus&chat_id={}&thread_id={}",
-        msg.chat.id.0, eff_thread_id
-    )));
+    let focus_token = super::dashboard::generate_focus_scope_token(
+        bot.inner().inner().token(),
+        agent_name,
+        msg.chat.id.0,
+        eff_thread_id,
+    );
+    url.query_pairs_mut()
+        .append_pair("view", "focus")
+        .append_pair("chat_id", &msg.chat.id.0.to_string())
+        .append_pair("thread_id", &eff_thread_id.to_string())
+        .append_pair("token", &focus_token);
 
     let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::web_app(
         "Set focus",

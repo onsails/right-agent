@@ -97,7 +97,12 @@ function toggleDisplayMode(): void {
 </script>
 
 <template>
-  <FocusView v-if="focusLaunch" :chat-id="focusLaunch.chatId" :thread-id="focusLaunch.threadId" />
+  <FocusView
+    v-if="focusLaunch"
+    :chat-id="focusLaunch.chatId"
+    :thread-id="focusLaunch.threadId"
+    :token="focusLaunch.token"
+  />
   <AppShell
     v-else
     :agent="shellTitle"

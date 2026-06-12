@@ -4,9 +4,10 @@ import { focusLaunchParams } from './focus'
 
 describe('focusLaunchParams', () => {
   it('parses focus view launch params', () => {
-    expect(focusLaunchParams('?view=focus&chat_id=-100123&thread_id=7')).toEqual({
+    expect(focusLaunchParams('?view=focus&chat_id=-100123&thread_id=7&token=abc.123')).toEqual({
       chatId: -100123,
       threadId: 7,
+      token: 'abc.123',
     })
   })
 
@@ -20,14 +21,16 @@ describe('focusLaunchParams', () => {
   })
 
   it('accepts thread_id=0', () => {
-    expect(focusLaunchParams('?view=focus&chat_id=42&thread_id=0')).toEqual({
+    expect(focusLaunchParams('?view=focus&chat_id=42&thread_id=0&token=abc.123')).toEqual({
       chatId: 42,
       threadId: 0,
+      token: 'abc.123',
     })
   })
 
-  it('returns null when thread_id is missing', () => {
+  it('returns null when thread_id or token is missing', () => {
     expect(focusLaunchParams('?view=focus&chat_id=42')).toBeNull()
+    expect(focusLaunchParams('?view=focus&chat_id=42&thread_id=7')).toBeNull()
   })
 
   it('returns null for malformed number parameters', () => {

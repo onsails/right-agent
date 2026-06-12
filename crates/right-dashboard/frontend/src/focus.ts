@@ -1,6 +1,7 @@
 export interface FocusLaunch {
   chatId: number
   threadId: number
+  token: string
 }
 
 export function focusLaunchParams(search: string): FocusLaunch | null {
@@ -11,7 +12,8 @@ export function focusLaunchParams(search: string): FocusLaunch | null {
 
   const rawChatId = params.get('chat_id')
   const rawThreadId = params.get('thread_id')
-  if (rawChatId === null || rawThreadId === null) {
+  const token = params.get('token')
+  if (rawChatId === null || rawThreadId === null || token === null || token === '') {
     return null
   }
 
@@ -21,7 +23,7 @@ export function focusLaunchParams(search: string): FocusLaunch | null {
     return null
   }
 
-  return { chatId, threadId }
+  return { chatId, threadId, token }
 }
 
 function parseSignedDecimalInteger(raw: string): number | null {
