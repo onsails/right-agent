@@ -692,12 +692,21 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
         match selection {
             CombinedMenuItem::Done => break,
             CombinedMenuItem::Tunnel(_) => {
-                let tunnel_name = inquire::Text::new("tunnel name:")
-                    .with_default("right")
-                    .prompt()
-                    .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
-
-                let result = tunnel_setup(tunnel_name.trim(), None, true)?;
+                // Edit the tunnel in-place for whichever provider is already
+                // configured. Without this branch, an `external` operator
+                // selecting the tunnel row would be silently switched to
+                // cloudflared (and hard-error on a host with no cloudflared
+                // certificate).
+                let result = match &config.tunnel.provider {
+                    right_config::TunnelProvider::Cloudflared { .. } => {
+                        let tunnel_name = inquire::Text::new("tunnel name:")
+                            .with_default("right")
+                            .prompt()
+                            .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+                        tunnel_setup(tunnel_name.trim(), None, true)?
+                    }
+                    right_config::TunnelProvider::External => external_tunnel_setup(None, true)?,
+                };
 
                 let mut new_config = read_global_config(home)?;
                 new_config.tunnel = result;
