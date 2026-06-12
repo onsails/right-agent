@@ -20,13 +20,19 @@ impl WhisperEngine {
         }
     }
 
+    pub(crate) fn ensure_model_present(&self) -> Result<(), SttError> {
+        if self.ctx.get().is_some() || self.model_path.exists() {
+            Ok(())
+        } else {
+            Err(SttError::ModelMissing(self.model_path.clone()))
+        }
+    }
+
     fn ensure_ctx(&self) -> Result<Arc<Mutex<WhisperContext>>, SttError> {
         if let Some(c) = self.ctx.get() {
             return Ok(c.clone());
         }
-        if !self.model_path.exists() {
-            return Err(SttError::ModelMissing(self.model_path.clone()));
-        }
+        self.ensure_model_present()?;
         let ctx =
             WhisperContext::new_with_params(&self.model_path, WhisperContextParameters::default())
                 .map_err(|e| SttError::WhisperLoadFailed(format!("{e}")))?;

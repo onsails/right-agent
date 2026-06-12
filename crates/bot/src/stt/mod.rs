@@ -70,6 +70,7 @@ impl Transcriber {
                 max_mb: MAX_AUDIO_FILE_MB,
             });
         }
+        self.engine.ensure_model_present()?;
         let samples = decode::decode_to_pcm_f32(file).await?;
         let (text, lang) = self.engine.transcribe(samples).await?;
         Ok(TranscriptionResult {
@@ -287,6 +288,17 @@ mod tests {
                 max_mb: 25,
             }) => {}
             other => panic!("expected FileTooLarge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_model_returns_before_decode() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(tmp.path(), b"not audio").await.unwrap();
+        let t = Transcriber::new(PathBuf::from("/nonexistent.bin"));
+        match t.transcribe_voice(tmp.path()).await {
+            Err(SttError::ModelMissing(_)) => {}
+            other => panic!("expected ModelMissing before decode, got {other:?}"),
         }
     }
 }
