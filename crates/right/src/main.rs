@@ -421,6 +421,15 @@ pub enum AgentCommands {
         #[command(subcommand)]
         command: AgentSkillCommands,
     },
+    /// Programmatic provider management (mirrors the Telegram Mini App
+    /// dashboard's create/list flows). Intended for fleet automation
+    /// where the dashboard isn't reachable (e.g. multi-tenant
+    /// provisioning by an upstream registrar). Requires `right up` to
+    /// be running so the internal API socket exists.
+    Providers {
+        #[command(subcommand)]
+        command: AgentProvidersCommands,
+    },
 }
 
 /// Skill lifecycle subcommands.
@@ -428,6 +437,52 @@ pub enum AgentCommands {
 pub enum AgentSkillCommands {
     /// List learned skill lifecycle rows across agents
     List,
+}
+
+/// Provider management subcommands. Same surface the dashboard exposes
+/// via internal-socket REST; this is a non-interactive entry point for
+/// automation. All actions go through the internal API so existing
+/// validation, locking, and gateway-side rollback are reused.
+#[derive(Subcommand)]
+pub enum AgentProvidersCommands {
+    /// Add a provider to an agent. Generic providers route to an
+    /// authored OpenShell profile (host + header + env-var). Built-in
+    /// providers (e.g. `anthropic`, `github`) reuse OpenShell's
+    /// catalog profile. The credential value is taken from
+    /// `RIGHT_PROVIDER_CREDENTIAL` env if not given via
+    /// `--credential` — passing secrets on argv leaks them to
+    /// `ps`, shell history, and journald.
+    Add {
+        /// Agent name
+        agent: String,
+        /// Provider type slug. `generic` requires `--upstream-host`
+        /// and `--env-var`; built-in types (e.g. `anthropic`,
+        /// `github`) pull these from OpenShell's profile catalog.
+        #[arg(long, default_value = "generic")]
+        type_: String,
+        /// Optional label, used in the resulting provider name
+        /// (`<agent>-<label>`). Defaults to the type slug.
+        #[arg(long)]
+        label: Option<String>,
+        /// Credential value (the API token / key). Prefer
+        /// `RIGHT_PROVIDER_CREDENTIAL` env to avoid argv leak.
+        #[arg(long, env = "RIGHT_PROVIDER_CREDENTIAL", hide_env_values = true)]
+        credential: String,
+        /// Upstream host (e.g. `api.openai.com`). Generic only.
+        #[arg(long)]
+        upstream_host: Option<String>,
+        /// Upstream path prefix (e.g. `/v1`). Generic only.
+        #[arg(long)]
+        upstream_path_prefix: Option<String>,
+        /// Header name to substitute into. Default `Authorization`.
+        /// Generic only.
+        #[arg(long)]
+        header_name: Option<String>,
+        /// Env var name the sandbox sees as the placeholder.
+        /// Generic only.
+        #[arg(long)]
+        env_var: Option<String>,
+    },
 }
 
 /// Subcommands for `right memory`.
@@ -1171,6 +1226,7 @@ async fn main() -> miette::Result<()> {
                 Ok(())
             }
             AgentCommands::Skill { command } => cmd_agent_skill(&home, command).await,
+            AgentCommands::Providers { command } => cmd_agent_providers(&home, command).await,
         },
         Commands::Memory { command } => match command {
             MemoryCommands::List {
@@ -4625,6 +4681,92 @@ async fn cmd_agent_skill(home: &Path, command: AgentSkillCommands) -> miette::Re
     match command {
         AgentSkillCommands::List => cmd_agent_skill_list(home).await,
     }
+}
+
+async fn cmd_agent_providers(home: &Path, command: AgentProvidersCommands) -> miette::Result<()> {
+    match command {
+        AgentProvidersCommands::Add {
+            agent,
+            type_,
+            label,
+            credential,
+            upstream_host,
+            upstream_path_prefix,
+            header_name,
+            env_var,
+        } => {
+            cmd_agent_providers_add(
+                home,
+                &agent,
+                &type_,
+                label.as_deref(),
+                &credential,
+                upstream_host.as_deref(),
+                upstream_path_prefix.as_deref(),
+                header_name.as_deref(),
+                env_var.as_deref(),
+            )
+            .await
+        }
+    }
+}
+
+async fn cmd_agent_providers_add(
+    home: &Path,
+    agent: &str,
+    type_: &str,
+    label: Option<&str>,
+    credential: &str,
+    upstream_host: Option<&str>,
+    upstream_path_prefix: Option<&str>,
+    header_name: Option<&str>,
+    env_var: Option<&str>,
+) -> miette::Result<()> {
+    // Validate the static argument shape before probing runtime state, so a
+    // misconfigured command surfaces the actionable arg error even when
+    // `right up` isn't running yet.
+    let generic = if type_ == "generic" {
+        let host = upstream_host
+            .ok_or_else(|| miette::miette!("--upstream-host is required for `--type generic`"))?;
+        let env =
+            env_var.ok_or_else(|| miette::miette!("--env-var is required for `--type generic`"))?;
+        Some(right_mcp::internal_client::ProviderCreateGenericArg {
+            env_var: env,
+            header_name,
+            upstream_host: host,
+            upstream_path_prefix,
+        })
+    } else {
+        None
+    };
+
+    let socket_path = home.join("run/internal.sock");
+    if !socket_path.exists() {
+        return Err(miette::miette!(
+            help = "Start right first with `right up`",
+            "Internal API socket not found at {} — `right up` must be running",
+            socket_path.display()
+        ));
+    }
+
+    let req = right_mcp::internal_client::ProviderCreateRequest {
+        agent,
+        type_,
+        label,
+        credential,
+        generic,
+    };
+
+    let client = right_mcp::internal_client::InternalClient::new(&socket_path);
+    let view = client
+        .provider_create(&req)
+        .await
+        .map_err(|e| miette::miette!("provider_create failed: {e:#}"))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&view).map_err(|e| miette::miette!("{e:#}"))?
+    );
+    Ok(())
 }
 
 async fn cmd_agent_skill_list(home: &Path) -> miette::Result<()> {
