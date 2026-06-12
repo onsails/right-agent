@@ -121,9 +121,8 @@ fn generic_provider_profiles_for_config(
                 providers.push(
                     right_openshell::managed_profiles::GenericProviderProfileInput {
                         name: &entry.name,
-                        upstream_host: &generic.upstream_host,
+                        upstream_hosts: &generic.upstream_hosts,
                         upstream_path_prefix: generic.upstream_path_prefix.as_deref(),
-                        header_name: &generic.header_name,
                         env_var: &generic.env_var,
                     },
                 );
@@ -154,7 +153,7 @@ async fn ensure_generic_provider_profiles_for_config(
 
 enum ProviderCompositionExpectation<'a> {
     RuleOnly,
-    Endpoint { host: &'a str, path: &'a str },
+    Endpoints(Vec<(&'a str, &'a str)>),
 }
 
 fn provider_composition_expectation<'a>(
@@ -172,10 +171,14 @@ fn provider_composition_expectation<'a>(
                     entry.name
                 )
             })?;
-            Ok(ProviderCompositionExpectation::Endpoint {
-                host: &generic.upstream_host,
-                path: generic.upstream_path_prefix.as_deref().unwrap_or(""),
-            })
+            let path = generic.upstream_path_prefix.as_deref().unwrap_or("");
+            Ok(ProviderCompositionExpectation::Endpoints(
+                generic
+                    .upstream_hosts
+                    .iter()
+                    .map(|host| (host.as_str(), path))
+                    .collect(),
+            ))
         }
     }
 }
@@ -195,13 +198,16 @@ async fn wait_for_provider_entry_composed(
             )
             .await
         }
-        ProviderCompositionExpectation::Endpoint { host, path } => {
-            right_openshell::openshell::wait_for_provider_composed_with_endpoint(
+        ProviderCompositionExpectation::Endpoints(endpoints) => {
+            let expected = endpoints
+                .into_iter()
+                .map(|(host, path)| (host.to_string(), path.to_string()))
+                .collect();
+            right_openshell::openshell::wait_for_provider_composed_with_all_endpoints(
                 client,
                 sandbox_name,
                 &entry.name,
-                host,
-                path,
+                expected,
             )
             .await
         }
@@ -920,8 +926,7 @@ mod tests {
                         label: None,
                         generic: Some(right_agent_config::GenericProvider {
                             env_var: "ACME_TOKEN".into(),
-                            header_name: "X-Api-Key".into(),
-                            upstream_host: "api.acme.test".into(),
+                            upstream_hosts: vec!["api.acme.test".into(), "queue.acme.test".into()],
                             upstream_path_prefix: Some("/v1".into()),
                         }),
                     },
@@ -963,23 +968,24 @@ mod tests {
     }
 
     #[test]
-    fn provider_composition_expectation_uses_endpoint_for_generic() {
+    fn provider_composition_expectation_uses_all_endpoints_for_generic() {
         let entry = right_agent_config::ProviderEntry {
             name: "right-acme".into(),
             type_: right_agent_config::ProviderType::Generic,
             label: None,
             generic: Some(right_agent_config::GenericProvider {
                 env_var: "ACME_TOKEN".into(),
-                header_name: "X-Api-Key".into(),
-                upstream_host: "api.acme.test".into(),
+                upstream_hosts: vec!["api.acme.test".into(), "queue.acme.test".into()],
                 upstream_path_prefix: Some("/v1".into()),
             }),
         };
 
         match provider_composition_expectation("right", &entry).unwrap() {
-            ProviderCompositionExpectation::Endpoint { host, path } => {
-                assert_eq!(host, "api.acme.test");
-                assert_eq!(path, "/v1");
+            ProviderCompositionExpectation::Endpoints(endpoints) => {
+                assert_eq!(
+                    endpoints,
+                    vec![("api.acme.test", "/v1"), ("queue.acme.test", "/v1")]
+                );
             }
             ProviderCompositionExpectation::RuleOnly => {
                 panic!("generic provider must use endpoint-aware composition")

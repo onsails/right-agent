@@ -180,9 +180,8 @@ async fn ci_openshell_provider_update_rejects_type_change() {
         &mut client,
         author_generic_profile(
             &profile_id,
-            "example.invalid",
+            &["example.invalid".to_string()],
             None,
-            "Authorization",
             "TYPECHANGE_TOKEN",
         ),
     )

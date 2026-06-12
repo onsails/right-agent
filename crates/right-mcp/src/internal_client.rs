@@ -366,9 +366,7 @@ impl std::fmt::Debug for ProviderCreateRequest<'_> {
 #[derive(Debug, serde::Serialize)]
 pub struct ProviderCreateGenericArg<'a> {
     pub env_var: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub header_name: Option<&'a str>,
-    pub upstream_host: &'a str,
+    pub upstream_hosts: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_path_prefix: Option<&'a str>,
 }
