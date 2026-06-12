@@ -38,8 +38,11 @@ pub(crate) async fn initial_sync(
     // Kept out of `sync_cycle` so it does not re-exec every 5 minutes forever.
     cleanup_obsolete_builtin_skill_paths(sbox).await?;
 
-    // Ensure user-local CLI/npm environment is configured before any claude invocation.
-    ensure_sandbox_user_local_env(sbox).await?;
+    // Ensure user-local CLI/npm environment is configured before any
+    // claude invocation. Includes the `agent.yaml::env` map so per-
+    // agent operator-declared env vars (e.g. ANTHROPIC_BASE_URL when
+    // routing through a LiteLLM proxy) actually reach the sandbox.
+    ensure_sandbox_user_local_env(agent_dir, sbox).await?;
 
     Ok(())
 }
@@ -464,9 +467,30 @@ fn bashrc_read_script(path: &str) -> String {
 /// bins in that directory. The managed env file is sourced by `.bashrc` for
 /// user SSH shells and provides the shared contract for non-login Claude setup.
 async fn ensure_sandbox_user_local_env(
+    agent_dir: &Path,
     sbox: &right_openshell::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
-    let env_content = shell_printf_b_arg(&env_file_content());
+    // Read `agent.yaml::env` so the generated env.sh includes per-agent
+    // operator-declared exports alongside the managed PATH/NPM block.
+    // Treat a missing/unparseable agent.yaml as "no extra env" — the
+    // managed block is still useful on its own, and sync should not
+    // fail closed for what is, semantically, optional config. A parse
+    // failure is still logged: silently dropping the operator's env
+    // (e.g. ANTHROPIC_BASE_URL) would route the agent elsewhere with no
+    // trace of why.
+    let agent_env = match right_agent::agent::discovery::parse_agent_config(agent_dir) {
+        Ok(cfg) => cfg.map(|c| c.env).unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(
+                agent_dir = %agent_dir.display(),
+                error = format!("{e:#}"),
+                "sync: failed to parse agent.yaml for env injection; \
+                 proceeding with managed env only"
+            );
+            Default::default()
+        }
+    };
+    let env_content = shell_printf_b_arg(&env_file_content(&agent_env));
     let write_script = format!(
         "mkdir -p {SANDBOX_ENV_DIR} && \
          printf '%b' {env_content} > {SANDBOX_ENV_PATH}.tmp && \
@@ -557,7 +581,7 @@ mod tests {
 
     #[test]
     fn sandbox_env_file_content_sets_user_local_npm_contract() {
-        let content = env_file_content();
+        let content = env_file_content(&std::collections::HashMap::new());
 
         assert!(content.contains("RIGHT_AGENT_MANAGED_ENV=1"));
         assert!(content.contains("mkdir -p /sandbox/.local/bin /sandbox/.npm"));
@@ -881,8 +905,12 @@ percent % and backslash \\ and carriage\r and tab\t done\n";
             sandbox_id,
         );
 
-        ensure_sandbox_user_local_env(&sbox).await.unwrap();
-        ensure_sandbox_user_local_env(&sbox).await.unwrap();
+        ensure_sandbox_user_local_env(std::path::Path::new("/tmp/no-agent-dir"), &sbox)
+            .await
+            .unwrap();
+        ensure_sandbox_user_local_env(std::path::Path::new("/tmp/no-agent-dir"), &sbox)
+            .await
+            .unwrap();
 
         let (output, code) = sandbox
             .exec(&[
