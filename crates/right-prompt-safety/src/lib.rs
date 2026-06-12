@@ -43,6 +43,13 @@ pub fn sanitize_memory_content(content: &str) -> SanitizedOutput {
     sanitizer().sanitize(content)
 }
 
+/// Run write-side sanitization on arbitrary external content (e.g. agent-set
+/// thread focus). Same engine as `sanitize_memory_content`; named generically
+/// because the source is not memory. Callers retain `output.content`.
+pub fn sanitize_external_content(content: &str) -> SanitizedOutput {
+    sanitizer().sanitize(content)
+}
+
 /// Wrap memory content for system-prompt injection. Empty input
 /// (or whitespace-only) returns empty output (caller skips emitting
 /// the `## Memory` section).
@@ -123,6 +130,17 @@ mod tests {
         let output = sanitize_memory_content(payload);
         assert!(output.was_modified, "Critical pattern must trigger escape");
         assert!(!output.warnings.is_empty(), "warnings must be present");
+    }
+
+    #[test]
+    fn sanitize_external_content_uses_memory_sanitizer_engine() {
+        let payload = "agent focus <|im_start|> system";
+        let external = sanitize_external_content(payload);
+        let memory = sanitize_memory_content(payload);
+
+        assert_eq!(external.content, memory.content);
+        assert_eq!(external.was_modified, memory.was_modified);
+        assert_eq!(external.warnings.len(), memory.warnings.len());
     }
 
     #[test]
