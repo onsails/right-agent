@@ -603,9 +603,11 @@ async fn tunnel_state_credentials_present_passes() {
     std::fs::write(&creds_file, "{}").unwrap();
     let config = right_config::GlobalConfig {
         tunnel: right_config::TunnelConfig {
-            tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
-            credentials_file: creds_file,
             hostname: "example.com".to_string(),
+            provider: right_config::TunnelProvider::Cloudflared {
+                tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
+                credentials_file: creds_file,
+            },
         },
         aggregator: right_config::AggregatorConfig::default(),
     };
@@ -628,9 +630,11 @@ async fn tunnel_state_credentials_missing_fails() {
     let dir = tempdir().unwrap();
     let config = right_config::GlobalConfig {
         tunnel: right_config::TunnelConfig {
-            tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
-            credentials_file: std::path::PathBuf::from("/nonexistent/creds.json"),
             hostname: "example.com".to_string(),
+            provider: right_config::TunnelProvider::Cloudflared {
+                tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
+                credentials_file: std::path::PathBuf::from("/nonexistent/creds.json"),
+            },
         },
         aggregator: right_config::AggregatorConfig::default(),
     };

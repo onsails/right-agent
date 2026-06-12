@@ -109,8 +109,15 @@ pub async fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
         checks.push(check);
     }
 
-    // cloudflared binary check — Warn severity (D-03, OAUTH-04)
-    checks.push(check_cloudflared_binary());
+    // cloudflared binary check — only meaningful when `right` owns the
+    // tunnel. External-provider deployments use the operator's own reverse
+    // proxy and need not have cloudflared installed.
+    if matches!(
+        right_config::read_global_config(home).map(|c| c.tunnel.provider),
+        Ok(right_config::TunnelProvider::Cloudflared { .. }),
+    ) {
+        checks.push(check_cloudflared_binary());
+    }
 
     // Tunnel config + credentials checks (unified).
     checks.extend(check_tunnel_state(home));
@@ -751,33 +758,48 @@ fn check_tunnel_state(home: &Path) -> Vec<DoctorCheck> {
 
     let tunnel_cfg = &config.tunnel;
 
+    let provider_label = match &tunnel_cfg.provider {
+        right_config::TunnelProvider::Cloudflared { .. } => "cloudflared",
+        right_config::TunnelProvider::External => "external",
+    };
     let mut checks = vec![DoctorCheck {
         name: "tunnel-config".to_string(),
         status: CheckStatus::Pass,
-        detail: format!("tunnel configured: {}", tunnel_cfg.hostname),
+        detail: format!(
+            "tunnel configured: {} (provider: {provider_label})",
+            tunnel_cfg.hostname
+        ),
         fix: None,
     }];
 
-    if tunnel_cfg.credentials_file.exists() {
-        checks.push(DoctorCheck {
-            name: "tunnel-credentials".to_string(),
-            status: CheckStatus::Pass,
-            detail: format!(
-                "credentials file present at {}",
-                tunnel_cfg.credentials_file.display()
-            ),
-            fix: None,
-        });
-    } else {
-        checks.push(DoctorCheck {
-            name: "tunnel-credentials".to_string(),
-            status: CheckStatus::Fail,
-            detail: format!(
-                "credentials file missing: {}",
-                tunnel_cfg.credentials_file.display()
-            ),
-            fix: Some("run `right config set` to reconfigure tunnel".to_string()),
-        });
+    match &tunnel_cfg.provider {
+        right_config::TunnelProvider::Cloudflared {
+            credentials_file, ..
+        } => {
+            if credentials_file.exists() {
+                checks.push(DoctorCheck {
+                    name: "tunnel-credentials".to_string(),
+                    status: CheckStatus::Pass,
+                    detail: format!("credentials file present at {}", credentials_file.display()),
+                    fix: None,
+                });
+            } else {
+                checks.push(DoctorCheck {
+                    name: "tunnel-credentials".to_string(),
+                    status: CheckStatus::Fail,
+                    detail: format!("credentials file missing: {}", credentials_file.display()),
+                    fix: Some("run `right config set` to reconfigure tunnel".to_string()),
+                });
+            }
+        }
+        right_config::TunnelProvider::External => {
+            checks.push(DoctorCheck {
+                name: "tunnel-credentials".to_string(),
+                status: CheckStatus::Pass,
+                detail: "skipped — external provider (operator owns the reverse proxy)".to_string(),
+                fix: None,
+            });
+        }
     }
 
     checks
@@ -798,6 +820,12 @@ fn check_tunnel_health(home: &Path) -> DoctorCheck {
             detail: "tunnel reachable".to_string(),
             fix: None,
         },
+        TunnelState::HealthyExternal => DoctorCheck {
+            name: "tunnel-health".to_string(),
+            status: CheckStatus::Pass,
+            detail: "external tunnel reachable".to_string(),
+            fix: None,
+        },
         TunnelState::NotConfigured => DoctorCheck {
             name: "tunnel-health".to_string(),
             status: CheckStatus::Warn,
@@ -815,6 +843,14 @@ fn check_tunnel_health(home: &Path) -> DoctorCheck {
             status: CheckStatus::Warn,
             detail: format!("hostname not reachable: {reason}"),
             fix: Some("check DNS and Cloudflare dashboard".to_string()),
+        },
+        TunnelState::UnhealthyExternal { reason } => DoctorCheck {
+            name: "tunnel-health".to_string(),
+            status: CheckStatus::Warn,
+            detail: format!("external hostname not reachable: {reason}"),
+            fix: Some(
+                "check your reverse proxy (caddy/nginx) is up and DNS resolves to it".to_string(),
+            ),
         },
     }
 }

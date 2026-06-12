@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::runtime::pc_client::PcClient;
-use right_config::read_global_config;
+use right_config::{TunnelProvider, read_global_config};
 
 /// Timeout for the tunnel hostname reachability probe.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -24,6 +24,11 @@ pub(crate) enum TunnelState {
     Unhealthy { reason: String },
     /// Tunnel is up and the hostname responds.
     Healthy,
+    /// `tunnel.provider: external` — the public front is owned by the operator.
+    /// The hostname responded to the probe; cloudflared is intentionally absent.
+    HealthyExternal,
+    /// `tunnel.provider: external` — operator-owned front did not respond.
+    UnhealthyExternal { reason: String },
 }
 
 #[cfg(test)]
@@ -45,7 +50,12 @@ impl TunnelState {
                 "Tunnel is configured and cloudflared is running, but the hostname \
                  is not reachable: {reason}. Check DNS and Cloudflare dashboard."
             )),
-            Self::Healthy => None,
+            Self::UnhealthyExternal { reason } => Some(format!(
+                "External tunnel hostname is not reachable: {reason}. \
+                 Check that your reverse proxy (caddy/nginx/...) is up \
+                 and DNS resolves to it."
+            )),
+            Self::Healthy | Self::HealthyExternal => None,
         }
     }
 }
@@ -67,40 +77,54 @@ pub(crate) async fn check_tunnel(home: &Path) -> TunnelState {
 
     let tunnel = config.tunnel;
 
-    // Step 2: check process-compose for cloudflared
-    let pc = match PcClient::from_home(home) {
-        Ok(Some(c)) => c,
-        Ok(None) => return TunnelState::NotRunning,
-        Err(_) => return TunnelState::NotRunning,
-    };
+    // Step 2: if cloudflared owns the front, verify the managed process is up.
+    // External providers run outside process-compose; skip the PC probe and
+    // go straight to the hostname reachability check.
+    if matches!(tunnel.provider, TunnelProvider::Cloudflared { .. }) {
+        let pc = match PcClient::from_home(home) {
+            Ok(Some(c)) => c,
+            Ok(None) => return TunnelState::NotRunning,
+            Err(_) => return TunnelState::NotRunning,
+        };
 
-    let processes = match pc.list_processes().await {
-        Ok(p) => p,
-        Err(_) => return TunnelState::NotRunning,
-    };
+        let processes = match pc.list_processes().await {
+            Ok(p) => p,
+            Err(_) => return TunnelState::NotRunning,
+        };
 
-    let cloudflared_running = processes
-        .iter()
-        .any(|p| p.name == CLOUDFLARED_PROCESS_NAME && p.status == RUNNING_STATUS);
+        let cloudflared_running = processes
+            .iter()
+            .any(|p| p.name == CLOUDFLARED_PROCESS_NAME && p.status == RUNNING_STATUS);
 
-    if !cloudflared_running {
-        return TunnelState::NotRunning;
+        if !cloudflared_running {
+            return TunnelState::NotRunning;
+        }
     }
 
     // Step 3: probe the hostname
     let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
         Ok(c) => c,
         Err(e) => {
-            return TunnelState::Unhealthy {
-                reason: format!("{e:#}"),
+            return match tunnel.provider {
+                TunnelProvider::External => TunnelState::UnhealthyExternal {
+                    reason: format!("{e:#}"),
+                },
+                TunnelProvider::Cloudflared { .. } => TunnelState::Unhealthy {
+                    reason: format!("{e:#}"),
+                },
             };
         }
     };
 
     let url = format!("https://{}/healthz-tunnel-probe", tunnel.hostname);
-    match client.get(&url).send().await {
-        Ok(_) => TunnelState::Healthy,
-        Err(e) => TunnelState::Unhealthy {
+    let result = client.get(&url).send().await;
+    match (result, &tunnel.provider) {
+        (Ok(_), TunnelProvider::External) => TunnelState::HealthyExternal,
+        (Ok(_), TunnelProvider::Cloudflared { .. }) => TunnelState::Healthy,
+        (Err(e), TunnelProvider::External) => TunnelState::UnhealthyExternal {
+            reason: format!("{e:#}"),
+        },
+        (Err(e), TunnelProvider::Cloudflared { .. }) => TunnelState::Unhealthy {
             reason: format!("{e:#}"),
         },
     }

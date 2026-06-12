@@ -1285,9 +1285,11 @@ mod tests {
             home,
             &right_config::GlobalConfig {
                 tunnel: right_config::TunnelConfig {
-                    tunnel_uuid: "00000000-0000-0000-0000-000000000000".to_string(),
-                    credentials_file,
                     hostname: "right.example.com".to_string(),
+                    provider: right_config::TunnelProvider::Cloudflared {
+                        tunnel_uuid: "00000000-0000-0000-0000-000000000000".to_string(),
+                        credentials_file,
+                    },
                 },
                 aggregator: right_config::AggregatorConfig::default(),
             },

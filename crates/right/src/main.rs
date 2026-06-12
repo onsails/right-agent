@@ -500,6 +500,11 @@ pub enum Commands {
         /// Public hostname for the tunnel (e.g. right.example.com)
         #[arg(long)]
         tunnel_hostname: Option<String>,
+        /// Tunnel provider: `cloudflared` (default — `right` runs cloudflared
+        /// as part of process-compose) or `external` (operator runs their own
+        /// reverse proxy on the public hostname).
+        #[arg(long, default_value = "cloudflared")]
+        tunnel_provider: String,
         /// Non-interactive mode — skip all prompts (requires --tunnel-hostname when cloudflared login detected)
         #[arg(short = 'y', long)]
         yes: bool,
@@ -801,6 +806,7 @@ async fn main() -> miette::Result<()> {
             telegram_allowed_chat_ids,
             tunnel_name,
             tunnel_hostname,
+            tunnel_provider,
             yes,
             network_policy,
             sandbox_mode,
@@ -812,6 +818,7 @@ async fn main() -> miette::Result<()> {
                 &telegram_allowed_chat_ids,
                 &tunnel_name,
                 tunnel_hostname.as_deref(),
+                &tunnel_provider,
                 yes,
                 network_policy,
                 sandbox_mode,
@@ -846,10 +853,32 @@ async fn main() -> miette::Result<()> {
                 let config = right_config::read_global_config(&home)?;
                 match key.as_str() {
                     "tunnel.hostname" => println!("{}", config.tunnel.hostname),
-                    "tunnel.uuid" => println!("{}", config.tunnel.tunnel_uuid),
-                    "tunnel.credentials-file" => {
-                        println!("{}", config.tunnel.credentials_file.display())
-                    }
+                    "tunnel.provider" => match &config.tunnel.provider {
+                        right_config::TunnelProvider::Cloudflared { .. } => {
+                            println!("cloudflared")
+                        }
+                        right_config::TunnelProvider::External => println!("external"),
+                    },
+                    "tunnel.uuid" => match &config.tunnel.provider {
+                        right_config::TunnelProvider::Cloudflared { tunnel_uuid, .. } => {
+                            println!("{tunnel_uuid}")
+                        }
+                        right_config::TunnelProvider::External => {
+                            return Err(miette::miette!(
+                                "tunnel.uuid is not set: tunnel.provider is `external`"
+                            ));
+                        }
+                    },
+                    "tunnel.credentials-file" => match &config.tunnel.provider {
+                        right_config::TunnelProvider::Cloudflared {
+                            credentials_file, ..
+                        } => println!("{}", credentials_file.display()),
+                        right_config::TunnelProvider::External => {
+                            return Err(miette::miette!(
+                                "tunnel.credentials-file is not set: tunnel.provider is `external`"
+                            ));
+                        }
+                    },
                     other => return Err(miette::miette!("Unknown config key: {other}")),
                 }
                 Ok(())
@@ -1625,6 +1654,7 @@ async fn cmd_init(
     telegram_allowed_chat_ids: &[i64],
     tunnel_name: &str,
     tunnel_hostname: Option<&str>,
+    tunnel_provider: &str,
     yes: bool,
     network_policy: Option<right_agent::agent::types::NetworkPolicy>,
     sandbox_mode: Option<right_agent::agent::types::SandboxMode>,
@@ -1910,7 +1940,16 @@ async fn cmd_init(
         println!("{}", right_ui::section(theme, "tunnel"));
         println!("{}", right_ui::Rail::blank(theme));
     }
-    let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
+    let tunnel_cfg = match tunnel_provider {
+        "cloudflared" => crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?,
+        "external" => crate::wizard::external_tunnel_setup(tunnel_hostname, interactive)?,
+        other => {
+            return Err(miette::miette!(
+                help = "supported values: `cloudflared`, `external`",
+                "unknown tunnel provider `{other}` (--tunnel-provider)"
+            ));
+        }
+    };
     let aggregator = if home.join("config.yaml").exists() {
         right_config::read_global_config(home)?.aggregator
     } else {
