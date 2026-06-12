@@ -203,7 +203,7 @@ async fn wait_for_provider_entry_composed(
                 .into_iter()
                 .map(|(host, path)| (host.to_string(), path.to_string()))
                 .collect();
-            right_openshell::openshell::wait_for_provider_composed_with_all_endpoints(
+            right_openshell::openshell::wait_for_provider_composed_with_exact_endpoints(
                 client,
                 sandbox_name,
                 &entry.name,

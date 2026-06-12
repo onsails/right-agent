@@ -784,6 +784,29 @@ mod provider_view_tests {
             "multi-host generic providers must require every host to be composed"
         );
     }
+
+    #[test]
+    fn provider_entry_is_composed_rejects_stale_extra_generic_host() {
+        let entry = right_agent_config::ProviderEntry {
+            name: "hostagent-fal".into(),
+            type_: right_agent_config::ProviderType::Generic,
+            label: None,
+            generic: Some(right_agent_config::GenericProvider {
+                env_var: "FAL_KEY".into(),
+                upstream_hosts: vec!["fal.run".into()],
+                upstream_path_prefix: Some("/v1".into()),
+            }),
+        };
+        let policy = policy_with_provider_endpoints(
+            "hostagent-fal",
+            &[("fal.run", "/v1"), ("queue.fal.run", "/v1")],
+        );
+
+        assert!(
+            !provider_entry_is_composed(&policy, &entry),
+            "generic list status must reject stale active endpoints removed from agent.yaml"
+        );
+    }
 }
 
 /// Load and parse `agent.yaml` for the given agent name from `agents_dir`.
@@ -1187,7 +1210,7 @@ fn provider_entry_is_composed(
                     &generic.upstream_hosts,
                     generic.upstream_path_prefix.as_deref(),
                 );
-                right_openshell::provider_capabilities::provider_is_composed_with_all_endpoints(
+                right_openshell::provider_capabilities::provider_is_composed_with_exact_endpoints(
                     policy,
                     &entry.name,
                     &expected,
@@ -1558,7 +1581,7 @@ async fn create_generic_provider(
     let expected_endpoints =
         generic_expected_endpoints(&upstream_hosts, g.upstream_path_prefix.as_deref());
     if let Err(compose_err) =
-        right_openshell::openshell::wait_for_provider_composed_with_all_endpoints(
+        right_openshell::openshell::wait_for_provider_composed_with_exact_endpoints(
             &mut client,
             &sandbox_name,
             &name,
@@ -2217,7 +2240,7 @@ pub(crate) async fn handle_provider_config_update(
     }
 
     let expected_endpoints = generic_expected_endpoints(&new_hosts, new_path.as_deref());
-    if let Err(e) = right_openshell::openshell::wait_for_provider_composed_with_all_endpoints(
+    if let Err(e) = right_openshell::openshell::wait_for_provider_composed_with_exact_endpoints(
         &mut client,
         &sandbox_name,
         &req.name,
@@ -2894,7 +2917,7 @@ mod sandbox_mode_tests {
                 "right_openshell::providers::create_provider(&mut client, &spec)",
                 "right_openshell::providers::attach_to_sandbox(&mut client, &sandbox_name, &name)",
                 "right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path)",
-                "right_openshell::openshell::wait_for_provider_composed_with_all_endpoints(",
+                "right_openshell::openshell::wait_for_provider_composed_with_exact_endpoints(",
                 "expected_endpoints,",
                 "append_provider_to_yaml(&state.agents_dir, &req.agent, &entry)",
             ],
@@ -2920,7 +2943,7 @@ mod sandbox_mode_tests {
             &[
                 "right_openshell::managed_profiles::ensure_profiles(&mut client, &[managed_profile])",
                 "right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path)",
-                "right_openshell::openshell::wait_for_provider_composed_with_all_endpoints(",
+                "right_openshell::openshell::wait_for_provider_composed_with_exact_endpoints(",
                 "expected_endpoints,",
                 "replace_provider_in_yaml(&state.agents_dir, &req.agent, &updated)",
             ],
