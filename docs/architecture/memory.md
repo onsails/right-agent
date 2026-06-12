@@ -103,10 +103,12 @@ tools are removed from the surface; their backing tables (`memories`,
 `memory_events`) are retained for migration compat. Conversation transcript
 search and legacy memory search use local Turso FTS indexes over the base
 tables. The schema no longer creates SQLite FTS5 virtual tables for fresh
-databases. During locked `migrate: true` schema bootstrap for real legacy
-databases, `right-db` removes the old SQLite FTS5 virtual tables and sync
-triggers with a pre-Turso scrubber; migration v34 then creates the Turso FTS
-indexes. Old SQLite FTS index contents are not preserved.
+databases. Migration v34 drops any remaining old SQLite FTS5 virtual tables
+and sync triggers and creates the Turso FTS indexes; it is idempotent for
+any database Turso can already open. Old SQLite FTS index contents are not
+preserved. The earlier pre-Turso `rusqlite` scrubber for databases Turso
+could not open was removed after v34 soaked (onsails/right-agent#79), so
+pre-v34 SQLite FTS5 cleanup is no longer supported in-process.
 
 ## Transcript Search
 

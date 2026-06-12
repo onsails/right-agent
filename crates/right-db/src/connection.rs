@@ -427,23 +427,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writable_pragmas_wait_for_existing_file_lock() {
+    async fn writable_writes_wait_for_existing_write_lock() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("data.db");
-        {
-            let conn = rusqlite::Connection::open(&db_path).unwrap();
-            conn.execute_batch("CREATE TABLE lock_probe (id INTEGER PRIMARY KEY)")
-                .unwrap();
-        }
 
         let conn = Connection::open_local(db_path.clone(), true).await.unwrap();
-        let lock =
-            crate::test_support::hold_exclusive_sqlite_lock(db_path, Duration::from_millis(500));
+        conn.apply_connection_pragmas().await.unwrap();
+        conn.execute_batch("CREATE TABLE lock_probe (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
 
-        let result = conn.apply_connection_pragmas().await;
-        lock.join().expect("release sqlite lock");
+        // A second connection holds the multiprocess WAL write lock; our write
+        // must wait on busy_timeout and recover once the holder releases.
+        let lock = crate::test_support::hold_write_lock(db_path, Duration::from_millis(500)).await;
 
-        result.expect("writable pragmas should honor busy_timeout");
+        let result = conn
+            .execute("INSERT INTO lock_probe (id) VALUES (1)", ())
+            .await;
+        lock.await.expect("release write lock");
+
+        result.expect("writable write should honor busy_timeout and recover");
     }
 
     #[tokio::test]

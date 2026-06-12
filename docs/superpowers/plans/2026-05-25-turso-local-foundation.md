@@ -1,5 +1,11 @@
 # Turso Local Foundation And FTS Migration Implementation Plan
 
+> **Superseded in part (onsails/right-agent#79):** the bundled-`rusqlite`
+> legacy FTS5 scrubber described below was removed after deployed databases
+> soaked past migration v34. Pre-v34 SQLite FTS5 cleanup is no longer
+> supported in-process — `right-db` now opens every `data.db` directly through
+> Turso, and v34 stays idempotent only for databases Turso can already open.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace runtime `right-db` `libsql` usage with `turso`, enable the `sync` feature for future Turso Cloud work, and migrate local search from SQLite FTS5 virtual tables to Turso FTS indexes without adding cloud behavior.

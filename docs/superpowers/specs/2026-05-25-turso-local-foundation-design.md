@@ -1,5 +1,12 @@
 # Turso Local Foundation And FTS Migration Design
 
+> **Superseded in part (onsails/right-agent#79):** the pre-Turso bundled-
+> `rusqlite` legacy FTS5 scrubber specified here was removed after deployed
+> databases soaked past migration v34. Pre-v34 SQLite FTS5 cleanup is no longer
+> supported in-process; databases still carrying legacy FTS5 virtual tables
+> that Turso cannot open now fail the open instead of being scrubbed. Migration
+> v34 remains idempotent for databases Turso can already open.
+
 ## Context
 
 Right Agent stores each agent's local state in `<agent>/data.db` behind the
