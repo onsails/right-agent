@@ -292,6 +292,14 @@ pub enum AgentCommands {
             conflicts_with_all = ["preserve_source_bindings", "rebind_to_target"]
         )]
         memory_bank_id: Option<String>,
+        /// Telegram bot token. Also accepted via RIGHT_TELEGRAM_TOKEN env var,
+        /// which avoids leaking the token into shell history, `ps`, and journald.
+        #[arg(long, env = "RIGHT_TELEGRAM_TOKEN", hide_env_values = true)]
+        telegram_token: Option<String>,
+        /// Comma-separated list of Telegram chat IDs allowed to use this bot
+        /// (e.g. --telegram-allowed-chat-ids 12345678,100200300)
+        #[arg(long, value_delimiter = ',')]
+        telegram_allowed_chat_ids: Vec<i64>,
     },
     /// Configure an agent interactively (or get/set a specific setting)
     Config {
@@ -899,6 +907,8 @@ async fn main() -> miette::Result<()> {
                 preserve_source_bindings,
                 rebind_to_target,
                 memory_bank_id,
+                telegram_token,
+                telegram_allowed_chat_ids,
             } => {
                 if let Some(backup_path) = from_backup {
                     let restore_binding_mode = restore_binding_mode_from_flags(
@@ -916,6 +926,8 @@ async fn main() -> miette::Result<()> {
                         fresh,
                         network_policy,
                         sandbox_mode,
+                        telegram_token.as_deref(),
+                        &telegram_allowed_chat_ids,
                     )
                     .await
                 }
@@ -2073,6 +2085,7 @@ async fn cmd_init(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_agent_init(
     home: &Path,
     name: &str,
@@ -2081,7 +2094,12 @@ async fn cmd_agent_init(
     fresh: bool,
     network_policy: Option<right_agent::agent::types::NetworkPolicy>,
     sandbox_mode: Option<right_agent::agent::types::SandboxMode>,
+    telegram_token: Option<&str>,
+    telegram_allowed_chat_ids: &[i64],
 ) -> miette::Result<()> {
+    if let Some(t) = telegram_token {
+        right_agent::init::validate_telegram_token(t)?;
+    }
     let interactive = !yes;
     let agents_parent = right_config::agents_dir(home);
     let agent_dir = agents_parent.join(name);
@@ -2203,12 +2221,25 @@ async fn cmd_agent_init(
 
     // --- Build overrides ---
     let overrides = if let Some(config) = saved_overrides {
-        // Reuse saved config from old agent.yaml.
+        // Reuse saved config from old agent.yaml. CLI-supplied
+        // --telegram-token / --telegram-allowed-chat-ids take precedence
+        // over saved values so the operator can rotate them at re-init
+        // time without dropping into the wizard.
+        // sandbox_mode() borrows config; bind it before we move fields out.
+        let saved_sandbox_mode = *config.sandbox_mode();
+        let merged_token = telegram_token
+            .map(|t| t.to_string())
+            .or(config.telegram_token);
+        let merged_chat_ids = if !telegram_allowed_chat_ids.is_empty() {
+            telegram_allowed_chat_ids.to_vec()
+        } else {
+            config.allowed_chat_ids
+        };
         right_agent::init::InitOverrides {
-            sandbox_mode: *config.sandbox_mode(),
+            sandbox_mode: saved_sandbox_mode,
             network_policy: config.network_policy,
-            telegram_token: config.telegram_token,
-            allowed_chat_ids: config.allowed_chat_ids,
+            telegram_token: merged_token,
+            allowed_chat_ids: merged_chat_ids,
             model: config.model,
             learning: config.learning,
             env: config.env,
@@ -2280,8 +2311,8 @@ async fn cmd_agent_init(
                     .unwrap_or(right_agent::agent::types::SandboxMode::Openshell),
                 network_policy: network_policy
                     .unwrap_or(right_agent::agent::types::NetworkPolicy::Permissive),
-                telegram_token: None,
-                allowed_chat_ids: vec![],
+                telegram_token: telegram_token.map(|t| t.to_string()),
+                allowed_chat_ids: telegram_allowed_chat_ids.to_vec(),
                 model: None,
                 learning: right_agent::agent::types::LearningConfig::default(),
                 env: std::collections::HashMap::new(),
@@ -2313,8 +2344,8 @@ async fn cmd_agent_init(
                 sandbox_mode.unwrap_or(right_agent::agent::types::SandboxMode::Openshell);
             let mut w_network =
                 network_policy.unwrap_or(right_agent::agent::types::NetworkPolicy::Permissive);
-            let mut w_token: Option<String> = None;
-            let mut w_chat_ids: Vec<i64> = vec![];
+            let mut w_token: Option<String> = telegram_token.map(|t| t.to_string());
+            let mut w_chat_ids: Vec<i64> = telegram_allowed_chat_ids.to_vec();
             let mut w_stt: right_agent::agent::types::SttConfig =
                 right_agent::agent::types::SttConfig::default();
             let mut w_mem = (
@@ -2353,6 +2384,11 @@ async fn cmd_agent_init(
                         }
                     }
                     Step::Telegram => {
+                        // Honour CLI/env-supplied token: skip the wizard step.
+                        if telegram_token.is_some() {
+                            step = Step::ChatIds;
+                            continue;
+                        }
                         use crate::wizard::TelegramSetupOutcome;
                         match crate::wizard::telegram_setup(None, true, true)? {
                             TelegramSetupOutcome::Token(t) => {
@@ -2367,25 +2403,46 @@ async fn cmd_agent_init(
                             }
                         }
                     }
-                    Step::ChatIds => match crate::wizard::chat_ids_setup(true)? {
-                        Some(ids) => {
-                            w_chat_ids = ids;
+                    Step::ChatIds => {
+                        // Honour CLI-supplied --telegram-allowed-chat-ids: skip prompt.
+                        if !telegram_allowed_chat_ids.is_empty() {
                             step = Step::Stt;
+                            continue;
                         }
-                        None => {
-                            step = Step::Telegram;
+                        match crate::wizard::chat_ids_setup(true)? {
+                            Some(ids) => {
+                                w_chat_ids = ids;
+                                step = Step::Stt;
+                            }
+                            None => {
+                                // The Telegram step may be CLI/env-pinned (and
+                                // thus auto-skipped); back-navigate past it so
+                                // "back" reaches the previous interactive prompt
+                                // instead of bouncing straight back here.
+                                step = if telegram_token.is_some() {
+                                    Step::Network
+                                } else {
+                                    Step::Telegram
+                                };
+                            }
                         }
-                    },
+                    }
                     Step::Stt => match crate::wizard::stt_setup() {
                         Ok(Some((enabled, model))) => {
                             w_stt = right_agent::agent::types::SttConfig { enabled, model };
                             step = Step::Memory;
                         }
                         Ok(None) => {
-                            step = if w_token.is_some() {
+                            // ChatIds and Telegram may be CLI/env-pinned (and
+                            // thus auto-skipped); back-navigate to the nearest
+                            // interactive step rather than a pinned one that
+                            // would immediately skip forward again.
+                            step = if telegram_allowed_chat_ids.is_empty() {
                                 Step::ChatIds
-                            } else {
+                            } else if telegram_token.is_none() {
                                 Step::Telegram
+                            } else {
+                                Step::Network
                             };
                         }
                         Err(e) => return Err(e),
