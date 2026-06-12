@@ -105,6 +105,27 @@ pub fn provider_is_composed_with_endpoint(
     })
 }
 
+/// True when the composed `_provider_<name>` rule contains EVERY expected
+/// (host, path). Multi-host providers must confirm all hosts so a stale rule
+/// carrying only the unchanged first host cannot pass on an update.
+pub fn provider_is_composed_with_all_endpoints(
+    policy: &SandboxPolicy,
+    provider_name: &str,
+    expected: &[(String, String)],
+) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+
+    rule_for_provider(policy, provider_name).is_some_and(|rule| {
+        expected.iter().all(|(host, path)| {
+            rule.endpoints
+                .iter()
+                .any(|endpoint| endpoint.host.eq_ignore_ascii_case(host) && endpoint.path == *path)
+        })
+    })
+}
+
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
