@@ -122,6 +122,9 @@ the current `(chat_id, effective_thread_id)`; the agent supplies only
 `message_ids`, and ids outside scope or not archived are absent. Agents must
 never be allowed to pass chat_id, thread_id, user ids, session ids, or a
 broader scope to these tools.
+`mcp__right__thread_focus_set` writes agent focus for the current
+`(chat_id, effective_thread_id)`; scope comes from `conversation_scope`, never
+agent args.
 
 `mcp__right__forum_topic_list` is scoped the same way: it returns only the
 current `chat_id`'s tracked topics, resolved server-side from the invocation —

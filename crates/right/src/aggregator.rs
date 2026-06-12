@@ -605,6 +605,8 @@ impl rmcp::ServerHandler for Aggregator {
                  - mcp__right__forum_topic_close / mcp__right__forum_topic_reopen: Archive / restore a topic (reversible; never deletes).\n\
                  - mcp__right__forum_topic_list: List topics this agent tracks in the CURRENT chat only (server-scoped).\n\
                  You cannot delete topics. Requires the bot's 'Manage Topics' admin right; errors surface as forum_op_failed with an actionable message.\n\n\
+                 ## Conversation Focus\n\
+                 - mcp__right__thread_focus_set: Set your standing focus for the CURRENT conversation; shown to you every future turn here. Empty string clears it. Scope is server-enforced.\n\n\
                  ## Providers\n\
                  - mcp__right__provider_capabilities: List the sandbox's attached providers, including injected env-var placeholder names only, which binaries may use each credential, and valid hosts. Scope is server-enforced to this sandbox; takes no args.\n\
                  On provider 401/403, call this before concluding the credential is invalid; the gateway substitutes the secret only for listed binaries and hosts.\n\n\
@@ -960,6 +962,10 @@ mod tests {
         assert!(
             instructions.contains("mcp__right__provider_capabilities"),
             "aggregator instructions should include provider_capabilities inventory: {instructions}"
+        );
+        assert!(
+            instructions.contains("mcp__right__thread_focus_set"),
+            "aggregator instructions should include thread_focus_set inventory: {instructions}"
         );
         assert!(
             instructions.contains("env-var placeholder names only"),

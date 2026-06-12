@@ -333,6 +333,10 @@ invocation-scoped tools (`mcp__right__send_progress`,
 is foreground-only. Learning tools are available only to registered
 `Foreground`, `ProbeWriter`, and `Curator` invocations, so ordinary background
 calls must use their structured output delivery path.
+Conversation-scoped built-ins (`mcp__right__thread_search`,
+`mcp__right__chat_search`, `mcp__right__get_messages_by_id`, and
+`mcp__right__thread_focus_set`) require foreground `conversation_scope` and are
+also denied outside foreground turns.
 
 The learning prefilter is stricter: it omits MCP config and passes
 `--tools ""`, so no MCP or Claude Code tools are available.
