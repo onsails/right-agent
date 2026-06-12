@@ -125,6 +125,49 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Built-in fal.ai OpenShell profile authored by RightClaw.
+pub fn fal_profile() -> proto_v1::ProviderProfile {
+    // This profile covers only authenticated API/control-plane hosts. Media/CDN
+    // and upload-target hosts are intentionally excluded from this credential-injection profile.
+    let hosts = ["fal.run", "queue.fal.run", "rest.fal.ai"];
+
+    proto_v1::ProviderProfile {
+        id: "right-fal".into(),
+        display_name: "fal.ai".into(),
+        description: "RightClaw-managed fal.ai provider".into(),
+        category: proto_v1::ProviderProfileCategory::Other as i32,
+        credentials: vec![proto_v1::ProviderProfileCredential {
+            name: "api_token".into(),
+            description: String::new(),
+            env_vars: vec!["FAL_KEY".into()],
+            required: true,
+            auth_style: "bearer".into(),
+            header_name: "Authorization".into(),
+            query_param: String::new(),
+            refresh: None,
+            path_template: String::new(),
+        }],
+        endpoints: hosts
+            .iter()
+            .map(|host| sandbox_v1::NetworkEndpoint {
+                host: (*host).into(),
+                port: 443,
+                protocol: "rest".into(),
+                enforcement: "enforce".into(),
+                access: "full".into(),
+                path: String::new(),
+                ..Default::default()
+            })
+            .collect(),
+        binaries: vec![sandbox_v1::NetworkBinary {
+            path: "**".into(),
+            ..Default::default()
+        }],
+        inference_capable: false,
+        discovery: None,
+    }
+}
+
 /// Author a self-contained OpenShell profile for a generic provider.
 pub fn author_generic_profile(
     id: &str,
@@ -209,7 +252,10 @@ where
 /// (see ARCHITECTURE.md "promote on demand"). Add a variant + an entry here to
 /// ship a new profile (e.g. right-browser-use).
 pub fn managed_profiles() -> Vec<ManagedProfile> {
-    vec![ManagedProfile::Github]
+    vec![
+        ManagedProfile::Github,
+        ManagedProfile::Authored(Box::new(fal_profile())),
+    ]
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -567,6 +613,23 @@ mod tests {
     }
 
     #[test]
+    fn fal_profile_id_and_hosts() {
+        let p = fal_profile();
+        assert_eq!(p.id, "right-fal");
+        assert_eq!(p.display_name, "fal.ai");
+        let hosts: Vec<&str> = p.endpoints.iter().map(|e| e.host.as_str()).collect();
+        assert_eq!(hosts, vec!["fal.run", "queue.fal.run", "rest.fal.ai"]);
+        for endpoint in &p.endpoints {
+            assert_eq!(endpoint.port, 443);
+            assert_eq!(endpoint.protocol, "rest");
+            assert_eq!(endpoint.enforcement, "enforce");
+            assert_eq!(endpoint.access, "full");
+            assert_eq!(endpoint.path, "");
+        }
+        assert_eq!(p.credentials[0].env_vars, vec!["FAL_KEY".to_string()]);
+    }
+
+    #[test]
     fn generic_provider_profile_id_is_valid_bounded_and_collision_resistant() {
         let names = [
             "foo-bar",
@@ -682,6 +745,13 @@ mod tests {
                 mp.id()
             );
         }
+    }
+
+    #[test]
+    fn managed_profiles_registry_includes_fal() {
+        let ids: Vec<String> = managed_profiles().iter().map(|p| p.id()).collect();
+        assert!(ids.contains(&"right-fal".to_string()));
+        assert!(ids.contains(&"right-github".to_string()));
     }
 
     #[test]
