@@ -125,20 +125,56 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Built-in fal.ai OpenShell profile authored by RightClaw.
+pub fn fal_profile() -> proto_v1::ProviderProfile {
+    // This profile covers only authenticated API/control-plane hosts. Media/CDN
+    // and upload-target hosts are intentionally excluded from this credential-injection profile.
+    let hosts = ["fal.run", "queue.fal.run", "rest.fal.ai"];
+
+    proto_v1::ProviderProfile {
+        id: "right-fal".into(),
+        display_name: "fal.ai".into(),
+        description: "RightClaw-managed fal.ai provider".into(),
+        category: proto_v1::ProviderProfileCategory::Other as i32,
+        credentials: vec![proto_v1::ProviderProfileCredential {
+            name: "api_token".into(),
+            description: String::new(),
+            env_vars: vec!["FAL_KEY".into()],
+            required: true,
+            auth_style: "bearer".into(),
+            header_name: "Authorization".into(),
+            query_param: String::new(),
+            refresh: None,
+            path_template: String::new(),
+        }],
+        endpoints: hosts
+            .iter()
+            .map(|host| sandbox_v1::NetworkEndpoint {
+                host: (*host).into(),
+                port: 443,
+                protocol: "rest".into(),
+                enforcement: "enforce".into(),
+                access: "full".into(),
+                path: String::new(),
+                ..Default::default()
+            })
+            .collect(),
+        binaries: vec![sandbox_v1::NetworkBinary {
+            path: "**".into(),
+            ..Default::default()
+        }],
+        inference_capable: false,
+        discovery: None,
+    }
+}
+
 /// Author a self-contained OpenShell profile for a generic provider.
 pub fn author_generic_profile(
     id: &str,
-    upstream_host: &str,
+    upstream_hosts: &[String],
     upstream_path_prefix: Option<&str>,
-    header_name: &str,
     env_var: &str,
 ) -> proto_v1::ProviderProfile {
-    let auth_style = if header_name.eq_ignore_ascii_case("authorization") {
-        "bearer"
-    } else {
-        "header"
-    };
-
     proto_v1::ProviderProfile {
         id: id.to_string(),
         display_name: id.to_string(),
@@ -149,21 +185,26 @@ pub fn author_generic_profile(
             description: String::new(),
             env_vars: vec![env_var.to_string()],
             required: true,
-            auth_style: auth_style.into(),
-            header_name: header_name.to_string(),
+            // Fixed placement is canonical-valid and inert for OpenShell static-key
+            // substitution; the agent writes the real auth header.
+            auth_style: "bearer".into(),
+            header_name: "Authorization".into(),
             query_param: String::new(),
             refresh: None,
             path_template: String::new(),
         }],
-        endpoints: vec![sandbox_v1::NetworkEndpoint {
-            host: upstream_host.to_string(),
-            port: 443,
-            protocol: "rest".into(),
-            enforcement: "enforce".into(),
-            access: "full".into(),
-            path: upstream_path_prefix.unwrap_or("").to_string(),
-            ..Default::default()
-        }],
+        endpoints: upstream_hosts
+            .iter()
+            .map(|host| sandbox_v1::NetworkEndpoint {
+                host: host.clone(),
+                port: 443,
+                protocol: "rest".into(),
+                enforcement: "enforce".into(),
+                access: "full".into(),
+                path: upstream_path_prefix.unwrap_or("").to_string(),
+                ..Default::default()
+            })
+            .collect(),
         binaries: vec![sandbox_v1::NetworkBinary {
             path: "**".into(),
             ..Default::default()
@@ -176,9 +217,8 @@ pub fn author_generic_profile(
 /// Config-free generic provider data used to author a managed OpenShell profile.
 pub struct GenericProviderProfileInput<'a> {
     pub name: &'a str,
-    pub upstream_host: &'a str,
+    pub upstream_hosts: &'a [String],
     pub upstream_path_prefix: Option<&'a str>,
-    pub header_name: &'a str,
     pub env_var: &'a str,
 }
 
@@ -197,9 +237,8 @@ where
         }
         profiles.push(ManagedProfile::Authored(Box::new(author_generic_profile(
             &id,
-            provider.upstream_host,
+            provider.upstream_hosts,
             provider.upstream_path_prefix,
-            provider.header_name,
             provider.env_var,
         ))));
     }
@@ -213,7 +252,10 @@ where
 /// (see ARCHITECTURE.md "promote on demand"). Add a variant + an entry here to
 /// ship a new profile (e.g. right-browser-use).
 pub fn managed_profiles() -> Vec<ManagedProfile> {
-    vec![ManagedProfile::Github]
+    vec![
+        ManagedProfile::Github,
+        ManagedProfile::Authored(Box::new(fal_profile())),
+    ]
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -542,41 +584,49 @@ mod tests {
     }
 
     #[test]
-    fn author_generic_profile_sets_endpoint_credential_and_binaries() {
-        let p = author_generic_profile(
-            "right-acme",
-            "api.acme.com",
-            Some("/v1"),
-            "x-api-key",
-            "MY_API_KEY",
-        );
-        assert_eq!(p.id, "right-acme");
-        let ep = &p.endpoints[0];
-        assert_eq!(ep.host, "api.acme.com");
-        assert_eq!(ep.port, 443);
-        assert_eq!(ep.protocol, "rest");
-        assert_eq!(ep.access, "full");
-        assert_eq!(ep.path, "/v1");
-        assert!(ep.tls.is_empty());
-        let cred = &p.credentials[0];
-        assert!(cred.env_vars.contains(&"MY_API_KEY".to_string()));
-        assert_eq!(cred.header_name.to_lowercase(), "x-api-key");
-        assert!(p.binaries.iter().any(|b| b.path == "**"));
+    fn author_generic_profile_emits_one_endpoint_per_host() {
+        let hosts = vec!["fal.run".to_string(), "queue.fal.run".to_string()];
+        let p = author_generic_profile("right-provider-x", &hosts, Some("/v1"), "FAL_KEY");
+        let endpoint_hosts: Vec<&str> = p.endpoints.iter().map(|e| e.host.as_str()).collect();
+        assert_eq!(endpoint_hosts, vec!["fal.run", "queue.fal.run"]);
+        for e in &p.endpoints {
+            assert_eq!(e.protocol, "rest");
+            assert_eq!(e.access, "full");
+            assert_eq!(e.path, "/v1");
+            assert_eq!(e.port, 443);
+        }
     }
 
     #[test]
-    fn author_generic_profile_uses_bearer_auth_for_authorization_header() {
+    fn author_generic_profile_credential_is_fixed_inert_placement() {
         let p = author_generic_profile(
-            "right-acme",
-            "api.acme.com",
+            "right-provider-x",
+            &["api.acme.com".to_string()],
             None,
-            "Authorization",
-            "MY_API_KEY",
+            "ACME_TOKEN",
         );
-
         let cred = &p.credentials[0];
-        assert_eq!(cred.auth_style, "bearer");
+        assert_eq!(cred.env_vars, vec!["ACME_TOKEN".to_string()]);
+        // Fixed canonical-valid placement; inert for static keys.
         assert_eq!(cred.header_name, "Authorization");
+        assert_eq!(cred.auth_style, "bearer");
+    }
+
+    #[test]
+    fn fal_profile_id_and_hosts() {
+        let p = fal_profile();
+        assert_eq!(p.id, "right-fal");
+        assert_eq!(p.display_name, "fal.ai");
+        let hosts: Vec<&str> = p.endpoints.iter().map(|e| e.host.as_str()).collect();
+        assert_eq!(hosts, vec!["fal.run", "queue.fal.run", "rest.fal.ai"]);
+        for endpoint in &p.endpoints {
+            assert_eq!(endpoint.port, 443);
+            assert_eq!(endpoint.protocol, "rest");
+            assert_eq!(endpoint.enforcement, "enforce");
+            assert_eq!(endpoint.access, "full");
+            assert_eq!(endpoint.path, "");
+        }
+        assert_eq!(p.credentials[0].env_vars, vec!["FAL_KEY".to_string()]);
     }
 
     #[test]
@@ -622,19 +672,18 @@ mod tests {
 
     #[test]
     fn generic_provider_profiles_uses_collision_resistant_profile_ids() {
+        let hosts = vec!["api.acme.com".to_string()];
         let profiles = generic_provider_profiles([
             GenericProviderProfileInput {
                 name: "right-acme",
-                upstream_host: "api.acme.com",
+                upstream_hosts: &hosts,
                 upstream_path_prefix: None,
-                header_name: "x-api-key",
                 env_var: "ACME_API_KEY",
             },
             GenericProviderProfileInput {
                 name: "acme",
-                upstream_host: "api.acme.com",
+                upstream_hosts: &hosts,
                 upstream_path_prefix: None,
-                header_name: "x-api-key",
                 env_var: "ACME_API_KEY",
             },
         ]);
@@ -646,19 +695,18 @@ mod tests {
 
     #[test]
     fn generic_provider_profiles_dedupes_duplicate_provider_names() {
+        let hosts = vec!["api.acme.com".to_string()];
         let profiles = generic_provider_profiles([
             GenericProviderProfileInput {
                 name: "right-acme",
-                upstream_host: "api.acme.com",
+                upstream_hosts: &hosts,
                 upstream_path_prefix: None,
-                header_name: "x-api-key",
                 env_var: "ACME_API_KEY",
             },
             GenericProviderProfileInput {
                 name: "right-acme",
-                upstream_host: "api.acme.com",
+                upstream_hosts: &hosts,
                 upstream_path_prefix: None,
-                header_name: "x-api-key",
                 env_var: "ACME_API_KEY",
             },
         ]);
@@ -700,6 +748,13 @@ mod tests {
     }
 
     #[test]
+    fn managed_profiles_registry_includes_fal() {
+        let ids: Vec<String> = managed_profiles().iter().map(|p| p.id()).collect();
+        assert!(ids.contains(&"right-fal".to_string()));
+        assert!(ids.contains(&"right-github".to_string()));
+    }
+
+    #[test]
     fn ensure_outcome_skipped_variant_exists() {
         // Compile-time guard that the non-fatal Skipped outcome is available.
         let s = EnsureOutcome::Skipped("right-github".into());
@@ -727,9 +782,8 @@ mod tests {
     fn needs_import_true_when_authored_profile_controlled_fields_differ() {
         let desired = author_generic_profile(
             "right-acme",
-            "api.acme.com",
+            &["api.acme.com".to_string()],
             Some("/v1"),
-            "x-api-key",
             "MY_API_KEY",
         );
 
@@ -759,9 +813,8 @@ mod tests {
     fn needs_import_true_when_authored_endpoint_port_allowlist_drift() {
         let desired = author_generic_profile(
             "right-acme",
-            "api.acme.com",
+            &["api.acme.com".to_string()],
             Some("/v1"),
-            "x-api-key",
             "MY_API_KEY",
         );
 
@@ -784,9 +837,8 @@ mod tests {
     fn needs_import_false_when_gateway_normalizes_port_into_ports() {
         let desired = author_generic_profile(
             "right-acme",
-            "api.acme.com",
+            &["api.acme.com".to_string()],
             Some("/v1"),
-            "x-api-key",
             "MY_API_KEY",
         );
         assert_eq!(desired.endpoints[0].port, 443);

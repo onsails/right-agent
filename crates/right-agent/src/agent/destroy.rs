@@ -690,6 +690,6 @@ sandbox:
             .as_ref()
             .expect("second provider must have generic config");
         assert_eq!(generic.env_var, "ACME_TOKEN");
-        assert_eq!(generic.upstream_host, "api.acme.com");
+        assert_eq!(generic.upstream_hosts, vec!["api.acme.com".to_string()]);
     }
 }

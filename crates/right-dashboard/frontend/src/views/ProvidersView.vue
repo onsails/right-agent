@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { Ref } from 'vue'
 import {
   providerList,
   providerTypes,
@@ -11,18 +12,18 @@ import {
 import type {
   ProviderView,
   ProviderProfileView,
-  ProviderGenericBody,
 } from '../types'
 import SecretInput from '../components/SecretInput.vue'
 import ProviderTypeList from './ProviderTypeList.vue'
 import {
   validateSlug,
   validateEnvVar,
+  validateUpstreamHosts,
   evaluateCredentialSubmit,
   providerCompositionClass,
   providerCompositionLabel,
   CREDENTIAL_HINT,
-  HEADER_NAME_HINT,
+  HOSTS_MICROCOPY,
 } from './providersViewModel'
 
 const providers = ref<ProviderView[]>([])
@@ -39,8 +40,7 @@ const addLabel = ref('')
 const addCredential = ref('')
 // Generic-specific fields
 const addEnvVar = ref('')
-const addHeaderName = ref('')
-const addUpstreamHost = ref('')
+const addUpstreamHosts = ref<string[]>([''])
 const addUpstreamPathPrefix = ref('')
 const addBusy = ref(false)
 const addError = ref<string | null>(null)
@@ -66,14 +66,65 @@ const rotateWarnAck = ref(false)
 const editOpen = ref(false)
 const editProvider = ref<ProviderView | null>(null)
 const editEnvVar = ref('')
-const editHeaderName = ref('')
-const editUpstreamHost = ref('')
+const editUpstreamHosts = ref<string[]>([''])
 const editUpstreamPathPrefix = ref('')
 const editBusy = ref(false)
 const editError = ref<string | null>(null)
 
 // Per-row busy tracking for delete
 const busyDelete = ref<string | null>(null)
+
+let nextHostInputKey = 1
+const addUpstreamHostKeys = ref<number[]>(freshHostInputKeys(1))
+const editUpstreamHostKeys = ref<number[]>(freshHostInputKeys(1))
+
+function freshHostInputKeys(count: number): number[] {
+  return Array.from({ length: Math.max(1, count) }, () => nextHostInputKey++)
+}
+
+function resetHostInputs(
+  hostsRef: Ref<string[]>,
+  keysRef: Ref<number[]>,
+  hosts: string[] = [''],
+): void {
+  const nextHosts = hosts.length > 0 ? [...hosts] : ['']
+  hostsRef.value = nextHosts
+  keysRef.value = freshHostInputKeys(nextHosts.length)
+}
+
+function addHostInput(hostsRef: Ref<string[]>, keysRef: Ref<number[]>): void {
+  hostsRef.value.push('')
+  keysRef.value.push(nextHostInputKey++)
+}
+
+function removeHostInput(hostsRef: Ref<string[]>, keysRef: Ref<number[]>, index: number): void {
+  if (hostsRef.value.length <= 1) {
+    resetHostInputs(hostsRef, keysRef)
+    return
+  }
+  hostsRef.value.splice(index, 1)
+  keysRef.value.splice(index, 1)
+}
+
+function normalizedHosts(hosts: string[]): string[] {
+  return hosts.map((host) => host.trim()).filter((host) => host.length > 0)
+}
+
+function addUpstreamHost(): void {
+  addHostInput(addUpstreamHosts, addUpstreamHostKeys)
+}
+
+function removeAddUpstreamHost(index: number): void {
+  removeHostInput(addUpstreamHosts, addUpstreamHostKeys, index)
+}
+
+function addEditUpstreamHost(): void {
+  addHostInput(editUpstreamHosts, editUpstreamHostKeys)
+}
+
+function removeEditUpstreamHost(index: number): void {
+  removeHostInput(editUpstreamHosts, editUpstreamHostKeys, index)
+}
 
 onMounted(() => {
   void refresh()
@@ -108,8 +159,7 @@ function openAdd(prefType?: string | null, prefLabel?: string | null): void {
   addLabel.value = prefLabel ?? ''
   addCredential.value = ''
   addEnvVar.value = ''
-  addHeaderName.value = ''
-  addUpstreamHost.value = ''
+  resetHostInputs(addUpstreamHosts, addUpstreamHostKeys)
   addUpstreamPathPrefix.value = ''
   addError.value = null
   addWarn.value = null
@@ -133,8 +183,7 @@ function closeAdd(): void {
   addLabel.value = ''
   addCredential.value = ''
   addEnvVar.value = ''
-  addHeaderName.value = ''
-  addUpstreamHost.value = ''
+  resetHostInputs(addUpstreamHosts, addUpstreamHostKeys)
   addUpstreamPathPrefix.value = ''
   addError.value = null
   addWarn.value = null
@@ -165,7 +214,8 @@ async function submitAdd(): Promise<void> {
     if (slugErr) { addError.value = `Label: ${slugErr}`; return }
     const envErr = validateEnvVar(addEnvVar.value)
     if (envErr) { addError.value = `Env var: ${envErr}`; return }
-    if (!addUpstreamHost.value.trim()) { addError.value = 'Upstream host is required'; return }
+    const hostsErr = validateUpstreamHosts(addUpstreamHosts.value)
+    if (hostsErr) { addError.value = `Upstream hosts: ${hostsErr}`; return }
   }
 
   if (!addCredential.value.trim()) { addError.value = 'Credential is required'; return }
@@ -186,8 +236,7 @@ async function submitAdd(): Promise<void> {
       credential: addCredential.value,
       generic: t.type === 'generic' ? {
         env_var: addEnvVar.value,
-        header_name: addHeaderName.value.trim() || undefined,
-        upstream_host: addUpstreamHost.value.trim(),
+        upstream_hosts: normalizedHosts(addUpstreamHosts.value),
         upstream_path_prefix: addUpstreamPathPrefix.value.trim() || undefined,
       } : undefined,
     })
@@ -247,8 +296,7 @@ function openEdit(provider: ProviderView): void {
   if (!provider.generic) return
   editProvider.value = provider
   editEnvVar.value = provider.generic.env_var
-  editHeaderName.value = provider.generic.header_name ?? ''
-  editUpstreamHost.value = provider.generic.upstream_host
+  resetHostInputs(editUpstreamHosts, editUpstreamHostKeys, provider.generic.upstream_hosts ?? [''])
   editUpstreamPathPrefix.value = provider.generic.upstream_path_prefix ?? ''
   editError.value = null
   editOpen.value = true
@@ -258,8 +306,7 @@ function closeEdit(): void {
   editOpen.value = false
   editProvider.value = null
   editEnvVar.value = ''
-  editHeaderName.value = ''
-  editUpstreamHost.value = ''
+  resetHostInputs(editUpstreamHosts, editUpstreamHostKeys)
   editUpstreamPathPrefix.value = ''
   editError.value = null
 }
@@ -268,14 +315,14 @@ async function submitEdit(): Promise<void> {
   if (!editProvider.value) return
   const envErr = validateEnvVar(editEnvVar.value)
   if (envErr) { editError.value = `Env var: ${envErr}`; return }
-  if (!editUpstreamHost.value.trim()) { editError.value = 'Upstream host is required'; return }
+  const hostsErr = validateUpstreamHosts(editUpstreamHosts.value)
+  if (hostsErr) { editError.value = `Upstream hosts: ${hostsErr}`; return }
   editBusy.value = true
   editError.value = null
   try {
     await providerConfigUpdate(editProvider.value.name, {
       env_var: editEnvVar.value,
-      header_name: editHeaderName.value.trim() || undefined,
-      upstream_host: editUpstreamHost.value.trim(),
+      upstream_hosts: normalizedHosts(editUpstreamHosts.value),
       upstream_path_prefix: editUpstreamPathPrefix.value.trim() || undefined,
     })
     closeEdit()
@@ -302,9 +349,14 @@ async function deleteProvider(provider: ProviderView): Promise<void> {
   }
 }
 
-// Ghost re-create: open Add modal pre-filled with same type + label
+// Ghost re-create: open Add modal pre-filled with same type + label/config
 function reCreate(provider: ProviderView): void {
   openAdd(provider.type, provider.label)
+  if (provider.generic) {
+    addEnvVar.value = provider.generic.env_var
+    resetHostInputs(addUpstreamHosts, addUpstreamHostKeys, provider.generic.upstream_hosts)
+    addUpstreamPathPrefix.value = provider.generic.upstream_path_prefix ?? ''
+  }
 }
 
 function statusClass(provider: ProviderView): string {
@@ -385,15 +437,39 @@ watch(rotateCredential, () => {
             <span class="label">Env var</span>
             <input v-model="addEnvVar" class="text-input" autocomplete="off" placeholder="e.g. OPENAI_API_KEY">
           </label>
-          <label class="field">
-            <span class="label">Upstream host</span>
-            <input v-model="addUpstreamHost" class="text-input" autocomplete="off" placeholder="e.g. api.openai.com">
-          </label>
-          <label class="field">
-            <span class="label">Header name (optional)</span>
-            <input v-model="addHeaderName" class="text-input" autocomplete="off" placeholder="e.g. Authorization">
-            <span class="hint">{{ HEADER_NAME_HINT }}</span>
-          </label>
+          <div class="field full-width">
+            <span class="label">Upstream hosts</span>
+            <div class="hosts-list">
+              <div
+                v-for="(_, index) in addUpstreamHosts"
+                :key="addUpstreamHostKeys[index]"
+                class="host-row"
+              >
+                <input
+                  :id="`add-upstream-host-${addUpstreamHostKeys[index]}`"
+                  v-model="addUpstreamHosts[index]"
+                  class="text-input"
+                  autocomplete="off"
+                  :aria-label="`Upstream host ${index + 1}`"
+                  placeholder="e.g. api.openai.com"
+                >
+                <button
+                  v-if="addUpstreamHosts.length > 1"
+                  class="tool-button compact-button"
+                  type="button"
+                  @click="removeAddUpstreamHost(index)"
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
+            <div class="button-row">
+              <button class="tool-button compact-button" type="button" @click="addUpstreamHost">
+                Add
+              </button>
+            </div>
+            <span class="hint">{{ HOSTS_MICROCOPY }}</span>
+          </div>
           <label class="field">
             <span class="label">Upstream path prefix (optional)</span>
             <input v-model="addUpstreamPathPrefix" class="text-input" autocomplete="off" placeholder="e.g. /v1">
@@ -444,15 +520,38 @@ watch(rotateCredential, () => {
           <span class="label">Env var</span>
           <input v-model="editEnvVar" class="text-input" autocomplete="off">
         </label>
-        <label class="field">
-          <span class="label">Upstream host</span>
-          <input v-model="editUpstreamHost" class="text-input" autocomplete="off">
-        </label>
-        <label class="field">
-          <span class="label">Header name (optional)</span>
-          <input v-model="editHeaderName" class="text-input" autocomplete="off">
-          <span class="hint">{{ HEADER_NAME_HINT }}</span>
-        </label>
+        <div class="field full-width">
+          <span class="label">Upstream hosts</span>
+          <div class="hosts-list">
+            <div
+              v-for="(_, index) in editUpstreamHosts"
+              :key="editUpstreamHostKeys[index]"
+              class="host-row"
+            >
+              <input
+                :id="`edit-upstream-host-${editUpstreamHostKeys[index]}`"
+                v-model="editUpstreamHosts[index]"
+                class="text-input"
+                autocomplete="off"
+                :aria-label="`Upstream host ${index + 1}`"
+              >
+              <button
+                v-if="editUpstreamHosts.length > 1"
+                class="tool-button compact-button"
+                type="button"
+                @click="removeEditUpstreamHost(index)"
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+          <div class="button-row">
+            <button class="tool-button compact-button" type="button" @click="addEditUpstreamHost">
+              Add
+            </button>
+          </div>
+          <span class="hint">{{ HOSTS_MICROCOPY }}</span>
+        </div>
         <label class="field">
           <span class="label">Upstream path prefix (optional)</span>
           <input v-model="editUpstreamPathPrefix" class="text-input" autocomplete="off">
@@ -594,6 +693,18 @@ watch(rotateCredential, () => {
   gap: 6px;
 }
 
+.hosts-list {
+  display: grid;
+  gap: 6px;
+}
+
+.host-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: start;
+}
+
 .compact-button {
   width: max-content;
 }
@@ -627,7 +738,8 @@ watch(rotateCredential, () => {
 
 @media (max-width: 680px) {
   .form-grid,
-  .providers-row {
+  .providers-row,
+  .host-row {
     grid-template-columns: minmax(0, 1fr);
   }
 

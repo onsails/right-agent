@@ -563,7 +563,8 @@ MCP visibility
 Telegram dashboard MCP view), foreground progress (`mcp__right__send_progress`),
 provider capabilities (`mcp__right__provider_capabilities` — env var names only,
 allowed binaries, and hosts; on provider 401/403 check it before treating a
-credential as invalid),
+credential as invalid; for raw HTTP, write auth exactly as the API docs say
+using the injected env var),
 learned-skill metadata/progress/receipt tools
 (`mcp__right__skill_learning_start` and
 `mcp__right__skill_learning_finish`), and bootstrap

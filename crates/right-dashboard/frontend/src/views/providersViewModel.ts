@@ -14,6 +14,10 @@ export function validateEnvVar(s: string): string | null {
   return null
 }
 
+export function validateUpstreamHosts(hosts: string[]): string | null {
+  return hosts.some((host) => host.trim().length > 0) ? null : 'required'
+}
+
 /** Known HTTP auth-scheme prefixes a user might wrongly paste into the key. */
 const CREDENTIAL_SCHEME_PREFIXES = ['Bearer', 'Basic', 'Token', 'Bot', 'Digest'] as const
 
@@ -68,6 +72,6 @@ export function providerCompositionLabel(provider: ProviderView): string {
 export const CREDENTIAL_HINT =
   'Paste only the key/token itself — no "Bearer ", no header name. The skill or agent adds any prefix.'
 
-/** Microcopy shown under the Header name field (add/edit generic). */
-export const HEADER_NAME_HINT =
-  'HTTP header the skill/agent puts the key into for requests to the upstream host. Must match what the consumer sends (e.g. Authorization for Typefully).'
+/** Microcopy shown under the Upstream hosts field (add/edit generic). */
+export const HOSTS_MICROCOPY =
+  'Hosts the agent may call. The agent uses $ENV_VAR and writes auth exactly as the API docs say; Right stores the secret and allows these hosts.'

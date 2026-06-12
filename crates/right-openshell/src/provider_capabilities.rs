@@ -95,12 +95,67 @@ pub fn provider_is_composed_with_endpoint(
     expected_path: &str,
 ) -> bool {
     rule_for_provider(policy, provider_name).is_some_and(|rule| {
-        rule.endpoints.iter().any(|endpoint| {
-            // Hosts are DNS names: compare case-insensitively so a gateway that
-            // normalizes the composed host's case is not mistaken for a stale
-            // (uncomposed) rule. Path stays an exact match — it is a literal
-            // upstream prefix, not case-folded.
-            endpoint.host.eq_ignore_ascii_case(expected_host) && endpoint.path == expected_path
+        rule.endpoints
+            .iter()
+            .any(|endpoint| endpoint_matches(endpoint, expected_host, expected_path))
+    })
+}
+
+fn endpoint_matches(
+    endpoint: &crate::openshell_proto::openshell::sandbox::v1::NetworkEndpoint,
+    expected_host: &str,
+    expected_path: &str,
+) -> bool {
+    // Hosts are DNS names: compare case-insensitively so a gateway that
+    // normalizes the composed host's case is not mistaken for a stale
+    // (uncomposed) rule. Path stays an exact match — it is a literal
+    // upstream prefix, not case-folded.
+    endpoint.host.eq_ignore_ascii_case(expected_host) && endpoint.path == expected_path
+}
+
+/// True when the composed `_provider_<name>` rule contains EVERY expected
+/// (host, path). Multi-host providers must confirm all hosts so a stale rule
+/// carrying only the unchanged first host cannot pass on an update.
+pub fn provider_is_composed_with_all_endpoints(
+    policy: &SandboxPolicy,
+    provider_name: &str,
+    expected: &[(String, String)],
+) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+
+    rule_for_provider(policy, provider_name).is_some_and(|rule| {
+        expected.iter().all(|(host, path)| {
+            rule.endpoints
+                .iter()
+                .any(|endpoint| endpoint_matches(endpoint, host, path))
+        })
+    })
+}
+
+/// True when the composed `_provider_<name>` rule contains exactly the expected
+/// endpoint set, ignoring duplicate active endpoints that match the same
+/// expected pair. Use this when a provider update removes hosts, because a
+/// stale superset rule must not confirm the new desired config.
+pub fn provider_is_composed_with_exact_endpoints(
+    policy: &SandboxPolicy,
+    provider_name: &str,
+    expected: &[(String, String)],
+) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+
+    rule_for_provider(policy, provider_name).is_some_and(|rule| {
+        expected.iter().all(|(host, path)| {
+            rule.endpoints
+                .iter()
+                .any(|endpoint| endpoint_matches(endpoint, host, path))
+        }) && rule.endpoints.iter().all(|endpoint| {
+            expected
+                .iter()
+                .any(|(host, path)| endpoint_matches(endpoint, host, path))
         })
     })
 }
@@ -109,7 +164,12 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-fn build_usage_hint(allowed_binaries: &[String], hosts: &[String], active: bool) -> String {
+fn build_usage_hint(
+    allowed_binaries: &[String],
+    hosts: &[String],
+    env_vars: &[String],
+    active: bool,
+) -> String {
     if !active {
         return "Attached but not currently active in the sandbox policy; the provider may still be composing. While inactive, requests will not receive gateway credential substitution and will 401."
             .to_string();
@@ -127,9 +187,18 @@ fn build_usage_hint(allowed_binaries: &[String], hosts: &[String], active: bool)
         );
     }
 
+    if env_vars.is_empty() {
+        return format!(
+            "Reach {hosts_list}, but capability metadata is incomplete: the injected env var could not be identified, so auth-header guidance cannot be generated."
+        );
+    }
+
+    let env_list = env_vars.join(", ");
+    let first_env = &env_vars[0];
+
     if allowed_binaries.iter().any(|binary| binary == "**") {
         return format!(
-            "Any binary can use this credential on {hosts_list}; the gateway substitutes the credential automatically for matching requests. Do not paste the placeholder env var elsewhere."
+            "Reach {hosts_list} using {env_list}. Write the auth exactly as the API documents using ${first_env}. The gateway substitutes the secret for the placeholder on matching requests. Do not print the placeholder."
         );
     }
 
@@ -142,7 +211,7 @@ fn build_usage_hint(allowed_binaries: &[String], hosts: &[String], active: bool)
     let binary_list = binary_names.join(", ");
 
     format!(
-        "Reach {hosts_list} via {binary_list}; the gateway substitutes the credential automatically for matching requests. curl/fetch/python or arbitrary clients will 401 if they paste the placeholder because they do not receive substitution."
+        "Reach {hosts_list} via {binary_list} using {env_list}. Only those binaries may use matching requests; if making raw HTTP requests, write the auth exactly as the API documents using ${first_env}. The gateway substitutes the secret for the placeholder on matching requests. Do not print the placeholder."
     )
 }
 
@@ -195,10 +264,13 @@ pub fn correlate_provider_capabilities(
             endpoint_hosts.sort_unstable();
             endpoint_hosts.dedup();
 
+            let usage_hint =
+                build_usage_hint(&allowed_binaries, &endpoint_hosts, &env_vars, active);
+
             ProviderCapability {
                 display_name: input.display_name.clone(),
                 env_vars,
-                usage_hint: build_usage_hint(&allowed_binaries, &endpoint_hosts, active),
+                usage_hint,
                 allowed_binaries,
                 endpoint_hosts,
             }

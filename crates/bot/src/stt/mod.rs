@@ -292,4 +292,15 @@ mod tests {
             other => panic!("expected FileTooLarge, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn missing_model_returns_before_decode() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(tmp.path(), b"not audio").await.unwrap();
+        let t = Transcriber::new(PathBuf::from("/nonexistent.bin"));
+        match t.transcribe_voice(tmp.path()).await {
+            Err(SttError::ModelMissing(_)) => {}
+            other => panic!("expected ModelMissing before decode, got {other:?}"),
+        }
+    }
 }

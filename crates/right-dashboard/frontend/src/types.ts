@@ -583,8 +583,7 @@ export interface ProviderProfileView {
 
 export interface ProviderGenericBody {
   env_var: string
-  header_name?: string
-  upstream_host: string
+  upstream_hosts: string[]
   upstream_path_prefix?: string
 }
 
