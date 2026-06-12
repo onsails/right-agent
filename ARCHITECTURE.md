@@ -408,22 +408,23 @@ The runtime database API is async-first: `open_connection`, `open_db`,
 Do not add sync facades, runtime `block_on` bridges, or shared-runtime
 adapters around `right-db`.
 
-`right-db` may use bundled `rusqlite` only inside locked `migrate: true`
-schema bootstrap for legacy FTS5 cleanup; it is not a general runtime
-database boundary.
+`right-db` opens every per-agent `data.db` through Turso. Pre-v34 SQLite
+FTS5 cleanup is no longer supported in-process: the bundled-`rusqlite`
+scrubber was removed (onsails/right-agent#79) after deployed databases
+soaked past migration v34. A database still carrying legacy SQLite FTS5
+virtual tables that Turso cannot open now fails the open instead of being
+scrubbed.
 
 ### Migration Ownership
 
 Both `right-mcp-server` and bot processes run schema bootstrap on
 per-agent `data.db` via `right_db::open_connection(path, migrate: true)`.
-This is the only path that may run legacy schema cleanup or migrations.
-`right-db` serializes that bootstrap with a per-agent advisory lock file
-so concurrent startup is safe without relying on process-compose
-ordering. Under the lock, `right-db` may use bundled `rusqlite` to drop
-legacy SQLite FTS5 virtual tables and sync triggers before opening
-through Turso, because Turso cannot resolve every old FTS5 schema.
-Runtime opens with `migrate: false` do not run the scrubber, do not
-inspect legacy FTS tables, and do not apply migrations. Read-only
+This is the only path that may run migrations. `right-db` serializes that
+bootstrap with a per-agent advisory lock file so concurrent startup is
+safe without relying on process-compose ordering. Migration v34 drops any
+remaining legacy SQLite FTS5 triggers/virtual tables and creates the Turso
+FTS indexes; it stays idempotent for any database Turso can already open.
+Runtime opens with `migrate: false` do not apply migrations. Read-only
 helpers do not mutate files. The migration registry
 (`right_db::migrations::MIGRATIONS`) is the sole place to add new tables.
 

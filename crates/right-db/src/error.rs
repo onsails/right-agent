@@ -22,13 +22,6 @@ pub enum DbError {
         source: turso::Error,
     },
 
-    #[error("legacy SQLite scrubber on {path}: {source}")]
-    LegacySqlite {
-        path: PathBuf,
-        #[source]
-        source: rusqlite::Error,
-    },
-
     #[error("database migration lock {path}: {source}")]
     MigrationLock {
         path: PathBuf,
@@ -77,7 +70,6 @@ impl DbError {
         match self {
             Self::Database(error) => turso_transient_kind(error),
             Self::Open { source, .. } => turso_transient_kind(source),
-            Self::LegacySqlite { source, .. } => rusqlite_transient_kind(source),
             Self::Migration { source, .. } => source.transient_kind(),
             _ => None,
         }
@@ -89,8 +81,6 @@ pub(crate) enum DbTransientKind {
     TursoBusy,
     TursoBusySnapshot,
     TursoFileLock,
-    SqliteBusy,
-    SqliteLocked,
 }
 
 impl DbTransientKind {
@@ -99,8 +89,6 @@ impl DbTransientKind {
             Self::TursoBusy => "turso_busy",
             Self::TursoBusySnapshot => "turso_busy_snapshot",
             Self::TursoFileLock => "turso_file_lock",
-            Self::SqliteBusy => "sqlite_busy",
-            Self::SqliteLocked => "sqlite_locked",
         }
     }
 }
@@ -120,14 +108,6 @@ fn turso_transient_kind(error: &turso::Error) -> Option<DbTransientKind> {
                 && message.contains("File is locked by another process")
         }
         .then_some(DbTransientKind::TursoFileLock),
-        _ => None,
-    }
-}
-
-fn rusqlite_transient_kind(error: &rusqlite::Error) -> Option<DbTransientKind> {
-    match error.sqlite_error_code() {
-        Some(rusqlite::ErrorCode::DatabaseBusy) => Some(DbTransientKind::SqliteBusy),
-        Some(rusqlite::ErrorCode::DatabaseLocked) => Some(DbTransientKind::SqliteLocked),
         _ => None,
     }
 }
@@ -174,28 +154,6 @@ mod tests {
             })
             .is_transient(),
             "Turso file locking errors must be transient",
-        );
-        assert!(
-            (DbError::LegacySqlite {
-                path: "data.db".into(),
-                source: rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                    None,
-                ),
-            })
-            .is_transient(),
-            "LegacySqlite(SQLITE_BUSY) must be transient",
-        );
-        assert!(
-            (DbError::LegacySqlite {
-                path: "data.db".into(),
-                source: rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
-                    None,
-                ),
-            })
-            .is_transient(),
-            "LegacySqlite(SQLITE_LOCKED) must be transient",
         );
         assert!(
             !DbError::Database(turso::Error::Constraint("unique".into())).is_transient(),

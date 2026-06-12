@@ -28,9 +28,9 @@
 
   languages.rust = {
     enable = true;
-    # cfg_select! (used by libsqlite3-sys >=0.38 build.rs) stabilized in
-    # Rust 1.95.0; nixpkgs' pinned rustc (1.94.1) predates it. Use the
-    # rust-overlay stable channel to track latest stable.
+    # Track the latest stable Rust via the rust-overlay channel rather than
+    # nixpkgs' pinned rustc, which can lag behind language features the
+    # workspace and its dependencies rely on.
     channel = "stable";
   };
 

@@ -12,7 +12,6 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 turso = { workspace = true }
 turso_core = { workspace = true }
-rusqlite = { workspace = true }
 
 [features]
 test-support = ["dep:tempfile"]

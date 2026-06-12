@@ -1,9 +1,8 @@
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use tempfile::TempDir;
+use tokio::task::JoinHandle;
 
 pub async fn migrated_connection() -> (TempDir, crate::Connection) {
     let dir = tempfile::tempdir().unwrap();
@@ -11,27 +10,33 @@ pub async fn migrated_connection() -> (TempDir, crate::Connection) {
     (dir, conn)
 }
 
-/// Hold duration that forces `prepare_legacy_fts5_schema_for_turso` to exhaust
-/// rusqlite's busy_timeout once and recover on the first retry. Long enough to
-/// outlast `connection::BUSY_TIMEOUT`, short enough to leave headroom within the
-/// retry budget (`BUSY_TIMEOUT * (1 + LEGACY_FTS5_PROBE_MAX_RETRIES)`).
-pub fn legacy_probe_retry_lock_hold() -> Duration {
-    crate::connection::BUSY_TIMEOUT + Duration::from_millis(1_500)
-}
-
-/// Take an exclusive `rusqlite` lock on `db_path` for `hold_for` to drive
-/// transient-lock recovery paths in `open_connection`. Returns only after the
-/// lock is acquired so the caller can race the next `open_connection` against it.
-pub fn hold_exclusive_sqlite_lock(db_path: PathBuf, hold_for: Duration) -> JoinHandle<()> {
-    let (locked_tx, locked_rx) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        let conn = rusqlite::Connection::open(db_path).expect("open sqlite lock connection");
-        conn.execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
-            .expect("acquire exclusive sqlite lock");
-        locked_tx.send(()).expect("send lock acquired");
-        thread::sleep(hold_for);
-        drop(conn);
+/// Hold a writable Turso write transaction on `db_path` for `hold_for`, taking
+/// the multiprocess WAL write lock so a racing writer must wait on the shared
+/// `busy_timeout`. Resolves only after the lock is held so the caller can race
+/// the next write against it; release happens when `hold_for` elapses.
+pub async fn hold_write_lock(db_path: PathBuf, hold_for: Duration) -> JoinHandle<()> {
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let conn = crate::Connection::open_local(db_path, true)
+            .await
+            .expect("open write-lock holder connection");
+        conn.apply_connection_pragmas()
+            .await
+            .expect("apply holder pragmas");
+        let tx = conn
+            .transaction()
+            .await
+            .expect("begin immediate write lock");
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS write_lock_probe (id INTEGER PRIMARY KEY)",
+            (),
+        )
+        .await
+        .expect("write under held lock");
+        locked_tx.send(()).expect("signal write lock acquired");
+        tokio::time::sleep(hold_for).await;
+        tx.rollback().await.expect("release write lock");
     });
-    locked_rx.recv().expect("exclusive lock acquired");
+    locked_rx.await.expect("write lock acquired");
     handle
 }
