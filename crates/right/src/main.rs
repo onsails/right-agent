@@ -99,8 +99,11 @@ mod voice_pass_main {
 #[cfg(test)]
 mod cli_parse_tests {
     use clap::{CommandFactory, Parser};
+    use serde_json::json;
 
-    use super::Cli;
+    use super::{
+        AgentCommands, AgentProvidersCommands, Cli, Commands, build_provider_create_generic_arg,
+    };
 
     #[test]
     fn restore_binding_flags_require_from_backup() {
@@ -155,6 +158,105 @@ mod cli_parse_tests {
     fn agent_skill_list_still_parses() {
         Cli::try_parse_from(["right", "agent", "skill", "list"])
             .expect("agent skill list must remain available");
+    }
+
+    #[test]
+    fn providers_add_accepts_repeated_upstream_host_values() {
+        let cli = Cli::try_parse_from([
+            "right",
+            "agent",
+            "providers",
+            "add",
+            "fal-agent",
+            "--credential",
+            "secret",
+            "--env-var",
+            "FAL_KEY",
+            "--upstream-host",
+            "fal.run",
+            "--upstream-host",
+            "queue.fal.run",
+        ])
+        .expect("providers add must parse repeated upstream hosts");
+
+        let upstream_host = match cli.command {
+            Commands::Agent {
+                command:
+                    AgentCommands::Providers {
+                        command: AgentProvidersCommands::Add { upstream_host, .. },
+                    },
+            } => upstream_host,
+            _ => panic!("expected agent providers add command"),
+        };
+
+        assert_eq!(
+            upstream_host,
+            vec!["fal.run".to_string(), "queue.fal.run".to_string()]
+        );
+    }
+
+    #[test]
+    fn providers_add_accepts_hidden_legacy_header_name_but_omits_it_from_request() {
+        let cli = Cli::try_parse_from([
+            "right",
+            "agent",
+            "providers",
+            "add",
+            "fal-agent",
+            "--credential",
+            "secret",
+            "--env-var",
+            "FAL_KEY",
+            "--upstream-host",
+            "fal.run",
+            "--upstream-path-prefix",
+            "/v1",
+            "--header-name",
+            "X-Fal-Key",
+        ])
+        .expect("legacy header-name flag must keep parsing");
+
+        let (upstream_host, upstream_path_prefix, header_name, env_var) = match cli.command {
+            Commands::Agent {
+                command:
+                    AgentCommands::Providers {
+                        command:
+                            AgentProvidersCommands::Add {
+                                upstream_host,
+                                upstream_path_prefix,
+                                header_name,
+                                env_var,
+                                ..
+                            },
+                    },
+            } => (upstream_host, upstream_path_prefix, header_name, env_var),
+            _ => panic!("expected agent providers add command"),
+        };
+
+        assert_eq!(header_name.as_deref(), Some("X-Fal-Key"));
+
+        let generic = build_provider_create_generic_arg(
+            "generic",
+            &upstream_host,
+            upstream_path_prefix.as_deref(),
+            env_var.as_deref(),
+        )
+        .expect("generic arg should build")
+        .expect("generic type should produce generic arg");
+        let req = right_mcp::internal_client::ProviderCreateRequest {
+            agent: "fal-agent",
+            type_: "generic",
+            label: None,
+            credential: "secret",
+            generic: Some(generic),
+        };
+        let body = serde_json::to_value(req).expect("request should serialize");
+
+        assert_eq!(body["generic"]["upstream_hosts"], json!(["fal.run"]));
+        assert!(
+            body["generic"].get("header_name").is_none(),
+            "legacy header_name must not be sent to the internal API: {body}"
+        );
     }
 
     #[test]
@@ -446,7 +548,7 @@ pub enum AgentSkillCommands {
 #[derive(Subcommand)]
 pub enum AgentProvidersCommands {
     /// Add a provider to an agent. Generic providers route to an
-    /// authored OpenShell profile (host + header + env-var). Built-in
+    /// authored OpenShell profile (hosts + env-var). Built-in
     /// providers (e.g. `anthropic`, `github`) reuse OpenShell's
     /// catalog profile. The credential value is taken from
     /// `RIGHT_PROVIDER_CREDENTIAL` env if not given via
@@ -455,7 +557,7 @@ pub enum AgentProvidersCommands {
     Add {
         /// Agent name
         agent: String,
-        /// Provider type slug. `generic` requires `--upstream-host`
+        /// Provider type slug. `generic` requires at least one `--upstream-host`
         /// and `--env-var`; built-in types (e.g. `anthropic`,
         /// `github`) pull these from OpenShell's profile catalog.
         #[arg(long, default_value = "generic")]
@@ -468,15 +570,15 @@ pub enum AgentProvidersCommands {
         /// `RIGHT_PROVIDER_CREDENTIAL` env to avoid argv leak.
         #[arg(long, env = "RIGHT_PROVIDER_CREDENTIAL", hide_env_values = true)]
         credential: String,
-        /// Upstream host (e.g. `api.openai.com`). Generic only.
+        /// Upstream host (e.g. `api.openai.com`). Repeat for multi-host providers.
+        /// Generic only.
         #[arg(long)]
-        upstream_host: Option<String>,
+        upstream_host: Vec<String>,
         /// Upstream path prefix (e.g. `/v1`). Generic only.
         #[arg(long)]
         upstream_path_prefix: Option<String>,
-        /// Header name to substitute into. Default `Authorization`.
-        /// Generic only.
-        #[arg(long)]
+        /// Legacy generic header name. Accepted for compatibility and ignored.
+        #[arg(long, hide = true)]
         header_name: Option<String>,
         /// Env var name the sandbox sees as the placeholder.
         /// Generic only.
@@ -2978,9 +3080,8 @@ fn generic_provider_profiles(
                     providers.push(
                         right_openshell::managed_profiles::GenericProviderProfileInput {
                             name: &entry.name,
-                            upstream_host: &generic.upstream_host,
+                            upstream_hosts: &generic.upstream_hosts,
                             upstream_path_prefix: generic.upstream_path_prefix.as_deref(),
-                            header_name: &generic.header_name,
                             env_var: &generic.env_var,
                         },
                     );
@@ -4695,15 +4796,17 @@ async fn cmd_agent_providers(home: &Path, command: AgentProvidersCommands) -> mi
             header_name,
             env_var,
         } => {
+            if header_name.is_some() {
+                eprintln!("warning: --header-name is deprecated and ignored");
+            }
             cmd_agent_providers_add(
                 home,
                 &agent,
                 &type_,
                 label.as_deref(),
                 &credential,
-                upstream_host.as_deref(),
+                &upstream_host,
                 upstream_path_prefix.as_deref(),
-                header_name.as_deref(),
                 env_var.as_deref(),
             )
             .await
@@ -4717,28 +4820,15 @@ async fn cmd_agent_providers_add(
     type_: &str,
     label: Option<&str>,
     credential: &str,
-    upstream_host: Option<&str>,
+    upstream_hosts: &[String],
     upstream_path_prefix: Option<&str>,
-    header_name: Option<&str>,
     env_var: Option<&str>,
 ) -> miette::Result<()> {
     // Validate the static argument shape before probing runtime state, so a
     // misconfigured command surfaces the actionable arg error even when
     // `right up` isn't running yet.
-    let generic = if type_ == "generic" {
-        let host = upstream_host
-            .ok_or_else(|| miette::miette!("--upstream-host is required for `--type generic`"))?;
-        let env =
-            env_var.ok_or_else(|| miette::miette!("--env-var is required for `--type generic`"))?;
-        Some(right_mcp::internal_client::ProviderCreateGenericArg {
-            env_var: env,
-            header_name,
-            upstream_host: host,
-            upstream_path_prefix,
-        })
-    } else {
-        None
-    };
+    let generic =
+        build_provider_create_generic_arg(type_, upstream_hosts, upstream_path_prefix, env_var)?;
 
     let socket_path = home.join("run/internal.sock");
     if !socket_path.exists() {
@@ -4767,6 +4857,31 @@ async fn cmd_agent_providers_add(
         serde_json::to_string_pretty(&view).map_err(|e| miette::miette!("{e:#}"))?
     );
     Ok(())
+}
+
+fn build_provider_create_generic_arg<'a>(
+    type_: &str,
+    upstream_hosts: &'a [String],
+    upstream_path_prefix: Option<&'a str>,
+    env_var: Option<&'a str>,
+) -> miette::Result<Option<right_mcp::internal_client::ProviderCreateGenericArg<'a>>> {
+    if type_ != "generic" {
+        return Ok(None);
+    }
+
+    if upstream_hosts.is_empty() {
+        return Err(miette::miette!(
+            "--upstream-host is required for `--type generic`"
+        ));
+    }
+    let env =
+        env_var.ok_or_else(|| miette::miette!("--env-var is required for `--type generic`"))?;
+
+    Ok(Some(right_mcp::internal_client::ProviderCreateGenericArg {
+        env_var: env,
+        upstream_hosts,
+        upstream_path_prefix,
+    }))
 }
 
 async fn cmd_agent_skill_list(home: &Path) -> miette::Result<()> {
@@ -5189,8 +5304,7 @@ mod tests {
             label: None,
             generic: Some(GenericProvider {
                 env_var: "MY_API_KEY".to_string(),
-                header_name: "x-api-key".to_string(),
-                upstream_host: "api.acme.com".to_string(),
+                upstream_hosts: vec!["api.acme.com".to_string()],
                 upstream_path_prefix: None,
             }),
         }

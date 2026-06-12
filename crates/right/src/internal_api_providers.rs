@@ -153,8 +153,8 @@ pub fn validate_env_var(name: &str) -> Result<(), ProviderApiError> {
 /// Validate a free-form text field that will be written verbatim into
 /// `agent.yaml` as an unquoted scalar. Rejects YAML metacharacters,
 /// control chars, and anything that would shift indentation. The
-/// allowed alphabet is intentionally narrow — hostnames, HTTP header
-/// names, URL path prefixes, and human labels all fit.
+/// allowed alphabet is intentionally narrow — hostnames, URL path prefixes,
+/// and human labels all fit.
 fn validate_yaml_scalar(
     value: &str,
     field: &str,
@@ -226,12 +226,69 @@ pub fn validate_upstream_host(host: &str) -> Result<(), ProviderApiError> {
     validate_yaml_scalar(host, "upstream_host", 253, ".-_:")
 }
 
-pub fn validate_header_name(name: &str) -> Result<(), ProviderApiError> {
-    validate_yaml_scalar(name, "header_name", 64, "-_")
-}
-
 pub fn validate_path_prefix(path: &str) -> Result<(), ProviderApiError> {
     validate_yaml_scalar(path, "upstream_path_prefix", 128, "-_/.~")
+}
+
+fn normalize_generic_hosts(
+    upstream_host: Option<&str>,
+    upstream_hosts: Option<&[String]>,
+) -> Vec<String> {
+    let mut hosts = Vec::new();
+    if let Some(host) = upstream_host {
+        let host = host.trim();
+        if !host.is_empty() {
+            hosts.push(host.to_string());
+        }
+    }
+    if let Some(extra_hosts) = upstream_hosts {
+        hosts.extend(extra_hosts.iter().filter_map(|host| {
+            let host = host.trim();
+            if host.is_empty() {
+                None
+            } else {
+                Some(host.to_string())
+            }
+        }));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    hosts.retain(|host| seen.insert(host.clone()));
+    hosts
+}
+
+fn validate_generic_request(
+    env_var: &str,
+    upstream_host: Option<&str>,
+    upstream_hosts: Option<&[String]>,
+    upstream_path_prefix: Option<&str>,
+) -> Result<Vec<String>, ProviderApiError> {
+    validate_env_var(env_var)?;
+    let hosts = normalize_generic_hosts(upstream_host, upstream_hosts);
+    if hosts.is_empty() {
+        return Err(ProviderApiError::InvalidName {
+            name: String::new(),
+            reason: "generic provider requires at least one upstream host".into(),
+        });
+    }
+    for host in &hosts {
+        validate_upstream_host(host)?;
+    }
+    if let Some(prefix) = upstream_path_prefix {
+        validate_path_prefix(prefix)?;
+    }
+    Ok(hosts)
+}
+
+fn generic_expected_endpoints(
+    upstream_hosts: &[String],
+    upstream_path_prefix: Option<&str>,
+) -> Vec<(String, String)> {
+    let path = upstream_path_prefix.unwrap_or("").to_string();
+    upstream_hosts
+        .iter()
+        .map(|host| (host.clone(), path.clone()))
+        .collect()
 }
 
 pub fn validate_type_slug(slug: &str) -> Result<(), ProviderApiError> {
@@ -332,8 +389,7 @@ mod provider_validation_tests {
             label: None,
             generic: Some(right_agent_config::GenericProvider {
                 env_var: env_var.to_string(),
-                header_name: "Authorization".to_string(),
-                upstream_host: "api.example.com".to_string(),
+                upstream_hosts: vec!["api.example.com".to_string()],
                 upstream_path_prefix: None,
             }),
         }
@@ -507,8 +563,7 @@ mod provider_validation_tests {
             label: Some("acme".to_string()),
             generic: Some(right_agent_config::GenericProvider {
                 env_var: "ACME_KEY".to_string(),
-                header_name: "Authorization".to_string(),
-                upstream_host: "api.acme.com".to_string(),
+                upstream_hosts: vec!["api.acme.com".to_string()],
                 upstream_path_prefix: Some("/v1".to_string()),
             }),
         };
@@ -525,7 +580,7 @@ mod provider_validation_tests {
         assert_eq!(entry_back.label.as_deref(), Some("acme"));
         let g = entry_back.generic.as_ref().unwrap();
         assert_eq!(g.env_var, "ACME_KEY");
-        assert_eq!(g.upstream_host, "api.acme.com");
+        assert_eq!(g.upstream_hosts, vec!["api.acme.com"]);
         assert_eq!(g.upstream_path_prefix.as_deref(), Some("/v1"));
     }
 
@@ -543,8 +598,7 @@ mod provider_validation_tests {
             label: Some("no".to_string()),
             generic: Some(right_agent_config::GenericProvider {
                 env_var: "NO_KEY".to_string(),
-                header_name: "Authorization".to_string(),
-                upstream_host: "api.example.com".to_string(),
+                upstream_hosts: vec!["api.example.com".to_string()],
                 upstream_path_prefix: None,
             }),
         };
@@ -643,10 +697,9 @@ mod provider_view_tests {
         assert!(json["composed"].is_null());
     }
 
-    fn policy_with_provider_endpoint(
+    fn policy_with_provider_endpoints(
         provider_name: &str,
-        host: &str,
-        path: &str,
+        endpoints: &[(&str, &str)],
     ) -> right_openshell::openshell_proto::openshell::sandbox::v1::SandboxPolicy {
         use right_openshell::openshell_proto::openshell::sandbox::v1::{
             NetworkEndpoint, NetworkPolicyRule,
@@ -655,17 +708,28 @@ mod provider_view_tests {
         let rule_key = format!("_provider_{}", provider_name.replace('-', "_"));
         let rule = NetworkPolicyRule {
             name: rule_key.clone(),
-            endpoints: vec![NetworkEndpoint {
-                host: host.into(),
-                path: path.into(),
-                ..Default::default()
-            }],
+            endpoints: endpoints
+                .iter()
+                .map(|(host, path)| NetworkEndpoint {
+                    host: (*host).into(),
+                    path: (*path).into(),
+                    ..Default::default()
+                })
+                .collect(),
             ..Default::default()
         };
         let mut policy =
             right_openshell::openshell_proto::openshell::sandbox::v1::SandboxPolicy::default();
         policy.network_policies.insert(rule_key, rule);
         policy
+    }
+
+    fn policy_with_provider_endpoint(
+        provider_name: &str,
+        host: &str,
+        path: &str,
+    ) -> right_openshell::openshell_proto::openshell::sandbox::v1::SandboxPolicy {
+        policy_with_provider_endpoints(provider_name, &[(host, path)])
     }
 
     #[test]
@@ -689,8 +753,7 @@ mod provider_view_tests {
             label: None,
             generic: Some(right_agent_config::GenericProvider {
                 env_var: "ACME_TOKEN".into(),
-                header_name: "X-Api-Key".into(),
-                upstream_host: "api.acme.test".into(),
+                upstream_hosts: vec!["api.acme.test".into()],
                 upstream_path_prefix: Some("/v1".into()),
             }),
         };
@@ -699,6 +762,49 @@ mod provider_view_tests {
         assert!(
             !provider_entry_is_composed(&policy, &entry),
             "generic list status must not accept a stale pre-update provider rule"
+        );
+    }
+
+    #[test]
+    fn provider_entry_is_composed_rejects_missing_one_generic_host() {
+        let entry = right_agent_config::ProviderEntry {
+            name: "hostagent-fal".into(),
+            type_: right_agent_config::ProviderType::Generic,
+            label: None,
+            generic: Some(right_agent_config::GenericProvider {
+                env_var: "FAL_KEY".into(),
+                upstream_hosts: vec!["fal.run".into(), "queue.fal.run".into()],
+                upstream_path_prefix: Some("/v1".into()),
+            }),
+        };
+        let policy = policy_with_provider_endpoint("hostagent-fal", "fal.run", "/v1");
+
+        assert!(
+            !provider_entry_is_composed(&policy, &entry),
+            "multi-host generic providers must require every host to be composed"
+        );
+    }
+
+    #[test]
+    fn provider_entry_is_composed_rejects_stale_extra_generic_host() {
+        let entry = right_agent_config::ProviderEntry {
+            name: "hostagent-fal".into(),
+            type_: right_agent_config::ProviderType::Generic,
+            label: None,
+            generic: Some(right_agent_config::GenericProvider {
+                env_var: "FAL_KEY".into(),
+                upstream_hosts: vec!["fal.run".into()],
+                upstream_path_prefix: Some("/v1".into()),
+            }),
+        };
+        let policy = policy_with_provider_endpoints(
+            "hostagent-fal",
+            &[("fal.run", "/v1"), ("queue.fal.run", "/v1")],
+        );
+
+        assert!(
+            !provider_entry_is_composed(&policy, &entry),
+            "generic list status must reject stale active endpoints removed from agent.yaml"
         );
     }
 }
@@ -818,8 +924,10 @@ pub struct ProviderCreateReq {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ProviderCreateGeneric {
     pub env_var: String,
-    pub header_name: Option<String>,
-    pub upstream_host: String,
+    #[serde(default)]
+    pub upstream_host: Option<String>,
+    #[serde(default)]
+    pub upstream_hosts: Option<Vec<String>>,
     pub upstream_path_prefix: Option<String>,
 }
 
@@ -832,15 +940,20 @@ pub(crate) async fn handle_provider_create(
     if let Some(label) = &req.label {
         validate_label(label)?;
     }
-    if let Some(g) = &req.generic {
-        validate_upstream_host(&g.upstream_host)?;
-        if let Some(h) = &g.header_name {
-            validate_header_name(h)?;
-        }
-        if let Some(p) = &g.upstream_path_prefix {
-            validate_path_prefix(p)?;
-        }
-    }
+    let generic_hosts = if req.type_ == "generic" {
+        let g = req
+            .generic
+            .as_ref()
+            .ok_or_else(|| ProviderApiError::InvalidEnvVar { env_var: "".into() })?;
+        Some(validate_generic_request(
+            &g.env_var,
+            g.upstream_host.as_deref(),
+            g.upstream_hosts.as_deref(),
+            g.upstream_path_prefix.as_deref(),
+        )?)
+    } else {
+        None
+    };
     let label_slug = req.label.clone().unwrap_or_else(|| req.type_.clone());
     let name = format!("{}-{}", req.agent, label_slug);
     validate_name(&req.agent, &name)?;
@@ -907,7 +1020,11 @@ pub(crate) async fn handle_provider_create(
         ) {
             return Err(ProviderApiError::NetworkPolicyForbidsGeneric);
         }
-        return create_generic_provider(state, req, name, env_var).await;
+        let upstream_hosts = generic_hosts.ok_or_else(|| ProviderApiError::InvalidName {
+            name: name.clone(),
+            reason: "generic provider requires at least one upstream host".into(),
+        })?;
+        return create_generic_provider(state, req, name, env_var, upstream_hosts).await;
     }
 
     // Built-in flow: OpenShell owns the profile endpoints, but Right must still
@@ -1089,11 +1206,14 @@ fn provider_entry_is_composed(
         }
         right_agent_config::ProviderType::Generic => {
             entry.generic.as_ref().is_some_and(|generic| {
-                right_openshell::provider_capabilities::provider_is_composed_with_endpoint(
+                let expected = generic_expected_endpoints(
+                    &generic.upstream_hosts,
+                    generic.upstream_path_prefix.as_deref(),
+                );
+                right_openshell::provider_capabilities::provider_is_composed_with_exact_endpoints(
                     policy,
                     &entry.name,
-                    &generic.upstream_host,
-                    generic.upstream_path_prefix.as_deref().unwrap_or(""),
+                    &expected,
                 )
             })
         }
@@ -1154,14 +1274,10 @@ fn serialize_provider_entry(entry: &right_agent_config::ProviderEntry) -> String
             "        env_var: {}\n",
             yaml_single_quote(&g.env_var)
         ));
-        out.push_str(&format!(
-            "        header_name: {}\n",
-            yaml_single_quote(&g.header_name)
-        ));
-        out.push_str(&format!(
-            "        upstream_host: {}\n",
-            yaml_single_quote(&g.upstream_host)
-        ));
+        out.push_str("        upstream_hosts:\n");
+        for host in &g.upstream_hosts {
+            out.push_str(&format!("          - {}\n", yaml_single_quote(host)));
+        }
         if let Some(prefix) = &g.upstream_path_prefix {
             out.push_str(&format!(
                 "        upstream_path_prefix: {}\n",
@@ -1285,9 +1401,8 @@ fn generic_provider_update_profile(
     let profile_id = right_openshell::managed_profiles::generic_provider_profile_id(provider_name);
     let profile = right_openshell::managed_profiles::author_generic_profile(
         &profile_id,
-        &generic.upstream_host,
+        &generic.upstream_hosts,
         generic.upstream_path_prefix.as_deref(),
-        &generic.header_name,
         &generic.env_var,
     );
     (profile_id, profile)
@@ -1385,6 +1500,7 @@ async fn create_generic_provider(
     req: ProviderCreateReq,
     name: String,
     env_var: String,
+    upstream_hosts: Vec<String>,
 ) -> Result<axum::Json<ProviderView>, ProviderApiError> {
     use secrecy::ExposeSecret;
     // Lock is already held by the caller (handle_provider_create acquires it
@@ -1393,10 +1509,6 @@ async fn create_generic_provider(
         .generic
         .clone()
         .ok_or_else(|| ProviderApiError::InvalidEnvVar { env_var: "".into() })?;
-    let header_name = g
-        .header_name
-        .clone()
-        .unwrap_or_else(|| "Authorization".into());
 
     let cfg = load_agent_config(&state.agents_dir, &req.agent)
         .map_err(ProviderApiError::AgentYamlWrite)?;
@@ -1418,9 +1530,8 @@ async fn create_generic_provider(
         generic_provider_profile_and_spec(&name, &env_var, req.credential.expose_secret());
     let profile = right_openshell::managed_profiles::author_generic_profile(
         &profile_id,
-        &g.upstream_host,
+        &upstream_hosts,
         g.upstream_path_prefix.as_deref(),
-        &header_name,
         &env_var,
     );
     let managed_profile =
@@ -1467,14 +1578,16 @@ async fn create_generic_provider(
         )));
     }
 
-    if let Err(compose_err) = right_openshell::openshell::wait_for_provider_composed_with_endpoint(
-        &mut client,
-        &sandbox_name,
-        &name,
-        &g.upstream_host,
-        g.upstream_path_prefix.as_deref().unwrap_or(""),
-    )
-    .await
+    let expected_endpoints =
+        generic_expected_endpoints(&upstream_hosts, g.upstream_path_prefix.as_deref());
+    if let Err(compose_err) =
+        right_openshell::openshell::wait_for_provider_composed_with_exact_endpoints(
+            &mut client,
+            &sandbox_name,
+            &name,
+            expected_endpoints,
+        )
+        .await
     {
         rollback_attached_provider(
             &mut client,
@@ -1490,8 +1603,7 @@ async fn create_generic_provider(
 
     let generic_entry = right_agent_config::GenericProvider {
         env_var: env_var.clone(),
-        header_name: header_name.clone(),
-        upstream_host: g.upstream_host.clone(),
+        upstream_hosts,
         upstream_path_prefix: g.upstream_path_prefix.clone(),
     };
     let entry = right_agent_config::ProviderEntry {
@@ -1530,6 +1642,101 @@ mod generic_provider_spec_tests {
     use super::*;
 
     #[test]
+    fn create_generic_request_accepts_multi_host_request() {
+        let g: ProviderCreateGeneric = serde_json::from_value(serde_json::json!({
+            "env_var": "FAL_KEY",
+            "upstream_hosts": ["fal.run", "queue.fal.run"],
+            "upstream_path_prefix": "/v1",
+        }))
+        .expect("multi-host generic request must deserialize");
+
+        let hosts = validate_generic_request(
+            &g.env_var,
+            g.upstream_host.as_deref(),
+            g.upstream_hosts.as_deref(),
+            g.upstream_path_prefix.as_deref(),
+        )
+        .expect("multi-host generic request must validate");
+
+        assert_eq!(hosts, vec!["fal.run", "queue.fal.run"]);
+    }
+
+    #[test]
+    fn create_generic_request_rejects_empty_hosts() {
+        let g: ProviderCreateGeneric = serde_json::from_value(serde_json::json!({
+            "env_var": "FAL_KEY",
+            "upstream_host": "  ",
+            "upstream_hosts": ["", "   "],
+        }))
+        .expect("empty-host generic request must deserialize for validation");
+
+        let err = validate_generic_request(
+            &g.env_var,
+            g.upstream_host.as_deref(),
+            g.upstream_hosts.as_deref(),
+            g.upstream_path_prefix.as_deref(),
+        )
+        .expect_err("generic request with no normalized hosts must fail validation");
+
+        assert!(
+            matches!(err, ProviderApiError::InvalidName { .. }),
+            "empty hosts must be rejected as invalid input, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn create_generic_request_merges_legacy_and_new_hosts() {
+        let g: ProviderCreateGeneric = serde_json::from_value(serde_json::json!({
+            "env_var": "FAL_KEY",
+            "header_name": "This-Legacy-Field-Is-Ignored",
+            "upstream_host": " fal.run ",
+            "upstream_hosts": ["queue.fal.run ", "fal.run", "", "  "],
+        }))
+        .expect("legacy plus new generic request must deserialize");
+
+        let hosts = validate_generic_request(
+            &g.env_var,
+            g.upstream_host.as_deref(),
+            g.upstream_hosts.as_deref(),
+            g.upstream_path_prefix.as_deref(),
+        )
+        .expect("legacy plus new generic request must validate");
+
+        assert_eq!(hosts, vec!["fal.run", "queue.fal.run"]);
+    }
+
+    #[test]
+    fn serialize_generic_provider_writes_upstream_hosts_only() {
+        let entry = right_agent_config::ProviderEntry {
+            name: "hostagent-fal".into(),
+            type_: right_agent_config::ProviderType::Generic,
+            label: Some("fal".into()),
+            generic: Some(right_agent_config::GenericProvider {
+                env_var: "FAL_KEY".into(),
+                upstream_hosts: vec!["fal.run".into(), "queue.fal.run".into()],
+                upstream_path_prefix: Some("/v1".into()),
+            }),
+        };
+
+        let serialized = serialize_provider_entry(&entry);
+
+        assert!(
+            serialized.contains(
+                "        upstream_hosts:\n          - 'fal.run'\n          - 'queue.fal.run'\n"
+            ),
+            "generic provider must serialize all hosts as a YAML list:\n{serialized}"
+        );
+        assert!(
+            !serialized.contains("header_name"),
+            "header_name must not be written for generic providers:\n{serialized}"
+        );
+        assert!(
+            !serialized.contains("upstream_host:"),
+            "legacy single upstream_host must not be written:\n{serialized}"
+        );
+    }
+
+    #[test]
     fn generic_provider_spec_uses_profile_id() {
         let expected_profile_id =
             right_openshell::managed_profiles::generic_provider_profile_id("right-acme");
@@ -1565,8 +1772,7 @@ mod generic_provider_spec_tests {
             label: None,
             generic: Some(right_agent_config::GenericProvider {
                 env_var: "ACME_API_KEY".into(),
-                header_name: "x-api-key".into(),
-                upstream_host: "api.acme.invalid".into(),
+                upstream_hosts: vec!["api.acme.invalid".into()],
                 upstream_path_prefix: Some("/v1".into()),
             }),
         };
@@ -1582,8 +1788,7 @@ mod generic_provider_spec_tests {
     fn generic_provider_config_update_authors_profile_only() {
         let generic = right_agent_config::GenericProvider {
             env_var: "ACME_API_KEY".into(),
-            header_name: "x-api-key".into(),
-            upstream_host: "api.acme.invalid".into(),
+            upstream_hosts: vec!["api.acme.invalid".into(), "queue.acme.invalid".into()],
             upstream_path_prefix: Some("/v2".into()),
         };
 
@@ -1595,7 +1800,9 @@ mod generic_provider_spec_tests {
         );
         assert_eq!(profile.id, profile_id);
         assert_eq!(profile.endpoints[0].host, "api.acme.invalid");
+        assert_eq!(profile.endpoints[1].host, "queue.acme.invalid");
         assert_eq!(profile.endpoints[0].path, "/v2");
+        assert_eq!(profile.endpoints[1].path, "/v2");
         assert_eq!(profile.credentials[0].env_vars, vec!["ACME_API_KEY"]);
     }
 
@@ -1892,8 +2099,10 @@ pub struct ProviderConfigUpdateReq {
 #[derive(Debug, serde::Deserialize)]
 pub struct ProviderConfigUpdateGeneric {
     pub env_var: Option<String>,
-    pub header_name: Option<String>,
+    #[serde(default)]
     pub upstream_host: Option<String>,
+    #[serde(default)]
+    pub upstream_hosts: Option<Vec<String>>,
     pub upstream_path_prefix: Option<Option<String>>,
 }
 
@@ -1943,27 +2152,26 @@ pub(crate) async fn handle_provider_config_update(
         .env_var
         .clone()
         .unwrap_or(current.env_var.clone());
-    let new_header = req
-        .generic
-        .header_name
-        .clone()
-        .unwrap_or(current.header_name.clone());
-    let new_host = req
-        .generic
-        .upstream_host
-        .clone()
-        .unwrap_or(current.upstream_host.clone());
     let new_path = match req.generic.upstream_path_prefix.clone() {
         None => current.upstream_path_prefix.clone(),
         Some(v) => v,
     };
-    validate_env_var(&new_env_var)?;
+    let fallback_hosts =
+        if req.generic.upstream_host.is_none() && req.generic.upstream_hosts.is_none() {
+            Some(current.upstream_hosts.clone())
+        } else {
+            None
+        };
+    let new_hosts = validate_generic_request(
+        &new_env_var,
+        req.generic.upstream_host.as_deref(),
+        req.generic
+            .upstream_hosts
+            .as_deref()
+            .or(fallback_hosts.as_deref()),
+        new_path.as_deref(),
+    )?;
     validate_generic_env_var_unchanged(&req.name, &current.env_var, &new_env_var)?;
-    validate_header_name(&new_header)?;
-    validate_upstream_host(&new_host)?;
-    if let Some(p) = &new_path {
-        validate_path_prefix(p)?;
-    }
 
     let mut client = open_openshell_client().await?;
     ensure_v2_for_mutation(&mut client).await?;
@@ -1977,8 +2185,7 @@ pub(crate) async fn handle_provider_config_update(
 
     let updated_generic = right_agent_config::GenericProvider {
         env_var: new_env_var.clone(),
-        header_name: new_header.clone(),
-        upstream_host: new_host.clone(),
+        upstream_hosts: new_hosts.clone(),
         upstream_path_prefix: new_path.clone(),
     };
     let (_, profile) = generic_provider_update_profile(&req.name, &updated_generic);
@@ -2032,12 +2239,12 @@ pub(crate) async fn handle_provider_config_update(
         return Err(ProviderApiError::Gateway(msg));
     }
 
-    if let Err(e) = right_openshell::openshell::wait_for_provider_composed_with_endpoint(
+    let expected_endpoints = generic_expected_endpoints(&new_hosts, new_path.as_deref());
+    if let Err(e) = right_openshell::openshell::wait_for_provider_composed_with_exact_endpoints(
         &mut client,
         &sandbox_name,
         &req.name,
-        &new_host,
-        new_path.as_deref().unwrap_or(""),
+        expected_endpoints,
     )
     .await
     {
@@ -2259,18 +2466,23 @@ pub(crate) async fn handle_provider_remove(
 
     let mut composition_reloaded = false;
     if let Some(g) = &entry.generic {
-        let used_by_other = sandbox.providers.iter().any(|p| {
-            p.name != req.name
-                && p.generic
-                    .as_ref()
-                    .map(|gp| gp.upstream_host == g.upstream_host)
-                    .unwrap_or(false)
+        // `providers_strip` removes the whole `_provider_<name>` stanza by
+        // provider name (its host arg is advisory), so one strip closes every
+        // host this provider opened. Only strip when at least one of the removed
+        // provider's hosts is not still required by another provider's own
+        // stanza; shared hosts stay reachable through those other stanzas.
+        let any_host_exclusive = g.upstream_hosts.iter().any(|host| {
+            !sandbox.providers.iter().any(|p| {
+                p.name != req.name
+                    && p.generic
+                        .as_ref()
+                        .is_some_and(|gp| gp.upstream_hosts.iter().any(|other| other == host))
+            })
         });
-        if !used_by_other {
+        if any_host_exclusive {
             let prior = std::fs::read_to_string(&policy_path)
                 .map_err(|e| ProviderApiError::AgentYamlWrite(format!("read policy: {e:#}")))?;
-            let stripped =
-                right_codegen::policy::providers_strip(&prior, &req.name, &g.upstream_host);
+            let stripped = right_codegen::policy::providers_strip(&prior, &req.name, "");
             right_codegen::contract::write_and_apply_sandbox_policy(
                 &sandbox_name,
                 &policy_path,
@@ -2699,9 +2911,8 @@ mod sandbox_mode_tests {
                 "right_openshell::providers::create_provider(&mut client, &spec)",
                 "right_openshell::providers::attach_to_sandbox(&mut client, &sandbox_name, &name)",
                 "right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path)",
-                "right_openshell::openshell::wait_for_provider_composed_with_endpoint(",
-                "&g.upstream_host,",
-                "g.upstream_path_prefix.as_deref().unwrap_or(\"\")",
+                "right_openshell::openshell::wait_for_provider_composed_with_exact_endpoints(",
+                "expected_endpoints,",
                 "append_provider_to_yaml(&state.agents_dir, &req.agent, &entry)",
             ],
         );
@@ -2726,9 +2937,8 @@ mod sandbox_mode_tests {
             &[
                 "right_openshell::managed_profiles::ensure_profiles(&mut client, &[managed_profile])",
                 "right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path)",
-                "right_openshell::openshell::wait_for_provider_composed_with_endpoint(",
-                "&new_host,",
-                "new_path.as_deref().unwrap_or(\"\")",
+                "right_openshell::openshell::wait_for_provider_composed_with_exact_endpoints(",
+                "expected_endpoints,",
                 "replace_provider_in_yaml(&state.agents_dir, &req.agent, &updated)",
             ],
         );
@@ -2901,8 +3111,7 @@ mod sandbox_mode_tests {
                 label: Some(format!("p{i:02}")),
                 generic: Some(right_agent_config::GenericProvider {
                     env_var: format!("KEY_{i:02}"),
-                    header_name: "Authorization".to_string(),
-                    upstream_host: format!("api{i:02}.example.com"),
+                    upstream_hosts: vec![format!("api{i:02}.example.com")],
                     upstream_path_prefix: None,
                 }),
             })

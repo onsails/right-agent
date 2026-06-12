@@ -32,9 +32,13 @@ network_policies:
 "#;
 
 const UPSTREAM_HOST: &str = "postman-echo.com";
+const SECOND_UPSTREAM_HOST: &str = "httpbin.org";
 const HEADER_NAME: &str = "x-api-key";
 const ENV_VAR: &str = "MY_API_KEY";
 const FAKE_CREDENTIAL: &str = "right-test-fake-api-key";
+const CLIENT_SCHEME_HEADER_NAME: &str = "Authorization";
+const CLIENT_SCHEME_ENV_VAR: &str = "RIGHT_TEST_KEY";
+const CLIENT_SCHEME_FAKE_CREDENTIAL: &str = "right-test-fake-client-scheme-key";
 /// Success path: retries transient upstream failures (postman-echo is a public
 /// service prone to 5xx/429/timeout) so the gate measures gateway substitution,
 /// not third-party uptime. A proxy CONNECT rejection is not transient and still
@@ -42,6 +46,9 @@ const FAKE_CREDENTIAL: &str = "right-test-fake-api-key";
 const CURL_ECHO_HEADER: &str = "curl -sS --fail-with-body --max-time 30 \
 --retry 3 --retry-delay 2 --retry-all-errors \
 https://postman-echo.com/get -H \"x-api-key: ${MY_API_KEY}\" 2>&1";
+const CURL_ECHO_AUTHORIZATION_KEY_HEADER: &str = "curl -sS --fail-with-body --max-time 30 \
+--retry 3 --retry-delay 2 --retry-all-errors \
+https://postman-echo.com/get -H \"Authorization: Key ${RIGHT_TEST_KEY}\" 2>&1";
 /// Block path: no retries — the test asserts the proxy rejects CONNECT, which is
 /// immediate and deterministic; retrying would only add latency.
 const CURL_ECHO_HEADER_NORETRY: &str = "curl -sS --fail-with-body --max-time 30 \
@@ -76,8 +83,17 @@ fn unique_profile_id(label: &str) -> String {
 }
 
 fn fake_provider_spec(provider_name: &str, profile_id: &str) -> ProviderSpec {
+    fake_provider_spec_with_credential(provider_name, profile_id, ENV_VAR, FAKE_CREDENTIAL)
+}
+
+fn fake_provider_spec_with_credential(
+    provider_name: &str,
+    profile_id: &str,
+    env_var: &str,
+    fake_credential: &str,
+) -> ProviderSpec {
     let mut credentials = HashMap::new();
-    credentials.insert(ENV_VAR.to_string(), FAKE_CREDENTIAL.to_string());
+    credentials.insert(env_var.to_string(), fake_credential.to_string());
     ProviderSpec {
         name: provider_name.to_string(),
         type_: profile_id.to_string(),
@@ -91,10 +107,24 @@ async fn ensure_generic_profile(
     profile_id: &str,
     include_binaries: bool,
 ) {
-    let mut profile = author_generic_profile(profile_id, UPSTREAM_HOST, None, HEADER_NAME, ENV_VAR);
+    let upstream_hosts = vec![UPSTREAM_HOST.to_string()];
+    let mut profile = author_generic_profile(profile_id, &upstream_hosts, None, ENV_VAR);
     if !include_binaries {
         profile.binaries.clear();
     }
+    let managed = ManagedProfile::Authored(Box::new(profile));
+    ensure_profiles(client, &[managed])
+        .await
+        .expect("ensure generic profile");
+}
+
+async fn ensure_generic_profile_for_hosts(
+    client: &mut right_openshell::managed_profiles::OpenShellGrpcClient,
+    profile_id: &str,
+    upstream_hosts: &[String],
+    env_var: &str,
+) {
+    let profile = author_generic_profile(profile_id, upstream_hosts, None, env_var);
     let managed = ManagedProfile::Authored(Box::new(profile));
     ensure_profiles(client, &[managed])
         .await
@@ -143,16 +173,16 @@ fn echoed_header(response: &str, header_name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn wait_for_provider_placeholder(sandbox: &TestSandbox) {
+async fn wait_for_provider_placeholder(sandbox: &TestSandbox, env_var: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        let (out, code) = sandbox.exec(&["printenv", ENV_VAR]).await;
+        let (out, code) = sandbox.exec(&["printenv", env_var]).await;
         if code == 0 && out.trim().starts_with("openshell:resolve:env:") {
             return;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "{ENV_VAR} provider placeholder did not appear in sandbox before timeout"
+            "{env_var} provider placeholder did not appear in sandbox before timeout"
         );
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
@@ -233,7 +263,7 @@ async fn ci_openshell_generic_profile_substitutes_custom_header() {
         )
         .await
         .expect("provider composed into active policy");
-        wait_for_provider_placeholder(&sandbox).await;
+        wait_for_provider_placeholder(&sandbox, ENV_VAR).await;
 
         let (out, code) = sandbox
             .exec_with_timeout(&["sh", "-lc", CURL_ECHO_HEADER], 60)
@@ -248,6 +278,91 @@ async fn ci_openshell_generic_profile_substitutes_custom_header() {
         assert!(
             echoed == FAKE_CREDENTIAL,
             "echoed x-api-key did not match fake credential (got {echoed:?})"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "ci-openshell: live sandbox + gateway"]
+async fn ci_openshell_generic_multi_host_composes_all_and_substitutes_client_scheme() {
+    let profile_id = unique_profile_id("generic-multi-host");
+    let provider_name = unique_name("generic-multi-host");
+    let sandbox_name = Arc::new(Mutex::new(None));
+    cleanup_generic_resources(&provider_name, &profile_id, None).await;
+
+    with_generic_cleanup(&provider_name, &profile_id, sandbox_name.clone(), async {
+        let mut client = connect_grpc(&default_mtls_dir()).await.unwrap();
+        right_openshell::providers::ensure_v2_enabled(&mut client)
+            .await
+            .expect("enable providers_v2");
+
+        let upstream_hosts = vec![UPSTREAM_HOST.to_string(), SECOND_UPSTREAM_HOST.to_string()];
+        ensure_generic_profile_for_hosts(
+            &mut client,
+            &profile_id,
+            &upstream_hosts,
+            CLIENT_SCHEME_ENV_VAR,
+        )
+        .await;
+        right_openshell::test_cleanup::register_test_provider(&provider_name, Some(&profile_id));
+        create_provider(
+            &mut client,
+            &fake_provider_spec_with_credential(
+                &provider_name,
+                &profile_id,
+                CLIENT_SCHEME_ENV_VAR,
+                CLIENT_SCHEME_FAKE_CREDENTIAL,
+            ),
+        )
+        .await
+        .expect("create provider");
+
+        let (_policy_tmp, policy_path) = raw_tunnel_policy_file();
+        let sandbox = TestSandbox::create_with_policy(
+            "ci-openshell-generic-multi-host",
+            RAW_TUNNEL_BASE_POLICY,
+        )
+        .await;
+        *sandbox_name.lock().expect("sandbox name lock") = Some(sandbox.name().to_string());
+        attach_to_sandbox(&mut client, sandbox.name(), &provider_name)
+            .await
+            .expect("attach provider");
+        right_openshell::test_cleanup::register_test_provider_attachment(
+            &provider_name,
+            sandbox.name(),
+        );
+        ensure_provider_policy_loaded(sandbox.name(), &policy_path)
+            .await
+            .expect("provider policy loaded");
+        let expected_endpoints = upstream_hosts
+            .iter()
+            .map(|host| (host.clone(), String::new()))
+            .collect();
+        right_openshell::openshell::wait_for_provider_composed_with_all_endpoints(
+            &mut client,
+            sandbox.name(),
+            &provider_name,
+            expected_endpoints,
+        )
+        .await
+        .expect("provider composed into active policy with all upstream hosts");
+        wait_for_provider_placeholder(&sandbox, CLIENT_SCHEME_ENV_VAR).await;
+
+        let (out, code) = sandbox
+            .exec_with_timeout(&["sh", "-lc", CURL_ECHO_AUTHORIZATION_KEY_HEADER], 60)
+            .await;
+
+        if code != 0 {
+            let diag = connect_failure_diagnostics(&mut client, &sandbox).await;
+            panic!("curl command should exit successfully (code {code}); output: {out}{diag}");
+        }
+        let echoed = echoed_header(&out, CLIENT_SCHEME_HEADER_NAME)
+            .unwrap_or_else(|| panic!("echo response must contain Authorization; output: {out}"));
+        assert_eq!(
+            echoed,
+            format!("Key {CLIENT_SCHEME_FAKE_CREDENTIAL}"),
+            "echoed Authorization header did not preserve the client-written scheme"
         );
     })
     .await;
@@ -301,7 +416,7 @@ async fn ci_openshell_profile_without_binaries_blocks_connect() {
         ensure_provider_policy_loaded(sandbox.name(), &policy_path)
             .await
             .expect("provider policy loaded");
-        wait_for_provider_placeholder(&sandbox).await;
+        wait_for_provider_placeholder(&sandbox, ENV_VAR).await;
 
         let (out, code) = sandbox
             .exec_with_timeout(&["sh", "-lc", CURL_ECHO_HEADER_NORETRY], 60)
@@ -357,7 +472,7 @@ async fn ci_openshell_provider_capabilities_reports_attached_provider() {
         ensure_provider_policy_loaded(sandbox.name(), &policy_path)
             .await
             .expect("provider policy loaded");
-        wait_for_provider_placeholder(&sandbox).await;
+        wait_for_provider_placeholder(&sandbox, ENV_VAR).await;
 
         let caps = right_openshell::provider_capabilities::provider_capabilities_for_sandbox(
             &mut client,

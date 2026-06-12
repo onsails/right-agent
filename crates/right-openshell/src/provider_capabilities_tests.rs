@@ -109,9 +109,28 @@ fn matched_provider_reports_policy_env_and_usage_hint() {
     assert!(github.usage_hint.contains("gh"));
     assert!(github.usage_hint.contains("git"));
     assert!(github.usage_hint.contains("api.github.com"));
-    assert!(github.usage_hint.contains("gateway"));
-    assert!(github.usage_hint.contains("curl/fetch/python"));
-    assert!(github.usage_hint.contains("401"));
+    assert!(github.usage_hint.contains("GH_TOKEN"));
+    assert!(
+        github
+            .usage_hint
+            .contains("Only those binaries may use matching requests")
+    );
+    assert!(github.usage_hint.contains("raw HTTP requests"));
+    assert!(
+        github
+            .usage_hint
+            .contains("auth exactly as the API documents using $GH_TOKEN")
+    );
+    assert!(
+        github
+            .usage_hint
+            .contains("gateway substitutes the secret for the placeholder")
+    );
+    assert!(github.usage_hint.contains("Do not print the placeholder"));
+    assert!(!github.usage_hint.contains("Authorization: Key"));
+    assert!(!github.usage_hint.contains("Authorization header"));
+    assert!(!github.usage_hint.contains("curl/fetch/python"));
+    assert!(!github.usage_hint.contains("401"));
 }
 
 #[test]
@@ -123,8 +142,59 @@ fn wildcard_binary_yields_any_binary_usage_hint() {
     let capabilities = correlate_provider_capabilities(&inputs, &policy, &env);
 
     assert_eq!(capabilities[0].allowed_binaries, ["**"]);
-    assert!(capabilities[0].usage_hint.contains("Any binary"));
     assert!(capabilities[0].usage_hint.contains("api.example.com"));
+    assert!(capabilities[0].usage_hint.contains("EXAMPLE_API_KEY"));
+    assert!(
+        capabilities[0]
+            .usage_hint
+            .contains("auth exactly as the API documents using $EXAMPLE_API_KEY")
+    );
+    assert!(
+        capabilities[0]
+            .usage_hint
+            .contains("Write the auth exactly")
+    );
+    assert!(!capabilities[0].usage_hint.contains("Authorization: Key"));
+    assert!(!capabilities[0].usage_hint.contains("Authorization header"));
+    assert!(!capabilities[0].usage_hint.contains("Any binary"));
+}
+
+#[test]
+fn usage_hint_names_env_and_tells_agent_to_write_header() {
+    let inputs = [input_with_profile(
+        "right-fal",
+        "fal.ai",
+        &["FAL_KEY"],
+        &["**"],
+        &["fal.run"],
+    )];
+    let env = env_keys(&["FAL_KEY"]);
+
+    let capabilities = correlate_provider_capabilities(&inputs, &SandboxPolicy::default(), &env);
+
+    let hint = &capabilities[0].usage_hint;
+    assert!(hint.contains("fal.run"));
+    assert!(hint.contains("FAL_KEY"));
+    assert!(hint.contains("auth exactly as the API documents using $FAL_KEY"));
+    assert!(hint.contains("Write the auth exactly"));
+    assert!(hint.contains("Do not print the placeholder"));
+    assert!(!hint.contains("Authorization: Key"));
+    assert!(!hint.contains("Authorization header"));
+}
+
+#[test]
+fn usage_hint_reports_incomplete_metadata_when_active_rule_has_no_env() {
+    let policy = policy_with("_provider_right_example", &["**"], &["api.example.com"]);
+    let inputs = [input("right-example", "Example", &["MISSING_API_KEY"])];
+    let env = env_keys(&["OTHER_API_KEY"]);
+
+    let capabilities = correlate_provider_capabilities(&inputs, &policy, &env);
+
+    let hint = &capabilities[0].usage_hint;
+    assert!(hint.contains("api.example.com"));
+    assert!(hint.contains("env var could not be identified"));
+    assert!(!hint.contains("Authorization: Key $ENV"));
+    assert!(!hint.contains("$ENV"));
 }
 
 #[test]
@@ -142,7 +212,24 @@ fn provider_profile_constraints_apply_when_placeholder_materialized_and_policy_e
 
     assert_eq!(capabilities[0].allowed_binaries, ["**"]);
     assert_eq!(capabilities[0].endpoint_hosts, ["api.example.com"]);
-    assert!(capabilities[0].usage_hint.contains("Any binary"));
+    assert!(capabilities[0].usage_hint.contains("EXAMPLE_API_KEY"));
+    assert!(
+        capabilities[0]
+            .usage_hint
+            .contains("auth exactly as the API documents using $EXAMPLE_API_KEY")
+    );
+    assert!(
+        capabilities[0]
+            .usage_hint
+            .contains("Write the auth exactly")
+    );
+    assert!(
+        capabilities[0]
+            .usage_hint
+            .contains("Do not print the placeholder")
+    );
+    assert!(!capabilities[0].usage_hint.contains("Authorization: Key"));
+    assert!(!capabilities[0].usage_hint.contains("Authorization header"));
 }
 
 #[test]
@@ -256,6 +343,158 @@ fn provider_is_composed_with_endpoint_matches_host_and_path() {
             "right-example",
             "API.EXAMPLE.COM",
             "/v1"
+        )
+    );
+}
+
+#[test]
+fn all_endpoints_present_requires_every_host() {
+    let mut policy = policy_with("_provider_right_example", &["**"], &["fal.run"]);
+    policy
+        .network_policies
+        .get_mut("_provider_right_example")
+        .unwrap()
+        .endpoints[0]
+        .path = "".into();
+
+    assert!(
+        crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[("FAL.RUN".into(), "".into())]
+        )
+    );
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[
+                ("fal.run".into(), "".into()),
+                ("queue.fal.run".into(), "".into())
+            ]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_all_endpoints_rejects_empty_expected() {
+    let policy = policy_with("_provider_right_example", &["**"], &["fal.run"]);
+
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_all_endpoints_rejects_missing_rule() {
+    let policy = SandboxPolicy::default();
+
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[("fal.run".into(), "".into())]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_all_endpoints_rejects_rule_with_no_endpoints() {
+    let policy = policy_with("_provider_right_example", &["**"], &[]);
+
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[("fal.run".into(), "".into())]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_all_endpoints_rejects_wrong_path() {
+    let mut policy = policy_with("_provider_right_example", &["**"], &["fal.run"]);
+    policy
+        .network_policies
+        .get_mut("_provider_right_example")
+        .unwrap()
+        .endpoints[0]
+        .path = "/v1".into();
+
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[("fal.run".into(), "/v2".into())]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_all_endpoints_allows_extra_rule_endpoints() {
+    let mut policy = policy_with(
+        "_provider_right_example",
+        &["**"],
+        &["fal.run", "queue.fal.run", "cdn.fal.run"],
+    );
+    let endpoints = &mut policy
+        .network_policies
+        .get_mut("_provider_right_example")
+        .unwrap()
+        .endpoints;
+    endpoints[0].path = "".into();
+    endpoints[1].path = "/queue".into();
+    endpoints[2].path = "/cdn".into();
+
+    assert!(
+        crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[
+                ("FAL.RUN".into(), "".into()),
+                ("queue.fal.run".into(), "/queue".into())
+            ]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_exact_endpoints_rejects_extra_rule_endpoint() {
+    let policy = policy_with(
+        "_provider_right_example",
+        &["**"],
+        &["fal.run", "queue.fal.run"],
+    );
+
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_exact_endpoints(
+            &policy,
+            "right-example",
+            &[("fal.run".into(), "".into())]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_exact_endpoints_accepts_same_endpoint_set() {
+    let policy = policy_with(
+        "_provider_right_example",
+        &["**"],
+        &["fal.run", "queue.fal.run"],
+    );
+
+    assert!(
+        crate::provider_capabilities::provider_is_composed_with_exact_endpoints(
+            &policy,
+            "right-example",
+            &[
+                ("FAL.RUN".into(), "".into()),
+                ("queue.fal.run".into(), "".into())
+            ]
         )
     );
 }
