@@ -5,8 +5,9 @@ import {
   evaluateCredentialSubmit,
   providerCompositionClass,
   providerCompositionLabel,
+  validateUpstreamHosts,
   CREDENTIAL_HINT,
-  HEADER_NAME_HINT,
+  HOSTS_MICROCOPY,
 } from './providersViewModel'
 import type { ProviderView } from '../types'
 
@@ -85,13 +86,27 @@ describe('provider composition labels', () => {
   })
 })
 
+describe('validateUpstreamHosts', () => {
+  it('requires at least one non-empty host', () => {
+    expect(validateUpstreamHosts([])).toBe('required')
+    expect(validateUpstreamHosts(['', '   '])).toBe('required')
+  })
+
+  it('accepts any trimmed host in the list', () => {
+    expect(validateUpstreamHosts(['', ' api.openai.com '])).toBeNull()
+  })
+})
+
 describe('microcopy', () => {
   it('credential hint tells users to omit Bearer/header', () => {
     expect(CREDENTIAL_HINT).toContain('Bearer')
     expect(CREDENTIAL_HINT.toLowerCase()).toContain('only')
   })
 
-  it('header-name hint explains the consumer must match it', () => {
-    expect(HEADER_NAME_HINT).toContain('Authorization')
+  it('hosts microcopy explains env-var auth and allowed hosts', () => {
+    expect(HOSTS_MICROCOPY.toLowerCase()).toContain('hosts')
+    expect(HOSTS_MICROCOPY).toContain('$ENV_VAR')
+    expect(HOSTS_MICROCOPY).toContain('API docs')
+    expect(HOSTS_MICROCOPY).toContain('Right stores')
   })
 })
