@@ -155,11 +155,13 @@ New built-in tool `mcp__right__thread_focus_set` in
 - Handler: get `invocation_id` from `context`; resolve scope via
   `self.progress.conversation_scope(&invocation_id)` (foreground-only gate —
   cron/background/probe/curator invocations return `conversation_scope_unavailable`).
-  Run the value through `ironclaw_safety::Sanitizer` (same as the memory-retain
-  path), then `right_db::thread_focus::set_agent(conn, scope.chat_id,
-  scope.thread_id, value)` via `get_conn(agent_name)`.
+  Then `right_db::thread_focus::set_agent(conn, scope.chat_id, scope.thread_id,
+  value)` via `get_conn(agent_name)`.
 - No bot RPC and no Telegram API call — a pure `data.db` write, simpler than
-  `forum_topic_create`.
+  `forum_topic_create`. Sanitize + untrusted-wrap happen at read time in the
+  bot (see Injection), not here — this keeps the `right` crate free of a
+  prompt-safety dependency and centralizes both defenses at the trusted
+  assembler.
 - No `get` tool: the agent already sees the current focus every turn (see
   Injection), so a read tool is redundant.
 
@@ -197,10 +199,11 @@ wrapper.
 (Anthropic guidance: untrusted content does not belong in the system prompt;
 the project already routes Hindsight recall and markers to stdin per
 ARCHITECTURE). Prepended to the user message in the foreground worker's stdin
-assembly, alongside recall, wrapped with
-`right_prompt_safety::wrap_external_content("thread_focus", agent_focus)` and a
-one-line policy framing it as the agent's own saved notes — reference data, not
-new instructions. Omitted when empty.
+assembly (`build_volatile_prefix`), alongside recall: sanitized with
+`right_prompt_safety::sanitize_external_content`, then wrapped with
+`right_prompt_safety::wrap_external("thread_focus", …)`, with a one-line policy
+framing it as the agent's own saved notes — reference data, not new
+instructions. Omitted when empty.
 
 ## Prompt-formatting rationale (domain research)
 
@@ -232,10 +235,10 @@ new instructions. Omitted when empty.
   edit the URL to target another thread of the same agent. Allowlist already
   grants full agent access, so this does not widen the trust boundary
   materially. Documented; a signed launch token is future work.
-- **`agent_focus` cannot escalate to system authority:** it is sanitized on
-  write, kept out of the system prompt, wrapped as EXTERNAL CONTENT on stdin,
-  and framed as non-instruction. This closes the "untrusted group member talks
-  the agent into persisting an injection" amplification path.
+- **`agent_focus` cannot escalate to system authority:** at read time it is
+  sanitized, kept out of the system prompt, wrapped as EXTERNAL CONTENT on
+  stdin, and framed as non-instruction. This closes the "untrusted group member
+  talks the agent into persisting an injection" amplification path.
 - **MCP tool is scope-safe:** foreground-only, server-resolved scope, no
   `chat_id`/`thread_id` argument — the agent cannot target another thread.
 
