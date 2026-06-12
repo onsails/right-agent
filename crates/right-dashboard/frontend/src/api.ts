@@ -202,6 +202,25 @@ export function providerRemove(name: string): Promise<void> {
   })
 }
 
+export interface FocusView {
+  operator_focus: string | null
+}
+
+export function focusGet(chatId: number, threadId: number): Promise<FocusView> {
+  const params = new URLSearchParams({
+    chat_id: String(chatId),
+    thread_id: String(threadId),
+  })
+  return requestJson<FocusView>(`api/v1/focus?${params.toString()}`)
+}
+
+export function focusUpdate(chatId: number, threadId: number, operatorFocus: string): Promise<FocusView> {
+  return requestJson<FocusView>('api/v1/focus', {
+    method: 'PATCH',
+    body: JSON.stringify({ chat_id: chatId, thread_id: threadId, operator_focus: operatorFocus }),
+  })
+}
+
 async function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   headers.set('Authorization', `tma ${window.Telegram?.WebApp?.initData ?? ''}`)
