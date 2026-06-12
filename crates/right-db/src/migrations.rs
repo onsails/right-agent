@@ -33,8 +33,9 @@ const V36_SCHEMA: &str = include_str!("sql/v36_mcp_http_headers.sql");
 const V38_SCHEMA: &str = include_str!("sql/v38_skill_spend_and_learning_skip.sql");
 const V39_SCHEMA: &str = include_str!("sql/v39_error_details.sql");
 const V40_SCHEMA: &str = include_str!("sql/v40_forum_topics.sql");
+const V43_SCHEMA: &str = include_str!("sql/v43_thread_focus.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 42;
+pub const LATEST_SCHEMA_VERSION: u32 = 43;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -1015,6 +1016,11 @@ pub static MIGRATIONS: Migrations = Migrations {
             version: 42,
             sql: "",
             hook: Some(v42_cron_model),
+        },
+        Migration {
+            version: 43,
+            sql: V43_SCHEMA,
+            hook: None,
         },
     ],
 };
