@@ -1,32 +1,35 @@
 name: Claude Code Review
 
 on:
+  # Label-gated: the review runs ONLY when a maintainer adds the
+  # `claude-review` label to a PR. This is the explicit, per-PR approval —
+  # required for every PR including a maintainer's own, because each review
+  # costs tokens and is often already done locally. Adding a label needs
+  # write/triage, so fork PRs cannot self-trigger execution-with-secrets.
+  #
+  # Why not the `environment:` required-reviewer gate we used before: a
+  # pull_request_target job reports its check run against the BASE sha
+  # (master's HEAD), and an environment gate leaves the job `waiting`
+  # (pending) until approved — which paints a perpetual yellow check on
+  # master's tip. A label gate creates no run (and no pending check) until
+  # the label is applied, so master stays green; once labeled the run
+  # completes normally. Re-review after new commits: remove and re-add the
+  # label.
   pull_request_target:
-    types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+    types: [labeled]
 
 jobs:
   claude-review:
-    # Skip release-plz PRs (version bumps + regenerated changelog),
-    # dependabot PRs (mechanical deps bumps), and skip when the synchronize
-    # was triggered by claude[bot] itself (humanize-changelog's commit)
-    # — would fail checkHumanActor.
+    # Only the claude-review label triggers a review. Also skip release-plz
+    # PRs (version bumps + regenerated changelog), dependabot PRs (mechanical
+    # deps bumps), and claude[bot]'s own commits (would fail checkHumanActor).
     if: |
+      github.event.label.name == 'claude-review' &&
       !startsWith(github.event.pull_request.title, 'chore: release') &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.event.sender.login != 'claude[bot]'
 
     runs-on: ubuntu-latest
-    # Gate fork PRs behind manual approval. pull_request_target runs in the
-    # base-repo context with full GITHUB_TOKEN (incl. id-token: write), which
-    # the action needs for OIDC. The environment's required reviewers force
-    # a maintainer to approve before any fork code is checked out.
-    environment: claude-review
     permissions:
       contents: read
       pull-requests: read
