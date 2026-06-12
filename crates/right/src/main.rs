@@ -4626,15 +4626,9 @@ async fn cmd_agent_providers_add(
     header_name: Option<&str>,
     env_var: Option<&str>,
 ) -> miette::Result<()> {
-    let socket_path = home.join("run/internal.sock");
-    if !socket_path.exists() {
-        return Err(miette::miette!(
-            help = "Start right first with `right up`",
-            "Internal API socket not found at {} — `right up` must be running",
-            socket_path.display()
-        ));
-    }
-
+    // Validate the static argument shape before probing runtime state, so a
+    // misconfigured command surfaces the actionable arg error even when
+    // `right up` isn't running yet.
     let generic = if type_ == "generic" {
         let host = upstream_host
             .ok_or_else(|| miette::miette!("--upstream-host is required for `--type generic`"))?;
@@ -4649,6 +4643,15 @@ async fn cmd_agent_providers_add(
     } else {
         None
     };
+
+    let socket_path = home.join("run/internal.sock");
+    if !socket_path.exists() {
+        return Err(miette::miette!(
+            help = "Start right first with `right up`",
+            "Internal API socket not found at {} — `right up` must be running",
+            socket_path.display()
+        ));
+    }
 
     let req = right_mcp::internal_client::ProviderCreateRequest {
         agent,
@@ -4665,7 +4668,7 @@ async fn cmd_agent_providers_add(
         .map_err(|e| miette::miette!("provider_create failed: {e:#}"))?;
     println!(
         "{}",
-        serde_json::to_string_pretty(&view).unwrap_or_default()
+        serde_json::to_string_pretty(&view).map_err(|e| miette::miette!("{e:#}"))?
     );
     Ok(())
 }
