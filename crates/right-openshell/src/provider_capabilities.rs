@@ -130,7 +130,12 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-fn build_usage_hint(allowed_binaries: &[String], hosts: &[String], active: bool) -> String {
+fn build_usage_hint(
+    allowed_binaries: &[String],
+    hosts: &[String],
+    env_vars: &[String],
+    active: bool,
+) -> String {
     if !active {
         return "Attached but not currently active in the sandbox policy; the provider may still be composing. While inactive, requests will not receive gateway credential substitution and will 401."
             .to_string();
@@ -148,9 +153,18 @@ fn build_usage_hint(allowed_binaries: &[String], hosts: &[String], active: bool)
         );
     }
 
+    if env_vars.is_empty() {
+        return format!(
+            "Reach {hosts_list}, but capability metadata is incomplete: the injected env var could not be identified, so auth-header guidance cannot be generated."
+        );
+    }
+
+    let env_list = env_vars.join(", ");
+    let first_env = &env_vars[0];
+
     if allowed_binaries.iter().any(|binary| binary == "**") {
         return format!(
-            "Any binary can use this credential on {hosts_list}; the gateway substitutes the credential automatically for matching requests. Do not paste the placeholder env var elsewhere."
+            "Reach {hosts_list} using {env_list}. Write the auth exactly as the API documents using ${first_env}. The gateway substitutes the secret for the placeholder on matching requests. Do not print the placeholder."
         );
     }
 
@@ -163,7 +177,7 @@ fn build_usage_hint(allowed_binaries: &[String], hosts: &[String], active: bool)
     let binary_list = binary_names.join(", ");
 
     format!(
-        "Reach {hosts_list} via {binary_list}; the gateway substitutes the credential automatically for matching requests. curl/fetch/python or arbitrary clients will 401 if they paste the placeholder because they do not receive substitution."
+        "Reach {hosts_list} via {binary_list} using {env_list}. Only those binaries may use matching requests; if making raw HTTP requests, write the auth exactly as the API documents using ${first_env}. The gateway substitutes the secret for the placeholder on matching requests. Do not print the placeholder."
     )
 }
 
@@ -216,10 +230,13 @@ pub fn correlate_provider_capabilities(
             endpoint_hosts.sort_unstable();
             endpoint_hosts.dedup();
 
+            let usage_hint =
+                build_usage_hint(&allowed_binaries, &endpoint_hosts, &env_vars, active);
+
             ProviderCapability {
                 display_name: input.display_name.clone(),
                 env_vars,
-                usage_hint: build_usage_hint(&allowed_binaries, &endpoint_hosts, active),
+                usage_hint,
                 allowed_binaries,
                 endpoint_hosts,
             }
