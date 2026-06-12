@@ -21,6 +21,7 @@ use right_dashboard::read_model::{
 use right_db::Connection;
 use serde::Deserialize;
 
+mod focus;
 mod health;
 mod identity;
 mod mcp;
@@ -189,6 +190,10 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
         .route(
             "/dashboard/{agent}/api/v1/providers",
             get(providers::handle_list).post(providers::handle_create),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/focus",
+            get(focus::handle_get).patch(focus::handle_update),
         )
         .route(
             "/dashboard/{agent}/api/v1/providers/types",
@@ -909,7 +914,7 @@ fn overview_sandbox_status(
     }
 }
 
-fn json_error(status: StatusCode, error: &str, detail: Option<&str>) -> Response {
+pub(super) fn json_error(status: StatusCode, error: &str, detail: Option<&str>) -> Response {
     (
         status,
         Json(ApiErrorBody {
@@ -2939,6 +2944,80 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn dashboard_focus_patch_trims_clears_and_preserves_agent_focus() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        right_db::thread_focus::set_agent(&conn, 7, 11, Some("agent-managed focus"))
+            .await
+            .expect("seed agent focus");
+        drop(conn);
+
+        let auth = signed_init_data(42);
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/focus",
+            Some(auth.clone()),
+            temp.path().to_path_buf(),
+            json!({
+                "chat_id": 7,
+                "thread_id": 11,
+                "operator_focus": "  operator focus  ",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operator_focus"], "operator focus");
+
+        let conn = right_db::open_connection(temp.path(), false)
+            .await
+            .expect("reopen db");
+        let row = right_db::thread_focus::get(&conn, 7, 11)
+            .await
+            .expect("read focus")
+            .expect("focus row");
+        assert_eq!(row.operator_focus.as_deref(), Some("operator focus"));
+        assert_eq!(row.agent_focus.as_deref(), Some("agent-managed focus"));
+        drop(conn);
+
+        let (status, body) = get_json(
+            "/dashboard/alpha/api/v1/focus?chat_id=7&thread_id=11",
+            Some(auth.clone()),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "operator_focus": "operator focus" }));
+
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/focus",
+            Some(auth),
+            temp.path().to_path_buf(),
+            json!({
+                "chat_id": 7,
+                "thread_id": 11,
+                "operator_focus": " \n\t ",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "operator_focus": null }));
+
+        let conn = right_db::open_connection(temp.path(), false)
+            .await
+            .expect("reopen db");
+        let row = right_db::thread_focus::get(&conn, 7, 11)
+            .await
+            .expect("read focus")
+            .expect("focus row");
+        assert_eq!(row.operator_focus, None);
+        assert_eq!(row.agent_focus.as_deref(), Some("agent-managed focus"));
     }
 
     #[tokio::test]
