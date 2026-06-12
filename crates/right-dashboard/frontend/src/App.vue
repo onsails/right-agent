@@ -11,6 +11,7 @@ import {
   normalizeInitialTab,
   type DashboardTab,
 } from './dashboardTabs'
+import { focusLaunchParams } from './focus'
 import { initialDashboardTabFromLocation } from './format'
 import {
   applyTelegramDisplayMode,
@@ -29,8 +30,16 @@ import IdentityContainer from './views/IdentityContainer.vue'
 import HealthContainer from './views/HealthContainer.vue'
 import McpView from './views/McpView.vue'
 import ProvidersView from './views/ProvidersView.vue'
+import FocusView from './views/FocusView.vue'
 
-const { data: bootstrapData } = useLiveResource(bootstrap, { intervalMs: 0, key: 'bootstrap' })
+const focusLaunch = focusLaunchParams(window.location.search)
+const { data: bootstrapData } = useLiveResource(bootstrap, {
+  immediate: focusLaunch === null,
+  intervalMs: 0,
+  key: 'bootstrap',
+  pauseWhenHidden: focusLaunch === null,
+  reportConnection: focusLaunch === null,
+})
 
 const activeTab = ref<DashboardTab>(
   normalizeInitialTab(initialDashboardTabFromLocation(window.location.search, window.location.hash)),
@@ -88,7 +97,9 @@ function toggleDisplayMode(): void {
 </script>
 
 <template>
+  <FocusView v-if="focusLaunch" :chat-id="focusLaunch.chatId" :thread-id="focusLaunch.threadId" />
   <AppShell
+    v-else
     :agent="shellTitle"
     :connection-state="globalConnectionState"
     :message="connectionMessage"
