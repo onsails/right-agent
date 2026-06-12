@@ -30,11 +30,13 @@ jobs:
       github.event.sender.login != 'claude[bot]'
 
     runs-on: ubuntu-latest
+    # write on pull-requests/issues so the action can post the review with
+    # the workflow GITHUB_TOKEN (see github_token below). No id-token needed:
+    # passing github_token skips the OIDC app-token exchange entirely.
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
-      id-token: write
+      pull-requests: write
+      issues: write
 
     steps:
       - name: Checkout repository
@@ -51,6 +53,14 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Provide an explicit token so the action skips its OIDC ->
+          # GitHub-App token exchange. That exchange 401s ("Invalid OIDC
+          # token") under pull_request_target — the OIDC subject differs
+          # from the pull_request event the exchange expects. Under
+          # pull_request_target the workflow GITHUB_TOKEN runs in base
+          # context with full write, so it can post the review (incl. on
+          # fork PRs). setupGitHubToken() short-circuits on this input.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
