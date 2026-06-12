@@ -12,6 +12,7 @@ fn test_script(base: &str, mode: PromptMode, args: &[String], mcp: Option<&str>)
         mcp,
         None,
         None,
+        None,
     )
 }
 
@@ -118,6 +119,7 @@ async fn script_custom_paths() {
         None,
         None,
         None,
+        None,
     );
     assert!(
         script.contains("/home/agent/IDENTITY.md"),
@@ -142,6 +144,7 @@ async fn script_bootstrap_mode_same_regardless_of_paths() {
         "/home/agent/.claude/composite-system-prompt.md",
         "/home/agent",
         &["claude".into()],
+        None,
         None,
         None,
         None,
@@ -188,6 +191,7 @@ async fn script_mcp_instructions_with_custom_paths() {
         "/home/agent",
         &["claude".into()],
         Some("# MCP Server Instructions\n\n## notion\n\nNotion tools.\n"),
+        None,
         None,
         None,
     );
@@ -244,6 +248,7 @@ async fn script_includes_memory_section_for_file_mode() {
         None,
         Some(&MemoryMode::File),
         None,
+        None,
     );
     assert!(
         script.contains("MEMORY.md"),
@@ -268,6 +273,7 @@ async fn script_hindsight_mode_emits_no_memory_section() {
         None,
         Some(&MemoryMode::Hindsight),
         Some("## Current Conversation\nchat_id: 1\nkind: dm\n"),
+        None,
     );
     assert!(!script.contains("composite-memory.md"));
     assert!(script.contains("## Current Conversation"));
@@ -285,6 +291,7 @@ async fn script_file_mode_still_emits_memory_md() {
         None,
         Some(&MemoryMode::File),
         None,
+        None,
     );
     assert!(script.contains("MEMORY.md"));
 }
@@ -298,6 +305,7 @@ async fn script_no_memory_section_when_none() {
         "/tmp/right-system-prompt.md",
         "/sandbox",
         &["claude".into()],
+        None,
         None,
         None,
         None,
@@ -317,6 +325,7 @@ async fn script_memory_section_is_last() {
         &["claude".into()],
         Some("# MCP Instructions\n\n## composio\n"),
         Some(&MemoryMode::File),
+        None,
         None,
     );
     let mcp_pos = script.rfind("MCP").unwrap();
@@ -338,6 +347,7 @@ async fn script_file_mode_wraps_memory_md_with_ironclaw_markers() {
         &["claude".into()],
         None,
         Some(&MemoryMode::File),
+        None,
         None,
     );
     assert!(
@@ -387,6 +397,7 @@ async fn script_file_mode_sed_escape_produces_actual_zwsp_at_runtime() {
         &["true".into()], // safe no-op claude_args; we only inspect prompt output
         None,
         Some(&MemoryMode::File),
+        None,
         None,
     );
 
@@ -443,6 +454,7 @@ async fn script_bootstrap_no_memory() {
         None,
         Some(&MemoryMode::File),
         None,
+        None,
     );
     assert!(
         !script.contains("MEMORY.md"),
@@ -452,16 +464,16 @@ async fn script_bootstrap_no_memory() {
 
 #[test]
 fn volatile_prefix_none_when_all_empty() {
-    assert!(build_volatile_prefix(None, None, None).is_none());
-    assert!(build_volatile_prefix(Some("   "), None, None).is_none());
-    assert!(build_volatile_prefix(None, Some("   "), None).is_none());
-    assert!(build_volatile_prefix(None, None, Some("   ")).is_none());
-    assert!(build_volatile_prefix(Some("   "), Some("   "), Some("   ")).is_none());
+    assert!(build_volatile_prefix(None, None, None, None).is_none());
+    assert!(build_volatile_prefix(Some("   "), None, None, None).is_none());
+    assert!(build_volatile_prefix(None, Some("   "), None, None).is_none());
+    assert!(build_volatile_prefix(None, None, Some("   "), None).is_none());
+    assert!(build_volatile_prefix(Some("   "), Some("   "), Some("   "), None).is_none());
 }
 
 #[test]
 fn volatile_prefix_wraps_recall_with_untrusted_label() {
-    let out = build_volatile_prefix(Some("- [observed 2026-06-01] likes tea"), None, None)
+    let out = build_volatile_prefix(Some("- [observed 2026-06-01] likes tea"), None, None, None)
         .expect("recall present");
     assert!(out.contains("NOT new user input"));
     assert!(out.contains("Do not call memory tools"));
@@ -475,6 +487,7 @@ fn volatile_prefix_markers_are_unwrapped_and_appended() {
         None,
         Some("<memory-status>degraded - recall may be incomplete</memory-status>"),
         Some("MCP server reconnected after a transient error"),
+        None,
     )
     .expect("markers present");
     assert!(out.contains("<memory-status>degraded"));
@@ -584,6 +597,7 @@ async fn cron_mode_does_not_emit_memory_section_when_memory_mode_none() {
         None,
         None, // cron callsites always pass None today
         None,
+        None,
     );
     assert!(
         !script.contains("MEMORY.md"),
@@ -604,6 +618,7 @@ async fn sandbox_script_sources_user_local_env_before_claude() {
         "/tmp/right-system-prompt.md",
         "/sandbox",
         &["claude".into(), "-p".into()],
+        None,
         None,
         None,
         None,
@@ -640,6 +655,7 @@ async fn no_sandbox_script_does_not_reference_sandbox_user_local_env() {
         "/Users/example/.right/agents/demo/.claude/prompt.md",
         "/Users/example/.right/agents/demo",
         &["claude".into(), "-p".into()],
+        None,
         None,
         None,
         None,
@@ -762,4 +778,52 @@ fn chat_context_block_group_omits_absent_topic_name() {
     });
     assert!(block.contains("topic_id: 7"));
     assert!(!block.contains("topic:"));
+}
+
+#[test]
+fn operator_focus_block_uses_label_and_framing() {
+    let block = format_operator_focus_block("Topic", "ship the spec");
+    assert!(block.starts_with("## Topic Focus\n"), "block: {block}");
+    assert!(block.contains("set by the operator"), "block: {block}");
+    assert!(block.contains("ship the spec"), "block: {block}");
+}
+
+#[tokio::test]
+async fn script_focus_section_sits_between_mcp_and_memory() {
+    let script = build_prompt_assembly_script(
+        "BASE",
+        PromptMode::Normal,
+        "/sandbox",
+        "/tmp/p.md",
+        "/sandbox",
+        &["claude".to_string()],
+        Some("MCP INSTRUCTIONS"),
+        Some(&MemoryMode::File),
+        Some("## Current Conversation\nchat_id: 1\n"),
+        Some("## Topic Focus\nset by the operator\n\nbe concise\n"),
+    );
+    let mcp_pos = script.find("MCP INSTRUCTIONS").unwrap();
+    let focus_pos = script.find("Topic Focus").unwrap();
+    let memory_pos = script.rfind("MEMORY.md").unwrap();
+    assert!(mcp_pos < focus_pos, "focus must come after MCP");
+    assert!(focus_pos < memory_pos, "focus must come before memory");
+}
+
+#[test]
+fn volatile_prefix_wraps_agent_focus_as_external_content() {
+    let prefix = build_volatile_prefix(None, None, None, Some("the agent's saved note")).unwrap();
+    assert!(
+        prefix.contains("the agent's saved note"),
+        "prefix: {prefix}"
+    );
+    assert!(
+        prefix.contains("EXTERNAL CONTENT"),
+        "must be wrapped: {prefix}"
+    );
+}
+
+#[test]
+fn volatile_prefix_omits_empty_agent_focus() {
+    assert!(build_volatile_prefix(None, None, None, Some("   ")).is_none());
+    assert!(build_volatile_prefix(None, None, None, None).is_none());
 }
