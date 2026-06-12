@@ -3215,6 +3215,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dashboard_focus_patch_rejects_overlong_operator_focus_and_accepts_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+
+        let auth = signed_init_data(42);
+        let token = signed_focus_scope_token("alpha", 7, 11, chrono::Utc::now().timestamp() + 60);
+
+        // One char over the cap (trimmed) is rejected and never written.
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/focus",
+            Some(auth.clone()),
+            temp.path().to_path_buf(),
+            json!({
+                "chat_id": 7,
+                "thread_id": 11,
+                "token": token.clone(),
+                "operator_focus": "x".repeat(super::focus::OPERATOR_FOCUS_MAX_CHARS + 1),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "focus_too_long");
+
+        let conn = right_db::open_connection(temp.path(), false)
+            .await
+            .expect("reopen db");
+        assert!(
+            right_db::thread_focus::get(&conn, 7, 11)
+                .await
+                .expect("read focus")
+                .is_none(),
+            "overlong operator focus must not persist"
+        );
+        drop(conn);
+
+        // Exactly at the cap is accepted.
+        let at_cap = "x".repeat(super::focus::OPERATOR_FOCUS_MAX_CHARS);
+        let (status, _body) = patch_json(
+            "/dashboard/alpha/api/v1/focus",
+            Some(auth),
+            temp.path().to_path_buf(),
+            json!({
+                "chat_id": 7,
+                "thread_id": 11,
+                "token": token,
+                "operator_focus": at_cap.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = right_db::open_connection(temp.path(), false)
+            .await
+            .expect("reopen db");
+        let row = right_db::thread_focus::get(&conn, 7, 11)
+            .await
+            .expect("read focus")
+            .expect("focus row");
+        assert_eq!(row.operator_focus.as_deref(), Some(at_cap.as_str()));
+    }
+
+    #[tokio::test]
     async fn overview_on_missing_db_returns_500_without_creating_db() {
         let temp = tempfile::tempdir().expect("tempdir");
         let db_path = temp.path().join("data.db");

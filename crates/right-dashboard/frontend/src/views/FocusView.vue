@@ -10,6 +10,9 @@ const props = defineProps<{
   token: string
 }>()
 
+// Keep in sync with OPERATOR_FOCUS_MAX_CHARS in the dashboard focus route.
+const MAX_FOCUS_CHARS = 4000
+
 const loading = ref(true)
 const loadError = ref<string | null>(null)
 const saveError = ref<string | null>(null)
@@ -65,7 +68,9 @@ async function save(): Promise<void> {
         class="focus-textarea"
         aria-label="Conversation focus"
         rows="10"
+        :maxlength="MAX_FOCUS_CHARS"
         placeholder="What should the agent keep in mind in this conversation?"
+        @input="saveError = null"
       />
       <p v-if="saveError" class="notice inline" role="alert">{{ saveError }}</p>
       <div class="focus-actions">
