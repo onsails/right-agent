@@ -34,6 +34,7 @@ pub const SKILL_LEARNING_FINISH_MCP_TOOL: &str = "mcp__right__skill_learning_fin
 pub const THREAD_SEARCH_MCP_TOOL: &str = "mcp__right__thread_search";
 pub const CHAT_SEARCH_MCP_TOOL: &str = "mcp__right__chat_search";
 pub const GET_MESSAGES_BY_ID_MCP_TOOL: &str = "mcp__right__get_messages_by_id";
+pub const THREAD_FOCUS_SET_MCP_TOOL: &str = "mcp__right__thread_focus_set";
 
 pub const FORUM_TOPIC_CREATE_MCP_TOOL: &str = "mcp__right__forum_topic_create";
 pub const FORUM_TOPIC_EDIT_MCP_TOOL: &str = "mcp__right__forum_topic_edit";
@@ -808,6 +809,7 @@ mod tests {
             PROGRESS_MCP_TOOL,
             format!("mcp__right__{SEND_PROGRESS_TOOL}")
         );
+        assert_eq!(THREAD_FOCUS_SET_MCP_TOOL, "mcp__right__thread_focus_set");
     }
 
     #[test]

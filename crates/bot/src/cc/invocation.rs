@@ -80,6 +80,16 @@ pub(crate) fn disallow_conversation_search(mut tools: Vec<String>) -> Vec<String
     tools
 }
 
+pub(crate) fn disallow_thread_focus_set(mut tools: Vec<String>) -> Vec<String> {
+    if !tools
+        .iter()
+        .any(|tool| tool == right_mcp::internal_client::THREAD_FOCUS_SET_MCP_TOOL)
+    {
+        tools.push(right_mcp::internal_client::THREAD_FOCUS_SET_MCP_TOOL.to_owned());
+    }
+    tools
+}
+
 pub(crate) fn disallow_forum_topic_tools(mut tools: Vec<String>) -> Vec<String> {
     for tool_name in [
         right_mcp::internal_client::FORUM_TOPIC_CREATE_MCP_TOOL,
@@ -96,8 +106,8 @@ pub(crate) fn disallow_forum_topic_tools(mut tools: Vec<String>) -> Vec<String> 
 }
 
 pub(crate) fn disallow_foreground_only_tools(tools: Vec<String>) -> Vec<String> {
-    disallow_forum_topic_tools(disallow_conversation_search(disallow_learning_tools(
-        disallow_send_progress(tools),
+    disallow_thread_focus_set(disallow_forum_topic_tools(disallow_conversation_search(
+        disallow_learning_tools(disallow_send_progress(tools)),
     )))
 }
 
@@ -1050,6 +1060,7 @@ mod tests {
             right_mcp::internal_client::THREAD_SEARCH_MCP_TOOL,
             right_mcp::internal_client::CHAT_SEARCH_MCP_TOOL,
             right_mcp::internal_client::GET_MESSAGES_BY_ID_MCP_TOOL,
+            right_mcp::internal_client::THREAD_FOCUS_SET_MCP_TOOL,
             right_mcp::internal_client::FORUM_TOPIC_CREATE_MCP_TOOL,
             right_mcp::internal_client::FORUM_TOPIC_EDIT_MCP_TOOL,
             right_mcp::internal_client::FORUM_TOPIC_CLOSE_MCP_TOOL,

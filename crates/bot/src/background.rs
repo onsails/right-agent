@@ -266,6 +266,7 @@ async fn build_background_command(
             mcp_instructions,
             memory_mode.as_ref(),
             None,
+            None,
         );
         if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
@@ -300,6 +301,7 @@ async fn build_background_command(
             claude_args,
             mcp_instructions,
             memory_mode.as_ref(),
+            None,
             None,
         );
         let mut cmd = tokio::process::Command::new("bash");

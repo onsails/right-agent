@@ -824,6 +824,71 @@ pub async fn handle_providers(
 }
 
 // ---------------------------------------------------------------------------
+// /set_focus command handler
+// ---------------------------------------------------------------------------
+
+/// Handle the /set_focus command by opening the dashboard focus view scoped to
+/// the current (chat_id, effective_thread_id). Works in DM, group, and topic.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_set_focus(
+    bot: BotType,
+    msg: Message,
+    _args: String,
+    agent_dir: Arc<AgentDir>,
+    _pending_auth: PendingAuthMap,
+    home: Arc<RightHome>,
+    _internal: Arc<InternalApi>,
+    _pending_token_slot: Arc<PendingTokenSlot>,
+    _pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
+    _ssh_config: Arc<SshConfigPath>,
+    _settings: Arc<AgentSettings>,
+) -> ResponseResult<()> {
+    tracing::info!(agent_dir = %agent_dir.0.display(), "set_focus: opening dashboard");
+    let global_config = right_config::read_global_config(&home.0)
+        .map_err(|e| to_request_err(format!("set_focus dashboard: read config.yaml: {e:#}")))?;
+    let agent_name = agent_dir
+        .0
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            to_request_err(format!(
+                "set_focus dashboard: invalid agent directory name: {}",
+                agent_dir.0.display()
+            ))
+        })?;
+    let eff_thread_id = effective_thread_id(&msg);
+    let mut url = super::dashboard::dashboard_url(&global_config.tunnel.hostname, agent_name)
+        .map_err(|e| to_request_err(format!("set_focus dashboard: invalid URL: {e:#}")))?;
+    let focus_token = super::dashboard::generate_focus_scope_token(
+        bot.inner().inner().token(),
+        agent_name,
+        msg.chat.id.0,
+        eff_thread_id,
+    );
+    url.query_pairs_mut()
+        .append_pair("view", "focus")
+        .append_pair("chat_id", &msg.chat.id.0.to_string())
+        .append_pair("thread_id", &eff_thread_id.to_string())
+        .append_pair("token", &focus_token);
+
+    let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::web_app(
+        "Set focus",
+        teloxide::types::WebAppInfo { url },
+    )]]);
+
+    let mut send = bot
+        .send_message(msg.chat.id, "Focus")
+        .reply_markup(keyboard);
+    if eff_thread_id != 0 {
+        send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+            eff_thread_id as i32,
+        )));
+    }
+    send.await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // /cron command handler
 // ---------------------------------------------------------------------------
 

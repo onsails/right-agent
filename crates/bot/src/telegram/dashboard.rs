@@ -5,6 +5,7 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use right_dashboard::api_types::{
     ApiErrorBody, BootstrapResponse, DashboardFeatures, ForegroundActivity, PinSkillRequest,
 };
@@ -20,7 +21,10 @@ use right_dashboard::read_model::{
 };
 use right_db::Connection;
 use serde::Deserialize;
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
+mod focus;
 mod health;
 mod identity;
 mod mcp;
@@ -39,6 +43,7 @@ pub(super) const DASHBOARD_SANDBOX_TIMEOUT_SECS: u64 = 4;
 /// already-warm sandbox and keep the short `DASHBOARD_SANDBOX_TIMEOUT_SECS`.
 pub(super) const DASHBOARD_SANDBOX_SKILLS_TIMEOUT_SECS: u64 = 20;
 const INIT_DATA_MAX_AGE_SECS: i64 = 86_400;
+const FOCUS_SCOPE_TOKEN_TTL_SECS: i64 = 600;
 const MAX_LOG_LINES: usize = 80;
 #[cfg(test)]
 const TEST_USAGE_GENERATED_AT: &str = "2026-06-04T12:00:00Z";
@@ -75,6 +80,66 @@ pub(crate) fn dashboard_url(
         return Err(DashboardUrlError::HostnameNotBare(hostname.to_string()));
     }
     Ok(base.join(&format!("/dashboard/{agent_name}/"))?)
+}
+
+pub(crate) fn generate_focus_scope_token(
+    bot_token: &str,
+    agent_name: &str,
+    chat_id: i64,
+    thread_id: i64,
+) -> String {
+    let expires_unix = chrono::Utc::now().timestamp() + FOCUS_SCOPE_TOKEN_TTL_SECS;
+    focus_scope_token_for_expires(bot_token, agent_name, chat_id, thread_id, expires_unix)
+}
+
+fn focus_scope_token_for_expires(
+    bot_token: &str,
+    agent_name: &str,
+    chat_id: i64,
+    thread_id: i64,
+    expires_unix: i64,
+) -> String {
+    let mac = focus_scope_mac(bot_token, agent_name, chat_id, thread_id, expires_unix);
+    format!("{expires_unix}.{mac}")
+}
+
+fn focus_scope_mac(
+    bot_token: &str,
+    agent_name: &str,
+    chat_id: i64,
+    thread_id: i64,
+    expires_unix: i64,
+) -> String {
+    let payload = format!("focus-scope-v1\n{agent_name}\n{chat_id}\n{thread_id}\n{expires_unix}");
+    Hmac::<Sha256>::new_from_slice(bot_token.as_bytes())
+        .expect("HMAC accepts any key length")
+        .chain_update(payload.as_bytes())
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+pub(crate) fn focus_scope_token_valid(
+    bot_token: &str,
+    agent_name: &str,
+    chat_id: i64,
+    thread_id: i64,
+    token: &str,
+) -> bool {
+    let Some((raw_expires, mac)) = token.split_once('.') else {
+        return false;
+    };
+    let Ok(expires_unix) = raw_expires.parse::<i64>() else {
+        return false;
+    };
+    if expires_unix <= chrono::Utc::now().timestamp() {
+        return false;
+    }
+
+    let expected = focus_scope_mac(bot_token, agent_name, chat_id, thread_id, expires_unix);
+    bool::from(expected.as_bytes().ct_eq(mac.as_bytes()))
 }
 
 #[derive(Clone)]
@@ -189,6 +254,10 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
         .route(
             "/dashboard/{agent}/api/v1/providers",
             get(providers::handle_list).post(providers::handle_create),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/focus",
+            get(focus::handle_get).patch(focus::handle_update),
         )
         .route(
             "/dashboard/{agent}/api/v1/providers/types",
@@ -909,7 +978,7 @@ fn overview_sandbox_status(
     }
 }
 
-fn json_error(status: StatusCode, error: &str, detail: Option<&str>) -> Response {
+pub(super) fn json_error(status: StatusCode, error: &str, detail: Option<&str>) -> Response {
     (
         status,
         Json(ApiErrorBody {
@@ -1039,6 +1108,72 @@ mod tests {
         }
         serializer.append_pair("hash", &hash);
         serializer.finish()
+    }
+
+    fn signed_focus_scope_token(
+        agent_name: &str,
+        chat_id: i64,
+        thread_id: i64,
+        expires_unix: i64,
+    ) -> String {
+        super::focus_scope_token_for_expires(
+            BOT_TOKEN,
+            agent_name,
+            chat_id,
+            thread_id,
+            expires_unix,
+        )
+    }
+
+    #[test]
+    fn focus_scope_token_valid_rejects_invalid_scope_and_token_shapes() {
+        let expires_unix = chrono::Utc::now().timestamp() + 60;
+        let token = signed_focus_scope_token("alpha", 7, 11, expires_unix);
+
+        assert!(super::focus_scope_token_valid(
+            BOT_TOKEN, "alpha", 7, 11, &token
+        ));
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN,
+            "alpha",
+            7,
+            11,
+            &signed_focus_scope_token("alpha", 7, 11, chrono::Utc::now().timestamp() - 1),
+        ));
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN, "beta", 7, 11, &token
+        ));
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN, "alpha", 8, 11, &token
+        ));
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN, "alpha", 7, 12, &token
+        ));
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN,
+            "alpha",
+            7,
+            11,
+            "missing-separator",
+        ));
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN,
+            "alpha",
+            7,
+            11,
+            &format!("{expires_unix}.not-a-valid-mac"),
+        ));
+
+        let mut changed_mac = token.clone();
+        let last = changed_mac.pop().expect("token has MAC");
+        changed_mac.push(if last == '0' { '1' } else { '0' });
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN,
+            "alpha",
+            7,
+            11,
+            &changed_mac,
+        ));
     }
 
     async fn get(path: &str, auth: Option<String>, agent_dir: std::path::PathBuf) -> StatusCode {
@@ -2941,6 +3076,208 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn dashboard_focus_patch_trims_clears_and_preserves_agent_focus() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        right_db::thread_focus::set_agent(&conn, 7, 11, Some("agent-managed focus"))
+            .await
+            .expect("seed agent focus");
+        drop(conn);
+
+        let auth = signed_init_data(42);
+        let token = signed_focus_scope_token("alpha", 7, 11, chrono::Utc::now().timestamp() + 60);
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/focus",
+            Some(auth.clone()),
+            temp.path().to_path_buf(),
+            json!({
+                "chat_id": 7,
+                "thread_id": 11,
+                "token": token.clone(),
+                "operator_focus": "  operator focus  ",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operator_focus"], "operator focus");
+
+        let conn = right_db::open_connection(temp.path(), false)
+            .await
+            .expect("reopen db");
+        let row = right_db::thread_focus::get(&conn, 7, 11)
+            .await
+            .expect("read focus")
+            .expect("focus row");
+        assert_eq!(row.operator_focus.as_deref(), Some("operator focus"));
+        assert_eq!(row.agent_focus.as_deref(), Some("agent-managed focus"));
+        drop(conn);
+
+        let (status, body) = get_json(
+            &format!("/dashboard/alpha/api/v1/focus?chat_id=7&thread_id=11&token={token}"),
+            Some(auth.clone()),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "operator_focus": "operator focus" }));
+
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/focus",
+            Some(auth),
+            temp.path().to_path_buf(),
+            json!({
+                "chat_id": 7,
+                "thread_id": 11,
+                "token": token,
+                "operator_focus": " \n\t ",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "operator_focus": null }));
+
+        let conn = right_db::open_connection(temp.path(), false)
+            .await
+            .expect("reopen db");
+        let row = right_db::thread_focus::get(&conn, 7, 11)
+            .await
+            .expect("read focus")
+            .expect("focus row");
+        assert_eq!(row.operator_focus, None);
+        assert_eq!(row.agent_focus.as_deref(), Some("agent-managed focus"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_focus_get_rejects_scope_token_for_different_chat() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        right_db::thread_focus::set_operator(&conn, 8, 11, Some("other chat focus"))
+            .await
+            .expect("seed operator focus");
+        drop(conn);
+
+        let token = signed_focus_scope_token("alpha", 7, 11, chrono::Utc::now().timestamp() + 60);
+        let (status, body) = get_json(
+            &format!("/dashboard/alpha/api/v1/focus?chat_id=8&thread_id=11&token={token}"),
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "invalid_focus_scope");
+    }
+
+    #[tokio::test]
+    async fn dashboard_focus_patch_rejects_scope_token_for_different_chat() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        right_db::thread_focus::set_operator(&conn, 8, 11, Some("other chat focus"))
+            .await
+            .expect("seed operator focus");
+        drop(conn);
+
+        let token = signed_focus_scope_token("alpha", 7, 11, chrono::Utc::now().timestamp() + 60);
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/focus",
+            Some(signed_init_data(42)),
+            temp.path().to_path_buf(),
+            json!({
+                "chat_id": 8,
+                "thread_id": 11,
+                "token": token,
+                "operator_focus": "tampered focus",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "invalid_focus_scope");
+
+        let conn = right_db::open_connection(temp.path(), false)
+            .await
+            .expect("reopen db");
+        let row = right_db::thread_focus::get(&conn, 8, 11)
+            .await
+            .expect("read focus")
+            .expect("focus row");
+        assert_eq!(row.operator_focus.as_deref(), Some("other chat focus"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_focus_patch_rejects_overlong_operator_focus_and_accepts_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+
+        let auth = signed_init_data(42);
+        let token = signed_focus_scope_token("alpha", 7, 11, chrono::Utc::now().timestamp() + 60);
+
+        // One char over the cap (trimmed) is rejected and never written.
+        let (status, body) = patch_json(
+            "/dashboard/alpha/api/v1/focus",
+            Some(auth.clone()),
+            temp.path().to_path_buf(),
+            json!({
+                "chat_id": 7,
+                "thread_id": 11,
+                "token": token.clone(),
+                "operator_focus": "x".repeat(super::focus::OPERATOR_FOCUS_MAX_CHARS + 1),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "focus_too_long");
+
+        let conn = right_db::open_connection(temp.path(), false)
+            .await
+            .expect("reopen db");
+        assert!(
+            right_db::thread_focus::get(&conn, 7, 11)
+                .await
+                .expect("read focus")
+                .is_none(),
+            "overlong operator focus must not persist"
+        );
+        drop(conn);
+
+        // Exactly at the cap is accepted.
+        let at_cap = "x".repeat(super::focus::OPERATOR_FOCUS_MAX_CHARS);
+        let (status, _body) = patch_json(
+            "/dashboard/alpha/api/v1/focus",
+            Some(auth),
+            temp.path().to_path_buf(),
+            json!({
+                "chat_id": 7,
+                "thread_id": 11,
+                "token": token,
+                "operator_focus": at_cap.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = right_db::open_connection(temp.path(), false)
+            .await
+            .expect("reopen db");
+        let row = right_db::thread_focus::get(&conn, 7, 11)
+            .await
+            .expect("read focus")
+            .expect("focus row");
+        assert_eq!(row.operator_focus.as_deref(), Some(at_cap.as_str()));
     }
 
     #[tokio::test]

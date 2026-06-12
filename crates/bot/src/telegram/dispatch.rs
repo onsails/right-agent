@@ -29,8 +29,8 @@ use super::handler::{
     AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingMcpAuthChoiceSlot,
     PendingTokenSlot, RightHome, SshConfigPath, handle_bg_callback, handle_cron, handle_dashboard,
     handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_providers,
-    handle_start, handle_stop_callback, handle_switch, handle_thinking_toggle_callback,
-    handle_usage,
+    handle_set_focus, handle_start, handle_stop_callback, handle_switch,
+    handle_thinking_toggle_callback, handle_usage,
 };
 use super::mention::BotIdentity;
 use super::mode_command::{handle_mode, handle_mode_callback, handle_mode_group};
@@ -53,6 +53,11 @@ enum BotCommand {
     Mcp(String),
     #[command(description = "Open providers dashboard")]
     Providers(String),
+    #[command(
+        description = "Set the focus for this conversation",
+        rename = "set_focus"
+    )]
+    SetFocus(String),
     #[command(description = "Run diagnostics")]
     Doctor,
     #[command(description = "Switch Claude model (menu)")]
@@ -538,6 +543,7 @@ fn build_dispatcher(
         .branch(dptree::case![BotCommand::Switch(uuid)].endpoint(handle_switch))
         .branch(dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp))
         .branch(dptree::case![BotCommand::Providers(args)].endpoint(handle_providers))
+        .branch(dptree::case![BotCommand::SetFocus(args)].endpoint(handle_set_focus))
         .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor))
         .branch(dptree::case![BotCommand::Model].endpoint(handle_model))
         .branch(dptree::case![BotCommand::Mode].endpoint(handle_mode))
@@ -810,6 +816,22 @@ mod tests {
         assert!(matches!(
             BotCommand::parse("/usage detail", "right_bot").unwrap(),
             BotCommand::Usage(arg) if arg == "detail"
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_focus_command_uses_snake_case_and_is_visible() {
+        let commands = visible_bot_commands();
+        let names = commands
+            .iter()
+            .map(|command| command.command.trim_start_matches('/'))
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"set_focus"));
+        assert!(!names.contains(&"setfocus"));
+        assert!(matches!(
+            BotCommand::parse("/set_focus now", "right_bot").unwrap(),
+            BotCommand::SetFocus(arg) if arg == "now"
         ));
     }
 

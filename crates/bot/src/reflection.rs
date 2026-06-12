@@ -259,6 +259,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
             None, // no MCP instructions refresh
             None, // no memory section
             None,
+            None,
         );
         if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
@@ -285,6 +286,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
             &prompt_path_str,
             &agent_dir_str,
             &claude_args,
+            None,
             None,
             None,
             None,

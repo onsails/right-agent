@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { browserUsageTimezone, usageOverview } from './api'
+import { browserUsageTimezone, focusGet, focusUpdate, usageOverview } from './api'
 
 function usagePayload() {
   return {
@@ -80,5 +80,54 @@ describe('usageOverview', () => {
     } as unknown as Intl.DateTimeFormat)
 
     expect(browserUsageTimezone()).toBe('UTC')
+  })
+})
+
+describe('focus API', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('gets conversation focus with chat and thread query parameters', async () => {
+    const fetchMock = vi.fn(async (_path: string, _options?: RequestInit) => new Response(JSON.stringify({
+      operator_focus: 'existing focus',
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('window', { Telegram: { WebApp: { initData: 'signed-init' } } })
+
+    await expect(focusGet(-100123, 7, 'scope-token')).resolves.toEqual({ operator_focus: 'existing focus' })
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(fetchMock.mock.calls[0][0]).toBe('api/v1/focus?chat_id=-100123&thread_id=7&token=scope-token')
+    expect((fetchMock.mock.calls[0][1]?.headers as Headers).get('Authorization')).toBe('tma signed-init')
+  })
+
+  it('patches conversation focus with chat and thread identifiers', async () => {
+    const fetchMock = vi.fn(async (_path: string, _options?: RequestInit) => new Response(JSON.stringify({
+      operator_focus: 'focus',
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('window', { Telegram: { WebApp: { initData: 'signed-init' } } })
+
+    await expect(focusUpdate(42, 0, 'scope-token', 'focus')).resolves.toEqual({ operator_focus: 'focus' })
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [path, options] = fetchMock.mock.calls[0]
+    expect(path).toBe('api/v1/focus')
+    expect(options?.method).toBe('PATCH')
+    expect(JSON.parse(String(options?.body))).toEqual({
+      chat_id: 42,
+      thread_id: 0,
+      token: 'scope-token',
+      operator_focus: 'focus',
+    })
+    expect((options?.headers as Headers).get('Authorization')).toBe('tma signed-init')
   })
 })

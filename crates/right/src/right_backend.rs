@@ -30,6 +30,7 @@ use serde::Deserialize;
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const CONVERSATION_SEARCH_DEFAULT_LIMIT: usize = 10;
 const GET_MESSAGES_BY_ID_MAX_IDS: usize = 50;
+const THREAD_FOCUS_MAX_CHARS: usize = 2000;
 
 use crate::learning::{
     LearningMessagePhase, SkillLearningFinishParams, SkillLearningStartParams,
@@ -96,6 +97,15 @@ pub(crate) struct ForumTopicThreadParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ForumTopicListParams {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ThreadFocusSetParams {
+    /// Standing focus for the CURRENT conversation, shown to you on every future
+    /// turn here. Replaces any previous value. Empty string clears it.
+    #[schemars(length(max = THREAD_FOCUS_MAX_CHARS))]
+    pub(crate) focus: String,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -237,6 +247,11 @@ impl RightBackend {
                 "List forum topics this agent has created or managed in the CURRENT chat only. Scope is server-enforced and not agent-controlled. There is no Telegram API to enumerate all topics, so this returns only tracked topics.",
                 schema_for_type::<ForumTopicListParams>(),
             ),
+            Tool::new(
+                "thread_focus_set",
+                "Set your standing focus for the CURRENT Telegram conversation (DM, group, or topic). The text is shown to you on every future turn in this conversation. Replaces the previous value; empty string clears it. Scope is server-enforced from the current foreground invocation and is not agent-controlled.",
+                schema_for_type::<ThreadFocusSetParams>(),
+            ),
             // Bootstrap
             Tool::new(
                 "bootstrap_done",
@@ -318,6 +333,7 @@ impl RightBackend {
                     .await
             }
             "forum_topic_list" => self.call_forum_topic_list(agent_name, context, &args).await,
+            "thread_focus_set" => self.call_thread_focus_set(agent_name, context, &args).await,
             "bootstrap_done" => self.call_bootstrap_done(agent_name).await,
             "provider_capabilities" => self.call_provider_capabilities(agent_name, &args).await,
             other => bail!("unknown tool: {other}"),
@@ -1126,6 +1142,54 @@ impl RightBackend {
         let output = serde_json::json!({ "messages": messages });
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&output)?,
+        )]))
+    }
+
+    async fn call_thread_focus_set(
+        &self,
+        agent_name: &str,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: ThreadFocusSetParams = match serde_json::from_value(args.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    format!("invalid thread_focus_set params: {e:#}"),
+                    None,
+                ));
+            }
+        };
+        let Some(invocation_id) = context.invocation_id else {
+            return Ok(conversation_scope_unavailable());
+        };
+        let scope = match self.progress.conversation_scope(&invocation_id).await {
+            Ok(scope) => scope,
+            Err(_) => return Ok(conversation_scope_unavailable()),
+        };
+        let trimmed = params.focus.trim();
+        if trimmed.chars().count() > THREAD_FOCUS_MAX_CHARS {
+            return Ok(tool_error(
+                "invalid_argument",
+                format!("thread focus must be at most {THREAD_FOCUS_MAX_CHARS} characters"),
+                None,
+            ));
+        }
+        let value = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        };
+
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
+        right_db::thread_focus::set_agent(&conn, scope.chat_id, scope.thread_id, value)
+            .await
+            .map_err(|e| anyhow::anyhow!("thread_focus set failed: {e:#}"))?;
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({ "status": "ok", "cleared": value.is_none() }).to_string(),
         )]))
     }
 
