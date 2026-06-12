@@ -2046,6 +2046,7 @@ async fn cmd_init(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_agent_init(
     home: &Path,
     name: &str,
@@ -2375,7 +2376,15 @@ async fn cmd_agent_init(
                                 step = Step::Stt;
                             }
                             None => {
-                                step = Step::Telegram;
+                                // The Telegram step may be CLI/env-pinned (and
+                                // thus auto-skipped); back-navigate past it so
+                                // "back" reaches the previous interactive prompt
+                                // instead of bouncing straight back here.
+                                step = if telegram_token.is_some() {
+                                    Step::Network
+                                } else {
+                                    Step::Telegram
+                                };
                             }
                         }
                     }
@@ -2385,10 +2394,16 @@ async fn cmd_agent_init(
                             step = Step::Memory;
                         }
                         Ok(None) => {
-                            step = if w_token.is_some() {
+                            // ChatIds and Telegram may be CLI/env-pinned (and
+                            // thus auto-skipped); back-navigate to the nearest
+                            // interactive step rather than a pinned one that
+                            // would immediately skip forward again.
+                            step = if telegram_allowed_chat_ids.is_empty() {
                                 Step::ChatIds
-                            } else {
+                            } else if telegram_token.is_none() {
                                 Step::Telegram
+                            } else {
+                                Step::Network
                             };
                         }
                         Err(e) => return Err(e),
