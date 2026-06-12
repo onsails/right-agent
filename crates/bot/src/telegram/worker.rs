@@ -3211,12 +3211,13 @@ async fn invoke_cc(
                 recall_content.as_deref(),
                 emit_marker.as_deref(),
                 repair_notice,
+                None,
             ),
         )
     } else {
         (
             Some(crate::cc::prompt::MemoryMode::File),
-            crate::cc::prompt::build_volatile_prefix(None, None, repair_notice),
+            crate::cc::prompt::build_volatile_prefix(None, None, repair_notice, None),
         )
     };
 
@@ -3330,6 +3331,7 @@ async fn invoke_cc(
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
             Some(chat_context_block.as_str()),
+            None,
         );
         // Inject auth token as env var in the remote shell
         if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
@@ -3371,6 +3373,7 @@ async fn invoke_cc(
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
             Some(chat_context_block.as_str()),
+            None,
         );
 
         let mut c = tokio::process::Command::new("bash");
