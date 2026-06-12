@@ -1125,6 +1125,57 @@ mod tests {
         )
     }
 
+    #[test]
+    fn focus_scope_token_valid_rejects_invalid_scope_and_token_shapes() {
+        let expires_unix = chrono::Utc::now().timestamp() + 60;
+        let token = signed_focus_scope_token("alpha", 7, 11, expires_unix);
+
+        assert!(super::focus_scope_token_valid(
+            BOT_TOKEN, "alpha", 7, 11, &token
+        ));
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN,
+            "alpha",
+            7,
+            11,
+            &signed_focus_scope_token("alpha", 7, 11, chrono::Utc::now().timestamp() - 1),
+        ));
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN, "beta", 7, 11, &token
+        ));
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN, "alpha", 8, 11, &token
+        ));
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN, "alpha", 7, 12, &token
+        ));
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN,
+            "alpha",
+            7,
+            11,
+            "missing-separator",
+        ));
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN,
+            "alpha",
+            7,
+            11,
+            &format!("{expires_unix}.not-a-valid-mac"),
+        ));
+
+        let mut changed_mac = token.clone();
+        let last = changed_mac.pop().expect("token has MAC");
+        changed_mac.push(if last == '0' { '1' } else { '0' });
+        assert!(!super::focus_scope_token_valid(
+            BOT_TOKEN,
+            "alpha",
+            7,
+            11,
+            &changed_mac,
+        ));
+    }
+
     async fn get(path: &str, auth: Option<String>, agent_dir: std::path::PathBuf) -> StatusCode {
         let router = super::build_dashboard_router(test_state(agent_dir));
         let mut builder = Request::builder().uri(path).method("GET");
