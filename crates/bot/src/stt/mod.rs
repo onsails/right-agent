@@ -70,6 +70,9 @@ impl Transcriber {
                 max_mb: MAX_AUDIO_FILE_MB,
             });
         }
+        // Fail fast on a missing model before spending an ffmpeg decode: the
+        // user must run `right up` to fetch it regardless of the audio.
+        self.engine.ensure_model_present()?;
         let samples = decode::decode_to_pcm_f32(file).await?;
         let (text, lang) = self.engine.transcribe(samples).await?;
         Ok(TranscriptionResult {
