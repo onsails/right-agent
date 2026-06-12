@@ -91,7 +91,8 @@ async fn ensure_generic_profile(
     profile_id: &str,
     include_binaries: bool,
 ) {
-    let mut profile = author_generic_profile(profile_id, UPSTREAM_HOST, None, HEADER_NAME, ENV_VAR);
+    let upstream_hosts = vec![UPSTREAM_HOST.to_string()];
+    let mut profile = author_generic_profile(profile_id, &upstream_hosts, None, ENV_VAR);
     if !include_binaries {
         profile.binaries.clear();
     }

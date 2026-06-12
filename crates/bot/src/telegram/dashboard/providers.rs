@@ -2,14 +2,13 @@ use axum::{
     Json,
     body::Bytes,
     extract::{Path as AxumPath, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 
-use super::DashboardState;
-use super::authenticate_api;
 use super::mcp::{internal_api_error_response, parse_json_body};
+use super::{DashboardState, authenticate_api, json_error};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ProviderCreateBody {
@@ -23,9 +22,30 @@ pub(crate) struct ProviderCreateBody {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ProviderCreateGenericBody {
     pub env_var: String,
-    pub header_name: Option<String>,
-    pub upstream_host: String,
+    #[serde(default)]
+    pub upstream_host: Option<String>,
+    #[serde(default)]
+    pub upstream_hosts: Vec<String>,
     pub upstream_path_prefix: Option<String>,
+}
+
+impl ProviderCreateGenericBody {
+    fn normalized_upstream_hosts(&self) -> Vec<String> {
+        let mut hosts = Vec::new();
+        if let Some(host) = &self.upstream_host {
+            let host = host.trim();
+            if !host.is_empty() {
+                hosts.push(host.to_string());
+            }
+        }
+        for host in &self.upstream_hosts {
+            let host = host.trim();
+            if !host.is_empty() && !hosts.iter().any(|existing| existing == host) {
+                hosts.push(host.to_string());
+            }
+        }
+        hosts
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,13 +94,27 @@ pub(crate) async fn handle_create(
         Ok(b) => b,
         Err(resp) => return resp,
     };
+    let generic_hosts = if let Some(g) = &body.generic {
+        let hosts = g.normalized_upstream_hosts();
+        if hosts.is_empty() {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                Some("at least one upstream host is required"),
+            );
+        }
+        Some(hosts)
+    } else {
+        None
+    };
     let generic =
         body.generic
             .as_ref()
             .map(|g| right_mcp::internal_client::ProviderCreateGenericArg {
                 env_var: &g.env_var,
-                header_name: g.header_name.as_deref(),
-                upstream_host: &g.upstream_host,
+                upstream_hosts: generic_hosts
+                    .as_deref()
+                    .expect("generic hosts are normalized when generic body is present"),
                 upstream_path_prefix: g.upstream_path_prefix.as_deref(),
             });
     let req = right_mcp::internal_client::ProviderCreateRequest {
@@ -172,5 +206,50 @@ pub(crate) async fn handle_config_update(
     match state.internal_client.provider_config_update(&full).await {
         Ok(view) => Json(view).into_response(),
         Err(error) => internal_api_error_response(error, "provider_config_update_failed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_create_generic_body_accepts_legacy_upstream_host() {
+        let body: ProviderCreateGenericBody = serde_json::from_value(serde_json::json!({
+            "env_var": "ACME_TOKEN",
+            "upstream_host": "api.acme.test"
+        }))
+        .unwrap();
+
+        assert_eq!(body.normalized_upstream_hosts(), ["api.acme.test"]);
+    }
+
+    #[test]
+    fn provider_create_generic_body_accepts_upstream_hosts() {
+        let body: ProviderCreateGenericBody = serde_json::from_value(serde_json::json!({
+            "env_var": "FAL_KEY",
+            "upstream_hosts": ["fal.run", "queue.fal.run"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            body.normalized_upstream_hosts(),
+            ["fal.run", "queue.fal.run"]
+        );
+    }
+
+    #[test]
+    fn provider_create_generic_body_trims_dedupes_and_merges_hosts() {
+        let body: ProviderCreateGenericBody = serde_json::from_value(serde_json::json!({
+            "env_var": "FAL_KEY",
+            "upstream_host": " fal.run ",
+            "upstream_hosts": ["queue.fal.run", "fal.run", "  "]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            body.normalized_upstream_hosts(),
+            ["fal.run", "queue.fal.run"]
+        );
     }
 }
