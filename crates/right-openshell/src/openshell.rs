@@ -2161,6 +2161,42 @@ pub async fn wait_for_provider_composed_with_endpoint(
     .await
 }
 
+/// Wait until a generic provider's composed rule contains every expected
+/// endpoint host/path. Use this for multi-host generic profiles where a stale
+/// rule may still contain one unchanged endpoint.
+pub async fn wait_for_provider_composed_with_all_endpoints(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_name: &str,
+    provider_name: &str,
+    expected: Vec<(String, String)>,
+) -> miette::Result<()> {
+    if expected.is_empty() {
+        return Err(miette::miette!(
+            "cannot wait for provider {provider_name} composition with no expected endpoints"
+        ));
+    }
+
+    let expected_label = expected
+        .iter()
+        .map(|(host, path)| format!("{host}{path}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    wait_for_provider_composed_where(
+        client,
+        sandbox_name,
+        provider_name,
+        format!("endpoints {expected_label}"),
+        |policy| {
+            crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+                policy,
+                provider_name,
+                &expected,
+            )
+        },
+    )
+    .await
+}
+
 async fn wait_for_provider_composed_where(
     client: &mut OpenShellClient<Channel>,
     sandbox_name: &str,

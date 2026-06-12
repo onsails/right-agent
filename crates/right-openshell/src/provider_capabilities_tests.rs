@@ -261,6 +261,121 @@ fn provider_is_composed_with_endpoint_matches_host_and_path() {
 }
 
 #[test]
+fn all_endpoints_present_requires_every_host() {
+    let mut policy = policy_with("_provider_right_example", &["**"], &["fal.run"]);
+    policy
+        .network_policies
+        .get_mut("_provider_right_example")
+        .unwrap()
+        .endpoints[0]
+        .path = "".into();
+
+    assert!(
+        crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[("FAL.RUN".into(), "".into())]
+        )
+    );
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[
+                ("fal.run".into(), "".into()),
+                ("queue.fal.run".into(), "".into())
+            ]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_all_endpoints_rejects_empty_expected() {
+    let policy = policy_with("_provider_right_example", &["**"], &["fal.run"]);
+
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_all_endpoints_rejects_missing_rule() {
+    let policy = SandboxPolicy::default();
+
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[("fal.run".into(), "".into())]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_all_endpoints_rejects_rule_with_no_endpoints() {
+    let policy = policy_with("_provider_right_example", &["**"], &[]);
+
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[("fal.run".into(), "".into())]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_all_endpoints_rejects_wrong_path() {
+    let mut policy = policy_with("_provider_right_example", &["**"], &["fal.run"]);
+    policy
+        .network_policies
+        .get_mut("_provider_right_example")
+        .unwrap()
+        .endpoints[0]
+        .path = "/v1".into();
+
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[("fal.run".into(), "/v2".into())]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_all_endpoints_allows_extra_rule_endpoints() {
+    let mut policy = policy_with(
+        "_provider_right_example",
+        &["**"],
+        &["fal.run", "queue.fal.run", "cdn.fal.run"],
+    );
+    let endpoints = &mut policy
+        .network_policies
+        .get_mut("_provider_right_example")
+        .unwrap()
+        .endpoints;
+    endpoints[0].path = "".into();
+    endpoints[1].path = "/queue".into();
+    endpoints[2].path = "/cdn".into();
+
+    assert!(
+        crate::provider_capabilities::provider_is_composed_with_all_endpoints(
+            &policy,
+            "right-example",
+            &[
+                ("FAL.RUN".into(), "".into()),
+                ("queue.fal.run".into(), "/queue".into())
+            ]
+        )
+    );
+}
+
+#[test]
 fn provider_is_composed_with_endpoint_rejects_stale_host_or_path() {
     let mut policy = policy_with("_provider_right_example", &["**"], &["old.example.com"]);
     policy
