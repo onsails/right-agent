@@ -2466,29 +2466,23 @@ pub(crate) async fn handle_provider_remove(
 
     let mut composition_reloaded = false;
     if let Some(g) = &entry.generic {
-        let mut hosts_to_strip = Vec::new();
-        for host in &g.upstream_hosts {
-            if hosts_to_strip.iter().any(|existing| existing == &host) {
-                continue;
-            }
-            let used_by_other = sandbox.providers.iter().any(|p| {
+        // `providers_strip` removes the whole `_provider_<name>` stanza by
+        // provider name (its host arg is advisory), so one strip closes every
+        // host this provider opened. Only strip when at least one of the removed
+        // provider's hosts is not still required by another provider's own
+        // stanza; shared hosts stay reachable through those other stanzas.
+        let any_host_exclusive = g.upstream_hosts.iter().any(|host| {
+            !sandbox.providers.iter().any(|p| {
                 p.name != req.name
                     && p.generic
                         .as_ref()
-                        .map(|gp| gp.upstream_hosts.iter().any(|other| other == host))
-                        .unwrap_or(false)
-            });
-            if !used_by_other {
-                hosts_to_strip.push(host);
-            }
-        }
-        if !hosts_to_strip.is_empty() {
+                        .is_some_and(|gp| gp.upstream_hosts.iter().any(|other| other == host))
+            })
+        });
+        if any_host_exclusive {
             let prior = std::fs::read_to_string(&policy_path)
                 .map_err(|e| ProviderApiError::AgentYamlWrite(format!("read policy: {e:#}")))?;
-            let mut stripped = prior;
-            for host in hosts_to_strip {
-                stripped = right_codegen::policy::providers_strip(&stripped, &req.name, host);
-            }
+            let stripped = right_codegen::policy::providers_strip(&prior, &req.name, "");
             right_codegen::contract::write_and_apply_sandbox_policy(
                 &sandbox_name,
                 &policy_path,
