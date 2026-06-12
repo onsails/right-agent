@@ -46,19 +46,46 @@ export NPM_CONFIG_PREFIX="{SANDBOX_LOCAL_PREFIX}"
 export NPM_CONFIG_CACHE="{SANDBOX_NPM_CACHE}"
 "#
     );
-    if !agent_env.is_empty() {
-        let mut keys: Vec<&String> = agent_env.keys().collect();
-        keys.sort();
-        out.push_str("# >>> agent.yaml::env >>>\n");
-        for key in keys {
-            // Single-quote and escape any embedded single quotes.
-            // Matches the doc-comment promise of no shell expansion.
-            let value = agent_env[key].replace('\'', "'\\''");
-            out.push_str(&format!("export {key}='{value}'\n"));
+    let mut keys: Vec<&String> = agent_env.keys().collect();
+    keys.sort();
+    let mut lines = String::new();
+    for key in keys {
+        // The value is single-quote escaped below, but the key is
+        // interpolated bare into a line that `.bashrc` and the
+        // prompt-assembly fallback source before every claude turn. A key
+        // that is not a POSIX shell identifier (`export FOO BAR=...`,
+        // `export 2X=...`) is a syntax error that aborts sourcing and
+        // breaks the agent, so skip it loudly rather than corrupt env.sh.
+        if !is_valid_env_key(key) {
+            tracing::warn!(
+                env_key = %key,
+                "agent.yaml::env key is not a valid POSIX shell identifier; skipping"
+            );
+            continue;
         }
+        // Single-quote and escape any embedded single quotes.
+        // Matches the doc-comment promise of no shell expansion.
+        let value = agent_env[key].replace('\'', "'\\''");
+        lines.push_str(&format!("export {key}='{value}'\n"));
+    }
+    if !lines.is_empty() {
+        out.push_str("# >>> agent.yaml::env >>>\n");
+        out.push_str(&lines);
         out.push_str("# <<< agent.yaml::env <<<\n");
     }
     out
+}
+
+/// A POSIX-portable environment variable name: a leading letter or
+/// underscore followed by letters, digits, or underscores. Keys outside
+/// this set cannot be `export`ed and would corrupt the sourced `env.sh`.
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Managed block sourced from `.bashrc`. Delimited by the markers above
@@ -101,6 +128,57 @@ mod tests {
         assert!(content.contains(SANDBOX_LOCAL_BIN));
         assert!(content.contains(SANDBOX_NPM_CACHE));
         assert!(content.contains("RIGHT_AGENT_MANAGED_ENV=1"));
+    }
+
+    /// `agent.yaml::env` entries render as single-quoted exports in sorted
+    /// order; embedded single quotes are POSIX-escaped, and keys that are
+    /// not valid shell identifiers are skipped so they cannot corrupt the
+    /// sourced env.sh.
+    #[tokio::test]
+    async fn env_file_content_renders_and_filters_agent_env() {
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://proxy.example/v1".to_string(),
+        );
+        env.insert("WITH_QUOTE".to_string(), "a'b".to_string());
+        env.insert("BAD KEY".to_string(), "x".to_string()); // space → invalid
+        env.insert("2LEADING".to_string(), "y".to_string()); // digit-leading → invalid
+
+        let content = env_file_content(&env);
+
+        assert!(
+            content.contains("export ANTHROPIC_BASE_URL='https://proxy.example/v1'"),
+            "valid key not rendered: {content}"
+        );
+        // Single quote escaped POSIX-style: a'b -> 'a'\''b'
+        assert!(
+            content.contains(r"export WITH_QUOTE='a'\''b'"),
+            "single quote not escaped: {content}"
+        );
+        assert!(
+            !content.contains("BAD KEY"),
+            "invalid key leaked: {content}"
+        );
+        assert!(
+            !content.contains("2LEADING"),
+            "digit-leading key leaked: {content}"
+        );
+        assert!(content.contains("# >>> agent.yaml::env >>>"));
+        assert!(content.contains("# <<< agent.yaml::env <<<"));
+    }
+
+    /// When every supplied key is invalid the env block is omitted
+    /// entirely — no empty marker pair, no broken exports.
+    #[tokio::test]
+    async fn env_file_content_omits_block_when_all_keys_invalid() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("BAD KEY".to_string(), "x".to_string());
+        let content = env_file_content(&env);
+        assert!(
+            !content.contains("agent.yaml::env"),
+            "block emitted: {content}"
+        );
     }
 
     /// Inline fallback must reference the same paths as env.sh — otherwise

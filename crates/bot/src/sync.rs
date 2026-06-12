@@ -474,12 +474,22 @@ async fn ensure_sandbox_user_local_env(
     // operator-declared exports alongside the managed PATH/NPM block.
     // Treat a missing/unparseable agent.yaml as "no extra env" — the
     // managed block is still useful on its own, and sync should not
-    // fail closed for what is, semantically, optional config.
-    let agent_env = right_agent::agent::discovery::parse_agent_config(agent_dir)
-        .ok()
-        .flatten()
-        .map(|c| c.env)
-        .unwrap_or_default();
+    // fail closed for what is, semantically, optional config. A parse
+    // failure is still logged: silently dropping the operator's env
+    // (e.g. ANTHROPIC_BASE_URL) would route the agent elsewhere with no
+    // trace of why.
+    let agent_env = match right_agent::agent::discovery::parse_agent_config(agent_dir) {
+        Ok(cfg) => cfg.map(|c| c.env).unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(
+                agent_dir = %agent_dir.display(),
+                error = format!("{e:#}"),
+                "sync: failed to parse agent.yaml for env injection; \
+                 proceeding with managed env only"
+            );
+            Default::default()
+        }
+    };
     let env_content = shell_printf_b_arg(&env_file_content(&agent_env));
     let write_script = format!(
         "mkdir -p {SANDBOX_ENV_DIR} && \
