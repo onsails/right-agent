@@ -140,6 +140,12 @@ pub fn profile_catalog() -> Vec<ProviderProfile> {
             env_var: "GITHUB_TOKEN".into(),
         },
         ProviderProfile {
+            type_slug: "right-fal".into(),
+            display_name: "fal.ai".into(),
+            category: ProviderCategory::Other,
+            env_var: "FAL_KEY".into(),
+        },
+        ProviderProfile {
             type_slug: "gitlab".into(),
             display_name: "GitLab".into(),
             category: ProviderCategory::SourceControl,
@@ -729,6 +735,18 @@ mod tests {
             .find(|p| p.type_slug == "anthropic")
             .unwrap();
         assert_eq!(entry.env_var, "ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn catalog_includes_fal() {
+        let c = profile_catalog();
+        let fal = c
+            .iter()
+            .find(|p| p.type_slug == "right-fal")
+            .expect("right-fal present");
+        assert_eq!(fal.display_name, "fal.ai");
+        assert_eq!(fal.env_var, "FAL_KEY");
+        assert_eq!(fal.category, ProviderCategory::Other);
     }
 
     #[test]
