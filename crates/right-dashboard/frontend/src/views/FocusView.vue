@@ -7,6 +7,7 @@ import AsyncState from '../components/AsyncState.vue'
 const props = defineProps<{
   chatId: number
   threadId: number
+  token: string
 }>()
 
 const loading = ref(true)
@@ -23,7 +24,7 @@ async function load(): Promise<void> {
   loading.value = true
   loadError.value = null
   try {
-    const response = await focusGet(props.chatId, props.threadId)
+    const response = await focusGet(props.chatId, props.threadId, props.token)
     value.value = response.operator_focus ?? ''
     saveError.value = null
   } catch (err) {
@@ -42,7 +43,7 @@ async function save(): Promise<void> {
   saveError.value = null
   try {
     const submitted = value.value
-    const response = await focusUpdate(props.chatId, props.threadId, submitted)
+    const response = await focusUpdate(props.chatId, props.threadId, props.token, submitted)
     if (value.value === submitted) {
       value.value = response.operator_focus ?? ''
     }

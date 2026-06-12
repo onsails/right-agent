@@ -18,12 +18,14 @@ use super::{DashboardState, authenticate_api, json_error};
 pub(crate) struct FocusScopeQuery {
     pub chat_id: i64,
     pub thread_id: i64,
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct FocusUpdateBody {
     pub chat_id: i64,
     pub thread_id: i64,
+    pub token: Option<String>,
     pub operator_focus: String,
 }
 
@@ -35,6 +37,19 @@ pub(crate) async fn handle_get(
 ) -> Response {
     if let Err(error) = authenticate_api(&state, &agent, &headers) {
         return error.into_response();
+    }
+    if !super::focus_scope_token_valid(
+        &state.bot_token,
+        &state.agent_name,
+        scope.chat_id,
+        scope.thread_id,
+        scope.token.as_deref().unwrap_or(""),
+    ) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "invalid_focus_scope",
+            Some("invalid conversation focus scope"),
+        );
     }
     let conn = match right_db::open_connection(&state.agent_dir, false).await {
         Ok(conn) => conn,
@@ -76,6 +91,19 @@ pub(crate) async fn handle_update(
         Ok(v) => v,
         Err(resp) => return resp,
     };
+    if !super::focus_scope_token_valid(
+        &state.bot_token,
+        &state.agent_name,
+        req.chat_id,
+        req.thread_id,
+        req.token.as_deref().unwrap_or(""),
+    ) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "invalid_focus_scope",
+            Some("invalid conversation focus scope"),
+        );
+    }
     let conn = match right_db::open_connection(&state.agent_dir, false).await {
         Ok(conn) => conn,
         Err(error) => {

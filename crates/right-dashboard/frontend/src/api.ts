@@ -206,18 +206,19 @@ export interface FocusView {
   operator_focus: string | null
 }
 
-export function focusGet(chatId: number, threadId: number): Promise<FocusView> {
+export function focusGet(chatId: number, threadId: number, token: string): Promise<FocusView> {
   const params = new URLSearchParams({
     chat_id: String(chatId),
     thread_id: String(threadId),
+    token,
   })
   return requestJson<FocusView>(`api/v1/focus?${params.toString()}`)
 }
 
-export function focusUpdate(chatId: number, threadId: number, operatorFocus: string): Promise<FocusView> {
+export function focusUpdate(chatId: number, threadId: number, token: string, operatorFocus: string): Promise<FocusView> {
   return requestJson<FocusView>('api/v1/focus', {
     method: 'PATCH',
-    body: JSON.stringify({ chat_id: chatId, thread_id: threadId, operator_focus: operatorFocus }),
+    body: JSON.stringify({ chat_id: chatId, thread_id: threadId, token, operator_focus: operatorFocus }),
   })
 }
 
