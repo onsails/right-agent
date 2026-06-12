@@ -95,14 +95,22 @@ pub fn provider_is_composed_with_endpoint(
     expected_path: &str,
 ) -> bool {
     rule_for_provider(policy, provider_name).is_some_and(|rule| {
-        rule.endpoints.iter().any(|endpoint| {
-            // Hosts are DNS names: compare case-insensitively so a gateway that
-            // normalizes the composed host's case is not mistaken for a stale
-            // (uncomposed) rule. Path stays an exact match — it is a literal
-            // upstream prefix, not case-folded.
-            endpoint.host.eq_ignore_ascii_case(expected_host) && endpoint.path == expected_path
-        })
+        rule.endpoints
+            .iter()
+            .any(|endpoint| endpoint_matches(endpoint, expected_host, expected_path))
     })
+}
+
+fn endpoint_matches(
+    endpoint: &crate::openshell_proto::openshell::sandbox::v1::NetworkEndpoint,
+    expected_host: &str,
+    expected_path: &str,
+) -> bool {
+    // Hosts are DNS names: compare case-insensitively so a gateway that
+    // normalizes the composed host's case is not mistaken for a stale
+    // (uncomposed) rule. Path stays an exact match — it is a literal
+    // upstream prefix, not case-folded.
+    endpoint.host.eq_ignore_ascii_case(expected_host) && endpoint.path == expected_path
 }
 
 /// True when the composed `_provider_<name>` rule contains EVERY expected
@@ -121,7 +129,33 @@ pub fn provider_is_composed_with_all_endpoints(
         expected.iter().all(|(host, path)| {
             rule.endpoints
                 .iter()
-                .any(|endpoint| endpoint.host.eq_ignore_ascii_case(host) && endpoint.path == *path)
+                .any(|endpoint| endpoint_matches(endpoint, host, path))
+        })
+    })
+}
+
+/// True when the composed `_provider_<name>` rule contains exactly the expected
+/// endpoint set, ignoring duplicate active endpoints that match the same
+/// expected pair. Use this when a provider update removes hosts, because a
+/// stale superset rule must not confirm the new desired config.
+pub fn provider_is_composed_with_exact_endpoints(
+    policy: &SandboxPolicy,
+    provider_name: &str,
+    expected: &[(String, String)],
+) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+
+    rule_for_provider(policy, provider_name).is_some_and(|rule| {
+        expected.iter().all(|(host, path)| {
+            rule.endpoints
+                .iter()
+                .any(|endpoint| endpoint_matches(endpoint, host, path))
+        }) && rule.endpoints.iter().all(|endpoint| {
+            expected
+                .iter()
+                .any(|(host, path)| endpoint_matches(endpoint, host, path))
         })
     })
 }

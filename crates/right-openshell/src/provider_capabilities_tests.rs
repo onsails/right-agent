@@ -463,6 +463,43 @@ fn provider_is_composed_with_all_endpoints_allows_extra_rule_endpoints() {
 }
 
 #[test]
+fn provider_is_composed_with_exact_endpoints_rejects_extra_rule_endpoint() {
+    let policy = policy_with(
+        "_provider_right_example",
+        &["**"],
+        &["fal.run", "queue.fal.run"],
+    );
+
+    assert!(
+        !crate::provider_capabilities::provider_is_composed_with_exact_endpoints(
+            &policy,
+            "right-example",
+            &[("fal.run".into(), "".into())]
+        )
+    );
+}
+
+#[test]
+fn provider_is_composed_with_exact_endpoints_accepts_same_endpoint_set() {
+    let policy = policy_with(
+        "_provider_right_example",
+        &["**"],
+        &["fal.run", "queue.fal.run"],
+    );
+
+    assert!(
+        crate::provider_capabilities::provider_is_composed_with_exact_endpoints(
+            &policy,
+            "right-example",
+            &[
+                ("FAL.RUN".into(), "".into()),
+                ("queue.fal.run".into(), "".into())
+            ]
+        )
+    );
+}
+
+#[test]
 fn provider_is_composed_with_endpoint_rejects_stale_host_or_path() {
     let mut policy = policy_with("_provider_right_example", &["**"], &["old.example.com"]);
     policy
