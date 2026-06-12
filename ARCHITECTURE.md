@@ -336,6 +336,8 @@ expected upstream host/path. Composition is visible only in the effective policy
 — the stored revision (`get_active_policy` = `GetSandboxPolicyStatus`) never
 carries authored generic provider rules. Never infer success from
 `policy set --wait`. This applies to built-in and generic providers.
+Multi-host generic providers MUST confirm every declared upstream host/path
+before writing config or reporting success.
 
 See: `docs/architecture/providers.md` for the placeholder mechanism,
 substitution flow, reconciler walkthrough, and policy interaction.

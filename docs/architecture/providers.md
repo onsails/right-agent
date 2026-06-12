@@ -23,11 +23,11 @@ The feature is sandbox-only. `sandbox.mode = none` agents cannot
 receive provider env vars; the bot rejects `/providers` for them.
 
 Generic providers additionally require `network_policy: permissive`.
-Right authors OpenShell provider profiles for generic upstream hosts and
-relies on those profile endpoints being composed into the sandbox's
-outbound policy for placeholder substitution. Restrictive mode has not
-been validated for generic provider-profile composition and is rejected
-up-front.
+Right authors OpenShell provider profiles for generic upstream hosts
+(one L7 endpoint per host) and relies on those profile endpoints being
+composed into the sandbox's outbound policy for placeholder substitution.
+Restrictive mode has not been validated for generic provider-profile
+composition and is rejected up-front.
 `handle_provider_create` and `handle_provider_config_update` reject
 generic operations with `network_policy_forbids_generic` when the agent
 is in restrictive mode. Built-in providers are unaffected — they do not
@@ -68,6 +68,12 @@ only the meaningless `openshell:resolve:env:...` token leaks. (Empirically
 confirmed on a throwaway sandbox: the upstream cert was the real CA, not
 the per-sandbox OpenShell CA, and the placeholder was echoed back
 unchanged.)
+
+Static-key providers do not carry an auth style or header name in Right's
+generic config. Placeholder substitution is verbatim: the agent writes
+the auth header exactly as the API documents, using the injected env var
+placeholder (for example `Authorization: Key $FAL_KEY`), and OpenShell
+replaces only the placeholder token with the stored secret.
 
 **Substitution is keyed by env-var name, not by host.** The proxy
 resolves a placeholder on any TLS-terminated endpoint using the combined
@@ -127,6 +133,8 @@ upstream 401/CONNECT failures later.
 Generic provider create/config-update and supervisor reconciles use the
 stricter endpoint-aware variant, requiring the composed rule to contain the
 expected upstream host/path so a stale pre-update rule cannot pass.
+For multi-host generic providers, confirmation must cover every declared
+host/path pair before the config is considered active.
 
 ## State of truth split
 
@@ -321,12 +329,19 @@ before the reconciler attaches providers to agent sandboxes.
 profiles. The stable profile ID is derived from the gateway provider name
 with a sanitized slug plus hash suffix so two provider names that
 normalize to the same slug still get distinct profile IDs. Each profile
-contains the generic provider's L7 endpoint (`host`, port 443,
-`protocol: rest`, optional path prefix), credential env-var shape, and a
-`binaries` entry with `path: "**"`. Without the binary wildcard, OpenShell
-does not match sandbox commands to the provider profile and CONNECT can be
-blocked before placeholder substitution. Right imports these profiles
-before create/update and at `right up` for already-configured agents.
+contains one L7 endpoint per generic upstream host (`host`, port 443,
+`protocol: rest`, optional shared path prefix), credential env-var shape,
+and a `binaries` entry with `path: "**"`. Without the binary wildcard,
+OpenShell does not match sandbox commands to the provider profile and
+CONNECT can be blocked before placeholder substitution. Right imports
+these profiles before create/update and at `right up` for already-configured
+agents.
+
+**`right-fal`** is a built-in managed static-key profile for fal.ai. It uses
+`FAL_KEY` and covers fal's authenticated API hosts only:
+`fal.run`, `queue.fal.run`, and `rest.fal.ai`. Output-media CDN and upload
+targets are intentionally outside the profile until their credential and
+network behavior are verified.
 
 **Provider-profile purity.** Like all built-in providers, `right-github`
 relies on the gateway to contribute its endpoints to the effective sandbox
