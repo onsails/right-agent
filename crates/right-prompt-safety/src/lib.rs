@@ -2,7 +2,7 @@
 //!
 //! Phase 1 (write-side): `sanitize_memory_content` runs detection +
 //! escape on content before it enters Hindsight.
-//! Phase 2 (read-side): `wrap_memory_for_prompt` wraps the `## Memory`
+//! Phase 2 (read-side): `wrap_memory_for_prompt` wraps the `## Long-Term Memory`
 //! section in untrusted-content framing before system-prompt assembly.
 //! For shell-side wrapping (file mode in the prompt-assembly script),
 //! `memory_wrap_prefix` / `memory_wrap_suffix` / `escape_memory_close_delimiter`
@@ -52,7 +52,7 @@ pub fn sanitize_external_content(content: &str) -> SanitizedOutput {
 
 /// Wrap memory content for system-prompt injection. Empty input
 /// (or whitespace-only) returns empty output (caller skips emitting
-/// the `## Memory` section).
+/// the `## Long-Term Memory` section).
 pub fn wrap_memory_for_prompt(content: &str) -> String {
     if content.trim().is_empty() {
         return String::new();
