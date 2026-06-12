@@ -280,19 +280,62 @@ impl serde::Serialize for ProviderType {
     }
 }
 
-/// Generic-only fields.
+/// Generic-only fields. Multi-host; the agent writes the auth header itself,
+/// so no header/scheme field exists (inert for OpenShell static-cred injection).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "GenericProviderRaw")]
 pub struct GenericProvider {
     pub env_var: String,
-    #[serde(default = "default_header_name")]
-    pub header_name: String,
-    pub upstream_host: String,
+    pub upstream_hosts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_path_prefix: Option<String>,
 }
 
-fn default_header_name() -> String {
-    "Authorization".to_string()
+#[derive(Deserialize)]
+struct GenericProviderRaw {
+    env_var: String,
+    #[serde(default)]
+    upstream_host: Option<String>,
+    #[serde(default)]
+    upstream_hosts: Option<Vec<String>>,
+    #[serde(default)]
+    upstream_path_prefix: Option<String>,
+    #[serde(default, rename = "header_name")]
+    _legacy_header_name: Option<String>,
+}
+
+impl TryFrom<GenericProviderRaw> for GenericProvider {
+    type Error = String;
+
+    fn try_from(r: GenericProviderRaw) -> Result<Self, String> {
+        let mut hosts: Vec<String> = Vec::new();
+        if let Some(h) = r.upstream_host {
+            let h = h.trim();
+            if !h.is_empty() {
+                hosts.push(h.to_string());
+            }
+        }
+        if let Some(extra) = r.upstream_hosts {
+            hosts.extend(extra.into_iter().filter_map(|h| {
+                let h = h.trim();
+                if h.is_empty() {
+                    None
+                } else {
+                    Some(h.to_string())
+                }
+            }));
+        }
+        let mut seen = std::collections::HashSet::new();
+        hosts.retain(|h| seen.insert(h.clone()));
+        if hosts.is_empty() {
+            return Err("generic provider requires at least one upstream host".into());
+        }
+        Ok(GenericProvider {
+            env_var: r.env_var,
+            upstream_hosts: hosts,
+            upstream_path_prefix: r.upstream_path_prefix,
+        })
+    }
 }
 
 /// One provider attached to an agent's sandbox.
@@ -931,9 +974,68 @@ prefilter_enabled: false
         assert_eq!(entry.label.as_deref(), Some("acme"));
         let g = entry.generic.as_ref().unwrap();
         assert_eq!(g.env_var, "ACME_TOKEN");
-        assert_eq!(g.header_name, "X-Acme-Token");
-        assert_eq!(g.upstream_host, "api.acme.com");
+        assert_eq!(g.upstream_hosts, vec!["api.acme.com".to_string()]);
         assert_eq!(g.upstream_path_prefix.as_deref(), Some("/v1"));
+    }
+
+    #[test]
+    fn generic_provider_deserializes_legacy_single_host_and_ignores_header_name() {
+        let yaml = "env_var: ACME_TOKEN\nheader_name: X-Acme-Token\nupstream_host: api.acme.com\nupstream_path_prefix: /v1\n";
+        let g: GenericProvider = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(g.env_var, "ACME_TOKEN");
+        assert_eq!(g.upstream_hosts, vec!["api.acme.com".to_string()]);
+        assert_eq!(g.upstream_path_prefix.as_deref(), Some("/v1"));
+    }
+
+    #[test]
+    fn generic_provider_deserializes_multi_host_and_dedups() {
+        let yaml =
+            "env_var: FAL_KEY\nupstream_hosts:\n  - fal.run\n  - queue.fal.run\n  - fal.run\n";
+        let g: GenericProvider = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(
+            g.upstream_hosts,
+            vec!["fal.run".to_string(), "queue.fal.run".to_string()]
+        );
+    }
+
+    #[test]
+    fn generic_provider_trims_hosts_before_deduping() {
+        let yaml = "env_var: FAL_KEY\nupstream_host: ' fal.run '\nupstream_hosts:\n  - ' '\n  - 'queue.fal.run '\n  - ' fal.run'\n  - ''\n";
+        let g: GenericProvider = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(
+            g.upstream_hosts,
+            vec!["fal.run".to_string(), "queue.fal.run".to_string()]
+        );
+    }
+
+    #[test]
+    fn generic_provider_merges_legacy_and_new_host_fields() {
+        let yaml = "env_var: K\nupstream_host: a.example.com\nupstream_hosts:\n  - b.example.com\n";
+        let g: GenericProvider = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(
+            g.upstream_hosts,
+            vec!["a.example.com".to_string(), "b.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn generic_provider_rejects_zero_hosts() {
+        let yaml = "env_var: K\n";
+        assert!(serde_saphyr::from_str::<GenericProvider>(yaml).is_err());
+    }
+
+    #[test]
+    fn generic_provider_roundtrips_to_upstream_hosts() {
+        let g = GenericProvider {
+            env_var: "K".into(),
+            upstream_hosts: vec!["a.example.com".into()],
+            upstream_path_prefix: None,
+        };
+        let s = serde_saphyr::to_string(&g).unwrap();
+        let roundtripped: GenericProvider = serde_saphyr::from_str(&s).unwrap();
+        assert_eq!(roundtripped, g);
+        assert!(s.contains("upstream_hosts"));
+        assert!(!s.contains("header_name"));
     }
 
     #[test]
