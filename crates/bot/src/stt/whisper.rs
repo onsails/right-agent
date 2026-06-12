@@ -20,13 +20,23 @@ impl WhisperEngine {
         }
     }
 
+    /// Cheap precondition: the model file must exist before we spend an
+    /// ffmpeg decode. Lets callers fail fast with `ModelMissing` (→ "run
+    /// right up") instead of surfacing an unrelated ffmpeg error when the
+    /// model was never downloaded. Once a context is cached the model has
+    /// already loaded, so a later on-disk deletion does not block inference.
+    pub(crate) fn ensure_model_present(&self) -> Result<(), SttError> {
+        if self.ctx.get().is_none() && !self.model_path.exists() {
+            return Err(SttError::ModelMissing(self.model_path.clone()));
+        }
+        Ok(())
+    }
+
     fn ensure_ctx(&self) -> Result<Arc<Mutex<WhisperContext>>, SttError> {
         if let Some(c) = self.ctx.get() {
             return Ok(c.clone());
         }
-        if !self.model_path.exists() {
-            return Err(SttError::ModelMissing(self.model_path.clone()));
-        }
+        self.ensure_model_present()?;
         let ctx =
             WhisperContext::new_with_params(&self.model_path, WhisperContextParameters::default())
                 .map_err(|e| SttError::WhisperLoadFailed(format!("{e}")))?;
