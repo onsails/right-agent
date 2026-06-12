@@ -494,6 +494,20 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "DO NOT CALL in stdio mode — thread_focus_set requires foreground HTTP aggregator scope. This stub exists only so the schema matches the HTTP server's tool list; every call returns conversation_scope_unavailable."
+    )]
+    async fn thread_focus_set(
+        &self,
+        Parameters(_params): Parameters<crate::right_backend::ThreadFocusSetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(tool_error(
+            "conversation_scope_unavailable",
+            "thread_focus_set requires foreground HTTP aggregator context",
+            None,
+        ))
+    }
+
+    #[tool(
         description = "DO NOT CALL — stdio mode cannot route progress to Telegram. This stub exists only so the schema matches the HTTP server's tool list; every call returns progress_unavailable and wastes budget. Reachable only when the agent is talking to this server directly (no aggregator). Available in HTTP mode for the current foreground Telegram invocation only (max 2000 characters)."
     )]
     async fn send_progress(
@@ -614,6 +628,8 @@ impl rmcp::ServerHandler for MemoryServer {
                  - mcp__right__forum_topic_close / mcp__right__forum_topic_reopen: Archive / restore a topic (reversible; never deletes).\n\
                  - mcp__right__forum_topic_list: List topics this agent tracks in the CURRENT chat only (server-scoped).\n\
                  You cannot delete topics. Requires the bot's 'Manage Topics' admin right; errors surface as forum_op_failed with an actionable message. DO NOT call in stdio mode — these require the HTTP aggregator scope.\n\n\
+                 ## Conversation Focus\n\
+                 - mcp__right__thread_focus_set: Set your standing focus for the CURRENT conversation; shown to you every future turn here. Empty string clears it. Scope is server-enforced. DO NOT call in stdio mode — requires the HTTP aggregator scope.\n\n\
                  ## Providers\n\
                  - mcp__right__provider_capabilities: List attached providers, including env-var placeholder names only, allowed binaries, and valid hosts. On provider 401/403, call this before concluding the credential is invalid.\n\
                  DO NOT call in stdio mode because provider capabilities require HTTP aggregator + sandbox gateway.\n\n\
@@ -820,6 +836,10 @@ mod tests {
             "stdio instructions should include provider_capabilities inventory: {instructions}"
         );
         assert!(
+            instructions.contains("mcp__right__thread_focus_set"),
+            "stdio instructions should include thread_focus_set inventory: {instructions}"
+        );
+        assert!(
             instructions.contains("env-var placeholder names only"),
             "stdio instructions should clarify provider_capabilities returns env var names only: {instructions}"
         );
@@ -840,6 +860,10 @@ mod tests {
                 .iter()
                 .any(|name| name == "provider_capabilities"),
             "stdio tool list should expose provider_capabilities when instructions advertise it: {tool_names:?}"
+        );
+        assert!(
+            tool_names.iter().any(|name| name == "thread_focus_set"),
+            "stdio tool list should expose thread_focus_set when instructions advertise it: {tool_names:?}"
         );
     }
 }
