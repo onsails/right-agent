@@ -145,8 +145,10 @@ paths because their `## Current Conversation` block is session-scoped; other
 session-bearing composite callers may omit chat context and use their existing
 prompt paths. The system prompt contains only stable/base prompt content, mode
 instructions, identity files, TOOLS, optional foreground-worker chat context,
-MCP instructions, and file-mode `MEMORY.md`; Hindsight recall, memory-status
-markers, and repair notices MUST be prepended to stdin/user message instead.
+MCP instructions, optional foreground-worker operator focus, and file-mode
+`MEMORY.md`. Hindsight recall, agent-saved focus, memory-status markers, and
+repair notices MUST be prepended to stdin/user message instead; agent-saved
+focus is sanitized and externally wrapped, not system prompt content.
 
 The per-turn skill-learning pipeline (anchor capture → Haiku prefilter →
 probe-writer fork → periodic curator) replaces the prior fork-probe
@@ -563,7 +565,7 @@ Rules:
   OpenShell policy is the security layer, not CC's permission system.
 - **Prompt-injection defense**: `ironclaw_safety::Sanitizer` runs on
   memory writes (Hindsight retain path) and `wrap_external_content`
-  frames the `## Memory` section as untrusted data on read. Phase-2 wrap
+  frames the `## Long-Term Memory` section as untrusted data on read. Phase-2 wrap
   is the primary defense; phase-1 sanitize is hygiene. See
   `docs/architecture/memory.md`.
 - **Chat ID allowlist**: Empty = block all (secure default); per-agent

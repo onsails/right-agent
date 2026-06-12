@@ -94,7 +94,10 @@ session UUID matches CC's own JSONL filename. Off by default.
 ## MCP Server Instructions  (if any external MCP servers have instructions)
 {fetched from aggregator via POST /mcp-instructions at prompt assembly time}
 
-## Memory  (file mode only)
+## {Topic|Group|Chat} Focus  (foreground worker only, if set by operator)
+{standing operator focus for the current conversation}
+
+## Long-Term Memory  (file mode only)
 {MEMORY.md content, truncated to 200 lines and ironclaw-wrapped as untrusted
  external content.}
 ```
@@ -103,19 +106,22 @@ Missing agent-owned files are silently skipped. Operating instructions and boots
 content are compiled into the binary — no file sync needed. MCP instructions are
 fetched from the aggregator's internal API (non-fatal if unavailable). In file
 mode, `MEMORY.md` is inlined into the system prompt. The `## Current
-Conversation` block is present only when the caller supplies chat context; today
-that is the foreground Telegram worker. In Hindsight mode, auto-recall is not
-part of the system prompt; it is prepended to the stdin user message by
-`build_volatile_prefix()` under the recalled-memory label and ironclaw wrap.
+Conversation` and `## {Topic|Group|Chat} Focus` blocks are foreground-worker-only
+and supplied by the foreground Telegram worker. Operator focus is placed after
+MCP instructions and before file-mode `MEMORY.md`. In Hindsight mode,
+auto-recall is not part of the system prompt. `build_volatile_prefix()`
+prepends Hindsight recall and agent-set thread focus to stdin; recall uses the
+recalled-memory label and ironclaw wrap, and thread focus is sanitized via
+`sanitize_external_content` and wrapped by `wrap_external("thread_focus", ...)`.
 Each recalled memory is rendered as `- [observed <date>] <text>` (date =
 `occurred_start` else `mentioned_at`, `YYYY-MM-DD`; no date → bare bullet).
 Operating instructions direct the agent to re-verify any dated fact with a live
 check before asserting it as current.
 
-The volatile stdin prefix is omitted when empty. It may contain Hindsight recall
-(wrapped as untrusted external content), an edge-triggered `<memory-status>`
-marker, and a one-shot repair notice as `<system-notification>`. These blocks
-are current-turn context, not durable system prompt content.
+The volatile stdin prefix is omitted when empty. It may also contain an
+edge-triggered `<memory-status>` marker and a one-shot repair notice as
+`<system-notification>`. These blocks are current-turn context, not durable
+system prompt content.
 
 Operating instructions include a `### Subagents` section that teaches use of the
 built-in Claude Code `Agent` tool for bounded independent workstreams. It makes
