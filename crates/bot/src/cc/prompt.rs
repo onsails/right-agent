@@ -141,7 +141,6 @@ pub(crate) fn format_chat_context_block(input: &ChatContextInput) -> String {
 /// Render the operator-set focus section for the system prompt. `label` is the
 /// chat-kind word ("Topic", "Group", or "Chat"). Trusted content (operator via
 /// dashboard) — no untrusted wrapper. Pure; stable input -> stable output.
-#[allow(dead_code)]
 pub(crate) fn format_operator_focus_block(label: &str, operator_focus: &str) -> String {
     format!(
         "## {label} Focus\nStanding focus for THIS conversation, set by the operator — \

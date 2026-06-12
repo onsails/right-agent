@@ -14,6 +14,13 @@ use serde::Deserialize;
 use super::mcp::parse_json_body;
 use super::{DashboardState, authenticate_api, json_error};
 
+/// Upper bound on operator-set focus length. Operator focus is injected
+/// verbatim and unwrapped into the system prompt on every foreground turn, so
+/// an unbounded value would inflate the cached prompt indefinitely. Kept more
+/// generous than the agent's self-set cap (`THREAD_FOCUS_MAX_CHARS` = 2000) but
+/// still bounded.
+pub(super) const OPERATOR_FOCUS_MAX_CHARS: usize = 4000;
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct FocusScopeQuery {
     pub chat_id: i64,
@@ -51,7 +58,7 @@ pub(crate) async fn handle_get(
             Some("invalid conversation focus scope"),
         );
     }
-    let conn = match right_db::open_connection(&state.agent_dir, false).await {
+    let conn = match right_db::open_connection_readonly(&state.agent_dir).await {
         Ok(conn) => conn,
         Err(error) => {
             tracing::error!(agent = %state.agent_name, "focus get: open db failed: {error:#}");
@@ -104,6 +111,19 @@ pub(crate) async fn handle_update(
             Some("invalid conversation focus scope"),
         );
     }
+    let trimmed = req.operator_focus.trim();
+    if trimmed.chars().count() > OPERATOR_FOCUS_MAX_CHARS {
+        return json_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "focus_too_long",
+            Some("conversation focus is too long"),
+        );
+    }
+    let value = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    };
     let conn = match right_db::open_connection(&state.agent_dir, false).await {
         Ok(conn) => conn,
         Err(error) => {
@@ -114,12 +134,6 @@ pub(crate) async fn handle_update(
                 Some("failed to open database"),
             );
         }
-    };
-    let trimmed = req.operator_focus.trim();
-    let value = if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
     };
     if let Err(error) =
         right_db::thread_focus::set_operator(&conn, req.chat_id, req.thread_id, value).await
