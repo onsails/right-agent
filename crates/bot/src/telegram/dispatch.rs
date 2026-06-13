@@ -42,7 +42,7 @@ use super::worker::{DebounceMsg, SessionKey};
 #[command(rename_rule = "lowercase")]
 enum BotCommand {
     #[command(description = "Start interacting with this agent")]
-    Start,
+    Start(String),
     #[command(description = "Start a new conversation")]
     New(String),
     #[command(description = "List all sessions")]
@@ -537,7 +537,7 @@ fn build_dispatcher(
     // Dispatch schema (RESEARCH.md Pattern 1)
     let command_handler = dptree::entry()
         .filter_command::<BotCommand>()
-        .branch(dptree::case![BotCommand::Start].endpoint(handle_start))
+        .branch(dptree::case![BotCommand::Start(payload)].endpoint(handle_start))
         .branch(dptree::case![BotCommand::New(name)].endpoint(handle_new))
         .branch(dptree::case![BotCommand::List].endpoint(handle_list))
         .branch(dptree::case![BotCommand::Switch(uuid)].endpoint(handle_switch))

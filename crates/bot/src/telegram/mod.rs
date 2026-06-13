@@ -9,6 +9,7 @@ pub(crate) mod debug_command;
 pub mod dispatch;
 pub(crate) mod error_details;
 pub mod filter;
+pub(crate) mod focus_deeplink;
 pub mod handler;
 pub(crate) mod idle;
 pub mod markdown;

@@ -41,8 +41,27 @@ MCP tool, dashboard view, and the in-prompt section label all say "focus".
 - **Launch context is not in `initData`.** A Telegram Mini App opened from an
   inline `web_app` button does not receive `chat_id`/`thread_id` in the signed
   `initData`. The bot knows the scope at send time and embeds it in the button
-  URL. Inline `web_app` buttons work in groups and topics, not only DMs — the
-  `is_private_chat` gate on `/mcp` is a policy choice, not a Telegram limit.
+  URL.
+- **CORRECTION (2026-06-14): inline `web_app` buttons are private-chat-only.**
+  The original claim here — that inline `web_app` buttons work in groups/topics
+  and the `is_private_chat` gate on `/mcp` is "a policy choice, not a Telegram
+  limit" — was wrong and unverified. Telegram rejects inline `web_app` buttons
+  outside private chats with `BUTTON_TYPE_INVALID`, so the as-shipped
+  `/set_focus` silently failed in every group/topic (`send.await?` errored, no
+  message delivered). The gate on `/mcp` is a real Telegram limit. Fix: in a
+  group/topic `/set_focus` sends a `t.me/<bot>?start=f<chat_id>_<thread_id>`
+  deep-link `url` button (allowed in groups); tapping it opens the DM and
+  `/start <payload>` re-emits the real `web_app` button scoped to the original
+  conversation. See `crates/bot/src/telegram/focus_deeplink.rs`.
+  - **Why the DM bounce and not a direct-link Mini App (`startapp`)?** A single-tap
+    `t.me/<bot>/<app>?startapp=` would open the Mini App in place, but it requires
+    registering a named Mini App per bot in BotFather — not automatable via the
+    Bot API, so it violates the platform's no-manual-steps / self-healing /
+    upgrade-without-recreation rules. The `/start` bounce reuses only standard
+    Bot API primitives. Telegram delivers `/start <payload>` even to bots the user
+    already started ([core.telegram.org/api/links](https://core.telegram.org/api/links):
+    the Start button appears "even if the user has already started the bot"); on
+    desktop clients it costs one button tap.
 - **Auth pattern exists.** Dashboard routes authenticate via
   `Authorization: tma <initData>` → HMAC-SHA256 validation
   (`crates/right-dashboard/src/auth.rs::validate_init_data`) → allowlist check
@@ -103,6 +122,11 @@ single statement, no transaction. Empty string normalizes to `NULL` (clear).
 Tests in `thread_focus_tests.rs`.
 
 ## Surface 1 — `/set_focus` command (launcher)
+
+> **Superseded (2026-06-14):** the design below (no `is_private_chat` gate, inline
+> `web_app` button in any chat) does not work in groups/topics — see the
+> CORRECTION in Background. DM keeps the inline `web_app` button; groups/topics
+> send a `t.me/<bot>?start=…` deep-link button that bounces through `/start`.
 
 New handler in `crates/bot/src/telegram/handler.rs`, mirroring `handle_mcp`,
 with two differences:
