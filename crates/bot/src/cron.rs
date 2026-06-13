@@ -187,6 +187,26 @@ fn effective_lock_ttl(spec: &CronSpec) -> &str {
     }
 }
 
+/// Compose a triggered run's prompt: force-notify notice, then this-run-only
+/// extra instruction, then the stored prompt. Each layer is optional.
+fn compose_run_prompt(prompt: &str, force_notify: bool, extra_instruction: Option<&str>) -> String {
+    let mut out = String::new();
+    if force_notify {
+        out.push_str(
+            "⟨⟨SYSTEM_NOTICE⟩⟩ Manual verification trigger: always emit \
+             delivery.kind=\"notify\" with a complete report of what you found; \
+             do not go silent. ⟨⟨/SYSTEM_NOTICE⟩⟩\n\n",
+        );
+    }
+    if let Some(extra) = extra_instruction.filter(|s| !s.trim().is_empty()) {
+        out.push_str(&format!(
+            "⟨⟨SYSTEM_NOTICE⟩⟩ Extra instruction for this run only: {extra} ⟨⟨/SYSTEM_NOTICE⟩⟩\n\n"
+        ));
+    }
+    out.push_str(prompt);
+    out
+}
+
 /// Delete old cron log files for a job, keeping the most recent `keep` files.
 async fn cleanup_old_logs(
     job_name: &str,
@@ -601,16 +621,11 @@ async fn execute_job(
         )
     };
 
-    let prompt_for_cc = if spec.trigger_force_notify {
-        format!(
-            "⟨⟨SYSTEM_NOTICE⟩⟩ Manual verification trigger: always emit \
-             delivery.kind=\"notify\" with a complete report of what you found; \
-             do not go silent. ⟨⟨/SYSTEM_NOTICE⟩⟩\n\n{}",
-            spec.prompt
-        )
-    } else {
-        spec.prompt.clone()
-    };
+    let prompt_for_cc = compose_run_prompt(
+        &spec.prompt,
+        spec.trigger_force_notify,
+        spec.trigger_extra_instruction.as_deref(),
+    );
 
     let invocation = crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: Some(mcp_path),
@@ -2384,6 +2399,22 @@ mod tests {
     }
 
     #[test]
+    fn compose_run_prompt_orders_force_notify_then_extra_then_prompt() {
+        let p = compose_run_prompt("BODY", true, Some("focus on X"));
+        let fn_idx = p.find("Manual verification trigger").unwrap();
+        let extra_idx = p.find("focus on X").unwrap();
+        let body_idx = p.find("BODY").unwrap();
+        assert!(fn_idx < extra_idx && extra_idx < body_idx);
+
+        // No force-notify, no extra -> body unchanged.
+        assert_eq!(compose_run_prompt("BODY", false, None), "BODY");
+
+        // Extra only.
+        let e = compose_run_prompt("BODY", false, Some("X"));
+        assert!(e.contains("X") && e.ends_with("BODY"));
+    }
+
+    #[test]
     fn test_to_7field_step() {
         assert_eq!(to_7field("*/5 * * * *"), "0 */5 * * * * *");
     }
@@ -2460,6 +2491,10 @@ mod tests {
             target_chat_id: None,
             target_thread_id: None,
             model: None,
+            trigger_extra_instruction: None,
+            then: None,
+            trigger_origin_chat_id: None,
+            trigger_origin_thread_id: None,
         };
         let recurring = CronSpec {
             schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
@@ -2667,6 +2702,10 @@ mod tests {
             target_chat_id: Some(-100),
             target_thread_id: Some(3),
             model: None,
+            trigger_extra_instruction: None,
+            then: None,
+            trigger_origin_chat_id: None,
+            trigger_origin_thread_id: None,
         };
         insert_running_run(
             &conn,
@@ -2723,6 +2762,10 @@ mod tests {
             target_chat_id: Some(-100),
             target_thread_id: None,
             model: None,
+            trigger_extra_instruction: None,
+            then: None,
+            trigger_origin_chat_id: None,
+            trigger_origin_thread_id: None,
         };
         insert_running_run(
             &conn,
@@ -2776,7 +2819,7 @@ mod tests {
         )
         .await
         .unwrap();
-        right_agent::cron_spec::trigger_spec(&conn, "trig-test", false)
+        right_agent::cron_spec::trigger_spec(&conn, "trig-test", false, None, None, None, None)
             .await
             .unwrap();
 
@@ -2797,7 +2840,7 @@ mod tests {
         right_agent::cron_spec::create_spec(&conn, "clr-test", "*/5 * * * *", "test", None, None)
             .await
             .unwrap();
-        right_agent::cron_spec::trigger_spec(&conn, "clr-test", false)
+        right_agent::cron_spec::trigger_spec(&conn, "clr-test", false, None, None, None, None)
             .await
             .unwrap();
         right_agent::cron_spec::clear_triggered_at(&conn, "clr-test")
@@ -3045,6 +3088,10 @@ mod target_snapshot_tests {
             target_chat_id: Some(-777),
             target_thread_id: Some(13),
             model: None,
+            trigger_extra_instruction: None,
+            then: None,
+            trigger_origin_chat_id: None,
+            trigger_origin_thread_id: None,
         };
         insert_running_run(
             &conn,
@@ -3081,6 +3128,10 @@ mod target_snapshot_tests {
             target_chat_id: None,
             target_thread_id: None,
             model: None,
+            trigger_extra_instruction: None,
+            then: None,
+            trigger_origin_chat_id: None,
+            trigger_origin_thread_id: None,
         };
         insert_running_run(
             &conn,
@@ -3117,6 +3168,10 @@ mod target_snapshot_tests {
             target_chat_id: Some(-777),
             target_thread_id: Some(13),
             model: None,
+            trigger_extra_instruction: None,
+            then: None,
+            trigger_origin_chat_id: None,
+            trigger_origin_thread_id: None,
         };
         insert_running_run(
             &conn,
@@ -3162,6 +3217,10 @@ mod target_snapshot_tests {
             target_chat_id: None,
             target_thread_id: None,
             model: None,
+            trigger_extra_instruction: None,
+            then: None,
+            trigger_origin_chat_id: None,
+            trigger_origin_thread_id: None,
         };
         insert_running_run(
             &conn,
@@ -3416,6 +3475,10 @@ sleep 120"#;
             target_chat_id: None,
             target_thread_id: None,
             model: Some("haiku".into()),
+            trigger_extra_instruction: None,
+            then: None,
+            trigger_origin_chat_id: None,
+            trigger_origin_thread_id: None,
         };
         assert_eq!(
             resolve_cron_model(&spec_with, &global).as_deref(),
