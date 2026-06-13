@@ -621,7 +621,8 @@ impl rmcp::ServerHandler for MemoryServer {
                  ## Memory Routing\n\
                  When the user says \"remember\", \"save this\", or \"don't forget\", treat it as persistence intent and use the /right-memory skill to classify the correct target before calling mcp__right__memory_retain or editing files. mcp__right__memory_retain is only for residual durable context after /right-memory routing chooses memory as the fallback target.\n\n\
                  ## Progress\n\
-                 - mcp__right__send_progress: Foreground-only progress messages (max 2000 characters). DO NOT call in stdio mode — always returns progress_unavailable and wastes budget. Available only when routed via the HTTP aggregator.\n\n\
+                 - mcp__right__send_progress: Foreground-only progress messages (max 2000 characters). DO NOT call in stdio mode — always returns progress_unavailable and wastes budget. Available only when routed via the HTTP aggregator.\n\
+                 - mcp__right__send_message: Send a standalone Telegram message (text and/or attachments such as photo+caption or document) for the current foreground invocation only. Call once per message to deliver several messages in a turn (e.g. multiple posts); attachment paths must be under /sandbox/outbox/. Max 20 calls per turn. After sending, the terminal reply may be content:null. Foreground-only — DO NOT call in stdio mode.\n\n\
                  ## Forum Topics (forum supergroups only)\n\
                  - mcp__right__forum_topic_create: Create a topic in the current group; returns its message_thread_id.\n\
                  - mcp__right__forum_topic_edit: Rename / re-icon a topic by message_thread_id.\n\

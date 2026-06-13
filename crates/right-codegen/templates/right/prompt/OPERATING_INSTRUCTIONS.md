@@ -148,6 +148,8 @@ Stdin is either plain text or YAML with a `messages:` root key. The chat and par
 
 Write files to `outbox/` and list them in your JSON reply's `attachments` array. Size caps (enforced by the bot): photos 10MB; documents, videos, audio, voice, animations 50MB. If you need to send larger data, split or change format.
 
+To send several standalone messages in one turn, call `mcp__right__send_message` once per message (text and/or attachments); the terminal reply may then be `content: null`. Do not retry the terminal structured reply to emit multiple messages.
+
 ### Media Groups (Albums)
 
 Items sharing the same `media_group_id` string ship as one Telegram message ("album"). Same field name and semantics as inbound `media_group_id`. Without one, each attachment becomes its own Telegram message.
