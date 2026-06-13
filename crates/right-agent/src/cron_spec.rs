@@ -171,6 +171,14 @@ pub struct CronSpec {
     /// agent's global `/model` at fire time. Config (not transient state) — see
     /// `PartialEq` below.
     pub model: Option<String>,
+    /// Ephemeral, set only for a triggered run; not config — excluded from
+    /// `PartialEq` like `triggered_at`/`trigger_force_notify`. Adding any of
+    /// these four fields to the `PartialEq` impl below would make the reconciler
+    /// abort running jobs on every trigger.
+    pub trigger_extra_instruction: Option<String>,
+    pub then: Option<ThenSpec>,
+    pub trigger_origin_chat_id: Option<i64>,
+    pub trigger_origin_thread_id: Option<i64>,
 }
 
 /// Compare only the spec fields that define the job configuration.
@@ -180,6 +188,9 @@ pub struct CronSpec {
 /// differs from the DB snapshot.
 /// `target_chat_id` and `target_thread_id` ARE config: changing them via
 /// `cron_update` is a real change the reconciler must react to.
+/// The four transient trigger fields (`trigger_extra_instruction`, `then`,
+/// `trigger_origin_chat_id`, `trigger_origin_thread_id`) are deliberately
+/// excluded here, same as `triggered_at`/`trigger_force_notify`.
 impl PartialEq for CronSpec {
     fn eq(&self, other: &Self) -> bool {
         self.schedule_kind == other.schedule_kind
@@ -825,6 +836,10 @@ pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, Cro
                 target_chat_id,
                 target_thread_id,
                 model,
+                trigger_extra_instruction: None,
+                then: None,
+                trigger_origin_chat_id: None,
+                trigger_origin_thread_id: None,
             },
         );
     }

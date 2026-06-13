@@ -624,6 +624,10 @@ async fn triggered_at_does_not_affect_equality() {
         target_chat_id: None,
         target_thread_id: None,
         model: None,
+        trigger_extra_instruction: None,
+        then: None,
+        trigger_origin_chat_id: None,
+        trigger_origin_thread_id: None,
     };
     let triggered = CronSpec {
         triggered_at: Some("2026-04-15T12:00:00Z".into()),
@@ -644,6 +648,10 @@ async fn spec_equality_detects_real_changes() {
         target_chat_id: None,
         target_thread_id: None,
         model: None,
+        trigger_extra_instruction: None,
+        then: None,
+        trigger_origin_chat_id: None,
+        trigger_origin_thread_id: None,
     };
     let changed_schedule = CronSpec {
         schedule_kind: ScheduleKind::Recurring("*/10 * * * *".into()),
@@ -1829,6 +1837,10 @@ fn cron_spec_eq_reacts_to_model_change() {
         target_chat_id: None,
         target_thread_id: None,
         model: Some("sonnet".into()),
+        trigger_extra_instruction: None,
+        then: None,
+        trigger_origin_chat_id: None,
+        trigger_origin_thread_id: None,
     };
     let mut other = base.clone();
     assert_eq!(base, other);
@@ -1864,4 +1876,37 @@ fn then_spec_roundtrips_and_run_on_is_required() {
     let parsed: ThenSpec = serde_json::from_str(minimal).unwrap();
     assert!(!parsed.notify);
     assert_eq!(parsed.target_chat_id, None);
+}
+
+#[test]
+fn cron_spec_eq_ignores_transient_trigger_fields() {
+    use crate::cron_spec::{CronSpec, RunOn, ScheduleKind, ThenSpec};
+
+    let base = CronSpec {
+        schedule_kind: ScheduleKind::Recurring("17 9 * * *".into()),
+        prompt: "p".into(),
+        lock_ttl: None,
+        max_budget_usd: 2.0,
+        triggered_at: None,
+        trigger_force_notify: false,
+        target_chat_id: Some(1),
+        target_thread_id: None,
+        model: None,
+        trigger_extra_instruction: None,
+        then: None,
+        trigger_origin_chat_id: None,
+        trigger_origin_thread_id: None,
+    };
+    let mut triggered = base.clone();
+    triggered.trigger_extra_instruction = Some("focus on X".into());
+    triggered.then = Some(ThenSpec {
+        instruction: "go".into(),
+        run_on: RunOn::Success,
+        notify: false,
+        target_chat_id: None,
+        target_thread_id: None,
+    });
+    triggered.trigger_origin_chat_id = Some(99);
+    // Transient trigger state must NOT affect equality (reconciler relies on this).
+    assert_eq!(base, triggered);
 }
