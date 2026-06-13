@@ -961,3 +961,87 @@ async fn update_referenced_profile_restores_prior_and_reattaches_on_import_failu
         "detached attachment must be re-attached on rollback"
     );
 }
+
+#[tokio::test]
+async fn update_referenced_profile_reattaches_on_midloop_detach_failure() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::managed_profiles::author_generic_profile;
+    use crate::providers::{ProfileAttachment, update_referenced_profile};
+
+    // Multi-attachment (the built-in shared-profile path): the first detach
+    // succeeds, a later one fails non-NotFound. The already-detached sandbox MUST
+    // be re-attached before the error propagates — a mid-loop bail cannot leave a
+    // sandbox detached. delete/import must never run (we bailed in step 1).
+    let detach_calls = Arc::new(AtomicUsize::new(0));
+    let attach_calls = Arc::new(AtomicUsize::new(0));
+    let delete_calls = Arc::new(AtomicUsize::new(0));
+    let detach_c = Arc::clone(&detach_calls);
+    let attach_c = Arc::clone(&attach_calls);
+    let delete_c = Arc::clone(&delete_calls);
+    let stored = author_generic_profile("right-shared", &["api.acme.com".into()], None, "KEY");
+
+    let mock = MockOpenShell {
+        mock_get_provider_profile: Some(Box::new(move |_| {
+            Ok(proto_v1::ProviderProfileResponse {
+                profile: Some(stored.clone()),
+            })
+        })),
+        mock_detach_sandbox_provider: Some(Box::new(move |_| {
+            let n = detach_c.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(proto_v1::DetachSandboxProviderResponse::default())
+            } else {
+                Err(tonic::Status::internal("detach boom"))
+            }
+        })),
+        mock_delete_provider_profile: Some(Box::new(move |_| {
+            delete_c.fetch_add(1, Ordering::SeqCst);
+            Ok(proto_v1::DeleteProviderProfileResponse { deleted: true })
+        })),
+        mock_attach_sandbox_provider: Some(Box::new(move |_| {
+            attach_c.fetch_add(1, Ordering::SeqCst);
+            Ok(proto_v1::AttachSandboxProviderResponse::default())
+        })),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    let desired = author_generic_profile(
+        "right-shared",
+        &["api.acme.com".into(), "api2.acme.com".into()],
+        None,
+        "KEY",
+    );
+    let atts = vec![
+        ProfileAttachment {
+            sandbox_name: "sbx-a".into(),
+            provider_name: "prov".into(),
+        },
+        ProfileAttachment {
+            sandbox_name: "sbx-b".into(),
+            provider_name: "prov".into(),
+        },
+    ];
+    let err = update_referenced_profile(&mut client, &atts, desired)
+        .await
+        .unwrap_err();
+
+    assert!(format!("{err:#}").contains("detach boom"), "got {err:#}");
+    assert_eq!(
+        detach_calls.load(Ordering::SeqCst),
+        2,
+        "both detaches attempted"
+    );
+    assert_eq!(
+        delete_calls.load(Ordering::SeqCst),
+        0,
+        "delete must not run after a detach failure"
+    );
+    assert_eq!(
+        attach_calls.load(Ordering::SeqCst),
+        1,
+        "the first (successful) detach must be re-attached on bailout"
+    );
+}

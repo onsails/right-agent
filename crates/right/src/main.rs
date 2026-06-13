@@ -3113,7 +3113,12 @@ fn managed_profile_attachments(
         let Some(sandbox) = cfg.sandbox.as_ref() else {
             continue;
         };
-        let sandbox_name = sandbox.name.clone().unwrap_or_else(|| agent_name.clone());
+        // Match the creation convention (`rightclaw-<agent>` when no explicit
+        // name) and the supervisor's resolved name — a bare `<agent>` fallback
+        // would target a non-existent sandbox, so the heal's delete would hit the
+        // real sandbox's still-referenced profile and re-trigger the abort.
+        let sandbox_name =
+            right_openshell::openshell::resolve_sandbox_name(agent_name, sandbox.name.as_deref());
         for entry in cfg.providers() {
             let profile_id = match &entry.type_ {
                 right_agent_config::ProviderType::Generic => {
@@ -5351,9 +5356,10 @@ mod tests {
     use super::{
         ConfigCommands, MemoryCommands, build_agent_ssh_command, cleanup_failed_restore_agent_dir,
         copy_agent_backup_config_files, copy_agent_restore_config_files,
-        copy_database_snapshot_for_restore, generic_provider_profiles, remove_database_sidecars,
-        resolve_agent_db, resolve_restored_policy_path, restored_mcp_auth_method, truncate_content,
-        write_bootstrap_right_mcp_policy, write_managed_settings,
+        copy_database_snapshot_for_restore, generic_provider_profiles, managed_profile_attachments,
+        remove_database_sidecars, resolve_agent_db, resolve_restored_policy_path,
+        restored_mcp_auth_method, truncate_content, write_bootstrap_right_mcp_policy,
+        write_managed_settings,
     };
     use right_agent_config::{
         AgentConfig, GenericProvider, ProviderEntry, ProviderType, SandboxConfig, SandboxMode,
@@ -5398,6 +5404,20 @@ mod tests {
             profiles[0].id(),
             right_openshell::managed_profiles::generic_provider_profile_id("right-acme")
         );
+    }
+
+    #[test]
+    fn managed_profile_attachments_resolves_unnamed_sandbox_to_creation_convention() {
+        // sandbox.name = None must resolve to `rightclaw-<agent>` (the creation
+        // convention) — a bare `<agent>` would target a non-existent sandbox, so
+        // the heal's delete would hit the real sandbox's still-referenced profile.
+        let config = config_with_provider(generic_provider("right-acme"));
+        let map = managed_profile_attachments(&[("agent-a".to_string(), config)]);
+        let id = right_openshell::managed_profiles::generic_provider_profile_id("right-acme");
+        let atts = map.get(&id).expect("attachment for the generic profile");
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].sandbox_name, "rightclaw-agent-a");
+        assert_eq!(atts[0].provider_name, "right-acme");
     }
 
     #[test]
