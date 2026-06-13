@@ -74,6 +74,21 @@ impl DbError {
             _ => None,
         }
     }
+
+    /// True if the error is a recoverable WAL-sidecar desync. Turso's
+    /// experimental multiprocess WAL (tursodatabase/turso#769) can leave a stale
+    /// `-tshm` authority that claims frames the `-wal` no longer holds, so every
+    /// open fails with "short read on WAL frame". Recoverable by resetting the
+    /// `-tshm`/`-shm` sidecars. Deliberately narrow: never matches main-database
+    /// corruption, which is NOT sidecar-recoverable.
+    pub fn is_wal_corruption(&self) -> bool {
+        match self {
+            Self::Database(error) => is_turso_wal_corruption(error),
+            Self::Open { source, .. } => is_turso_wal_corruption(source),
+            Self::Migration { source, .. } => source.is_wal_corruption(),
+            _ => false,
+        }
+    }
 }
 
 // The `Turso` prefix is intentional: these are Turso-driver-specific transient
@@ -100,6 +115,14 @@ impl DbTransientKind {
 
 fn is_turso_constraint(error: &turso::Error) -> bool {
     matches!(error, turso::Error::Constraint(_))
+}
+
+fn is_turso_wal_corruption(error: &turso::Error) -> bool {
+    matches!(
+        error,
+        turso::Error::Error(message)
+            if message.contains("short read on WAL") || message.contains("WAL short read")
+    )
 }
 
 fn turso_transient_kind(error: &turso::Error) -> Option<DbTransientKind> {
@@ -167,6 +190,47 @@ mod tests {
         assert!(
             !DbError::NotFound.is_transient(),
             "NotFound is not transient",
+        );
+    }
+
+    #[test]
+    fn is_wal_corruption_matches_short_read_only() {
+        let msg =
+            "I/O error: short read on WAL frame at offset 2566792: expected 4096 bytes, got 0";
+        assert!(
+            DbError::Database(turso::Error::Error(msg.into())).is_wal_corruption(),
+            "bare turso short-read must be WAL corruption",
+        );
+        assert!(
+            (DbError::Open {
+                path: "data.db".into(),
+                source: turso::Error::Error(msg.into()),
+            })
+            .is_wal_corruption(),
+            "Open(short-read) must be WAL corruption",
+        );
+        let wal_short = "I/O error: WAL short read at offset 4096, page 1, frame_id=1: expected 4096 bytes, got 0";
+        assert!(
+            DbError::Database(turso::Error::Error(wal_short.into())).is_wal_corruption(),
+            "the 'WAL short read' variant must also be WAL corruption",
+        );
+        assert!(
+            (DbError::Migration {
+                path: "data.db".into(),
+                version: 1,
+                source: Box::new(DbError::Database(turso::Error::Error(msg.into()))),
+            })
+            .is_wal_corruption(),
+            "Migration-wrapped short-read must be WAL corruption",
+        );
+        // Negatives: transient, constraint, not-found, and main-db corruption.
+        assert!(!DbError::Database(turso::Error::Busy("locked".into())).is_wal_corruption());
+        assert!(!DbError::Database(turso::Error::Constraint("unique".into())).is_wal_corruption());
+        assert!(!DbError::NotFound.is_wal_corruption());
+        assert!(
+            !DbError::Database(turso::Error::Error("database header magic mismatch".into()))
+                .is_wal_corruption(),
+            "main-database corruption is NOT sidecar-recoverable",
         );
     }
 
