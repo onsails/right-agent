@@ -626,30 +626,6 @@ use crate::test_support::TestSandbox;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-/// Shared sandbox for upload / download / verify tests that need a generic
-/// working sandbox but don't care about its initial state. Booted once per
-/// test process via `tokio::sync::OnceCell`. Each test must use a distinct
-/// sandbox-side path to avoid stepping on its peers; all current users do.
-///
-/// Replaces N × ~5–7s sandbox boots with a single boot, dropping the
-/// upload/download/verify suite from ~50s to ~10s. The shared sandbox
-/// persists at process exit (statics never drop) — the next run cleans
-/// the leftover at `TestSandbox::create("shared").await` time.
-async fn shared_test_sandbox() -> &'static TestSandbox {
-    use tokio::sync::OnceCell;
-    struct Shared {
-        sandbox: TestSandbox,
-    }
-    static SHARED: OnceCell<Shared> = OnceCell::const_new();
-    let shared = SHARED
-        .get_or_init(|| async {
-            let sandbox = TestSandbox::create("shared").await;
-            Shared { sandbox }
-        })
-        .await;
-    &shared.sandbox
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -875,7 +851,7 @@ async fn wait_for_deleted_succeeds_when_sandbox_disappears() {
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn ci_openshell_verify_sandbox_files_detects_missing_and_reuploads() {
-    let sbox = shared_test_sandbox().await;
+    let sbox = crate::test_support::shared_sandbox("io").await;
 
     let tmp = tempfile::tempdir().unwrap();
     let host_dir = tmp.path();
@@ -1041,7 +1017,7 @@ network_policies:
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn ci_openshell_verify_sandbox_files_passes_when_all_present() {
-    let sbox = shared_test_sandbox().await;
+    let sbox = crate::test_support::shared_sandbox("io").await;
 
     let tmp = tempfile::tempdir().unwrap();
     let host_dir = tmp.path();
@@ -1063,7 +1039,7 @@ async fn ci_openshell_verify_sandbox_files_passes_when_all_present() {
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn ci_openshell_upload_file_to_directory() {
-    let sbox = shared_test_sandbox().await;
+    let sbox = crate::test_support::shared_sandbox("io").await;
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("hello.txt"), "hello sandbox\n").unwrap();
@@ -1110,7 +1086,7 @@ async fn upload_file_rejects_non_directory_dest() {
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn ci_openshell_upload_directory_preserves_files_and_overwrites() {
-    let sbox = shared_test_sandbox().await;
+    let sbox = crate::test_support::shared_sandbox("io").await;
 
     // Create a directory tree mimicking a skill: right-mcp/SKILL.md
     let tmp = tempfile::tempdir().unwrap();
@@ -1159,7 +1135,7 @@ async fn ci_openshell_upload_directory_preserves_files_and_overwrites() {
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn ci_openshell_download_file_writes_to_exact_dest_path() {
-    let sbox = shared_test_sandbox().await;
+    let sbox = crate::test_support::shared_sandbox("io").await;
 
     // Put a known file in the sandbox.
     let (_, code) = sbox
