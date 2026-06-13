@@ -2949,7 +2949,7 @@ mod sandbox_mode_tests {
         assert_markers_in_order(
             &src[start..end],
             &[
-                "right_openshell::managed_profiles::ensure_profiles(&mut client, &[managed_profile])",
+                "right_openshell::providers::update_referenced_profile(&mut client, &attachments, profile)",
                 "right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path)",
                 "right_openshell::openshell::wait_for_provider_composed_with_exact_endpoints(",
                 "expected_endpoints,",
