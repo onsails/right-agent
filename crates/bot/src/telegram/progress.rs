@@ -50,6 +50,9 @@ pub(crate) struct ProgressTarget {
     pub(crate) token: String,
     pub(crate) chat_id: i64,
     pub(crate) thread_id: i64,
+    pub(crate) agent_dir: std::path::PathBuf,
+    pub(crate) ssh_config_path: Option<std::path::PathBuf>,
+    pub(crate) resolved_sandbox: Option<String>,
 }
 
 impl std::fmt::Debug for ProgressTarget {
@@ -59,6 +62,9 @@ impl std::fmt::Debug for ProgressTarget {
             .field("chat_id", &self.chat_id)
             .field("thread_id", &self.thread_id)
             .field("token", &"<redacted>")
+            .field("agent_dir", &self.agent_dir)
+            .field("ssh_config_path", &self.ssh_config_path)
+            .field("resolved_sandbox", &self.resolved_sandbox)
             .finish()
     }
 }
@@ -395,6 +401,9 @@ mod tests {
             token: "secret-token".to_owned(),
             chat_id: 42,
             thread_id: 7,
+            agent_dir: std::path::PathBuf::from("/tmp/agent"),
+            ssh_config_path: None,
+            resolved_sandbox: None,
         };
 
         state.register(target.clone());
@@ -415,6 +424,9 @@ mod tests {
             token: "supersecret".to_owned(),
             chat_id: 42,
             thread_id: 7,
+            agent_dir: std::path::PathBuf::from("/tmp/agent"),
+            ssh_config_path: None,
+            resolved_sandbox: None,
         };
         let s = format!("{target:?}");
         assert!(!s.contains("supersecret"), "Debug must redact token: {s}");
@@ -428,6 +440,9 @@ mod tests {
             token: "secret-token".to_owned(),
             chat_id: 42,
             thread_id: 0,
+            agent_dir: std::path::PathBuf::from("/tmp/agent"),
+            ssh_config_path: None,
+            resolved_sandbox: None,
         };
 
         assert!(target.token_matches("secret-token"));
