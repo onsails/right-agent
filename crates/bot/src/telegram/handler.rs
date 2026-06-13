@@ -404,10 +404,46 @@ pub async fn handle_message(
 ///
 /// Sends a greeting without invoking CC. Cron runtime starts automatically
 /// alongside the bot -- no explicit bootstrap needed.
-pub async fn handle_start(bot: BotType, msg: Message) -> ResponseResult<()> {
+///
+/// A `focus` deep-link payload (`/start f<chat_id>_<thread_id>`, produced by
+/// `/set_focus` in a group/topic) re-emits the focus Mini App button here in the
+/// DM, scoped to the originating conversation. Inline `web_app` buttons are
+/// private-chat-only, so the group bounces the operator through this DM path.
+pub async fn handle_start(
+    bot: BotType,
+    msg: Message,
+    payload: String,
+    home: Arc<RightHome>,
+    agent_dir: Arc<AgentDir>,
+) -> ResponseResult<()> {
     if !is_private_chat(&msg.chat.kind) {
         tracing::debug!(cmd = "start", "ignoring command in group chat (DM-only)");
         return Ok(());
+    }
+    // The deep-link scope is attacker-supplied, but the routing filter only lets
+    // trusted senders reach a private chat (`make_routing_filter` drops untrusted
+    // DM senders), and the dashboard re-validates the operator's `tma` initData
+    // against the allowlist plus the focus-scope MAC on every focus read/write.
+    // So minting a token for the requested scope here cannot grant an untrusted
+    // user any access. Keep that filter gate if this handler ever stops being
+    // DM-only.
+    if let Some((scope_chat, scope_thread)) =
+        super::focus_deeplink::decode_focus_start_param(payload.trim())
+    {
+        tracing::info!(
+            scope_chat,
+            scope_thread,
+            "start: focus deep-link → focus button"
+        );
+        return send_focus_webapp_button(
+            &bot,
+            msg.chat.id,
+            &home,
+            &agent_dir,
+            scope_chat,
+            scope_thread,
+        )
+        .await;
     }
     bot.send_message(msg.chat.id, "Agent is running. Send a message to start.")
         .await?;
@@ -827,8 +863,15 @@ pub async fn handle_providers(
 // /set_focus command handler
 // ---------------------------------------------------------------------------
 
-/// Handle the /set_focus command by opening the dashboard focus view scoped to
-/// the current (chat_id, effective_thread_id). Works in DM, group, and topic.
+/// Handle the /set_focus command, opening the dashboard focus view scoped to the
+/// current `(chat_id, effective_thread_id)`.
+///
+/// In a DM the focus Mini App opens directly via an inline `web_app` button. In
+/// a group or topic that button is impossible — Telegram rejects inline
+/// `web_app` buttons outside private chats (`BUTTON_TYPE_INVALID`) — so we send a
+/// `t.me/<bot>?start=<scope>` deep-link `url` button instead. Tapping it opens
+/// the DM and delivers `/start <scope>`, where `handle_start` re-emits the
+/// `web_app` button scoped to this conversation.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_set_focus(
     bot: BotType,
@@ -842,8 +885,57 @@ pub async fn handle_set_focus(
     _pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
     _ssh_config: Arc<SshConfigPath>,
     _settings: Arc<AgentSettings>,
+    identity: Arc<super::mention::BotIdentity>,
 ) -> ResponseResult<()> {
-    tracing::info!(agent_dir = %agent_dir.0.display(), "set_focus: opening dashboard");
+    let eff_thread_id = effective_thread_id(&msg);
+    if is_private_chat(&msg.chat.kind) {
+        tracing::info!(agent_dir = %agent_dir.0.display(), "set_focus: opening dashboard (DM)");
+        return send_focus_webapp_button(
+            &bot,
+            msg.chat.id,
+            &home,
+            &agent_dir,
+            msg.chat.id.0,
+            eff_thread_id,
+        )
+        .await;
+    }
+
+    tracing::info!(
+        chat_id = msg.chat.id.0,
+        thread_id = eff_thread_id,
+        "set_focus: sending DM deep-link button (group/topic)"
+    );
+    let param = super::focus_deeplink::encode_focus_start_param(msg.chat.id.0, eff_thread_id);
+    let link = format!("https://t.me/{}?start={}", identity.username, param);
+    let url = url::Url::parse(&link)
+        .map_err(|e| to_request_err(format!("set_focus: build deep link: {e:#}")))?;
+    let keyboard =
+        InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::url("Set focus", url)]]);
+    let mut send = bot
+        .send_message(msg.chat.id, "Open focus settings:")
+        .reply_markup(keyboard);
+    if eff_thread_id != 0 {
+        send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+            eff_thread_id as i32,
+        )));
+    }
+    send.await?;
+    Ok(())
+}
+
+/// Send the focus Mini App `web_app` button into a private chat, scoped to
+/// `(scope_chat, scope_thread)`. DM-only: Telegram rejects inline `web_app`
+/// buttons outside private chats, so the scope of the conversation being focused
+/// is carried in the URL/token rather than implied by the send target.
+async fn send_focus_webapp_button(
+    bot: &BotType,
+    send_to: teloxide::types::ChatId,
+    home: &RightHome,
+    agent_dir: &AgentDir,
+    scope_chat: i64,
+    scope_thread: i64,
+) -> ResponseResult<()> {
     let global_config = right_config::read_global_config(&home.0)
         .map_err(|e| to_request_err(format!("set_focus dashboard: read config.yaml: {e:#}")))?;
     let agent_name = agent_dir
@@ -856,35 +948,27 @@ pub async fn handle_set_focus(
                 agent_dir.0.display()
             ))
         })?;
-    let eff_thread_id = effective_thread_id(&msg);
     let mut url = super::dashboard::dashboard_url(&global_config.tunnel.hostname, agent_name)
         .map_err(|e| to_request_err(format!("set_focus dashboard: invalid URL: {e:#}")))?;
     let focus_token = super::dashboard::generate_focus_scope_token(
         bot.inner().inner().token(),
         agent_name,
-        msg.chat.id.0,
-        eff_thread_id,
+        scope_chat,
+        scope_thread,
     );
     url.query_pairs_mut()
         .append_pair("view", "focus")
-        .append_pair("chat_id", &msg.chat.id.0.to_string())
-        .append_pair("thread_id", &eff_thread_id.to_string())
+        .append_pair("chat_id", &scope_chat.to_string())
+        .append_pair("thread_id", &scope_thread.to_string())
         .append_pair("token", &focus_token);
 
     let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::web_app(
         "Set focus",
         teloxide::types::WebAppInfo { url },
     )]]);
-
-    let mut send = bot
-        .send_message(msg.chat.id, "Focus")
-        .reply_markup(keyboard);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
-            eff_thread_id as i32,
-        )));
-    }
-    send.await?;
+    bot.send_message(send_to, "Focus")
+        .reply_markup(keyboard)
+        .await?;
     Ok(())
 }
 
