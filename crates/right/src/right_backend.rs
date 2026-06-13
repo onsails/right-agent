@@ -11,7 +11,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use dashmap::DashMap;
 use right_mcp::internal_client::{
     ForumTopicCreateRequest, ForumTopicCreateResponse, ForumTopicEditRequest,
     ForumTopicThreadRequest, InternalClient, InternalClientError, ProgressSendRequest,
@@ -115,12 +114,8 @@ pub(crate) struct ThreadFocusSetParams {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProviderCapabilitiesParams {}
 
-/// Connection cache keyed by agent name.
-type ConnCache = Arc<DashMap<String, Arc<tokio::sync::Mutex<right_db::Connection>>>>;
-
 #[derive(Clone)]
 pub struct RightBackend {
-    conn_cache: ConnCache,
     agents_dir: PathBuf,
     mtls_dir: Option<PathBuf>,
     progress: crate::progress::ProgressRegistry,
@@ -129,7 +124,6 @@ pub struct RightBackend {
 impl RightBackend {
     pub fn new(agents_dir: PathBuf, mtls_dir: Option<PathBuf>) -> Self {
         Self {
-            conn_cache: Arc::new(DashMap::new()),
             agents_dir,
             mtls_dir,
             progress: crate::progress::ProgressRegistry::default(),
@@ -356,24 +350,27 @@ impl RightBackend {
     // Connection helpers
     // ------------------------------------------------------------------
 
+    /// Open the agent's `data.db` for a single operation. The caller drops the
+    /// returned connection when its tool call ends.
+    ///
+    /// The aggregator must NOT hold a long-lived `data.db` handle. Turso's
+    /// experimental multiprocess WAL (tursodatabase/turso#769, not production
+    /// ready) can desync the WAL coordination sidecars (`-tshm`/`-shm`) under
+    /// concurrent cross-process access; self-healing recovery in `right_db::open_connection`
+    /// repairs that by deleting the `-tshm`/`-shm` sidecars. A cached connection
+    /// here would keep writing to the unlinked inodes while the bot rebuilds
+    /// fresh ones — split brain. Opening per operation (like the bot) keeps the
+    /// concurrency window small and lets recovery delete sidecars safely.
+    /// Do NOT reintroduce a connection cache.
     pub(crate) async fn get_conn(
         &self,
         agent_name: &str,
     ) -> Result<Arc<tokio::sync::Mutex<right_db::Connection>>, anyhow::Error> {
-        // Fast path: shared read.
-        if let Some(entry) = self.conn_cache.get(agent_name) {
-            return Ok(Arc::clone(entry.value()));
-        }
         let db_dir = self.agents_dir.join(agent_name);
         let conn = right_db::open_connection(&db_dir, false)
             .await
             .with_context(|| format!("failed to open memory DB for {agent_name}"))?;
-        let opened = Arc::new(tokio::sync::Mutex::new(conn));
-        let entry = self
-            .conn_cache
-            .entry(agent_name.to_owned())
-            .or_insert_with(|| Arc::clone(&opened));
-        Ok(Arc::clone(entry.value()))
+        Ok(Arc::new(tokio::sync::Mutex::new(conn)))
     }
 
     fn invocation_kind_to_created_by(
