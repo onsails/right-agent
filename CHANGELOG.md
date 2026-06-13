@@ -1,76 +1,35 @@
 # Changelog
 ## [0.4.0] - 2026-06-13
 
+### Learning & Skills
 
-### Bug Fixes
+- Agents now author and patch `rightx-*` skills mid-turn on their own judgment — not only when the user explicitly asks. Cron sessions can also write skills inline during a run; the async post-turn probe skips any turn where the agent already wrote one.
+- Agent-authored and cron-authored skills now participate in the curator's auto-lifecycle (active → stale → archived when unused). Use the dashboard pin to keep a skill permanently.
+- The cron prompt guide now teaches "what, not how": put the goal in the cron `prompt:` and push the repeatable procedure into a `rightx-*` skill the cron loads at run time.
+- Skill-learning receipts appear in the conversation language instead of always in English.
 
-- **mcp**: Reconnect dead upstream session on first health probe
-- **bot**: Check missing STT model before decode
-- **bot**: Supervisor self-heals drifted generic provider profiles
-- **delivery**: Deliver cron attachments, stop duplicate posts on retry
-- **attachments**: Render markdown in single captions with plain fallback
-- **attachments**: Render markdown in media-group captions with plain retry
-- **progress**: Render markdown in send_progress with plain fallback
-- **telegram**: Gate markdown plain-retry to formatting errors to avoid duplicate sends
-- **cc**: Drop removed-upstream TeamCreate/TeamDelete from baseline deny-list
-- **providers**: Reject stale extra generic endpoints
-- **clippy**: Satisfy latest-stable clippy lints
-- **providers**: Dashboard config-update swaps profile via detach-dance
-- **providers**: Route config-update rollback through detach-dance restore
-- **providers**: Resolve heal sandbox name + reattach on mid-loop detach failure
-- **bot,right**: Disallow send_message on non-foreground turns + validation tests
+### Agents & Conversations
 
-### Documentation
+- New `/set_focus` Telegram command opens a Mini App where operators set standing instructions for any DM, group, or forum topic. Those instructions appear in the agent's system prompt every turn in that scope. Agents update their own per-thread notes via the new `mcp__right__thread_focus_set` tool.
+- New `mcp__right__send_message` MCP tool lets agents send standalone Telegram messages — text, photos, documents, or media groups — at any point during a turn, instead of cramming all output into the single terminal reply.
+- A foreground turn that submits malformed StructuredOutput three times consecutively now aborts and routes to reflection, producing a readable error summary instead of looping invisibly until a bot restart.
+- Attachment captions and `send_progress` messages now render Markdown (bold, italic, links, lists) instead of showing raw `**asterisks**`. Both fall back to plain text on Telegram parse errors.
+- Cron deliveries now send file attachments correctly and no longer post duplicate messages when a delivery is retried.
+- Dead MCP upstream sessions reconnect on the first health probe instead of staying broken until the bot restarts.
 
-- **learning**: Fix doc-comment placement in learning_pipeline
-- **prompt**: Teach send_message + sync aggregator instructions
+### Providers & Sandbox
 
-### Features
+- Generic providers now support multiple upstream hosts per entry. The dashboard removes the confusing "Header name" field — agents write the auth header themselves using the named env var, exactly as the API docs describe.
+- fal.ai is now a built-in one-click provider type. Paste the API key and `right` provisions all required hosts automatically.
+- Provider profiles self-heal: `right up`, the sandbox supervisor, and the dashboard config-update all update a drifted profile via a detach/delete/reimport/reattach sequence. `right up` no longer aborts with "custom provider profile already exists" after a config change.
+- Per-agent env vars declared in `agent.yaml::env` are now actually injected into the sandbox. Previously this field was documented but not implemented — `ANTHROPIC_BASE_URL` and other operator-set knobs had no effect.
 
-- **openshell**: Usage hint names env var and tells agent to write the auth header
-- **learning**: Allow self-judgment skill authoring in right-learn-skill
-- **cron**: Teach what-not-how cron prompt authoring
-- **right-mcp**: Add send_message wire DTOs + client method
-- **right-db**: Add thread_focus table (v43 migration)
-- **right-db**: Thread_focus get/set module
-- **lifecycle**: Auto-manage foreground and cron learned skills
-- **attachments**: Caption_to_html/plain markdown helpers
-- **learning**: Skip async probe when a skill was authored this turn
-- **cron**: Allow inline skill authoring in cron turns
-- **bot**: Carry sandbox download context on ProgressTarget
-- **bot**: /message/send route delivering text + sandbox attachments
-- **bot**: Structured-output schema-rejection stream detector
-- **bot**: StructuredOutputLoop failure kind + reflection wording
-- **bot**: Abort + reflect on 3 consecutive structured-output rejections
-- **tunnel**: Support external reverse-proxy provider ([#119](https://github.com/onsails/right-agent/pull/119))
-- **agent-init**: Accept telegram token + chat ids non-interactively ([#117](https://github.com/onsails/right-agent/pull/117))
-- **agent-providers**: Non-interactive `right agent providers add` CLI ([#116](https://github.com/onsails/right-agent/pull/116))
-- **internal-api**: Multi-host generic providers, all-host composition, drop header_name
-- **cli**: Providers add multi --upstream-host, deprecate --header-name
-- **providers**: Merge generic provider env-var ux
-- **up**: Self-heal drifted managed provider profiles on right up
-- **learning**: Add learning-capable Cron invocation kind
-- **right**: SendMessageParams + per-turn send_message cap in ProgressRegistry
-- **right**: Call_send_message tool handler + registration + dispatch
+### Platform
 
-### Miscellaneous
-
-- Address final review (drop dead PRAGMA in v44, document cron overview fold)
-
-### Refactor
-
-- **right-db**: [**breaking**] Remove legacy rusqlite FTS5 scrubber after v34 soak
-- **cc**: Learning-preserving disallowed-tools helper for cron
-- **bot**: Adapt provider callers to multi-host GenericProvider
-- **providers**: Simplify generic policy strip on remove
-- **bot,right**: Single-parse schema-rejection detector + outbox prefix const
-
-### Testing
-
-- **mcp,memory**: Install rustls crypto provider per-test for nextest isolation
-- **learning**: Update curator candidate test for foreground+cron auto-management
-- **bot**: Message_send route auth/lookup coverage
-- **providers**: Pin config-update ordering on update_referenced_profile
+- Operators with their own reverse proxy (Caddy, nginx, Traefik) can set `tunnel.provider: external` in `~/.right/config.yaml`. `right up` then skips the cloudflared binary check, credentials file, and process. Existing configs without the field default to cloudflared.
+- `right agent init` now accepts `--telegram-token` and `--telegram-allowed-chat-ids` flags (and reads `RIGHT_TELEGRAM_TOKEN` from the environment) for fully non-interactive agent creation without entering the wizard.
+- New `right agent providers add <agent> --type <type> --label <label>` CLI command attaches providers without the Telegram dashboard. The credential is read from `RIGHT_PROVIDER_CREDENTIAL` to avoid leaking secrets to shell history and process tables.
+- **Breaking:** Databases that were never migrated past schema v34 (pre-v0.3.x era) can no longer be opened. Agents deployed on v0.3.x are unaffected.
 
 ## [0.3.4] - 2026-06-10
 
