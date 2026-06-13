@@ -133,21 +133,53 @@ pub(crate) fn parse_persisted_stream_events(line: &str) -> Vec<PersistedStreamEv
 /// StructuredOutput tool call does not satisfy `--json-schema`.
 pub(crate) const SCHEMA_REJECTION_MARKER: &str = "does not match required schema";
 
-/// True when this stream line is a `tool_result` error reporting a
-/// structured-output schema violation. Reuses `parse_persisted_stream_events`
-/// so the matching rules stay in one place.
-pub(crate) fn is_structured_output_rejection(line: &str) -> bool {
-    parse_persisted_stream_events(line).iter().any(|e| {
-        e.kind == PersistedStreamEventKind::ToolError
+/// Single-parse classification of a CC stream line for the schema-rejection guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SchemaLineClass {
+    /// A structured-output schema-validation rejection (tool_result is_error + marker).
+    Rejection,
+    /// A successful tool_result (resets the consecutive-rejection run).
+    SuccessfulToolResult,
+    /// Anything else (assistant text/thinking/tool_use, result line, etc.).
+    Other,
+}
+
+/// Classify a raw stream line in ONE parse. Rejection takes precedence so a
+/// line carrying both an error rejection and a success cannot reset the run.
+pub(crate) fn classify_schema_line(line: &str) -> SchemaLineClass {
+    let mut saw_success = false;
+    for e in parse_persisted_stream_events(line) {
+        if e.kind == PersistedStreamEventKind::ToolError
             && e.content_text.contains(SCHEMA_REJECTION_MARKER)
-    })
+        {
+            return SchemaLineClass::Rejection;
+        }
+        if e.kind == PersistedStreamEventKind::ToolResult {
+            saw_success = true;
+        }
+    }
+    if saw_success {
+        SchemaLineClass::SuccessfulToolResult
+    } else {
+        SchemaLineClass::Other
+    }
+}
+
+/// True when this stream line is a `tool_result` error reporting a
+/// structured-output schema violation. Reuses `classify_schema_line` so the
+/// matching rules stay in one place. Retained as a tested boolean view of the
+/// classifier; runtime callers use `classify_schema_line` directly.
+#[allow(dead_code)]
+pub(crate) fn is_structured_output_rejection(line: &str) -> bool {
+    classify_schema_line(line) == SchemaLineClass::Rejection
 }
 
 /// True when this line is a successful `tool_result` (resets the rejection run).
+/// Retained as a tested boolean view of the classifier; runtime callers use
+/// `classify_schema_line` directly.
+#[allow(dead_code)]
 pub(crate) fn is_successful_tool_result(line: &str) -> bool {
-    parse_persisted_stream_events(line)
-        .iter()
-        .any(|e| e.kind == PersistedStreamEventKind::ToolResult)
+    classify_schema_line(line) == SchemaLineClass::SuccessfulToolResult
 }
 
 /// Extract owned `/message/content` array from a stream-json event JSON.
@@ -1248,5 +1280,27 @@ mod tests {
         assert!(is_successful_tool_result(line));
         let rej = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output does not match required schema","is_error":true}]}}"#;
         assert!(!is_successful_tool_result(rej));
+    }
+
+    #[test]
+    fn classify_schema_line_precedence_and_cases() {
+        assert_eq!(
+            classify_schema_line(
+                r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output does not match required schema","is_error":true}]}}"#
+            ),
+            SchemaLineClass::Rejection
+        );
+        assert_eq!(
+            classify_schema_line(
+                r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","is_error":false}]}}"#
+            ),
+            SchemaLineClass::SuccessfulToolResult
+        );
+        assert_eq!(
+            classify_schema_line(
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"StructuredOutput","input":{}}]}}"#
+            ),
+            SchemaLineClass::Other
+        );
     }
 }
