@@ -429,6 +429,7 @@ mod tests {
             total_cost_usd: 0.0,
             wall_elapsed_ms: 0,
             used_skill_receipts: Vec::new(),
+            learning_invocation_id: None,
         }
     }
 
