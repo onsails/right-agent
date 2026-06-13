@@ -39,6 +39,7 @@ pub enum CreatedBy {
     ProbeWriter,
     Curator,
     Bundled,
+    Cron,
 }
 
 impl CreatedBy {
@@ -48,6 +49,7 @@ impl CreatedBy {
             Self::ProbeWriter => "probe_writer",
             Self::Curator => "curator",
             Self::Bundled => "bundled",
+            Self::Cron => "cron",
         }
     }
 
@@ -57,6 +59,7 @@ impl CreatedBy {
             "probe_writer" => Ok(Self::ProbeWriter),
             "curator" => Ok(Self::Curator),
             "bundled" => Ok(Self::Bundled),
+            "cron" => Ok(Self::Cron),
             other => Err(LifecycleError::InvalidCreatedBy(other.to_string())),
         }
     }
@@ -465,6 +468,12 @@ mod tests {
         DateTime::parse_from_rfc3339(value)
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn created_by_cron_round_trips_db_str() {
+        assert_eq!(CreatedBy::Cron.as_db_str(), "cron");
+        assert_eq!(CreatedBy::from_db_str("cron").unwrap(), CreatedBy::Cron);
     }
 
     #[tokio::test]
