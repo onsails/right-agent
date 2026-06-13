@@ -398,6 +398,82 @@ pub async fn list_attached(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Profile update — detach-dance primitive
+// ────────────────────────────────────────────────────────────────────────────
+
+/// A sandbox attachment that references a managed profile.
+#[derive(Debug, Clone)]
+pub struct ProfileAttachment {
+    pub sandbox_name: String,
+    pub provider_name: String,
+}
+
+/// Update a managed/authored profile that may be referenced by live sandboxes.
+///
+/// OpenShell's `import` never upserts and the gateway refuses to delete a profile
+/// while a sandbox references it, so an update is: detach every referencing
+/// attachment, delete + re-import the profile (same id), then re-attach. Provider
+/// secrets are never re-supplied (detach/attach do not carry them). On import
+/// failure the prior profile is restored and detached attachments re-attached
+/// before the error propagates (FAIL FAST). Callers still own the subsequent
+/// policy reload + composition confirmation.
+pub async fn update_referenced_profile(
+    client: &mut OpenShellClient<Channel>,
+    attachments: &[ProfileAttachment],
+    desired: proto_v1::ProviderProfile,
+) -> Result<(), ProviderError> {
+    let id = desired.id.clone();
+    let stored = crate::managed_profiles::get_profile(client, &id)
+        .await
+        .map_err(|e| ProviderError::Grpc(format!("get profile {id}: {e:#}")))?;
+
+    // 1. Detach every currently-referencing attachment (NotFound = not attached).
+    let mut to_reattach: Vec<&ProfileAttachment> = Vec::new();
+    for att in attachments {
+        match detach_from_sandbox(client, &att.sandbox_name, &att.provider_name).await {
+            Ok(()) => to_reattach.push(att),
+            Err(ProviderError::NotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    // 2. Delete the now-unreferenced profile.
+    if let Err(e) = crate::managed_profiles::delete_profile(client, &id).await {
+        reattach_all(client, &to_reattach).await;
+        return Err(ProviderError::Grpc(format!("delete profile {id}: {e:#}")));
+    }
+
+    // 3. Import the desired profile; restore the prior one on failure.
+    if let Err(e) = crate::managed_profiles::lint_and_import(client, desired).await {
+        if let Some(prev) = stored
+            && let Err(re) = crate::managed_profiles::lint_and_import(client, prev).await
+        {
+            tracing::error!(profile = %id, "rollback re-import of prior profile failed: {re:#}");
+        }
+        reattach_all(client, &to_reattach).await;
+        return Err(ProviderError::Grpc(format!("import profile {id}: {e:#}")));
+    }
+
+    // 4. Re-attach.
+    for att in &to_reattach {
+        attach_to_sandbox(client, &att.sandbox_name, &att.provider_name).await?;
+    }
+    Ok(())
+}
+
+async fn reattach_all(client: &mut OpenShellClient<Channel>, atts: &[&ProfileAttachment]) {
+    for att in atts {
+        if let Err(e) = attach_to_sandbox(client, &att.sandbox_name, &att.provider_name).await {
+            tracing::error!(
+                provider = %att.provider_name,
+                sandbox = %att.sandbox_name,
+                "rollback re-attach failed: {e:#}"
+            );
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // gRPC wrappers
 // ────────────────────────────────────────────────────────────────────────────
 
