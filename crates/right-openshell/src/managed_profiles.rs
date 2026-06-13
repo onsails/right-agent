@@ -476,6 +476,11 @@ pub enum EnsureOutcome {
     Unchanged(String),
     /// Base profile was absent on the gateway — profile skipped (non-fatal).
     Skipped(String),
+    /// Profile exists but drifted. `ensure_profiles` cannot update it (OpenShell
+    /// rejects re-importing an existing id, and a referenced profile cannot be
+    /// deleted without sandbox context). A context-aware caller must run
+    /// `providers::update_referenced_profile` to heal it.
+    DriftedSkipped(String),
 }
 
 /// Idempotently provision the given managed profiles to the gateway.
@@ -508,13 +513,23 @@ pub async fn ensure_profiles(
             DesiredProfileSource::Authored(profile) => *profile,
         };
         let stored = get_profile(client, &id).await?;
-        if needs_import(stored.as_ref(), &desired) {
-            lint_and_import(client, desired).await?;
-            tracing::info!(profile = id, "managed profile drift → imported");
-            outcomes.push(EnsureOutcome::Imported(id));
-        } else {
-            tracing::debug!(profile = id, "managed profile unchanged");
-            outcomes.push(EnsureOutcome::Unchanged(id));
+        match stored {
+            None => {
+                lint_and_import(client, desired).await?;
+                tracing::info!(profile = id, "managed profile absent → imported");
+                outcomes.push(EnsureOutcome::Imported(id));
+            }
+            Some(stored) if fingerprint(&stored) != fingerprint(&desired) => {
+                tracing::warn!(
+                    profile = id,
+                    "managed profile drifted — needs detach-dance update (see update_referenced_profile)"
+                );
+                outcomes.push(EnsureOutcome::DriftedSkipped(id));
+            }
+            Some(_) => {
+                tracing::debug!(profile = id, "managed profile unchanged");
+                outcomes.push(EnsureOutcome::Unchanged(id));
+            }
         }
     }
     Ok(outcomes)
