@@ -129,6 +129,27 @@ pub(crate) fn parse_persisted_stream_events(line: &str) -> Vec<PersistedStreamEv
     }
 }
 
+/// The substring CC's structured-output validator emits when the model's
+/// StructuredOutput tool call does not satisfy `--json-schema`.
+pub(crate) const SCHEMA_REJECTION_MARKER: &str = "does not match required schema";
+
+/// True when this stream line is a `tool_result` error reporting a
+/// structured-output schema violation. Reuses `parse_persisted_stream_events`
+/// so the matching rules stay in one place.
+pub(crate) fn is_structured_output_rejection(line: &str) -> bool {
+    parse_persisted_stream_events(line).iter().any(|e| {
+        e.kind == PersistedStreamEventKind::ToolError
+            && e.content_text.contains(SCHEMA_REJECTION_MARKER)
+    })
+}
+
+/// True when this line is a successful `tool_result` (resets the rejection run).
+pub(crate) fn is_successful_tool_result(line: &str) -> bool {
+    parse_persisted_stream_events(line)
+        .iter()
+        .any(|e| e.kind == PersistedStreamEventKind::ToolResult)
+}
+
 /// Extract owned `/message/content` array from a stream-json event JSON.
 /// Returns `None` when the path is missing or not an array.
 fn take_message_content_blocks(mut v: serde_json::Value) -> Option<Vec<serde_json::Value>> {
@@ -1197,5 +1218,35 @@ mod tests {
         let u = parse_usage(json);
         assert_eq!(u.cache_creation_tokens, 30);
         assert_eq!(u.cache_read_tokens, 40);
+    }
+
+    #[test]
+    fn detects_structured_output_schema_rejection() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"Output does not match required schema: root: must have required property 'content'","is_error":true,"tool_use_id":"x"}]}}"#;
+        assert!(is_structured_output_rejection(line));
+    }
+
+    #[test]
+    fn non_error_tool_result_is_not_rejection() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok","is_error":false,"tool_use_id":"x"}]}}"#;
+        assert!(!is_structured_output_rejection(line));
+    }
+
+    #[test]
+    fn assistant_and_result_lines_are_not_rejection() {
+        assert!(!is_structured_output_rejection(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#
+        ));
+        assert!(!is_structured_output_rejection(
+            r#"{"type":"result","is_error":true,"result":"boom"}"#
+        ));
+    }
+
+    #[test]
+    fn successful_tool_result_detected() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","is_error":false}]}}"#;
+        assert!(is_successful_tool_result(line));
+        let rej = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output does not match required schema","is_error":true}]}}"#;
+        assert!(!is_successful_tool_result(rej));
     }
 }
