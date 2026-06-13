@@ -2189,20 +2189,23 @@ pub(crate) async fn handle_provider_config_update(
         upstream_path_prefix: new_path.clone(),
     };
     let (_, profile) = generic_provider_update_profile(&req.name, &updated_generic);
-    let managed_profile =
-        right_openshell::managed_profiles::ManagedProfile::Authored(Box::new(profile));
+    let attachments = vec![right_openshell::providers::ProfileAttachment {
+        sandbox_name: sandbox_name.clone(),
+        provider_name: req.name.clone(),
+    }];
     if let Err(e) =
-        right_openshell::managed_profiles::ensure_profiles(&mut client, &[managed_profile]).await
+        right_openshell::providers::update_referenced_profile(&mut client, &attachments, profile)
+            .await
     {
         let rollback_errors = reensure_generic_profile_after_rollback(
             &mut client,
             &req.name,
             &current,
             format!("{e:#}"),
-            "profile import failure",
+            "profile update failure",
         )
         .await;
-        let mut msg = format!("profile import: {e:#}");
+        let mut msg = format!("profile update: {e:#}");
         if !rollback_errors.is_empty() {
             msg.push_str(" (rollback also failed: ");
             msg.push_str(&rollback_errors.join("; "));
