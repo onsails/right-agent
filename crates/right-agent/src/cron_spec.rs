@@ -775,7 +775,10 @@ pub fn format_result(result: &CronSpecResult) -> String {
 pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, CronSpec>, DbError> {
     let mut specs = HashMap::new();
     let rows = conn.query_all(
-        "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, trigger_force_notify, recurring, run_at, target_chat_id, target_thread_id, model FROM cron_specs",
+        "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, \
+         trigger_force_notify, recurring, run_at, target_chat_id, target_thread_id, model, \
+         trigger_extra_instruction, trigger_then_json, trigger_origin_chat_id, trigger_origin_thread_id \
+         FROM cron_specs",
         (),
         |row| {
         Ok((
@@ -791,6 +794,10 @@ pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, Cro
             row.get::<_, Option<i64>>(9)?,
             row.get::<_, Option<i64>>(10)?,
             row.get::<_, Option<String>>(11)?,
+            row.get::<_, Option<String>>(12)?, // trigger_extra_instruction
+            row.get::<_, Option<String>>(13)?, // trigger_then_json
+            row.get::<_, Option<i64>>(14)?,    // trigger_origin_chat_id
+            row.get::<_, Option<i64>>(15)?,    // trigger_origin_thread_id
         ))
     })
     .await?;
@@ -809,7 +816,22 @@ pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, Cro
             target_chat_id,
             target_thread_id,
             model,
+            trigger_extra_instruction,
+            trigger_then_json,
+            trigger_origin_chat_id,
+            trigger_origin_thread_id,
         ) = row;
+
+        let then = match trigger_then_json.as_deref() {
+            Some(j) => match serde_json::from_str::<ThenSpec>(j) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    tracing::error!(job = %job_name, "ignoring unparseable trigger_then_json: {e}");
+                    None
+                }
+            },
+            None => None,
+        };
 
         let schedule_kind = match ScheduleKind::from_db_row(&schedule, run_at.as_deref(), recurring)
         {
@@ -836,10 +858,10 @@ pub async fn load_specs_from_db(conn: &Connection) -> Result<HashMap<String, Cro
                 target_chat_id,
                 target_thread_id,
                 model,
-                trigger_extra_instruction: None,
-                then: None,
-                trigger_origin_chat_id: None,
-                trigger_origin_thread_id: None,
+                trigger_extra_instruction,
+                then,
+                trigger_origin_chat_id,
+                trigger_origin_thread_id,
             },
         );
     }
@@ -860,16 +882,32 @@ pub fn describe_schedule(schedule: &str) -> String {
 ///
 /// When `force_notify` is set, the resulting run delivers a report regardless
 /// of the job's own silent decision and bypasses the delivery idle gate.
+#[allow(clippy::too_many_arguments)]
 pub async fn trigger_spec(
     conn: &Connection,
     job_name: &str,
     force_notify: bool,
+    extra_instruction: Option<&str>,
+    then_json: Option<&str>,
+    origin_chat_id: Option<i64>,
+    origin_thread_id: Option<i64>,
 ) -> Result<String, String> {
     let now = chrono::Utc::now().to_rfc3339();
     let rows = conn
         .execute(
-            "UPDATE cron_specs SET triggered_at = ?2, trigger_force_notify = ?3 WHERE job_name = ?1",
-            params![job_name, now, force_notify as i64],
+            "UPDATE cron_specs SET triggered_at = ?2, trigger_force_notify = ?3, \
+             trigger_extra_instruction = ?4, trigger_then_json = ?5, \
+             trigger_origin_chat_id = ?6, trigger_origin_thread_id = ?7 \
+             WHERE job_name = ?1",
+            params![
+                job_name,
+                now,
+                force_notify as i64,
+                extra_instruction,
+                then_json,
+                origin_chat_id,
+                origin_thread_id
+            ],
         )
         .await
         .map_err(|e| format!("trigger failed: {e:#}"))?;
@@ -884,7 +922,10 @@ pub async fn trigger_spec(
 /// subsequent non-triggered runs.
 pub async fn clear_triggered_at(conn: &Connection, job_name: &str) -> Result<(), String> {
     conn.execute(
-        "UPDATE cron_specs SET triggered_at = NULL, trigger_force_notify = 0 WHERE job_name = ?1",
+        "UPDATE cron_specs SET triggered_at = NULL, trigger_force_notify = 0, \
+         trigger_extra_instruction = NULL, trigger_then_json = NULL, \
+         trigger_origin_chat_id = NULL, trigger_origin_thread_id = NULL \
+         WHERE job_name = ?1",
         params![job_name],
     )
     .await
