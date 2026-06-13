@@ -139,11 +139,13 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Dashboard bundle freshness
-        run: devenv shell -- cargo test -p right-dashboard dashboard_bundle_contains_providers_view
+        run: devenv shell -- cargo nextest run -p right-dashboard -E 'test(dashboard_bundle_contains_providers_view)'
 
       - name: Test workspace
         run: |
-          devenv shell -- bash -lc "export PATH=\"\$RUNNER_TEMP/bin:\$PATH\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked"
+          devenv shell -- bash -lc "export PATH=\"\$RUNNER_TEMP/bin:\$PATH\"; cargo nextest run --profile ci --workspace --locked"
+      - name: Doctests (guard)
+        run: devenv shell -- cargo test --doc --workspace --locked
 
   ignored:
     name: ignored tests
@@ -237,7 +239,7 @@ jobs:
         id: stt_tests
         continue-on-error: true
         run: |
-          devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast --locked ci_stt -- --ignored
+          devenv shell -- cargo nextest run --profile ci-ignored --workspace --locked --run-ignored=only -E 'test(/ci_stt_/)'
       - name: Disk usage before OpenShell install
         if: always()
         run: |
@@ -291,24 +293,17 @@ jobs:
       - name: OpenShell doctor
         run: openshell doctor check
 
-      - name: Run Claude/OpenShell ignored tests
-        id: claude_tests
-        continue-on-error: true
-        env:
-          RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "1"
-        run: |
-          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked ci_claude -- --ignored"
-
-      - name: Run OpenShell ignored tests
-        id: openshell_tests
+      - name: Run Claude + OpenShell ignored tests
+        id: sandbox_tests
         continue-on-error: true
         env:
           RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "2"
+          RIGHT_TEST_RUN_ID: "${{ github.run_id }}-${{ github.run_attempt }}"
         run: |
-          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --features right-openshell/test-support --lib --bins --tests --no-fail-fast --locked ci_openshell -- --ignored"
+          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo nextest run --profile ci-ignored --workspace --features right-openshell/test-support --locked --run-ignored=only -E 'test(/ci_claude_/) | test(/ci_openshell_/)'"
 
       - name: Dump OpenShell diagnostics
-        if: ${{ failure() || steps.claude_tests.outcome == 'failure' || steps.openshell_tests.outcome == 'failure' }}
+        if: ${{ failure() || steps.sandbox_tests.outcome == 'failure' }}
         run: |
           openshell status || true
           journalctl --user -u openshell-gateway --no-pager -n 200 || true
@@ -329,12 +324,8 @@ jobs:
             echo "::error::STT ignored tests failed"
             failed=1
           fi
-          if test "${{ steps.claude_tests.outcome }}" != "success"; then
+          if test "${{ steps.sandbox_tests.outcome }}" != "success"; then
             echo "::error::Claude/OpenShell ignored tests failed"
-            failed=1
-          fi
-          if test "${{ steps.openshell_tests.outcome }}" != "success"; then
-            echo "::error::OpenShell ignored tests failed"
             failed=1
           fi
           exit "$failed"
