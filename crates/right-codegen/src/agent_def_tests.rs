@@ -379,8 +379,12 @@ fn operating_instructions_teach_used_learned_skill_receipts() {
 fn right_learn_skill_prompt_uses_explicit_intent_framing() {
     let skill = include_str!("../skills/right-learn-skill/SKILL.md");
     assert!(
-        skill.contains("description: >-\n  Use ONLY when the user explicitly asks"),
-        "right-learn-skill description should narrow to explicit-user-intent only"
+        skill.contains("Use when you verified a reusable procedure this turn"),
+        "right-learn-skill description should trigger on self-judgment"
+    );
+    assert!(
+        !skill.contains("Use ONLY when the user explicitly asks"),
+        "right-learn-skill must no longer hard-gate to explicit user intent only"
     );
     assert!(
         skill.contains(right_mcp::LEARNED_SKILL_PREFIX),
