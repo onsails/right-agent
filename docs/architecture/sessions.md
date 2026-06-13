@@ -275,6 +275,41 @@ summary of the failure instead of the raw ring-buffer dump.
   futile, billable turn). `cron.rs` detects `FailureKind::BudgetExceeded` and
   reports a deterministic reason instead of calling `reflect_on_failure`.
 
+### Structured-output loop guard
+
+A `claude -p` turn can get stuck repeatedly emitting a `StructuredOutput`
+tool_use whose payload fails schema validation, with CC re-prompting itself
+after each rejection. Before the guard this loop was both invisible (the
+rejection lines were never surfaced in the worker stream) and durable (it
+survived restarts, because the resumed session's pending state was still an
+unsatisfied structured-output demand), so the agent could burn turns and budget
+without ever producing a deliverable.
+
+The worker tracks consecutive rejections with a small `SchemaRejectionRun`
+FSM while reading the stream:
+
+- Each stream line is tested with `is_structured_output_rejection`; a match
+  increments the run counter.
+- The counter resets **only** on a successful `tool_result` — i.e. real
+  forward progress. It is deliberately **not** reset by the intervening
+  `StructuredOutput` tool_use that precedes a rejection, since that tool_use is
+  the very thing being retried; resetting there would let an infinite
+  use→reject→use→reject loop run forever.
+- When the run reaches the threshold of **3** consecutive rejections, the
+  worker kills the CC child and returns
+  `InvokeCcFailure::Reflectable { kind: FailureKind::StructuredOutputLoop { rejections } }`,
+  where `rejections` is the observed count.
+
+Each detected rejection is now logged in the worker stream (the previously
+invisible loop is observable). Routing the failure as `Reflectable` sends it
+through the normal `reflect_on_failure` path, which `--resume`s the session for
+a short summarizing turn and delivers a human-friendly failure message. This is
+what breaks the restart-surviving loop: reflection replaces the pending
+structured-output demand with a delivered summary, so the next resumed state is
+no longer an unsatisfied schema request. Reflection runs on a separate path and
+never feeds the detector, so the guard cannot recurse on its own reflection
+turn.
+
 Cron success output stores `async_runs.run_note` plus a structured
 `delivery_json` decision. `delivery.kind = "notify"` enters the async delivery
 queue; `delivery.kind = "silent"` is a completed non-delivering run. The

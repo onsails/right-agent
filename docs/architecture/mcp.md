@@ -310,6 +310,8 @@ Internal REST API on Unix socket (~/.right/run/internal.sock):
   - POST /progress/register — register an invocation for foreground progress,
     foreground learning, probe-writer learning, curator learning, or search scope
   - POST /progress/unregister — remove that invocation when the run ends
+  - POST /message/send — deliver a foreground agent message (text and/or
+    attachments) for `mcp__right__send_message` (reuses the progress channel)
 
 Telegram dashboard routes use InternalClient (hyper UDS) to call these
 endpoints; the `/mcp` Telegram command only opens the dashboard MCP view.
@@ -348,6 +350,45 @@ also denied outside foreground turns.
 
 The learning prefilter is stricter: it omits MCP config and passes
 `--tools ""`, so no MCP or Claude Code tools are available.
+
+## Foreground `send_message` delivery
+
+`mcp__right__send_message` lets a foreground agent push one or more
+intermediate messages — text, attachments, or both — to the originating chat
+mid-turn, distinct from the turn's final structured-output deliverable. Like
+`send_progress`, it is a built-in RightBackend tool, foreground-only, and
+disallowed on reflection/cron/delivery/background invocations via
+`--disallowedTools`.
+
+Tool arguments are `content?` (optional message text) and `attachments[]` (zero
+or more files). The shared DTOs live in `right-mcp` so the aggregator and bot
+agree on the wire shape: `SendMessageRequest` carries the agent-supplied
+`content`/`attachments`, and `SendMessageResponse` reports per-call delivery
+status. Each `MessageAttachmentDto` (caption, path, kind/mime hints) maps to a
+bot-side `OutboundAttachment` before delivery. Attachment paths MUST resolve
+under `/sandbox/outbox/`; paths outside that prefix are rejected.
+
+Channel reuse, not a new transport: the aggregator routes `send_message` over
+the same Unix-socket channel as `send_progress`, calling the bot's new
+`POST /message/send` route instead of `/progress/send`. The bot handler shares
+the same delivery internals as `handle_progress_send` — text goes through
+`send_text_message`, and attachments go through `send_attachments` /
+`partition_sends` (the existing path that batches/splits media into
+Telegram-legal groups). This guarantees `send_message` and `send_progress`
+produce identical chat-targeting and formatting behavior.
+
+Per-turn cap: `ProgressRegistry::begin_message_send` enforces a ceiling of 20
+`send_message` calls per registered invocation; the 21st call is rejected at the
+registry before any Telegram I/O. The counter is scoped to the invocation
+registration, so it resets when the turn unregisters.
+
+Scope-from-target invariant: the destination `(chat_id, effective_thread_id)`
+is read server-side from the registered `ProgressTarget`, never from agent
+arguments — identical to the `send_progress` scope rule. The agent cannot
+address another chat or topic. To support downloading attachments out of the
+sandbox before delivery, `ProgressTarget` now also carries `agent_dir`,
+`ssh_config_path`, and `resolved_sandbox`; for `sandbox: mode: none` agents the
+`/sandbox/outbox/` paths resolve directly on the host instead.
 
 ## Learned Skill MCP Tools
 
