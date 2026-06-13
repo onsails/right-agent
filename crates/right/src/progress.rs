@@ -324,6 +324,22 @@ impl ProgressRegistry {
         Ok(scope)
     }
 
+    /// Origin conversation scope for a foreground invocation, or `None` for a
+    /// non-foreground invocation or unknown id. Used by `cron_trigger` to learn
+    /// the chat it was triggered from — origin exists iff the trigger came from
+    /// a live foreground turn.
+    pub(crate) async fn conversation_scope_opt(
+        &self,
+        invocation_id: &str,
+    ) -> Option<ConversationScope> {
+        let inner = self.inner.lock().await;
+        let invocation = inner.get(invocation_id)?;
+        if !matches!(invocation.kind, ProgressInvocationKind::Foreground) {
+            return None;
+        }
+        invocation.conversation_scope
+    }
+
     /// Resolve the bot endpoint + token + chat id for a forum-topic
     /// operation. Foreground-only (like progress and conversation search):
     /// cron/delivery/reflection/background turns must not manage topics.
@@ -530,6 +546,43 @@ mod tests {
         let target = reg.forum_target("inv-1").await.unwrap();
         assert_eq!(target.chat_id, 42);
         assert_eq!(target.bot_send_token, "tok");
+    }
+
+    #[tokio::test]
+    async fn conversation_scope_opt_returns_some_for_foreground_none_for_cron() {
+        let reg = ProgressRegistry::default();
+        reg.register(ProgressRegistration {
+            invocation_id: "fg".into(),
+            kind: ProgressInvocationKind::Foreground,
+            bot_socket_path: "/tmp/x".into(),
+            bot_send_token: "t".into(),
+            conversation_scope: Some(ConversationScope {
+                chat_id: 5,
+                thread_id: 2,
+            }),
+        })
+        .await;
+        reg.register(ProgressRegistration {
+            invocation_id: "cron".into(),
+            kind: ProgressInvocationKind::Cron,
+            bot_socket_path: "/tmp/x".into(),
+            bot_send_token: "t".into(),
+            conversation_scope: Some(ConversationScope {
+                chat_id: 9,
+                thread_id: 0,
+            }),
+        })
+        .await;
+
+        assert_eq!(
+            reg.conversation_scope_opt("fg").await,
+            Some(ConversationScope {
+                chat_id: 5,
+                thread_id: 2,
+            })
+        );
+        assert_eq!(reg.conversation_scope_opt("cron").await, None);
+        assert_eq!(reg.conversation_scope_opt("missing").await, None);
     }
 
     #[tokio::test]
