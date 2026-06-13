@@ -385,6 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn connected_flips_unreachable_after_three_dead_probes() {
+        crate::ensure_crypto_provider();
         let (_tmp, backend, proxies) = dead_backend();
         backend.set_status(BackendStatus::Connected).await;
 
@@ -407,6 +408,7 @@ mod tests {
 
     #[tokio::test]
     async fn needs_auth_is_never_probed() {
+        crate::ensure_crypto_provider();
         let (_tmp, backend, proxies) = dead_backend();
         backend.set_status(BackendStatus::NeedsAuth).await;
 

@@ -1908,6 +1908,7 @@ mod tests {
 
     #[test]
     fn register_client_or_fallback_uses_static_client_id_when_no_registration_endpoint() {
+        setup_crypto();
         // Synchronous test: when no registration_endpoint and static_client_id provided, returns static
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -1936,6 +1937,7 @@ mod tests {
 
     #[test]
     fn register_client_or_fallback_returns_missing_client_id_when_neither() {
+        setup_crypto();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let client = reqwest::Client::new();
