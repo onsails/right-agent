@@ -176,12 +176,12 @@ async fn insert_async_run(
 fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
-    // 7 cron + 1 mcp + 1 progress + 2 learning + 3 conversation + 5 forum
-    // + 1 conversation focus + 1 bootstrap + 1 provider capabilities = 22
+    // 7 cron + 1 mcp + 1 progress + 1 send_message + 2 learning + 3 conversation
+    // + 5 forum + 1 conversation focus + 1 bootstrap + 1 provider capabilities = 23
     assert_eq!(
         tools.len(),
-        22,
-        "expected 22 tools, got {}: {:?}",
+        23,
+        "expected 23 tools, got {}: {:?}",
         tools.len(),
         tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
     );

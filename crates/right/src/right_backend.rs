@@ -15,7 +15,7 @@ use dashmap::DashMap;
 use right_mcp::internal_client::{
     ForumTopicCreateRequest, ForumTopicCreateResponse, ForumTopicEditRequest,
     ForumTopicThreadRequest, InternalClient, InternalClientError, ProgressSendRequest,
-    SKILL_LEARNING_FINISH_TOOL, SKILL_LEARNING_START_TOOL,
+    SKILL_LEARNING_FINISH_TOOL, SKILL_LEARNING_START_TOOL, SendMessageRequest,
 };
 use right_mcp::tool_error::tool_error;
 use rmcp::handler::server::tool::schema_for_type;
@@ -28,6 +28,10 @@ use serde::Deserialize;
 /// per-invocation rate-limit slot from being held indefinitely if Telegram
 /// stalls.
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// End-to-end timeout for `mcp__right__send_message`. Larger than the progress
+/// timeout because a single call may upload attachments to Telegram.
+const SEND_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONVERSATION_SEARCH_DEFAULT_LIMIT: usize = 10;
 const GET_MESSAGES_BY_ID_MAX_IDS: usize = 50;
 const THREAD_FOCUS_MAX_CHARS: usize = 2000;
@@ -193,6 +197,11 @@ impl RightBackend {
                 schema_for_type::<crate::progress::SendProgressParams>(),
             ),
             Tool::new(
+                right_mcp::internal_client::SEND_MESSAGE_TOOL,
+                "Send a standalone Telegram message (text and/or attachments like photo+caption, document) to the current chat for the current foreground invocation only. Use one call per message to deliver several messages in a turn (e.g. multiple posts). Attachment paths must be under /sandbox/outbox/. Max 20 calls per turn. The terminal reply may then be content:null.",
+                schema_for_type::<crate::progress::SendMessageParams>(),
+            ),
+            Tool::new(
                 SKILL_LEARNING_START_TOOL,
                 "Stage 1 foreground metadata/progress for learned skill create/update. Call before writing or patching skill package files. action=create and action=update both require rightx-* skill names. Accepts skill names only, never paths.",
                 schema_for_type::<SkillLearningStartParams>(),
@@ -289,6 +298,9 @@ impl RightBackend {
             "cron_trigger" => self.call_cron_trigger(agent_name, &args).await,
             "mcp_list" => self.call_mcp_list(agent_name).await,
             crate::progress::SEND_PROGRESS_TOOL => self.call_send_progress(context, &args).await,
+            right_mcp::internal_client::SEND_MESSAGE_TOOL => {
+                self.call_send_message(context, &args).await
+            }
             SKILL_LEARNING_START_TOOL => {
                 self.call_skill_learning_start(agent_name, agent_dir, context, &args)
                     .await
@@ -709,6 +721,108 @@ impl RightBackend {
                     None,
                 ))
             }
+        }
+    }
+
+    async fn call_send_message(
+        &self,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: crate::progress::SendMessageParams = match serde_json::from_value(args.clone())
+        {
+            Ok(params) => params,
+            Err(e) => {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    format!("invalid send_message params: {e:#}"),
+                    None,
+                ));
+            }
+        };
+
+        let has_content = params
+            .content
+            .as_deref()
+            .is_some_and(|c| !c.trim().is_empty());
+        if !has_content && params.attachments.is_empty() {
+            return Ok(tool_error(
+                "send_message_empty",
+                "send_message requires non-empty content or at least one attachment",
+                None,
+            ));
+        }
+        if let Some(bad) = params
+            .attachments
+            .iter()
+            .find(|a| !a.path.starts_with("/sandbox/outbox/"))
+        {
+            return Ok(tool_error(
+                "send_message_bad_path",
+                format!(
+                    "attachment path must be under /sandbox/outbox/: {}",
+                    bad.path
+                ),
+                None,
+            ));
+        }
+
+        let Some(invocation_id) = context.invocation_id else {
+            return Ok(tool_error(
+                "send_message_unavailable",
+                "send_message is available only for the current foreground invocation",
+                None,
+            ));
+        };
+
+        let target = match self.progress.begin_message_send(&invocation_id).await {
+            Ok(target) => target,
+            Err(crate::progress::ProgressError::RateLimited { .. }) => {
+                return Ok(tool_error(
+                    "send_message_limit",
+                    "send_message limit reached for this turn (max 20); deliver the rest in the terminal reply attachments array",
+                    None,
+                ));
+            }
+            Err(crate::progress::ProgressError::Forbidden) => {
+                return Ok(tool_error(
+                    "send_message_forbidden",
+                    "send_message is available only for foreground turns",
+                    None,
+                ));
+            }
+            Err(crate::progress::ProgressError::Unavailable) => {
+                return Ok(tool_error(
+                    "send_message_unavailable",
+                    "send_message is unavailable for this invocation",
+                    None,
+                ));
+            }
+        };
+
+        let request = SendMessageRequest {
+            invocation_id: invocation_id.clone(),
+            token: target.bot_send_token,
+            content: params.content,
+            attachments: params.attachments,
+        };
+        let client = InternalClient::new(target.bot_socket_path);
+        match tokio::time::timeout(SEND_MESSAGE_TIMEOUT, client.message_send(&request)).await {
+            Ok(Ok(resp)) if resp.ok => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::json!({ "status": "sent", "message_ids": resp.message_ids })
+                    .to_string(),
+            )])),
+            Ok(Ok(_)) => Ok(tool_error(
+                "send_message_failed",
+                "bot reported delivery failure",
+                None,
+            )),
+            Ok(Err(e)) => Ok(tool_error("send_message_failed", format!("{e:#}"), None)),
+            Err(_) => Ok(tool_error(
+                "send_message_failed",
+                "send_message timed out",
+                None,
+            )),
         }
     }
 
