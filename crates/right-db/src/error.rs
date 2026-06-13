@@ -239,6 +239,14 @@ mod tests {
                 .is_wal_corruption(),
             "main-database corruption is NOT sidecar-recoverable",
         );
+        assert!(
+            !DbError::SidecarRemove {
+                path: "data.db-tshm".into(),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            }
+            .is_wal_corruption(),
+            "sidecar-removal failure must not re-trigger recovery",
+        );
     }
 
     #[tokio::test]
