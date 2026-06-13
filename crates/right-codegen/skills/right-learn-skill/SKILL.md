@@ -1,26 +1,35 @@
 ---
 name: right-learn-skill
 description: >-
-  Use ONLY when the user explicitly asks you to save / remember / fix a
-  reusable workflow. Routine learning is handled automatically by the
-  platform's probe-writer; do not invoke this skill based on your own
-  judgment that a workflow might be reusable.
-version: 0.2.0
+  Use when you verified a reusable procedure this turn (non-trivial multi-step
+  work, concrete gotchas, or you just corrected a wrong approach) and want to
+  save or fix a rightx-* skill, or when the user explicitly asks to save,
+  remember, or fix one. Not for one-off tasks, unverified guesses, or trivial
+  single-step work.
+version: 0.3.0
 compatibility: Uses standard Claude Code Agent Skills in .claude/skills.
 ---
 
-# /right-learn-skill — Explicit User-Intent Skill Writes
+# /right-learn-skill — Mid-Conversation Skill Writes
 
-Use this skill ONLY when the user explicitly says something like "save this as
-a skill", "remember how to do X", "this skill is broken, fix it", or otherwise
-directs you to create or modify a `rightx-*` skill. Routine learning happens
-automatically — you do NOT need this skill for every reusable workflow you
-encounter.
+Create or fix a `rightx-*` learned skill, either:
+
+- the user explicitly asks ("save this as a skill", "remember how to do X",
+  "this skill is broken, fix it"), **or**
+- on your own judgment, when *during this turn* you verified a reusable "how":
+  non-trivial multi-step work, concrete gotchas / exact commands / API quirks,
+  and you are confident it will recur. The strongest trigger is correcting a
+  wrong approach and now knowing the right one.
+
+The post-turn probe-writer is the safety net for turns where you did NOT
+capture the "how" yourself; on any turn where you author or patch a skill, it
+does not run. In a cron turn, only write a skill after your `delivery` output
+is secured — the budget that produces the deliverable comes first.
 
 ## Create A New Skill
 
 Create a new skill when the user explicitly asked you to learn, save, or
-remember the workflow.
+remember the workflow, or when you verified a reusable procedure this turn.
 
 New skills created by Right learning must use a `rightx-` package name:
 
