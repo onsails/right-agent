@@ -1473,16 +1473,23 @@ async fn rollback_attached_provider(
 
 async fn reensure_generic_profile_after_rollback(
     client: &mut OpenShellClient,
+    sandbox_name: &str,
     provider_name: &str,
     generic: &right_agent_config::GenericProvider,
     original_err: String,
     rollback_reason: &str,
 ) -> Vec<String> {
+    // Restoring the prior profile means replacing an id that the gateway already
+    // holds — `ensure_profiles` cannot do that (it reports drift and skips), so
+    // the restore must go through the same detach-dance the forward update uses.
     let (_, profile) = generic_provider_update_profile(provider_name, generic);
-    let managed_profile =
-        right_openshell::managed_profiles::ManagedProfile::Authored(Box::new(profile));
-    match right_openshell::managed_profiles::ensure_profiles(client, &[managed_profile]).await {
-        Ok(_) => Vec::new(),
+    let attachments = vec![right_openshell::providers::ProfileAttachment {
+        sandbox_name: sandbox_name.to_string(),
+        provider_name: provider_name.to_string(),
+    }];
+    match right_openshell::providers::update_referenced_profile(client, &attachments, profile).await
+    {
+        Ok(()) => Vec::new(),
         Err(rollback_err) => {
             tracing::warn!(
                 provider = %provider_name,
@@ -2199,6 +2206,7 @@ pub(crate) async fn handle_provider_config_update(
     {
         let rollback_errors = reensure_generic_profile_after_rollback(
             &mut client,
+            &sandbox_name,
             &req.name,
             &current,
             format!("{e:#}"),
@@ -2219,6 +2227,7 @@ pub(crate) async fn handle_provider_config_update(
     {
         let rollback_errors = reensure_generic_profile_after_rollback(
             &mut client,
+            &sandbox_name,
             &req.name,
             &current,
             format!("{e:#}"),
@@ -2253,6 +2262,7 @@ pub(crate) async fn handle_provider_config_update(
     {
         let rollback_errors = reensure_generic_profile_after_rollback(
             &mut client,
+            &sandbox_name,
             &req.name,
             &current,
             format!("{e:#}"),
@@ -2287,6 +2297,7 @@ pub(crate) async fn handle_provider_config_update(
         // Roll the profile back so the proxy matches the file.
         let rollback_errors = reensure_generic_profile_after_rollback(
             &mut client,
+            &sandbox_name,
             &req.name,
             &current,
             format!("{e:#}"),
