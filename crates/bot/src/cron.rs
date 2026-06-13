@@ -996,6 +996,7 @@ async fn execute_job(
                                         // effect of empty receipts is CreateNew-leaning framing,
                                         // acceptable for v1.
                                         used_skill_receipts: Vec::new(),
+                                        learning_invocation_id: None,
                                     };
                                     let learn_ctx = crate::learning_pipeline::PostTurnLearningCtx {
                                         agent_dir: agent_dir.to_path_buf(),

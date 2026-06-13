@@ -222,6 +222,11 @@ pub(crate) struct ProbeAnchor {
     pub wall_elapsed_ms: u64,
     /// `rightx-<slug>` skill names the foreground turn reported in the reply schema.
     pub used_skill_receipts: Vec<String>,
+    /// The learning invocation id (per-invocation MCP config's `X-Right-Invocation`)
+    /// for this turn, when one was registered; `None` if no learning invocation.
+    /// Used by the post-turn pipeline to skip the probe when a skill was
+    /// authored/patched this turn.
+    pub learning_invocation_id: Option<String>,
 }
 
 /// A single Telegram message queued into the debounce channel.
@@ -1673,6 +1678,7 @@ pub fn spawn_worker(
                 cc_prompt_mode,
                 cc_usage,
                 cc_wall_elapsed_ms,
+                cc_learning_invocation_id,
             ) = match invoke_cc(
                 InvokeCcRequest {
                     conn: &prepared.conn,
@@ -1699,6 +1705,7 @@ pub fn spawn_worker(
                     prompt_mode,
                     usage,
                     wall_elapsed_ms,
+                    learning_invocation_id,
                 }) => (
                     Ok(output),
                     session_uuid,
@@ -1707,6 +1714,7 @@ pub fn spawn_worker(
                     Some(prompt_mode),
                     usage,
                     wall_elapsed_ms,
+                    learning_invocation_id,
                 ),
                 Err(failure) => {
                     if ctx.resolved_sandbox.is_some() {
@@ -1734,6 +1742,7 @@ pub fn spawn_worker(
                         None,
                         crate::cc::stream::StreamUsage::default(),
                         0u64,
+                        None,
                     )
                 }
             };
@@ -1959,6 +1968,7 @@ pub fn spawn_worker(
                             total_cost_usd: cc_usage.cost_usd,
                             wall_elapsed_ms: cc_wall_elapsed_ms,
                             used_skill_receipts: used_skill_names.into_iter().collect::<Vec<_>>(),
+                            learning_invocation_id: cc_learning_invocation_id.clone(),
                         });
                     } else {
                         tracing::warn!(?key, "CC returned content: null -- no text reply sent");
@@ -2671,6 +2681,8 @@ pub(crate) struct CcReply {
     pub(crate) usage: crate::cc::stream::StreamUsage,
     /// Wall-clock elapsed ms from CC spawn to result event (or process exit).
     pub(crate) wall_elapsed_ms: u64,
+    /// Learning invocation id used this turn (for probe-skip), if any.
+    pub(crate) learning_invocation_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -3061,6 +3073,9 @@ async fn invoke_cc(
     let mcp_path =
         crate::cc::invocation::mcp_config_path(ctx.ssh_config_path.as_deref(), &ctx.agent_dir);
     let mut active_progress = start_progress_invocation(ctx, chat_id, eff_thread_id).await;
+    let learning_invocation_id = active_progress
+        .as_ref()
+        .map(|active| active.invocation_id.clone());
     let invocation_mcp_path = active_progress
         .as_ref()
         .map(|active| active.claude_mcp_config_path.clone())
@@ -3492,6 +3507,7 @@ async fn invoke_cc(
             prompt_mode,
             usage: crate::cc::stream::StreamUsage::default(),
             wall_elapsed_ms: 0,
+            learning_invocation_id: learning_invocation_id.clone(),
         });
     }
     log_invoking_claude(&log_ctx, is_first_call, sandboxed);
@@ -4202,6 +4218,7 @@ async fn invoke_cc(
             prompt_mode,
             usage: usage.clone(),
             wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
+            learning_invocation_id: learning_invocation_id.clone(),
         });
     }
 
@@ -4291,6 +4308,7 @@ async fn invoke_cc(
                         prompt_mode,
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
+                        learning_invocation_id: learning_invocation_id.clone(),
                     });
                 } else {
                     // Token request already running — silent, don't spam.
@@ -4302,6 +4320,7 @@ async fn invoke_cc(
                         prompt_mode,
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
+                        learning_invocation_id: learning_invocation_id.clone(),
                     });
                 }
             } else {
@@ -4334,6 +4353,7 @@ async fn invoke_cc(
                         prompt_mode,
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
+                        learning_invocation_id: learning_invocation_id.clone(),
                     });
                 } else {
                     return Ok(CcReply {
@@ -4344,6 +4364,7 @@ async fn invoke_cc(
                         prompt_mode,
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
+                        learning_invocation_id: learning_invocation_id.clone(),
                     });
                 }
             }
@@ -4476,6 +4497,7 @@ async fn invoke_cc(
                 prompt_mode,
                 usage,
                 wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
+                learning_invocation_id: learning_invocation_id.clone(),
             })
         }
         Err(reason) => {
