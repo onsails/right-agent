@@ -1,6 +1,7 @@
 -- V44: Widen skill_lifecycle.created_by CHECK to include 'cron'.
 -- SQLite does not support ALTER COLUMN; recreate the table preserving all data.
-PRAGMA foreign_keys = OFF;
+-- No table FKs reference skill_lifecycle, and migrations run inside one
+-- transaction (where PRAGMA foreign_keys is a no-op), so no FK toggle is needed.
 
 CREATE TABLE skill_lifecycle_new (
   skill_name       TEXT PRIMARY KEY,
@@ -32,5 +33,3 @@ CREATE INDEX IF NOT EXISTS idx_skill_lifecycle_created_by_state
 
 CREATE INDEX IF NOT EXISTS idx_skill_lifecycle_pinned
   ON skill_lifecycle(pinned);
-
-PRAGMA foreign_keys = ON;

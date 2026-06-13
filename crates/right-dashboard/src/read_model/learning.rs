@@ -714,6 +714,10 @@ pub async fn skill_lifecycle_overview(
                 CreatedBy::Curator => curator_active += 1,
                 CreatedBy::Foreground => foreground_active += 1,
                 CreatedBy::Bundled => bundled_active += 1,
+                // Cron-authored skills are intentionally folded into the
+                // agent-created (curator) bucket; there is no separate
+                // cron_active overview field yet. Per-skill provenance still
+                // surfaces the distinct `cron` value via SkillCreatedBy.
                 CreatedBy::Cron => curator_active += 1,
             }
         }
