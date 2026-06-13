@@ -79,7 +79,10 @@ async fn curator_lifecycle_pinned_skills_are_skipped_by_automatic_transitions() 
 }
 
 #[tokio::test]
-async fn curator_lifecycle_foreground_bundled_pinned_and_archived_rows_are_not_candidates() {
+async fn curator_lifecycle_bundled_pinned_and_archived_rows_are_not_candidates() {
+    // foreground (and cron) rows ARE candidates now (decision A: inline-authored
+    // skills are curator-auto-managed). Only bundled, pinned, and archived/
+    // non-stale rows are excluded.
     let conn = open_test_conn().await;
     for (skill_name, state, pinned, created_by) in [
         (
@@ -140,7 +143,10 @@ async fn curator_lifecycle_foreground_bundled_pinned_and_archived_rows_are_not_c
         .map(|row| row.skill_name)
         .collect();
 
-    assert_eq!(names, vec!["rightx-curator", "rightx-probe"]);
+    assert_eq!(
+        names,
+        vec!["rightx-curator", "rightx-foreground", "rightx-probe"]
+    );
 }
 
 #[tokio::test]
