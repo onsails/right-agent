@@ -60,6 +60,31 @@ Replaces the prior fork-probe classifier.
    `min_cooldown_hours` floor blocks all triggers including the time
    fallback. Trigger evidence is captured in `last_spike_evidence_json`.
 
+## Inline authoring (agent self-judgment)
+
+Besides the async probe, the agent may author/patch a `rightx-*` skill mid-turn
+via `right-learn-skill` and the `skill_learning_start`/`_finish` protocol — on
+its own judgment (a reusable "how" verified this turn) or explicit user request.
+Available in foreground (the `Foreground` invocation is learning-capable) and in
+cron, where `bot::cron::execute_job` registers a learning-capable `Cron`
+invocation per run when `learning.prefilter_enabled` (non-message-sending — no
+live user — and cleaned up after the CC child exits; the cron's disallowed-tools
+set switches to `disallow_foreground_only_tools_keep_learning`).
+
+On any turn where a skill was successfully created/updated, the async probe is
+skipped entirely: `run_post_turn` returns early (before the budget gate) when
+`learning_pipeline::authored_skill_this_turn` finds a successful
+`skill_learning_events` finish row for the turn's `learning_invocation_id`
+(threaded onto `ProbeAnchor`; foreground via `CcReply`, cron via the registered
+invocation id). The probe is the safety net for turns the agent did not
+self-capture.
+
+Provenance: foreground inline writes → `created_by = foreground`; cron inline
+writes → `created_by = cron` (`right_backend::invocation_kind_to_created_by`).
+Both are curator-auto-managed (stale→archive when unused+unpinned), alongside
+`probe_writer`/`curator`; the dashboard pin is the durability escape. (Migration
+v44 widened the `skill_lifecycle.created_by` CHECK to include `cron`.)
+
 ## Invocation contract notes
 
 The probe-writer fork IS session-bearing — it forks the main session

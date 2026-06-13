@@ -278,6 +278,11 @@ recurring-cron successes (`ScheduleKind::Recurring`; one-shot cron runs are
 excluded). No new `LEARNING_SOURCES` entry — cron learning *is*
 `learning_prefilter` + `learning_probe_writer` spend.
 
+The agent may also author/patch `rightx-*` skills inline mid-turn (foreground,
+and cron via the learning-capable `Cron` invocation kind); the async probe is
+skipped on any turn that did so. Inline `foreground`/`cron` provenance skills
+are curator-auto-managed like `probe_writer`/`curator`.
+
 Skill lifecycle state lives in `data.db.skill_lifecycle`. Curator
 transitions skip pinned rows. The dashboard is the only operator
 pin/unpin surface — do not add CLI pinning.

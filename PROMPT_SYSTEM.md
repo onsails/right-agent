@@ -624,11 +624,18 @@ spot-check a job instead of creating a second cron to watch it.
 `mcp__right__skill_learning_finish` are metadata/progress/receipt tools for
 the `/right-learn-skill` built-in skill. They validate skill-learning
 provenance, record events, and update lifecycle state; foreground invocations
-also send Telegram learning receipts. Probe-writer and curator invocations
-record events/lifecycle without Telegram learning-message delivery. These tools
-do not move skill files from sandbox to host. The active agent writes skill
-package files under `.claude/skills/<skill_name>/`. Create and update both
-require `rightx-*` skill package names.
+also send Telegram learning receipts. Probe-writer, curator, and cron
+invocations record events/lifecycle without Telegram learning-message delivery.
+These tools do not move skill files from sandbox to host. The active agent
+writes skill package files under `.claude/skills/<skill_name>/`. Create and
+update both require `rightx-*` skill package names.
+
+`/right-learn-skill` now activates on the agent's own judgment (a reusable
+"how" verified this turn) as well as explicit user requests. It works in
+foreground and in cron turns (cron registers a learning-capable `Cron`
+invocation per run when learning is enabled). Cron inline writes get
+`created_by = cron`; foreground writes get `foreground`; both are
+curator-auto-managed.
 
 Per-turn skill-learning pipeline (the prior fork-probe is removed): after
 every successful foreground reply, the worker runs a Haiku prefilter against
@@ -636,7 +643,9 @@ the captured anchor (with per-agent baselines and skill index). On a non-`skip`
 decision the worker forks the main session as a tool-whitelisted probe-writer
 (max_turns 16), passing the `PatchExisting` or `CreateNew` hint. The writer
 either patches or creates a `rightx-*` SKILL.md and reports `hint_outcome` via
-`mcp__right__skill_learning_finish`. A periodic per-agent curator ticker reads
+`mcp__right__skill_learning_finish`. On any turn where the agent already
+authored or patched a skill inline, this async probe is skipped entirely (the
+"how" is already captured). A periodic per-agent curator ticker reads
 state from the `curator_state` singleton in `data.db`, checks a multi-signal
 gate (cost spike, skill-change count, or time fallback), and forks a fresh CC
 session with `CURATOR_SYSTEM_PROMPT` for consolidation work. See
