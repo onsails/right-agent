@@ -50,6 +50,30 @@ impl Drop for PathGuard {
 const SANDBOX_READY_TIMEOUT_ENV: &str = "RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS";
 const SANDBOX_SSH_TIMEOUT_ENV: &str = "RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS";
 
+/// Minimal fast-startup policy: public `allowed_ips` endpoint on 443, all
+/// binaries allowed. Shared by [`TestSandbox::create`] and [`shared_sandbox`].
+pub(crate) const MINIMAL_POLICY: &str = "\
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_write:
+    - /tmp
+    - /sandbox
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+network_policies:
+  outbound:
+    endpoints:
+      - port: 443
+        allowed_ips:
+          - \"1.1.1.1/32\"
+        protocol: rest
+        access: full
+    binaries:
+      - path: \"**\"
+";
+
 fn timeout_secs_from_env_value(value: Option<&str>, default_secs: u64) -> u64 {
     value
         .and_then(|value| value.parse::<u64>().ok())
@@ -89,28 +113,6 @@ impl TestSandbox {
     ///
     /// [`create_with_policy`]: Self::create_with_policy
     pub async fn create(test_name: &str) -> Self {
-        // Minimal policy — fast startup, public allowed_ips endpoint on 443.
-        const MINIMAL_POLICY: &str = "\
-version: 1
-filesystem_policy:
-  include_workdir: true
-  read_write:
-    - /tmp
-    - /sandbox
-process:
-  run_as_user: sandbox
-  run_as_group: sandbox
-network_policies:
-  outbound:
-    endpoints:
-      - port: 443
-        allowed_ips:
-          - \"1.1.1.1/32\"
-        protocol: rest
-        access: full
-    binaries:
-      - path: \"**\"
-";
         Self::create_with_policy(test_name, MINIMAL_POLICY).await
     }
 
@@ -207,13 +209,7 @@ network_policies:
     /// Execute a command inside the sandbox with an explicit server-side
     /// timeout (seconds). OpenShell returns exit 124 once the timer expires.
     pub async fn exec_with_timeout(&self, cmd: &[&str], timeout_seconds: u32) -> (String, i32) {
-        let mut client = openshell::connect_grpc(&self.mtls_dir).await.unwrap();
-        let id = openshell::resolve_sandbox_id(&mut client, &self.name)
-            .await
-            .unwrap();
-        openshell::exec_in_sandbox(&mut client, &id, cmd, timeout_seconds)
-            .await
-            .unwrap()
+        exec_in_named_sandbox(&self.mtls_dir, &self.name, cmd, timeout_seconds).await
     }
 }
 
@@ -222,6 +218,23 @@ impl Drop for TestSandbox {
         test_cleanup::unregister_test_sandbox(&self.name);
         test_cleanup::delete_sandbox_sync(&self.name);
     }
+}
+
+/// Execute a command inside a named sandbox via gRPC. Shared by
+/// [`TestSandbox`] and [`SharedSandboxRef`].
+pub(crate) async fn exec_in_named_sandbox(
+    mtls_dir: &Path,
+    name: &str,
+    cmd: &[&str],
+    timeout_seconds: u32,
+) -> (String, i32) {
+    let mut client = openshell::connect_grpc(mtls_dir).await.unwrap();
+    let id = openshell::resolve_sandbox_id(&mut client, name)
+        .await
+        .unwrap();
+    openshell::exec_in_sandbox(&mut client, &id, cmd, timeout_seconds)
+        .await
+        .unwrap()
 }
 
 #[cfg(test)]
