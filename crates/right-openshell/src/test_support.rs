@@ -220,6 +220,116 @@ impl Drop for TestSandbox {
     }
 }
 
+/// Per-run identifier shared by every test process of one runner invocation.
+/// Under nextest each test is its own process, but they all share one parent
+/// (the nextest runner), so `parent_id()` is identical across the run and
+/// distinct across invocations. `RIGHT_TEST_RUN_ID` overrides it (CI pins it
+/// to the GitHub run id).
+fn test_run_id() -> String {
+    std::env::var("RIGHT_TEST_RUN_ID")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| std::os::unix::process::parent_id().to_string())
+}
+
+/// Non-owning handle to a long-lived, cross-process shared sandbox.
+///
+/// Unlike [`TestSandbox`] it does NOT delete the sandbox on drop and does NOT
+/// hold the lifetime name lock — so many test processes can attach
+/// concurrently (capped only by the nextest test-group). The sandbox persists
+/// past the process; a later run with a different run id recreates a fresh one.
+pub struct SharedSandboxRef {
+    name: String,
+    mtls_dir: PathBuf,
+}
+
+impl SharedSandboxRef {
+    /// Sandbox name (already prefixed with `right-test-shared-`).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub async fn exec(&self, cmd: &[&str]) -> (String, i32) {
+        self.exec_with_timeout(cmd, openshell::DEFAULT_EXEC_TIMEOUT_SECS)
+            .await
+    }
+
+    pub async fn exec_with_timeout(&self, cmd: &[&str], timeout_seconds: u32) -> (String, i32) {
+        exec_in_named_sandbox(&self.mtls_dir, &self.name, cmd, timeout_seconds).await
+    }
+}
+
+/// Boot-once-per-run, reuse-across-processes shared sandbox for tests that need
+/// a generic working sandbox and don't care about its initial state. Each
+/// caller MUST use a distinct sandbox-side path to avoid stepping on peers.
+///
+/// Safety: the coordination lock is advisory and held ONLY across this
+/// create-or-attach block (kernel releases it on process death). The sandbox
+/// name is run-scoped (`right-test-shared-<label>-<runid>`), so concurrent
+/// runs/worktrees never block on each other's lock or delete each other's live
+/// sandbox. Attach is gated on liveness (`exists && ready`), never on mere
+/// existence. The sandbox slot is held only during boot.
+pub async fn shared_sandbox(label: &str) -> SharedSandboxRef {
+    let runid = test_run_id();
+    let name = format!("right-test-shared-{label}-{runid}");
+
+    // Coordination lock — released when `_create_lock` drops on return.
+    let _create_lock = openshell::acquire_test_name_lock(&format!("shared-create-{name}"));
+
+    let mtls_dir = match openshell::preflight_check() {
+        openshell::OpenShellStatus::Ready(dir) => dir,
+        other => panic!("OpenShell not ready: {other:?}"),
+    };
+    let mut client = openshell::connect_grpc(&mtls_dir).await.unwrap();
+
+    // Attach to a live, healthy shared sandbox booted earlier in this run.
+    if openshell::sandbox_exists(&mut client, &name).await.unwrap()
+        && openshell::is_sandbox_ready(&mut client, &name)
+            .await
+            .unwrap()
+    {
+        let id = openshell::resolve_sandbox_id(&mut client, &name)
+            .await
+            .unwrap();
+        openshell::wait_for_ssh(&mut client, &id, sandbox_ssh_timeout_secs(60), 2)
+            .await
+            .expect("shared sandbox SSH not ready");
+        return SharedSandboxRef { name, mtls_dir };
+    }
+
+    // Stale / half-booted leftover (crashed boot, or a prior run that reused
+    // this run id): delete before recreating.
+    if openshell::sandbox_exists(&mut client, &name).await.unwrap() {
+        openshell::delete_sandbox(&name).await;
+        openshell::wait_for_deleted(&mut client, &name, 60, 2)
+            .await
+            .expect("cleanup of stale shared sandbox failed");
+    }
+
+    // Boot once. Hold a sandbox slot ONLY during creation so the long-lived
+    // idle shared sandbox doesn't permanently consume a concurrency slot.
+    let slot = openshell::acquire_sandbox_slot();
+    let tmp = tempfile::tempdir().unwrap();
+    let policy_path = tmp.path().join("policy.yaml");
+    std::fs::write(&policy_path, MINIMAL_POLICY).unwrap();
+
+    let mut child = openshell::spawn_sandbox(&name, &policy_path, None, &[])
+        .expect("failed to spawn shared sandbox");
+    openshell::wait_for_ready(&mut client, &name, sandbox_ready_timeout_secs(120), 2)
+        .await
+        .expect("shared sandbox did not become READY");
+    let id = openshell::resolve_sandbox_id(&mut client, &name)
+        .await
+        .unwrap();
+    openshell::wait_for_ssh(&mut client, &id, sandbox_ssh_timeout_secs(60), 2)
+        .await
+        .expect("shared sandbox SSH did not become ready");
+    let _ = child.kill().await;
+    drop(slot);
+
+    SharedSandboxRef { name, mtls_dir }
+}
+
 /// Execute a command inside a named sandbox via gRPC. Shared by
 /// [`TestSandbox`] and [`SharedSandboxRef`].
 pub(crate) async fn exec_in_named_sandbox(
