@@ -1,6 +1,10 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::managed_profiles::{
+    EnsureOutcome, ManagedProfile, author_generic_profile, ensure_profiles,
+};
 use crate::openshell_proto::openshell::datamodel::v1 as datamodel;
 use crate::openshell_proto::openshell::sandbox::v1 as sandbox_v1;
 use crate::openshell_proto::openshell::v1 as proto_v1;
@@ -771,5 +775,52 @@ async fn get_sandbox_provider_environment_returns_map() {
     assert_eq!(
         env.get("MY_TOKEN"),
         Some(&"openshell:resolve:env:v1_MY_TOKEN".to_string())
+    );
+}
+
+#[tokio::test]
+async fn ensure_profiles_reports_drift_without_reimport() {
+    let import_calls = Arc::new(AtomicUsize::new(0));
+    let import_calls_c = Arc::clone(&import_calls);
+
+    // Stored profile differs from desired on a MEANINGFUL field (env var), so the
+    // fingerprints differ → drift. Import must NOT be attempted.
+    let desired = author_generic_profile(
+        "right-provider-x",
+        &["api.acme.com".into()],
+        None,
+        "NEW_KEY",
+    );
+    let mut stored = desired.clone();
+    stored.credentials[0].env_vars = vec!["OLD_KEY".into()];
+
+    let mock = MockOpenShell {
+        mock_get_provider_profile: Some(Box::new(move |_req| {
+            Ok(proto_v1::ProviderProfileResponse {
+                profile: Some(stored.clone()),
+            })
+        })),
+        mock_import_provider_profiles: Some(Box::new(move |_req| {
+            import_calls_c.fetch_add(1, Ordering::SeqCst);
+            Ok(proto_v1::ImportProviderProfilesResponse::default())
+        })),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    let managed = ManagedProfile::Authored(Box::new(desired));
+    let outcomes = ensure_profiles(&mut client, &[managed]).await.unwrap();
+
+    assert_eq!(outcomes.len(), 1);
+    assert!(
+        matches!(outcomes[0], EnsureOutcome::DriftedSkipped(_)),
+        "got {:?}",
+        outcomes[0]
+    );
+    assert_eq!(
+        import_calls.load(Ordering::SeqCst),
+        0,
+        "drift must NOT trigger an import"
     );
 }
