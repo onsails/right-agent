@@ -105,10 +105,16 @@ pub(crate) fn disallow_forum_topic_tools(mut tools: Vec<String>) -> Vec<String> 
     tools
 }
 
-pub(crate) fn disallow_foreground_only_tools(tools: Vec<String>) -> Vec<String> {
+/// Foreground-only tool restrictions EXCEPT learning tools. Used by cron turns
+/// that may author skills inline.
+pub(crate) fn disallow_foreground_only_tools_keep_learning(tools: Vec<String>) -> Vec<String> {
     disallow_thread_focus_set(disallow_forum_topic_tools(disallow_conversation_search(
-        disallow_learning_tools(disallow_send_progress(tools)),
+        disallow_send_progress(tools),
     )))
+}
+
+pub(crate) fn disallow_foreground_only_tools(tools: Vec<String>) -> Vec<String> {
+    disallow_learning_tools(disallow_foreground_only_tools_keep_learning(tools))
 }
 
 pub(crate) fn disable_all_tools_args() -> Vec<String> {
@@ -1501,6 +1507,27 @@ mod tests {
         assert!(args.contains(&"--debug".to_string()));
         // No --debug-file because we have no session UUID to put in the path.
         assert!(!args.iter().any(|a| a.starts_with("--debug-file=")));
+    }
+
+    #[test]
+    fn keep_learning_variant_allows_learning_tools_but_disallows_others() {
+        let kept = disallow_foreground_only_tools_keep_learning(baseline_disallowed_tools());
+        assert!(
+            !kept
+                .iter()
+                .any(|t| t == right_mcp::internal_client::SKILL_LEARNING_START_MCP_TOOL)
+        );
+        assert!(
+            !kept
+                .iter()
+                .any(|t| t == right_mcp::internal_client::SKILL_LEARNING_FINISH_MCP_TOOL)
+        );
+        assert!(kept.iter().any(|t| t == SEND_PROGRESS_MCP_TOOL));
+        let full = disallow_foreground_only_tools(baseline_disallowed_tools());
+        assert!(
+            full.iter()
+                .any(|t| t == right_mcp::internal_client::SKILL_LEARNING_START_MCP_TOOL)
+        );
     }
 
     fn process_exists(pid: u32) -> bool {
