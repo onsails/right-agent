@@ -66,6 +66,12 @@ impl<T> OptionalExtension<T> for Result<T, DbError> {
 ///   transaction for the full batch duration, not just the next pending
 ///   version. Under WAL + 5s `busy_timeout`, a slow first-boot batch can
 ///   force the second opener to time out.
+///
+/// # WAL desync recovery
+///
+/// On a Turso multiprocess-WAL desync (open fails `is_wal_corruption`), the
+/// connection resets the `-tshm`/`-shm` sidecars once under the per-agent
+/// bootstrap lock and retries exactly once. See tursodatabase/turso#769.
 pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
     let db_path = agent_path.join("data.db");
     let mut retries = 0;
@@ -110,11 +116,9 @@ fn remove_wal_sidecars(agent_path: &Path) -> Result<(), DbError> {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                return Err(DbError::Open {
+                return Err(DbError::SidecarRemove {
                     path: sidecar,
-                    source: turso::Error::Error(format!(
-                        "failed to remove WAL sidecar during recovery: {e}"
-                    )),
+                    source: e,
                 });
             }
         }
@@ -128,8 +132,11 @@ fn remove_wal_sidecars(agent_path: &Path) -> Result<(), DbError> {
 async fn recover_wal_sidecars(agent_path: &Path) -> Result<(), DbError> {
     let _lock = bootstrap_lock::acquire(agent_path).await?;
     let db_path = agent_path.join("data.db");
-    // The desync surfaces during open (WAL recovery). Re-check under the lock so
-    // we don't reset sidecars a sibling just rebuilt.
+    // Re-check under the lock with the SAME semantics as the production open
+    // (create: true) so the probe reproduces the desync exactly. Reaching
+    // recovery means the first open already failed with is_wal_corruption,
+    // which proves data.db + its sidecars existed; the file cannot vanish
+    // during the locked probe, so create: true cannot mask a missing database.
     match Connection::open_local(db_path, true).await {
         Ok(_) => return Ok(()),
         Err(error) if error.is_wal_corruption() => {}
