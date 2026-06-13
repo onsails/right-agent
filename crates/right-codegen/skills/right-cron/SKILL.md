@@ -98,6 +98,15 @@ agent to look for an external messaging tool.
 message and Telegram renders it as a mention. Don't strip the user's
 content or schedule; only rephrase the delivery-imperative verbs.
 
+### What, not how
+
+A cron `prompt:` states the **goal** — the outcome you want — and trusts your
+skills to supply the **procedure**. Do not inline brittle step-by-step "how"
+into the prompt: it can't be improved centrally and rots as tools change. When
+a cron's procedure is non-trivial, capture it as a `rightx-*` skill (see
+right-learn-skill) before creating the cron, then write the cron's "what". At
+fire time the cron loads the skill and executes.
+
 ## Choosing the Model
 
 The session that creates a cron picks that cron's model by judging the task's

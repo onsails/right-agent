@@ -678,6 +678,16 @@ mod tests {
     }
 
     #[test]
+    fn right_cron_teaches_what_not_how() {
+        let dir = tempdir().unwrap();
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude/skills/right-cron/SKILL.md")).unwrap();
+        assert!(content.contains("What, not how"));
+        assert!(content.contains("rightx-"));
+    }
+
+    #[test]
     fn right_reflect_skill_frontmatter_is_valid() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
