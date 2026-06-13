@@ -533,6 +533,7 @@ pub enum SkillCreatedBy {
     ProbeWriter,
     Curator,
     Bundled,
+    Cron,
 }
 
 impl From<right_lifecycle::CreatedBy> for SkillCreatedBy {
@@ -542,6 +543,7 @@ impl From<right_lifecycle::CreatedBy> for SkillCreatedBy {
             right_lifecycle::CreatedBy::ProbeWriter => Self::ProbeWriter,
             right_lifecycle::CreatedBy::Curator => Self::Curator,
             right_lifecycle::CreatedBy::Bundled => Self::Bundled,
+            right_lifecycle::CreatedBy::Cron => Self::Cron,
         }
     }
 }

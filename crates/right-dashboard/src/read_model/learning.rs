@@ -714,6 +714,7 @@ pub async fn skill_lifecycle_overview(
                 CreatedBy::Curator => curator_active += 1,
                 CreatedBy::Foreground => foreground_active += 1,
                 CreatedBy::Bundled => bundled_active += 1,
+                CreatedBy::Cron => curator_active += 1,
             }
         }
         if use_count > 0 {
