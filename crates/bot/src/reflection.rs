@@ -31,6 +31,8 @@ pub(crate) enum FailureKind {
     MaxTurns { limit: u32 },
     /// Non-zero exit code with no auth-error classification.
     NonZeroExit { code: i32 },
+    /// Aborted after repeated structured-output schema rejections.
+    StructuredOutputLoop { rejections: u32 },
 }
 
 /// Discriminator for where the reflection originated — decides how the usage
@@ -101,6 +103,9 @@ pub(crate) fn failure_reason_text(kind: &FailureKind) -> String {
         }
         FailureKind::MaxTurns { limit } => format!("reached the maximum turn count ({limit})"),
         FailureKind::NonZeroExit { code } => format!("Claude process exited with code {code}"),
+        FailureKind::StructuredOutputLoop { rejections } => format!(
+            "could not produce a valid structured reply after {rejections} attempts (its output kept failing schema validation)"
+        ),
     }
 }
 
@@ -416,6 +421,13 @@ mod tests {
         assert!(failure_reason_text(&FailureKind::MaxTurns { limit: 30 }).contains("30"));
         assert!(failure_reason_text(&FailureKind::NonZeroExit { code: 137 }).contains("137"));
         assert!(failure_reason_text(&FailureKind::NonZeroExit { code: -1 }).contains("-1"));
+    }
+
+    #[test]
+    fn failure_reason_text_for_structured_output_loop() {
+        let s = failure_reason_text(&FailureKind::StructuredOutputLoop { rejections: 3 });
+        assert!(s.contains("structured"), "{s}");
+        assert!(s.contains('3'), "{s}");
     }
 
     #[tokio::test]
