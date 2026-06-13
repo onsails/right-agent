@@ -151,6 +151,54 @@ async fn ensure_generic_provider_profiles_for_config(
     Ok(outcomes)
 }
 
+/// Heal any generic profile that `ensure_*` reported as drifted, using the
+/// detach-dance primitive. Built-in profiles are not healed here (handled at
+/// `right up`); only generic providers declare drift in this path.
+async fn heal_drifted_generic_profiles(
+    client: &mut right_openshell::managed_profiles::OpenShellGrpcClient,
+    sandbox_name: &str,
+    agent_name: &str,
+    config: &AgentConfig,
+    outcomes: &[right_openshell::managed_profiles::EnsureOutcome],
+) -> miette::Result<()> {
+    use right_openshell::managed_profiles::EnsureOutcome;
+    for entry in config.providers() {
+        let right_agent_config::ProviderType::Generic = entry.type_ else {
+            continue;
+        };
+        let id = right_openshell::managed_profiles::generic_provider_profile_id(&entry.name);
+        let drifted = outcomes
+            .iter()
+            .any(|o| matches!(o, EnsureOutcome::DriftedSkipped(d) if *d == id));
+        if !drifted {
+            continue;
+        }
+        let generic = entry.generic.as_ref().ok_or_else(|| {
+            miette::miette!(
+                "agent {agent_name} generic provider {} missing generic config",
+                entry.name
+            )
+        })?;
+        let desired = right_openshell::managed_profiles::author_generic_profile(
+            &id,
+            &generic.upstream_hosts,
+            generic.upstream_path_prefix.as_deref(),
+            &generic.env_var,
+        );
+        let atts = vec![right_openshell::providers::ProfileAttachment {
+            sandbox_name: sandbox_name.to_string(),
+            provider_name: entry.name.clone(),
+        }];
+        right_openshell::providers::update_referenced_profile(client, &atts, desired)
+            .await
+            .map_err(|e| {
+                miette::miette!("heal drifted generic profile {} failed: {e:#}", entry.name)
+            })?;
+        tracing::info!(agent = %agent_name, provider = %entry.name, "healed drifted generic provider profile");
+    }
+    Ok(())
+}
+
 enum ProviderCompositionExpectation<'a> {
     RuleOnly,
     Endpoints(Vec<(&'a str, &'a str)>),
@@ -251,6 +299,7 @@ async fn reconcile_and_confirm_providers(
 ) -> miette::Result<()> {
     let profile_outcomes =
         ensure_generic_provider_profiles_for_config(client, agent, config).await?;
+    heal_drifted_generic_profiles(client, sandbox, agent, config, &profile_outcomes).await?;
     let declared: Vec<String> = sandbox_cfg
         .providers
         .iter()
@@ -565,6 +614,14 @@ pub(crate) async fn hot_reconcile_providers(
     let providers = config.providers();
     let profile_outcomes =
         ensure_generic_provider_profiles_for_config(&mut client, agent, config).await?;
+    heal_drifted_generic_profiles(
+        &mut client,
+        resolved_sandbox,
+        agent,
+        config,
+        &profile_outcomes,
+    )
+    .await?;
 
     let declared: Vec<String> = providers.iter().map(|p| p.name.clone()).collect();
     let report = right_openshell::providers::reconcile_for_sandbox(
