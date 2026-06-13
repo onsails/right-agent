@@ -149,11 +149,13 @@ continuation's target **defaults to the originating chat**.
 The originating chat is **resolved server-side** from the foreground
 invocation that issued the trigger — the same conversation-scope resolver
 that backs `send_message`/`thread_search`. The agent never passes a chat
-id for "here"; the runtime stamps the resolved `(chat_id, thread_id)`
-onto the triggered run's `async_runs` row (origin columns) and uses it as
-the `then` continuation's default `target_chat_id`/`target_thread_id`. An
-explicit `then.target_chat_id` (allowlist-validated) overrides it to send
-elsewhere.
+id for "here". The `cron_trigger` handler resolves it via the existing
+foreground-only conversation-scope accessor (which returns a scope **only**
+for a foreground invocation — precisely when origin should exist) and
+writes it to the `cron_specs` transient origin columns; it flows into the
+in-memory `CronSpec` and becomes the `then` continuation's default
+`target_chat_id`/`target_thread_id`. An explicit `then.target_chat_id`
+(allowlist-validated) overrides it to send elsewhere.
 
 So the channel post and the "how it went" report are two *different*
 messages from two different runs (A → channel via its standing target;
@@ -178,16 +180,19 @@ migration rules):
   - `trigger_then_json TEXT NULL` (serialized `ThenSpec`)
   - `trigger_origin_chat_id INTEGER NULL`
   - `trigger_origin_thread_id INTEGER NULL`
-- `async_runs` per-run carry (copied at job start, read at completion):
-  - `then_json TEXT NULL`
-  - `origin_chat_id INTEGER NULL`
-  - `origin_thread_id INTEGER NULL`
 
-The transient `cron_specs` fields are copied onto the run's `async_runs`
-row in `execute_job` and cleared from `cron_specs` immediately, so a
-recurring spec never retains per-trigger state and a scheduled
-(non-triggered) run carries none of it. `then`/origin live on the run,
-which is the unit that completes.
+**No `async_runs` columns are added.** The reconciler loads these
+transient fields into the in-memory `CronSpec` snapshot (via
+`load_specs_from_db`), then `clear_triggered_at` wipes the DB row *before*
+`execute_job` runs — exactly the existing `trigger_force_notify`
+lifecycle. `execute_job` and its completion handler read `extra_instruction`
+/ `then` / origin straight off the in-memory `spec`, which stays in scope
+through completion (no early returns). They must be **excluded from
+`CronSpec`'s `PartialEq`** (transient state, like `triggered_at` /
+`trigger_force_notify`) or the reconciler aborts running jobs on trigger.
+The spawned `then` continuation is an ordinary `kind='background'`
+`async_runs` row whose `target_chat_id` is the resolved origin/`then`
+target — no schema change there.
 
 `ThenSpec` (serde): `{ instruction: String, run_on: RunOn,
 notify: bool, target_chat_id: Option<i64>, target_thread_id: Option<i64> }`
@@ -287,17 +292,21 @@ Still to confirm:
 
 ## Testing
 
-- Unit: `ThenSpec` serde round-trip; `run_on` matching against each
-  terminal status; transient→`async_runs` copy + `clear_triggered_at`
-  clears all new fields; allowlist rejection of a bad `then.target_chat_id`.
-- Unit: `extra_instruction` prepend ordering relative to force-notify
+- Unit: `ThenSpec` serde round-trip; missing `run_on` fails
+  deserialization; `run_on` matching against each terminal status;
+  `trigger_spec` writes all transient fields and `clear_triggered_at`
+  clears them; `load_specs_from_db` carries them into `CronSpec` while
+  `PartialEq` ignores them; allowlist rejection of a bad
+  `then.target_chat_id`.
+- Unit: `extra_instruction` prepend ordering relative to the force-notify
   notice; stored `prompt` unchanged after a triggered run.
 - Integration (mock CC): triggered run terminal `success` →
-  continuation spawned with `source_session_id == run.run_session_id`;
+  continuation spawned with `source_session_id == run_id` (A's session);
   `failure` + `run_on=success` → no continuation; `failure` +
   `run_on=always` → continuation spawned.
-- Origin: trigger from a foreground invocation stamps origin columns;
-  trigger from a cron turn leaves them null.
+- Origin: `trigger_spec` invoked with a resolved foreground scope writes
+  origin columns; invoked from a cron-turn caller (no scope) leaves them
+  null and the continuation falls back to the standing target.
 - Final: `cargo nextest run --workspace` + `cargo test --doc --workspace`.
 
 ## Verification cadence
