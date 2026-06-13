@@ -264,9 +264,15 @@ pub fn managed_profiles() -> Vec<ManagedProfile> {
 
 /// One endpoint allow-rule fingerprint: `(method, path, command, operation_type)`.
 type RuleFp = (String, String, String, String);
-/// One credential fingerprint:
-/// `(name, sorted env vars, required, auth_style, header_name, query_param)`.
-type CredentialFp = (String, Vec<String>, bool, String, String, String);
+/// One credential fingerprint: `(name, sorted env vars, required)`.
+///
+/// `auth_style`/`header_name`/`query_param` are intentionally excluded: they are
+/// inert for OpenShell static-key substitution (keyed by env-var name; the agent
+/// writes the real auth header), so they carry no behavioral meaning. Including
+/// them would make an already-provisioned profile read as drifted whenever the
+/// authored placement changed — an unfixable churn, since the gateway rejects
+/// re-importing an existing id and a referenced profile cannot be deleted.
+type CredentialFp = (String, Vec<String>, bool);
 /// One endpoint's fingerprint:
 /// `(host, effective ports, protocol, tls, enforcement, access, sorted allowed IPs, path, sorted rules)`.
 type EndpointFp = (
@@ -344,14 +350,7 @@ fn fingerprint(p: &proto_v1::ProviderProfile) -> ProfileFp {
         .map(|c| {
             let mut env_vars = c.env_vars.clone();
             env_vars.sort();
-            (
-                c.name.clone(),
-                env_vars,
-                c.required,
-                c.auth_style.clone(),
-                c.header_name.clone(),
-                c.query_param.clone(),
-            )
+            (c.name.clone(), env_vars, c.required)
         })
         .collect();
     credentials.sort();
@@ -850,6 +849,29 @@ mod tests {
         assert!(
             !needs_import(Some(&stored_normalized), &desired),
             "gateway port normalization must not force re-import"
+        );
+    }
+
+    #[test]
+    fn needs_import_false_when_only_inert_credential_fields_differ() {
+        // auth_style/header_name/query_param are inert for OpenShell static-key
+        // substitution (keyed by env-var name; the agent writes the real auth
+        // header). They MUST NOT be a drift signal: re-importing an existing id is
+        // rejected by the gateway and a referenced profile cannot be deleted, so
+        // spurious drift on these fields would wedge `right up`.
+        let desired = author_generic_profile(
+            "right-provider-x",
+            &["api.acme.com".to_string()],
+            None,
+            "ACME_TOKEN",
+        );
+        let mut stored_old_inert = desired.clone();
+        stored_old_inert.credentials[0].auth_style = "header".into();
+        stored_old_inert.credentials[0].header_name = "x-api-key".into();
+        stored_old_inert.credentials[0].query_param = "token".into();
+        assert!(
+            !needs_import(Some(&stored_old_inert), &desired),
+            "inert credential fields must not force a re-import"
         );
     }
 }
