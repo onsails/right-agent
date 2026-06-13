@@ -1,4 +1,77 @@
 # Changelog
+## [0.4.0] - 2026-06-13
+
+
+### Bug Fixes
+
+- **mcp**: Reconnect dead upstream session on first health probe
+- **bot**: Check missing STT model before decode
+- **bot**: Supervisor self-heals drifted generic provider profiles
+- **delivery**: Deliver cron attachments, stop duplicate posts on retry
+- **attachments**: Render markdown in single captions with plain fallback
+- **attachments**: Render markdown in media-group captions with plain retry
+- **progress**: Render markdown in send_progress with plain fallback
+- **telegram**: Gate markdown plain-retry to formatting errors to avoid duplicate sends
+- **cc**: Drop removed-upstream TeamCreate/TeamDelete from baseline deny-list
+- **providers**: Reject stale extra generic endpoints
+- **clippy**: Satisfy latest-stable clippy lints
+- **providers**: Dashboard config-update swaps profile via detach-dance
+- **providers**: Route config-update rollback through detach-dance restore
+- **providers**: Resolve heal sandbox name + reattach on mid-loop detach failure
+- **bot,right**: Disallow send_message on non-foreground turns + validation tests
+
+### Documentation
+
+- **learning**: Fix doc-comment placement in learning_pipeline
+- **prompt**: Teach send_message + sync aggregator instructions
+
+### Features
+
+- **openshell**: Usage hint names env var and tells agent to write the auth header
+- **learning**: Allow self-judgment skill authoring in right-learn-skill
+- **cron**: Teach what-not-how cron prompt authoring
+- **right-mcp**: Add send_message wire DTOs + client method
+- **right-db**: Add thread_focus table (v43 migration)
+- **right-db**: Thread_focus get/set module
+- **lifecycle**: Auto-manage foreground and cron learned skills
+- **attachments**: Caption_to_html/plain markdown helpers
+- **learning**: Skip async probe when a skill was authored this turn
+- **cron**: Allow inline skill authoring in cron turns
+- **bot**: Carry sandbox download context on ProgressTarget
+- **bot**: /message/send route delivering text + sandbox attachments
+- **bot**: Structured-output schema-rejection stream detector
+- **bot**: StructuredOutputLoop failure kind + reflection wording
+- **bot**: Abort + reflect on 3 consecutive structured-output rejections
+- **tunnel**: Support external reverse-proxy provider ([#119](https://github.com/onsails/right-agent/pull/119))
+- **agent-init**: Accept telegram token + chat ids non-interactively ([#117](https://github.com/onsails/right-agent/pull/117))
+- **agent-providers**: Non-interactive `right agent providers add` CLI ([#116](https://github.com/onsails/right-agent/pull/116))
+- **internal-api**: Multi-host generic providers, all-host composition, drop header_name
+- **cli**: Providers add multi --upstream-host, deprecate --header-name
+- **providers**: Merge generic provider env-var ux
+- **up**: Self-heal drifted managed provider profiles on right up
+- **learning**: Add learning-capable Cron invocation kind
+- **right**: SendMessageParams + per-turn send_message cap in ProgressRegistry
+- **right**: Call_send_message tool handler + registration + dispatch
+
+### Miscellaneous
+
+- Address final review (drop dead PRAGMA in v44, document cron overview fold)
+
+### Refactor
+
+- **right-db**: [**breaking**] Remove legacy rusqlite FTS5 scrubber after v34 soak
+- **cc**: Learning-preserving disallowed-tools helper for cron
+- **bot**: Adapt provider callers to multi-host GenericProvider
+- **providers**: Simplify generic policy strip on remove
+- **bot,right**: Single-parse schema-rejection detector + outbox prefix const
+
+### Testing
+
+- **mcp,memory**: Install rustls crypto provider per-test for nextest isolation
+- **learning**: Update curator candidate test for foreground+cron auto-management
+- **bot**: Message_send route auth/lookup coverage
+- **providers**: Pin config-update ordering on update_referenced_profile
+
 ## [0.3.4] - 2026-06-10
 
 
