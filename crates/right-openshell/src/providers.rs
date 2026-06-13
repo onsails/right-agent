@@ -433,7 +433,12 @@ pub async fn update_referenced_profile(
         match detach_from_sandbox(client, &att.sandbox_name, &att.provider_name).await {
             Ok(()) => to_reattach.push(att),
             Err(ProviderError::NotFound(_)) => {}
-            Err(e) => return Err(e),
+            Err(e) => {
+                // Restore the attachments already detached this call before
+                // bailing, so a mid-loop failure cannot leave a sandbox detached.
+                reattach_all(client, &to_reattach).await;
+                return Err(e);
+            }
         }
     }
 

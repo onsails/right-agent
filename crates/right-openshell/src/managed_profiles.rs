@@ -507,11 +507,14 @@ pub enum EnsureOutcome {
     DriftedSkipped(String),
 }
 
-/// Idempotently provision the given managed profiles to the gateway.
+/// Provision the given managed profiles to the gateway — create-or-skip only.
 ///
 /// Derived profiles re-read their base each call (drift-proof). A missing base
-/// is non-fatal — the profile is skipped with a warning. Re-imports happen only
-/// on real diff.
+/// is non-fatal — the profile is `Skipped` with a warning. An absent profile is
+/// imported; an identical one is `Unchanged`; an existing-but-drifted one is
+/// reported as `DriftedSkipped` and NOT re-imported (the gateway rejects
+/// re-importing an existing id). Healing drift requires sandbox context — see
+/// `providers::update_referenced_profile`.
 pub async fn ensure_profiles(
     client: &mut OpenShellClient<Channel>,
     profiles: &[ManagedProfile],
