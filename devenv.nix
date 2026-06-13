@@ -22,6 +22,7 @@
     pnpm
     git-lfs
     curl             # libcurl required to link release-plz (installed in enterShell)
+    cargo-nextest    # recommended test runner (process-per-test, faster CI/local loop)
   ] ++ lib.optionals pkgs.stdenv.isLinux [
     pkgs.bubblewrap
   ];
