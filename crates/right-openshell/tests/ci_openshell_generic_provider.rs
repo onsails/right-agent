@@ -13,7 +13,8 @@ use right_openshell::managed_profiles::{
 };
 use right_openshell::openshell::{connect_grpc, default_mtls_dir, ensure_provider_policy_loaded};
 use right_openshell::providers::{
-    ProviderSpec, attach_to_sandbox, create_provider, delete_provider, detach_from_sandbox,
+    ProfileAttachment, ProviderSpec, attach_to_sandbox, create_provider, delete_provider,
+    detach_from_sandbox, update_referenced_profile,
 };
 use right_openshell::test_support::TestSandbox;
 
@@ -505,6 +506,101 @@ async fn ci_openshell_provider_capabilities_reports_attached_provider() {
             "endpoint host must include {UPSTREAM_HOST}; got {:?}",
             cap.endpoint_hosts
         );
+    })
+    .await;
+}
+
+/// CONTRACT: a generic provider profile can be updated in place under a live
+/// provider via `update_referenced_profile` (detach → delete → import → attach),
+/// the sandbox's effective policy reflects the new endpoint set after a reload,
+/// and the provider secret is preserved (never re-supplied).
+#[tokio::test]
+#[ignore = "ci-openshell: live sandbox + gateway"]
+async fn ci_openshell_update_referenced_profile_swaps_endpoints_preserving_secret() {
+    let profile_id = unique_profile_id("update-referenced");
+    let provider_name = unique_name("update-referenced");
+    let sandbox_name = Arc::new(Mutex::new(None));
+    cleanup_generic_resources(&provider_name, &profile_id, None).await;
+
+    with_generic_cleanup(&provider_name, &profile_id, sandbox_name.clone(), async {
+        let mut client = connect_grpc(&default_mtls_dir()).await.unwrap();
+        right_openshell::providers::ensure_v2_enabled(&mut client)
+            .await
+            .expect("enable providers_v2");
+
+        let host_a = UPSTREAM_HOST.to_string();
+        let host_b = SECOND_UPSTREAM_HOST.to_string();
+
+        // baseline: profile(A) + provider(secret) + attach + compose(A)
+        ensure_generic_profile_for_hosts(&mut client, &profile_id, &[host_a.clone()], ENV_VAR)
+            .await;
+        right_openshell::test_cleanup::register_test_provider(&provider_name, Some(&profile_id));
+        create_provider(
+            &mut client,
+            &fake_provider_spec(&provider_name, &profile_id),
+        )
+        .await
+        .expect("create provider");
+
+        let (_policy_tmp, policy_path) = raw_tunnel_policy_file();
+        let sandbox = TestSandbox::create_with_policy(
+            "ci-openshell-update-referenced",
+            RAW_TUNNEL_BASE_POLICY,
+        )
+        .await;
+        *sandbox_name.lock().expect("sandbox name lock") = Some(sandbox.name().to_string());
+        attach_to_sandbox(&mut client, sandbox.name(), &provider_name)
+            .await
+            .expect("attach provider");
+        right_openshell::test_cleanup::register_test_provider_attachment(
+            &provider_name,
+            sandbox.name(),
+        );
+        ensure_provider_policy_loaded(sandbox.name(), &policy_path)
+            .await
+            .expect("provider policy loaded");
+        right_openshell::openshell::wait_for_provider_composed_with_all_endpoints(
+            &mut client,
+            sandbox.name(),
+            &provider_name,
+            vec![(host_a.clone(), String::new())],
+        )
+        .await
+        .expect("baseline HOST_A composed");
+        wait_for_provider_placeholder(&sandbox, ENV_VAR).await;
+
+        // update via the primitive (secret never re-supplied past create_provider)
+        let desired = author_generic_profile(
+            &profile_id,
+            &[host_a.clone(), host_b.clone()],
+            None,
+            ENV_VAR,
+        );
+        let atts = vec![ProfileAttachment {
+            sandbox_name: sandbox.name().to_string(),
+            provider_name: provider_name.clone(),
+        }];
+        update_referenced_profile(&mut client, &atts, desired)
+            .await
+            .expect("update referenced profile");
+
+        ensure_provider_policy_loaded(sandbox.name(), &policy_path)
+            .await
+            .expect("reload after profile update");
+        right_openshell::openshell::wait_for_provider_composed_with_all_endpoints(
+            &mut client,
+            sandbox.name(),
+            &provider_name,
+            vec![
+                (host_a.clone(), String::new()),
+                (host_b.clone(), String::new()),
+            ],
+        )
+        .await
+        .expect("updated endpoints must compose into effective policy");
+
+        // secret survived
+        wait_for_provider_placeholder(&sandbox, ENV_VAR).await;
     })
     .await;
 }
