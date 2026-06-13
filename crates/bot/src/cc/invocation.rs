@@ -53,10 +53,18 @@ pub(crate) fn baseline_disallowed_tools() -> Vec<String> {
 }
 
 pub(crate) use right_mcp::internal_client::PROGRESS_MCP_TOOL as SEND_PROGRESS_MCP_TOOL;
+pub(crate) use right_mcp::internal_client::SEND_MESSAGE_MCP_TOOL;
 
 pub(crate) fn disallow_send_progress(mut tools: Vec<String>) -> Vec<String> {
     if !tools.iter().any(|tool| tool == SEND_PROGRESS_MCP_TOOL) {
         tools.push(SEND_PROGRESS_MCP_TOOL.to_owned());
+    }
+    tools
+}
+
+pub(crate) fn disallow_send_message(mut tools: Vec<String>) -> Vec<String> {
+    if !tools.iter().any(|tool| tool == SEND_MESSAGE_MCP_TOOL) {
+        tools.push(SEND_MESSAGE_MCP_TOOL.to_owned());
     }
     tools
 }
@@ -115,7 +123,7 @@ pub(crate) fn disallow_forum_topic_tools(mut tools: Vec<String>) -> Vec<String> 
 /// that may author skills inline.
 pub(crate) fn disallow_foreground_only_tools_keep_learning(tools: Vec<String>) -> Vec<String> {
     disallow_thread_focus_set(disallow_forum_topic_tools(disallow_conversation_search(
-        disallow_send_progress(tools),
+        disallow_send_message(disallow_send_progress(tools)),
     )))
 }
 
@@ -1075,6 +1083,7 @@ mod tests {
 
         for tool_name in [
             SEND_PROGRESS_MCP_TOOL,
+            SEND_MESSAGE_MCP_TOOL,
             right_mcp::internal_client::SKILL_LEARNING_START_MCP_TOOL,
             right_mcp::internal_client::SKILL_LEARNING_FINISH_MCP_TOOL,
             right_mcp::internal_client::THREAD_SEARCH_MCP_TOOL,
@@ -1537,6 +1546,7 @@ mod tests {
                 .any(|t| t == right_mcp::internal_client::SKILL_LEARNING_FINISH_MCP_TOOL)
         );
         assert!(kept.iter().any(|t| t == SEND_PROGRESS_MCP_TOOL));
+        assert!(kept.iter().any(|t| t == SEND_MESSAGE_MCP_TOOL));
         let full = disallow_foreground_only_tools(baseline_disallowed_tools());
         assert!(
             full.iter()

@@ -2547,3 +2547,41 @@ async fn bootstrap_done_returns_tool_error_when_files_missing() {
     assert!(names.contains(&"SOUL.md"));
     assert!(names.contains(&"USER.md"));
 }
+
+#[tokio::test]
+async fn send_message_rejects_empty() {
+    let (backend, _agents_dir, _tmp) = make_backend();
+    let result = backend
+        .tools_call(
+            "test-agent",
+            Path::new("/tmp/unused"),
+            "send_message",
+            json!({}),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("dispatch should be Ok with operation error");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "send_message_empty");
+}
+
+#[tokio::test]
+async fn send_message_rejects_bad_path() {
+    let (backend, _agents_dir, _tmp) = make_backend();
+    let result = backend
+        .tools_call(
+            "test-agent",
+            Path::new("/tmp/unused"),
+            "send_message",
+            json!({ "attachments": [{ "type": "photo", "path": "/etc/passwd" }] }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("dispatch should be Ok with operation error");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "send_message_bad_path");
+}
