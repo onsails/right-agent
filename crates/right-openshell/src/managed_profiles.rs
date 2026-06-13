@@ -399,6 +399,26 @@ pub(crate) fn desired_profile_source(mp: &ManagedProfile) -> DesiredProfileSourc
     }
 }
 
+/// Resolve the desired profile body for a managed profile, fetching+deriving the
+/// base for derived variants (e.g. `Github`). Errors if a derived base is absent
+/// — the detach-dance heal cannot author a derived profile without its live base.
+pub async fn desired_profile_for(
+    client: &mut OpenShellClient<Channel>,
+    mp: &ManagedProfile,
+) -> Result<proto_v1::ProviderProfile, ManagedProfileError> {
+    match desired_profile_source(mp) {
+        DesiredProfileSource::DeriveFromBase(base_id) => {
+            match get_profile(client, base_id).await? {
+                Some(base) => Ok(mp.derive(base)),
+                None => Err(ManagedProfileError::Grpc(format!(
+                    "base profile {base_id} absent on gateway"
+                ))),
+            }
+        }
+        DesiredProfileSource::Authored(profile) => Ok(*profile),
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // gRPC wrappers
 // ────────────────────────────────────────────────────────────────────────────
