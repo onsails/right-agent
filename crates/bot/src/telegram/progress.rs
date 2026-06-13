@@ -15,7 +15,7 @@ use serde::Serialize;
 use subtle::ConstantTimeEq;
 use teloxide::payloads::{CreateForumTopicSetters, EditForumTopicSetters, SendMessageSetters};
 use teloxide::prelude::Requester;
-use teloxide::types::{ChatId, CustomEmojiId, MessageId, Rgb, ThreadId};
+use teloxide::types::{ChatId, CustomEmojiId, MessageId, ParseMode, Rgb, ThreadId};
 
 /// End-to-end timeout for the Telegram `send_message` call invoked by the
 /// progress UDS endpoint. Bounds how long the caller (aggregator's
@@ -126,9 +126,20 @@ async fn handle_progress_send(
             .into_response();
     }
 
-    let mut send = state.bot.send_message(ChatId(target.chat_id), message);
-    if target.thread_id != 0 {
-        send = send.message_thread_id(ThreadId(MessageId(target.thread_id as i32)));
+    let html = crate::telegram::markdown::md_to_telegram_html(message);
+    let thread = if target.thread_id != 0 {
+        Some(ThreadId(MessageId(target.thread_id as i32)))
+    } else {
+        None
+    };
+
+    // First attempt: HTML parse mode.
+    let mut send = state
+        .bot
+        .send_message(ChatId(target.chat_id), html.clone())
+        .parse_mode(ParseMode::Html);
+    if let Some(tid) = thread {
+        send = send.message_thread_id(tid);
     }
 
     // Scrub Telegram error details before they surface to the agent. The
@@ -136,7 +147,25 @@ async fn handle_progress_send(
     // agent only needs to learn that the send failed, plus enough category
     // info (`telegram_send_failed` vs `telegram_send_timeout`) to react.
     // Full error is logged on the bot side via `tracing::warn!`.
-    match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await {
+    let outcome = tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await;
+    let outcome = match outcome {
+        Ok(Err(e)) => {
+            tracing::warn!(
+                invocation_id = %req.invocation_id,
+                "progress HTML send failed, retrying as plain text: {e:#}",
+            );
+            // Fallback: strip HTML tags and retry without parse mode.
+            let plain = crate::telegram::markdown::strip_html_tags(&html);
+            let mut send = state.bot.send_message(ChatId(target.chat_id), plain);
+            if let Some(tid) = thread {
+                send = send.message_thread_id(tid);
+            }
+            tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await
+        }
+        other => other,
+    };
+
+    match outcome {
         Ok(Ok(message)) => (
             StatusCode::OK,
             Json(ProgressSendResponse {
