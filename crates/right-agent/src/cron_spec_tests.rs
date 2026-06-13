@@ -1838,3 +1838,30 @@ fn cron_spec_eq_reacts_to_model_change() {
         "changing model must make specs unequal so the reconciler reacts"
     );
 }
+
+#[test]
+fn then_spec_roundtrips_and_run_on_is_required() {
+    use crate::cron_spec::{RunOn, ThenSpec};
+
+    let then = ThenSpec {
+        instruction: "summarize how it went".into(),
+        run_on: RunOn::Always,
+        notify: true,
+        target_chat_id: Some(42),
+        target_thread_id: None,
+    };
+    let json = serde_json::to_string(&then).unwrap();
+    let back: ThenSpec = serde_json::from_str(&json).unwrap();
+    assert_eq!(then, back);
+    assert!(json.contains("\"run_on\":\"always\""));
+
+    // run_on missing -> deserialization fails (required field)
+    let no_run_on = r#"{"instruction":"x"}"#;
+    assert!(serde_json::from_str::<ThenSpec>(no_run_on).is_err());
+
+    // notify / targets default when absent
+    let minimal = r#"{"instruction":"x","run_on":"success"}"#;
+    let parsed: ThenSpec = serde_json::from_str(minimal).unwrap();
+    assert!(!parsed.notify);
+    assert_eq!(parsed.target_chat_id, None);
+}
