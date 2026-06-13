@@ -77,8 +77,35 @@ impl ProgressTarget {
 
 #[derive(Clone)]
 pub(crate) struct ProgressEndpointState {
-    pub(crate) bot: teloxide::Bot,
+    pub(crate) bot: super::BotType,
     pub(crate) progress: ProgressState,
+}
+
+/// Map an internal-client `MessageAttachmentDto` (received over the UDS
+/// `/message/send` route) to the bot's `OutboundAttachment`, reusing the same
+/// downloader/sender path as CC-produced attachments.
+pub(crate) fn message_dto_to_outbound(
+    dto: &right_mcp::internal_client::MessageAttachmentDto,
+) -> crate::cc::attachments_dto::OutboundAttachment {
+    use crate::cc::attachments_dto::OutboundKind as O;
+    use right_mcp::internal_client::MessageAttachmentKind as K;
+    let kind = match dto.kind {
+        K::Photo => O::Photo,
+        K::Document => O::Document,
+        K::Video => O::Video,
+        K::Audio => O::Audio,
+        K::Voice => O::Voice,
+        K::VideoNote => O::VideoNote,
+        K::Sticker => O::Sticker,
+        K::Animation => O::Animation,
+    };
+    crate::cc::attachments_dto::OutboundAttachment {
+        kind,
+        path: dto.path.clone(),
+        filename: dto.filename.clone(),
+        caption: dto.caption.clone(),
+        media_group_id: dto.media_group_id.clone(),
+    }
 }
 
 #[derive(Serialize)]
@@ -89,6 +116,7 @@ struct ProgressErrorResponse {
 pub(crate) fn build_progress_router(state: ProgressEndpointState) -> Router {
     Router::new()
         .route("/progress/send", post(handle_progress_send))
+        .route("/message/send", post(handle_message_send))
         .route("/forum-topic/create", post(handle_forum_topic_create))
         .route("/forum-topic/edit", post(handle_forum_topic_edit))
         .route("/forum-topic/close", post(handle_forum_topic_close))
@@ -132,47 +160,12 @@ async fn handle_progress_send(
             .into_response();
     }
 
-    let html = crate::telegram::markdown::md_to_telegram_html(message);
-    let thread = if target.thread_id != 0 {
-        Some(ThreadId(MessageId(target.thread_id as i32)))
-    } else {
-        None
-    };
-
-    // First attempt: HTML parse mode.
-    let mut send = state
-        .bot
-        .send_message(ChatId(target.chat_id), html.clone())
-        .parse_mode(ParseMode::Html);
-    if let Some(tid) = thread {
-        send = send.message_thread_id(tid);
-    }
-
     // Scrub Telegram error details before they surface to the agent. The
     // teloxide error description can include chat IDs and message ids; the
     // agent only needs to learn that the send failed, plus enough category
     // info (`telegram_send_failed` vs `telegram_send_timeout`) to react.
     // Full error is logged on the bot side via `tracing::warn!`.
-    let outcome = tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await;
-    let outcome = match outcome {
-        // Only retry on a deterministic, pre-delivery formatting rejection
-        // (entity/URL parse failure or too-long). Network/5xx/timeout errors
-        // may have been delivered, so retrying them would double-post.
-        Ok(Err(e)) if super::attachments::is_retryable_format_error(&format!("{e}")) => {
-            tracing::warn!(
-                invocation_id = %req.invocation_id,
-                "progress HTML send failed, retrying as plain text: {e:#}",
-            );
-            // Fallback: strip HTML tags and retry without parse mode.
-            let plain = crate::telegram::markdown::strip_html_tags(&html);
-            let mut send = state.bot.send_message(ChatId(target.chat_id), plain);
-            if let Some(tid) = thread {
-                send = send.message_thread_id(tid);
-            }
-            tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await
-        }
-        other => other,
-    };
+    let outcome = send_text_message(&state.bot, &target, message).await;
 
     match outcome {
         Ok(Ok(message)) => (
@@ -211,6 +204,164 @@ async fn handle_progress_send(
                 .into_response()
         }
     }
+}
+
+/// Shared text-send path for the progress and message endpoints.
+///
+/// Renders `message` as Telegram HTML and sends it to the target chat/thread.
+/// On a deterministic, pre-delivery formatting rejection (entity/URL parse
+/// failure or too-long) it strips the HTML tags and retries once as plain text;
+/// network/5xx/timeout errors are NOT retried because they may have been
+/// delivered and retrying would double-post. Each attempt is bounded by
+/// `PROGRESS_SEND_TIMEOUT`; the outer `Elapsed` distinguishes a timeout from a
+/// Telegram error so callers can map them to distinct statuses.
+async fn send_text_message(
+    bot: &super::BotType,
+    target: &ProgressTarget,
+    message: &str,
+) -> Result<Result<teloxide::types::Message, teloxide::RequestError>, tokio::time::error::Elapsed> {
+    let html = crate::telegram::markdown::md_to_telegram_html(message);
+    let thread = if target.thread_id != 0 {
+        Some(ThreadId(MessageId(target.thread_id as i32)))
+    } else {
+        None
+    };
+
+    // First attempt: HTML parse mode.
+    let mut send = bot
+        .send_message(ChatId(target.chat_id), html.clone())
+        .parse_mode(ParseMode::Html);
+    if let Some(tid) = thread {
+        send = send.message_thread_id(tid);
+    }
+
+    let outcome = tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await;
+    match outcome {
+        // Only retry on a deterministic, pre-delivery formatting rejection
+        // (entity/URL parse failure or too-long). Network/5xx/timeout errors
+        // may have been delivered, so retrying them would double-post.
+        Ok(Err(e)) if super::attachments::is_retryable_format_error(&format!("{e}")) => {
+            tracing::warn!(
+                invocation_id = %target.invocation_id,
+                "HTML send failed, retrying as plain text: {e:#}",
+            );
+            // Fallback: strip HTML tags and retry without parse mode.
+            let plain = crate::telegram::markdown::strip_html_tags(&html);
+            let mut send = bot.send_message(ChatId(target.chat_id), plain);
+            if let Some(tid) = thread {
+                send = send.message_thread_id(tid);
+            }
+            tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await
+        }
+        other => other,
+    }
+}
+
+/// Standalone rich-message delivery: optional text content plus zero or more
+/// attachments, sent to the invocation's chat/thread. Reuses `send_text_message`
+/// for text and `attachments::send_attachments` for files.
+async fn handle_message_send(
+    State(state): State<ProgressEndpointState>,
+    Json(req): Json<right_mcp::internal_client::SendMessageRequest>,
+) -> axum::response::Response {
+    let Some(target) = state.progress.get(&req.invocation_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ProgressErrorResponse {
+                error: "message invocation not found".to_owned(),
+            }),
+        )
+            .into_response();
+    };
+    if !target.token_matches(&req.token) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ProgressErrorResponse {
+                error: "message token mismatch".to_owned(),
+            }),
+        )
+            .into_response();
+    }
+
+    let mut message_ids: Vec<i32> = Vec::new();
+
+    if let Some(content) = req
+        .content
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        match send_text_message(&state.bot, &target, content).await {
+            Ok(Ok(message)) => message_ids.push(message.id.0),
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    invocation_id = %req.invocation_id,
+                    "message_send text failed: {e:#}",
+                );
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ProgressErrorResponse {
+                        error: "telegram_send_failed".to_owned(),
+                    }),
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                tracing::warn!(
+                    invocation_id = %req.invocation_id,
+                    "message_send text timed out after {}s",
+                    PROGRESS_SEND_TIMEOUT.as_secs(),
+                );
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(ProgressErrorResponse {
+                        error: "telegram_send_timeout".to_owned(),
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    if !req.attachments.is_empty() {
+        let outbound: Vec<_> = req
+            .attachments
+            .iter()
+            .map(message_dto_to_outbound)
+            .collect();
+        if let Err(e) = crate::telegram::attachments::send_attachments(
+            &outbound,
+            &state.bot,
+            ChatId(target.chat_id),
+            target.thread_id,
+            &target.agent_dir,
+            target.ssh_config_path.as_deref(),
+            target.resolved_sandbox.as_deref(),
+        )
+        .await
+        {
+            tracing::warn!(
+                invocation_id = %req.invocation_id,
+                "message_send attachments failed: {e:#}",
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(ProgressErrorResponse {
+                    error: "attachment_send_failed".to_owned(),
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(right_mcp::internal_client::SendMessageResponse {
+            ok: true,
+            message_ids,
+        }),
+    )
+        .into_response()
 }
 
 /// Map a teloxide forum error description to a clear, actionable sentence for
@@ -379,6 +530,25 @@ fn forum_telegram_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_message_attachment_dto_to_outbound() {
+        use right_mcp::internal_client::{MessageAttachmentDto, MessageAttachmentKind};
+        let dto = MessageAttachmentDto {
+            kind: MessageAttachmentKind::Document,
+            path: "/sandbox/outbox/r.csv".into(),
+            filename: Some("results.csv".into()),
+            caption: Some("data".into()),
+            media_group_id: None,
+        };
+        let out = super::message_dto_to_outbound(&dto);
+        assert!(matches!(
+            out.kind,
+            crate::cc::attachments_dto::OutboundKind::Document
+        ));
+        assert_eq!(out.path, "/sandbox/outbox/r.csv");
+        assert_eq!(out.filename.as_deref(), Some("results.csv"));
+    }
 
     #[test]
     fn forum_error_message_maps_known_cases() {
