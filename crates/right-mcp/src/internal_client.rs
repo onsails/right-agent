@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// HTTP header set on per-invocation MCP requests so the aggregator can route
@@ -41,6 +42,11 @@ pub const FORUM_TOPIC_EDIT_MCP_TOOL: &str = "mcp__right__forum_topic_edit";
 pub const FORUM_TOPIC_CLOSE_MCP_TOOL: &str = "mcp__right__forum_topic_close";
 pub const FORUM_TOPIC_REOPEN_MCP_TOOL: &str = "mcp__right__forum_topic_reopen";
 pub const FORUM_TOPIC_LIST_MCP_TOOL: &str = "mcp__right__forum_topic_list";
+
+pub const SEND_MESSAGE_TOOL: &str = "send_message";
+pub const SEND_MESSAGE_MCP_TOOL: &str = "mcp__right__send_message";
+/// Max standalone `send_message` calls per foreground turn.
+pub const MAX_SEND_MESSAGE_PER_TURN: u32 = 20;
 
 /// Maximum length (in Unicode scalar values) of a `send_progress` message.
 ///
@@ -250,6 +256,14 @@ impl InternalClient {
         request: &ProgressSendRequest,
     ) -> Result<ProgressSendResponse, InternalClientError> {
         self.post("/progress/send", request).await
+    }
+
+    /// Ask the bot-local UDS endpoint to send standalone rich messages.
+    pub async fn message_send(
+        &self,
+        request: &SendMessageRequest,
+    ) -> Result<SendMessageResponse, InternalClientError> {
+        self.post("/message/send", request).await
     }
 
     /// Create a forum topic via the bot-local UDS endpoint.
@@ -616,6 +630,65 @@ pub struct ProgressSendResponse {
 }
 
 // ---------------------------------------------------------------------------
+// send_message (standalone rich-message delivery)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageAttachmentKind {
+    Photo,
+    Document,
+    Video,
+    Audio,
+    Voice,
+    VideoNote,
+    Sticker,
+    Animation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MessageAttachmentDto {
+    #[serde(rename = "type")]
+    pub kind: MessageAttachmentKind,
+    /// Absolute path inside the sandbox, under `/sandbox/outbox/`.
+    pub path: String,
+    #[serde(default)]
+    pub filename: Option<String>,
+    #[serde(default)]
+    pub caption: Option<String>,
+    #[serde(default)]
+    pub media_group_id: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SendMessageRequest {
+    pub invocation_id: String,
+    pub token: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<MessageAttachmentDto>,
+}
+
+impl std::fmt::Debug for SendMessageRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendMessageRequest")
+            .field("invocation_id", &self.invocation_id)
+            .field("token", &"<redacted>")
+            .field("content", &self.content)
+            .field("attachments", &self.attachments)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendMessageResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub message_ids: Vec<i32>,
+}
+
+// ---------------------------------------------------------------------------
 // Forum topic management (bot-local UDS endpoints)
 // ---------------------------------------------------------------------------
 
@@ -952,6 +1025,47 @@ mod tests {
                 "Debug must mark redaction: {debug}"
             );
         }
+    }
+
+    #[test]
+    fn message_attachment_dto_roundtrips_snake_case() {
+        let dto = MessageAttachmentDto {
+            kind: MessageAttachmentKind::Photo,
+            path: "/sandbox/outbox/a.png".into(),
+            filename: None,
+            caption: Some("hi".into()),
+            media_group_id: None,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(json.contains("\"photo\""), "{json}");
+        let back: MessageAttachmentDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, dto);
+    }
+
+    #[test]
+    fn send_message_request_carries_content_and_attachments() {
+        let req = SendMessageRequest {
+            invocation_id: "inv".into(),
+            token: "tok".into(),
+            content: None,
+            attachments: vec![],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: SendMessageRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.invocation_id, req.invocation_id);
+    }
+
+    #[test]
+    fn send_message_request_debug_redacts_token() {
+        let req = SendMessageRequest {
+            invocation_id: "inv-1".to_owned(),
+            token: "supersecret".to_owned(),
+            content: Some("hi".to_owned()),
+            attachments: vec![],
+        };
+        let s = format!("{req:?}");
+        assert!(!s.contains("supersecret"), "Debug must redact token: {s}");
+        assert!(s.contains("<redacted>"), "Debug must mark redaction: {s}");
     }
 
     #[test]

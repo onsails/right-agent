@@ -19,6 +19,7 @@ reqwest = { workspace = true }
 right-db = { path = "../right-db", version = "*" }
 rmcp = { workspace = true }
 rustls = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
