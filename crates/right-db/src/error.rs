@@ -22,6 +22,13 @@ pub enum DbError {
         source: turso::Error,
     },
 
+    #[error("remove WAL sidecar {path}: {source}")]
+    SidecarRemove {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("database migration lock {path}: {source}")]
     MigrationLock {
         path: PathBuf,
