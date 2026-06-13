@@ -289,7 +289,7 @@ impl RightBackend {
             "cron_list" => self.call_cron_list(agent_name).await,
             "cron_list_runs" => self.call_cron_list_runs(agent_name, &args).await,
             "cron_show_run" => self.call_cron_show_run(agent_name, &args).await,
-            "cron_trigger" => self.call_cron_trigger(agent_name, &args).await,
+            "cron_trigger" => self.call_cron_trigger(agent_name, &args, &context).await,
             "mcp_list" => self.call_mcp_list(agent_name).await,
             crate::progress::SEND_PROGRESS_TOOL => self.call_send_progress(context, &args).await,
             right_mcp::internal_client::SEND_MESSAGE_TOOL => {
@@ -589,14 +589,42 @@ impl RightBackend {
         &self,
         agent_name: &str,
         args: &serde_json::Value,
+        context: &crate::progress::ToolCallContext,
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronTriggerParams =
             serde_json::from_value(args.clone()).context("invalid cron_trigger params")?;
+
+        // Resolve origin chat from the foreground invocation that issued this
+        // call. `None` for cron-turn callers (legacy hand-off) — then falls back
+        // to the job's standing target.
+        let origin = match &context.invocation_id {
+            Some(id) => self.progress.conversation_scope_opt(id).await,
+            None => None,
+        };
+        let (origin_chat, origin_thread) = match origin {
+            Some(s) => (Some(s.chat_id), Some(s.thread_id)),
+            None => (None, None),
+        };
+
+        // Serialize `then` (input shape) into the JSON ThenSpec stored in DB.
+        let then_json = match &params.then {
+            Some(t) => Some(serde_json::to_string(t).context("serialize then")?),
+            None => None,
+        };
+
         let conn_arc = self.get_conn(agent_name).await?;
         let conn = conn_arc.lock().await;
-        let msg = right_agent::cron_spec::trigger_spec(&conn, &params.job_name, params.notify)
-            .await
-            .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
+        let msg = right_agent::cron_spec::trigger_spec(
+            &conn,
+            &params.job_name,
+            params.notify,
+            params.extra_instruction.as_deref(),
+            then_json.as_deref(),
+            origin_chat,
+            origin_thread,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 

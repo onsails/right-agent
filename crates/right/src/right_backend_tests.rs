@@ -2214,6 +2214,79 @@ async fn cron_create_persists_model_and_update_clears_it() {
 }
 
 #[tokio::test]
+async fn cron_trigger_with_then_persists_then_json_and_origin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agents_dir = tmp.path().to_path_buf();
+    let agent_dir = agents_dir.join("a1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    write_allowlist(&agent_dir, &[7], &[]);
+    right_db::open_connection(&agent_dir, true).await.unwrap();
+
+    let backend = RightBackend::new(agents_dir.clone(), None);
+
+    // Standing job to trigger.
+    backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_create",
+            serde_json::json!({
+                "job_name": "j",
+                "schedule": "17 9 * * *",
+                "prompt": "p",
+                "target_chat_id": 7_i64,
+            }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("cron_create ok");
+
+    // Register the foreground invocation that "issues" the trigger.
+    backend
+        .progress_registry()
+        .register(crate::progress::ProgressRegistration {
+            invocation_id: "inv-1".to_owned(),
+            kind: crate::progress::ProgressInvocationKind::Foreground,
+            bot_socket_path: "/tmp/x.sock".into(),
+            bot_send_token: "tok".to_owned(),
+            conversation_scope: Some(crate::progress::ConversationScope {
+                chat_id: 77,
+                thread_id: 0,
+            }),
+        })
+        .await;
+
+    backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_trigger",
+            serde_json::json!({
+                "job_name": "j",
+                "then": { "instruction": "go", "run_on": "success" }
+            }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-1".to_owned()),
+            },
+        )
+        .await
+        .expect("cron_trigger ok");
+
+    let conn = right_db::open_connection(&agent_dir, false)
+        .await
+        .expect("open db");
+    let specs = right_agent::cron_spec::load_specs_from_db(&conn)
+        .await
+        .expect("load specs");
+    let s = specs.get("j").expect("spec j present");
+    let then = s.then.as_ref().expect("then persisted");
+    assert_eq!(then.instruction, "go");
+    assert_eq!(then.run_on, right_agent::cron_spec::RunOn::Success);
+    assert_eq!(s.trigger_origin_chat_id, Some(77));
+    assert_eq!(s.trigger_origin_thread_id, Some(0));
+}
+
+#[tokio::test]
 async fn cron_create_rejects_missing_target_chat_id() {
     let tmp = tempfile::tempdir().unwrap();
     let agents_dir = tmp.path().to_path_buf();
