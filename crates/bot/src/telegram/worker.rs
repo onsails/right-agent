@@ -1216,6 +1216,32 @@ fn log_stream_update(ctx: &InvocationLogContext, assistant_turn: u32, formatted:
     );
 }
 
+/// Tracks consecutive structured-output schema rejections in the CC stream.
+/// Reset only on a successful tool_result; the StructuredOutput `tool_use`
+/// lines between rejections must NOT reset the run.
+#[derive(Default)]
+pub(crate) struct SchemaRejectionRun {
+    consecutive: u32,
+}
+
+impl SchemaRejectionRun {
+    const LIMIT: u32 = 3;
+
+    pub(crate) fn count(&self) -> u32 {
+        self.consecutive
+    }
+
+    /// Feed one raw stream line. Returns true once the abort threshold is hit.
+    pub(crate) fn observe(&mut self, line: &str) -> bool {
+        if crate::cc::stream::is_structured_output_rejection(line) {
+            self.consecutive += 1;
+        } else if crate::cc::stream::is_successful_tool_result(line) {
+            self.consecutive = 0;
+        }
+        self.consecutive >= Self::LIMIT
+    }
+}
+
 fn log_claude_finished(
     ctx: &InvocationLogContext,
     exit_code: i32,
@@ -3598,6 +3624,8 @@ async fn invoke_cc(
 
     let mut timed_out = false;
     let mut stopped = false;
+    let mut schema_run = SchemaRejectionRun::default();
+    let mut schema_loop_detected = false;
     // Set once stdin (carrying the volatile prefix's memory-status marker) is
     // fully written; gates the deferred edge-trigger commit below.
     let mut input_delivered = false;
@@ -3797,6 +3825,27 @@ async fn invoke_cc(
                         }
 
                         let event = crate::cc::stream::parse_stream_event(&line);
+
+                        // Detect structured-output schema-rejection loops. These
+                        // `tool_result` errors are dropped by the display parser,
+                        // so operate on the RAW line. Surface each rejection for
+                        // visibility, then abort once the run hits the threshold.
+                        if crate::cc::stream::is_structured_output_rejection(&line) {
+                            total_assistant_events += 1;
+                            log_stream_update(
+                                &log_ctx,
+                                total_assistant_events,
+                                &format!(
+                                    "⚠️ StructuredOutput rejected (schema) [{}]",
+                                    schema_run.count() + 1
+                                ),
+                            );
+                        }
+                        if schema_run.observe(&line) {
+                            schema_loop_detected = true;
+                            child.kill().await.ok();
+                            break;
+                        }
 
                         match &event {
                             crate::cc::stream::StreamEvent::Result(json) => {
@@ -4235,6 +4284,27 @@ async fn invoke_cc(
         });
     }
 
+    // Structured-output schema-rejection loop — we killed the child, so the
+    // exit code is non-zero and would otherwise build a generic NonZeroExit
+    // reflectable. Return a specific StructuredOutputLoop failure first so the
+    // agent reflects on the real cause. `details_id` is not yet computed at
+    // this point (it lives in the `exit_code != 0` branch below), so pass None.
+    if schema_loop_detected {
+        return Err(InvokeCcFailure::Reflectable {
+            kind: crate::reflection::FailureKind::StructuredOutputLoop {
+                rejections: schema_run.count(),
+            },
+            ring_buffer_tail: ring_buffer.events().clone(),
+            session_uuid: session_uuid.clone(),
+            raw_message: format!(
+                "aborted after {} consecutive structured-output schema rejections",
+                schema_run.count()
+            ),
+            thinking_msg_id,
+            details_id: None,
+        });
+    }
+
     // DIS-06: non-zero exit → error reply
     if exit_code != 0 {
         // Log full output on failure for debuggability.
@@ -4625,6 +4695,38 @@ mod tests {
 
         let bytes = buffer.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn schema_loop_fsm_aborts_on_third_consecutive() {
+        let mut s = SchemaRejectionRun::default();
+        let rej = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output does not match required schema","is_error":true}]}}"#;
+        assert!(!s.observe(rej));
+        assert!(!s.observe(rej));
+        assert!(s.observe(rej));
+    }
+
+    #[test]
+    fn schema_loop_fsm_resets_on_success() {
+        let mut s = SchemaRejectionRun::default();
+        let rej = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output does not match required schema","is_error":true}]}}"#;
+        let ok = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"done","is_error":false}]}}"#;
+        assert!(!s.observe(rej));
+        assert!(!s.observe(ok));
+        assert!(!s.observe(rej));
+        assert!(!s.observe(rej));
+        assert!(s.observe(rej));
+    }
+
+    #[test]
+    fn schema_loop_fsm_ignores_assistant_tool_use_between_rejections() {
+        let mut s = SchemaRejectionRun::default();
+        let rej = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output does not match required schema","is_error":true}]}}"#;
+        let tool_use = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"StructuredOutput","input":{}}]}}"#;
+        assert!(!s.observe(rej));
+        assert!(!s.observe(tool_use));
+        assert!(!s.observe(rej));
+        assert!(s.observe(rej));
     }
 
     fn used_skill_receipt(package_name: &str) -> UsedSkillReceipt {
