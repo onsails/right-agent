@@ -94,6 +94,7 @@ pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connect
                 recovered = true;
                 tracing::warn!(
                     path = %db_path.display(),
+                    removed = "-tshm,-shm",
                     error = format!("{error:#}"),
                     "WAL desync detected; resetting -tshm/-shm sidecars and retrying \
                      (tursodatabase/turso#769)",
