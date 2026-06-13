@@ -36,7 +36,7 @@ const V40_SCHEMA: &str = include_str!("sql/v40_forum_topics.sql");
 const V43_SCHEMA: &str = include_str!("sql/v43_thread_focus.sql");
 const V44_SCHEMA: &str = include_str!("sql/v44_skill_lifecycle_cron.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 44;
+pub const LATEST_SCHEMA_VERSION: u32 = 45;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -805,6 +805,54 @@ fn v42_cron_model(conn: &dyn MigrationConnection) -> BoxFuture<'_, Result<(), cr
     })
 }
 
+/// v45: Add transient trigger columns to `cron_specs`.
+///
+/// Four nullable columns carrying per-trigger context for cron continuations:
+/// `trigger_extra_instruction` (TEXT), `trigger_then_json` (TEXT),
+/// `trigger_origin_chat_id` (INTEGER), `trigger_origin_thread_id` (INTEGER).
+/// All NULL for existing rows, preserving prior behavior. Idempotent — checks
+/// `pragma_table_info` before each ALTER. Guards on table existence via
+/// `sqlite_master` like v42, because the synthetic legacy-v33 test fixture
+/// lacks `cron_specs`.
+fn v45_cron_trigger_transient(
+    conn: &dyn MigrationConnection,
+) -> BoxFuture<'_, Result<(), crate::DbError>> {
+    Box::pin(async move {
+        let cron_specs_exists = conn
+            .query_i64(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cron_specs'",
+                MigrationParams::Empty,
+            )
+            .await?;
+        if cron_specs_exists == 0 {
+            return Ok(());
+        }
+        for (column, ddl) in [
+            (
+                "trigger_extra_instruction",
+                "ALTER TABLE cron_specs ADD COLUMN trigger_extra_instruction TEXT",
+            ),
+            (
+                "trigger_then_json",
+                "ALTER TABLE cron_specs ADD COLUMN trigger_then_json TEXT",
+            ),
+            (
+                "trigger_origin_chat_id",
+                "ALTER TABLE cron_specs ADD COLUMN trigger_origin_chat_id INTEGER",
+            ),
+            (
+                "trigger_origin_thread_id",
+                "ALTER TABLE cron_specs ADD COLUMN trigger_origin_thread_id INTEGER",
+            ),
+        ] {
+            if !column_exists(conn, "cron_specs", column).await? {
+                conn.execute_batch(ddl).await?;
+            }
+        }
+        Ok(())
+    })
+}
+
 pub static MIGRATIONS: Migrations = Migrations {
     migrations: &[
         Migration {
@@ -1027,6 +1075,11 @@ pub static MIGRATIONS: Migrations = Migrations {
             sql: V44_SCHEMA,
             hook: None,
         },
+        Migration {
+            version: 45,
+            sql: "",
+            hook: Some(v45_cron_trigger_transient),
+        },
     ],
 };
 
@@ -1080,6 +1133,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(null_model, None);
+    }
+
+    #[tokio::test]
+    async fn v45_adds_cron_trigger_transient_columns() {
+        let conn = Connection::open_in_memory().await.unwrap();
+        MIGRATIONS.to_latest(&conn).await.unwrap();
+
+        for column in [
+            "trigger_extra_instruction",
+            "trigger_then_json",
+            "trigger_origin_chat_id",
+            "trigger_origin_thread_id",
+        ] {
+            let present: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('cron_specs') WHERE name = ?",
+                    [column],
+                    |row| row.get(0),
+                )
+                .await
+                .unwrap();
+            assert_eq!(present, 1, "column {column} should exist on cron_specs");
+        }
     }
 
     #[tokio::test]
