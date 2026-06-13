@@ -23,6 +23,17 @@ pub(crate) struct SendProgressParams {
     pub(crate) message: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub(crate) struct SendMessageParams {
+    /// Optional plain-text body sent as its own message.
+    #[serde(default)]
+    pub(crate) content: Option<String>,
+    /// Standalone rich attachments; each renders as its own Telegram message
+    /// (or a media group when `media_group_id` is shared).
+    #[serde(default)]
+    pub(crate) attachments: Vec<right_mcp::internal_client::MessageAttachmentDto>,
+}
+
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ToolCallContext {
     pub(crate) invocation_id: Option<String>,
@@ -133,6 +144,8 @@ struct ProgressInvocation {
     bot_send_token: String,
     conversation_scope: Option<ConversationScope>,
     last_sent_at: Option<Instant>,
+    /// Count of `send_message` calls this turn; capped at MAX_SEND_MESSAGE_PER_TURN.
+    message_send_count: u32,
 }
 
 impl std::fmt::Debug for ProgressInvocation {
@@ -143,6 +156,7 @@ impl std::fmt::Debug for ProgressInvocation {
             .field("bot_send_token", &"<redacted>")
             .field("conversation_scope", &self.conversation_scope)
             .field("last_sent_at", &self.last_sent_at)
+            .field("message_send_count", &self.message_send_count)
             .finish()
     }
 }
@@ -158,6 +172,7 @@ impl ProgressRegistry {
                 bot_send_token: registration.bot_send_token,
                 conversation_scope: registration.conversation_scope,
                 last_sent_at: None,
+                message_send_count: 0,
             },
         );
     }
@@ -202,6 +217,33 @@ impl ProgressRegistry {
         }
         invocation.last_sent_at = Some(now);
 
+        Ok(ProgressSendTarget {
+            bot_socket_path: invocation.bot_socket_path.clone(),
+            bot_send_token: invocation.bot_send_token.clone(),
+        })
+    }
+
+    /// Foreground-only per-turn gate for `send_message`, mirroring `begin_send`
+    /// but counting attempts instead of time-gating. The cap is an anti-runaway
+    /// ceiling on attempts, not a success counter: the count is never rolled
+    /// back on delivery failure.
+    pub(crate) async fn begin_message_send(
+        &self,
+        invocation_id: &str,
+    ) -> Result<ProgressSendTarget, ProgressError> {
+        let mut guard = self.inner.lock().await;
+        let invocation = guard
+            .get_mut(invocation_id)
+            .ok_or(ProgressError::Unavailable)?;
+        if !matches!(invocation.kind, ProgressInvocationKind::Foreground) {
+            return Err(ProgressError::Forbidden);
+        }
+        if invocation.message_send_count >= right_mcp::internal_client::MAX_SEND_MESSAGE_PER_TURN {
+            return Err(ProgressError::RateLimited {
+                retry_after: Duration::ZERO,
+            });
+        }
+        invocation.message_send_count += 1;
         Ok(ProgressSendTarget {
             bot_socket_path: invocation.bot_socket_path.clone(),
             bot_send_token: invocation.bot_send_token.clone(),
@@ -539,6 +581,7 @@ mod tests {
             bot_send_token: "supersecret".to_owned(),
             conversation_scope: None,
             last_sent_at: None,
+            message_send_count: 0,
         };
         let s = format!("{invocation:?}");
         assert!(
@@ -561,6 +604,37 @@ mod tests {
             .expect("message.maxLength must be set on the schema");
         assert_eq!(max_length as usize, PROGRESS_MESSAGE_MAX_CHARS);
         assert_eq!(PROGRESS_MESSAGE_MAX_CHARS, 2000);
+    }
+
+    #[tokio::test]
+    async fn begin_message_send_counts_per_turn_and_caps() {
+        let registry = ProgressRegistry::default();
+        registry.register(foreground_registration()).await;
+        for _ in 0..right_mcp::internal_client::MAX_SEND_MESSAGE_PER_TURN {
+            registry
+                .begin_message_send("inv-1")
+                .await
+                .expect("under cap");
+        }
+        let err = registry.begin_message_send("inv-1").await.unwrap_err();
+        assert_eq!(
+            err,
+            ProgressError::RateLimited {
+                retry_after: std::time::Duration::ZERO
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_message_send_rejects_non_foreground() {
+        let registry = ProgressRegistry::default();
+        let mut reg = foreground_registration();
+        reg.kind = ProgressInvocationKind::NonForeground;
+        registry.register(reg).await;
+        assert_eq!(
+            registry.begin_message_send("inv-1").await.unwrap_err(),
+            ProgressError::Forbidden
+        );
     }
 
     #[tokio::test]
