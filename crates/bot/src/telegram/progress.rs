@@ -618,4 +618,64 @@ mod tests {
         assert!(target.token_matches("secret-token"));
         assert!(!target.token_matches("wrong-token"));
     }
+
+    /// Build a `ProgressEndpointState` with a dummy bot for router tests.
+    /// `build_bot` only constructs the adaptor; it performs no network I/O, so
+    /// a placeholder token is safe for the lookup/auth gates which never reach
+    /// a real Telegram send.
+    fn test_state(progress: ProgressState) -> ProgressEndpointState {
+        ProgressEndpointState {
+            bot: crate::telegram::bot::build_bot("123:test".to_owned()),
+            progress,
+        }
+    }
+
+    fn message_send_request_json(invocation_id: &str, token: &str) -> Vec<u8> {
+        let req = right_mcp::internal_client::SendMessageRequest {
+            invocation_id: invocation_id.to_owned(),
+            token: token.to_owned(),
+            content: Some("hi".to_owned()),
+            attachments: Vec::new(),
+        };
+        serde_json::to_vec(&req).expect("serialize SendMessageRequest")
+    }
+
+    async fn post_message_send(state: ProgressEndpointState, body: Vec<u8>) -> StatusCode {
+        use tower::ServiceExt as _;
+        let app = build_progress_router(state);
+        let request = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/message/send")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .expect("build request");
+        let response = app.oneshot(request).await.expect("router oneshot");
+        response.status()
+    }
+
+    #[tokio::test]
+    async fn message_send_unknown_invocation_is_404() {
+        let state = test_state(ProgressState::default());
+        let body = message_send_request_json("missing", "t");
+        let status = post_message_send(state, body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn message_send_wrong_token_is_403() {
+        let progress = ProgressState::default();
+        progress.register(ProgressTarget {
+            invocation_id: "inv".to_owned(),
+            token: "right".to_owned(),
+            chat_id: 42,
+            thread_id: 0,
+            agent_dir: std::path::PathBuf::from("/tmp"),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+        });
+        let state = test_state(progress);
+        let body = message_send_request_json("inv", "wrong");
+        let status = post_message_send(state, body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
 }
