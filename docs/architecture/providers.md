@@ -198,9 +198,31 @@ gateway provider name (`right-provider-...`). The gateway provider's
 `type` is the profile ID, while the dashboard and `agent.yaml` continue
 to expose the provider as `generic`.
 
+**Profile create vs update.** OpenShell `import` is not an upsert — the
+gateway rejects re-importing an existing profile id, and it refuses to
+delete a profile while a sandbox references it (`... is in use by
+sandboxes: ...`). So `managed_profiles::ensure_profiles` is **create-or-skip
+only**: it imports an absent profile, leaves an identical one `Unchanged`,
+and reports `EnsureOutcome::DriftedSkipped(id)` for an existing-but-changed
+profile — it never attempts the doomed re-import. Updating a referenced
+profile goes through `providers::update_referenced_profile(client,
+attachments, desired)`, which detaches every referencing attachment →
+deletes → re-imports the same id → re-attaches. Detach/attach never carry
+the credential, so the provider's gateway-only secret survives an update;
+on import failure the prior profile is restored and attachments
+re-attached (FAIL FAST). The behaviorally-inert credential fields
+(`auth_style`/`header_name`/`query_param`) are excluded from the drift
+fingerprint, so an inert authored-placement change is not flagged as drift.
+
+**Self-heal.** Drift is converged automatically wherever sandbox context
+exists: `right up` (bulk reconcile, `heal_drifted_managed_profiles` — built-in
++ generic), the supervisor (`heal_drifted_generic_profiles` in startup
+reconcile + `hot_reconcile_providers`), and the dashboard config-update
+handler all route `DriftedSkipped` through `update_referenced_profile`.
+
 On create or upstream-host/config change, Right authors/imports the
-generic provider profile, creates or updates the gateway provider against
-that profile ID, and calls `ensure_provider_policy_loaded(sandbox,
+generic provider profile (create) or swaps it via the detach-dance
+(update), and calls `ensure_provider_policy_loaded(sandbox,
 policy_path)`. That helper reapplies the current base `policy.yaml` with
 `openshell policy set --wait`; it does not write provider stanzas. The
 reload is required because OpenShell provider-profile composition is not

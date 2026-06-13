@@ -344,6 +344,14 @@ carries authored generic provider rules. Never infer success from
 Multi-host generic providers MUST confirm every declared upstream host/path
 before writing config or reporting success.
 
+`ensure_profiles` is create-or-skip and MUST NOT re-import an existing id
+(OpenShell rejects duplicate import; a referenced profile cannot be
+deleted) — it reports `DriftedSkipped`. Updating a referenced managed
+profile MUST go through `providers::update_referenced_profile`
+(detach→delete→import→re-attach, secret-preserving). The inert credential
+fields `auth_style`/`header_name`/`query_param` are excluded from the drift
+fingerprint.
+
 See: `docs/architecture/providers.md` for the placeholder mechanism,
 substitution flow, reconciler walkthrough, and policy interaction.
 
