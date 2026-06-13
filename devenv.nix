@@ -72,7 +72,8 @@
   '';
 
   enterTest = ''
-    cargo test --workspace
+    cargo nextest run --workspace
+    cargo test --doc --workspace
     cargo clippy --workspace -- -D warnings
   '';
 }
