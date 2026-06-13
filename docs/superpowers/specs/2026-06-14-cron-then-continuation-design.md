@@ -53,9 +53,9 @@ stay normal; this spec fixes how we *orchestrate* them live.
   **runtime guarantees** to run after the triggered run, **in the
   continued context** of that run (so the follow-up sees everything the
   first run did, including a failure).
-- A triggered run (and/or its `then`) can deliver an **extra report to
-  the originating chat**, resolved server-side, in addition to the cron's
-  standing `target_chat_id`.
+- The `then` continuation can deliver to the **originating chat**
+  ("report here") by defaulting its target to the server-resolved
+  foreground chat — no separate flag, no delivery fan-out.
 - Reuse the existing background-continuation substrate; add no new
   scheduler subsystem.
 
@@ -79,7 +79,7 @@ already exist:
 |---|---|---|
 | Ephemeral per-run instruction | `force_notify` transient-prepend pattern in `execute_job` (`cron.rs:604`) | `extra_instruction` param + transient column |
 | Structured `then` continuation | `spawn_background_continuation` (`background.rs:40`) resuming `source_session_id` with `fork_session: true` | `then` param + per-run carry on `async_runs` |
-| Report-to-origin | server-resolved invocation scope (same as `send_message`) + async delivery loop | `report_to_origin` intent + origin columns |
+| `then` → originating chat | server-resolved invocation scope (same as `send_message`) | origin columns feeding the continuation's default target |
 
 ### Feature 1 — ephemeral `extra_instruction`
 
@@ -106,8 +106,10 @@ user message. Because it forks the run's session, the continuation has
 the full context of what the run did — discovered sources, partial
 output, or the failure itself.
 
-- `run_on`: `"success"` (default) | `"failure"` | `"always"`. `failure`
-  / `always` exist precisely because the triggered run can die; the
+- `run_on`: `"success"` | `"failure"` | `"always"` — **required** when
+  `then` is present. The tool errors if `then` is given without `run_on`
+  (no implicit default — the agent must choose deliberately). `failure` /
+  `always` exist precisely because the triggered run can die; the
   continuation then runs in-context to salvage, recover, or report.
 - Delivery: the continuation produces structured output
   (`BG_CONTINUATION_SCHEMA_JSON`) delivered through the normal async
@@ -138,28 +140,32 @@ recovery all work unchanged.
 Depth cap: the spawned continuation never carries its own `then`
 (enforced — it is created without one). Prevents runaway chains.
 
-### Feature 3 — report-to-origin
+### Feature 3 — `then` delivers to the originating chat
 
-`mcp__right__cron_trigger(job_name, report_to_origin: true)` (and `then`
-defaults to origin when present).
+There is **no standalone report-to-origin flag** and no delivery fan-out
+(decided: option b). "Report here" is realized through `then`: the
+continuation's target **defaults to the originating chat**.
 
 The originating chat is **resolved server-side** from the foreground
 invocation that issued the trigger — the same conversation-scope resolver
-that backs `send_message`/`thread_search`. The agent passes **intent**
-(`report_to_origin: true`), never a chat id, so it cannot misroute.
-Resolved `(chat_id, thread_id)` is stamped onto the triggered run's
-`async_runs` row as origin columns and carried into the `then`
-continuation's default target.
+that backs `send_message`/`thread_search`. The agent never passes a chat
+id for "here"; the runtime stamps the resolved `(chat_id, thread_id)`
+onto the triggered run's `async_runs` row (origin columns) and uses it as
+the `then` continuation's default `target_chat_id`/`target_thread_id`. An
+explicit `then.target_chat_id` (allowlist-validated) overrides it to send
+elsewhere.
 
-- Delivery still passes the agent's **allowlist** (the origin chat is
-  already allowlisted — the agent is conversing there).
+So the channel post and the "how it went" report are two *different*
+messages from two different runs (A → channel via its standing target;
+the `then` continuation → origin via the resolved origin), not one
+message duplicated.
+
+- Delivery passes the agent's **allowlist** (the origin chat is already
+  allowlisted — the agent is conversing there).
 - When `cron_trigger` is called **from inside a cron turn** (no
-  foreground invocation — the legacy hand-off case), there is no origin;
-  `report_to_origin` is a documented no-op and `then` falls back to the
-  cron's standing target.
-- This is *additional* to the cron's standing `target_chat_id`; it does
-  not replace it. A run with `report_to_origin` and a different standing
-  target produces two deliveries.
+  foreground invocation — the legacy hand-off case), there is no origin.
+  The `then` continuation then requires an explicit `then.target_chat_id`,
+  else it falls back to the triggered cron's standing `target_chat_id`.
 
 ## Data model
 
@@ -170,7 +176,6 @@ migration rules):
   `clear_triggered_at`):
   - `trigger_extra_instruction TEXT NULL`
   - `trigger_then_json TEXT NULL` (serialized `ThenSpec`)
-  - `trigger_report_origin INTEGER NOT NULL DEFAULT 0`
   - `trigger_origin_chat_id INTEGER NULL`
   - `trigger_origin_thread_id INTEGER NULL`
 - `async_runs` per-run carry (copied at job start, read at completion):
@@ -186,7 +191,24 @@ which is the unit that completes.
 
 `ThenSpec` (serde): `{ instruction: String, run_on: RunOn,
 notify: bool, target_chat_id: Option<i64>, target_thread_id: Option<i64> }`
-with `RunOn = Success | Failure | Always`.
+with `RunOn = Success | Failure | Always`. `run_on` has **no `Default`** —
+deserialization fails if the field is absent, surfacing as a tool error.
+
+### Delivery mechanism (where content goes)
+
+The **destination chat is never in the structured output** — agents
+cannot choose the chat (scope invariant). A run's structured output
+carries only `delivery.kind` (notify/silent) and `delivery.content` (the
+text). The destination is the `async_runs` row's
+`target_chat_id`/`target_thread_id`, set server-side; the async delivery
+loop reads content from `delivery_json` and address from the row columns.
+
+Consequently the `then` continuation delivers to the origin chat simply
+by having its row's `target_chat_id = origin` (server-resolved) — content
+via its own structured output, address via the row target. One row, one
+destination. Mirroring a *single* run's output to *two* chats (the
+report-to-origin variant) is the only case that needs more than the row
+target; see Feature 3.
 
 ## Tool surface
 
@@ -195,13 +217,14 @@ with `RunOn = Success | Failure | Always`.
 | Param | Type | Default | Notes |
 |---|---|---|---|
 | `extra_instruction` | string | – | this-run-only prepend; no spec mutation |
-| `then` | object | – | `{ instruction, run_on?, notify?, target_chat_id?, target_thread_id? }` |
-| `report_to_origin` | bool | `false` | deliver an extra report to the chat the trigger was issued from; chat resolved server-side |
+| `then` | object | – | `{ instruction, run_on (required), notify?, target_chat_id?, target_thread_id? }` |
 
-`then.target_chat_id` (if provided) is allowlist-validated like
-`cron_create`'s `target_chat_id`. No new tools; `cron_create`/`cron_update`
-unchanged in v1 (a future iteration could let a standing spec carry a
-default `then`, but YAGNI now).
+`then.run_on` is required (tool errors if absent). `then.target_chat_id`
+defaults to the **server-resolved originating chat**; if provided
+explicitly it is allowlist-validated like `cron_create`'s
+`target_chat_id`. No standalone report-to-origin param. No new tools;
+`cron_create`/`cron_update` unchanged in v1 (a future iteration could let
+a standing spec carry a default `then`, but YAGNI now).
 
 ## Prompt / skill updates (cite-on-touch)
 
@@ -209,8 +232,8 @@ default `then`, but YAGNI now).
   "schedule one delayed one-shot that triggers B with notify=true"
   hand-off guidance with the structured `then` (guaranteed,
   context-continuing). Document `extra_instruction` for one-off tweaks
-  instead of `cron_update`. Document `report_to_origin` for "run it and
-  tell me here." Bump skill `version`.
+  instead of `cron_update`. Document the `then`-to-origin pattern for
+  "run it and tell me here." Bump skill `version`.
 - `crates/right-codegen/templates/right/prompt/CRON_INSTRUCTIONS.md`
   and the `cron_trigger` tool description (`TRIGGER_TOOL_DESC`,
   `cron_spec.rs:40`): note the new params at prompt-tier brevity.
@@ -234,27 +257,33 @@ default `then`, but YAGNI now).
 - **Continuation itself fails**: ordinary `kind='background'` failure path
   — `complete_background_run` classifies and delivers a user-facing
   reason; never reflects (avoids re-issuing an overloaded call).
-- **Origin absent** (cron-turn caller): `report_to_origin` no-ops, `then`
-  uses the standing target. Logged, not errored.
+- **Origin absent** (cron-turn caller): no origin to default to; `then`
+  uses an explicit `then.target_chat_id` or falls back to the triggered
+  cron's standing target. Logged, not errored.
 - **Runaway chains**: continuation carries no `then`; depth capped at 1.
 - **Scope safety**: origin chat is server-resolved; agent never supplies
   it. `then.target_chat_id` is allowlist-validated.
 
-## Decisions & assumptions to confirm (review gate)
+## Decisions & assumptions
 
-1. **`run_on` default = `success`.** `failure`/`always` are available for
-   the "the called step can die" concern. Confirm this is the right
-   default, or whether you want `always` as default given that concern.
-2. **`then` continuation forks the run's session** (`fork_session: true`),
+Resolved:
+
+- **`run_on` is required** (no default; tool errors if `then` is present
+  without it). ✓ confirmed 2026-06-14.
+- **Single structured hop only** (no `then`-of-`then`). ✓ confirmed
+  2026-06-14.
+- **Report-to-origin via `then`** (option b). ✓ confirmed 2026-06-14.
+  No standalone flag, no delivery fan-out; the `then` continuation's
+  target defaults to the server-resolved originating chat.
+
+Still to confirm:
+
+1. **`then` continuation forks the run's session** (`fork_session: true`),
    leaving the original run intact, rather than mutating it. Assumed
    correct (matches today's background-continuation behavior).
-3. **Single structured hop only** (no `then`-of-`then`). Assumed
-   sufficient; multi-hop deferred.
-4. **`then` lives only on `cron_trigger`, not on standing
+2. **`then` lives only on `cron_trigger`, not on standing
    `cron_create`/`cron_update`.** Assumed — this is a foreground
    orchestration feature, not a standing-spec property.
-5. **Report-to-origin is additive** (two deliveries when the standing
-   target differs), not a redirect. Confirm.
 
 ## Testing
 
