@@ -440,6 +440,7 @@ mod tests {
 
     #[tokio::test]
     async fn bump_client_drop_records_timestamp() {
+        setup_crypto();
         let client = HindsightClient::new("hs_x", "b", "high", 1024, Some("http://127.0.0.1:1"));
         let w = ResilientHindsight::new(client, PathBuf::from("/tmp"), "bot");
         assert_eq!(w.client_drops_24h().await, 0);
@@ -450,6 +451,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_starts_healthy() {
+        setup_crypto();
         let client = HindsightClient::new("hs_x", "b", "high", 1024, Some("http://127.0.0.1:1"));
         let w = ResilientHindsight::new(client, PathBuf::from("/tmp"), "bot");
         assert!(matches!(w.status(), MemoryStatus::Healthy));

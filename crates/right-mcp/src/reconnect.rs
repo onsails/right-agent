@@ -742,6 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_classifies_5xx_as_transient() {
+        setup_crypto();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/token"))
@@ -773,6 +774,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_classifies_network_error_as_transient() {
+        setup_crypto();
         // Use a URL that fails DNS / TCP — port 1 on 127.0.0.1 should be closed.
         let entry = make_entry("http://127.0.0.1:1/token".into());
         let client = reqwest::Client::builder()
@@ -801,6 +803,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_classifies_400_as_permanent_no_retry() {
+        setup_crypto();
         let server = MockServer::start().await;
         // 400 invalid_grant — refresh token revoked.
         Mock::given(method("POST"))
@@ -863,6 +866,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_classifies_429_as_transient() {
+        setup_crypto();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/token"))
