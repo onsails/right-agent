@@ -838,31 +838,34 @@ pub async fn send_attachments(
     resolved_sandbox: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let sandboxed = ssh_config_path.is_some();
-    let outbox_prefix = if sandboxed {
-        SANDBOX_OUTBOX.to_owned()
-    } else {
-        agent_dir.join("outbox").to_string_lossy().into_owned()
-    };
+    let host_outbox = agent_dir.join("outbox").to_string_lossy().into_owned();
 
     // Pre-create tmp/outbox for sandboxed downloads (avoids repeated create_dir_all in loop)
     if sandboxed {
         tokio::fs::create_dir_all(agent_dir.join("tmp/outbox")).await?;
     }
 
-    // Canonicalize the outbox dir once per call (non-sandboxed only). Eliminates
-    // N repeated blocking syscalls in groups of ≤10.
-    let outbox_canonical = if sandboxed {
-        None
-    } else {
-        match std::fs::canonicalize(agent_dir.join("outbox")) {
-            Ok(p) => Some(p),
-            Err(e) => {
+    // Canonicalize the host outbox dir once per call. Eliminates N repeated
+    // blocking syscalls in groups of ≤10. Used for host-local resolution:
+    // every non-sandboxed attachment, and cron/background deliveries that
+    // pre-stage files under the host outbox even for sandboxed agents. A
+    // sandboxed agent with no staged host-local attachments may legitimately
+    // lack this dir, so a missing dir is only a hard error when non-sandboxed.
+    let host_outbox_canonical = match std::fs::canonicalize(agent_dir.join("outbox")) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            if sandboxed {
+                tracing::debug!(
+                    "Host outbox dir {} not present: {e} — host-local attachments unavailable",
+                    agent_dir.join("outbox").display(),
+                );
+            } else {
                 tracing::warn!(
                     "Failed to canonicalize outbox dir {}: {e} — all outbound attachments will be skipped",
                     agent_dir.join("outbox").display(),
                 );
-                None
             }
+            None
         }
     };
 
@@ -873,8 +876,8 @@ pub async fn send_attachments(
         agent_dir,
         resolved_sandbox,
         sandboxed,
-        outbox_prefix: &outbox_prefix,
-        outbox_canonical,
+        host_outbox: &host_outbox,
+        host_outbox_canonical,
     };
 
     let (sends, warnings) = partition_sends(attachments);
@@ -948,8 +951,10 @@ async fn send_group_items_as_singles(
 }
 
 /// Shared context passed to per-send helpers. Built once per `send_attachments`
-/// call. `outbox_canonical` is pre-computed in non-sandboxed mode so we don't
-/// re-canonicalize the outbox dir per attachment.
+/// call. `host_outbox_canonical` is pre-computed so we don't re-canonicalize the
+/// host outbox dir per attachment; it backs the host-local resolution path used
+/// by non-sandboxed agents and by cron/background deliveries (which pre-stage
+/// attachments under the host outbox).
 struct SendCtx<'a> {
     bot: &'a super::BotType,
     chat_id: teloxide::types::ChatId,
@@ -957,8 +962,8 @@ struct SendCtx<'a> {
     agent_dir: &'a std::path::Path,
     resolved_sandbox: Option<&'a str>,
     sandboxed: bool,
-    outbox_prefix: &'a str,
-    outbox_canonical: Option<PathBuf>,
+    host_outbox: &'a str,
+    host_outbox_canonical: Option<PathBuf>,
 }
 
 /// Internal error type for per-send operations in this module.
@@ -1020,6 +1025,52 @@ impl From<teloxide::RequestError> for SendError {
     }
 }
 
+/// How an outbound attachment path should be resolved to a host file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboxResolution {
+    /// Path is under the agent's host-side outbox dir; use it directly.
+    /// Cron/background deliveries pre-download attachments here, so such paths
+    /// must NOT be re-downloaded from the sandbox.
+    HostLocal,
+    /// Path is a sandbox outbox path (`/sandbox/outbox/...`); download it from
+    /// the sandbox to a host temp file.
+    SandboxDownload,
+    /// Path is outside any recognized outbox; reject it.
+    Reject,
+}
+
+/// Classify an outbound attachment path to decide how `resolve_host_path`
+/// should fetch the underlying host file.
+///
+/// `host_outbox` is the agent's host-side outbox dir (e.g.
+/// `.../agents/<name>/outbox`). For sandboxed agents, normal in-turn
+/// attachments live under `/sandbox/outbox/` and must be downloaded, while
+/// cron/background deliveries pre-stage attachments under `host_outbox` and
+/// must be used as-is — re-downloading a host path from the sandbox fails.
+///
+/// This is a fast string pre-filter only. The `HostLocal` branch of
+/// `resolve_host_path` canonicalizes the path and re-confines it to the host
+/// outbox; that component-wise containment is the load-bearing security
+/// boundary against traversal/escape, not this function.
+fn classify_outbox_path(raw_path: &str, host_outbox: &str, sandboxed: bool) -> OutboxResolution {
+    if !host_outbox.is_empty() && path_is_within_dir(raw_path, host_outbox) {
+        OutboxResolution::HostLocal
+    } else if sandboxed && raw_path.starts_with(SANDBOX_OUTBOX) {
+        OutboxResolution::SandboxDownload
+    } else {
+        OutboxResolution::Reject
+    }
+}
+
+/// String-level "is `path` inside directory `dir`" check. Requires a `/`
+/// separator at the boundary so `/a/outbox` does not match `/a/outboxEVIL/x`.
+fn path_is_within_dir(path: &str, dir: &str) -> bool {
+    match path.strip_prefix(dir) {
+        Some(rest) => rest.starts_with('/'),
+        None => false,
+    }
+}
+
 /// Validate an outbound attachment, fetch its host path, and enforce the size
 /// limit. Returns `Ok(path)` on success; logs WARN and returns `Err(reason)` on
 /// any failure. On sandboxed paths a size/metadata failure deletes the
@@ -1033,63 +1084,70 @@ async fn resolve_host_path(
     ctx: &SendCtx<'_>,
     log_suffix: &str,
 ) -> Result<PathBuf, String> {
-    if !att.path.starts_with(ctx.outbox_prefix) {
-        let msg = format!(
-            "Outbound attachment path {} is outside outbox prefix {} — {log_suffix}",
-            att.path, ctx.outbox_prefix,
-        );
-        tracing::warn!("{msg}");
-        return Err(msg);
-    }
-
-    let host: PathBuf = if ctx.sandboxed {
-        let tmp_dir = ctx.agent_dir.join("tmp/outbox");
-        let file_name = std::path::Path::new(&att.path)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let dest = tmp_dir.join(&file_name);
-        let sandbox = ctx.resolved_sandbox.unwrap();
-        if let Err(e) = right_openshell::openshell::download_file(sandbox, &att.path, &dest).await {
+    let host: PathBuf = match classify_outbox_path(&att.path, ctx.host_outbox, ctx.sandboxed) {
+        OutboxResolution::Reject => {
             let msg = format!(
-                "download_file failed for {}: {:#} — {log_suffix}",
-                att.path, e
+                "Outbound attachment path {} is outside outbox prefix {} — {log_suffix}",
+                att.path, ctx.host_outbox,
             );
             tracing::warn!("{msg}");
             return Err(msg);
         }
-        dest
-    } else {
-        let Some(outbox_c) = ctx.outbox_canonical.as_deref() else {
-            let msg = format!(
-                "outbox dir not canonicalizable — {log_suffix} (path {})",
-                att.path,
-            );
-            tracing::warn!("{msg}");
-            return Err(msg);
-        };
-        let canonical = match tokio::fs::canonicalize(&att.path).await {
-            Ok(p) => p,
-            Err(e) => {
+        OutboxResolution::SandboxDownload => {
+            let tmp_dir = ctx.agent_dir.join("tmp/outbox");
+            let file_name = std::path::Path::new(&att.path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let dest = tmp_dir.join(&file_name);
+            let sandbox = ctx.resolved_sandbox.unwrap();
+            if let Err(e) =
+                right_openshell::openshell::download_file(sandbox, &att.path, &dest).await
+            {
                 let msg = format!(
-                    "Outbound attachment path {} could not be canonicalized: {e} — {log_suffix}",
-                    att.path,
+                    "download_file failed for {}: {:#} — {log_suffix}",
+                    att.path, e
                 );
                 tracing::warn!("{msg}");
                 return Err(msg);
             }
-        };
-        if !canonical.starts_with(outbox_c) {
-            let msg = format!(
-                "Outbound attachment path {} resolves to {} which is outside outbox — {log_suffix}",
-                att.path,
-                canonical.display(),
-            );
-            tracing::warn!("{msg}");
-            return Err(msg);
+            dest
         }
-        canonical
+        // Cron/background deliveries (and all non-sandboxed attachments) live on
+        // the host already: canonicalize and confine to the host outbox dir
+        // instead of trying to download them from the sandbox.
+        OutboxResolution::HostLocal => {
+            let Some(outbox_c) = ctx.host_outbox_canonical.as_deref() else {
+                let msg = format!(
+                    "outbox dir not canonicalizable — {log_suffix} (path {})",
+                    att.path,
+                );
+                tracing::warn!("{msg}");
+                return Err(msg);
+            };
+            let canonical = match tokio::fs::canonicalize(&att.path).await {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = format!(
+                        "Outbound attachment path {} could not be canonicalized: {e} — {log_suffix}",
+                        att.path,
+                    );
+                    tracing::warn!("{msg}");
+                    return Err(msg);
+                }
+            };
+            if !canonical.starts_with(outbox_c) {
+                let msg = format!(
+                    "Outbound attachment path {} resolves to {} which is outside outbox — {log_suffix}",
+                    att.path,
+                    canonical.display(),
+                );
+                tracing::warn!("{msg}");
+                return Err(msg);
+            }
+            canonical
+        }
     };
 
     let meta = match tokio::fs::metadata(&host).await {
@@ -1494,6 +1552,66 @@ async fn cleanup_local_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HOST_OUTBOX: &str = "/Users/x/.right/agents/agent-a/outbox";
+
+    #[test]
+    fn sandboxed_cron_host_outbox_path_is_host_local() {
+        // Regression: cron/background pre-download attachments to the host
+        // outbox; a sandboxed agent must use them directly, not re-download
+        // from /sandbox/outbox (which produced the "outside outbox prefix" skip
+        // and an undeliverable image).
+        let path = format!("{HOST_OUTBOX}/cron/run-123/post_illustration.png");
+        assert_eq!(
+            classify_outbox_path(&path, HOST_OUTBOX, true),
+            OutboxResolution::HostLocal
+        );
+    }
+
+    #[test]
+    fn sandboxed_normal_outbox_path_is_sandbox_download() {
+        assert_eq!(
+            classify_outbox_path("/sandbox/outbox/img.png", HOST_OUTBOX, true),
+            OutboxResolution::SandboxDownload
+        );
+    }
+
+    #[test]
+    fn sandboxed_arbitrary_path_is_rejected() {
+        assert_eq!(
+            classify_outbox_path("/etc/passwd", HOST_OUTBOX, true),
+            OutboxResolution::Reject
+        );
+    }
+
+    #[test]
+    fn sibling_dir_sharing_outbox_prefix_is_rejected() {
+        // `/…/outbox` must not match `/…/outboxEVIL/x` — the boundary check
+        // rejects the prefix collision before downstream canonicalization.
+        let path = format!("{HOST_OUTBOX}EVIL/secret.png");
+        assert_eq!(
+            classify_outbox_path(&path, HOST_OUTBOX, true),
+            OutboxResolution::Reject
+        );
+    }
+
+    #[test]
+    fn non_sandboxed_host_outbox_path_is_host_local() {
+        let path = format!("{HOST_OUTBOX}/inbox-staged.png");
+        assert_eq!(
+            classify_outbox_path(&path, HOST_OUTBOX, false),
+            OutboxResolution::HostLocal
+        );
+    }
+
+    #[test]
+    fn non_sandboxed_sandbox_path_is_rejected() {
+        // A non-sandboxed agent has no sandbox to download from.
+        assert_eq!(
+            classify_outbox_path("/sandbox/outbox/img.png", HOST_OUTBOX, false),
+            OutboxResolution::Reject
+        );
+    }
 
     fn test_author() -> MessageAuthor {
         MessageAuthor {

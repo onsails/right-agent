@@ -883,6 +883,18 @@ impl DeliverySendReport {
     }
 }
 
+/// Decide whether a failed attachment batch should fail the whole delivery.
+///
+/// Retrying a delivery re-invokes the session and re-sends any text content
+/// that already reached Telegram, so once at least one text message has been
+/// sent the delivery MUST NOT be retried — the failed attachment is dropped
+/// (and logged) instead, preventing duplicate posts. An attachment-only
+/// delivery (no text sent yet) remains retryable: nothing reached the user, so
+/// a retry cannot duplicate anything.
+fn attachment_failure_is_fatal(text_messages_sent: usize) -> bool {
+    text_messages_sent == 0
+}
+
 pub(crate) fn ensure_delivery_send_report_non_empty(
     report: DeliverySendReport,
 ) -> Result<(), String> {
@@ -1180,7 +1192,8 @@ async fn deliver_through_session(
 
     if let Some(ref atts) = reply.attachments
         && !atts.is_empty()
-        && let Err(e) = run_telegram_request_with_shutdown(
+    {
+        let send_result = run_telegram_request_with_shutdown(
             shutdown,
             report.total_sent() > 0,
             crate::telegram::attachments::send_attachments(
@@ -1193,17 +1206,28 @@ async fn deliver_through_session(
                 resolved_sandbox,
             ),
         )
-        .await?
-    {
-        tracing::error!(
-            chat_id = target_chat_id,
-            "async delivery: attachment send failed: {e:#}"
-        );
-        return Err(format!("telegram attachment send failed: {e:#}"));
-    } else if let Some(ref atts) = reply.attachments
-        && !atts.is_empty()
-    {
-        report.attachment_batches_sent += 1;
+        .await?;
+        match send_result {
+            Ok(()) => report.attachment_batches_sent += 1,
+            Err(e) if attachment_failure_is_fatal(report.text_messages_sent) => {
+                tracing::error!(
+                    chat_id = target_chat_id,
+                    "async delivery: attachment send failed: {e:#}"
+                );
+                return Err(format!("telegram attachment send failed: {e:#}"));
+            }
+            Err(e) => {
+                // The text content already reached Telegram. Failing here would
+                // requeue the whole delivery and re-send that text on the next
+                // attempt, duplicating the post. Drop the failed attachment and
+                // treat the (text-only) delivery as done.
+                tracing::error!(
+                    chat_id = target_chat_id,
+                    "async delivery: attachment send failed after text delivered; \
+                     dropping attachment to avoid duplicate re-send: {e:#}"
+                );
+            }
+        }
     }
 
     ensure_delivery_send_report_non_empty(report)?;
@@ -1213,6 +1237,16 @@ async fn deliver_through_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_failure_fatal_only_when_no_text_sent() {
+        // Nothing reached the user yet → retry is safe.
+        assert!(attachment_failure_is_fatal(0));
+        // Text already delivered → retry would duplicate the post, so the
+        // attachment failure must be tolerated, not fatal.
+        assert!(!attachment_failure_is_fatal(1));
+        assert!(!attachment_failure_is_fatal(3));
+    }
 
     #[tokio::test]
     async fn delivery_mode_shutdown_flush_skips_idle_gate() {
