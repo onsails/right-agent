@@ -184,6 +184,22 @@ pub(crate) fn merge_group_captions(captions: &mut [Option<String>]) {
     }
 }
 
+/// Truncate a raw caption to at most `TELEGRAM_CAPTION_LIMIT` characters
+/// (char-safe), then convert agent Markdown to Telegram-supported HTML.
+/// Truncating raw text before conversion keeps tags balanced and the visible
+/// length within the caption limit (Telegram counts captions by visible text,
+/// not HTML tag characters).
+fn caption_to_html(raw: &str) -> String {
+    let truncated: String = raw.chars().take(TELEGRAM_CAPTION_LIMIT).collect();
+    super::markdown::md_to_telegram_html(&truncated)
+}
+
+/// Plain-text form of a caption for the `ParseMode::Html` fallback: visible
+/// text with all formatting removed.
+fn caption_to_plain(raw: &str) -> String {
+    super::markdown::strip_html_tags(&caption_to_html(raw))
+}
+
 /// One Telegram API call the bot must make to honour a reply's attachments.
 /// `Single` reuses the per-type `send_*` path; `Group` becomes one
 /// `sendMediaGroup`.
@@ -1552,6 +1568,27 @@ async fn cleanup_local_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caption_to_html_renders_bold() {
+        assert_eq!(super::caption_to_html("**x**"), "<b>x</b>");
+    }
+
+    #[test]
+    fn caption_to_html_truncates_raw_to_limit() {
+        let raw = "a".repeat(super::TELEGRAM_CAPTION_LIMIT + 50);
+        let html = super::caption_to_html(&raw);
+        assert!(
+            html.chars().count() <= super::TELEGRAM_CAPTION_LIMIT,
+            "converted caption visible length {} exceeds limit",
+            html.chars().count()
+        );
+    }
+
+    #[test]
+    fn caption_to_plain_strips_formatting() {
+        assert_eq!(super::caption_to_plain("**x**"), "x");
+    }
 
     const HOST_OUTBOX: &str = "/Users/x/.right/agents/riskoff/outbox";
 
