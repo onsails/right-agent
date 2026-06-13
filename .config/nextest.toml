@@ -1,0 +1,37 @@
+# cargo-nextest configuration. https://nexte.st/docs/configuration
+#
+# Concurrency model: test-groups bound concurrency WITHIN one `cargo nextest
+# run`. The host-global, cross-worktree cap is still enforced separately by
+# acquire_sandbox_slot() via RIGHT_MAX_CONCURRENT_SANDBOX_TESTS. Both apply.
+
+[profile.default]
+# Local dev loop: fail fast, no retries.
+fail-fast = true
+retries = 0
+
+[profile.ci]
+# Workspace job: run everything, absorb the two known parallel-load flakes
+# (cc/invocation pid race, dashboard warn-count) with one retry.
+fail-fast = false
+retries = 1
+
+[profile.ci-ignored]
+# Live-sandbox job: run everything; never auto-mask a flaky sandbox test.
+fail-fast = false
+retries = 0
+
+[test-groups]
+sandbox-claude = { max-threads = 1 }
+sandbox-openshell = { max-threads = 2 }
+
+# ci_claude_* — heaviest (a full Claude Code turn inside the sandbox): 1 at a time.
+[[profile.ci-ignored.overrides]]
+filter = 'test(/ci_claude_/)'
+test-group = 'sandbox-claude'
+slow-timeout = { period = '120s', terminate-after = 6 }
+
+# ci_openshell_* — sandbox I/O suite: 2 at a time.
+[[profile.ci-ignored.overrides]]
+filter = 'test(/ci_openshell_/)'
+test-group = 'sandbox-openshell'
+slow-timeout = { period = '120s', terminate-after = 6 }
