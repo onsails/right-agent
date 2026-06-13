@@ -3094,6 +3094,79 @@ fn generic_provider_profiles(
     Ok(right_openshell::managed_profiles::generic_provider_profiles(providers))
 }
 
+/// Map each managed-profile id to the sandbox attachments that reference it,
+/// derived from loaded agent configs. Generic providers map by
+/// `generic_provider_profile_id(name)`; built-in providers map by their gateway
+/// profile id, which is the slug verbatim (matches `provider_gateway_type` in
+/// `internal_api_providers.rs` — Right-managed built-ins already carry their
+/// `right-*` id, e.g. `right-github`/`right-fal`; non-managed slugs like
+/// `github`/`anthropic` produce ids absent from `managed_profiles()` and are
+/// harmlessly skipped by the heal loop).
+fn managed_profile_attachments(
+    configs: &[(String, right_agent_config::AgentConfig)],
+) -> std::collections::HashMap<String, Vec<right_openshell::providers::ProfileAttachment>> {
+    let mut map: std::collections::HashMap<
+        String,
+        Vec<right_openshell::providers::ProfileAttachment>,
+    > = std::collections::HashMap::new();
+    for (agent_name, cfg) in configs {
+        let Some(sandbox) = cfg.sandbox.as_ref() else {
+            continue;
+        };
+        let sandbox_name = sandbox.name.clone().unwrap_or_else(|| agent_name.clone());
+        for entry in cfg.providers() {
+            let profile_id = match &entry.type_ {
+                right_agent_config::ProviderType::Generic => {
+                    right_openshell::managed_profiles::generic_provider_profile_id(&entry.name)
+                }
+                right_agent_config::ProviderType::BuiltIn(slug) => slug.clone(),
+            };
+            map.entry(profile_id).or_default().push(
+                right_openshell::providers::ProfileAttachment {
+                    sandbox_name: sandbox_name.clone(),
+                    provider_name: entry.name.clone(),
+                },
+            );
+        }
+    }
+    map
+}
+
+/// Heal every profile `ensure_profiles` reported as `DriftedSkipped`, using the
+/// detach-dance primitive against all known referencing attachments. Generic and
+/// Right-managed built-in (`right-github`/`right-fal`) profiles are both healed:
+/// the attachment map resolves built-in ids identically to gateway attach.
+async fn heal_drifted_managed_profiles(
+    client: &mut right_openshell::managed_profiles::OpenShellGrpcClient,
+    configs: &[(String, right_agent_config::AgentConfig)],
+    outcomes: &[right_openshell::managed_profiles::EnsureOutcome],
+) -> miette::Result<()> {
+    use right_openshell::managed_profiles::EnsureOutcome;
+    let attachments = managed_profile_attachments(configs);
+    let all_profiles = {
+        let mut p = right_openshell::managed_profiles::managed_profiles();
+        p.extend(generic_provider_profiles(configs)?);
+        p
+    };
+    for outcome in outcomes {
+        let EnsureOutcome::DriftedSkipped(id) = outcome else {
+            continue;
+        };
+        let Some(mp) = all_profiles.iter().find(|m| m.id() == *id) else {
+            continue;
+        };
+        let desired = right_openshell::managed_profiles::desired_profile_for(client, mp)
+            .await
+            .map_err(|e| miette::miette!("author desired profile {id} for heal: {e:#}"))?;
+        let atts = attachments.get(id).cloned().unwrap_or_default();
+        right_openshell::providers::update_referenced_profile(client, &atts, desired)
+            .await
+            .map_err(|e| miette::miette!("heal drifted managed profile {id}: {e:#}"))?;
+        tracing::info!(profile = %id, "up: healed drifted managed profile");
+    }
+    Ok(())
+}
+
 async fn cmd_up(
     home: &Path,
     agents_filter: Option<Vec<String>>,
@@ -3285,6 +3358,7 @@ async fn cmd_up(
             .await
             .map_err(|e| miette::miette!("provision managed profiles failed: {e:#}"))?;
         tracing::info!(?outcomes, "up: managed_profiles_provisioned");
+        heal_drifted_managed_profiles(&mut client, &loaded_agent_configs, &outcomes).await?;
     }
 
     // Download any whisper models needed by STT-enabled agents.
