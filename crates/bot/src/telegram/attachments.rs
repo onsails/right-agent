@@ -186,18 +186,26 @@ pub(crate) fn merge_group_captions(captions: &mut [Option<String>]) {
 
 /// Truncate a raw caption to at most `TELEGRAM_CAPTION_LIMIT` characters
 /// (char-safe), then convert agent Markdown to Telegram-supported HTML.
-/// Truncating raw text before conversion keeps tags balanced and the visible
-/// length within the caption limit (Telegram counts captions by visible text,
-/// not HTML tag characters).
+/// Truncating raw before conversion keeps the HTML tag-balanced. Most Markdown
+/// shrinks the visible text (markers and link URLs drop out), so the converted
+/// caption is normally within Telegram's limit (which counts visible text, not
+/// tag characters); a few constructs (e.g. wide tables) can still expand past
+/// it, in which case the send falls back to the length-capped plain text from
+/// [`caption_to_plain`].
 fn caption_to_html(raw: &str) -> String {
     let truncated: String = raw.chars().take(TELEGRAM_CAPTION_LIMIT).collect();
     super::markdown::md_to_telegram_html(&truncated)
 }
 
 /// Plain-text form of a caption for the `ParseMode::Html` fallback: visible
-/// text with all formatting removed.
+/// text with all formatting removed, hard-capped to `TELEGRAM_CAPTION_LIMIT`
+/// visible characters so the fallback caption is always within Telegram's limit
+/// even when the HTML form expanded past it.
 fn caption_to_plain(raw: &str) -> String {
     super::markdown::strip_html_tags(&caption_to_html(raw))
+        .chars()
+        .take(TELEGRAM_CAPTION_LIMIT)
+        .collect()
 }
 
 /// One Telegram API call the bot must make to honour a reply's attachments.
@@ -1022,6 +1030,18 @@ fn is_media_group_validation_error_text(text: &str) -> bool {
             && (lower.contains("file identifier") || lower.contains("http url")))
 }
 
+/// True when a Telegram send error is a deterministic, pre-delivery rejection of
+/// the caption *formatting* — an HTML entity/URL parse failure or a too-long
+/// caption — i.e. the only errors a plain-text re-send can fix. Network,
+/// rate-limit, auth, and 5xx errors are excluded: those may have been delivered
+/// before the error surfaced, so retrying them would duplicate the message.
+/// Telegram returns formatting errors as a 400 *before* delivery, so a retry is
+/// safe.
+pub(crate) fn is_retryable_format_error(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("parse entities") || lower.contains("too long")
+}
+
 impl SendError {
     /// Format a user-visible error string labelled with the attachment description.
     fn into_user_msg(self, label: &str) -> String {
@@ -1284,20 +1304,24 @@ async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), 
         {
             Ok(()) => Ok(()),
             Err(e) => {
-                tracing::warn!(
-                    "caption HTML send failed, retrying as plain text: {}",
-                    display_error_chain(&e)
-                );
-                let plain_cap = caption_to_plain(raw);
-                send_single_attempt(
-                    ctx,
-                    &host_path,
-                    att.kind,
-                    thread_id,
-                    Some(&plain_cap),
-                    false,
-                )
-                .await
+                let reason = display_error_chain(&e);
+                if is_retryable_format_error(&reason) {
+                    tracing::warn!("caption HTML send failed, retrying as plain text: {reason}");
+                    let plain_cap = caption_to_plain(raw);
+                    send_single_attempt(
+                        ctx,
+                        &host_path,
+                        att.kind,
+                        thread_id,
+                        Some(&plain_cap),
+                        false,
+                    )
+                    .await
+                } else {
+                    // Network / rate-limit / 5xx — the send may have been
+                    // delivered; do not retry (avoids a duplicate message).
+                    Err(e)
+                }
             }
         }
     } else {
@@ -1486,17 +1510,31 @@ async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(
                 // Real album incompatibility — degrade to individual sends
                 // (each send_single then runs its own HTML+plain fallback).
                 Err(SendError::FallbackToSingles { reason })
-            } else {
-                // Likely a caption parse rejection — retry the album once with
-                // plain captions, preserving the album and dropping only the
-                // caption's formatting.
+            } else if is_retryable_format_error(&reason) {
+                // Caption formatting rejection (pre-delivery 400) — retry the
+                // album once with plain captions, preserving the album and
+                // dropping only the caption's formatting.
                 tracing::warn!(
                     "media-group HTML caption send failed, retrying as plain text: {reason}"
                 );
                 match send_album(ctx, items, &host_paths, thread_id, false).await {
                     Ok(()) => Ok(()),
-                    Err(e2) => Err(SendError::Api(e2)),
+                    Err(e2) => {
+                        // The plain retry can still surface a genuine album
+                        // incompatibility — degrade to singles in that case
+                        // rather than reporting a hard failure.
+                        let reason2 = display_error_chain(&e2);
+                        if is_media_group_validation_error_text(&reason2) {
+                            Err(SendError::FallbackToSingles { reason: reason2 })
+                        } else {
+                            Err(SendError::Api(e2))
+                        }
+                    }
                 }
+            } else {
+                // Network / rate-limit / 5xx — the album may have been
+                // delivered; do not retry (avoids a duplicate album).
+                Err(SendError::Api(e))
             }
         }
     };
@@ -1621,19 +1659,44 @@ mod tests {
     }
 
     #[test]
-    fn caption_to_html_truncates_raw_to_limit() {
+    fn caption_to_plain_is_capped_to_limit() {
+        // The plain fallback caption must always be within Telegram's visible
+        // caption limit (HTML-string length is irrelevant — Telegram counts
+        // visible text). Use a raw input over the limit.
         let raw = "a".repeat(super::TELEGRAM_CAPTION_LIMIT + 50);
-        let html = super::caption_to_html(&raw);
+        let plain = super::caption_to_plain(&raw);
         assert!(
-            html.chars().count() <= super::TELEGRAM_CAPTION_LIMIT,
-            "converted caption visible length {} exceeds limit",
-            html.chars().count()
+            plain.chars().count() <= super::TELEGRAM_CAPTION_LIMIT,
+            "plain caption length {} exceeds limit",
+            plain.chars().count()
         );
     }
 
     #[test]
     fn caption_to_plain_strips_formatting() {
         assert_eq!(super::caption_to_plain("**x**"), "x");
+    }
+
+    #[test]
+    fn is_retryable_format_error_gates_retry_correctly() {
+        // Deterministic pre-delivery formatting rejections → retry is safe.
+        assert!(super::is_retryable_format_error(
+            "Bad Request: can't parse entities: Unsupported start tag \"x\""
+        ));
+        assert!(super::is_retryable_format_error(
+            "Bad Request: can't parse entities: Unsupported URL protocol"
+        ));
+        assert!(super::is_retryable_format_error(
+            "Bad Request: message caption is too long"
+        ));
+        // Transient / possibly-delivered errors → must NOT retry (would duplicate).
+        assert!(!super::is_retryable_format_error(
+            "Network error: connection reset by peer"
+        ));
+        assert!(!super::is_retryable_format_error(
+            "Too Many Requests: retry after 5"
+        ));
+        assert!(!super::is_retryable_format_error("Internal Server Error"));
     }
 
     const HOST_OUTBOX: &str = "/Users/x/.right/agents/riskoff/outbox";
