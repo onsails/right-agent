@@ -121,6 +121,41 @@ impl std::fmt::Display for ScheduleKind {
     }
 }
 
+/// When a `then` continuation fires, relative to the triggered run's
+/// terminal status. Required on every `ThenSpec` (no default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOn {
+    Success,
+    Failure,
+    Always,
+}
+
+impl RunOn {
+    /// Whether a continuation should fire given the triggered run's outcome.
+    pub fn fires_on(&self, success: bool) -> bool {
+        match self {
+            RunOn::Always => true,
+            RunOn::Success => success,
+            RunOn::Failure => !success,
+        }
+    }
+}
+
+/// A runtime-guaranteed follow-up that resumes (forks) the triggered run's
+/// session after it reaches a terminal state matching `run_on`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ThenSpec {
+    pub instruction: String,
+    pub run_on: RunOn,
+    #[serde(default)]
+    pub notify: bool,
+    #[serde(default)]
+    pub target_chat_id: Option<i64>,
+    #[serde(default)]
+    pub target_thread_id: Option<i64>,
+}
+
 /// A cron job specification loaded from the database.
 #[derive(Debug, Clone)]
 pub struct CronSpec {
