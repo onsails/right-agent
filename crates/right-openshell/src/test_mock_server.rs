@@ -82,6 +82,27 @@ pub(crate) struct MockOpenShell {
             os_proto::sandbox::v1::GetSandboxConfigResponse,
         >,
     >,
+    pub(crate) mock_get_provider_profile: Option<
+        UnaryMockFn<os_proto::v1::GetProviderProfileRequest, os_proto::v1::ProviderProfileResponse>,
+    >,
+    pub(crate) mock_lint_provider_profiles: Option<
+        UnaryMockFn<
+            os_proto::v1::LintProviderProfilesRequest,
+            os_proto::v1::LintProviderProfilesResponse,
+        >,
+    >,
+    pub(crate) mock_import_provider_profiles: Option<
+        UnaryMockFn<
+            os_proto::v1::ImportProviderProfilesRequest,
+            os_proto::v1::ImportProviderProfilesResponse,
+        >,
+    >,
+    pub(crate) mock_delete_provider_profile: Option<
+        UnaryMockFn<
+            os_proto::v1::DeleteProviderProfileRequest,
+            os_proto::v1::DeleteProviderProfileResponse,
+        >,
+    >,
 }
 
 impl MockOpenShell {
@@ -370,30 +391,42 @@ impl OpenShell for MockOpenShell {
 
     async fn get_provider_profile(
         &self,
-        _: tonic::Request<os_proto::v1::GetProviderProfileRequest>,
+        request: tonic::Request<os_proto::v1::GetProviderProfileRequest>,
     ) -> Result<tonic::Response<os_proto::v1::ProviderProfileResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("stub"))
+        match &self.mock_get_provider_profile {
+            Some(f) => f(request.into_inner()).map(tonic::Response::new),
+            None => Err(tonic::Status::unimplemented("stub")),
+        }
     }
 
     async fn import_provider_profiles(
         &self,
-        _: tonic::Request<os_proto::v1::ImportProviderProfilesRequest>,
+        request: tonic::Request<os_proto::v1::ImportProviderProfilesRequest>,
     ) -> Result<tonic::Response<os_proto::v1::ImportProviderProfilesResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("stub"))
+        match &self.mock_import_provider_profiles {
+            Some(f) => f(request.into_inner()).map(tonic::Response::new),
+            None => Err(tonic::Status::unimplemented("stub")),
+        }
     }
 
     async fn lint_provider_profiles(
         &self,
-        _: tonic::Request<os_proto::v1::LintProviderProfilesRequest>,
+        request: tonic::Request<os_proto::v1::LintProviderProfilesRequest>,
     ) -> Result<tonic::Response<os_proto::v1::LintProviderProfilesResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("stub"))
+        match &self.mock_lint_provider_profiles {
+            Some(f) => f(request.into_inner()).map(tonic::Response::new),
+            None => Err(tonic::Status::unimplemented("stub")),
+        }
     }
 
     async fn delete_provider_profile(
         &self,
-        _: tonic::Request<os_proto::v1::DeleteProviderProfileRequest>,
+        request: tonic::Request<os_proto::v1::DeleteProviderProfileRequest>,
     ) -> Result<tonic::Response<os_proto::v1::DeleteProviderProfileResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented("stub"))
+        match &self.mock_delete_provider_profile {
+            Some(f) => f(request.into_inner()).map(tonic::Response::new),
+            None => Err(tonic::Status::unimplemented("stub")),
+        }
     }
 
     // --- New v0.0.50 provider refresh stubs ---
