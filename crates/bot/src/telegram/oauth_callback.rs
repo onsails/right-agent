@@ -45,7 +45,7 @@ pub struct OAuthCallbackState {
     /// Agent name used in logs and internal API requests.
     pub agent_name: String,
     /// Telegram bot clone reused by the progress endpoint.
-    pub bot: teloxide::Bot,
+    pub bot: super::BotType,
     /// Internal API client for delivering OAuth tokens to the aggregator
     pub internal_client: Arc<InternalClient>,
 }
@@ -455,7 +455,7 @@ mod tests {
             pending_auth: map,
             oauth_status: super::super::oauth_status::OAuthFlowStatusStore::default(),
             agent_name: "test-agent".to_string(),
-            bot: teloxide::Bot::new("0:fake_token_for_tests"),
+            bot: super::super::bot::build_bot("0:fake_token_for_tests".to_owned()),
             internal_client: Arc::new(InternalClient::new("/tmp/fake-internal.sock")),
         }
     }
