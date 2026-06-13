@@ -28,8 +28,8 @@ Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw
 
 - Tests are milestone checks, not punctuation after every edit. Batch small edits and avoid repeating cargo checks/tests when the signal would be the same.
 - At the start of substantial feature work or a new worktree, run one baseline verification appropriate to the scope. Prefer targeted package/module tests for narrow work; use full workspace tests only when the change is broad or the baseline is uncertain. Record any pre-existing failures.
-- During implementation, prefer the narrowest useful command (`devenv shell -- cargo test -p <crate> <filter>`, package-level tests, or a targeted build/check) after a TDD red/green loop or a coherent feature slice.
-- At the end of all code work, including work done inside a worktree, `devenv shell -- cargo test --workspace` is mandatory. Targeted tests do not replace the final full workspace test.
+- During implementation, prefer the narrowest useful command (`devenv shell -- cargo nextest run -p <crate> <filter>`, package-level tests, or a targeted build/check) after a TDD red/green loop or a coherent feature slice. `cargo nextest run` is the recommended runner; doctests run only under `cargo test --doc`.
+- At the end of all code work, including work done inside a worktree, `devenv shell -- cargo nextest run --workspace` plus `devenv shell -- cargo test --doc --workspace` is mandatory. Targeted tests do not replace the final full workspace test.
 - New `docs/superpowers/` plans must encode this cadence: targeted intermediate verification and one final full workspace test, not full workspace tests after every task.
 
 ## Conventions
