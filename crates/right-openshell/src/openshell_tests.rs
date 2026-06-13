@@ -1379,6 +1379,23 @@ async fn ci_openshell_test_sandbox_holds_name_lock() {
     assert!(acquired.load(Ordering::SeqCst));
 }
 
+#[tokio::test]
+#[ignore = "ci-openshell: boots a live shared sandbox"]
+async fn ci_openshell_shared_sandbox_reuses_within_run() {
+    // Two calls with the same label in the same process (= same run id) must
+    // resolve to ONE sandbox: the first boots it, the second attaches.
+    let a = crate::test_support::shared_sandbox("reuse").await;
+    let b = crate::test_support::shared_sandbox("reuse").await;
+    assert_eq!(
+        a.name(),
+        b.name(),
+        "same run + label must reuse a single shared sandbox"
+    );
+    let (out, code) = a.exec(&["echo", "shared-ok"]).await;
+    assert_eq!(code, 0, "exec in attached shared sandbox should succeed");
+    assert_eq!(out.trim(), "shared-ok");
+}
+
 #[test]
 fn control_master_directives_block_content() {
     // Pure-content check: verify the appended block has the expected
