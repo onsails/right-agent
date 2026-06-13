@@ -319,10 +319,8 @@ message SandboxSpec {
   repeated string providers = 8;
   // Request NVIDIA GPU resources for this sandbox.
   bool gpu = 9;
-  // Optional PCI BDF address (e.g. "0000:2d:00.0") or device index
-  // (e.g. "0", "1"). When empty with gpu=true, the driver assigns the
-  // first available GPU.
-  string gpu_device = 10;
+  reserved 10;
+  reserved "gpu_device";
   // Field 11 was `proposal_approval_mode`. The approval mode is now a
   // runtime setting (gateway or sandbox scope) read via UpdateConfig /
   // GetSandboxConfig, so it can be flipped on a running sandbox and
@@ -892,6 +890,52 @@ message ProviderProfileDiagnostic {
   string severity = 5;
 }
 
+// Endpoint selector for token grant audience overrides.
+message ProviderCredentialTokenGrantAudienceOverride {
+  // Optional: endpoint host selector. If omitted, inherits the profile endpoint host.
+  string host = 1;
+
+  // Optional: endpoint port selector. If omitted, matches the expanded profile endpoint port.
+  uint32 port = 2;
+
+  // Optional: endpoint path selector. If omitted, inherits the profile endpoint path.
+  string path = 3;
+
+  // Resource audience to request for matching endpoints.
+  string audience = 4;
+
+  // Optional: OAuth2 scopes to request. If omitted, inherits the token grant scopes.
+  repeated string scopes = 5;
+}
+
+// Provider credential token grant configuration.
+// When present, the credential is obtained dynamically via OAuth2 grant when needed.
+message ProviderCredentialTokenGrant {
+  // OAuth2 token endpoint URL (e.g., https://keycloak.example.com/realms/my-realm/protocol/openid-connect/token)
+  string token_endpoint = 1;
+
+  // Optional: default resource audience to request from the token service
+  string audience = 2;
+
+  // Optional: audience to request when fetching the JWT-SVID from SPIRE.
+  // If omitted, the sandbox derives this from token_endpoint.
+  string jwt_svid_audience = 6;
+
+  // Optional: OAuth2 scopes to request
+  repeated string scopes = 3;
+
+  // Optional: override token cache TTL (seconds)
+  // If 0 or omitted, use expires_in from token response
+  int64 cache_ttl_seconds = 4;
+
+  // Optional: endpoint-specific resource audience overrides.
+  repeated ProviderCredentialTokenGrantAudienceOverride audience_overrides = 5;
+
+  // Optional: OAuth2 client_assertion_type value. If omitted, OpenShell uses
+  // urn:ietf:params:oauth:client-assertion-type:jwt-bearer.
+  string client_assertion_type = 7;
+}
+
 // Provider credential declaration.
 message ProviderProfileCredential {
   string name = 1;
@@ -903,6 +947,7 @@ message ProviderProfileCredential {
   string query_param = 7;
   ProviderCredentialRefresh refresh = 8;
   string path_template = 9;
+  ProviderCredentialTokenGrant token_grant = 10;
 }
 
 enum ProviderCredentialRefreshStrategy {
@@ -1100,6 +1145,10 @@ message GetSandboxProviderEnvironmentResponse {
   uint64 provider_env_revision = 2;
   // Expiration timestamps for returned environment variables.
   map<string, int64> credential_expires_at_ms = 3;
+  // Dynamic credentials that require token grants or other runtime injection.
+  // Maps endpoint-bound provider metadata to credential metadata.
+  // Supervisor uses this to inject Authorization headers for token grant credentials.
+  map<string, ProviderProfileCredential> dynamic_credentials = 4;
 }
 
 // ---------------------------------------------------------------------------
