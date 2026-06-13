@@ -114,6 +114,36 @@ pub struct CronDeleteParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CronListParams {}
 
+#[derive(Debug, Clone, Copy, serde::Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOnDto {
+    Success,
+    Failure,
+    Always,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Deserialize, JsonSchema)]
+pub struct CronThenParams {
+    #[schemars(
+        description = "Instruction for the follow-up turn. It resumes (forks) THIS run's session, so it can reference what the run just did."
+    )]
+    pub instruction: String,
+    #[schemars(description = "When the follow-up fires relative to this run's outcome. REQUIRED.")]
+    pub run_on: RunOnDto,
+    #[serde(default)]
+    #[schemars(
+        description = "Force the follow-up's report to the user (skip silent/idle gate). Default false."
+    )]
+    pub notify: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Override the follow-up's delivery chat. Defaults to the chat this trigger was issued from."
+    )]
+    pub target_chat_id: Option<i64>,
+    #[serde(default)]
+    pub target_thread_id: Option<i64>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CronTriggerParams {
     #[schemars(description = "Job name to trigger for immediate execution")]
@@ -123,6 +153,16 @@ pub struct CronTriggerParams {
         description = "Force a verification report: override a silent decision and skip the idle gate so the user receives the result promptly. Default false."
     )]
     pub notify: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Extra instruction prepended to THIS run only; does not change the stored prompt."
+    )]
+    pub extra_instruction: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Runtime-guaranteed follow-up that resumes this run's session after it finishes."
+    )]
+    pub then: Option<CronThenParams>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -418,10 +458,27 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<CronTriggerParams>,
     ) -> Result<CallToolResult, McpError> {
+        // The rmcp-macro path has no ToolCallContext/registry, so origin is
+        // always absent here; the live path is RightBackend::call_cron_trigger.
+        let then_json =
+            match &params.then {
+                Some(t) => Some(serde_json::to_string(t).map_err(|e| {
+                    McpError::invalid_params(format!("serialize then: {e:#}"), None)
+                })?),
+                None => None,
+            };
         let conn = self.conn.lock().await;
-        let msg = right_agent::cron_spec::trigger_spec(&conn, &params.job_name, params.notify)
-            .await
-            .map_err(|e| McpError::invalid_params(e, None))?;
+        let msg = right_agent::cron_spec::trigger_spec(
+            &conn,
+            &params.job_name,
+            params.notify,
+            params.extra_instruction.as_deref(),
+            then_json.as_deref(),
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| McpError::invalid_params(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
@@ -740,6 +797,35 @@ mod tests {
         let p2: CronTriggerParams =
             serde_json::from_value(serde_json::json!({ "job_name": "j", "notify": true })).unwrap();
         assert!(p2.notify);
+    }
+
+    #[test]
+    fn cron_then_params_json_matches_then_spec() {
+        use super::{CronThenParams, RunOnDto};
+        let p = CronThenParams {
+            instruction: "go".into(),
+            run_on: RunOnDto::Success,
+            notify: true,
+            target_chat_id: Some(9),
+            target_thread_id: None,
+        };
+        // Serialized CronThenParams must deserialize into right_agent's ThenSpec.
+        let json = serde_json::to_string(&p).unwrap();
+        let spec: right_agent::cron_spec::ThenSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec.instruction, "go");
+        assert_eq!(spec.run_on, right_agent::cron_spec::RunOn::Success);
+        assert!(spec.notify);
+        assert_eq!(spec.target_chat_id, Some(9));
+    }
+
+    #[test]
+    fn cron_then_params_run_on_required() {
+        // A `then` missing `run_on` must fail to parse (RunOnDto has no default).
+        let r = serde_json::from_value::<CronTriggerParams>(serde_json::json!({
+            "job_name": "j",
+            "then": { "instruction": "x" }
+        }));
+        assert!(r.is_err());
     }
 
     /// rmcp's `#[tool]` macro accepts only string literals for `description`,
