@@ -146,6 +146,7 @@ pub fn fal_profile() -> proto_v1::ProviderProfile {
             query_param: String::new(),
             refresh: None,
             path_template: String::new(),
+            token_grant: None,
         }],
         endpoints: hosts
             .iter()
@@ -192,6 +193,7 @@ pub fn author_generic_profile(
             query_param: String::new(),
             refresh: None,
             path_template: String::new(),
+            token_grant: None,
         }],
         endpoints: upstream_hosts
             .iter()

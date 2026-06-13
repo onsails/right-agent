@@ -759,6 +759,7 @@ async fn get_sandbox_provider_environment_returns_map() {
                 environment: env,
                 provider_env_revision: 1,
                 credential_expires_at_ms: HashMap::new(),
+                dynamic_credentials: HashMap::new(),
             })
         })),
         ..Default::default()
