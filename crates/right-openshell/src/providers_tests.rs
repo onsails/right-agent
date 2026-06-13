@@ -9,10 +9,10 @@ use crate::openshell_proto::openshell::datamodel::v1 as datamodel;
 use crate::openshell_proto::openshell::sandbox::v1 as sandbox_v1;
 use crate::openshell_proto::openshell::v1 as proto_v1;
 use crate::providers::{
-    PROVIDERS_V2_ENABLED_KEY, ProviderError, ProviderSpec, attach_to_sandbox, create_provider,
-    delete_provider, detach_from_sandbox, ensure_v2_enabled, get_provider,
+    PROVIDERS_V2_ENABLED_KEY, ProfileAttachment, ProviderError, ProviderSpec, attach_to_sandbox,
+    create_provider, delete_provider, detach_from_sandbox, ensure_v2_enabled, get_provider,
     get_sandbox_provider_environment, list_attached, list_providers_by_prefix,
-    reconcile_for_sandbox, update_provider,
+    reconcile_for_sandbox, update_provider, update_referenced_profile,
 };
 use crate::test_mock_server::{MockOpenShell, mock_client, start_mock_server};
 
@@ -822,5 +822,142 @@ async fn ensure_profiles_reports_drift_without_reimport() {
         import_calls.load(Ordering::SeqCst),
         0,
         "drift must NOT trigger an import"
+    );
+}
+
+#[tokio::test]
+async fn update_referenced_profile_detaches_deletes_imports_reattaches_in_order() {
+    let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+    let (o1, o2, o3, o4, o5) = (
+        Arc::clone(&order),
+        Arc::clone(&order),
+        Arc::clone(&order),
+        Arc::clone(&order),
+        Arc::clone(&order),
+    );
+
+    let stored = author_generic_profile("right-provider-x", &["api.acme.com".into()], None, "KEY");
+    let mock = MockOpenShell {
+        mock_get_provider_profile: Some(Box::new(move |_| {
+            o1.lock().unwrap().push("get");
+            Ok(proto_v1::ProviderProfileResponse {
+                profile: Some(stored.clone()),
+            })
+        })),
+        mock_detach_sandbox_provider: Some(Box::new(move |_| {
+            o2.lock().unwrap().push("detach");
+            Ok(proto_v1::DetachSandboxProviderResponse::default())
+        })),
+        mock_delete_provider_profile: Some(Box::new(move |_| {
+            o3.lock().unwrap().push("delete");
+            Ok(proto_v1::DeleteProviderProfileResponse { deleted: true })
+        })),
+        mock_lint_provider_profiles: Some(Box::new(|_| {
+            Ok(proto_v1::LintProviderProfilesResponse {
+                diagnostics: vec![],
+                valid: true,
+            })
+        })),
+        mock_import_provider_profiles: Some(Box::new(move |_| {
+            o4.lock().unwrap().push("import");
+            Ok(proto_v1::ImportProviderProfilesResponse::default())
+        })),
+        mock_attach_sandbox_provider: Some(Box::new(move |_| {
+            o5.lock().unwrap().push("attach");
+            Ok(proto_v1::AttachSandboxProviderResponse::default())
+        })),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    let desired = author_generic_profile(
+        "right-provider-x",
+        &["api.acme.com".into(), "api2.acme.com".into()],
+        None,
+        "KEY",
+    );
+    let atts = vec![ProfileAttachment {
+        sandbox_name: "sbx".into(),
+        provider_name: "prov".into(),
+    }];
+    update_referenced_profile(&mut client, &atts, desired)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec!["get", "detach", "delete", "import", "attach"]
+    );
+}
+
+#[tokio::test]
+async fn update_referenced_profile_restores_prior_and_reattaches_on_import_failure() {
+    let import_calls = Arc::new(AtomicUsize::new(0));
+    let attach_calls = Arc::new(AtomicUsize::new(0));
+    let import_c = Arc::clone(&import_calls);
+    let attach_c = Arc::clone(&attach_calls);
+    let stored = author_generic_profile("right-provider-x", &["api.acme.com".into()], None, "KEY");
+
+    let mock = MockOpenShell {
+        mock_get_provider_profile: Some(Box::new(move |_| {
+            Ok(proto_v1::ProviderProfileResponse {
+                profile: Some(stored.clone()),
+            })
+        })),
+        mock_detach_sandbox_provider: Some(Box::new(|_| {
+            Ok(proto_v1::DetachSandboxProviderResponse::default())
+        })),
+        mock_delete_provider_profile: Some(Box::new(|_| {
+            Ok(proto_v1::DeleteProviderProfileResponse { deleted: true })
+        })),
+        mock_lint_provider_profiles: Some(Box::new(|_| {
+            Ok(proto_v1::LintProviderProfilesResponse {
+                diagnostics: vec![],
+                valid: true,
+            })
+        })),
+        // First import (desired) fails; second import (rollback of prior) succeeds.
+        mock_import_provider_profiles: Some(Box::new(move |_| {
+            let n = import_c.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Err(tonic::Status::internal("boom"))
+            } else {
+                Ok(proto_v1::ImportProviderProfilesResponse::default())
+            }
+        })),
+        mock_attach_sandbox_provider: Some(Box::new(move |_| {
+            attach_c.fetch_add(1, Ordering::SeqCst);
+            Ok(proto_v1::AttachSandboxProviderResponse::default())
+        })),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    let desired = author_generic_profile(
+        "right-provider-x",
+        &["api.acme.com".into(), "api2.acme.com".into()],
+        None,
+        "KEY",
+    );
+    let atts = vec![ProfileAttachment {
+        sandbox_name: "sbx".into(),
+        provider_name: "prov".into(),
+    }];
+    let err = update_referenced_profile(&mut client, &atts, desired)
+        .await
+        .unwrap_err();
+
+    assert!(format!("{err:#}").contains("import profile"), "got {err:#}");
+    assert_eq!(
+        import_calls.load(Ordering::SeqCst),
+        2,
+        "desired import + rollback re-import"
+    );
+    assert_eq!(
+        attach_calls.load(Ordering::SeqCst),
+        1,
+        "detached attachment must be re-attached on rollback"
     );
 }
