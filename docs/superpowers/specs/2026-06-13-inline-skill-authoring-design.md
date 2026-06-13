@@ -51,12 +51,39 @@ system is for.
 
 ## Non-Goals
 
-- No change to the async prefilter/probe-writer/curator pipeline behavior
-  beyond the single "skip this turn" coordination signal.
+- No change to the async prefilter/probe-writer pipeline behavior beyond the
+  single "skip this turn" coordination signal.
 - No numeric budget cap for inline self-writes in v1 (see Budget below).
-- No change to the curator, lifecycle transitions, or dashboard pin surface.
+- No change to the dashboard pin surface or pin semantics (pin stays the
+  dashboard-only durability escape).
 - No change to which skills are eligible (`rightx-*` only; bundled / hub /
   manual / codegen-owned skills stay off-limits to the learning flow).
+
+**In scope (changed from first draft):** the curator's auto-stale/archive
+lifecycle is widened to cover `foreground` and `cron` provenance (Component 5).
+This is a deliberate consequence of relaxing the authoring gate.
+
+## Verified runtime seams
+
+Confirmed against the code so the plan rests on real seams:
+
+- **Foreground inline authoring already works at runtime.** The foreground
+  worker writes a per-invocation MCP config (`write_invocation_mcp_config` →
+  `/sandbox/.claude/mcp-{invocation_id}.json`) and registers a `Foreground`
+  progress invocation, which `is_learning_capable`. `skill_learning_start`
+  resolves `context.invocation_id` from that config. So Component 2 is
+  predominantly a prompt-text change.
+- **`created_by` is derived from invocation kind** via
+  `right_backend::invocation_kind_to_created_by(kind)` in the
+  `skill_learning_finish` handler, then passed to `right_lifecycle::mark_created`
+  / `bump_patch`. Adding `cron` provenance = extend that one `match`.
+- **Messaging is gated by kind** via `should_send_learning_message(kind, …)`.
+  ProbeWriter/Curator are already non-sending learning kinds, so a non-sending
+  `Cron` kind follows a trodden path.
+- **Cron registers no learning invocation today**, so `skill_learning_start`
+  fails closed in a cron turn. Component 4 adds the registration + per-invocation
+  config (mirroring the foreground worker), the new kind, and the tool
+  whitelist.
 
 ## Design
 
@@ -132,14 +159,37 @@ Cron sessions cannot author skills today. Enable it:
   `Read` in the cron invocation's tool set so the inline write can happen.
 - Cron inline writes obey the same `right-learn-skill` trigger and skip rules.
   Component 3's flag then suppresses the async post-cron probe for that run.
+- **Budget caution:** a cron runs under `max_budget_usd` (default `$2`). The
+  deliverable comes first — an inline skill write must not consume the budget
+  the cron needs to produce and deliver its structured output. `right-learn-skill`
+  (and/or `CRON_INSTRUCTIONS.md`) must instruct: in a budget-capped cron, only
+  self-write when the task's delivery is already secured; otherwise defer to the
+  async post-cron probe.
 
-### Component 5 — Provenance: `cron` (runtime)
+### Component 5 — Provenance + lifecycle (runtime)
 
-`right_lifecycle::CreatedBy` gains a `Cron` variant (DB code e.g. `c`). Cron
-inline writes stamp `created_by = cron`; foreground inline writes keep
-`foreground`. Curator skip rules and dashboard provenance labels learn the new
-value. Distinguishing cron-authored skills keeps lifecycle/dashboard analytics
-honest.
+**Provenance.** `right_lifecycle::CreatedBy` gains a `Cron` variant (DB code
+e.g. `c`). Cron inline writes stamp `created_by = cron` (via the
+`invocation_kind_to_created_by` extension); foreground inline writes keep
+`foreground`. Dashboard provenance labels learn the new value. This keeps
+lifecycle/dashboard analytics honest about who authored a skill.
+
+**Lifecycle (decision A).** Today the curator auto-stales/archives only
+`created_by IN ('probe_writer','curator')` (`list_curator_candidates`,
+`apply_automatic_transitions`); `foreground` skills are durable. Relaxing the
+gate (Component 2) makes agent-self-authored skills frequent, and the prefilter
+reads the full `rightx-*` index **every learning turn** — so unbounded growth
+costs tokens and degrades classification each turn. Therefore widen the
+curator's auto-management to all learned provenances:
+
+- Add `foreground` and `cron` to the `created_by IN (…)` filters in
+  `list_curator_candidates` and both `UPDATE`s in `apply_automatic_transitions`.
+- Unused, **unpinned** inline skills then age `active → stale → archived` like
+  probe skills. The dashboard **pin** is the durability escape for "keep this
+  forever."
+- Pinned-row and `bundled` exclusions are unchanged. Archive is recoverable
+  (state flip, not deletion), so this is low-harm for deployed agents whose
+  existing `foreground` skills become auto-prunable on upgrade.
 
 ### Component 6 — Docs
 
@@ -179,8 +229,12 @@ run at the end.
   table test includes `Cron`. Test that a cron-kind invocation passes the
   `skill_learning_start` gate and a non-registered cron invocation still fails
   closed.
-- **Component 5 (provenance):** round-trip `CreatedBy::Cron` ↔ DB code; curator
-  skip / dashboard label tests cover the new value.
+- **Component 5 (provenance + lifecycle):** round-trip `CreatedBy::Cron` ↔ DB
+  code; dashboard label test covers the new value. **Curator transition tests:
+  a `foreground` and a `cron` row now become curator candidates / age to
+  stale→archived when unused+unpinned, and a pinned one does not** (this is the
+  RED that fails against today's `IN ('probe_writer','curator')` filter, then
+  passes after the widening).
 - **Components 1–2 (skill text):** if `right-codegen` has skill-presence /
   contract tests, assert the new guidance lines and the relaxed description are
   present; otherwise a behavioral subagent check that the agent self-authors on
@@ -188,7 +242,18 @@ run at the end.
 - **Docs:** keep `ARCHITECTURE.md` under the 40k budget;
   `registry_covers_all_per_agent_writes` unaffected (no new codegen output).
 
+## Decisions
+
+- Combined spec; single stage covering both inline paths (foreground + cron).
+- Mechanism 1: relax the existing `right-learn-skill` gate (no new skill).
+- Probe-skip semantics: **full** skip on any turn the agent authored/patched a
+  skill (not a bias).
+- Provenance: new `cron` value, stamped for cron inline writes.
+- Lifecycle: **A** — widen curator auto-management to `foreground` + `cron`;
+  pin is the durability escape.
+- Budget: inline writes are not metered against `learning.max_daily_budget_usd`;
+  cron inline writes must not jeopardize the deliverable under `max_budget_usd`.
+
 ## Open Questions
 
-None blocking. Provenance value (`cron`), staging (single stage, both paths),
-and probe-skip semantics (full skip) are decided.
+None blocking.
