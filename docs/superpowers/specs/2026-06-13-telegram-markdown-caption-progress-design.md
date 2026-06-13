@@ -75,7 +75,10 @@ emits balanced tags — truncation can never produce broken HTML.
 - **Single sends (`send_single`):** truncate the raw caption to 1024, convert to
   HTML, apply `.caption(html).parse_mode(ParseMode::Html)` on every captioned
   kind (Photo, Document, Video, Audio, Voice, Animation; VideoNote/Sticker take
-  no caption).
+  no caption). The current per-kind `match` is refactored so the send is an
+  inner helper parameterized by `(caption: Option<&str>, html: bool)` that
+  rebuilds `InputFile::file(&host_path)` fresh on each call — a failed send
+  consumes the `InputFile`, so the plain-text retry must construct a new one.
 - **Helper:** a thin, pure, caption-local helper:
   ```rust
   /// Truncate the raw caption to the Telegram limit, then convert Markdown to
@@ -86,7 +89,13 @@ emits balanced tags — truncation can never produce broken HTML.
   Single-caption truncation moves into this helper (today only the media-group
   path truncates). The existing media-group raw truncation in
   `merge_group_captions` stays; the merged result is passed through
-  `caption_to_html` (which re-applies the limit harmlessly).
+  `caption_to_html` (which re-applies the limit harmlessly). Truncation is
+  char-safe (`chars().take(limit)`, matching the existing `merge_group_captions`
+  code) — never a byte slice. Note: the 1024 limit is approximated in
+  `chars()` (code points), not UTF-16 units; a near-limit emoji-heavy caption
+  could still be rejected by Telegram and is caught by the plain-text fallback.
+  This approximation is pre-existing in `merge_group_captions` and is not
+  widened here.
 
 **Plain-text fallback (`send_single`):** build both `caption_html` and
 `caption_plain = strip_html_tags(caption_html)` before sending. Try the HTML
@@ -101,10 +110,32 @@ fallback guarantees the attachment is still delivered (caption as plain text)
 instead of the whole send failing — important for a cron poster where a failed
 photo send is a silent missed post.
 
-**Media-group fallback:** unchanged. A rejected group send already degrades to
-individual `send_single` calls via the existing `fallback_items` machinery;
-those inherit the per-send HTML+fallback robustness, so no extra handling is
-needed at the group layer.
+**Media-group fallback (corrected — the original spec was wrong here):**
+`send_group` does **not** degrade to individual sends on an API error; it only
+routes to `FallbackToSingles` when the error text matches
+`is_media_group_validation_error_text` (album incompatibility). An HTML
+caption Telegram refuses to parse currently returns `SendError::Api` and the
+whole album fails with no recovery. To match the single-send guarantee, add a
+group-level plain-caption retry inside `send_group`:
+
+- `build_group_input_media` gains an `html: bool` parameter. When `html`, it
+  applies `caption_to_html(raw)` + `.parse_mode(ParseMode::Html)` on the
+  captioned item; when not, it applies `strip_html_tags(caption_to_html(raw))`
+  with no parse mode.
+- First attempt builds media with `html = true`. On `send_media_group` error:
+  - if `is_media_group_validation_error_text(&reason)` → `FallbackToSingles`
+    (unchanged — a real album incompatibility; plain caption would not help).
+  - otherwise → rebuild media from the still-resolved `host_paths` with
+    `html = false` and retry `send_media_group` **once**; only if that also
+    fails return `SendError::Api`.
+- `host_paths` stay valid for the retry because `cleanup_host_paths` runs after
+  the result is decided; the first `send_media_group` consumed the `media`
+  vec, so the retry rebuilds it (fresh `InputFile`s) from `host_paths`.
+
+This preserves the album on the rare caption-parse rejection and drops only the
+caption's formatting — never the whole post. Album-incompatibility degradation
+to singles (which then inherit the per-`send_single` HTML+plain fallback) is
+unchanged.
 
 ### 2. `send_progress` (`crates/bot/src/telegram/progress.rs`)
 
@@ -164,9 +195,11 @@ TDD; targeted package tests during the loop, full workspace test at the end.
 
 ## Files touched
 
-- `crates/bot/src/telegram/attachments.rs` — `caption_to_html` helper,
-  conversion + `parse_mode` + plain fallback in `send_single`, `parse_mode` on
-  media-group `InputMedia`, conversion after `merge_group_captions`.
+- `crates/bot/src/telegram/attachments.rs` — `caption_to_html` helper (char-safe
+  truncate + convert); `send_single` refactored to an inner per-kind send helper
+  with HTML attempt + plain retry; `build_group_input_media` gains an `html: bool`
+  param applying caption conversion + `parse_mode`; `send_group` adds the
+  group-level plain-caption retry on a non-album send error.
 - `crates/bot/src/telegram/attachments_tests.rs` (or inline `#[cfg(test)]`) —
   `caption_to_html` unit tests.
 - `crates/bot/src/telegram/progress.rs` — convert + `parse_mode` + plain
