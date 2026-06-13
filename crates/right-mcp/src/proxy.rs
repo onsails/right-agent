@@ -701,6 +701,16 @@ impl ProxyBackend {
         self.last_connect_error.read().await.clone()
     }
 
+    /// Test-only: drop the cached upstream session while leaving the upstream
+    /// server reachable, simulating an idle-session expiry (e.g. obsidian's
+    /// 404 "Session not found"). The next `probe_live()` returns `Dead`, but a
+    /// `connect()` still succeeds — exactly the condition the health
+    /// reconciler's reconnect-on-dead path must self-heal.
+    #[cfg(test)]
+    pub(crate) async fn test_drop_session(&self) {
+        *self.client.write().await = None;
+    }
+
     async fn record_connect_success(&self) {
         let now = chrono::Utc::now();
         *self.last_attempt_at.write().await = Some(now);

@@ -135,12 +135,14 @@ truth instead of `connected`.
 
 ### Dead-session reconnect-and-retry
 
-A session can also drop without an auth error: a flaky upstream (e.g. a
-Tailscale-hosted server that recycles its session every few minutes) leaves
-the cached rmcp session dead while the health reconciler still reports
-`Connected` — it lags a dropped session by up to `MAX_STRIKES *
-CONNECTED_CADENCE` (3 × 120s). A tool call landing in that window would
-otherwise surface a raw transport error. `ProxyBackend::tools_call` instead
+A session can also drop without an auth error: a flaky upstream (e.g. an
+Obsidian-local-rest-api server that expires its idle MCP session every few
+minutes) leaves the cached rmcp session dead. The health reconciler now
+reconnects on the **first** Dead `Connected` probe (see Health reconciler
+below), so the dead-session window is bounded by `CONNECTED_CADENCE` (one
+120s tick), not `MAX_STRIKES * CONNECTED_CADENCE`. A tool call landing inside
+that one-tick window would otherwise surface a raw transport error.
+`ProxyBackend::tools_call` instead
 self-heals: on a **transport-class** failure (`proxy.rs::is_dead_session_error`
 → `ServiceError::TransportSend`/`TransportClosed`, or a missing cached
 session) it reconnects once with the client stashed from the last `connect()`
@@ -200,8 +202,9 @@ tool-call-, and health-reconciler-driven transitions:
 | Tool-call upstream 401 (`Auth required`) | `Connected` | `NeedsAuth` |
 | Successful refresh | `NeedsAuth` | `NeedsAuth` → background `connect()` → `Connected` |
 | Successful refresh | `Connected` | `Connected` (no reconnect needed) |
-| Health reconciler: 3 consecutive Dead probes | `Connected` | `Unreachable` |
-| Health reconciler: probe returns `Auth required` | `Connected` | `NeedsAuth` |
+| Health reconciler: Dead probe, in-tick reconnect succeeds | `Connected` | `Connected` (session restored, strikes reset) |
+| Health reconciler: 3 consecutive Dead-and-failed-reconnect probes | `Connected` | `Unreachable` |
+| Health reconciler: probe (or in-tick reconnect) returns `Auth required` | `Connected` | `NeedsAuth` |
 | Health reconciler: reconnect succeeds | `Unreachable` | `Connected` |
 
 ### Health reconciler
@@ -220,9 +223,14 @@ It probes on an adaptive cadence — `Connected` every 120s (light backstop),
 by refresh/reconnect). A `Connected` probe is a lightweight
 `ProxyBackend::probe_live()` (lists tools on the live session, refreshes the
 tool cache, 10s timeout, never writes status); an `Unreachable` probe is a
-full `connect()` attempt. Outage detection is debounced — three consecutive
-Dead probes flip `Connected → Unreachable`; a single `Alive` resets the
-strike count; an `Auth required` probe flips to `NeedsAuth` immediately. The
+full `connect()` attempt. A **Dead** `Connected` probe triggers an immediate
+in-tick `connect()`: a reachable upstream that merely dropped an idle session
+is restored on the spot and stays `Connected` (zero `Unreachable` window, so
+cron/tool calls never see `unreachable`); only a *failed* reconnect feeds the
+debounce. Outage detection is debounced — three consecutive Dead-and-failed-
+reconnect probes flip `Connected → Unreachable`; a single `Alive` (or a
+successful reconnect) resets the strike count; an `Auth required` probe (or a
+reconnect that returns `NeedsAuth`) flips to `NeedsAuth` immediately. The
 status-transition policy is the pure `decide_connected` function so it is
 unit-tested without I/O. Each tick snapshots the shared proxies map under a
 brief read lock, drops it, probes due backends concurrently, then applies
