@@ -69,6 +69,7 @@ impl<T> OptionalExtension<T> for Result<T, DbError> {
 pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
     let db_path = agent_path.join("data.db");
     let mut retries = 0;
+    let mut recovered = false;
     loop {
         match open_connection_once(agent_path, migrate).await {
             Ok(conn) => return Ok(conn),
@@ -83,9 +84,58 @@ pub async fn open_connection(agent_path: &Path, migrate: bool) -> Result<Connect
                 );
                 tokio::time::sleep(DB_OPEN_RETRY_DELAY).await;
             }
+            Err(error) if error.is_wal_corruption() && !recovered => {
+                recovered = true;
+                tracing::warn!(
+                    path = %db_path.display(),
+                    error = format!("{error:#}"),
+                    "WAL desync detected; resetting -tshm/-shm sidecars and retrying \
+                     (tursodatabase/turso#769)",
+                );
+                recover_wal_sidecars(agent_path).await?;
+            }
             Err(error) => return Err(error),
         }
     }
+}
+
+/// Delete the Turso WAL-coordination sidecars so the next open cold-rebuilds.
+/// Removes `-tshm` (the persisted authority snapshot) and `-shm` (the
+/// wal-index). Keeps `-wal`: a non-empty WAL's still-valid frame prefix is
+/// salvaged on rebuild. See tursodatabase/turso#769.
+fn remove_wal_sidecars(agent_path: &Path) -> Result<(), DbError> {
+    for suffix in ["-tshm", "-shm"] {
+        let sidecar = agent_path.join(format!("data.db{suffix}"));
+        match std::fs::remove_file(&sidecar) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(DbError::Open {
+                    path: sidecar,
+                    source: turso::Error::Error(format!(
+                        "failed to remove WAL sidecar during recovery: {e}"
+                    )),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Recover from a WAL-sidecar desync (turso#769). Serializes across the bot and
+/// aggregator processes via the per-agent bootstrap lock, re-checks whether a
+/// sibling already healed the database, and otherwise resets the sidecars.
+async fn recover_wal_sidecars(agent_path: &Path) -> Result<(), DbError> {
+    let _lock = bootstrap_lock::acquire(agent_path).await?;
+    let db_path = agent_path.join("data.db");
+    // The desync surfaces during open (WAL recovery). Re-check under the lock so
+    // we don't reset sidecars a sibling just rebuilt.
+    match Connection::open_local(db_path, true).await {
+        Ok(_) => return Ok(()),
+        Err(error) if error.is_wal_corruption() => {}
+        Err(error) => return Err(error),
+    }
+    remove_wal_sidecars(agent_path)
 }
 
 async fn open_connection_once(agent_path: &Path, migrate: bool) -> Result<Connection, DbError> {
@@ -218,6 +268,30 @@ mod tests {
 
         FileExt::unlock(&lock_file).unwrap();
         open_connection(dir.path(), true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remove_wal_sidecars_drops_authority_keeps_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["data.db", "data.db-wal", "data.db-shm", "data.db-tshm"] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+
+        super::remove_wal_sidecars(dir.path()).unwrap();
+
+        assert!(dir.path().join("data.db").exists(), "main db must remain");
+        assert!(dir.path().join("data.db-wal").exists(), "-wal must remain");
+        assert!(
+            !dir.path().join("data.db-shm").exists(),
+            "-shm must be removed"
+        );
+        assert!(
+            !dir.path().join("data.db-tshm").exists(),
+            "-tshm must be removed"
+        );
+
+        // Idempotent: re-running with sidecars already gone is fine.
+        super::remove_wal_sidecars(dir.path()).unwrap();
     }
 
     #[test]
