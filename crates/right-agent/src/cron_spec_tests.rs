@@ -445,7 +445,9 @@ async fn trigger_spec_sets_timestamp() {
     create_spec(&conn, "trig-job", "*/5 * * * *", "do stuff", None, None)
         .await
         .unwrap();
-    let msg = trigger_spec(&conn, "trig-job", false).await.unwrap();
+    let msg = trigger_spec(&conn, "trig-job", false, None, None, None, None)
+        .await
+        .unwrap();
     assert!(msg.contains("Triggered"));
     let ts: Option<String> = conn
         .query_row(
@@ -461,7 +463,9 @@ async fn trigger_spec_sets_timestamp() {
 #[tokio::test]
 async fn trigger_spec_nonexistent_job() {
     let (_dir, conn) = setup_db().await;
-    let err = trigger_spec(&conn, "ghost", false).await.unwrap_err();
+    let err = trigger_spec(&conn, "ghost", false, None, None, None, None)
+        .await
+        .unwrap_err();
     assert!(err.contains("not found"));
 }
 
@@ -471,8 +475,12 @@ async fn trigger_spec_idempotent() {
     create_spec(&conn, "idem-job", "*/5 * * * *", "do stuff", None, None)
         .await
         .unwrap();
-    trigger_spec(&conn, "idem-job", false).await.unwrap();
-    trigger_spec(&conn, "idem-job", false).await.unwrap();
+    trigger_spec(&conn, "idem-job", false, None, None, None, None)
+        .await
+        .unwrap();
+    trigger_spec(&conn, "idem-job", false, None, None, None, None)
+        .await
+        .unwrap();
     let ts: Option<String> = conn
         .query_row(
             "SELECT triggered_at FROM cron_specs WHERE job_name = 'idem-job'",
@@ -490,7 +498,9 @@ async fn clear_triggered_at_clears() {
     create_spec(&conn, "clr-job", "*/5 * * * *", "do stuff", None, None)
         .await
         .unwrap();
-    trigger_spec(&conn, "clr-job", false).await.unwrap();
+    trigger_spec(&conn, "clr-job", false, None, None, None, None)
+        .await
+        .unwrap();
     clear_triggered_at(&conn, "clr-job").await.unwrap();
     let ts: Option<String> = conn
         .query_row(
@@ -684,7 +694,9 @@ async fn load_specs_includes_triggered_at() {
     create_spec(&conn, "tr-load", "*/5 * * * *", "p", None, None)
         .await
         .unwrap();
-    trigger_spec(&conn, "tr-load", false).await.unwrap();
+    trigger_spec(&conn, "tr-load", false, None, None, None, None)
+        .await
+        .unwrap();
     let specs = load_specs_from_db(&conn).await.unwrap();
     assert!(specs["tr-load"].triggered_at.is_some());
 }
@@ -747,7 +759,9 @@ async fn trigger_spec_force_notify_sets_both_columns() {
         .await
         .unwrap();
 
-    trigger_spec(&conn, "fn-job", true).await.unwrap();
+    trigger_spec(&conn, "fn-job", true, None, None, None, None)
+        .await
+        .unwrap();
 
     let (triggered_at, force): (Option<String>, i64) = conn
         .query_row(
@@ -768,7 +782,9 @@ async fn trigger_spec_without_force_notify_leaves_flag_zero() {
         .await
         .unwrap();
 
-    trigger_spec(&conn, "plain-job", false).await.unwrap();
+    trigger_spec(&conn, "plain-job", false, None, None, None, None)
+        .await
+        .unwrap();
 
     let force: i64 = conn
         .query_row(
@@ -787,7 +803,9 @@ async fn clear_triggered_at_resets_force_notify() {
     create_spec(&conn, "clr-fn-job", "*/5 * * * *", "do stuff", None, None)
         .await
         .unwrap();
-    trigger_spec(&conn, "clr-fn-job", true).await.unwrap();
+    trigger_spec(&conn, "clr-fn-job", true, None, None, None, None)
+        .await
+        .unwrap();
 
     clear_triggered_at(&conn, "clr-fn-job").await.unwrap();
 
@@ -809,7 +827,9 @@ async fn load_specs_carries_force_notify() {
     create_spec(&conn, "load-fn-job", "*/5 * * * *", "do stuff", None, None)
         .await
         .unwrap();
-    trigger_spec(&conn, "load-fn-job", true).await.unwrap();
+    trigger_spec(&conn, "load-fn-job", true, None, None, None, None)
+        .await
+        .unwrap();
 
     let specs = load_specs_from_db(&conn).await.unwrap();
     assert!(
@@ -1909,4 +1929,63 @@ fn cron_spec_eq_ignores_transient_trigger_fields() {
     triggered.trigger_origin_chat_id = Some(99);
     // Transient trigger state must NOT affect equality (reconciler relies on this).
     assert_eq!(base, triggered);
+}
+
+#[tokio::test]
+async fn trigger_spec_writes_then_and_origin() {
+    let (_dir, conn) = setup_db().await;
+    crate::cron_spec::create_spec(&conn, "j", "17 9 * * *", "p", None, None)
+        .await
+        .unwrap();
+
+    crate::cron_spec::trigger_spec(
+        &conn,
+        "j",
+        true,
+        Some("focus on X"),
+        Some(r#"{"instruction":"go","run_on":"always"}"#),
+        Some(555),
+        Some(7),
+    )
+    .await
+    .unwrap();
+
+    let specs = crate::cron_spec::load_specs_from_db(&conn).await.unwrap();
+    let s = specs.get("j").unwrap();
+    assert_eq!(s.trigger_extra_instruction.as_deref(), Some("focus on X"));
+    assert_eq!(s.then.as_ref().unwrap().instruction, "go");
+    assert_eq!(s.trigger_origin_chat_id, Some(555));
+    assert_eq!(s.trigger_origin_thread_id, Some(7));
+    assert!(s.trigger_force_notify);
+}
+
+#[tokio::test]
+async fn clear_triggered_at_wipes_all_transient_fields() {
+    let (_dir, conn) = setup_db().await;
+    crate::cron_spec::create_spec(&conn, "j", "17 9 * * *", "p", None, None)
+        .await
+        .unwrap();
+    crate::cron_spec::trigger_spec(
+        &conn,
+        "j",
+        true,
+        Some("x"),
+        Some(r#"{"instruction":"go","run_on":"success"}"#),
+        Some(5),
+        Some(1),
+    )
+    .await
+    .unwrap();
+
+    crate::cron_spec::clear_triggered_at(&conn, "j")
+        .await
+        .unwrap();
+
+    let s = crate::cron_spec::load_specs_from_db(&conn).await.unwrap();
+    let j = s.get("j").unwrap();
+    assert_eq!(j.trigger_extra_instruction, None);
+    assert!(j.then.is_none());
+    assert_eq!(j.trigger_origin_chat_id, None);
+    assert_eq!(j.trigger_origin_thread_id, None);
+    assert!(!j.trigger_force_notify);
 }
