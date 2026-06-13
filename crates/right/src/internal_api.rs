@@ -739,6 +739,7 @@ async fn handle_progress_register(
             crate::progress::ProgressInvocationKind::ProbeWriter
         }
         ProgressInvocationKindDto::Curator => crate::progress::ProgressInvocationKind::Curator,
+        ProgressInvocationKindDto::Cron => crate::progress::ProgressInvocationKind::Cron,
     };
     let conversation_scope = match (req.chat_id, req.thread_id) {
         (Some(chat_id), Some(thread_id)) => {

@@ -34,13 +34,17 @@ pub(crate) enum ProgressInvocationKind {
     BackgroundReview,
     ProbeWriter,
     Curator,
+    Cron,
     #[cfg(test)]
     NonForeground,
 }
 
 impl ProgressInvocationKind {
     pub(crate) fn is_learning_capable(self) -> bool {
-        matches!(self, Self::Foreground | Self::ProbeWriter | Self::Curator)
+        matches!(
+            self,
+            Self::Foreground | Self::ProbeWriter | Self::Curator | Self::Cron
+        )
     }
 
     pub(crate) fn sends_learning_messages(self) -> bool {
@@ -519,6 +523,12 @@ mod tests {
             "Debug must redact bot_send_token: {s}"
         );
         assert!(s.contains("<redacted>"), "Debug must mark redaction: {s}");
+    }
+
+    #[test]
+    fn cron_kind_is_learning_capable_but_does_not_send_messages() {
+        assert!(ProgressInvocationKind::Cron.is_learning_capable());
+        assert!(!ProgressInvocationKind::Cron.sends_learning_messages());
     }
 
     #[test]

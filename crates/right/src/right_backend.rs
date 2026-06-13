@@ -377,6 +377,7 @@ impl RightBackend {
             crate::progress::ProgressInvocationKind::Curator => {
                 Ok(right_lifecycle::CreatedBy::Curator)
             }
+            crate::progress::ProgressInvocationKind::Cron => Ok(right_lifecycle::CreatedBy::Cron),
             crate::progress::ProgressInvocationKind::BackgroundReview => Err(tool_error(
                 "learning_unavailable",
                 "learning messages are unavailable for this invocation kind",

@@ -548,6 +548,7 @@ pub enum ProgressInvocationKindDto {
     BackgroundReview,
     ProbeWriter,
     Curator,
+    Cron,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -796,6 +797,12 @@ mod tests {
         assert_eq!(json["bot_send_token"], "send-token");
         assert_eq!(json["chat_id"], 100);
         assert_eq!(json["thread_id"], 7);
+    }
+
+    #[test]
+    fn cron_kind_dto_serializes_snake_case() {
+        let json = serde_json::to_value(ProgressInvocationKindDto::Cron).unwrap();
+        assert_eq!(json, serde_json::json!("cron"));
     }
 
     #[test]
