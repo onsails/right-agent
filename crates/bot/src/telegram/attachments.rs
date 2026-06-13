@@ -1354,19 +1354,29 @@ async fn file_has_webp_header(path: &std::path::Path) -> bool {
 fn build_group_input_media(
     att: &OutboundAttachment,
     host_path: &std::path::Path,
+    html: bool,
 ) -> teloxide::types::InputMedia {
     use teloxide::types::{
         InputFile, InputMedia, InputMediaAudio, InputMediaDocument, InputMediaPhoto,
-        InputMediaVideo,
+        InputMediaVideo, ParseMode,
     };
 
     let file = InputFile::file(host_path.to_path_buf());
-    let cap = att.caption.clone();
+    let cap = att.caption.as_deref().map(|raw| {
+        if html {
+            caption_to_html(raw)
+        } else {
+            caption_to_plain(raw)
+        }
+    });
     match att.kind {
         OutboundKind::Photo => {
             let mut media = InputMediaPhoto::new(file);
             if let Some(caption) = cap {
                 media = media.caption(caption);
+                if html {
+                    media = media.parse_mode(ParseMode::Html);
+                }
             }
             InputMedia::Photo(media)
         }
@@ -1374,6 +1384,9 @@ fn build_group_input_media(
             let mut media = InputMediaVideo::new(file);
             if let Some(caption) = cap {
                 media = media.caption(caption);
+                if html {
+                    media = media.parse_mode(ParseMode::Html);
+                }
             }
             InputMedia::Video(media)
         }
@@ -1382,6 +1395,9 @@ fn build_group_input_media(
             media.disable_content_type_detection = Some(true);
             if let Some(caption) = cap {
                 media = media.caption(caption);
+                if html {
+                    media = media.parse_mode(ParseMode::Html);
+                }
             }
             InputMedia::Document(media)
         }
@@ -1389,6 +1405,9 @@ fn build_group_input_media(
             let mut media = InputMediaAudio::new(file);
             if let Some(caption) = cap {
                 media = media.caption(caption);
+                if html {
+                    media = media.parse_mode(ParseMode::Html);
+                }
             }
             InputMedia::Audio(media)
         }
@@ -1404,9 +1423,7 @@ fn build_group_input_media(
 }
 
 async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(), SendError> {
-    use teloxide::payloads::SendMediaGroupSetters;
-    use teloxide::requests::Requester;
-    use teloxide::types::{InputMedia, MessageId, ThreadId};
+    use teloxide::types::{MessageId, ThreadId};
 
     // All-or-nothing: Telegram's sendMediaGroup requires the full set in one
     // call. If any member fails path validation, download, metadata read, or
@@ -1431,30 +1448,55 @@ async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(
         return Err(SendError::FallbackToSingles { reason });
     }
 
-    let media: Vec<InputMedia> = items
-        .iter()
-        .zip(host_paths.iter())
-        .map(|(att, host)| build_group_input_media(att, host))
-        .collect();
-
     let thread_id = if ctx.eff_thread_id != 0 {
         Some(ThreadId(MessageId(ctx.eff_thread_id as i32)))
     } else {
         None
     };
 
-    let mut req = ctx.bot.send_media_group(ctx.chat_id, media);
-    if let Some(tid) = thread_id {
-        req = req.message_thread_id(tid);
+    // Send an album once with the given caption rendering.
+    async fn send_album(
+        ctx: &SendCtx<'_>,
+        items: &[OutboundAttachment],
+        host_paths: &[PathBuf],
+        thread_id: Option<ThreadId>,
+        html: bool,
+    ) -> Result<(), teloxide::RequestError> {
+        use teloxide::payloads::SendMediaGroupSetters;
+        use teloxide::requests::Requester;
+        use teloxide::types::InputMedia;
+
+        let media: Vec<InputMedia> = items
+            .iter()
+            .zip(host_paths.iter())
+            .map(|(att, host)| build_group_input_media(att, host, html))
+            .collect();
+        let mut req = ctx.bot.send_media_group(ctx.chat_id, media);
+        if let Some(tid) = thread_id {
+            req = req.message_thread_id(tid);
+        }
+        req.await.map(|_| ())
     }
-    let result = match req.await {
-        Ok(_) => Ok(()),
+
+    let result = match send_album(ctx, items, &host_paths, thread_id, true).await {
+        Ok(()) => Ok(()),
         Err(e) => {
             let reason = display_error_chain(&e);
             if is_media_group_validation_error_text(&reason) {
+                // Real album incompatibility — degrade to individual sends
+                // (each send_single then runs its own HTML+plain fallback).
                 Err(SendError::FallbackToSingles { reason })
             } else {
-                Err(SendError::Api(e))
+                // Likely a caption parse rejection — retry the album once with
+                // plain captions, preserving the album and dropping only the
+                // caption's formatting.
+                tracing::warn!(
+                    "media-group HTML caption send failed, retrying as plain text: {reason}"
+                );
+                match send_album(ctx, items, &host_paths, thread_id, false).await {
+                    Ok(()) => Ok(()),
+                    Err(e2) => Err(SendError::Api(e2)),
+                }
             }
         }
     };
@@ -2713,7 +2755,7 @@ mod tests {
     #[tokio::test]
     async fn build_group_input_media_document_disables_content_type_detection() {
         let att = att_with(OutboundKind::Document, Some("docs"), Some("report"));
-        let media = build_group_input_media(&att, std::path::Path::new("/tmp/report.pdf"));
+        let media = build_group_input_media(&att, std::path::Path::new("/tmp/report.pdf"), true);
 
         match media {
             teloxide::types::InputMedia::Document(document) => {
