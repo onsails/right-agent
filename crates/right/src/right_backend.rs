@@ -752,15 +752,15 @@ impl RightBackend {
                 None,
             ));
         }
-        if let Some(bad) = params
-            .attachments
-            .iter()
-            .find(|a| !a.path.starts_with("/sandbox/outbox/"))
-        {
+        if let Some(bad) = params.attachments.iter().find(|a| {
+            !a.path
+                .starts_with(right_mcp::internal_client::SANDBOX_OUTBOX_PREFIX)
+        }) {
             return Ok(tool_error(
                 "send_message_bad_path",
                 format!(
-                    "attachment path must be under /sandbox/outbox/: {}",
+                    "attachment path must be under {}: {}",
+                    right_mcp::internal_client::SANDBOX_OUTBOX_PREFIX,
                     bad.path
                 ),
                 None,

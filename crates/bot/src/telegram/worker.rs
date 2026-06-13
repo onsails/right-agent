@@ -1231,14 +1231,18 @@ impl SchemaRejectionRun {
         self.consecutive
     }
 
-    /// Feed one raw stream line. Returns true once the abort threshold is hit.
-    pub(crate) fn observe(&mut self, line: &str) -> bool {
-        if crate::cc::stream::is_structured_output_rejection(line) {
-            self.consecutive += 1;
-        } else if crate::cc::stream::is_successful_tool_result(line) {
-            self.consecutive = 0;
+    /// Feed one raw stream line. Returns `(tripped, was_rejection)`:
+    /// `tripped` once the abort threshold is hit, `was_rejection` for the
+    /// caller's visibility log (avoids a second parse of the same line).
+    pub(crate) fn observe(&mut self, line: &str) -> (bool, bool) {
+        let class = crate::cc::stream::classify_schema_line(line);
+        let was_rejection = class == crate::cc::stream::SchemaLineClass::Rejection;
+        match class {
+            crate::cc::stream::SchemaLineClass::Rejection => self.consecutive += 1,
+            crate::cc::stream::SchemaLineClass::SuccessfulToolResult => self.consecutive = 0,
+            crate::cc::stream::SchemaLineClass::Other => {}
         }
-        self.consecutive >= Self::LIMIT
+        (self.consecutive >= Self::LIMIT, was_rejection)
     }
 }
 
@@ -3830,18 +3834,18 @@ async fn invoke_cc(
                         // `tool_result` errors are dropped by the display parser,
                         // so operate on the RAW line. Surface each rejection for
                         // visibility, then abort once the run hits the threshold.
-                        if crate::cc::stream::is_structured_output_rejection(&line) {
-                            total_assistant_events += 1;
+                        let (schema_tripped, was_schema_rejection) = schema_run.observe(&line);
+                        if was_schema_rejection {
                             log_stream_update(
                                 &log_ctx,
                                 total_assistant_events,
                                 &format!(
                                     "⚠️ StructuredOutput rejected (schema) [{}]",
-                                    schema_run.count() + 1
+                                    schema_run.count()
                                 ),
                             );
                         }
-                        if schema_run.observe(&line) {
+                        if schema_tripped {
                             schema_loop_detected = true;
                             child.kill().await.ok();
                             break;
@@ -4701,9 +4705,9 @@ mod tests {
     fn schema_loop_fsm_aborts_on_third_consecutive() {
         let mut s = SchemaRejectionRun::default();
         let rej = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output does not match required schema","is_error":true}]}}"#;
-        assert!(!s.observe(rej));
-        assert!(!s.observe(rej));
-        assert!(s.observe(rej));
+        assert!(!s.observe(rej).0);
+        assert!(!s.observe(rej).0);
+        assert!(s.observe(rej).0);
     }
 
     #[test]
@@ -4711,11 +4715,11 @@ mod tests {
         let mut s = SchemaRejectionRun::default();
         let rej = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output does not match required schema","is_error":true}]}}"#;
         let ok = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"done","is_error":false}]}}"#;
-        assert!(!s.observe(rej));
-        assert!(!s.observe(ok));
-        assert!(!s.observe(rej));
-        assert!(!s.observe(rej));
-        assert!(s.observe(rej));
+        assert!(!s.observe(rej).0);
+        assert!(!s.observe(ok).0);
+        assert!(!s.observe(rej).0);
+        assert!(!s.observe(rej).0);
+        assert!(s.observe(rej).0);
     }
 
     #[test]
@@ -4723,10 +4727,10 @@ mod tests {
         let mut s = SchemaRejectionRun::default();
         let rej = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Output does not match required schema","is_error":true}]}}"#;
         let tool_use = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"StructuredOutput","input":{}}]}}"#;
-        assert!(!s.observe(rej));
-        assert!(!s.observe(tool_use));
-        assert!(!s.observe(rej));
-        assert!(s.observe(rej));
+        assert!(!s.observe(rej).0);
+        assert!(!s.observe(tool_use).0);
+        assert!(!s.observe(rej).0);
+        assert!(s.observe(rej).0);
     }
 
     fn used_skill_receipt(package_name: &str) -> UsedSkillReceipt {

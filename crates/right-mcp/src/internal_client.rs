@@ -47,6 +47,8 @@ pub const SEND_MESSAGE_TOOL: &str = "send_message";
 pub const SEND_MESSAGE_MCP_TOOL: &str = "mcp__right__send_message";
 /// Max standalone `send_message` calls per foreground turn.
 pub const MAX_SEND_MESSAGE_PER_TURN: u32 = 20;
+/// Required prefix for `send_message` attachment paths (sandbox outbox).
+pub const SANDBOX_OUTBOX_PREFIX: &str = "/sandbox/outbox/";
 
 /// Maximum length (in Unicode scalar values) of a `send_progress` message.
 ///
