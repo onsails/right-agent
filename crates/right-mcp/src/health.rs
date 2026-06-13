@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
-use crate::proxy::{BackendStatus, ProbeOutcome, ProxyBackend};
+use crate::proxy::{BackendStatus, ProbeOutcome, ProxyBackend, ProxyError};
 
 /// Probe cadence for a healthy backend (light backstop; the tool-call event
 /// path catches death between ticks).
@@ -117,6 +117,33 @@ pub async fn run_health_reconciler(
                                 Ok(o) => o,
                                 Err(_) => ProbeOutcome::Dead("probe timeout".into()),
                             };
+                        // A dead session on a still-reachable backend (idle-session
+                        // expiry — e.g. obsidian-local-rest-api's 404 "Session not
+                        // found") is restored in this same tick instead of waiting
+                        // out MAX_STRIKES * CONNECTED_CADENCE. A successful reconnect
+                        // keeps the backend Connected with zero Unreachable window
+                        // (cron/tool calls never see `unreachable`); a failed
+                        // reconnect falls through to the strike debounce below, so a
+                        // genuinely-down backend still demotes after MAX_STRIKES. The
+                        // tool-call path self-heals identically, so this only closes
+                        // the between-calls gap the reconciler used to leave open.
+                        let o = if matches!(o, ProbeOutcome::Dead(_)) {
+                            match tokio::time::timeout(PROBE_TIMEOUT, backend.connect(http)).await {
+                                Ok(Ok(_)) => ProbeOutcome::Alive,
+                                Ok(Err(ProxyError::NeedsAuth { .. })) => ProbeOutcome::AuthRequired,
+                                // Non-auth failure or timeout: keep `Dead` so the
+                                // strike debounce below runs. `connect()` already
+                                // logged the redacted reason and recorded
+                                // `last_connect_error`; do NOT re-log the error here
+                                // (its chain can carry a query-string credential).
+                                _ => {
+                                    tracing::debug!(server = %name, "health: in-tick reconnect failed; falling through to strike debounce");
+                                    o
+                                }
+                            }
+                        } else {
+                            o
+                        };
                         Probed::Connected(o)
                     }
                     BackendStatus::Unreachable => {
@@ -378,6 +405,68 @@ mod tests {
         assert!(
             recovered.is_ok(),
             "recovered backend must reconnect within timeout"
+        );
+        assert_eq!(backend.status().await, BackendStatus::Connected);
+        h.abort();
+    }
+
+    /// A Connected backend whose upstream is reachable but whose cached session
+    /// was dropped (idle-session expiry — e.g. obsidian-local-rest-api's 404
+    /// "Session not found") must be reconnected on the FIRST Dead probe, not
+    /// after MAX_STRIKES * CONNECTED_CADENCE. The backend must stay Connected
+    /// throughout (no Unreachable window that would reject in-flight tool/cron
+    /// calls), and its session must be restored (last_success_at advances).
+    /// Real time + real loopback I/O, same rationale as the recovery test above.
+    #[tokio::test]
+    async fn connected_dead_session_reconnects_on_first_probe() {
+        crate::ensure_crypto_provider();
+        let (_srv, url) = crate::test_server::serve_two_tool_server().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).await.unwrap();
+        crate::credentials::db_add_server(&conn, "obsidian", &url)
+            .await
+            .unwrap();
+        let backend = Arc::new(ProxyBackend::new(
+            "obsidian".into(),
+            tmp.path().to_path_buf(),
+            url,
+            Arc::new(RwLock::new(None)),
+            AuthMethod::default(),
+        ));
+        // Establish a live session, then drop it while the server stays up.
+        backend.connect(reqwest::Client::new()).await.unwrap();
+        assert_eq!(backend.status().await, BackendStatus::Connected);
+        let first_success = backend.last_success_at().await.expect("initial connect");
+        backend.test_drop_session().await;
+
+        let proxies: Proxies = Arc::new(RwLock::new(HashMap::from([(
+            "obsidian".into(),
+            backend.clone(),
+        )])));
+        let h = tokio::spawn(run_health_reconciler(proxies, reqwest::Client::new()));
+
+        let healed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                assert_eq!(
+                    backend.status().await,
+                    BackendStatus::Connected,
+                    "a reachable backend must not flip Unreachable on a dropped session"
+                );
+                if backend
+                    .last_success_at()
+                    .await
+                    .map(|t| t > first_success)
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            healed.is_ok(),
+            "dropped session must be reconnected on the first dead probe, not after demotion"
         );
         assert_eq!(backend.status().await, BackendStatus::Connected);
         h.abort();
