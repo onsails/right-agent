@@ -8,9 +8,12 @@ use anyhow::Context as _;
 /// Built-in CC harness tools blocked for every agent-driven `claude -p` call.
 ///
 /// `Cron*` / memory / etc. are reserved for our MCP equivalents; the rest are
-/// harness-only tools (multi-agent UI, dynamic /loop wakeup, plan mode,
-/// worktree juggling, push notifications, in-process Monitor) that don't
-/// belong in a headless Telegram-driven agent.
+/// harness-only tools (dynamic /loop wakeup, plan mode, worktree juggling,
+/// push notifications, in-process Monitor) that don't belong in a headless
+/// Telegram-driven agent. Only list tool names the running `claude` still
+/// registers — denying a removed/renamed tool just emits a startup
+/// "matches no known tool" warning (see the `TeamCreate`/`TeamDelete` note
+/// below).
 ///
 /// `Agent` is NOT in this list — foreground workers use subagents legitimately.
 /// Callsites layer on additional denies when needed.
@@ -34,8 +37,11 @@ pub(crate) const BASELINE_DISALLOWED_TOOLS: &[&str] = &[
     "ExitWorktree",
     "Monitor",
     "PushNotification",
-    "TeamCreate",
-    "TeamDelete",
+    // NOTE: `TeamCreate`/`TeamDelete` were removed from headless Claude Code
+    // upstream (present in 2.1.143/2.1.173, gone by 2.1.177). Denying a tool
+    // name CC no longer registers only emits a startup
+    // "matches no known tool — check for typos." warning, so they are
+    // intentionally not listed. Harness tool names drift across releases.
     "AskUserQuestion",
 ];
 
@@ -975,8 +981,6 @@ mod tests {
             "ExitWorktree",
             "Monitor",
             "PushNotification",
-            "TeamCreate",
-            "TeamDelete",
             "AskUserQuestion",
             "EnterPlanMode",
             "RemoteTrigger",
@@ -986,6 +990,16 @@ mod tests {
             assert!(
                 baseline.iter().any(|s| s == required),
                 "baseline must block {required}"
+            );
+        }
+        // `TeamCreate`/`TeamDelete` were removed from headless Claude Code
+        // upstream (gone by 2.1.177); denying a non-existent tool only emits a
+        // startup "matches no known tool" warning, so baseline must NOT carry
+        // them.
+        for gone in ["TeamCreate", "TeamDelete"] {
+            assert!(
+                !baseline.iter().any(|s| s == gone),
+                "baseline must NOT block removed-upstream tool {gone}"
             );
         }
         // Tools we deliberately keep available.
