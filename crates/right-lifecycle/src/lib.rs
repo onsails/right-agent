@@ -294,7 +294,7 @@ pub async fn list_curator_candidates(conn: &Connection) -> Result<Vec<SkillLifec
          FROM skill_lifecycle
          WHERE state = 'stale'
            AND pinned = 0
-           AND created_by IN ('probe_writer', 'curator')
+           AND created_by IN ('probe_writer', 'curator', 'foreground', 'cron')
          ORDER BY skill_name",
     )
     .await
@@ -310,9 +310,9 @@ pub async fn apply_automatic_transitions(
     let now = now_utc.to_rfc3339();
     let tx = conn.transaction().await?;
 
-    // Archive first: any unpinned curator/probe-writer row (active OR stale)
-    // whose latest activity is older than the archive cutoff. Running archive
-    // before stale prevents an active-then-stale double hop in one call.
+    // Archive first: any unpinned learned (probe-writer/curator/foreground/cron) row
+    // (active OR stale) whose latest activity is older than the archive cutoff.
+    // Running archive before stale prevents an active-then-stale double hop in one call.
     let archived = tx
         .execute(
             &format!(
@@ -320,17 +320,15 @@ pub async fn apply_automatic_transitions(
              SET state = ?1, archived_at = ?2
              WHERE state IN (?3, ?4)
                AND pinned = 0
-               AND created_by IN (?5, ?6)
+               AND created_by IN ('probe_writer', 'curator', 'foreground', 'cron')
                AND {}",
-                activity_before_cutoff("?7"),
+                activity_before_cutoff("?5"),
             ),
             (
                 LifecycleState::Archived.as_db_str(),
                 now.as_str(),
                 LifecycleState::Active.as_db_str(),
                 LifecycleState::Stale.as_db_str(),
-                CreatedBy::ProbeWriter.as_db_str(),
-                CreatedBy::Curator.as_db_str(),
                 archive_cutoff.as_str(),
             ),
         )
@@ -343,15 +341,13 @@ pub async fn apply_automatic_transitions(
              SET state = ?1
              WHERE state = ?2
                AND pinned = 0
-               AND created_by IN (?3, ?4)
+               AND created_by IN ('probe_writer', 'curator', 'foreground', 'cron')
                AND {}",
-                activity_before_cutoff("?5"),
+                activity_before_cutoff("?3"),
             ),
             (
                 LifecycleState::Stale.as_db_str(),
                 LifecycleState::Active.as_db_str(),
-                CreatedBy::ProbeWriter.as_db_str(),
-                CreatedBy::Curator.as_db_str(),
                 stale_cutoff.as_str(),
             ),
         )
@@ -643,7 +639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_transitions_skip_pinned_foreground_and_bundled_rows() {
+    async fn automatic_transitions_skip_pinned_and_bundled_rows() {
         let (_dir, conn) = migrated_conn().await;
         let now = utc("2026-05-23T12:00:00Z");
         let old = now - TimeDelta::days(45);
@@ -671,11 +667,13 @@ mod tests {
             .last_used_at(old)
             .insert(&conn)
             .await;
+        // Unpinned foreground row old enough to archive — foreground is now auto-managed.
         LifecycleRowFixture::new("foreground-old")
             .created_by(CreatedBy::Foreground)
             .last_used_at(old)
             .insert(&conn)
             .await;
+        // Bundled rows are never touched regardless of age.
         LifecycleRowFixture::new("bundled-old")
             .created_by(CreatedBy::Bundled)
             .last_used_at(old)
@@ -692,20 +690,23 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(updated, 2);
+        // candidate-probe → Stale, old-stale-curator → Archived, foreground-old → Archived
+        assert_eq!(updated, 3);
         assert_eq!(
             get(&conn, "candidate-probe").await.unwrap().unwrap().state,
             LifecycleState::Stale
         );
-        let archived = get(&conn, "old-stale-curator").await.unwrap().unwrap();
-        assert_eq!(archived.state, LifecycleState::Archived);
-        assert_eq!(archived.archived_at, Some(now));
-        for skill_name in [
-            "pinned-probe",
-            "foreground-old",
-            "bundled-old",
-            "recent-patch-wins",
-        ] {
+        let archived_curator = get(&conn, "old-stale-curator").await.unwrap().unwrap();
+        assert_eq!(archived_curator.state, LifecycleState::Archived);
+        assert_eq!(archived_curator.archived_at, Some(now));
+        let archived_fg = get(&conn, "foreground-old").await.unwrap().unwrap();
+        assert_eq!(
+            archived_fg.state,
+            LifecycleState::Archived,
+            "unpinned foreground row must be archived when old enough"
+        );
+        assert_eq!(archived_fg.archived_at, Some(now));
+        for skill_name in ["pinned-probe", "bundled-old", "recent-patch-wins"] {
             assert_eq!(
                 get(&conn, skill_name).await.unwrap().unwrap().state,
                 LifecycleState::Active,
@@ -956,6 +957,85 @@ mod tests {
         .unwrap();
 
         assert_eq!(count_changes_since(&conn, since).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn foreground_and_cron_rows_become_curator_candidates() {
+        let (_dir, conn) = migrated_conn().await;
+        let now = utc("2026-05-23T12:00:00Z");
+        let old = now - TimeDelta::days(20);
+
+        LifecycleRowFixture::new("rightx-fg")
+            .state(LifecycleState::Stale)
+            .created_by(CreatedBy::Foreground)
+            .last_used_at(old)
+            .insert(&conn)
+            .await;
+        LifecycleRowFixture::new("rightx-cron")
+            .state(LifecycleState::Stale)
+            .created_by(CreatedBy::Cron)
+            .last_used_at(old)
+            .insert(&conn)
+            .await;
+        LifecycleRowFixture::new("rightx-probe")
+            .state(LifecycleState::Stale)
+            .created_by(CreatedBy::ProbeWriter)
+            .last_used_at(old)
+            .insert(&conn)
+            .await;
+
+        let candidates = list_curator_candidates(&conn).await.unwrap();
+        let names: Vec<&str> = candidates.iter().map(|r| r.skill_name.as_str()).collect();
+        assert!(
+            names.contains(&"rightx-fg"),
+            "foreground row must be a curator candidate"
+        );
+        assert!(
+            names.contains(&"rightx-cron"),
+            "cron row must be a curator candidate"
+        );
+        assert!(
+            names.contains(&"rightx-probe"),
+            "probe_writer row must be a curator candidate"
+        );
+    }
+
+    #[tokio::test]
+    async fn unused_foreground_row_archives_but_pinned_does_not() {
+        let (_dir, conn) = migrated_conn().await;
+        let now = utc("2026-05-23T12:00:00Z");
+        let old = now - TimeDelta::days(45);
+        let config = TransitionConfig {
+            stale_after: TimeDelta::days(7),
+            archive_after: TimeDelta::days(30),
+        };
+
+        LifecycleRowFixture::new("fg-unpinned")
+            .created_by(CreatedBy::Foreground)
+            .last_used_at(old)
+            .insert(&conn)
+            .await;
+        LifecycleRowFixture::new("fg-pinned")
+            .created_by(CreatedBy::Foreground)
+            .pinned(true)
+            .last_used_at(old)
+            .insert(&conn)
+            .await;
+
+        apply_automatic_transitions(&conn, now, config)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get(&conn, "fg-unpinned").await.unwrap().unwrap().state,
+            LifecycleState::Archived,
+            "unpinned foreground row must be archived"
+        );
+        assert_eq!(
+            get(&conn, "fg-pinned").await.unwrap().unwrap().state,
+            LifecycleState::Active,
+            "pinned foreground row must stay active"
+        );
     }
 
     #[tokio::test]
