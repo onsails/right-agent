@@ -598,7 +598,13 @@ impl rmcp::ServerHandler for Aggregator {
                  progress message (max 2000 characters) for the current foreground \
                  invocation only. Use for complex or long-running work, not routine \
                  short tasks. Rate limited to one message every 30 seconds. Cron, \
-                 delivery, reflection, and background-continuation turns must not use it.\n\n\
+                 delivery, reflection, and background-continuation turns must not use it.\n\
+                 - mcp__right__send_message: Send a standalone Telegram message (text \
+                 and/or attachments such as photo+caption or document) for the current \
+                 foreground invocation only. Call once per message to deliver several \
+                 messages in a turn (e.g. multiple posts); attachment paths must be under \
+                 /sandbox/outbox/. Max 20 calls per turn. After sending, the terminal \
+                 reply may be content:null.\n\n\
                  ## Forum Topics (forum supergroups only)\n\
                  - mcp__right__forum_topic_create: Create a topic in the current group; returns its message_thread_id.\n\
                  - mcp__right__forum_topic_edit: Rename / re-icon a topic by message_thread_id.\n\

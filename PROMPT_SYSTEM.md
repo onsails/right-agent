@@ -561,6 +561,7 @@ MCP visibility
 (`mcp__right__rightmeta__mcp_list` via the HTTP aggregator, and
 `mcp__right__mcp_list` only in direct stdio mode; add/remove/auth stay in the
 Telegram dashboard MCP view), foreground progress (`mcp__right__send_progress`),
+foreground standalone message delivery (`mcp__right__send_message`),
 provider capabilities (`mcp__right__provider_capabilities` — env var names only,
 allowed binaries, and hosts; on provider 401/403 check it before treating a
 credential as invalid; for raw HTTP, write auth exactly as the API docs say
@@ -600,6 +601,16 @@ conversation-scope `mcp__right__thread_search`, `mcp__right__chat_search`,
 `mcp__right__get_messages_by_id`, and `mcp__right__thread_focus_set`, plus
 learning-invocation-only `mcp__right__skill_learning_start` and
 `mcp__right__skill_learning_finish`.
+
+`mcp__right__send_message` is available only for the current foreground Telegram
+invocation. Each call delivers one standalone Telegram message — text and/or
+attachments (e.g. photo+caption or document) whose paths must live under
+`/sandbox/outbox/`. An agent calls it once per message to emit several messages
+in a turn (e.g. multiple posts), capped at 20 calls per turn; after sending, the
+terminal structured reply may be `content: null` rather than retried to fan out
+more messages. Non-foreground turns are refused with `send_message_forbidden`,
+and other failures surface as `send_message_unavailable`, `send_message_empty`,
+`send_message_bad_path`, `send_message_limit`, or `send_message_failed`.
 
 `mcp__right__thread_search`, `mcp__right__chat_search`, and
 `mcp__right__get_messages_by_id` are local transcript tools for the current
