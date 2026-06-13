@@ -1203,89 +1203,51 @@ async fn resolve_host_path(
     Ok(host)
 }
 
-async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), SendError> {
+/// One Telegram send for a single attachment. Rebuilds `InputFile` on each call
+/// so a failed send (which consumes the file) can be retried with a different
+/// caption. `html = true` sets `ParseMode::Html`; `false` sends plain text.
+async fn send_single_attempt(
+    ctx: &SendCtx<'_>,
+    host_path: &std::path::Path,
+    kind: OutboundKind,
+    thread_id: Option<teloxide::types::ThreadId>,
+    caption: Option<&str>,
+    html: bool,
+) -> Result<(), teloxide::RequestError> {
     use teloxide::payloads::{
         SendAnimationSetters, SendAudioSetters, SendDocumentSetters, SendPhotoSetters,
-        SendStickerSetters, SendVideoNoteSetters, SendVideoSetters, SendVoiceSetters,
+        SendVideoSetters, SendVoiceSetters,
     };
     use teloxide::requests::Requester;
-    use teloxide::types::{InputFile, MessageId, ThreadId};
+    use teloxide::types::{InputFile, ParseMode};
 
-    let host_path = resolve_host_path(att, ctx, "skipping")
-        .await
-        .map_err(SendError::Skip)?;
+    let input_file = InputFile::file(host_path.to_path_buf());
 
-    let input_file = InputFile::file(&host_path);
-    let thread_id = if ctx.eff_thread_id != 0 {
-        Some(ThreadId(MessageId(ctx.eff_thread_id as i32)))
-    } else {
-        None
-    };
+    macro_rules! captioned {
+        ($req:expr) => {{
+            let mut req = $req;
+            if let Some(cap) = caption {
+                req = req.caption(cap);
+                if html {
+                    req = req.parse_mode(ParseMode::Html);
+                }
+            }
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
+            req.await.map(|_| ())
+        }};
+    }
 
-    let caption = att.caption.as_deref();
-
-    let send_result: Result<_, teloxide::RequestError> = match att.kind {
-        OutboundKind::Photo => {
-            let mut req = ctx.bot.send_photo(ctx.chat_id, input_file);
-            if let Some(cap) = caption {
-                req = req.caption(cap);
-            }
-            if let Some(tid) = thread_id {
-                req = req.message_thread_id(tid);
-            }
-            req.await.map(|_| ())
-        }
-        OutboundKind::Document => {
-            let mut req = ctx.bot.send_document(ctx.chat_id, input_file);
-            if let Some(cap) = caption {
-                req = req.caption(cap);
-            }
-            if let Some(tid) = thread_id {
-                req = req.message_thread_id(tid);
-            }
-            req.await.map(|_| ())
-        }
-        OutboundKind::Video => {
-            let mut req = ctx.bot.send_video(ctx.chat_id, input_file);
-            if let Some(cap) = caption {
-                req = req.caption(cap);
-            }
-            if let Some(tid) = thread_id {
-                req = req.message_thread_id(tid);
-            }
-            req.await.map(|_| ())
-        }
-        OutboundKind::Audio => {
-            let mut req = ctx.bot.send_audio(ctx.chat_id, input_file);
-            if let Some(cap) = caption {
-                req = req.caption(cap);
-            }
-            if let Some(tid) = thread_id {
-                req = req.message_thread_id(tid);
-            }
-            req.await.map(|_| ())
-        }
-        OutboundKind::Voice => {
-            let mut req = ctx.bot.send_voice(ctx.chat_id, input_file);
-            if let Some(cap) = caption {
-                req = req.caption(cap);
-            }
-            if let Some(tid) = thread_id {
-                req = req.message_thread_id(tid);
-            }
-            req.await.map(|_| ())
-        }
-        OutboundKind::Animation => {
-            let mut req = ctx.bot.send_animation(ctx.chat_id, input_file);
-            if let Some(cap) = caption {
-                req = req.caption(cap);
-            }
-            if let Some(tid) = thread_id {
-                req = req.message_thread_id(tid);
-            }
-            req.await.map(|_| ())
-        }
+    match kind {
+        OutboundKind::Photo => captioned!(ctx.bot.send_photo(ctx.chat_id, input_file)),
+        OutboundKind::Document => captioned!(ctx.bot.send_document(ctx.chat_id, input_file)),
+        OutboundKind::Video => captioned!(ctx.bot.send_video(ctx.chat_id, input_file)),
+        OutboundKind::Audio => captioned!(ctx.bot.send_audio(ctx.chat_id, input_file)),
+        OutboundKind::Voice => captioned!(ctx.bot.send_voice(ctx.chat_id, input_file)),
+        OutboundKind::Animation => captioned!(ctx.bot.send_animation(ctx.chat_id, input_file)),
         OutboundKind::VideoNote => {
+            use teloxide::payloads::SendVideoNoteSetters;
             let mut req = ctx.bot.send_video_note(ctx.chat_id, input_file);
             if let Some(tid) = thread_id {
                 req = req.message_thread_id(tid);
@@ -1293,12 +1255,53 @@ async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), 
             req.await.map(|_| ())
         }
         OutboundKind::Sticker => {
+            use teloxide::payloads::SendStickerSetters;
             let mut req = ctx.bot.send_sticker(ctx.chat_id, input_file);
             if let Some(tid) = thread_id {
                 req = req.message_thread_id(tid);
             }
             req.await.map(|_| ())
         }
+    }
+}
+
+async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), SendError> {
+    use teloxide::types::{MessageId, ThreadId};
+
+    let host_path = resolve_host_path(att, ctx, "skipping")
+        .await
+        .map_err(SendError::Skip)?;
+
+    let thread_id = if ctx.eff_thread_id != 0 {
+        Some(ThreadId(MessageId(ctx.eff_thread_id as i32)))
+    } else {
+        None
+    };
+
+    let result: Result<(), teloxide::RequestError> = if let Some(raw) = att.caption.as_deref() {
+        let html_cap = caption_to_html(raw);
+        match send_single_attempt(ctx, &host_path, att.kind, thread_id, Some(&html_cap), true).await
+        {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    "caption HTML send failed, retrying as plain text: {}",
+                    display_error_chain(&e)
+                );
+                let plain_cap = caption_to_plain(raw);
+                send_single_attempt(
+                    ctx,
+                    &host_path,
+                    att.kind,
+                    thread_id,
+                    Some(&plain_cap),
+                    false,
+                )
+                .await
+            }
+        }
+    } else {
+        send_single_attempt(ctx, &host_path, att.kind, thread_id, None, false).await
     };
 
     if ctx.sandboxed
@@ -1307,7 +1310,8 @@ async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), 
     {
         tracing::warn!("failed to remove temp file {}: {e}", host_path.display());
     }
-    send_result.map_err(SendError::Api)
+
+    result.map_err(SendError::Api)
 }
 
 async fn document_group_preflight_fallback_reason(
