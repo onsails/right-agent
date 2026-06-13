@@ -2779,6 +2779,9 @@ async fn start_progress_invocation(
             token: bot_send_token.clone(),
             chat_id,
             thread_id: eff_thread_id,
+            agent_dir: ctx.agent_dir.clone(),
+            ssh_config_path: ctx.ssh_config_path.clone(),
+            resolved_sandbox: ctx.resolved_sandbox.clone(),
         });
 
     let register_req = right_mcp::internal_client::ProgressRegisterRequest {
@@ -5333,6 +5336,9 @@ esac
             token: "token".to_owned(),
             chat_id: 42,
             thread_id: 7,
+            agent_dir: std::path::PathBuf::from("/tmp/agent"),
+            ssh_config_path: None,
+            resolved_sandbox: None,
         };
 
         assert_eq!(target.thread_id, 7);
