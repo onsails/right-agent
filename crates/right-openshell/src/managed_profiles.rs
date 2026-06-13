@@ -373,6 +373,10 @@ fn fingerprint(p: &proto_v1::ProviderProfile) -> ProfileFp {
 }
 
 /// True if `desired` must be (re)imported given the currently `stored` profile.
+/// Test-only since `ensure_profiles` stopped re-importing on drift — it now
+/// reports `DriftedSkipped` instead (the gateway rejects re-importing an existing
+/// id). The fingerprint helpers it exercises remain the drift signal.
+#[cfg(test)]
 fn needs_import(
     stored: Option<&proto_v1::ProviderProfile>,
     desired: &proto_v1::ProviderProfile,
