@@ -111,7 +111,10 @@ inside the sandbox.
 
 Foreground progress uses the built-in `mcp__right__send_progress` tool.
 Cron, delivery, reflection, and background-continuation invocations
-disallow it.
+disallow it. `mcp__right__send_message` is foreground-only, capped at 20
+calls/turn, with chat/thread scope server-resolved from the registered
+invocation — never from agent args (same rule as `send_progress`);
+attachment paths MUST be under `/sandbox/outbox/`.
 
 Conversation transcript scope is server-enforced.
 `mcp__right__thread_search` searches only the current
@@ -205,6 +208,10 @@ Reflection never reflects on itself. Hindsight `memory_retain` is skipped
 for reflection turns. `async_runs.status` gates delivery: `'failed'`
 routes to `DELIVERY_INSTRUCTION_FAILURE`; any other status routes to
 `DELIVERY_INSTRUCTION_SUCCESS` (verbatim relay).
+
+The worker aborts after 3 consecutive structured-output schema rejections
+and routes to reflection (`FailureKind::StructuredOutputLoop`); reflection
+runs on a separate path and never triggers the detector.
 
 See: `docs/architecture/sessions.md` for `ReflectionLimits` (worker vs
 cron), usage-event accounting, and label-routing detail.
