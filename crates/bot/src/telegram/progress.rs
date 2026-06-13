@@ -149,7 +149,10 @@ async fn handle_progress_send(
     // Full error is logged on the bot side via `tracing::warn!`.
     let outcome = tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await;
     let outcome = match outcome {
-        Ok(Err(e)) => {
+        // Only retry on a deterministic, pre-delivery formatting rejection
+        // (entity/URL parse failure or too-long). Network/5xx/timeout errors
+        // may have been delivered, so retrying them would double-post.
+        Ok(Err(e)) if super::attachments::is_retryable_format_error(&format!("{e}")) => {
             tracing::warn!(
                 invocation_id = %req.invocation_id,
                 "progress HTML send failed, retrying as plain text: {e:#}",
