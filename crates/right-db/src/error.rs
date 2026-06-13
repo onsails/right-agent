@@ -76,6 +76,11 @@ impl DbError {
     }
 }
 
+// The `Turso` prefix is intentional: these are Turso-driver-specific transient
+// conditions, and each maps to a stable `turso_*` string id in `as_str()` used
+// for telemetry/logging. Keeping the variant names aligned with those ids is
+// worth the redundant prefix.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DbTransientKind {
     TursoBusy,

@@ -4814,6 +4814,9 @@ async fn cmd_agent_providers(home: &Path, command: AgentProvidersCommands) -> mi
     }
 }
 
+// CLI subcommand handler: the arguments mirror the parsed CLI flags, so a
+// parameter object would just shuffle the same fields without clarifying.
+#[allow(clippy::too_many_arguments)]
 async fn cmd_agent_providers_add(
     home: &Path,
     agent: &str,
