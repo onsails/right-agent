@@ -545,9 +545,61 @@ async fn execute_job(
         return;
     }
 
-    let disallowed_tools = crate::cc::invocation::disallow_foreground_only_tools(
-        crate::cc::invocation::baseline_disallowed_tools(),
-    );
+    // Inline skill authoring: when learning is enabled, register a Cron learning
+    // invocation so this cron CC turn can call skill_learning_start/finish. The
+    // invocation MUST outlive the CC run and be cleaned up only after the child
+    // exits (see the single cleanup point after `consume_cron_stream`).
+    let learning_inline_enabled = learning.prefilter_enabled;
+    let mut registered_learning: Option<crate::cc::invocation::RegisteredNonForegroundInvocation> =
+        if learning_inline_enabled {
+            match crate::cc::invocation::register_non_foreground_invocation(
+                crate::cc::invocation::NonForegroundInvocationRegistration {
+                    agent_name: agent_name.to_owned(),
+                    agent_dir: agent_dir.to_path_buf(),
+                    ssh_config_path: ssh_config_path.map(|p| p.to_path_buf()),
+                    resolved_sandbox: resolved_sandbox.map(|s| s.to_owned()),
+                    internal_client: Arc::clone(internal_client),
+                    kind: right_mcp::internal_client::ProgressInvocationKindDto::Cron,
+                    chat_id: spec.target_chat_id,
+                    thread_id: spec.target_thread_id,
+                },
+            )
+            .await
+            {
+                Ok(active) => Some(active),
+                Err(e) => {
+                    tracing::warn!(
+                        job = %job_name,
+                        "failed to register cron learning invocation; proceeding without inline authoring: {e:#}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    let cron_invocation_id: Option<String> = registered_learning
+        .as_ref()
+        .map(|a| a.invocation_id().to_owned());
+
+    // The disallowed-tool set and the MCP config path both depend on whether a
+    // learning invocation is registered: keep skill_learning_* tools allowed and
+    // point CC at the per-invocation MCP config so progress/learning routes work.
+    let (disallowed_tools, mcp_path) = if let Some(active) = registered_learning.as_ref() {
+        (
+            crate::cc::invocation::disallow_foreground_only_tools_keep_learning(
+                crate::cc::invocation::baseline_disallowed_tools(),
+            ),
+            active.mcp_config_path().to_owned(),
+        )
+    } else {
+        (
+            crate::cc::invocation::disallow_foreground_only_tools(
+                crate::cc::invocation::baseline_disallowed_tools(),
+            ),
+            crate::cc::invocation::mcp_config_path(ssh_config_path, agent_dir),
+        )
+    };
 
     let prompt_for_cc = if spec.trigger_force_notify {
         format!(
@@ -559,8 +611,6 @@ async fn execute_job(
     } else {
         spec.prompt.clone()
     };
-
-    let mcp_path = crate::cc::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
     let invocation = crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: Some(mcp_path),
@@ -624,6 +674,9 @@ async fn execute_job(
         crate::cc::invocation::guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)
     {
         tracing::error!(job = %job_name, "{e:#}");
+        if let Some(active) = registered_learning.take() {
+            active.cleanup().await;
+        }
         update_failed_run_record(&conn, &run_id, None).await;
         std::fs::remove_file(&lock_path).ok();
         return;
@@ -683,6 +736,9 @@ async fn execute_job(
         );
         if which::which("claude").is_err() && which::which("claude-bun").is_err() {
             tracing::error!(job = %job_name, "claude binary not found in PATH");
+            if let Some(active) = registered_learning.take() {
+                active.cleanup().await;
+            }
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
@@ -690,6 +746,9 @@ async fn execute_job(
         let host_log_dir = agent_dir.join("crons").join("logs");
         if let Err(e) = std::fs::create_dir_all(&host_log_dir) {
             tracing::error!(job = %job_name, "failed to create log dir: {e:#}");
+            if let Some(active) = registered_learning.take() {
+                active.cleanup().await;
+            }
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
@@ -722,6 +781,9 @@ async fn execute_job(
     let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
+            if let Some(active) = registered_learning.take() {
+                active.cleanup().await;
+            }
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
@@ -736,6 +798,19 @@ async fn execute_job(
         CronStreamOutcome::Success { collected_lines }
         | CronStreamOutcome::Failed { collected_lines } => collected_lines.clone(),
     };
+
+    // Inline-authoring cleanup: the CC child has emitted its terminal result, so
+    // any skill_learning_start/finish calls have already executed and their DB
+    // rows are durable. Unregister the learning invocation and remove its
+    // per-invocation MCP config now. This is the single cleanup point on the path
+    // every outcome (Success AND Failed) flows through after the child finishes —
+    // there are no early returns between `consume_cron_stream` and here, and all
+    // outcome-specific processing (the `match outcome` below, reflection, usage
+    // insert) happens after it. The finish rows persist past cleanup, so the
+    // downstream probe-skip check still works.
+    if let Some(active) = registered_learning.take() {
+        active.cleanup().await;
+    }
 
     // Post-stream-loop cleanup. ProcessGroupChild::Drop kills the slave's
     // group on function return, so a hang here can never outlive `execute_job`.
@@ -996,7 +1071,7 @@ async fn execute_job(
                                         // effect of empty receipts is CreateNew-leaning framing,
                                         // acceptable for v1.
                                         used_skill_receipts: Vec::new(),
-                                        learning_invocation_id: None,
+                                        learning_invocation_id: cron_invocation_id.clone(),
                                     };
                                     let learn_ctx = crate::learning_pipeline::PostTurnLearningCtx {
                                         agent_dir: agent_dir.to_path_buf(),
@@ -2252,6 +2327,25 @@ mod tests {
         cell.store(Arc::new(Some("claude-opus-4-5".to_owned())));
         let snapshot2: Option<String> = crate::snapshot_model(&cell);
         assert_eq!(snapshot2.as_deref(), Some("claude-opus-4-5"));
+    }
+
+    #[test]
+    fn cron_keeps_learning_tools_when_learning_enabled() {
+        let with = crate::cc::invocation::disallow_foreground_only_tools_keep_learning(
+            crate::cc::invocation::baseline_disallowed_tools(),
+        );
+        let without = crate::cc::invocation::disallow_foreground_only_tools(
+            crate::cc::invocation::baseline_disallowed_tools(),
+        );
+        let start = right_mcp::internal_client::SKILL_LEARNING_START_MCP_TOOL;
+        assert!(
+            !with.iter().any(|t| t == start),
+            "learning-enabled cron must allow skill_learning_start"
+        );
+        assert!(
+            without.iter().any(|t| t == start),
+            "learning-disabled cron must disallow it"
+        );
     }
 
     #[test]
