@@ -34,8 +34,9 @@ const V38_SCHEMA: &str = include_str!("sql/v38_skill_spend_and_learning_skip.sql
 const V39_SCHEMA: &str = include_str!("sql/v39_error_details.sql");
 const V40_SCHEMA: &str = include_str!("sql/v40_forum_topics.sql");
 const V43_SCHEMA: &str = include_str!("sql/v43_thread_focus.sql");
+const V44_SCHEMA: &str = include_str!("sql/v44_skill_lifecycle_cron.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 43;
+pub const LATEST_SCHEMA_VERSION: u32 = 44;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -1019,6 +1020,11 @@ pub static MIGRATIONS: Migrations = Migrations {
         Migration {
             version: 43,
             sql: V43_SCHEMA,
+            hook: None,
+        },
+        Migration {
+            version: 44,
+            sql: V44_SCHEMA,
             hook: None,
         },
     ],
@@ -3570,7 +3576,7 @@ continue background work',
         .await;
         assert!(invalid_state.is_err(), "invalid state must be rejected");
 
-        for created_by in ["foreground", "probe_writer", "curator", "bundled"] {
+        for created_by in ["foreground", "probe_writer", "curator", "bundled", "cron"] {
             conn.execute(
                 "INSERT INTO skill_lifecycle (skill_name, created_by) VALUES (?1, ?2)",
                 [format!("created-by-{created_by}"), created_by.to_string()],
