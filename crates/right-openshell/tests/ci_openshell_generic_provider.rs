@@ -532,8 +532,13 @@ async fn ci_openshell_update_referenced_profile_swaps_endpoints_preserving_secre
         let host_b = SECOND_UPSTREAM_HOST.to_string();
 
         // baseline: profile(A) + provider(secret) + attach + compose(A)
-        ensure_generic_profile_for_hosts(&mut client, &profile_id, &[host_a.clone()], ENV_VAR)
-            .await;
+        ensure_generic_profile_for_hosts(
+            &mut client,
+            &profile_id,
+            std::slice::from_ref(&host_a),
+            ENV_VAR,
+        )
+        .await;
         right_openshell::test_cleanup::register_test_provider(&provider_name, Some(&profile_id));
         create_provider(
             &mut client,
