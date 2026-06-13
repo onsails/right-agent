@@ -36,9 +36,6 @@ pub(crate) struct PostTurnLearningCtx {
     pub baseline_min_sample: u32,
 }
 
-/// Run the budget gate, prefilter, and (on a non-Skip decision) the
-/// probe-writer fork for one captured turn. All failure paths log and return;
-/// never propagates (the caller is fire-and-forget and must not be disrupted).
 /// True when a `rightx-*` skill was successfully created/updated during this
 /// turn (so the async probe must not run — the agent already captured the how).
 /// `None` invocation (progress/learning disabled) → false; query error → false.
@@ -58,6 +55,9 @@ pub(crate) async fn authored_skill_this_turn(
     }
 }
 
+/// Run the budget gate, prefilter, and (on a non-Skip decision) the
+/// probe-writer fork for one captured turn. All failure paths log and return;
+/// never propagates (the caller is fire-and-forget and must not be disrupted).
 pub(crate) async fn run_post_turn(ctx: PostTurnLearningCtx, anchor: ProbeAnchor) {
     let now_utc = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let conn = match right_db::open_connection(&ctx.agent_db_dir, false).await {
