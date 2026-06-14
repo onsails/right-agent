@@ -227,6 +227,10 @@ pub(crate) struct ProbeAnchor {
     /// Used by the post-turn pipeline to skip the probe when a skill was
     /// authored/patched this turn.
     pub learning_invocation_id: Option<String>,
+    /// The originating recurring-cron `job_name` when this anchor came from a
+    /// cron run; `None` for foreground turns. Drives auto-linking the learned
+    /// skill to the cron.
+    pub origin_cron_job: Option<String>,
 }
 
 /// A single Telegram message queued into the debounce channel.
@@ -1998,6 +2002,7 @@ pub fn spawn_worker(
                             wall_elapsed_ms: cc_wall_elapsed_ms,
                             used_skill_receipts: used_skill_names.into_iter().collect::<Vec<_>>(),
                             learning_invocation_id: cc_learning_invocation_id.clone(),
+                            origin_cron_job: None,
                         });
                     } else {
                         tracing::warn!(?key, "CC returned content: null -- no text reply sent");
