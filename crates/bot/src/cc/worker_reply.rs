@@ -54,7 +54,7 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
 
     // CC sometimes returns result as a plain string (e.g. after multi-turn MCP tool use)
     // instead of complying with --json-schema. Wrap it as ReplyOutput so the message is delivered.
-    let output: ReplyOutput = if let Some(text) = result_val.as_str() {
+    let mut output: ReplyOutput = if let Some(text) = result_val.as_str() {
         ReplyOutput {
             content: if text.is_empty() {
                 None
@@ -71,7 +71,36 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
             .map_err(|e| format!("failed to deserialize result: {e}"))?
     };
 
+    strip_caption_duplicating_content(&mut output);
+
     Ok((output, session_id))
+}
+
+/// Telegram delivers the top-level `content` string as its own message and an
+/// attachment `caption` as part of the media message. When the model puts the
+/// same text in both, the user receives it twice (observed: a news-post cron
+/// authored the post into `content` *and* the chart photo's caption). Strip any
+/// caption that duplicates `content` (trimmed compare) so the post is sent once;
+/// the file itself is preserved. Keeping `content` (rather than the caption) is
+/// the always-deliverable choice — `content` has no length cap, whereas Telegram
+/// caps captions at 1024 chars.
+fn strip_caption_duplicating_content(output: &mut ReplyOutput) {
+    let content = match output.content.as_deref().map(str::trim) {
+        Some(c) if !c.is_empty() => c.to_owned(),
+        _ => return,
+    };
+    let Some(attachments) = output.attachments.as_mut() else {
+        return;
+    };
+    for att in attachments.iter_mut() {
+        if att.caption.as_deref().map(str::trim) == Some(content.as_str()) {
+            tracing::warn!(
+                path = %att.path,
+                "stripping attachment caption identical to reply content to avoid duplicate Telegram send"
+            );
+            att.caption = None;
+        }
+    }
 }
 
 /// Returns `true` when `name` is a `rightx-` skill package name (prefix "rightx-").
@@ -217,6 +246,67 @@ mod tests {
         assert_eq!(atts.len(), 1);
         assert_eq!(atts[0].path, "/sandbox/outbox/data.csv");
         assert_eq!(atts[0].filename.as_deref(), Some("results.csv"));
+    }
+
+    #[tokio::test]
+    async fn parse_reply_output_strips_caption_identical_to_content() {
+        // Telegram sends `content` as one message and an attachment `caption` as
+        // part of the media message. Identical text in both double-posts. The
+        // parser must strip the duplicate caption while keeping content + the file.
+        let json = r#"{"result":{"content":"Big news: the thing happened.","attachments":[{"type":"photo","path":"/sandbox/outbox/chart.png","caption":"Big news: the thing happened."}]}}"#;
+        let (output, _) = parse_reply_output(json).unwrap();
+        assert_eq!(
+            output.content.as_deref(),
+            Some("Big news: the thing happened.")
+        );
+        let atts = output.attachments.unwrap();
+        assert_eq!(atts.len(), 1, "attachment is preserved");
+        assert_eq!(atts[0].path, "/sandbox/outbox/chart.png");
+        assert!(
+            atts[0].caption.is_none(),
+            "caption duplicating content must be stripped, got {:?}",
+            atts[0].caption
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_reply_output_keeps_caption_differing_from_content() {
+        // A genuinely different caption is intentional and must survive.
+        let json = r#"{"result":{"content":"See the latest chart.","attachments":[{"type":"photo","path":"/sandbox/outbox/chart.png","caption":"BTC 4h, 2026-06-14"}]}}"#;
+        let (output, _) = parse_reply_output(json).unwrap();
+        let atts = output.attachments.unwrap();
+        assert_eq!(atts[0].caption.as_deref(), Some("BTC 4h, 2026-06-14"));
+    }
+
+    #[tokio::test]
+    async fn parse_reply_output_strips_caption_differing_only_in_whitespace() {
+        // Models routinely add a trailing newline to one side but not the other.
+        // The trimmed compare must treat these as duplicates (exercises trim on
+        // the caption side specifically).
+        let json = r#"{"result":{"content":"hello","attachments":[{"type":"photo","path":"/sandbox/outbox/a.png","caption":"hello\n"}]}}"#;
+        let (output, _) = parse_reply_output(json).unwrap();
+        assert!(output.attachments.unwrap()[0].caption.is_none());
+    }
+
+    #[tokio::test]
+    async fn parse_reply_output_strips_duplicate_caption_in_media_group() {
+        // The duplicate may sit on a non-first item of a media group. It must be
+        // stripped here at parse time, BEFORE send-time caption folding
+        // (`merge_group_captions`) would otherwise fold it into the visible group
+        // caption. Locks the strip-before-fold ordering.
+        let json = r#"{"result":{"content":"Post body.","attachments":[{"type":"photo","path":"/sandbox/outbox/a.png","media_group_id":"g","caption":"Chart A"},{"type":"photo","path":"/sandbox/outbox/b.png","media_group_id":"g","caption":"Post body."}]}}"#;
+        let (output, _) = parse_reply_output(json).unwrap();
+        let atts = output.attachments.unwrap();
+        assert_eq!(atts.len(), 2);
+        assert_eq!(
+            atts[0].caption.as_deref(),
+            Some("Chart A"),
+            "distinct caption survives"
+        );
+        assert!(
+            atts[1].caption.is_none(),
+            "content-duplicating caption stripped"
+        );
     }
 
     #[tokio::test]
