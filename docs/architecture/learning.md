@@ -217,3 +217,58 @@ Deprecated `agent.yaml` learning keys (`background_review_enabled`,
 for upgrade compatibility and warn at load time. Stage 2 selector/reviewer
 calls intentionally omitted `--mcp-config` / `--strict-mcp-config`; that
 path no longer ships and the field is silently ignored.
+
+## Cron ↔ skill linking
+
+The `cron_skill_links(job_name, skill_name, origin, created_at)` table
+(migration v47) records which `rightx-*` skills belong to a cron job.
+Its purpose is deterministic skill loading at fire time: `compose_run_prompt`
+reads the job's live linked skills (state ≠ `archived`) and appends a
+`## Linked skills` block naming them, so the cron always loads its own
+skills rather than relying on description-matching.
+
+`created_by` on `skill_lifecycle` cannot express cron provenance — a
+probe-writer that ran from a cron turn still records `created_by =
+'probe_writer'`. The link table is the only reliable carrier for cron→skill
+provenance, which is why it was introduced rather than adding a new
+`created_by` value.
+
+Auto-linking runs from two seams, both keyed off `ProbeAnchor.origin_cron_job`:
+
+- **Inline authoring** (`bot::cron::execute_job`): when a recurring cron
+  run successfully creates or patches a skill inline, the run writes a link
+  row with `origin = 'auto'` immediately after the CC child exits.
+- **Async probe-writer tail** (`bot::learning_probe_writer`): when the
+  probe-writer finishes for a cron-originated anchor (non-`Skip` decision,
+  `origin_cron_job` set), it writes the same link row on success.
+
+In both cases the link row is inserted only on success, inside the same
+transaction that updates `skill_lifecycle`. Duplicate inserts are silently
+ignored (`INSERT OR IGNORE`).
+
+The agent MCP surface exposes three link operations:
+
+- `skill_names` on `mcp__right__cron_create` — links existing skills at
+  creation time (origin = `agent`). The skill must already exist; create
+  the skill first, then create the cron.
+- `mcp__right__cron_link_skill(job_name, skill_names=[...])` — links one
+  or more skills to an existing cron (origin = `agent`).
+- `mcp__right__cron_unlink_skill(job_name, skill_names=[...])` — removes
+  links. An auto-linked skill may be re-linked if the cron re-learns it.
+
+`mcp__right__cron_list` includes `linked_skills` for each job. The
+`right-cron` skill documents this surface and the prompt-evolution guidance
+(slim "fat" cron prompts toward the "what" once skills cover the "how").
+
+When the curator archives a skill, it redirects existing links to the
+absorbing skill (`absorbed_into`) or drops them if there is no absorber.
+The runtime's live-state filter (`state != 'archived'`) is the correctness
+backstop: even a stale link to an archived skill is harmless because the
+runtime simply omits it from the `## Linked skills` block.
+
+Prompt evolution via cron linking is agent-driven only. The platform never
+rewrites a cron's `prompt` field automatically. A proactive nudge to guide
+the agent toward slimming fat prompts is tracked in onsails/right-agent#128
+and deferred.
+
+Spec: `docs/superpowers/specs/2026-06-15-cron-skill-linking-design.md`.

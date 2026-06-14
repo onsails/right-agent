@@ -641,6 +641,16 @@ foreground invocation, never agent-supplied) unless `then.target_chat_id`
 overrides it. Continuation depth is capped at one — the follow-up carries no
 `then`.
 
+`mcp__right__cron_create` accepts `skill_names` (string array) to link existing
+`rightx-*` skills at creation time; `mcp__right__cron_link_skill` and
+`mcp__right__cron_unlink_skill` manage links on existing jobs. At cron fire time,
+`compose_run_prompt` appends a `## Linked skills` block listing the job's live
+linked skills (state ≠ `'archived'`), so the cron loads them deterministically.
+Skills a recurring cron creates or patches are auto-linked. The `right-cron` skill
+documents the prompt-evolution guidance: before updating a cron's prompt, check
+`linked_skills` from `cron_list` — if a skill now covers the "how", slim the
+prompt to the "what" and tell the user what changed.
+
 `mcp__right__skill_learning_start` and
 `mcp__right__skill_learning_finish` are metadata/progress/receipt tools for
 the `/right-learn-skill` built-in skill. They validate skill-learning
