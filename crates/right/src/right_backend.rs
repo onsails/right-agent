@@ -602,7 +602,10 @@ impl RightBackend {
             None => None,
         };
         let (origin_chat, origin_thread) = match origin {
-            Some(s) => (Some(s.chat_id), Some(s.thread_id)),
+            // Telegram thread 0 = "no topic"; store None, not Some(0)
+            // (matches the (thread_id != 0).then_some(...) convention used
+            // for every other background/cron target in the codebase).
+            Some(s) => (Some(s.chat_id), (s.thread_id != 0).then_some(s.thread_id)),
             None => (None, None),
         };
 
