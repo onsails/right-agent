@@ -2251,6 +2251,22 @@ async fn cron_trigger_with_then_persists_then_json_and_origin() {
             bot_send_token: "tok".to_owned(),
             conversation_scope: Some(crate::progress::ConversationScope {
                 chat_id: 77,
+                thread_id: 8,
+            }),
+        })
+        .await;
+
+    // Sibling foreground invocation from a thread-0 ("no topic") scope. Used
+    // below to prove thread 0 normalizes to None (not Some(0)).
+    backend
+        .progress_registry()
+        .register(crate::progress::ProgressRegistration {
+            invocation_id: "inv-2".to_owned(),
+            kind: crate::progress::ProgressInvocationKind::Foreground,
+            bot_socket_path: "/tmp/x.sock".into(),
+            bot_send_token: "tok".to_owned(),
+            conversation_scope: Some(crate::progress::ConversationScope {
+                chat_id: 77,
                 thread_id: 0,
             }),
         })
@@ -2283,7 +2299,36 @@ async fn cron_trigger_with_then_persists_then_json_and_origin() {
     assert_eq!(then.instruction, "go");
     assert_eq!(then.run_on, right_agent::cron_spec::RunOn::Success);
     assert_eq!(s.trigger_origin_chat_id, Some(77));
-    assert_eq!(s.trigger_origin_thread_id, Some(0));
+    // Non-zero origin thread is captured verbatim.
+    assert_eq!(s.trigger_origin_thread_id, Some(8));
+
+    // Re-trigger from the thread-0 scope: thread 0 ("no topic") normalizes to
+    // None, never Some(0).
+    backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_trigger",
+            serde_json::json!({
+                "job_name": "j",
+                "then": { "instruction": "go", "run_on": "success" }
+            }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-2".to_owned()),
+            },
+        )
+        .await
+        .expect("cron_trigger (thread-0) ok");
+
+    let conn = right_db::open_connection(&agent_dir, false)
+        .await
+        .expect("reopen db");
+    let specs = right_agent::cron_spec::load_specs_from_db(&conn)
+        .await
+        .expect("reload specs");
+    let s = specs.get("j").expect("spec j present");
+    assert_eq!(s.trigger_origin_chat_id, Some(77));
+    assert_eq!(s.trigger_origin_thread_id, None);
 }
 
 #[tokio::test]

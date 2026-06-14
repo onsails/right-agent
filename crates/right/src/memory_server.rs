@@ -132,7 +132,7 @@ pub struct CronThenParams {
     pub run_on: RunOnDto,
     #[serde(default)]
     #[schemars(
-        description = "Force the follow-up's report to the user (skip silent/idle gate). Default false."
+        description = "Add emphasis instructing the follow-up to report. The follow-up always delivers a message; idle-gate skip is not yet implemented. Default false."
     )]
     pub notify: bool,
     #[serde(default)]
@@ -802,20 +802,30 @@ mod tests {
     #[test]
     fn cron_then_params_json_matches_then_spec() {
         use super::{CronThenParams, RunOnDto};
-        let p = CronThenParams {
-            instruction: "go".into(),
-            run_on: RunOnDto::Success,
-            notify: true,
-            target_chat_id: Some(9),
-            target_thread_id: None,
-        };
-        // Serialized CronThenParams must deserialize into right_agent's ThenSpec.
-        let json = serde_json::to_string(&p).unwrap();
-        let spec: right_agent::cron_spec::ThenSpec = serde_json::from_str(&json).unwrap();
-        assert_eq!(spec.instruction, "go");
-        assert_eq!(spec.run_on, right_agent::cron_spec::RunOn::Success);
-        assert!(spec.notify);
-        assert_eq!(spec.target_chat_id, Some(9));
+        use right_agent::cron_spec::RunOn;
+
+        // Every RunOnDto variant must round-trip into the matching RunOn variant
+        // (the runtime relies on serialize(CronThenParams)→deserialize(ThenSpec)).
+        for (dto, expected) in [
+            (RunOnDto::Success, RunOn::Success),
+            (RunOnDto::Failure, RunOn::Failure),
+            (RunOnDto::Always, RunOn::Always),
+        ] {
+            let p = CronThenParams {
+                instruction: "go".into(),
+                run_on: dto,
+                notify: true,
+                target_chat_id: Some(9),
+                target_thread_id: Some(77),
+            };
+            let json = serde_json::to_string(&p).unwrap();
+            let spec: right_agent::cron_spec::ThenSpec = serde_json::from_str(&json).unwrap();
+            assert_eq!(spec.instruction, "go");
+            assert_eq!(spec.run_on, expected);
+            assert!(spec.notify);
+            assert_eq!(spec.target_chat_id, Some(9));
+            assert_eq!(spec.target_thread_id, Some(77));
+        }
     }
 
     #[test]

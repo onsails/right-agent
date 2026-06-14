@@ -219,9 +219,10 @@ pub(crate) struct ThenAction {
 /// the job's standing `target_chat_id`. Returns `None` when there is no `then`,
 /// the `run_on` does not match, or no deliverable chat is known.
 ///
-/// NOTE (v1 limitation): `then.notify` is realized via the prompt directive below
-/// (the continuation chooses `notify`). Forcing delivery through the background
-/// row's `force_notify` column + idle-gate skip is a documented follow-up.
+/// NOTE: the background continuation schema forces `delivery.kind=notify`, so a
+/// `then` continuation always delivers. `then.notify` only adds a prompt-emphasis
+/// directive below; forcing idle-gate skip via the row's `force_notify` column is
+/// a documented follow-up.
 pub(crate) fn resolve_then_action(spec: &CronSpec, success: bool) -> Option<ThenAction> {
     let then = spec.then.as_ref()?;
     if !then.run_on.fires_on(success) {
@@ -238,6 +239,8 @@ pub(crate) fn resolve_then_action(spec: &CronSpec, success: bool) -> Option<Then
     } else {
         spec.target_thread_id
     };
+    // Telegram thread 0 == "no topic": never propagate Some(0) into a send.
+    let target_thread_id = target_thread_id.filter(|&t| t != 0);
     let prompt = if then.notify {
         format!(
             "⟨⟨SYSTEM_NOTICE⟩⟩ Scheduled follow-up of the job you just ran. Always emit \
@@ -1191,12 +1194,13 @@ async fn execute_job(
                                     silent_reason = cron_output.delivery.silent_reason().unwrap_or("-"),
                                     "cron output persisted to DB"
                                 );
-                                // `then` continuation: fork this run's session for
-                                // a runtime-guaranteed follow-up. Awaited inline; it
-                                // returns after the continuation's system/init, like
-                                // the worker hand-off. Holds the SOURCE-session mutex
-                                // internally, so it serializes against the learning
-                                // probe fork spawned below.
+                                // `then` continuation: fork this run's session for a
+                                // runtime-guaranteed follow-up. Awaited inline; returns
+                                // after the continuation's system/init, like the worker
+                                // hand-off. Takes the SOURCE-session guard for the
+                                // hand-off window; this and the learning-probe fork
+                                // below both use `fork_session`, so the source
+                                // transcript is read-only and concurrent forks are safe.
                                 if let Some(action) = resolve_then_action(spec, true) {
                                     spawn_then_continuation(
                                         action,
@@ -1326,6 +1330,28 @@ async fn execute_job(
                             "failed to persist cron parse error atomically: {e:#}"
                         );
                         update_failed_run_record(&conn, &run_id, exit_code).await;
+                    }
+
+                    // Parse failed but CC produced a terminal result, so the run's
+                    // session exists — fire a run_on=failure/always `then` (same as
+                    // the CronStreamOutcome::Failed arm). Pre-CC-start infra failures
+                    // (spawn/binary/sandbox) have no session and are intentionally not
+                    // covered — there is nothing to fork.
+                    if let Some(action) = resolve_then_action(spec, false) {
+                        spawn_then_continuation(
+                            action,
+                            run_id.clone(),
+                            agent_dir,
+                            agent_name,
+                            model,
+                            ssh_config_path,
+                            internal_client,
+                            resolved_sandbox,
+                            Arc::clone(&upgrade_lock),
+                            session_locks,
+                            Arc::clone(&debug),
+                        )
+                        .await;
                     }
                 }
             }
@@ -2679,6 +2705,20 @@ mod tests {
         let act = resolve_then_action(&origin_thread, true).unwrap();
         assert_eq!(act.target_chat_id, 1);
         assert_eq!(act.target_thread_id, Some(11));
+
+        // Telegram thread 0 ("no topic") normalizes to None even when the
+        // winning source carries Some(0).
+        let mut thread_zero = sample_cron_spec();
+        thread_zero.then = Some(ThenSpec {
+            instruction: "go".into(),
+            run_on: RunOn::Always,
+            notify: false,
+            target_chat_id: Some(9),
+            target_thread_id: Some(0),
+        });
+        let act = resolve_then_action(&thread_zero, true).unwrap();
+        assert_eq!(act.target_chat_id, 9);
+        assert_eq!(act.target_thread_id, None);
     }
 
     /// End-to-end at the observable boundary: a successful triggered run with
