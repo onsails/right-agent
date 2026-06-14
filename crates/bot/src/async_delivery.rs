@@ -928,14 +928,19 @@ impl DeliverySendReport {
 
 /// Decide whether a failed attachment batch should fail the whole delivery.
 ///
-/// Retrying a delivery re-invokes the session and re-sends any text content
-/// that already reached Telegram, so once at least one text message has been
+/// Retrying a delivery re-invokes the session and re-sends any *body* content
+/// that already reached Telegram, so once at least one body message has been
 /// sent the delivery MUST NOT be retried — the failed attachment is dropped
 /// (and logged) instead, preventing duplicate posts. An attachment-only
-/// delivery (no text sent yet) remains retryable: nothing reached the user, so
-/// a retry cannot duplicate anything.
-fn attachment_failure_is_fatal(text_messages_sent: usize) -> bool {
-    text_messages_sent == 0
+/// delivery (no body content sent yet) remains retryable: the user's payload
+/// never reached them, so a retry must run.
+///
+/// The platform status header is deliberately EXCLUDED from this count: on an
+/// attachments-only delivery the standalone header send must not flip an
+/// attachment failure to non-fatal. Re-sending the one-line header on retry is
+/// cheap; losing the attachment is not.
+fn attachment_failure_is_fatal(body_messages_sent: usize) -> bool {
+    body_messages_sent == 0
 }
 
 pub(crate) fn ensure_delivery_send_report_non_empty(
@@ -1188,6 +1193,10 @@ async fn deliver_through_session(
         text_messages_sent: 0,
         attachment_batches_sent: 0,
     };
+    // Body-content messages only — excludes the standalone platform header below.
+    // Drives the attachment-failure fatality decision so the header send can't
+    // turn an attachments-only failure non-fatal.
+    let mut body_messages_sent = 0usize;
 
     if let Some(ref content) = reply.content
         && !content.trim().is_empty()
@@ -1230,8 +1239,10 @@ async fn deliver_through_session(
                     ));
                 }
                 report.text_messages_sent += 1;
+                body_messages_sent += 1;
             } else {
                 report.text_messages_sent += 1;
+                body_messages_sent += 1;
             }
         }
     }
@@ -1273,7 +1284,7 @@ async fn deliver_through_session(
         .await?;
         match send_result {
             Ok(()) => report.attachment_batches_sent += 1,
-            Err(e) if attachment_failure_is_fatal(report.text_messages_sent) => {
+            Err(e) if attachment_failure_is_fatal(body_messages_sent) => {
                 tracing::error!(
                     chat_id = target_chat_id,
                     "async delivery: attachment send failed: {e:#}"
@@ -1303,13 +1314,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn attachment_failure_fatal_only_when_no_text_sent() {
-        // Nothing reached the user yet → retry is safe.
+    fn attachment_failure_fatal_only_when_no_body_sent() {
+        // No body content reached the user yet → retry is safe and required.
         assert!(attachment_failure_is_fatal(0));
-        // Text already delivered → retry would duplicate the post, so the
+        // Body content already delivered → retry would duplicate it, so the
         // attachment failure must be tolerated, not fatal.
         assert!(!attachment_failure_is_fatal(1));
         assert!(!attachment_failure_is_fatal(3));
+    }
+
+    #[test]
+    fn attachments_only_with_header_keeps_attachment_failure_fatal() {
+        // Regression: an attachments-only delivery sends the one-line platform
+        // status header standalone before the attachment batch. That header send
+        // must NOT count as body content — otherwise an attachment failure would
+        // flip non-fatal and the user's payload would be dropped with no retry.
+        // The body-content count stays 0, so the failure remains fatal (requeue).
+        let body_messages_sent_after_header_only = 0usize;
+        assert!(attachment_failure_is_fatal(
+            body_messages_sent_after_header_only
+        ));
     }
 
     #[tokio::test]
