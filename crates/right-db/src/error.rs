@@ -124,6 +124,13 @@ fn is_turso_constraint(error: &turso::Error) -> bool {
     matches!(error, turso::Error::Constraint(_))
 }
 
+// WORKAROUND (tracked in onsails/right-agent#127): we detect the WAL-sidecar
+// desync by substring-matching Turso's stringly-typed `Error::Error` message
+// because the driver exposes no typed variant for it. This is brittle to Turso
+// message changes. When tursodatabase/turso#769 is fixed upstream — either a
+// typed short-read/corruption error, or the authority-rebuild no longer leaving
+// a stale `-tshm` against an empty `-wal` — revisit: prefer matching the typed
+// error here, and the sidecar-reset recovery in `lib.rs` may become unnecessary.
 fn is_turso_wal_corruption(error: &turso::Error) -> bool {
     matches!(
         error,
