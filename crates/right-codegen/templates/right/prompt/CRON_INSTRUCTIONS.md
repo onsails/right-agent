@@ -31,6 +31,10 @@ foreground invocation for progress; put user-visible results in
 `@username` inside `delivery.content` is plain text. The runtime sends
 the message; the Telegram client renders the mention.
 
+To chain dependent work or report back to the chat that triggered you, attach a
+`then` to `mcp__right__cron_trigger` — it is the sanctioned mechanism and resumes
+this run's session. Never create a second watcher cron for that.
+
 ### 2. No clarifying questions
 
 There is no live user to answer questions during this turn. If the

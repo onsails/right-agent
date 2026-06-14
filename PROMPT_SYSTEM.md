@@ -555,7 +555,8 @@ conversation transcript tools (`mcp__right__thread_search`,
 `mcp__right__chat_search`, and `mcp__right__get_messages_by_id`), conversation
 focus (`mcp__right__thread_focus_set`), cron
 (`mcp__right__cron_trigger` — trigger a job for immediate execution, with
-optional `notify=true` to force a verification report;
+optional `notify=true` to force a verification report, `extra_instruction` for a
+one-off note to that run, and a `then` follow-up that resumes the run's session;
 `mcp__right__cron_list_runs` and `mcp__right__cron_show_run` for inspection),
 MCP visibility
 (`mcp__right__rightmeta__mcp_list` via the HTTP aggregator, and
@@ -630,6 +631,15 @@ scope is server-resolved and empty string clears it.
 report — it overrides the run's silent decision and skips the delivery idle
 gate, so the user is guaranteed to receive the result promptly. Use it to
 spot-check a job instead of creating a second cron to watch it.
+`extra_instruction` prepends a one-off note to that run only (the stored prompt
+is unchanged). `then` is a runtime-guaranteed follow-up: when the run reaches the
+terminal state matching its required `run_on` (`success`/`failure`/`always`), the
+runtime forks the run's session and runs `then.instruction`, so the follow-up
+sees what the run did. `then.notify` forces its report; delivery defaults to the
+chat the trigger was issued from (origin chat is server-resolved from the
+foreground invocation, never agent-supplied) unless `then.target_chat_id`
+overrides it. Continuation depth is capped at one — the follow-up carries no
+`then`.
 
 `mcp__right__skill_learning_start` and
 `mcp__right__skill_learning_finish` are metadata/progress/receipt tools for

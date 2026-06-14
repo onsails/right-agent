@@ -452,7 +452,7 @@ impl MemoryServer {
     // must stay byte-for-byte equal to that constant — the
     // `cron_trigger_description_matches_const` test in this file enforces it.
     #[tool(
-        description = "Trigger a cron job for immediate execution. Lock check applies — if the job is currently running, the trigger is skipped. By default delivery is conditional: the cron decides whether to notify (sets `delivery` in its structured output), and any notification is held until the chat has been idle for 2 minutes. Set `notify=true` to force a verification report — it overrides a silent decision and skips the idle gate, so the user is sure to receive the result promptly. Use `notify=true` to check a job instead of creating a second cron to watch it. Use `cron_list_runs` to inspect `delivery_status` and `delivery`."
+        description = "Trigger a cron job for immediate execution. Lock check applies — if the job is currently running, the trigger is skipped. By default delivery is conditional: the cron decides whether to notify (sets `delivery` in its structured output), and any notification is held until the chat has been idle for 2 minutes. Set `notify=true` to force a verification report — it overrides a silent decision and skips the idle gate, so the user is sure to receive the result promptly. Use `notify=true` to check a job instead of creating a second cron to watch it. `extra_instruction` adds a one-off note to this run without changing the stored prompt; `then` schedules a runtime-guaranteed follow-up that resumes this run's session (set `run_on`). Use `cron_list_runs` to inspect `delivery_status` and `delivery`."
     )]
     async fn cron_trigger(
         &self,

@@ -45,8 +45,10 @@ pub const TRIGGER_TOOL_DESC: &str = const_format::formatcp!(
      idle for {} minutes. Set `notify=true` to force a verification report — it \
      overrides a silent decision and skips the idle gate, so the user is sure to \
      receive the result promptly. Use `notify=true` to check a job instead of \
-     creating a second cron to watch it. Use `cron_list_runs` to inspect \
-     `delivery_status` and `delivery`.",
+     creating a second cron to watch it. `extra_instruction` adds a one-off note \
+     to this run without changing the stored prompt; `then` schedules a \
+     runtime-guaranteed follow-up that resumes this run's session (set `run_on`). \
+     Use `cron_list_runs` to inspect `delivery_status` and `delivery`.",
     IDLE_THRESHOLD_MIN,
 );
 
