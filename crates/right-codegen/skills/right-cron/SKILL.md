@@ -5,7 +5,7 @@ description: >-
   and deletes cron specs stored in the agent database. The Rust runtime handles
   scheduling and execution automatically. Use when the user mentions cron
   jobs, scheduled tasks, reminders, one-shot tasks, or recurring tasks.
-version: 3.5.0
+version: 3.6.0
 ---
 
 # /right-cron -- Cron Job Manager
@@ -182,6 +182,22 @@ important argument on this tool:
 must reach them — pass `notify: true`.** Don't fall back to "I'll check
 `cron_list_runs` later"; that is a diagnostic tool, not a delivery mechanism.
 
+**One-off tweaks.** To adjust a single run without changing the stored job, pass
+`extra_instruction` on `mcp__right__cron_trigger`. It is prepended to this run
+only and leaves the spec's `prompt` untouched — use it instead of
+`mcp__right__cron_update`, which mutates the stored prompt for every future run.
+
+**Report back to this chat.** Attach a `then` to surface the result here:
+
+```
+mcp__right__cron_trigger(
+  job_name: "health-check",
+  then: { run_on: "always", notify: true, instruction: "summarize how it went" }
+)
+```
+
+A `then` with no `target_chat_id` delivers back to the chat you triggered from.
+
 ## Chaining Jobs and Multi-Step Pipelines
 
 `notify: true` replaces the old "watch it with a second cron" habit. Do NOT
@@ -189,20 +205,25 @@ create a watcher, poller, or finish-notifier cron just to check a job and report
 its outcome — that proliferates throwaway crons and routinely drops the notify
 intent. To surface a job's result, trigger it with `notify: true`.
 
-**Sequencing (run B only after A finishes).** Schedule ONE delayed one-shot cron
-that does the hand-off. Two rules make it actually deliver:
+**Sequencing (run B only after A finishes).** Attach a `then` to A's
+`mcp__right__cron_trigger`. It is runtime-guaranteed: when A reaches the terminal
+state matching `run_on` (`success` \| `failure` \| `always`), the runtime resumes
+(forks) A's session and runs `then.instruction`, so B sees what A actually did —
+no second watcher cron, no lost notify intent.
 
-1. A cron turn sees ONLY its stored `prompt` — not this chat, not your current
-   intent. So if the user must hear B's outcome, write it into the prompt
-   **literally**: "trigger ai-content-drafter **with notify=true**". A prompt
-   that merely says "trigger ai-content-drafter" produces a plain trigger
-   (`notify=false`), and B's result is lost the moment B goes silent.
-2. Never promise "I'll let you know" without a mechanism that delivers it —
-   either `notify=true` on the downstream trigger, or the hand-off cron's own
-   `delivery.kind = "notify"` output. No mechanism = no message.
+```
+mcp__right__cron_trigger(
+  job_name: "build-report",
+  then: { run_on: "success", notify: true, instruction: "publish the report you just built" }
+)
+```
 
-Prefer the fewest jobs that work: one hand-off one-shot carrying `notify=true`
-beats a chain of probe + retry + notifier crons.
+`run_on` is required. `then.notify: true` forces the follow-up's report to the
+user. Delivery defaults to the chat you triggered from; set `then.target_chat_id`
+to override.
+
+Prefer the fewest jobs that work: one trigger with a `then` beats a chain of
+probe + retry + notifier crons.
 
 ## Listing Current Cron Jobs
 
@@ -228,6 +249,18 @@ Returns: job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at
 | `model` | enum | No | inherit | `haiku` \| `sonnet` \| `opus`. Picks the model for this cron by complexity (see "Choosing the Model"). Omit to inherit the agent's current `/model`. |
 | `target_chat_id` | integer | No | - | Telegram chat ID to deliver cron notifications to. See guidance below. |
 | `target_thread_id` | integer | No | - | Message thread ID within a supergroup topic. Only relevant when `target_chat_id` is a supergroup with topics enabled. |
+
+### `cron_trigger`-only parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `extra_instruction` | string | No | - | Prepended to THIS run only; does not change the stored `prompt`. |
+| `then` | object | No | - | Runtime-guaranteed follow-up that resumes (forks) this run's session after it finishes. Fields below. |
+| `then.instruction` | string | Yes | - | The follow-up task. It can reference what the run just did. |
+| `then.run_on` | enum | Yes | - | `success` \| `failure` \| `always`. When the follow-up fires relative to this run's outcome. |
+| `then.notify` | boolean | No | `false` | Force the follow-up's report to the user (skip silent + idle gate). |
+| `then.target_chat_id` | integer | No | origin | Override the follow-up's delivery chat. Defaults to the chat the trigger was issued from. |
+| `then.target_thread_id` | integer | No | - | Message thread ID for the follow-up's delivery chat. |
 
 ## Delivery Target
 
