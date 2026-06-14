@@ -831,8 +831,9 @@ pub async fn delete_auth_token(conn: &Connection) -> Result<(), CredentialError>
 /// stable for the agent's lifetime. Used to make `⟨⟨SYSTEM_NOTICE:<token>⟩⟩`
 /// unforgeable by untrusted content the agent reads.
 pub async fn get_or_create_notice_token(conn: &Connection) -> Result<String, CredentialError> {
+    // Fast path: token already exists.
     if let Some(existing) = conn
-        .query_one("SELECT token FROM notice_token LIMIT 1", (), |row| {
+        .query_one("SELECT token FROM notice_token WHERE id = 1", (), |row| {
             row.get(0)
         })
         .await
@@ -840,15 +841,22 @@ pub async fn get_or_create_notice_token(conn: &Connection) -> Result<String, Cre
     {
         return Ok(existing);
     }
-    let token = generate_notice_token();
-    let tx = conn.transaction().await?;
-    tx.execute("DELETE FROM notice_token", ()).await?;
-    tx.execute(
-        "INSERT INTO notice_token (token) VALUES (?1)",
-        [token.as_str()],
+    // Race-safe create: the single-row `CHECK (id = 1)` PRIMARY KEY means only
+    // the first concurrent writer's row lands; every other `INSERT OR IGNORE` is
+    // a no-op. Re-reading then returns the one winning token for every caller,
+    // so two concurrent first-ever fetches can never observe different tokens
+    // (which would make the agent reject its own legitimate notices as forged).
+    let candidate = generate_notice_token();
+    conn.execute(
+        "INSERT OR IGNORE INTO notice_token (id, token) VALUES (1, ?1)",
+        [candidate.as_str()],
     )
     .await?;
-    tx.commit().await?;
+    let token = conn
+        .query_one("SELECT token FROM notice_token WHERE id = 1", (), |row| {
+            row.get(0)
+        })
+        .await?;
     Ok(token)
 }
 

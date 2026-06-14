@@ -68,38 +68,12 @@ fn system_prompt(token: &str) -> String {
     )
 }
 
-/// Minimal base64 (standard alphabet, padded) — pure Rust, no extra dep.
-/// Used only to ship arbitrary bytes (multibyte angle brackets, newlines,
-/// quotes) into the sandbox without any shell-quoting hazard.
-fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[((n >> 6) & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[(n & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
-
 /// Write `contents` to `path` inside the sandbox without any quoting hazard:
 /// base64-encode on the host, decode in the sandbox. `contents` may contain
 /// arbitrary bytes (multibyte angle brackets, newlines, quotes).
 async fn write_file(sbox: &TestSandbox, path: &str, contents: &str) {
-    let b64 = base64_encode(contents.as_bytes());
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(contents.as_bytes());
     // `printf %s` keeps the base64 blob intact (no trailing newline, no escape
     // interpretation); `base64 -d` reconstructs the exact bytes.
     let script = format!("printf '%s' '{b64}' | base64 -d > '{path}'");

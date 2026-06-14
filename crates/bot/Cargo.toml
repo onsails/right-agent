@@ -62,6 +62,7 @@ whisper-rs = { version = "0.16", default-features = false }
 whisper-rs = { version = "0.16", default-features = false, features = ["metal"] }
 
 [dev-dependencies]
+base64 = { workspace = true }
 right-agent = { path = "../right-agent", version = "*" }
 right-openshell = { path = "../right-openshell", version = "*", features = ["test-support"] }
 rustls = { workspace = true }
