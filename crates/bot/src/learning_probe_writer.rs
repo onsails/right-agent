@@ -595,29 +595,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn link_cron_authored_links_created_and_patched() {
+    async fn link_cron_authored_links_created_and_updated_skills() {
         let (_t, c) = right_db::test_support::migrated_connection().await;
         c.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
              VALUES ('j','17 9 * * *','x',2.0,'t','t')",
             (),
-        )
-        .await
-        .unwrap();
+        ).await.unwrap();
+        for (skill, status) in [
+            ("rightx-a", "created"),
+            ("rightx-b", "updated"),
+            ("rightx-c", "aborted"),
+        ] {
+            c.execute(
+                "INSERT INTO skill_learning_events (invocation_id, agent_name, action, skill_name, phase, status, created_at) \
+                 VALUES ('inv','a','create',?1,'finish',?2,'t')",
+                right_db::params![skill, status],
+            ).await.unwrap();
+        }
+        let n = link_cron_authored(&c, "j", "inv").await.unwrap();
+        assert_eq!(n, 2, "only created+updated link, not aborted");
+        let mut linked = right_agent::cron_skill_link::list_for_job(&c, "j")
+            .await
+            .unwrap();
+        linked.sort();
+        assert_eq!(linked, vec!["rightx-a".to_string(), "rightx-b".to_string()]);
+
+        // No-op when an invocation authored nothing.
+        let n0 = link_cron_authored(&c, "j", "other-inv").await.unwrap();
+        assert_eq!(n0, 0);
+    }
+
+    #[tokio::test]
+    async fn link_cron_authored_partitions_by_invocation_no_double_link() {
+        // The inline seam (cron_invocation_id) and async seam (probe-writer id)
+        // query DISJOINT invocation_ids; each links its own skill exactly once.
+        let (_t, c) = right_db::test_support::migrated_connection().await;
+        c.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
+             VALUES ('j','17 9 * * *','x',2.0,'t','t')",
+            (),
+        ).await.unwrap();
         c.execute(
             "INSERT INTO skill_learning_events (invocation_id, agent_name, action, skill_name, phase, status, created_at) \
-             VALUES ('inv','a','create','rightx-a','finish','created','t')",
+             VALUES ('inv-cron','a','create','rightx-inline','finish','created','t')",
             (),
-        )
-        .await
-        .unwrap();
-        let n = link_cron_authored(&c, "j", "inv").await.unwrap();
-        assert_eq!(n, 1);
+        ).await.unwrap();
+        c.execute(
+            "INSERT INTO skill_learning_events (invocation_id, agent_name, action, skill_name, phase, status, created_at) \
+             VALUES ('inv-probe','a','create','rightx-async','finish','created','t')",
+            (),
+        ).await.unwrap();
+        assert_eq!(link_cron_authored(&c, "j", "inv-cron").await.unwrap(), 1);
+        assert_eq!(link_cron_authored(&c, "j", "inv-probe").await.unwrap(), 1);
+        let mut linked = right_agent::cron_skill_link::list_for_job(&c, "j")
+            .await
+            .unwrap();
+        linked.sort();
         assert_eq!(
-            right_agent::cron_skill_link::list_for_job(&c, "j")
-                .await
-                .unwrap(),
-            vec!["rightx-a".to_string()]
+            linked,
+            vec!["rightx-async".to_string(), "rightx-inline".to_string()]
         );
     }
 }
