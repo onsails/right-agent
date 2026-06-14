@@ -242,9 +242,11 @@ Auto-linking runs from two seams, both keyed off `ProbeAnchor.origin_cron_job`:
   probe-writer finishes for a cron-originated anchor (non-`Skip` decision,
   `origin_cron_job` set), it writes the same link row on success.
 
-In both cases the link row is inserted only on success, inside the same
-transaction that updates `skill_lifecycle`. Duplicate inserts are silently
-ignored (`INSERT OR IGNORE`).
+In both cases the link row is inserted only on success. The auto-link write
+runs in its own transaction, on a separately-opened connection, after the CC
+child that wrote `skill_lifecycle` (via `skill_learning_finish` in a different
+process) has exited and committed. Duplicate inserts are silently ignored
+(`INSERT OR IGNORE`).
 
 The agent MCP surface exposes three link operations:
 

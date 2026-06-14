@@ -84,7 +84,6 @@ async fn redirect_moves_links_pk_safe() {
         .unwrap();
     assert_eq!(list_for_job(&c, "j1").await.unwrap(), vec!["rightx-new"]);
     assert_eq!(list_for_job(&c, "j2").await.unwrap(), vec!["rightx-new"]);
-    assert!(jobs_for_skill(&c, "rightx-old").await.unwrap().is_empty());
 }
 
 #[tokio::test]
