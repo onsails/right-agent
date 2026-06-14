@@ -118,14 +118,17 @@ pub async fn list_live_for_job(conn: &Connection, job_name: &str) -> Result<Vec<
     .await
 }
 
-/// Jobs linking a given skill (reverse index; curator cleanup).
-pub async fn jobs_for_skill(conn: &Connection, skill_name: &str) -> Result<Vec<String>, DbError> {
-    conn.query_all(
-        "SELECT job_name FROM cron_skill_links WHERE skill_name = ?1 ORDER BY job_name",
-        params![skill_name],
-        |row| row.get::<_, String>(0),
-    )
-    .await
+/// Validate every skill exists and is not archived. Used by `cron_create` to
+/// pre-check before persisting the spec, so a link failure never leaves a
+/// created-but-unlinked cron behind a failed response.
+pub async fn ensure_skills_live(
+    conn: &Connection,
+    skill_names: &[String],
+) -> Result<(), LinkError> {
+    for s in skill_names {
+        ensure_skill_live(conn, s).await?;
+    }
+    Ok(())
 }
 
 /// Repoint every link from `old` to `new` (skill absorbed). PK-safe: copy then

@@ -392,6 +392,12 @@ impl MemoryServer {
         Parameters(params): Parameters<CronCreateParams>,
     ) -> Result<CallToolResult, McpError> {
         let conn = self.conn.lock().await;
+        if let Some(skills) = params.skill_names.as_deref()
+            && !skills.is_empty()
+            && let Err(e) = right_agent::cron_skill_link::ensure_skills_live(&conn, skills).await
+        {
+            return Ok(tool_error("cron_link_failed", format!("{e:#}"), None));
+        }
         let result = right_agent::cron_spec::create_spec_v2(
             &conn,
             &params.job_name,
