@@ -836,6 +836,21 @@ async fn execute_job(
         return;
     }
 
+    // Per-agent notice token for the trusted `## Platform Notice Token` prompt
+    // section, so the agent can verify SYSTEM_NOTICE markers. Reuse the run's conn.
+    let notice_token = match right_mcp::credentials::get_or_create_notice_token(&conn).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(job = %job_name, "notice token fetch failed: {e:#}");
+            if let Some(active) = registered_learning.take() {
+                active.cleanup().await;
+            }
+            update_failed_run_record(&conn, &run_id, None).await;
+            std::fs::remove_file(&lock_path).ok();
+            return;
+        }
+    };
+
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
         // Sandbox mode: assemble system prompt via shell script (same as worker).
         let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
@@ -849,6 +864,7 @@ async fn execute_job(
             memory_mode.as_ref(),
             None,
             None,
+            Some(&notice_token),
         );
         if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
@@ -887,6 +903,7 @@ async fn execute_job(
             memory_mode.as_ref(),
             None,
             None,
+            Some(&notice_token),
         );
         if which::which("claude").is_err() && which::which("claude-bun").is_err() {
             tracing::error!(job = %job_name, "claude binary not found in PATH");

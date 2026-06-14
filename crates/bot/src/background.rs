@@ -252,6 +252,17 @@ async fn build_background_command(
     crate::cc::invocation::guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)
         .map_err(|e| format!("{e:#}"))?;
 
+    // Per-agent notice token for the trusted `## Platform Notice Token` prompt
+    // section, so the agent can verify SYSTEM_NOTICE markers.
+    let notice_token = {
+        let conn = right_db::open_connection(agent_dir, false)
+            .await
+            .map_err(|e| format!("open DB for notice token: {e:#}"))?;
+        right_mcp::credentials::get_or_create_notice_token(&conn)
+            .await
+            .map_err(|e| format!("fetch notice token: {e:#}"))?
+    };
+
     if let Some(ssh_config) = ssh_config_path {
         let Some(sandbox_name) = resolved_sandbox else {
             return Err("resolved sandbox missing for sandboxed background run".to_string());
@@ -267,6 +278,7 @@ async fn build_background_command(
             memory_mode.as_ref(),
             None,
             None,
+            Some(&notice_token),
         );
         if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
@@ -303,6 +315,7 @@ async fn build_background_command(
             memory_mode.as_ref(),
             None,
             None,
+            Some(&notice_token),
         );
         let mut cmd = tokio::process::Command::new("bash");
         cmd.arg("-c");

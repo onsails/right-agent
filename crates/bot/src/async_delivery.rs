@@ -1090,6 +1090,7 @@ async fn deliver_through_session(
             memory_mode.as_ref(),
             None,
             None,
+            None,
         );
         if let Some(token) = crate::login::load_auth_token(agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
@@ -1116,6 +1117,7 @@ async fn deliver_through_session(
             &claude_args,
             mcp_instructions.as_deref(),
             memory_mode.as_ref(),
+            None,
             None,
             None,
         );
