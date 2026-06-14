@@ -1989,3 +1989,35 @@ async fn clear_triggered_at_wipes_all_transient_fields() {
     assert_eq!(j.trigger_origin_thread_id, None);
     assert!(!j.trigger_force_notify);
 }
+
+#[tokio::test]
+async fn list_specs_includes_linked_skills() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "linked-job", "17 9 * * *", "do stuff", None, None)
+        .await
+        .unwrap();
+    crate::cron_skill_link::link_auto(&conn, "linked-job", &["rightx-a".to_string()])
+        .await
+        .unwrap();
+
+    let output = list_specs(&conn).await.unwrap();
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
+    assert_eq!(parsed.len(), 1);
+    let linked = parsed[0]["linked_skills"].as_array().unwrap();
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].as_str().unwrap(), "rightx-a");
+}
+
+#[tokio::test]
+async fn list_specs_linked_skills_empty_when_none() {
+    let (_dir, conn) = setup_db().await;
+    create_spec(&conn, "plain-job", "17 9 * * *", "no links", None, None)
+        .await
+        .unwrap();
+
+    let output = list_specs(&conn).await.unwrap();
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
+    assert_eq!(parsed.len(), 1);
+    let linked = parsed[0]["linked_skills"].as_array().unwrap();
+    assert!(linked.is_empty());
+}
