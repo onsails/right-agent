@@ -148,6 +148,8 @@ Stdin is either plain text or YAML with a `messages:` root key. The chat and par
 
 Write files to `outbox/` and list them in your JSON reply's `attachments` array. Size caps (enforced by the bot): photos 10MB; documents, videos, audio, voice, animations 50MB. If you need to send larger data, split or change format.
 
+`content` and an attachment `caption` are delivered as SEPARATE messages — putting the same text in both sends it twice. To send an illustrated post as one message, set `content: null` and put the text in the photo's `caption`. Otherwise put the text in `content` and leave attachments without a caption (or give a short, distinct one).
+
 To send several standalone messages in one turn, call `mcp__right__send_message` once per message (text and/or attachments); the terminal reply may then be `content: null`. Do not retry the terminal structured reply to emit multiple messages.
 
 ### Media Groups (Albums)

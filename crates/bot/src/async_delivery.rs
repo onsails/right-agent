@@ -202,7 +202,7 @@ You are delivering a cron job result to the user.
 The `content` field below is the FINAL user-facing message — send it VERBATIM in your response.
 Do NOT summarize, rephrase, or omit any part of the content.
 You MAY prepend a short contextual intro (1 sentence max) if recent conversation was on a different topic, so the message feels natural.
-Ignore the attachments field — attachments are sent separately.
+Re-emit any attachments from the report in your reply's `attachments` array. `content` and an attachment `caption` are delivered as SEPARATE messages — never repeat the content text in a caption.
 
 Here is the YAML report of the cron job:
 ";
@@ -227,7 +227,7 @@ You are delivering a background task result to the user.
 The `content` field below is the FINAL user-facing message - send it VERBATIM in your response.
 Do NOT summarize, rephrase, or omit any part of the content.
 You MAY prepend a short contextual intro (1 sentence max) if recent conversation was on a different topic, so the message feels natural.
-Ignore the attachments field - attachments are sent separately.
+Re-emit any attachments from the report in your reply's `attachments` array. `content` and an attachment `caption` are delivered as SEPARATE messages - never repeat the content text in a caption.
 
 Here is the YAML report of the background task:
 ";
@@ -1894,7 +1894,7 @@ mod tests {
         // Instruction prefix assertions
         assert!(output.starts_with("You are delivering a cron job result"));
         assert!(output.contains("VERBATIM"));
-        assert!(output.contains("attachments are sent separately"));
+        assert!(output.contains("never repeat the content text in a caption"));
         assert!(output.contains("Here is the YAML report of the cron job:"));
         // YAML content assertions
         assert!(output.contains("job: \"health-check\""));
