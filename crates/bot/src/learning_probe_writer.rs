@@ -290,6 +290,7 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
     let chat_id = ctx.chat_id;
     let thread_id = ctx.thread_id;
     let invocation_id = active_invocation.invocation_id().to_owned();
+    let origin_cron_job = anchor.origin_cron_job.clone();
     tokio::spawn(async move {
         let mut tail = String::new();
         let drain = async {
@@ -337,6 +338,11 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
                 tracing::warn!(agent = %agent_name, "probe-writer usage insert failed: {e:#}");
             }
             record_probe_writer_spend(&conn, &agent_name, &invocation_id, &b).await;
+            if let Some(job) = origin_cron_job.as_deref()
+                && let Err(e) = link_cron_authored(&conn, job, &invocation_id).await
+            {
+                tracing::warn!(agent = %agent_name, job = %job, "cron auto-link failed: {e:#}");
+            }
         }
 
         active_invocation.cleanup().await;
@@ -392,6 +398,25 @@ async fn record_probe_writer_spend(
         Ok(None) => {}
         Err(e) => tracing::warn!(agent = %agent_name, "probe-writer finish lookup failed: {e:#}"),
     }
+}
+
+/// Auto-link the skills authored under `invocation_id` to the originating cron.
+/// Returns the number of skills linked. Shared by the async probe-writer tail
+/// and the inline cron seam.
+pub(crate) async fn link_cron_authored(
+    conn: &right_db::Connection,
+    job: &str,
+    invocation_id: &str,
+) -> Result<usize, right_db::DbError> {
+    let authored: Vec<String> =
+        right_agent::learned_skills::successful_finishes_for_invocation(conn, invocation_id)
+            .await?
+            .into_iter()
+            .map(|(name, _status)| name)
+            .collect();
+    let n = authored.len();
+    right_agent::cron_skill_link::link_auto(conn, job, &authored).await?;
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -566,6 +591,33 @@ mod tests {
         assert!(
             !observed,
             "silent probe-writer child should not hold the session lock forever"
+        );
+    }
+
+    #[tokio::test]
+    async fn link_cron_authored_links_created_and_patched() {
+        let (_t, c) = right_db::test_support::migrated_connection().await;
+        c.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
+             VALUES ('j','17 9 * * *','x',2.0,'t','t')",
+            (),
+        )
+        .await
+        .unwrap();
+        c.execute(
+            "INSERT INTO skill_learning_events (invocation_id, agent_name, action, skill_name, phase, status, created_at) \
+             VALUES ('inv','a','create','rightx-a','finish','created','t')",
+            (),
+        )
+        .await
+        .unwrap();
+        let n = link_cron_authored(&c, "j", "inv").await.unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            right_agent::cron_skill_link::list_for_job(&c, "j")
+                .await
+                .unwrap(),
+            vec!["rightx-a".to_string()]
         );
     }
 }
