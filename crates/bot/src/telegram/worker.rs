@@ -2273,34 +2273,22 @@ pub fn spawn_worker(
                     let gate_release =
                         BgHandoffGateRelease::new(Arc::clone(&ctx.bg_handoff_gates), key);
 
-                    let run_id_result = {
-                        match right_db::open_connection(&ctx.agent_dir, false).await {
-                            Ok(conn) => {
-                                create_background_run(
-                                    &conn,
-                                    chat_id,
-                                    eff_thread_id,
-                                    &main_session_id,
-                                )
-                                .await
-                            }
-                            Err(e) => {
-                                tracing::error!(?key, "DB open for bg run create failed: {e:#}");
-                                Err("database unavailable".to_string())
-                            }
-                        }
-                    };
-                    let run_id = match run_id_result {
-                        Ok(run_id) => run_id,
+                    // Open one connection for both the notice token and the run
+                    // row. Fetch the token BEFORE creating the run so a token
+                    // failure leaves no orphaned `queued` async_runs row (which
+                    // a later bot startup would reap and report as a spurious
+                    // "interrupted" failure to the user).
+                    let conn = match right_db::open_connection(&ctx.agent_dir, false).await {
+                        Ok(conn) => conn,
                         Err(e) => {
-                            tracing::error!(?key, "background run create failed: {e}");
+                            tracing::error!(?key, "DB open for bg handoff failed: {e:#}");
                             send_error_to_telegram(
                                 &ctx,
                                 tg_chat_id,
                                 eff_thread_id,
                                 &format!(
                                     "\u{26a0}\u{fe0f} Failed to start background work: {}",
-                                    html_escape(&e)
+                                    html_escape("database unavailable")
                                 ),
                             )
                             .await;
@@ -2309,17 +2297,39 @@ pub fn spawn_worker(
                     };
 
                     // Per-agent notice token for unforgeable SYSTEM_NOTICE markers.
-                    let notice_token_result =
-                        match right_db::open_connection(&ctx.agent_dir, false).await {
-                            Ok(conn) => right_mcp::credentials::get_or_create_notice_token(&conn)
-                                .await
-                                .map_err(|e| format!("fetch notice token: {e:#}")),
-                            Err(e) => Err(format!("open DB for notice token: {e:#}")),
+                    let notice_token =
+                        match right_mcp::credentials::get_or_create_notice_token(&conn).await {
+                            Ok(token) => token,
+                            Err(e) => {
+                                tracing::error!(
+                                    ?key,
+                                    "background notice token fetch failed: {e:#}"
+                                );
+                                send_error_to_telegram(
+                                    &ctx,
+                                    tg_chat_id,
+                                    eff_thread_id,
+                                    &format!(
+                                        "\u{26a0}\u{fe0f} Failed to start background work: {}",
+                                        html_escape("notice token unavailable")
+                                    ),
+                                )
+                                .await;
+                                continue;
+                            }
                         };
-                    let notice_token = match notice_token_result {
-                        Ok(token) => token,
+
+                    let run_id = match create_background_run(
+                        &conn,
+                        chat_id,
+                        eff_thread_id,
+                        &main_session_id,
+                    )
+                    .await
+                    {
+                        Ok(run_id) => run_id,
                         Err(e) => {
-                            tracing::error!(?key, "background notice token fetch failed: {e}");
+                            tracing::error!(?key, "background run create failed: {e}");
                             send_error_to_telegram(
                                 &ctx,
                                 tg_chat_id,

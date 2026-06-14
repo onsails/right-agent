@@ -250,14 +250,14 @@ pub(crate) fn render_delivery_header(pending: &PendingAsyncResult) -> String {
     } else {
         "✓"
     };
-    let label = pending
-        .producer_ref
-        .as_deref()
-        .unwrap_or(if pending.kind == "background" {
-            "background task"
-        } else {
-            "cron"
-        });
+    // Background runs always carry `producer_ref = "background"` (a raw slug);
+    // present the friendly label instead. Cron runs use the spec name as-is,
+    // falling back to "cron" only if absent.
+    let label = match pending.producer_ref.as_deref() {
+        _ if pending.kind == "background" => "background task",
+        Some(name) => name,
+        None => "cron",
+    };
     let label = crate::cc::markdown_utils::html_escape(label);
     let status_word = if pending.status == "failed" {
         "failed"
@@ -1261,9 +1261,24 @@ async fn deliver_through_session(
         if let Some(t) = target_thread_id {
             send = send.message_thread_id(ThreadId(MessageId(t as i32)));
         }
-        run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, send)
-            .await?
-            .map_err(|e| format!("telegram header send failed: {e:#}"))?;
+        if let Err(e) =
+            run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, send).await?
+        {
+            // Degrade gracefully like the body path: don't let a header HTML
+            // rejection sink an otherwise-deliverable attachments-only payload.
+            tracing::warn!(
+                chat_id = target_chat_id,
+                "async delivery: header HTML send failed, retrying plain: {e:#}"
+            );
+            let plain = strip_html_tags(header);
+            let mut fallback = bot.send_message(chat_id, &plain);
+            if let Some(t) = target_thread_id {
+                fallback = fallback.message_thread_id(ThreadId(MessageId(t as i32)));
+            }
+            run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, fallback)
+                .await?
+                .map_err(|e2| format!("telegram header send failed; html: {e:#}; plain: {e2:#}"))?;
+        }
         report.text_messages_sent += 1;
     }
 
@@ -2526,6 +2541,17 @@ mod tests {
     #[test]
     fn header_background_label_fallback() {
         let p = test_pending("background", "success", None, false);
+        assert_eq!(
+            render_delivery_header(&p),
+            "✓ <b>background task</b> · success"
+        );
+    }
+
+    #[test]
+    fn header_background_slug_normalized() {
+        // Real background runs carry `producer_ref = Some("background")`; the raw
+        // slug must not surface — present "background task" instead.
+        let p = test_pending("background", "success", Some("background"), false);
         assert_eq!(
             render_delivery_header(&p),
             "✓ <b>background task</b> · success"

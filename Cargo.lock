@@ -3750,6 +3750,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "axum",
+ "base64",
  "chrono",
  "cron",
  "dashmap",

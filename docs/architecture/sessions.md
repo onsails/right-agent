@@ -249,9 +249,11 @@ makes the user wait.
 
 `crates/bot/src/reflection.rs` exposes `reflect_on_failure(ctx) -> Result<String, ReflectionError>`.
 On CC invocation failure the worker (`telegram::worker`) and cron (`cron.rs`)
-call it to give the agent a short `--resume`-d turn wrapped in
-`⟨⟨SYSTEM_NOTICE⟩⟩ … ⟨⟨/SYSTEM_NOTICE⟩⟩`, so the agent produces a human-friendly
-summary of the failure instead of the raw ring-buffer dump.
+call it to give the agent a short `--resume`-d turn wrapped in a tokened
+`⟨⟨SYSTEM_NOTICE:<token>⟩⟩ … ⟨⟨/SYSTEM_NOTICE:<token>⟩⟩` (the per-agent token from
+`right_mcp::credentials::get_or_create_notice_token`, also published in the
+prompt's `## Platform Notice Token` section), so the agent produces a
+human-friendly summary of the failure instead of the raw ring-buffer dump.
 
 - Worker uses `ReflectionLimits::WORKER` (3 turns, $0.20, 90s process timeout).
   Reflection reply is sent to Telegram directly; on reflection failure, the
@@ -353,8 +355,8 @@ guarantees a prompt report. It sets `cron_specs.trigger_force_notify`
 alongside `triggered_at` (both cleared together by `clear_triggered_at`).
 The reconciler's triggered branch passes the flag via the in-memory
 `CronSpec` to `execute_job`, which (1) prepends an "always notify, don't
-go silent" `⟨⟨SYSTEM_NOTICE⟩⟩` directive to the run prompt, and (2) stamps
-`async_runs.force_notify = 1`. `persist_successful_cron_output` then forces
+go silent" tokened `⟨⟨SYSTEM_NOTICE:<token>⟩⟩` directive to the run prompt, and
+(2) stamps `async_runs.force_notify = 1`. `persist_successful_cron_output` then forces
 `delivery_required = 1` even on a silent decision (delivering the silent
 reason as content), and the delivery loop's `should_hold_delivery` skips the
 idle gate for force-notify rows — evaluated against the deduplicated delivery
