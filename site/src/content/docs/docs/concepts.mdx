@@ -1,0 +1,50 @@
+---
+title: Concepts
+description: How agents, sandboxes, memory, and learned skills fit together.
+---
+
+## One bot per agent
+
+You talk to an agent in Telegram. Each surface, a dm, a group, or a forum topic
+inside a group, is its own Claude Code session, keyed by chat and thread. All
+sessions share one chat-tagged memory, so separate working contexts still
+remember the same things about you. In groups the agent stays quiet until you
+mention or reply to it.
+
+## Every agent in its own sandbox
+
+Each agent gets a persistent OpenShell sandbox with its own filesystem
+(landlock), its own scoped network, and a tls-terminating proxy. A misbehaving
+agent cannot reach the host, the other agents, or arbitrary networks. Sandboxes
+persist: they live as long as the agent and survive restarts.
+
+## Credentials stay outside the box
+
+mcp tokens and provider keys live on the host. The sandbox sees opaque
+placeholders that the outbound proxy substitutes on each request. The secret
+bytes never enter the sandbox, and the proxy never resolves them onto the open
+internet. A compromised agent can misuse a tool while it runs, but it cannot read
+the credential.
+
+## Memory it can trust
+
+Memory persists across sessions and chats. It runs on Hindsight by default, with
+an agent-managed `MEMORY.md` file mode as fallback. Recall shows when each memory
+formed and lets the model judge relevance, with no hidden staleness thresholds.
+Memory is treated as untrusted data: incoming memories are sanitized, and
+recalled memory is framed so the model weighs it as information, not commands.
+
+## Skills it learns on its own
+
+When the agent works something out during real use, an api quirk or a multi-step
+workflow, a per-turn pipeline captures it into a reusable skill and loads it in
+later sessions. The platform records what each skill costs and how often it runs,
+a curator prunes the ones that do not earn their keep, and you pin or unpin
+skills from the dashboard.
+
+## A dashboard inside Telegram
+
+`/mcp` and `/providers` open a Mini App dashboard with views for health,
+activity, identity, learned skills, and usage with cost. All management is
+proxied to the bot's control plane, and secret inputs are write-only. You never
+hand-edit config or credential files.
