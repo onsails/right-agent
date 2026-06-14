@@ -818,6 +818,7 @@ mod tests {
             wall_elapsed_ms: 0,
             used_skill_receipts: Vec::new(),
             learning_invocation_id: None,
+            origin_cron_job: None,
         }
     }
 

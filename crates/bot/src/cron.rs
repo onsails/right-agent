@@ -1276,6 +1276,7 @@ async fn execute_job(
                                         // acceptable for v1.
                                         used_skill_receipts: Vec::new(),
                                         learning_invocation_id: cron_invocation_id.clone(),
+                                        origin_cron_job: Some(job_name.to_owned()),
                                     };
                                     let learn_ctx = crate::learning_pipeline::PostTurnLearningCtx {
                                         agent_dir: agent_dir.to_path_buf(),
