@@ -1307,6 +1307,21 @@ async fn execute_job(
                                         crate::learning_pipeline::run_post_turn(learn_ctx, anchor)
                                             .await;
                                     });
+                                    // Inline authoring runs under cron_invocation_id
+                                    // (created_by='cron') and the async pipeline skips it
+                                    // (authored_skill_this_turn); link those skills here.
+                                    // Probe-writer-authored skills use a different
+                                    // invocation_id and are linked in the async seam, so
+                                    // no double-linking. No-op when nothing was authored.
+                                    if let Some(inv) = cron_invocation_id.as_deref()
+                                        && let Err(e) =
+                                            crate::learning_probe_writer::link_cron_authored(
+                                                &conn, job_name, inv,
+                                            )
+                                            .await
+                                    {
+                                        tracing::warn!(job = %job_name, "cron inline auto-link failed: {e:#}");
+                                    }
                                 }
                             }
                             Err(e) => {
