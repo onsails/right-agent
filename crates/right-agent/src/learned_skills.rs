@@ -131,6 +131,22 @@ pub async fn finish_event_for_invocation(
     .optional()
 }
 
+/// All (skill_name, status) finish rows with a create/patch status for an
+/// invocation. Plural sibling of `successful_finish_exists`.
+pub async fn successful_finishes_for_invocation(
+    conn: &Connection,
+    invocation_id: &str,
+) -> Result<Vec<(String, String)>, DbError> {
+    conn.query_all(
+        "SELECT skill_name, status FROM skill_learning_events \
+         WHERE invocation_id = ?1 AND phase = 'finish' AND status IN ('created','updated') \
+         ORDER BY id",
+        [invocation_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +279,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hint_outcome.as_deref(), Some("refused"));
+    }
+
+    #[tokio::test]
+    async fn successful_finishes_returns_created_and_updated() {
+        let (_t, c) = conn().await;
+        for (skill, status) in [
+            ("rightx-a", "created"),
+            ("rightx-b", "updated"),
+            ("rightx-c", "aborted"),
+        ] {
+            insert_learning_event(
+                &c,
+                &LearningEvent {
+                    invocation_id: "inv1".to_owned(),
+                    skill_name: skill.to_owned(),
+                    status: Some(match status {
+                        "created" => LearningStatus::Created,
+                        "updated" => LearningStatus::Updated,
+                        _ => LearningStatus::Aborted,
+                    }),
+                    ..learning_event("inv1", LearningPhase::Finish, None)
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let mut got = successful_finishes_for_invocation(&c, "inv1")
+            .await
+            .unwrap();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("rightx-a".to_string(), "created".to_string()),
+                ("rightx-b".to_string(), "updated".to_string()),
+            ]
+        );
     }
 
     #[tokio::test]
