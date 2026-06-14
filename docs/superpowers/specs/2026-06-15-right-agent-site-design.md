@@ -26,7 +26,12 @@ not in v1.
   pulls in a separate Python+Rust toolchain). The deciding factor: the more
   custom the brand, the less a docs theme's built-in aesthetic helps, and the
   more a component model pays off. Right Agent's brand is highly custom.
-- **Hosting:** GitHub Pages, deployed by a GitHub Actions workflow.
+- **Hosting:** GitHub Pages, deployed by a GitHub Actions workflow that replaces
+  the existing `static.yml` (today it publishes the whole repo to Pages; two
+  Pages workflows would fight over the `pages` concurrency group).
+- **Toolchain:** Bun as package manager and script runner. `nodejs` stays
+  available as a fallback for `astro build` if Bun trips on `sharp` image
+  optimization. Provisioned through a devenv `site` profile, not the base shell.
 - **URL:** project page `https://onsails.github.io/right-agent/`, so Astro runs
   with `base: '/right-agent'`. A future custom domain is a one-line config change
   plus a `CNAME`.
@@ -60,7 +65,7 @@ one product.
 site/
   astro.config.mjs          # site + base, starlight() integration, sitemap
   package.json
-  pnpm-lock.yaml
+  bun.lock
   tsconfig.json
   public/                   # favicon, og-image (CNAME later, if a domain is added)
   src/
@@ -82,10 +87,13 @@ site/
         security.mdx        # moved from docs/SECURITY.md
         commands.mdx        # new (slash-command reference)
     content.config.ts       # Starlight docs collection schema
-.github/workflows/site.yml  # build and deploy to GitHub Pages (separate from build.yml)
+nix/site/devenv.nix         # devenv module defining the `site` profile (bun, scripts)
+devenv.yaml                 # gains: imports: [ ./nix/site ]
+.github/workflows/static.yml # REPLACED: builds Astro and deploys site/dist
 ```
 
-The Rust `build.yml` workflow is untouched. The site gets its own `site.yml`.
+The Rust `build.yml` workflow is untouched. The site rewrites the existing
+`static.yml` rather than adding a second Pages workflow.
 
 ## Content scope
 
@@ -197,21 +205,60 @@ claims against the code and docs before stating them. Migrated docs keep their
 substance; only reformat them into MDX and fix links, do not rewrite their
 meaning.
 
+## devenv integration (profile)
+
+Site tooling does not enter the base devenv shell. It lives in a devenv
+**profile** named `site`, defined in its own module file so the base `devenv.nix`
+stays Rust-focused.
+
+- `devenv.yaml` gains `imports: [ ./nix/site ]`.
+- `nix/site/devenv.nix` defines the profile. A profile module that uses `pkgs` is
+  written as a function. Exact form is confirmed at the scaffold baseline:
+
+  ```nix
+  { ... }:
+  {
+    profiles.site.module = { pkgs, ... }: {
+      packages = [ pkgs.bun pkgs.nodejs ];   # bun primary, node = astro build fallback
+      scripts.site-dev.exec   = ''cd "$DEVENV_ROOT/site" && bun run dev'';
+      scripts.site-build.exec = ''cd "$DEVENV_ROOT/site" && bun run build'';
+    };
+  }
+  ```
+
+- Activate with `devenv --profile site shell` (`-P site`). The base
+  `devenv shell` (Rust) carries neither Bun nor the site scripts.
+- The base `devenv.nix` already lists `nodejs` and `pnpm`, and grep finds no
+  local consumer, so they are pre-existing dead weight. This work does not delete
+  them (pre-existing, not made unused by this change); the `site` profile is
+  self-contained regardless. Dropping base `nodejs`/`pnpm` is a separate cleanup
+  the user decides on.
+- Fallback if an imported module cannot contribute `profiles.site` cleanly in
+  devenv 2.1.2: define `profiles.site` in the root `devenv.nix`. Either way the
+  profile keeps site tooling out of the base packages list.
+
 ## Build, deploy, verification
 
-- **Package manager:** pnpm.
-- **Deploy workflow (`site.yml`):** trigger on push to `master` touching
-  `site/**`; set up node and pnpm; run `astro build` with the configured `base`;
-  upload `site/dist` with `actions/upload-pages-artifact`; deploy with
-  `actions/deploy-pages`. Set the GitHub Pages source to GitHub Actions.
+- **Package manager and runner:** Bun (`bun install`, `bun run`). Lockfile
+  `bun.lock`, committed.
+- **Deploy workflow:** rewrite the existing `.github/workflows/static.yml`, do
+  not add a second Pages workflow. Keep its `permissions` and `concurrency: pages`.
+  Run inside devenv via `onsails/nix-action` (matching `tests.yml`), so Bun is
+  pinned by Nix rather than a separate `setup-bun`:
+  `devenv --profile site shell -- bash -lc 'cd site && bun install --frozen-lockfile && bun run build'`.
+  Then `actions/upload-pages-artifact` with `path: site/dist` and
+  `actions/deploy-pages`. Trigger on push to `master` (optionally path-filtered to
+  `site/**`, `nix/site/**`, and the migrated docs).
 - **Verification is the site's own, separate from the Rust workspace** (the site
-  touches no Rust crates, so cargo is not involved):
-  - `astro build` succeeds.
+  touches no Rust crates, so cargo and `enterTest` are not involved):
+  - `astro build` succeeds under Bun (scaffold baseline; if `sharp` fails under
+    Bun, run the build step under node and record it).
   - `astro check` passes (types).
   - Broken-link validation across the build output (for example the
     `starlight-links-validator` plugin, plus a link check over `dist` for the
     landing), so the rewritten README and cross-page links resolve.
   - Starlight's Pagefind search index builds.
+  - `devenv --profile site shell` activates and exposes `bun` (profile sanity).
   - Lighthouse and visual polish are manual and iterative.
 
 ## Defaults accepted (switchable later)
@@ -219,7 +266,9 @@ meaning.
 - No custom domain: `base: '/right-agent'`. Adding a domain is one config line
   plus a `CNAME`.
 - GitHub Security tab preserved by a two-line root `SECURITY.md` pointer.
-- pnpm as the package manager.
+- Bun as package manager and runner, in a `site` devenv profile, with `nodejs`
+  retained as the `astro build` fallback.
+- Pre-existing base `nodejs`/`pnpm` left in place (flagged, not deleted).
 
 ## Risks and notes
 
@@ -227,6 +276,13 @@ meaning.
   under `/right-agent`. Use Astro's link and asset helpers rather than hardcoded
   absolute paths, and verify the deployed site, not just the local dev server
   (the dev server can mask base-path mistakes).
+- **Bun and Astro build.** Astro's best-tested runtime is node; the main risk is
+  `sharp` image optimization under Bun. Mitigation is built in: node ships in the
+  `site` profile, so the build step can fall back to node. The scaffold baseline
+  build under Bun is the gate.
+- **devenv profile in an imported module.** Confirm at scaffold that
+  `devenv --profile site shell` activates the profile defined in
+  `nix/site/devenv.nix`. Fallback: define the profile in the root `devenv.nix`.
 - **Starlight and custom landing coexistence.** The custom `index.astro` owns the
   root route while Starlight owns the docs routes. Confirm the mounting during
   implementation (custom index plus docs under `/docs`).
