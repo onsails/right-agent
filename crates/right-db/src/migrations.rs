@@ -35,8 +35,9 @@ const V39_SCHEMA: &str = include_str!("sql/v39_error_details.sql");
 const V40_SCHEMA: &str = include_str!("sql/v40_forum_topics.sql");
 const V43_SCHEMA: &str = include_str!("sql/v43_thread_focus.sql");
 const V44_SCHEMA: &str = include_str!("sql/v44_skill_lifecycle_cron.sql");
+const V46_NOTICE_TOKEN: &str = include_str!("sql/v46_notice_token.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 45;
+pub const LATEST_SCHEMA_VERSION: u32 = 46;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -1080,6 +1081,11 @@ pub static MIGRATIONS: Migrations = Migrations {
             sql: "",
             hook: Some(v45_cron_trigger_transient),
         },
+        Migration {
+            version: 46,
+            sql: V46_NOTICE_TOKEN,
+            hook: None,
+        },
     ],
 };
 
@@ -1580,6 +1586,20 @@ mod tests {
             result.is_err(),
             "partial unique index should prevent two active sessions"
         );
+    }
+
+    #[tokio::test]
+    async fn v46_creates_notice_token_table() {
+        let mut conn = Connection::open_in_memory().await.unwrap();
+        MIGRATIONS.to_version(&mut conn, 46).await.unwrap();
+        conn.execute("INSERT INTO notice_token (token) VALUES ('abc')", [])
+            .await
+            .unwrap();
+        let t: String = conn
+            .query_one("SELECT token FROM notice_token LIMIT 1", (), |r| r.get(0))
+            .await
+            .unwrap();
+        assert_eq!(t, "abc");
     }
 
     #[tokio::test]
