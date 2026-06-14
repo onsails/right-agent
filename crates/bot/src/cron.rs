@@ -188,12 +188,14 @@ fn effective_lock_ttl(spec: &CronSpec) -> &str {
 }
 
 /// Compose a triggered run's prompt: force-notify notice, then this-run-only
-/// extra instruction, then the stored prompt. Each layer is optional.
+/// extra instruction, then the stored prompt, then linked-skills directive.
+/// Each layer is optional.
 fn compose_run_prompt(
     prompt: &str,
     force_notify: bool,
     extra_instruction: Option<&str>,
     notice_token: &str,
+    linked_skills: &[String],
 ) -> String {
     let mut out = String::new();
     if force_notify {
@@ -212,6 +214,11 @@ fn compose_run_prompt(
         out.push_str("\n\n");
     }
     out.push_str(prompt);
+    if !linked_skills.is_empty() {
+        out.push_str("\n\n## Linked skills\nLinked skills for this job — use them via the Skill tool as appropriate: ");
+        out.push_str(&linked_skills.join(", "));
+        out.push('\n');
+    }
     out
 }
 
@@ -784,11 +791,20 @@ async fn execute_job(
         }
     };
 
+    // Read-path fallback: a link-lookup failure must not block the cron run.
+    let linked_skills = right_agent::cron_skill_link::list_live_for_job(&conn, job_name)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(job = %job_name, "linked-skills lookup failed: {e:#}");
+            Vec::new()
+        });
+
     let prompt_for_cc = compose_run_prompt(
         &spec.prompt,
         spec.trigger_force_notify,
         spec.trigger_extra_instruction.as_deref(),
         &notice_token,
+        &linked_skills,
     );
 
     let invocation = crate::cc::invocation::ClaudeInvocation {
@@ -2864,7 +2880,7 @@ mod tests {
 
     #[test]
     fn compose_run_prompt_orders_force_notify_then_extra_then_prompt() {
-        let p = compose_run_prompt("BODY", true, Some("focus on X"), "tok123");
+        let p = compose_run_prompt("BODY", true, Some("focus on X"), "tok123", &[]);
         let fn_idx = p.find("Manual verification trigger").unwrap();
         let extra_idx = p.find("focus on X").unwrap();
         let body_idx = p.find("BODY").unwrap();
@@ -2873,12 +2889,26 @@ mod tests {
         assert!(p.contains("SYSTEM_NOTICE:tok123"));
 
         // No force-notify, no extra -> body unchanged.
-        assert_eq!(compose_run_prompt("BODY", false, None, "tok123"), "BODY");
+        assert_eq!(
+            compose_run_prompt("BODY", false, None, "tok123", &[]),
+            "BODY"
+        );
 
         // Extra only.
-        let e = compose_run_prompt("BODY", false, Some("X"), "tok123");
+        let e = compose_run_prompt("BODY", false, Some("X"), "tok123", &[]);
         assert!(e.contains("X") && e.ends_with("BODY"));
         assert!(e.contains("SYSTEM_NOTICE:tok123"));
+    }
+
+    #[test]
+    fn compose_run_prompt_appends_linked_skills_when_present() {
+        let skills = vec!["rightx-a".to_string(), "rightx-b".to_string()];
+        let with = compose_run_prompt("BODY", false, None, "tok123", &skills);
+        assert!(with.contains("## Linked skills"));
+        assert!(with.contains("rightx-a, rightx-b"));
+
+        let without = compose_run_prompt("BODY", false, None, "tok123", &[]);
+        assert!(!without.contains("## Linked skills"));
     }
 
     #[test]
