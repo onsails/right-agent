@@ -278,9 +278,8 @@ Adding more hot-reloadable fields requires extending the two-stage diff in
 
 Adding a new learning-adjacent invocation requires extending
 `right_agent::usage::LEARNING_SOURCES` so both the budget gate and the
-dashboard `SOURCES` array pick it up; the dashboard test
-(`usage_overview_sources_match_learning_sources_constant`) enforces sync
-via a dev-dep cross-crate assertion.
+dashboard `SOURCES` array pick it up (enforced by a dev-dep cross-crate
+assertion in the dashboard tests).
 
 The per-turn pipeline runs from two call sites through the shared
 `bot::learning_pipeline::run_post_turn`: foreground `Normal` turns and
@@ -298,20 +297,20 @@ transitions skip pinned rows. The dashboard is the only operator
 pin/unpin surface — do not add CLI pinning.
 
 The prefilter and probe-writer skill index is read from inside the sandbox
-(`/sandbox/.claude/skills/rightx-*`) via gRPC `exec_in_sandbox`; the host
-path is used only for `sandbox: mode: none` agents. A prefilter
-skill-index read error returns `Skip`, never an empty index (an empty
-index would allow the classifier to recommend creating a skill that
-already exists).
+(`/sandbox/.claude/skills/rightx-*`) via gRPC `exec_in_sandbox`; host path
+only for `sandbox: mode: none`. A prefilter skill-index read error returns
+`Skip`, never an empty index — empty would let the classifier recommend
+creating a skill that already exists.
 
 Per-skill learning cost and cache are recorded in `data.db.skill_spend`
 (kinds `create`/`patch`/`maintain`/`usage`), separate from `usage_events`;
 budget-blocked attempts are counted in `data.db.learning_skip`
-(`reason='budget'`, `intended_kind` always NULL because the classifier
-does not run when budget is exhausted).
+(`reason='budget'`, `intended_kind` always NULL — classifier doesn't run).
 
-See: `docs/architecture/learning.md` for the full pipeline, gate
-ordering, spend ledger details, and removed Stage 2 paths.
+`cron_skill_links` is the only reliable cron→skill provenance carrier
+(`created_by` can't express it); link MCP tools resolve scope server-side,
+multi-row writes share one transaction, deletion cascades via `delete_spec`.
+See `docs/architecture/learning.md` for pipeline, spend ledger, and cron↔skill linking.
 
 ### Memory
 

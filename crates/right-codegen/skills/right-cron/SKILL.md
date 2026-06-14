@@ -5,7 +5,7 @@ description: >-
   and deletes cron specs stored in the agent database. The Rust runtime handles
   scheduling and execution automatically. Use when the user mentions cron
   jobs, scheduled tasks, reminders, one-shot tasks, or recurring tasks.
-version: 3.6.0
+version: 3.7.0
 ---
 
 # /right-cron -- Cron Job Manager
@@ -107,6 +107,22 @@ a cron's procedure is non-trivial, capture it as a `rightx-*` skill (see
 right-learn-skill) before creating the cron, then write the cron's "what". At
 fire time the cron loads the skill and executes.
 
+## Linking Skills to a Cron
+
+A cron can have one or more `rightx-*` skills **linked** to it. At fire time the
+runtime names the job's live linked skills as authoritative, so the cron pulls
+them deterministically instead of relying on description-matching.
+
+- **Automatic:** any skill a recurring cron's own runs create or patch is linked
+  to that cron automatically. You do not need to link those by hand.
+- **At creation:** pass `skill_names` to `cron_create` to link existing skills up
+  front (capture the skill first, then create the cron that uses it).
+- **For existing crons:** `mcp__right__cron_link_skill(job_name, skill_names=[...])`
+  links several at once; `mcp__right__cron_unlink_skill(job_name, skill_names=[...])`
+  removes them. (A skill the cron re-learns may be auto-linked again.)
+
+`mcp__right__cron_list` shows each job's `linked_skills`.
+
 ## Choosing the Model
 
 The session that creates a cron picks that cron's model by judging the task's
@@ -132,6 +148,12 @@ Pass `model: null` to clear it back to inheriting the agent's `/model`.
 ## Editing a Cron Job
 
 Use the `mcp__right__cron_update` MCP tool. Only pass the fields you want to change — unspecified fields keep their current values.
+
+**Evolve the prompt toward its skills.** Before `cron_update`-ing a prompt, check
+the job's `linked_skills` (`cron_list`). If the prompt still spells out "how" that
+a linked skill now covers, slim the prompt to the "what" and rely on the link —
+migrating a fat cron prompt toward a thin goal + skill references. Tell the user
+what you simplified; never rewrite silently.
 
 ```
 # Change only the prompt
@@ -244,6 +266,7 @@ Returns: job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at
 | `run_at` | string | Conditional | - | ISO8601 UTC datetime (e.g. `2026-04-15T15:30:00Z`). Fire once at this time, then auto-delete. Required if `schedule` not set. Mutually exclusive with `schedule`. |
 | `recurring` | boolean | No | `true` | If `false` with `schedule`, fires once at next match then auto-deletes. Ignored if `run_at` is set. |
 | `prompt` | string | Yes | - | The task prompt that Claude executes when the cron fires. |
+| `skill_names` | string[] | No | - | `cron_create` only. rightx-* skills to link at creation; pulled deterministically at fire time. Skills must already exist. |
 | `lock_ttl` | string | No | `30m` | Duration after which a lock is considered stale (e.g. `10m`, `1h`). |
 | `max_budget_usd` | number | No | `2.0` | Maximum dollar spend per invocation. Claude stops gracefully when budget is reached. |
 | `model` | enum | No | inherit | `haiku` \| `sonnet` \| `opus`. Picks the model for this cron by complexity (see "Choosing the Model"). Omit to inherit the agent's current `/model`. |
