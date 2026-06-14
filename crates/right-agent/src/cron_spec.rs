@@ -723,7 +723,7 @@ pub async fn delete_spec(
 
 /// List all cron specs as a JSON string.
 pub async fn list_specs(conn: &Connection) -> Result<String, String> {
-    let rows: Vec<serde_json::Value> = conn
+    let mut rows: Vec<serde_json::Value> = conn
         .query_all(
             "SELECT s.job_name, s.schedule, s.prompt, s.lock_ttl, s.max_budget_usd, \
                     s.created_at, s.updated_at, s.recurring, s.run_at, \
@@ -759,6 +759,20 @@ pub async fn list_specs(conn: &Connection) -> Result<String, String> {
         })
         .await
         .map_err(|e| format!("query failed: {e:#}"))?;
+
+    for entry in rows.iter_mut() {
+        if let Some(job) = entry.get("job_name").and_then(|v| v.as_str()) {
+            // unwrap_or_default is intentional here: list_specs is a read/diagnostic surface;
+            // a link-lookup error must not prevent listing cron jobs.
+            let links = crate::cron_skill_link::list_for_job(conn, job)
+                .await
+                .unwrap_or_default();
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("linked_skills".into(), serde_json::json!(links));
+            }
+        }
+    }
+
     serde_json::to_string_pretty(&rows).map_err(|e| format!("serialization error: {e:#}"))
 }
 
