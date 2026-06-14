@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod async_runs;
+pub mod cron_skill_link;
 pub mod cron_spec;
 pub mod doctor;
 pub mod identity_mirror;
