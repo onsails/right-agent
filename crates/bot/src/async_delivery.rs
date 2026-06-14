@@ -271,6 +271,16 @@ pub(crate) fn render_delivery_header(pending: &PendingAsyncResult) -> String {
     }
 }
 
+/// Join a platform header above the relayed body. Header is already HTML;
+/// body is the relay model's content (also HTML at the send site).
+pub(crate) fn prepend_delivery_header(header: &str, body: &str) -> String {
+    if body.trim().is_empty() {
+        header.to_string()
+    } else {
+        format!("{header}\n\n{body}")
+    }
+}
+
 /// Format a pending async result as YAML for the main CC session.
 ///
 /// The output begins with an instruction prefix selected by kind/status,
@@ -2480,5 +2490,17 @@ mod tests {
             render_delivery_header(&p),
             "✓ <b>a&lt;b&gt;&amp;c</b> · success"
         );
+    }
+
+    #[test]
+    fn prepend_header_separates_with_blank_lines() {
+        let out = prepend_delivery_header("✓ <b>job</b> · success", "body text");
+        assert_eq!(out, "✓ <b>job</b> · success\n\nbody text");
+    }
+
+    #[test]
+    fn prepend_header_handles_empty_body() {
+        let out = prepend_delivery_header("✓ <b>job</b> · success", "");
+        assert_eq!(out, "✓ <b>job</b> · success");
     }
 }
