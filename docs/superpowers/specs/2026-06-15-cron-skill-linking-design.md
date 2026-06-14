@@ -68,7 +68,8 @@ ethos.
   editing or reasoning about the cron (skill guidance + `cron_list` introspection).
   Rationale: the functional benefit is delivered immediately by auto-link + runtime
   directive; prompt slimming is token-only and non-urgent, so lazy evolution is
-  correct and churn-free. (A proactive nudge is a possible v2.)
+  correct and churn-free. (The proactive nudge is deferred to v2 — tracked in
+  **onsails/right-agent#128**.)
 - **No cron self-rewrite** mid-run.
 - **No dashboard linking surface** (the agent/MCP is the control plane for this
   feature per the user's scope).
@@ -89,8 +90,8 @@ directive makes safe.
 
 ## Data model
 
-New migration (next free version in `right_db::migrations::MIGRATIONS`, e.g.
-`v45_cron_skill_links.sql`), idempotent:
+New migration in `right_db::migrations::MIGRATIONS` — highest existing is `v46`,
+so this is `v47_cron_skill_links.sql` — idempotent:
 
 ```sql
 CREATE TABLE IF NOT EXISTS cron_skill_links (
@@ -176,8 +177,9 @@ changes, and no cross-crate transaction composition with `right-lifecycle`.
 - Inline seam and `cron_create` with N skills perform 2+ writes → wrap the upserts
   (and the adjacent spec write, for `cron_create`) in one immediate transaction.
 - Async seam: the `skill_spend` insert + the single link upsert → one transaction.
-- Cron deletion (both the `cron_delete` tool and the one-shot auto-delete in
-  `cron.rs`): `delete cron_specs` + `delete_for_job` → one transaction.
+- Cron deletion: fold `delete_for_job` into the shared `cron_spec::delete_spec`
+  (`cron_spec.rs:693`) transaction — both the `cron_delete` tool and the one-shot
+  auto-delete (`cron.rs:2065-2073`) route through it, so one change covers both.
 - Single-skill, single-statement upserts on their own need no transaction.
 
 ## Runtime surfacing
@@ -240,14 +242,14 @@ the anchor.)
 
 ## Lifecycle integrity
 
-- **Curator absorb** (`learning_curator.rs`): `redirect_skill(old → absorbed_into)`.
-  **Curator archive/retire**: links to archived skills are filtered out at runtime
-  (the `state != 'archived'` backstop), so strict atomicity is not required for
-  correctness; `drop_skill` on archive is an optional tidy-up. The runtime filter
-  is the safety net for any redirect miss (e.g. multi-hop absorb chains converge as
-  each absorb redirects).
-- **Cron deletion**: `delete_for_job` in the same transaction as the `cron_specs`
-  delete — both the `cron_delete` tool and the one-shot auto-delete path.
+- **Curator** (`learning_curator.rs:370`, after `archived_skill_names` is
+  computed): per archived skill, `redirect_skill(old → absorbed_into)` when
+  `absorbed_into` is set, else `drop_skill`. The runtime `state != 'archived'`
+  filter is the correctness backstop, so strict atomicity here is not required (it
+  also covers multi-hop absorb chains, which converge as each pass redirects).
+  Confirm `absorbed_into` population during execution.
+- **Cron deletion**: `delete_for_job` folded into the shared `cron_spec::delete_spec`
+  transaction (see Transaction rule) — covers tool + one-shot in one place.
 
 ## Edge cases
 
@@ -303,9 +305,9 @@ the anchor.)
 - **Final (mandatory, in-worktree)**: `devenv shell -- cargo nextest run --workspace`
   plus `devenv shell -- cargo test --doc --workspace`.
 
-## Open question carried to the user
+## Resolved decisions
 
-- v1 makes evolution **reactive** (no proactive nudge). Confirm that is acceptable,
-  or promote the proactive "this cron grew a skill, consider slimming" nudge into
-  scope (it would be a pull-only signal surfaced to the agent, never a silent
-  rewrite).
+- Evolution is **reactive** in v1 (no proactive nudge). The proactive
+  "this cron grew a skill, consider slimming" nudge — pull-only, surfaced to the
+  agent, never a silent rewrite — is deferred to v2, tracked in
+  **onsails/right-agent#128**.
