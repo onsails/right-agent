@@ -9,7 +9,7 @@ You talk to an agent in Telegram. Each surface, a dm, a group, or a forum topic
 inside a group, is its own Claude Code session, keyed by chat and thread. All
 sessions share one chat-tagged memory, so separate working contexts still
 remember the same things about you. In groups the agent stays quiet until you
-mention or reply to it.
+@mention or reply to it.
 
 ## Every agent in its own sandbox
 
@@ -46,5 +46,5 @@ skills from the dashboard.
 
 `/mcp` and `/providers` open a Mini App dashboard with views for health,
 activity, identity, learned skills, and usage with cost. All management is
-proxied to the bot's control plane, and secret inputs are write-only. You never
-hand-edit config or credential files.
+proxied to the bot's control plane, and credentials you enter are accepted but
+never displayed. You never hand-edit config or credential files.
