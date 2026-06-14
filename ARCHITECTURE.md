@@ -135,6 +135,9 @@ never agent-supplied. Forum write tools (`forum_topic_create`/`_edit`/`_close`/
 `_reopen`) resolve `chat_id` identically and never accept it as an argument; no
 delete tool exists.
 
+`mcp__right__cron_trigger` resolves the origin chat for a `then` follow-up from
+the foreground invocation's conversation scope; agents never pass it.
+
 See: `docs/architecture/mcp.md` for the internal REST surface, progress
 register/send wiring, dispatch detail, and rationale.
 

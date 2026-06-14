@@ -363,6 +363,17 @@ is the oldest pending row. Force-trigger while the job is locked is dropped,
 same as a plain trigger; the flag is transient, so scheduled runs of a
 recurring job are unaffected.
 
+`cron_trigger` can also carry a transient `then` and a resolved origin chat,
+written to `cron_specs` next to `triggered_at` (same lifecycle, cleared together)
+and loaded onto the in-memory `CronSpec`. On the triggered run's terminal
+completion `execute_job` calls `resolve_then_action` (honoring `then.run_on` and
+the target precedence `then.target_chat_id` > resolved origin > the job's
+standing `target_chat_id`); if it fires, `spawn_then_continuation` forks the
+triggered run's session via `spawn_background_continuation` — a normal
+`kind='background'` row (`producer_ref='cron_then'`) so delivery and recovery
+treat it like any continuation. Depth is capped at one: the continuation carries
+no `then`. The failure-branch then-spawn runs after reflection.
+
 Worker-created background rows start as `status = 'queued'` and
 `handoff_state = 'queued'`. Startup recovery converts only those interrupted
 queued handoffs into failed rows with pending delivery. It does not infer stale
