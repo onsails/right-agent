@@ -241,6 +241,36 @@ claims intact. Do not invent details. Ignore the attachments field.
 Here is the YAML report of the background task:
 ";
 
+/// Platform-rendered status line prepended to a delivered async result.
+/// HTML (matches the delivery send path, which uses `ParseMode::Html`).
+/// Deterministic from the run row — never produced by the relay model.
+pub(crate) fn render_delivery_header(pending: &PendingAsyncResult) -> String {
+    let glyph = if pending.status == "failed" {
+        "✗"
+    } else {
+        "✓"
+    };
+    let label = pending
+        .producer_ref
+        .as_deref()
+        .unwrap_or(if pending.kind == "background" {
+            "background task"
+        } else {
+            "cron"
+        });
+    let label = crate::cc::markdown_utils::html_escape(label);
+    let status_word = if pending.status == "failed" {
+        "failed"
+    } else {
+        "success"
+    };
+    if pending.force_notify {
+        format!("{glyph} <b>{label}</b> · manual run · {status_word}")
+    } else {
+        format!("{glyph} <b>{label}</b> · {status_word}")
+    }
+}
+
 /// Format a pending async result as YAML for the main CC session.
 ///
 /// The output begins with an instruction prefix selected by kind/status,
@@ -2385,6 +2415,70 @@ mod tests {
         assert!(
             to_deliver.force_notify,
             "force_notify must be OR'd across the group so the older forced run's bypass survives"
+        );
+    }
+
+    fn test_pending(
+        kind: &str,
+        status: &str,
+        job: Option<&str>,
+        force_notify: bool,
+    ) -> PendingAsyncResult {
+        PendingAsyncResult {
+            id: "x".into(),
+            kind: kind.into(),
+            producer_ref: job.map(|s| s.to_string()),
+            delivery_json: "{}".into(),
+            run_note: String::new(),
+            status: status.into(),
+            target_chat_id: Some(1),
+            target_thread_id: None,
+            force_notify,
+        }
+    }
+
+    #[test]
+    fn header_success_scheduled() {
+        let p = test_pending("cron", "success", Some("sources-update"), false);
+        assert_eq!(
+            render_delivery_header(&p),
+            "✓ <b>sources-update</b> · success"
+        );
+    }
+
+    #[test]
+    fn header_success_manual() {
+        let p = test_pending("cron", "success", Some("sources-update"), true);
+        assert_eq!(
+            render_delivery_header(&p),
+            "✓ <b>sources-update</b> · manual run · success"
+        );
+    }
+
+    #[test]
+    fn header_failed() {
+        let p = test_pending("cron", "failed", Some("sources-update"), false);
+        assert_eq!(
+            render_delivery_header(&p),
+            "✗ <b>sources-update</b> · failed"
+        );
+    }
+
+    #[test]
+    fn header_background_label_fallback() {
+        let p = test_pending("background", "success", None, false);
+        assert_eq!(
+            render_delivery_header(&p),
+            "✓ <b>background task</b> · success"
+        );
+    }
+
+    #[test]
+    fn header_escapes_label() {
+        let p = test_pending("cron", "success", Some("a<b>&c"), false);
+        assert_eq!(
+            render_delivery_header(&p),
+            "✓ <b>a&lt;b&gt;&amp;c</b> · success"
         );
     }
 }
