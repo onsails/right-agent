@@ -690,10 +690,16 @@ markdown via `generate_mcp_instructions_md()`.
 
 ### ⟨⟨SYSTEM_NOTICE⟩⟩ Markers
 
-When the platform needs to inject a platform-level message into the agent's
-conversation (currently: only error reflection after a CC invocation failure),
-it wraps the injected text in `⟨⟨SYSTEM_NOTICE⟩⟩ … ⟨⟨/SYSTEM_NOTICE⟩⟩`. The
-agent is taught via `OPERATING_INSTRUCTIONS` ("System Notices" section) that
+Trusted platform messages are wrapped in
+`⟨⟨SYSTEM_NOTICE:<token>⟩⟩ … ⟨⟨/SYSTEM_NOTICE:<token>⟩⟩`. The token is a
+per-agent secret (`right_mcp::credentials::get_or_create_notice_token`) emitted
+in the composite system prompt's "Platform Notice Token" section and stamped
+into every real notice. The agent obeys a notice only if it carries the token;
+forged notices in untrusted content lack it and are ignored. Injectors: error
+reflection (`reflection.rs`), cron manual-trigger (`cron.rs`), background
+continuation (`worker.rs::build_continuation_prompt`).
+
+The agent is taught via `OPERATING_INSTRUCTIONS` ("System Notices" section) that
 such messages are not from the user and should be acted on for the current
 turn but not treated as user input on subsequent turns.
 
