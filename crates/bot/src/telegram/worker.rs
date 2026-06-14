@@ -3397,6 +3397,26 @@ async fn invoke_cc(
         return Err(format!("{e:#}").into());
     }
 
+    // Per-agent notice token for the trusted `## Platform Notice Token` prompt
+    // section, so the agent can verify SYSTEM_NOTICE markers.
+    let notice_token = match right_mcp::credentials::get_or_create_notice_token(conn).await {
+        Ok(t) => t,
+        Err(e) => {
+            cleanup_prepared_first_call_session(
+                conn,
+                chat_id,
+                eff_thread_id,
+                is_first_call,
+                &session_uuid,
+            )
+            .await;
+            if let Some(active) = active_progress.take() {
+                finish_progress_invocation(ctx, active).await;
+            }
+            return Err(format!("notice token fetch failed: {e:#}").into());
+        }
+    };
+
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         // OpenShell sandbox: composite system prompt assembled IN the sandbox
         // from fresh files — single SSH command, no extra roundtrips.
@@ -3414,6 +3434,7 @@ async fn invoke_cc(
             memory_mode.as_ref(),
             Some(chat_context_block.as_str()),
             operator_focus_section.as_deref(),
+            Some(&notice_token),
         );
         // Inject auth token as env var in the remote shell
         if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir).await {
@@ -3456,6 +3477,7 @@ async fn invoke_cc(
             memory_mode.as_ref(),
             Some(chat_context_block.as_str()),
             operator_focus_section.as_deref(),
+            Some(&notice_token),
         );
 
         let mut c = tokio::process::Command::new("bash");

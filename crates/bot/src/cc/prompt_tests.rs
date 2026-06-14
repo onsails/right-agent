@@ -13,7 +13,49 @@ fn test_script(base: &str, mode: PromptMode, args: &[String], mcp: Option<&str>)
         None,
         None,
         None,
+        None,
     )
+}
+
+#[test]
+fn assembly_includes_notice_token_when_present() {
+    let script = build_prompt_assembly_script(
+        "BASE",
+        PromptMode::Normal,
+        "/x",
+        "/x/p.md",
+        "/x",
+        &["claude".to_string()],
+        None,
+        None,
+        None,
+        None,
+        Some("deadbeef"),
+    );
+    // The emitted markdown header `## Platform Notice Token` is distinct from
+    // the quoted "Platform Notice Token" reference in OPERATING_INSTRUCTIONS.
+    assert!(script.contains("## Platform Notice Token"));
+    assert!(script.contains("deadbeef"));
+}
+
+#[test]
+fn assembly_omits_notice_token_when_absent() {
+    let script = build_prompt_assembly_script(
+        "BASE",
+        PromptMode::Normal,
+        "/x",
+        "/x/p.md",
+        "/x",
+        &["claude".to_string()],
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    // No emitted section header when the token is absent. (OPERATING_INSTRUCTIONS
+    // still mentions the quoted "Platform Notice Token", so match the header form.)
+    assert!(!script.contains("## Platform Notice Token"));
 }
 
 #[tokio::test]
@@ -120,6 +162,7 @@ async fn script_custom_paths() {
         None,
         None,
         None,
+        None,
     );
     assert!(
         script.contains("/home/agent/IDENTITY.md"),
@@ -144,6 +187,7 @@ async fn script_bootstrap_mode_same_regardless_of_paths() {
         "/home/agent/.claude/composite-system-prompt.md",
         "/home/agent",
         &["claude".into()],
+        None,
         None,
         None,
         None,
@@ -191,6 +235,7 @@ async fn script_mcp_instructions_with_custom_paths() {
         "/home/agent",
         &["claude".into()],
         Some("# MCP Server Instructions\n\n## notion\n\nNotion tools.\n"),
+        None,
         None,
         None,
         None,
@@ -249,6 +294,7 @@ async fn script_includes_memory_section_for_file_mode() {
         Some(&MemoryMode::File),
         None,
         None,
+        None,
     );
     assert!(
         script.contains("MEMORY.md"),
@@ -274,6 +320,7 @@ async fn script_hindsight_mode_emits_no_memory_section() {
         Some(&MemoryMode::Hindsight),
         Some("## Current Conversation\nchat_id: 1\nkind: dm\n"),
         None,
+        None,
     );
     assert!(!script.contains("composite-memory.md"));
     assert!(script.contains("## Current Conversation"));
@@ -292,6 +339,7 @@ async fn script_file_mode_still_emits_memory_md() {
         Some(&MemoryMode::File),
         None,
         None,
+        None,
     );
     assert!(script.contains("MEMORY.md"));
 }
@@ -305,6 +353,7 @@ async fn script_no_memory_section_when_none() {
         "/tmp/right-system-prompt.md",
         "/sandbox",
         &["claude".into()],
+        None,
         None,
         None,
         None,
@@ -327,6 +376,7 @@ async fn script_memory_section_is_last() {
         Some(&MemoryMode::File),
         None,
         None,
+        None,
     );
     let mcp_pos = script.rfind("MCP").unwrap();
     let memory_pos = script.rfind("MEMORY.md").unwrap();
@@ -347,6 +397,7 @@ async fn script_file_mode_wraps_memory_md_with_ironclaw_markers() {
         &["claude".into()],
         None,
         Some(&MemoryMode::File),
+        None,
         None,
         None,
     );
@@ -397,6 +448,7 @@ async fn script_file_mode_sed_escape_produces_actual_zwsp_at_runtime() {
         &["true".into()], // safe no-op claude_args; we only inspect prompt output
         None,
         Some(&MemoryMode::File),
+        None,
         None,
         None,
     );
@@ -453,6 +505,7 @@ async fn script_bootstrap_no_memory() {
         &["claude".into()],
         None,
         Some(&MemoryMode::File),
+        None,
         None,
         None,
     );
@@ -598,6 +651,7 @@ async fn cron_mode_does_not_emit_memory_section_when_memory_mode_none() {
         None, // cron callsites always pass None today
         None,
         None,
+        None,
     );
     assert!(
         !script.contains("MEMORY.md"),
@@ -618,6 +672,7 @@ async fn sandbox_script_sources_user_local_env_before_claude() {
         "/tmp/right-system-prompt.md",
         "/sandbox",
         &["claude".into(), "-p".into()],
+        None,
         None,
         None,
         None,
@@ -655,6 +710,7 @@ async fn no_sandbox_script_does_not_reference_sandbox_user_local_env() {
         "/Users/example/.right/agents/demo/.claude/prompt.md",
         "/Users/example/.right/agents/demo",
         &["claude".into(), "-p".into()],
+        None,
         None,
         None,
         None,
@@ -801,6 +857,7 @@ async fn script_focus_section_sits_between_mcp_and_memory() {
         Some(&MemoryMode::File),
         Some("## Current Conversation\nchat_id: 1\n"),
         Some("## Topic Focus\nset by the operator\n\nbe concise\n"),
+        None,
     );
     let mcp_pos = script.find("MCP INSTRUCTIONS").unwrap();
     let focus_pos = script.find("Topic Focus").unwrap();

@@ -248,6 +248,17 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     )
     .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
 
+    // Per-agent notice token for the trusted `## Platform Notice Token` prompt
+    // section, so the agent can verify SYSTEM_NOTICE markers.
+    let notice_token = {
+        let conn = right_db::open_connection(&ctx.agent_dir, false)
+            .await
+            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
+        right_mcp::credentials::get_or_create_notice_token(&conn)
+            .await
+            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?
+    };
+
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         let sandbox_name = ctx.resolved_sandbox.as_deref().ok_or_else(|| {
             ReflectionError::Spawn("ssh_config_path set but resolved_sandbox is None".into())
@@ -265,6 +276,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
             None, // no memory section
             None,
             None,
+            Some(&notice_token),
         );
         if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
@@ -295,6 +307,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
             None,
             None,
             None,
+            Some(&notice_token),
         );
         let mut c = tokio::process::Command::new("bash");
         c.arg("-c");

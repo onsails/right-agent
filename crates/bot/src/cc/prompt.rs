@@ -189,6 +189,7 @@ pub(crate) fn build_prompt_assembly_script(
     memory_mode: Option<&MemoryMode>,
     chat_context: Option<&str>,
     focus_section: Option<&str>,
+    notice_token: Option<&str>,
 ) -> String {
     let escaped_base = base_prompt.replace('\'', "'\\''");
     let escaped_args: Vec<String> = claude_args.iter().map(|a| shell_escape(a)).collect();
@@ -277,8 +278,16 @@ fi"#
         _ => String::new(),
     };
 
+    let notice_token_section = match notice_token {
+        Some(tok) => {
+            let escaped = tok.replace('\'', "'\\''");
+            format!("\nprintf '\\n## Platform Notice Token\\n\\n'\nprintf '%s\\n' '{escaped}'")
+        }
+        None => String::new(),
+    };
+
     format!(
-        "{sandbox_env_prelude}\n{{ printf '{escaped_base}'\n{file_sections}\n{chat_context_section}\n{mcp_section}\n{focus_section_sh}\n{memory_section}\n}} > {prompt_file}\ncd {workdir} && {claude_cmd} --system-prompt-file {prompt_file}"
+        "{sandbox_env_prelude}\n{{ printf '{escaped_base}'\n{file_sections}\n{notice_token_section}\n{chat_context_section}\n{mcp_section}\n{focus_section_sh}\n{memory_section}\n}} > {prompt_file}\ncd {workdir} && {claude_cmd} --system-prompt-file {prompt_file}"
     )
 }
 
