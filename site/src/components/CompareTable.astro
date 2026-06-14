@@ -11,7 +11,7 @@ const rows = [
 ];
 ---
 <table class="ra-compare">
-  <thead><tr><th></th><th>typical agent setup</th><th>right agent</th></tr></thead>
+  <thead><tr><td></td><th scope="col">typical agent setup</th><th scope="col">right agent</th></tr></thead>
   <tbody>
     {rows.map(([k, a, b]) => (<tr><td><strong>{k}</strong></td><td>{a}</td><td>{b}</td></tr>))}
   </tbody>
