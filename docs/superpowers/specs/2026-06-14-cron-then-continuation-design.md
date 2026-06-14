@@ -269,6 +269,23 @@ a standing spec carry a default `then`, but YAGNI now).
 - **Scope safety**: origin chat is server-resolved; agent never supplies
   it. `then.target_chat_id` is allowlist-validated.
 
+## Known v1 limitations (from code review)
+
+- **`run_on: failure`/`always` covers CC-ran-but-failed only.** The `then`
+  continuation *forks the triggered run's session*, so it can fire only when a
+  session exists: the `CronStreamOutcome::Failed` arm and the unparseable-output
+  parse-failure arm. Pre-CC-start infra failures (process spawn failed, missing
+  `claude` binary, sandbox guard, DB-open failure) record the run `failed` but
+  fire no continuation — there is nothing to fork. Acceptable for v1.
+- **`then.notify` is emphasis-only.** The background-continuation schema forces
+  `delivery.kind=notify` and the row sets `delivery_required=true`, so a `then`
+  continuation always delivers a message. `notify` only adds a prompt-emphasis
+  directive; forcing idle-gate skip via the row's `force_notify` column is a
+  follow-up. The DTO description says so.
+- **One DB connection per fired continuation.** `insert_then_continuation_row`
+  opens its own `right_db` connection rather than reusing the cron run's open
+  `conn` — a minor avoidable open on the cron path; reuse is a follow-up.
+
 ## Decisions & assumptions
 
 Resolved:
