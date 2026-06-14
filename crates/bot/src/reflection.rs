@@ -140,6 +140,7 @@ pub(crate) fn build_reflection_prompt(
     kind: &FailureKind,
     ring_buffer_tail: &VecDeque<StreamEvent>,
     max_turns: u32,
+    token: &str,
 ) -> String {
     let reason = failure_reason_text(kind);
     let mut activity = String::new();
@@ -154,9 +155,8 @@ pub(crate) fn build_reflection_prompt(
     } else {
         activity
     };
-    format!(
-        "⟨⟨SYSTEM_NOTICE⟩⟩\n\
-         \n\
+    let body = format!(
+        "\n\
          Your previous turn did not complete successfully.\n\
          \n\
          Reason: {reason}.\n\
@@ -171,9 +171,9 @@ pub(crate) fn build_reflection_prompt(
             or ask for clarification).\n\
          \n\
          Do NOT continue the original investigation — stay within {max_turns} turns.\n\
-         Do NOT call Agent or other long-running tools.\n\
-         ⟨⟨/SYSTEM_NOTICE⟩⟩\n"
-    )
+         Do NOT call Agent or other long-running tools.\n"
+    );
+    crate::cc::system_notice::wrap_system_notice(token, &body)
 }
 
 /// Run one reflection pass for a failed CC invocation.
@@ -193,8 +193,25 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
 
     tracing::info!("reflection starting");
 
+    // Per-agent notice token for the trusted `## Platform Notice Token` prompt
+    // section, so the agent can verify SYSTEM_NOTICE markers. Fetched before the
+    // prompt build so the reflection notice carries the token.
+    let notice_token = {
+        let conn = right_db::open_connection(&ctx.agent_dir, false)
+            .await
+            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
+        right_mcp::credentials::get_or_create_notice_token(&conn)
+            .await
+            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?
+    };
+
     // 1. Build stdin prompt from pure helpers.
-    let input = build_reflection_prompt(&ctx.failure, &ctx.ring_buffer_tail, ctx.limits.max_turns);
+    let input = build_reflection_prompt(
+        &ctx.failure,
+        &ctx.ring_buffer_tail,
+        ctx.limits.max_turns,
+        &notice_token,
+    );
 
     // 2. Reply schema (reuse worker's — sandbox vs no-sandbox both read same file).
     let schema_path = ctx.agent_dir.join(".claude").join("reply-schema.json");
@@ -247,17 +264,6 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         ctx.ssh_config_path.as_deref(),
     )
     .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
-
-    // Per-agent notice token for the trusted `## Platform Notice Token` prompt
-    // section, so the agent can verify SYSTEM_NOTICE markers.
-    let notice_token = {
-        let conn = right_db::open_connection(&ctx.agent_dir, false)
-            .await
-            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
-        right_mcp::credentials::get_or_create_notice_token(&conn)
-            .await
-            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?
-    };
 
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         let sandbox_name = ctx.resolved_sandbox.as_deref().ok_or_else(|| {
@@ -491,9 +497,10 @@ mod tests {
             },
             StreamEvent::Text("partial finding".into()),
         ]);
-        let p = build_reflection_prompt(&FailureKind::NonZeroExit { code: -1 }, &tail, 3);
-        assert!(p.starts_with("⟨⟨SYSTEM_NOTICE⟩⟩"));
-        assert!(p.contains("⟨⟨/SYSTEM_NOTICE⟩⟩"));
+        let p =
+            build_reflection_prompt(&FailureKind::NonZeroExit { code: -1 }, &tail, 3, "deadbeef");
+        assert!(p.starts_with("\u{27e8}\u{27e8}SYSTEM_NOTICE:deadbeef\u{27e9}\u{27e9}"));
+        assert!(p.contains("\u{27e8}\u{27e8}/SYSTEM_NOTICE:deadbeef\u{27e9}\u{27e9}"));
         assert!(p.contains("exited with code -1"));
         assert!(p.contains("called Read"));
         assert!(p.contains("partial finding"));
@@ -503,7 +510,8 @@ mod tests {
     #[tokio::test]
     async fn prompt_handles_empty_ring_buffer() {
         let tail: VecDeque<StreamEvent> = VecDeque::new();
-        let p = build_reflection_prompt(&FailureKind::NonZeroExit { code: 1 }, &tail, 3);
+        let p =
+            build_reflection_prompt(&FailureKind::NonZeroExit { code: 1 }, &tail, 3, "deadbeef");
         assert!(p.contains("(no tool activity recorded)"));
     }
 }
