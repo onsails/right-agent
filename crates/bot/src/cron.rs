@@ -189,19 +189,27 @@ fn effective_lock_ttl(spec: &CronSpec) -> &str {
 
 /// Compose a triggered run's prompt: force-notify notice, then this-run-only
 /// extra instruction, then the stored prompt. Each layer is optional.
-fn compose_run_prompt(prompt: &str, force_notify: bool, extra_instruction: Option<&str>) -> String {
+fn compose_run_prompt(
+    prompt: &str,
+    force_notify: bool,
+    extra_instruction: Option<&str>,
+    notice_token: &str,
+) -> String {
     let mut out = String::new();
     if force_notify {
-        out.push_str(
-            "⟨⟨SYSTEM_NOTICE⟩⟩ Manual verification trigger: always emit \
-             delivery.kind=\"notify\" with a complete report of what you found; \
-             do not go silent. ⟨⟨/SYSTEM_NOTICE⟩⟩\n\n",
-        );
+        out.push_str(&crate::cc::system_notice::wrap_system_notice(
+            notice_token,
+            "Manual verification trigger: always emit delivery.kind=\"notify\" \
+             with a complete report of what you found; do not go silent.",
+        ));
+        out.push_str("\n\n");
     }
     if let Some(extra) = extra_instruction.filter(|s| !s.trim().is_empty()) {
-        out.push_str(&format!(
-            "⟨⟨SYSTEM_NOTICE⟩⟩ Extra instruction for this run only: {extra} ⟨⟨/SYSTEM_NOTICE⟩⟩\n\n"
+        out.push_str(&crate::cc::system_notice::wrap_system_notice(
+            notice_token,
+            &format!("Extra instruction for this run only: {extra}"),
         ));
+        out.push_str("\n\n");
     }
     out.push_str(prompt);
     out
@@ -760,10 +768,27 @@ async fn execute_job(
         )
     };
 
+    // Per-agent notice token for the trusted `## Platform Notice Token` prompt
+    // section and for stamping the force-notify / extra-instruction SYSTEM_NOTICE
+    // markers. Reuse the run's conn.
+    let notice_token = match right_mcp::credentials::get_or_create_notice_token(&conn).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(job = %job_name, "notice token fetch failed: {e:#}");
+            if let Some(active) = registered_learning.take() {
+                active.cleanup().await;
+            }
+            update_failed_run_record(&conn, &run_id, None).await;
+            std::fs::remove_file(&lock_path).ok();
+            return;
+        }
+    };
+
     let prompt_for_cc = compose_run_prompt(
         &spec.prompt,
         spec.trigger_force_notify,
         spec.trigger_extra_instruction.as_deref(),
+        &notice_token,
     );
 
     let invocation = crate::cc::invocation::ClaudeInvocation {
@@ -835,21 +860,6 @@ async fn execute_job(
         std::fs::remove_file(&lock_path).ok();
         return;
     }
-
-    // Per-agent notice token for the trusted `## Platform Notice Token` prompt
-    // section, so the agent can verify SYSTEM_NOTICE markers. Reuse the run's conn.
-    let notice_token = match right_mcp::credentials::get_or_create_notice_token(&conn).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!(job = %job_name, "notice token fetch failed: {e:#}");
-            if let Some(active) = registered_learning.take() {
-                active.cleanup().await;
-            }
-            update_failed_run_record(&conn, &run_id, None).await;
-            std::fs::remove_file(&lock_path).ok();
-            return;
-        }
-    };
 
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
         // Sandbox mode: assemble system prompt via shell script (same as worker).
@@ -2549,6 +2559,16 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[test]
+    fn manual_trigger_notice_carries_token() {
+        let n = crate::cc::system_notice::wrap_system_notice(
+            "tok123",
+            "Manual verification trigger: x",
+        );
+        assert!(n.contains("SYSTEM_NOTICE:tok123"));
+        assert!(n.contains("Manual verification trigger"));
+    }
+
     /// ArcSwap cell used by run_cron_task must reflect the current value, not
     /// the value at task-spawn time.  This test verifies the `snapshot_model`
     /// helper that every call site in this module uses.
@@ -2828,18 +2848,21 @@ mod tests {
 
     #[test]
     fn compose_run_prompt_orders_force_notify_then_extra_then_prompt() {
-        let p = compose_run_prompt("BODY", true, Some("focus on X"));
+        let p = compose_run_prompt("BODY", true, Some("focus on X"), "tok123");
         let fn_idx = p.find("Manual verification trigger").unwrap();
         let extra_idx = p.find("focus on X").unwrap();
         let body_idx = p.find("BODY").unwrap();
         assert!(fn_idx < extra_idx && extra_idx < body_idx);
+        // Both notices carry the token.
+        assert!(p.contains("SYSTEM_NOTICE:tok123"));
 
         // No force-notify, no extra -> body unchanged.
-        assert_eq!(compose_run_prompt("BODY", false, None), "BODY");
+        assert_eq!(compose_run_prompt("BODY", false, None, "tok123"), "BODY");
 
         // Extra only.
-        let e = compose_run_prompt("BODY", false, Some("X"));
+        let e = compose_run_prompt("BODY", false, Some("X"), "tok123");
         assert!(e.contains("X") && e.ends_with("BODY"));
+        assert!(e.contains("SYSTEM_NOTICE:tok123"));
     }
 
     #[test]
