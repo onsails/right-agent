@@ -381,6 +381,7 @@ pub(crate) async fn run_if_due(
             Vec::new()
         }
     };
+    maintain_cron_links_for_archived(&conn, &archived_skill_names).await;
     let lifecycle_rows = match right_lifecycle::list_curator_candidates(&conn).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -620,6 +621,42 @@ fn render_candidate_list(lifecycle_rows: &[right_lifecycle::SkillLifecycleRow]) 
     }
     s.push_str("</inventory>");
     s
+}
+
+/// Maintain cron→skill links for skills the curator just archived: redirect to
+/// the successor when absorbed, otherwise drop. Best-effort cleanup — the
+/// runtime read (`list_live_for_job`) filters archived skills at read time, so
+/// a failure here leaves no correctness gap; we warn and continue rather than
+/// aborting the curator pass over link bookkeeping.
+async fn maintain_cron_links_for_archived(
+    conn: &right_db::Connection,
+    archived_skill_names: &[String],
+) {
+    for skill in archived_skill_names {
+        let absorbed_into: Option<String> = match conn
+            .query_row(
+                "SELECT absorbed_into FROM skill_lifecycle WHERE skill_name = ?1",
+                right_db::params![skill.as_str()],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(skill = %skill, "absorbed_into lookup failed: {e:#}");
+                continue;
+            }
+        };
+        let res = match absorbed_into {
+            Some(ref target) => {
+                right_agent::cron_skill_link::redirect_skill(conn, skill, target).await
+            }
+            None => right_agent::cron_skill_link::drop_skill(conn, skill).await,
+        };
+        if let Err(e) = res {
+            tracing::warn!(skill = %skill, "cron link maintenance failed: {e:#}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -913,6 +950,62 @@ mod tests {
         assert_eq!(
             should_run_now(cfg(), &s, now, Some(just_now), None, 0),
             CuratorGateDecision::SkipChatNotIdle
+        );
+    }
+
+    #[tokio::test]
+    async fn maintain_links_redirects_absorbed_and_drops_retired() {
+        let conn = open_test_conn().await;
+        // Insert a cron job and two archived skills: one absorbed, one plain-retired.
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
+             VALUES ('j','17 9 * * *','x',2.0,'t','t')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_lifecycle (skill_name, state, created_by, created_at, absorbed_into) \
+             VALUES ('rightx-absorbed','archived','cron','t','rightx-successor')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_lifecycle (skill_name, state, created_by, created_at) \
+             VALUES ('rightx-successor','active','cron','t')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_lifecycle (skill_name, state, created_by, created_at) \
+             VALUES ('rightx-retired','archived','cron','t')",
+            (),
+        )
+        .await
+        .unwrap();
+        right_agent::cron_skill_link::link_auto(
+            &conn,
+            "j",
+            &["rightx-absorbed".to_string(), "rightx-retired".to_string()],
+        )
+        .await
+        .unwrap();
+
+        maintain_cron_links_for_archived(
+            &conn,
+            &["rightx-absorbed".to_string(), "rightx-retired".to_string()],
+        )
+        .await;
+
+        let links = right_agent::cron_skill_link::list_for_job(&conn, "j")
+            .await
+            .unwrap();
+        assert_eq!(
+            links,
+            vec!["rightx-successor".to_string()],
+            "absorbed skill redirected to successor, retired skill dropped"
         );
     }
 }
