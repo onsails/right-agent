@@ -3958,6 +3958,68 @@ sleep 120"#;
         );
     }
 
+    /// Composition: a skill authored under a recurring cron's invocation is
+    /// auto-linked, then named in the next run's prompt — with the stored prompt
+    /// unchanged. Proves link_cron_authored → list_live_for_job → compose_run_prompt
+    /// compose correctly (the live Claude round-trip is covered separately by the
+    /// ignored live stub).
+    #[tokio::test]
+    async fn cron_learned_skill_is_linked_then_named_next_run() {
+        let (_dir, conn) = migrated_conn().await;
+        // A recurring cron.
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
+             VALUES ('writer','17 9 * * *','Find sources and write an article',2.0,'t','t')",
+            [],
+        )
+        .await
+        .unwrap();
+        // Simulate the cron run authoring a skill inline under its invocation id:
+        // a successful finish event + a live lifecycle row.
+        conn.execute(
+            "INSERT INTO skill_learning_events \
+             (invocation_id, agent_name, action, skill_name, phase, status, created_at) \
+             VALUES ('cron-inv','writer-agent','create','rightx-source-finder','finish','created','t')",
+            [],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_lifecycle (skill_name, state, created_by, created_at) \
+             VALUES ('rightx-source-finder','active','cron','t')",
+            [],
+        )
+        .await
+        .unwrap();
+
+        // Auto-link seam (inline path) links the authored skill to the cron.
+        let n = crate::learning_probe_writer::link_cron_authored(&conn, "writer", "cron-inv")
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+
+        // Next run resolves the live linked skills...
+        let live = right_agent::cron_skill_link::list_live_for_job(&conn, "writer")
+            .await
+            .unwrap();
+        assert_eq!(live, vec!["rightx-source-finder".to_string()]);
+
+        // ...and names them in the run prompt, stored prompt unchanged.
+        let prompt = compose_run_prompt(
+            "Find sources and write an article",
+            false,
+            None,
+            "tok",
+            &live,
+        );
+        assert!(
+            prompt.contains("Find sources and write an article"),
+            "stored prompt preserved"
+        );
+        assert!(prompt.contains("## Linked skills"));
+        assert!(prompt.contains("rightx-source-finder"));
+    }
+
     #[test]
     fn resolve_cron_model_prefers_spec_then_global() {
         let global = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Some("opus".to_string())));
