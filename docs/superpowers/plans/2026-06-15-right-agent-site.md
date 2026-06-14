@@ -332,7 +332,7 @@ Replace `site/src/styles/starlight.css`:
 
   --sl-color-accent-low: var(--ra-fire-soft);
   --sl-color-accent: var(--ra-fire);
-  --sl-color-accent-high: var(--ra-cream);
+  --sl-color-accent-high: var(--ra-coal-900);
 
   --sl-color-white: var(--ra-cream);
   --sl-color-gray-1: var(--ra-cream);
