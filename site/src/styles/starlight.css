@@ -1,1 +1,26 @@
-/* starlight overrides (Task 2) */
+/* Force the coal-and-fire palette regardless of theme toggle. */
+:root,
+:root[data-theme='light'],
+:root[data-theme='dark'] {
+  --sl-font: var(--ra-font-sans);
+  --sl-font-mono: var(--ra-font-mono);
+
+  --sl-color-accent-low: var(--ra-fire-soft);
+  --sl-color-accent: var(--ra-fire);
+  --sl-color-accent-high: var(--ra-cream);
+
+  --sl-color-white: var(--ra-cream);
+  --sl-color-gray-1: var(--ra-cream);
+  --sl-color-gray-2: var(--ra-parchment);
+  --sl-color-gray-3: #b9b1a2;
+  --sl-color-gray-4: var(--ra-muted);
+  --sl-color-gray-5: #3a352d;
+  --sl-color-gray-6: var(--ra-coal-700);
+  --sl-color-gray-7: var(--ra-coal-600);
+  --sl-color-black: var(--ra-coal-800);
+
+  --sl-color-bg: var(--ra-coal-800);
+  --sl-color-bg-nav: var(--ra-coal-700);
+  --sl-color-bg-sidebar: var(--ra-coal-700);
+  --sl-color-text-accent: var(--ra-fire);
+}
