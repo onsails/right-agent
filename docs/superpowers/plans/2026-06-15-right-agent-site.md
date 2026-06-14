@@ -494,10 +494,15 @@ credential lives outside it.
 
 Start here:
 
-- [Install](/docs/install/): prerequisites and first-run setup.
-- [Concepts](/docs/concepts/): how agents, sandboxes, memory, and skills fit together.
-- [Security model](/docs/security/): the sandbox, credential, and network model.
-- [Telegram commands](/docs/commands/): the slash commands you use day to day.
+- [Install](install/): prerequisites and first-run setup.
+- [Concepts](concepts/): how agents, sandboxes, memory, and skills fit together.
+- [Security model](security/): the sandbox, credential, and network model.
+- [Telegram commands](commands/): the slash commands you use day to day.
+
+<!-- NB: links are RELATIVE (no leading slash) so Starlight serves them under the
+     Astro base (/right-agent). Root-absolute /docs/... links are NOT base-prefixed
+     by Starlight for author-written Markdown and 404 on GitHub Pages. -->
+
 ```
 
 - [ ] **Step 2: Write the concepts page**
