@@ -827,6 +827,39 @@ pub async fn delete_auth_token(conn: &Connection) -> Result<(), CredentialError>
     Ok(())
 }
 
+/// Per-agent platform-notice authentication token. Generated once and stored;
+/// stable for the agent's lifetime. Used to make `⟨⟨SYSTEM_NOTICE:<token>⟩⟩`
+/// unforgeable by untrusted content the agent reads.
+pub async fn get_or_create_notice_token(conn: &Connection) -> Result<String, CredentialError> {
+    if let Some(existing) = conn
+        .query_one("SELECT token FROM notice_token LIMIT 1", (), |row| {
+            row.get(0)
+        })
+        .await
+        .optional()?
+    {
+        return Ok(existing);
+    }
+    let token = generate_notice_token();
+    let tx = conn.transaction().await?;
+    tx.execute("DELETE FROM notice_token", ()).await?;
+    tx.execute(
+        "INSERT INTO notice_token (token) VALUES (?1)",
+        [token.as_str()],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(token)
+}
+
+/// 128-bit token as 32 lowercase hex chars.
+fn generate_notice_token() -> String {
+    use rand::RngExt as _;
+    let mut bytes = [0u8; 16];
+    rand::rng().fill(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Redact query parameters from a URL.
 ///
 /// If the URL contains a `?`, returns `scheme://host/path?<redacted>`.
@@ -1725,6 +1758,16 @@ mod db_tests {
             oauth[0].oauth_resource.as_deref(),
             Some("https://a.com/mcp")
         );
+    }
+
+    #[tokio::test]
+    async fn notice_token_is_stable_and_generated_once() {
+        let (_dir, conn) = setup_db().await;
+        let t1 = get_or_create_notice_token(&conn).await.unwrap();
+        let t2 = get_or_create_notice_token(&conn).await.unwrap();
+        assert_eq!(t1, t2, "token must be stable across calls");
+        assert_eq!(t1.len(), 32, "token is 32 hex chars");
+        assert!(t1.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[tokio::test]
