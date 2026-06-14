@@ -583,9 +583,6 @@ impl rmcp::ServerHandler for Aggregator {
             .with_instructions(
                 "Right Agent MCP Aggregator — routes tool calls to built-in Right Agent tools \
                  and connected external MCP servers via prefix-based dispatch.\n\n\
-                 ## Cron skill links\n\
-                 - mcp__right__cron_link_skill: Link rightx-* skills to a cron (deterministic pull at fire time)\n\
-                 - mcp__right__cron_unlink_skill: Unlink rightx-* skills from a cron\n\n\
                  Memory tools (when Hindsight is configured):\n\
                  - mcp__right__memory_retain: Store residual durable context to long-term memory only after `/right-memory` routing chooses memory as the fallback target\n\
                  - mcp__right__memory_recall: Search memory by relevance\n\
