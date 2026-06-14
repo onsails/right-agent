@@ -36,8 +36,9 @@ const V40_SCHEMA: &str = include_str!("sql/v40_forum_topics.sql");
 const V43_SCHEMA: &str = include_str!("sql/v43_thread_focus.sql");
 const V44_SCHEMA: &str = include_str!("sql/v44_skill_lifecycle_cron.sql");
 const V46_NOTICE_TOKEN: &str = include_str!("sql/v46_notice_token.sql");
+const V47_CRON_SKILL_LINKS: &str = include_str!("sql/v47_cron_skill_links.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 46;
+pub const LATEST_SCHEMA_VERSION: u32 = 47;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -1086,6 +1087,11 @@ pub static MIGRATIONS: Migrations = Migrations {
             sql: V46_NOTICE_TOKEN,
             hook: None,
         },
+        Migration {
+            version: 47,
+            sql: V47_CRON_SKILL_LINKS,
+            hook: None,
+        },
     ],
 };
 
@@ -1600,6 +1606,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(t, "abc");
+    }
+
+    #[tokio::test]
+    async fn v47_creates_cron_skill_links_table() {
+        let mut conn = Connection::open_in_memory().await.unwrap();
+        MIGRATIONS.to_latest(&mut conn).await.unwrap();
+        conn.execute(
+            "INSERT INTO cron_skill_links (job_name, skill_name, origin, created_at) \
+             VALUES ('j', 'rightx-a', 'auto', '2026-06-15T00:00:00Z')",
+            [],
+        )
+        .await
+        .unwrap();
+        let rows = conn
+            .execute(
+                "INSERT OR IGNORE INTO cron_skill_links (job_name, skill_name, origin, created_at) \
+                 VALUES ('j', 'rightx-a', 'agent', '2026-06-15T00:00:01Z')",
+                [],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "duplicate PK must not insert");
+        let bad = conn
+            .execute(
+                "INSERT INTO cron_skill_links (job_name, skill_name, origin, created_at) \
+                 VALUES ('j', 'rightx-b', 'bogus', '2026-06-15T00:00:02Z')",
+                [],
+            )
+            .await;
+        assert!(bad.is_err(), "origin CHECK must reject 'bogus'");
     }
 
     #[tokio::test]
