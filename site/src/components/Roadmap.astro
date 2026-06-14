@@ -1,0 +1,30 @@
+---
+const shipped = [
+  'multi-agent orchestration, sandboxed by default',
+  'live Telegram Mini App dashboard with usage and cost',
+  'mcp aggregator with auto-detected oauth, bearer, header, query-string auth',
+  'credential providers injected at the outbound proxy',
+  'automatic skill learning with curator pruning',
+  'fail-closed sandbox with a self-healing supervisor',
+];
+const next = [
+  'zero-token clis: aws, gcloud, kubectl',
+  'native browser automation',
+  'shareable agent templates',
+  'agent-to-agent communication',
+];
+---
+<div class="ra-grid">
+  <div class="ra-card">
+    <h3>shipped</h3>
+    <ul style="margin:0; padding-left:1.1rem; color:var(--ra-parchment);">
+      {shipped.map((i) => <li>{i}</li>)}
+    </ul>
+  </div>
+  <div class="ra-card">
+    <h3>next</h3>
+    <ul style="margin:0; padding-left:1.1rem; color:var(--ra-parchment);">
+      {next.map((i) => <li>{i}</li>)}
+    </ul>
+  </div>
+</div>

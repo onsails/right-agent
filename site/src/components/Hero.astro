@@ -1,0 +1,27 @@
+---
+import { Image } from 'astro:assets';
+import lockup from '../assets/lockup-horizontal.svg';
+import screenshot from '../assets/screenshot.png';
+---
+<header class="ra-section" style="border-top:none; padding-top:3rem;">
+  <div class="ra-wrap">
+    <Image src={lockup} alt="right agent" height={28} />
+    <h1 style="font-size:2.6rem; line-height:1.2; margin:1.5rem 0 1rem; max-width:34ch;">
+      an ai agent you run by messaging it
+    </h1>
+    <p style="font-size:1.15rem; color:var(--ra-parchment); max-width:60ch;">
+      you can give it real credentials without handing them to the model. every
+      agent runs in its own sandbox, every credential lives outside it. the box is
+      closed; you just use it.
+    </p>
+    <p style="margin:1.75rem 0;">
+      <a class="ra-btn" href="#install">install</a>
+      <a href={`${import.meta.env.BASE_URL}/docs/`} style="margin-left:1rem;">read the docs</a>
+    </p>
+    <p style="font-size:0.9rem; color:var(--ra-muted);">
+      today every agent runs on Claude Code, so you need a Claude subscription.
+    </p>
+    <Image src={screenshot} alt="right agent in Telegram" width={900}
+           style="width:100%; max-width:720px; margin-top:2rem; border:1px solid var(--ra-coal-600); border-radius:var(--ra-radius);" />
+  </div>
+</header>
