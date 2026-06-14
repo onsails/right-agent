@@ -1,0 +1,15 @@
+---
+const tiers = [
+  { label: 'Cloud', items: ['Telegram', 'Cloudflare', 'Anthropic', 'Hindsight', 'Linear / Notion / Gmail'] },
+  { label: 'Host', items: ['Bot per agent', 'MCP aggregator (holds credentials)', 'OpenShell gateway', 'cloudflared'] },
+  { label: 'Sandbox per agent', items: ['Claude Code', 'Identity', 'scoped fs + network + tls proxy'] },
+];
+---
+<div style="display:grid; gap:1rem;">
+  {tiers.map((t) => (
+    <div class="ra-card">
+      <h3 style="color:var(--ra-fire);">{t.label}</h3>
+      <p style="color:var(--ra-parchment);">{t.items.join('  ·  ')}</p>
+    </div>
+  ))}
+</div>

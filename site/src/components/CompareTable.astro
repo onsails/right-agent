@@ -1,0 +1,18 @@
+---
+const rows = [
+  ['setup', 'wire the stack yourself over a weekend', 'curl installer, right init, right up'],
+  ['daily use', 'a service you operate from the cli', 'a bot you message in Telegram'],
+  ['credentials', 'given to the agent', 'held on the host, injected at the proxy'],
+  ['isolation', 'opt-in, often skipped', 'per-agent sandbox by default'],
+  ['on failure', 'may fall back to a looser path', 'fails closed, diagnoses, retries'],
+  ['memory', 'replay the full history each turn', 'persistent, dated, model-judged recall'],
+  ['cost', 'often per-agent', 'many agents, one Claude subscription'],
+  ['recovery', 'manual fixes, often from scratch', 'self-heals; data is preserved'],
+];
+---
+<table class="ra-compare">
+  <thead><tr><th></th><th>typical agent setup</th><th>right agent</th></tr></thead>
+  <tbody>
+    {rows.map(([k, a, b]) => (<tr><td><strong>{k}</strong></td><td>{a}</td><td>{b}</td></tr>))}
+  </tbody>
+</table>
