@@ -585,8 +585,11 @@ async fn run_delivery_once(
         "delivering async result through main session"
     );
 
+    let header = render_delivery_header(&to_deliver);
+
     match deliver_through_session(
         &yaml,
+        &header,
         agent_dir,
         agent_name,
         bot,
@@ -980,6 +983,7 @@ fn build_delivery_invocation_args(
 #[allow(clippy::too_many_arguments)]
 async fn deliver_through_session(
     yaml_input: &str,
+    header: &str,
     agent_dir: &Path,
     agent_name: &str,
     bot: &crate::telegram::BotType,
@@ -1191,6 +1195,7 @@ async fn deliver_through_session(
         use teloxide::prelude::Requester as _;
         use teloxide::types::{ChatId, MessageId, ThreadId};
         let html = crate::telegram::markdown::md_to_telegram_html(content);
+        let html = prepend_delivery_header(header, &html);
         let parts = crate::telegram::markdown::split_html_message(&html);
         let chat_id = ChatId(target_chat_id);
         for part in &parts {
@@ -1229,6 +1234,24 @@ async fn deliver_through_session(
                 report.text_messages_sent += 1;
             }
         }
+    }
+
+    // Attachments-only delivery (no text content): the header would otherwise be
+    // lost, so send it as a standalone text message before the attachment batch.
+    if !has_content && has_attachments {
+        use teloxide::prelude::Requester as _;
+        use teloxide::types::{ChatId, MessageId, ThreadId};
+        let chat_id = ChatId(target_chat_id);
+        let mut send = bot
+            .send_message(chat_id, header)
+            .parse_mode(teloxide::types::ParseMode::Html);
+        if let Some(t) = target_thread_id {
+            send = send.message_thread_id(ThreadId(MessageId(t as i32)));
+        }
+        run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, send)
+            .await?
+            .map_err(|e| format!("telegram header send failed: {e:#}"))?;
+        report.text_messages_sent += 1;
     }
 
     if let Some(ref atts) = reply.attachments
