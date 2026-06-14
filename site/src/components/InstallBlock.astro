@@ -10,8 +10,14 @@ const cmd = 'curl -LsSf https://raw.githubusercontent.com/onsails/right-agent/ma
   const btn = document.getElementById('ra-copy');
   const src = document.getElementById('ra-install-cmd');
   btn?.addEventListener('click', async () => {
-    await navigator.clipboard.writeText(src?.textContent ?? '');
-    btn.textContent = 'copied';
-    setTimeout(() => (btn.textContent = 'copy'), 1500);
+    // navigator.clipboard is undefined on insecure origins and can reject on
+    // permission denial; guard so the click never throws an unhandled rejection.
+    try {
+      await navigator.clipboard.writeText(src?.textContent ?? '');
+      btn.textContent = 'copied';
+    } catch {
+      btn.textContent = 'copy failed';
+    }
+    setTimeout(() => { btn.textContent = 'copy'; }, 1500);
   });
 </script>

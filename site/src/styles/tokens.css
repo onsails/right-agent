@@ -13,7 +13,7 @@
   /* cream / parchment */
   --ra-cream: #f2ede4;
   --ra-parchment: #ddd6c9;
-  --ra-muted: #776e5e;
+  --ra-muted: #948a79; /* lightened from #776e5e for WCAG AA on coal (>=4.5:1) */
 
   /* semantic */
   --ra-red: #e03c3c;
