@@ -762,11 +762,15 @@ pub async fn list_specs(conn: &Connection) -> Result<String, String> {
 
     for entry in rows.iter_mut() {
         if let Some(job) = entry.get("job_name").and_then(|v| v.as_str()) {
-            // unwrap_or_default is intentional here: list_specs is a read/diagnostic surface;
-            // a link-lookup error must not prevent listing cron jobs.
+            // Intentional non-propagation: list_specs is a read/diagnostic surface; a
+            // link-lookup failure must not abort the entire listing. Log the error so
+            // it is observable, then fall back to an empty list for this entry.
             let links = crate::cron_skill_link::list_for_job(conn, job)
                 .await
-                .unwrap_or_default();
+                .unwrap_or_else(|e| {
+                    tracing::warn!(job, "failed to fetch linked skills: {e:#}");
+                    Vec::new()
+                });
             if let Some(obj) = entry.as_object_mut() {
                 obj.insert("linked_skills".into(), serde_json::json!(links));
             }
