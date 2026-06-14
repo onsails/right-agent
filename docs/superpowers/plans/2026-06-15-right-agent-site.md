@@ -1064,6 +1064,9 @@ on:
     paths:
       - "site/**"
       - "nix/site/**"
+      - "devenv.nix"
+      - "devenv.yaml"
+      - "devenv.lock"
       - ".github/workflows/static.yml"
   workflow_dispatch:
 
@@ -1083,6 +1086,8 @@ jobs:
       - uses: actions/checkout@v6
         with:
           lfs: true
+      - name: Setup Pages
+        uses: actions/configure-pages@v6
       # Determinate Nix + devenv + FlakeHub cache, matching tests.yml.
       - uses: onsails/nix-action@v2.2.0
       - name: Build site (Bun, in the devenv site profile)
@@ -1093,8 +1098,6 @@ jobs:
         uses: actions/upload-pages-artifact@v5
         with:
           path: site/dist
-      - name: Setup Pages
-        uses: actions/configure-pages@v6
 
   deploy:
     needs: build
