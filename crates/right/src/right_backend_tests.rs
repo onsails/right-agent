@@ -176,12 +176,12 @@ async fn insert_async_run(
 fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
-    // 7 cron + 1 mcp + 1 progress + 1 send_message + 2 learning + 3 conversation
-    // + 5 forum + 1 conversation focus + 1 bootstrap + 1 provider capabilities = 23
+    // 9 cron + 1 mcp + 1 progress + 1 send_message + 2 learning + 3 conversation
+    // + 5 forum + 1 conversation focus + 1 bootstrap + 1 provider capabilities = 25
     assert_eq!(
         tools.len(),
-        23,
-        "expected 23 tools, got {}: {:?}",
+        25,
+        "expected 25 tools, got {}: {:?}",
         tools.len(),
         tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
     );
@@ -2211,6 +2211,128 @@ async fn cron_create_persists_model_and_update_clears_it() {
         m2, None,
         "explicit null clears model back to inherit-global"
     );
+}
+
+/// Seed an active `skill_lifecycle` row so cron→skill links validate.
+async fn seed_active_skill(conn: &right_db::Connection, skill_name: &str) {
+    conn.execute(
+        "INSERT INTO skill_lifecycle (skill_name, state) VALUES (?1, 'active')",
+        right_db::params![skill_name],
+    )
+    .await
+    .expect("seed skill_lifecycle row");
+}
+
+#[tokio::test]
+async fn cron_create_links_skill_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agents_dir = tmp.path().to_path_buf();
+    let agent_dir = agents_dir.join("a1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    write_allowlist(&agent_dir, &[7], &[]);
+    let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
+    seed_active_skill(&conn, "rightx-a").await;
+
+    let backend = RightBackend::new(agents_dir.clone(), None);
+    let result = backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_create",
+            json!({
+                "job_name": "j1",
+                "schedule": "17 9 * * *",
+                "prompt": "p",
+                "target_chat_id": 7_i64,
+                "skill_names": ["rightx-a"],
+            }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("cron_create ok");
+    assert_ne!(result.is_error, Some(true), "cron_create should succeed");
+
+    let linked = right_agent::cron_skill_link::list_for_job(&conn, "j1")
+        .await
+        .expect("list links");
+    assert_eq!(linked, vec!["rightx-a".to_string()]);
+}
+
+#[tokio::test]
+async fn cron_link_skill_links_and_validates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agents_dir = tmp.path().to_path_buf();
+    let agent_dir = agents_dir.join("a1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    write_allowlist(&agent_dir, &[7], &[]);
+    let conn = right_db::open_connection(&agent_dir, true).await.unwrap();
+    seed_active_skill(&conn, "rightx-a").await;
+
+    let backend = RightBackend::new(agents_dir.clone(), None);
+    backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_create",
+            json!({
+                "job_name": "j1",
+                "schedule": "17 9 * * *",
+                "prompt": "p",
+                "target_chat_id": 7_i64,
+            }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("cron_create ok");
+
+    // Link an existing skill — appears in the link list.
+    let result = backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_link_skill",
+            json!({ "job_name": "j1", "skill_names": ["rightx-a"] }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("cron_link_skill ok");
+    assert_ne!(result.is_error, Some(true), "link of existing skill ok");
+    let linked = right_agent::cron_skill_link::list_for_job(&conn, "j1")
+        .await
+        .expect("list links");
+    assert_eq!(linked, vec!["rightx-a".to_string()]);
+
+    // Linking a missing skill is a validated tool_error.
+    let result = backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_link_skill",
+            json!({ "job_name": "j1", "skill_names": ["rightx-missing"] }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "cron_link_failed");
+
+    // Unlink removes the live link.
+    let result = backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_unlink_skill",
+            json!({ "job_name": "j1", "skill_names": ["rightx-a"] }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("cron_unlink_skill ok");
+    assert_ne!(result.is_error, Some(true), "unlink ok");
+    let linked = right_agent::cron_skill_link::list_for_job(&conn, "j1")
+        .await
+        .expect("list links");
+    assert!(linked.is_empty(), "link removed after unlink: {linked:?}");
 }
 
 #[tokio::test]
