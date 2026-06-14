@@ -1,0 +1,21 @@
+---
+title: Telegram commands
+description: The slash commands you use to run an agent from Telegram.
+---
+
+You run an agent from chat, not a terminal. These are the commands you reach for.
+
+| Command | What it does |
+| --- | --- |
+| `/start` | Start talking to the agent. |
+| `/new <name>` | Start a fresh session in this chat or topic. |
+| `/list` | Show this chat's sessions. |
+| `/switch <id>` | Move between sessions. |
+| `/model` | Switch the Claude model from an inline menu. Hot-reloads, no restart. |
+| `/debug [on\|off\|status]` | Toggle debug mode for the next invocations. |
+| `/doctor` | Report agent and sandbox health in chat. |
+| `/cron [list\|<id>]` | Show scheduled-job status. Creation is in the dashboard. |
+| `/dashboard` | Open the full Mini App dashboard. |
+| `/mcp` | Open the dashboard mcp view. |
+| `/providers` | Open the dashboard providers view. |
+| `/allow`, `/deny`, `/allowed`, `/allow_all`, `/deny_all` | Manage who the agent will talk to. |
