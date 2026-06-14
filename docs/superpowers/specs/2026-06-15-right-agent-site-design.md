@@ -59,6 +59,10 @@ as an Astro integration, generates the documentation routes under `/docs` from a
 content collection. The two surfaces share one brand token sheet, so they read as
 one product.
 
+Docs use Starlight's documented subpath pattern: files in
+`src/content/docs/docs/*` map to `/docs/*`, which leaves `/` free for the custom
+landing. No collection-root index exists, so Starlight never claims `/`.
+
 ### Repo layout
 
 ```
@@ -81,11 +85,13 @@ site/
     pages/
       index.astro           # the marketing landing (custom, full brand)
     content/
-      docs/                 # Starlight content collection (MDX)
-        install.mdx         # moved from docs/INSTALL.md
-        concepts.mdx        # new (public version of how-it-works)
-        security.mdx        # moved from docs/SECURITY.md
-        commands.mdx        # new (slash-command reference)
+      docs/                 # Starlight content collection root
+        docs/               # subpath: Starlight serves these under /docs/*
+          index.mdx         # /docs landing
+          install.mdx       # /docs/install  (moved from docs/INSTALL.md)
+          concepts.mdx      # /docs/concepts (new, public how-it-works)
+          security.mdx      # /docs/security (moved from docs/SECURITY.md)
+          commands.mdx      # /docs/commands (new, slash-command reference)
     content.config.ts       # Starlight docs collection schema
 nix/site/devenv.nix         # devenv module defining the `site` profile (bun, scripts)
 devenv.yaml                 # gains: imports: [ ./nix/site ]
@@ -132,8 +138,8 @@ be rewritten so nothing points at a deleted or duplicated file.
 
 | Original | New home | References to rewrite |
 |---|---|---|
-| `docs/INSTALL.md` | `site/src/content/docs/install.mdx` | `README.md:184`, `README.md:247` |
-| `docs/SECURITY.md` | `site/src/content/docs/security.mdx` | `README.md:200`, `README.md:248` |
+| `docs/INSTALL.md` | `site/src/content/docs/docs/install.mdx` | `README.md:184`, `README.md:247` |
+| `docs/SECURITY.md` | `site/src/content/docs/docs/security.mdx` | `README.md:200`, `README.md:248` |
 
 Rewrite targets point at the published site URLs
 (`https://onsails.github.io/right-agent/docs/install` and `.../docs/security`).
