@@ -516,7 +516,7 @@ You talk to an agent in Telegram. Each surface, a dm, a group, or a forum topic
 inside a group, is its own Claude Code session, keyed by chat and thread. All
 sessions share one chat-tagged memory, so separate working contexts still
 remember the same things about you. In groups the agent stays quiet until you
-mention or reply to it.
+@mention or reply to it.
 
 ## Every agent in its own sandbox
 
@@ -553,8 +553,8 @@ skills from the dashboard.
 
 `/mcp` and `/providers` open a Mini App dashboard with views for health,
 activity, identity, learned skills, and usage with cost. All management is
-proxied to the bot's control plane, and secret inputs are write-only. You never
-hand-edit config or credential files.
+proxied to the bot's control plane, and credentials you enter are accepted but
+never displayed. You never hand-edit config or credential files.
 ```
 
 - [ ] **Step 3: Write the commands page**
@@ -572,7 +572,7 @@ You run an agent from chat, not a terminal. These are the commands you reach for
 | Command | What it does |
 | --- | --- |
 | `/start` | Start talking to the agent. |
-| `/new <name>` | Start a fresh session in this chat or topic. |
+| `/new <name>` | Start a fresh named session in this chat or topic. |
 | `/list` | Show this chat's sessions. |
 | `/switch <id>` | Move between sessions. |
 | `/model` | Switch the Claude model from an inline menu. Hot-reloads, no restart. |
