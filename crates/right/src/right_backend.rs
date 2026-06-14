@@ -40,8 +40,9 @@ use crate::learning::{
     SkillPackageExpectation,
 };
 use crate::memory_server::{
-    CronCreateParams, CronDeleteParams, CronListParams, CronListRunsParams, CronShowRunParams,
-    CronTriggerParams, CronUpdateParams, McpListParams, cron_run_to_json,
+    CronCreateParams, CronDeleteParams, CronLinkSkillParams, CronListParams, CronListRunsParams,
+    CronShowRunParams, CronTriggerParams, CronUnlinkSkillParams, CronUpdateParams, McpListParams,
+    cron_run_to_json,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -158,6 +159,16 @@ impl RightBackend {
                 "cron_delete",
                 "Delete a cron job spec. Also removes its lock file if present.",
                 schema_for_type::<CronDeleteParams>(),
+            ),
+            Tool::new(
+                "cron_link_skill",
+                "Link one or more existing rightx-* skills to a cron job. At fire time the cron deterministically pulls its linked skills. Use after capturing a procedure as a skill, or to attach skills a cron should rely on.",
+                schema_for_type::<CronLinkSkillParams>(),
+            ),
+            Tool::new(
+                "cron_unlink_skill",
+                "Unlink one or more rightx-* skills from a cron job. Note: a skill the cron's own runs re-learn may be auto-linked again.",
+                schema_for_type::<CronUnlinkSkillParams>(),
             ),
             Tool::new(
                 "cron_list",
@@ -286,6 +297,8 @@ impl RightBackend {
             "cron_create" => self.call_cron_create(agent_name, agent_dir, &args).await,
             "cron_update" => self.call_cron_update(agent_name, agent_dir, &args).await,
             "cron_delete" => self.call_cron_delete(agent_name, agent_dir, &args).await,
+            "cron_link_skill" => self.call_cron_link_skill(agent_name, &args).await,
+            "cron_unlink_skill" => self.call_cron_unlink_skill(agent_name, &args).await,
             "cron_list" => self.call_cron_list(agent_name).await,
             "cron_list_runs" => self.call_cron_list_runs(agent_name, &args).await,
             "cron_show_run" => self.call_cron_show_run(agent_name, &args).await,
@@ -434,9 +447,54 @@ impl RightBackend {
         )
         .await
         .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
+        if let Some(skills) = params.skill_names.as_deref()
+            && !skills.is_empty()
+            && let Err(e) =
+                right_agent::cron_skill_link::link_agent(&conn, &params.job_name, skills).await
+        {
+            return Ok(tool_error("cron_link_failed", format!("{e:#}"), None));
+        }
         Ok(CallToolResult::success(vec![Content::text(
             right_agent::cron_spec::format_result(&result),
         )]))
+    }
+
+    async fn call_cron_link_skill(
+        &self,
+        agent_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: CronLinkSkillParams =
+            serde_json::from_value(args.clone()).context("invalid cron_link_skill params")?;
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
+        match right_agent::cron_skill_link::link_agent(&conn, &params.job_name, &params.skill_names)
+            .await
+        {
+            Ok(msg) => Ok(CallToolResult::success(vec![Content::text(msg)])),
+            Err(e) => Ok(tool_error("cron_link_failed", format!("{e:#}"), None)),
+        }
+    }
+
+    async fn call_cron_unlink_skill(
+        &self,
+        agent_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: CronUnlinkSkillParams =
+            serde_json::from_value(args.clone()).context("invalid cron_unlink_skill params")?;
+        let conn_arc = self.get_conn(agent_name).await?;
+        let conn = conn_arc.lock().await;
+        match right_agent::cron_skill_link::unlink_agent(
+            &conn,
+            &params.job_name,
+            &params.skill_names,
+        )
+        .await
+        {
+            Ok(msg) => Ok(CallToolResult::success(vec![Content::text(msg)])),
+            Err(e) => Ok(tool_error("cron_unlink_failed", format!("{e:#}"), None)),
+        }
     }
 
     async fn call_cron_update(

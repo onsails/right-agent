@@ -66,6 +66,11 @@ pub struct CronCreateParams {
         description = "Model tier for this cron, chosen by complexity: 'haiku' (trivial request-and-format), 'sonnet' (mechanical multi-step — the usual choice), 'opus' (complex reasoning/research). Omit to inherit the agent's current /model. See the right-cron skill for the full heuristic."
     )]
     pub model: Option<CronModel>,
+    #[schemars(
+        description = "Optional rightx-* skill names to link to this cron at creation. The cron deterministically pulls these at fire time. The skills must already exist."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -109,6 +114,22 @@ pub struct CronUpdateParams {
 pub struct CronDeleteParams {
     #[schemars(description = "Job name to delete")]
     pub job_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronLinkSkillParams {
+    #[schemars(description = "The cron job_name to link skills to.")]
+    pub job_name: String,
+    #[schemars(description = "rightx-* skill names to link. Each must already exist.")]
+    pub skill_names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronUnlinkSkillParams {
+    #[schemars(description = "The cron job_name to unlink skills from.")]
+    pub job_name: String,
+    #[schemars(description = "rightx-* skill names to unlink.")]
+    pub skill_names: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -387,9 +408,52 @@ impl MemoryServer {
         )
         .await
         .map_err(|e| McpError::invalid_params(e, None))?;
+        if let Some(skills) = params.skill_names.as_deref()
+            && !skills.is_empty()
+            && let Err(e) =
+                right_agent::cron_skill_link::link_agent(&conn, &params.job_name, skills).await
+        {
+            return Ok(tool_error("cron_link_failed", format!("{e:#}"), None));
+        }
         Ok(CallToolResult::success(vec![Content::text(
             right_agent::cron_spec::format_result(&result),
         )]))
+    }
+
+    #[tool(
+        description = "Link one or more existing rightx-* skills to a cron job. At fire time the cron deterministically pulls its linked skills. Use after capturing a procedure as a skill, or to attach skills a cron should rely on."
+    )]
+    async fn cron_link_skill(
+        &self,
+        Parameters(params): Parameters<CronLinkSkillParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let conn = self.conn.lock().await;
+        match right_agent::cron_skill_link::link_agent(&conn, &params.job_name, &params.skill_names)
+            .await
+        {
+            Ok(msg) => Ok(CallToolResult::success(vec![Content::text(msg)])),
+            Err(e) => Ok(tool_error("cron_link_failed", format!("{e:#}"), None)),
+        }
+    }
+
+    #[tool(
+        description = "Unlink one or more rightx-* skills from a cron job. Note: a skill the cron's own runs re-learn may be auto-linked again."
+    )]
+    async fn cron_unlink_skill(
+        &self,
+        Parameters(params): Parameters<CronUnlinkSkillParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let conn = self.conn.lock().await;
+        match right_agent::cron_skill_link::unlink_agent(
+            &conn,
+            &params.job_name,
+            &params.skill_names,
+        )
+        .await
+        {
+            Ok(msg) => Ok(CallToolResult::success(vec![Content::text(msg)])),
+            Err(e) => Ok(tool_error("cron_unlink_failed", format!("{e:#}"), None)),
+        }
     }
 
     #[tool(
@@ -664,6 +728,8 @@ impl rmcp::ServerHandler for MemoryServer {
                  - mcp__right__cron_create: Create a new cron job spec\n\
                  - mcp__right__cron_update: Update an existing cron job spec (partial — only changed fields)\n\
                  - mcp__right__cron_delete: Delete a cron job spec\n\
+                 - mcp__right__cron_link_skill: Link rightx-* skills to a cron (deterministic pull at fire time)\n\
+                 - mcp__right__cron_unlink_skill: Unlink rightx-* skills from a cron\n\
                  - mcp__right__cron_list: List all current cron job specs\n\
                  - mcp__right__cron_list_runs: List recent cron job runs with results (run_note + delivery)\n\
                  - mcp__right__cron_show_run: Get full details of a specific cron run (run_note + delivery)\n\
