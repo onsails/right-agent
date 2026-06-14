@@ -727,11 +727,10 @@ fn continuation_reason_text(reason: BgReason) -> &'static str {
 ///
 /// The notice instructs the agent to continue from the most recent user
 /// message without re-engaging prior history, and frames why the fork happened.
-fn build_continuation_prompt(reason: BgReason, interrupted_input: &str) -> String {
+fn build_continuation_prompt(reason: BgReason, interrupted_input: &str, token: &str) -> String {
     let reason_text = continuation_reason_text(reason);
-    format!(
-        "\u{27e8}\u{27e8}SYSTEM_NOTICE\u{27e9}\u{27e9}\n\
-You were forked from the main conversation because {reason_text}.\n\
+    let body = format!(
+        "You were forked from the main conversation because {reason_text}.\n\
 The previous turn did not complete. Please continue and produce a final\n\
 answer to the user's MOST RECENT MESSAGE.\n\
 \n\
@@ -752,9 +751,9 @@ back to the main conversation, so write it as if responding to the user\n\
 directly.\n\
 \n\
 You MUST produce a non-empty notify.content. Silence is not a valid outcome\n\
-for this turn — the user is waiting for an answer.\n\
-\u{27e8}\u{27e8}/SYSTEM_NOTICE\u{27e9}\u{27e9}"
-    )
+for this turn — the user is waiting for an answer."
+    );
+    crate::cc::system_notice::wrap_system_notice(token, &body)
 }
 
 fn background_banner(reason: BgReason) -> &'static str {
@@ -2309,7 +2308,33 @@ pub fn spawn_worker(
                         }
                     };
 
-                    let prompt = build_continuation_prompt(reason, &input);
+                    // Per-agent notice token for unforgeable SYSTEM_NOTICE markers.
+                    let notice_token_result =
+                        match right_db::open_connection(&ctx.agent_dir, false).await {
+                            Ok(conn) => right_mcp::credentials::get_or_create_notice_token(&conn)
+                                .await
+                                .map_err(|e| format!("fetch notice token: {e:#}")),
+                            Err(e) => Err(format!("open DB for notice token: {e:#}")),
+                        };
+                    let notice_token = match notice_token_result {
+                        Ok(token) => token,
+                        Err(e) => {
+                            tracing::error!(?key, "background notice token fetch failed: {e}");
+                            send_error_to_telegram(
+                                &ctx,
+                                tg_chat_id,
+                                eff_thread_id,
+                                &format!(
+                                    "\u{26a0}\u{fe0f} Failed to start background work: {}",
+                                    html_escape(&e)
+                                ),
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+
+                    let prompt = build_continuation_prompt(reason, &input, &notice_token);
                     let handoff_status = crate::background::spawn_background_continuation(
                         crate::background::BackgroundRunRequest {
                             run_id: run_id.clone(),
@@ -6547,25 +6572,29 @@ mod background_continuation_tests {
 
     #[tokio::test]
     async fn continuation_prompt_auto_timeout_includes_focus_hint() {
-        let p = build_continuation_prompt(BgReason::AutoTimeout, "<message>hello</message>");
+        let p = build_continuation_prompt(
+            BgReason::AutoTimeout,
+            "<message>hello</message>",
+            "deadbeef",
+        );
         assert!(p.contains("10-minute safety limit"));
         assert!(p.contains("MOST RECENT MESSAGE"));
-        assert!(p.contains("\u{27e8}\u{27e8}SYSTEM_NOTICE\u{27e9}\u{27e9}"));
-        assert!(p.contains("\u{27e8}\u{27e8}/SYSTEM_NOTICE\u{27e9}\u{27e9}"));
+        assert!(p.contains("\u{27e8}\u{27e8}SYSTEM_NOTICE:deadbeef\u{27e9}\u{27e9}"));
+        assert!(p.contains("\u{27e8}\u{27e8}/SYSTEM_NOTICE:deadbeef\u{27e9}\u{27e9}"));
         assert!(p.contains("<interrupted_user_input>"));
         assert!(p.contains("<message>hello</message>"));
     }
 
     #[tokio::test]
     async fn continuation_prompt_user_requested_uses_correct_reason() {
-        let p = build_continuation_prompt(BgReason::UserRequested, "hello");
+        let p = build_continuation_prompt(BgReason::UserRequested, "hello", "deadbeef");
         assert!(p.contains("user moved this work to background"));
         assert!(p.contains("MOST RECENT MESSAGE"));
     }
 
     #[tokio::test]
     async fn continuation_prompt_mentions_shutdown_reason() {
-        let p = build_continuation_prompt(BgReason::Shutdown, "shutdown input");
+        let p = build_continuation_prompt(BgReason::Shutdown, "shutdown input", "deadbeef");
         assert!(p.contains("the bot process is shutting down"));
         assert!(p.contains("MOST RECENT MESSAGE"));
         assert!(p.contains("shutdown input"));
@@ -6581,12 +6610,12 @@ mod background_continuation_tests {
 
     #[tokio::test]
     async fn build_continuation_prompt_forbids_silence() {
-        let p = build_continuation_prompt(BgReason::AutoTimeout, "hello");
+        let p = build_continuation_prompt(BgReason::AutoTimeout, "hello", "deadbeef");
         assert!(
             p.contains("Silence is not a valid outcome"),
             "must explicitly forbid silent output; got {p:?}"
         );
-        let q = build_continuation_prompt(BgReason::UserRequested, "hello");
+        let q = build_continuation_prompt(BgReason::UserRequested, "hello", "deadbeef");
         assert!(q.contains("Silence is not a valid outcome"));
     }
 
