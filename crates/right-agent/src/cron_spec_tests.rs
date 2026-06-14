@@ -2021,3 +2021,78 @@ async fn list_specs_linked_skills_empty_when_none() {
     let linked = parsed[0]["linked_skills"].as_array().unwrap();
     assert!(linked.is_empty());
 }
+
+#[tokio::test]
+async fn delete_spec_cascades_skill_links() {
+    let (_dir, conn) = setup_db().await;
+    let tmp = tempfile::tempdir().unwrap();
+
+    create_spec(&conn, "linked-del", "17 9 * * *", "p", None, None)
+        .await
+        .unwrap();
+    crate::cron_skill_link::link_auto(&conn, "linked-del", &["rightx-a".to_string()])
+        .await
+        .unwrap();
+
+    // Confirm the link exists before deletion.
+    let links_before = crate::cron_skill_link::list_for_job(&conn, "linked-del")
+        .await
+        .unwrap();
+    assert_eq!(links_before, vec!["rightx-a"]);
+
+    let msg = delete_spec(&conn, "linked-del", tmp.path()).await.unwrap();
+    assert!(msg.contains("Deleted"));
+
+    // Links must be gone after deletion.
+    let links_after = crate::cron_skill_link::list_for_job(&conn, "linked-del")
+        .await
+        .unwrap();
+    assert!(
+        links_after.is_empty(),
+        "skill links must be deleted with the spec"
+    );
+
+    // Second delete must return not-found.
+    let err = delete_spec(&conn, "linked-del", tmp.path())
+        .await
+        .unwrap_err();
+    assert!(err.contains("not found"));
+}
+
+#[tokio::test]
+async fn delete_spec_cascades_multiple_skill_links() {
+    let (_dir, conn) = setup_db().await;
+    let tmp = tempfile::tempdir().unwrap();
+
+    create_spec(&conn, "multi-link-del", "17 9 * * *", "p", None, None)
+        .await
+        .unwrap();
+    crate::cron_skill_link::link_auto(
+        &conn,
+        "multi-link-del",
+        &[
+            "rightx-a".to_string(),
+            "rightx-b".to_string(),
+            "rightx-c".to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let links_before = crate::cron_skill_link::list_for_job(&conn, "multi-link-del")
+        .await
+        .unwrap();
+    assert_eq!(links_before.len(), 3, "expected 3 links before deletion");
+
+    delete_spec(&conn, "multi-link-del", tmp.path())
+        .await
+        .unwrap();
+
+    let links_after = crate::cron_skill_link::list_for_job(&conn, "multi-link-del")
+        .await
+        .unwrap();
+    assert!(
+        links_after.is_empty(),
+        "all skill links must be deleted with the spec, got: {links_after:?}"
+    );
+}

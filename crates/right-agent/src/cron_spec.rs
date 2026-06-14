@@ -689,13 +689,17 @@ pub async fn update_spec_partial(
     })
 }
 
-/// Delete a cron spec and its lock file. Returns error if not found.
+/// Delete a cron spec, its skill links, and its lock file. Returns error if not found.
 pub async fn delete_spec(
     conn: &Connection,
     job_name: &str,
     agent_dir: &Path,
 ) -> Result<String, String> {
-    let rows = conn
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| format!("delete failed: {e:#}"))?;
+    let rows = tx
         .execute(
             "DELETE FROM cron_specs WHERE job_name = ?1",
             params![job_name],
@@ -704,8 +708,21 @@ pub async fn delete_spec(
         .map_err(|e| format!("delete failed: {e:#}"))?;
 
     if rows == 0 {
+        if let Err(e) = tx.rollback().await {
+            tracing::warn!(job = %job_name, "rollback after not-found failed: {e:#}");
+        }
         return Err(format!("job '{job_name}' not found"));
     }
+
+    tx.execute(
+        "DELETE FROM cron_skill_links WHERE job_name = ?1",
+        params![job_name],
+    )
+    .await
+    .map_err(|e| format!("delete failed: {e:#}"))?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("delete failed: {e:#}"))?;
 
     // Remove lock file if present.
     let lock_path = agent_dir
