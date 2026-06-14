@@ -207,6 +207,142 @@ fn compose_run_prompt(prompt: &str, force_notify: bool, extra_instruction: Optio
     out
 }
 
+/// What a `then` continuation should deliver, if it fires.
+pub(crate) struct ThenAction {
+    pub target_chat_id: i64,
+    pub target_thread_id: Option<i64>,
+    pub prompt: String,
+}
+
+/// Decide whether/where a `then` continuation fires for a finished triggered run.
+/// Target precedence: explicit `then.target_chat_id` > resolved origin >
+/// the job's standing `target_chat_id`. Returns `None` when there is no `then`,
+/// the `run_on` does not match, or no deliverable chat is known.
+///
+/// NOTE (v1 limitation): `then.notify` is realized via the prompt directive below
+/// (the continuation chooses `notify`). Forcing delivery through the background
+/// row's `force_notify` column + idle-gate skip is a documented follow-up.
+pub(crate) fn resolve_then_action(spec: &CronSpec, success: bool) -> Option<ThenAction> {
+    let then = spec.then.as_ref()?;
+    if !then.run_on.fires_on(success) {
+        return None;
+    }
+    let target_chat_id = then
+        .target_chat_id
+        .or(spec.trigger_origin_chat_id)
+        .or(spec.target_chat_id)?;
+    let target_thread_id = if then.target_chat_id.is_some() {
+        then.target_thread_id
+    } else if spec.trigger_origin_chat_id.is_some() {
+        spec.trigger_origin_thread_id
+    } else {
+        spec.target_thread_id
+    };
+    let prompt = if then.notify {
+        format!(
+            "⟨⟨SYSTEM_NOTICE⟩⟩ Scheduled follow-up of the job you just ran. Always emit \
+             delivery.kind=\"notify\" with a complete report. ⟨⟨/SYSTEM_NOTICE⟩⟩\n\n{}",
+            then.instruction
+        )
+    } else {
+        then.instruction.clone()
+    };
+    Some(ThenAction {
+        target_chat_id,
+        target_thread_id,
+        prompt,
+    })
+}
+
+/// `producer_ref` stamped on every `then`-continuation `async_runs` row.
+pub(crate) const THEN_PRODUCER_REF: &str = "cron_then";
+
+/// Insert the queued `kind='background'` row for a `then` continuation, returning
+/// the new run id. The row's `source_session_id` is the triggered run's session
+/// (the one the continuation forks), and `run_session_id` is the new run's own
+/// session. Observable boundary for tests — see
+/// `then_row_insert_matches_continuation_contract`.
+async fn insert_then_continuation_row(
+    agent_dir: &std::path::Path,
+    action: &ThenAction,
+    source_session_id: &str,
+) -> Result<String, right_db::DbError> {
+    let new_run_id = uuid::Uuid::new_v4().to_string();
+    let conn = right_db::open_connection(agent_dir, false).await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    right_agent::async_runs::insert_queued_background_run(
+        &conn,
+        right_agent::async_runs::NewBackgroundRun {
+            id: &new_run_id,
+            producer_ref: Some(THEN_PRODUCER_REF),
+            source_session_id,
+            run_session_id: &new_run_id,
+            target_chat_id: action.target_chat_id,
+            target_thread_id: action.target_thread_id,
+            created_at: &now,
+        },
+    )
+    .await?;
+    Ok(new_run_id)
+}
+
+/// Insert the queued `kind='background'` row for a `then` continuation, acquire
+/// the per-session mutex on the SOURCE session (the triggered run we fork), and
+/// spawn the continuation. A failed row insert is logged and returns early — the
+/// continuation never runs without its tracking row, and the helper never panics.
+#[allow(clippy::too_many_arguments)]
+async fn spawn_then_continuation(
+    action: ThenAction,
+    source_session_id: String, // the triggered run's run_id == its session id
+    agent_dir: &std::path::Path,
+    agent_name: &str,
+    model: Option<&str>,
+    ssh_config_path: Option<&std::path::Path>,
+    internal_client: &Arc<right_mcp::internal_client::InternalClient>,
+    resolved_sandbox: Option<&str>,
+    upgrade_lock: Arc<tokio::sync::RwLock<()>>,
+    session_locks: &crate::telegram::SessionLocks,
+    debug: Arc<std::sync::atomic::AtomicBool>,
+) {
+    // Insert the queued background row so delivery + recovery treat it normally.
+    let new_run_id =
+        match insert_then_continuation_row(agent_dir, &action, &source_session_id).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!("then: insert background row failed: {e:#}");
+                return;
+            }
+        };
+    // Acquire the per-session mutex on the SOURCE session (we --resume/fork it).
+    let session_guard = {
+        let entry = session_locks
+            .entry(source_session_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        entry.lock_owned().await
+    };
+    let status = crate::background::spawn_background_continuation(
+        crate::background::BackgroundRunRequest {
+            run_id: new_run_id,
+            source_session_id,
+            target_chat_id: action.target_chat_id,
+            target_thread_id: action.target_thread_id,
+            prompt: action.prompt,
+        },
+        agent_dir.to_path_buf(),
+        agent_name.to_string(),
+        model.map(|s| s.to_owned()),
+        ssh_config_path.map(|p| p.to_path_buf()),
+        Arc::clone(internal_client),
+        resolved_sandbox.map(|s| s.to_owned()),
+        upgrade_lock,
+        session_guard,
+        debug,
+    )
+    .await;
+    tracing::info!(?status, "cron then continuation handoff");
+}
+
 /// Delete old cron log files for a job, keeping the most recent `keep` files.
 async fn cleanup_old_logs(
     job_name: &str,
@@ -1055,6 +1191,28 @@ async fn execute_job(
                                     silent_reason = cron_output.delivery.silent_reason().unwrap_or("-"),
                                     "cron output persisted to DB"
                                 );
+                                // `then` continuation: fork this run's session for
+                                // a runtime-guaranteed follow-up. Awaited inline; it
+                                // returns after the continuation's system/init, like
+                                // the worker hand-off. Holds the SOURCE-session mutex
+                                // internally, so it serializes against the learning
+                                // probe fork spawned below.
+                                if let Some(action) = resolve_then_action(spec, true) {
+                                    spawn_then_continuation(
+                                        action,
+                                        run_id.clone(),
+                                        agent_dir,
+                                        agent_name,
+                                        model,
+                                        ssh_config_path,
+                                        internal_client,
+                                        resolved_sandbox,
+                                        Arc::clone(&upgrade_lock),
+                                        session_locks,
+                                        Arc::clone(&debug),
+                                    )
+                                    .await;
+                                }
                                 // Skill learning: recurring cron runs feed the
                                 // shared pipeline (prefilter → probe-writer fork
                                 // of this run's session). Fire-and-forget; never
@@ -1287,6 +1445,27 @@ async fn execute_job(
                 Err(e) => {
                     tracing::error!(job = %job_name, "failed to serialize failure notify: {e:#}");
                 }
+            }
+
+            // `then` continuation on failure. Sequenced AFTER reflection: reflection
+            // resumed A's session WITHOUT the per-session guard, so the fork here
+            // must not overlap it. `spawn_then_continuation` takes the guard and
+            // forks A's session, leaving the reflected session intact.
+            if let Some(action) = resolve_then_action(spec, false) {
+                spawn_then_continuation(
+                    action,
+                    run_id.clone(),
+                    agent_dir,
+                    agent_name,
+                    model,
+                    ssh_config_path,
+                    internal_client,
+                    resolved_sandbox,
+                    Arc::clone(&upgrade_lock),
+                    session_locks,
+                    Arc::clone(&debug),
+                )
+                .await;
             }
         }
     }
@@ -2396,6 +2575,164 @@ mod tests {
         assert!(!super::schedule_kind_feeds_learning(&ScheduleKind::RunAt(
             chrono::Utc::now()
         )));
+    }
+
+    /// Minimal `CronSpec` with all transient/target fields cleared, for pure
+    /// decision-function tests.
+    fn sample_cron_spec() -> CronSpec {
+        use right_agent::cron_spec::ScheduleKind;
+        CronSpec {
+            schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            trigger_force_notify: false,
+            target_chat_id: None,
+            target_thread_id: None,
+            model: None,
+            trigger_extra_instruction: None,
+            then: None,
+            trigger_origin_chat_id: None,
+            trigger_origin_thread_id: None,
+        }
+    }
+
+    #[test]
+    fn then_action_respects_run_on_and_target_precedence() {
+        use right_agent::cron_spec::{RunOn, ThenSpec};
+
+        let mk = |run_on, then_target: Option<i64>, origin: Option<i64>, standing: Option<i64>| {
+            let mut s = sample_cron_spec();
+            s.target_chat_id = standing;
+            s.trigger_origin_chat_id = origin;
+            s.then = Some(ThenSpec {
+                instruction: "go".into(),
+                run_on,
+                notify: false,
+                target_chat_id: then_target,
+                target_thread_id: None,
+            });
+            s
+        };
+
+        // run_on=success fires only on success
+        assert!(resolve_then_action(&mk(RunOn::Success, None, Some(1), Some(2)), true).is_some());
+        assert!(resolve_then_action(&mk(RunOn::Success, None, Some(1), Some(2)), false).is_none());
+        // run_on=failure fires only on failure
+        assert!(resolve_then_action(&mk(RunOn::Failure, None, Some(1), Some(2)), false).is_some());
+        // run_on=always fires both
+        assert!(resolve_then_action(&mk(RunOn::Always, None, Some(1), Some(2)), true).is_some());
+
+        // target precedence: then.target_chat_id > origin > standing
+        assert_eq!(
+            resolve_then_action(&mk(RunOn::Always, Some(9), Some(1), Some(2)), true)
+                .unwrap()
+                .target_chat_id,
+            9
+        );
+        assert_eq!(
+            resolve_then_action(&mk(RunOn::Always, None, Some(1), Some(2)), true)
+                .unwrap()
+                .target_chat_id,
+            1
+        );
+        assert_eq!(
+            resolve_then_action(&mk(RunOn::Always, None, None, Some(2)), true)
+                .unwrap()
+                .target_chat_id,
+            2
+        );
+        // no target anywhere -> None (cannot deliver)
+        assert!(resolve_then_action(&mk(RunOn::Always, None, None, None), true).is_none());
+    }
+
+    /// End-to-end at the observable boundary: a successful triggered run with
+    /// `then{run_on:"success"}` and an origin chat resolves an action and inserts
+    /// a `kind='background'`, `producer_ref='cron_then'` row whose
+    /// `source_session_id` is the triggered run's session and `target_chat_id` is
+    /// the origin. The `run_on:"failure"` variant resolves to `None` on success,
+    /// so no row is inserted.
+    ///
+    /// We assert at the row-insert boundary (`insert_then_continuation_row`)
+    /// because the full `spawn_then_continuation` spawns a real CC subprocess,
+    /// which the cron unit harness cannot stand up.
+    #[tokio::test]
+    async fn triggered_run_with_then_success_spawns_continuation() {
+        use right_agent::cron_spec::{RunOn, ThenSpec};
+
+        let dir = tempdir().unwrap();
+        let conn = right_db::open_connection(dir.path(), true).await.unwrap();
+
+        let triggered_run_id = "triggered-session-abc";
+        let origin_chat: i64 = 4242;
+
+        let mut success_spec = sample_cron_spec();
+        success_spec.trigger_origin_chat_id = Some(origin_chat);
+        success_spec.then = Some(ThenSpec {
+            instruction: "follow up".into(),
+            run_on: RunOn::Success,
+            notify: false,
+            target_chat_id: None,
+            target_thread_id: None,
+        });
+
+        // run_on=success fires on a successful run → row inserted.
+        let action = resolve_then_action(&success_spec, true).expect("then fires on success");
+        let new_run_id = insert_then_continuation_row(dir.path(), &action, triggered_run_id)
+            .await
+            .expect("row insert");
+
+        let row: (String, String, String, i64) = conn
+            .query_row(
+                "SELECT kind, producer_ref, source_session_id, target_chat_id \
+                 FROM async_runs WHERE producer_ref = 'cron_then'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.0, "background");
+        assert_eq!(row.1, THEN_PRODUCER_REF);
+        assert_eq!(row.2, triggered_run_id);
+        assert_eq!(row.3, origin_chat);
+
+        // run_session_id is the new run's own session, distinct from the source.
+        let run_session_id: String = conn
+            .query_row(
+                "SELECT run_session_id FROM async_runs WHERE id = ?1",
+                [new_run_id.as_str()],
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(run_session_id, new_run_id);
+
+        // run_on=failure does NOT fire on a successful run → no decision, no row.
+        let mut failure_spec = sample_cron_spec();
+        failure_spec.trigger_origin_chat_id = Some(origin_chat);
+        failure_spec.then = Some(ThenSpec {
+            instruction: "only on failure".into(),
+            run_on: RunOn::Failure,
+            notify: false,
+            target_chat_id: None,
+            target_thread_id: None,
+        });
+        assert!(
+            resolve_then_action(&failure_spec, true).is_none(),
+            "run_on=failure must not fire on a successful run"
+        );
+
+        // Exactly one cron_then row exists (the success one).
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM async_runs WHERE producer_ref = 'cron_then'",
+                [],
+                |r| r.get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
