@@ -6,7 +6,7 @@
 
 **Architecture:** One Astro project in `site/`. A custom `src/pages/index.astro` owns `/` with full brand control. Starlight serves docs from `src/content/docs/docs/*` (its documented subpath pattern) at `/docs/*`. Both surfaces share one brand token sheet. Tooling lives in a devenv `site` profile using Bun. CI rewrites the existing `static.yml` to build and deploy `site/dist`.
 
-**Tech Stack:** Astro 5, `@astrojs/starlight`, `@astrojs/sitemap`, `sharp`, `@fontsource-variable/inter`, `@fontsource-variable/jetbrains-mono`, `starlight-links-validator`. Bun as package manager and runner, node as build fallback. devenv 2.1.2 profiles. GitHub Actions + Pages.
+**Tech Stack:** Astro 6, `@astrojs/starlight` (0.40+, which requires Astro 6), `@astrojs/sitemap`, `sharp`, `@fontsource-variable/inter`, `@fontsource-variable/jetbrains-mono`, `starlight-links-validator`. Bun as package manager and runner, node as build fallback. devenv 2.1.2 profiles. GitHub Actions + Pages.
 
 **Source spec:** `docs/superpowers/specs/2026-06-15-right-agent-site-design.md`.
 
