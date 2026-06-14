@@ -261,7 +261,7 @@ pub(crate) const THEN_PRODUCER_REF: &str = "cron_then";
 /// the new run id. The row's `source_session_id` is the triggered run's session
 /// (the one the continuation forks), and `run_session_id` is the new run's own
 /// session. Observable boundary for tests — see
-/// `then_row_insert_matches_continuation_contract`.
+/// `triggered_run_with_then_success_spawns_continuation`.
 async fn insert_then_continuation_row(
     agent_dir: &std::path::Path,
     action: &ThenAction,
@@ -2645,6 +2645,40 @@ mod tests {
         );
         // no target anywhere -> None (cannot deliver)
         assert!(resolve_then_action(&mk(RunOn::Always, None, None, None), true).is_none());
+
+        // thread-id precedence follows the chosen chat source.
+        // When then.target_chat_id wins, the action carries then.target_thread_id.
+        let mut then_thread = sample_cron_spec();
+        then_thread.trigger_origin_chat_id = Some(1);
+        then_thread.trigger_origin_thread_id = Some(11);
+        then_thread.target_thread_id = Some(22);
+        then_thread.then = Some(ThenSpec {
+            instruction: "go".into(),
+            run_on: RunOn::Always,
+            notify: false,
+            target_chat_id: Some(9),
+            target_thread_id: Some(99),
+        });
+        let act = resolve_then_action(&then_thread, true).unwrap();
+        assert_eq!(act.target_chat_id, 9);
+        assert_eq!(act.target_thread_id, Some(99));
+
+        // When origin wins (no then.target_chat_id), the action carries the
+        // origin thread id, ignoring then.target_thread_id and standing thread.
+        let mut origin_thread = sample_cron_spec();
+        origin_thread.trigger_origin_chat_id = Some(1);
+        origin_thread.trigger_origin_thread_id = Some(11);
+        origin_thread.target_thread_id = Some(22);
+        origin_thread.then = Some(ThenSpec {
+            instruction: "go".into(),
+            run_on: RunOn::Always,
+            notify: false,
+            target_chat_id: None,
+            target_thread_id: Some(99),
+        });
+        let act = resolve_then_action(&origin_thread, true).unwrap();
+        assert_eq!(act.target_chat_id, 1);
+        assert_eq!(act.target_thread_id, Some(11));
     }
 
     /// End-to-end at the observable boundary: a successful triggered run with
