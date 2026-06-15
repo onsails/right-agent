@@ -39,6 +39,7 @@ pub(crate) struct CuratorConfig {
     pub skill_change_threshold: u32,
     pub circuit_failure_threshold: u32,
     pub circuit_cooldown_hours: u32,
+    pub mode: right_agent_config::CuratorMode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -446,6 +447,11 @@ pub(crate) async fn run_if_due(
     // Capture evidence.
     state.last_spike_evidence_json = Some(serialize_evidence(&trigger, now));
 
+    if ctx.config.mode == right_agent_config::CuratorMode::ReportOnly {
+        run_report_only_pass(&ctx, &conn, &mut state, &trigger, now).await;
+        return;
+    }
+
     let skills_dir = ctx.agent_dir.join(".claude/skills");
     let backups_dir = ctx.agent_dir.join("curator_backups");
     let now_str = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -753,6 +759,187 @@ fn serialize_evidence(trigger: &CuratorTrigger, now: DateTime<Utc>) -> String {
     }
 }
 
+async fn run_report_only_pass(
+    ctx: &CuratorContext,
+    conn: &right_db::Connection,
+    state: &mut CuratorState,
+    trigger: &CuratorTrigger,
+    now: DateTime<Utc>,
+) {
+    let lifecycle_rows = match right_lifecycle::list_curator_candidates(conn).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "report-only candidate read failed: {e:#}");
+            return;
+        }
+    };
+    let active = match crate::cc::invocation::register_non_foreground_invocation(
+        crate::cc::invocation::NonForegroundInvocationRegistration {
+            agent_name: ctx.agent_name.clone(),
+            agent_dir: ctx.agent_dir.clone(),
+            ssh_config_path: ctx.ssh_config_path.clone(),
+            resolved_sandbox: ctx.resolved_sandbox.clone(),
+            internal_client: Arc::clone(&ctx.internal_client),
+            kind: right_mcp::internal_client::ProgressInvocationKindDto::Curator,
+            chat_id: None,
+            thread_id: None,
+        },
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "report-only registration failed: {e:#}");
+            return;
+        }
+    };
+    let invocation =
+        build_report_only_invocation(ctx, &lifecycle_rows, active.mcp_config_path().to_owned());
+    let args = invocation.into_args();
+    let mut cmd = match crate::cc::invocation::build_claude_command(
+        &args,
+        &ctx.agent_dir,
+        ctx.ssh_config_path.as_deref(),
+        ctx.resolved_sandbox.as_deref(),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "skipping report-only curator: {e:#}");
+            active.cleanup().await;
+            return;
+        }
+    };
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let (actions_json, action_count, cost, cache_r, cache_c) =
+        match right_process::ProcessGroupChild::spawn(cmd) {
+            Ok(child) => {
+                match crate::cc::invocation::wait_with_output_or_kill(child, CURATOR_TIMEOUT).await
+                {
+                    Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                        let usage = crate::cc::stream::parse_usage_full(&stdout);
+                        if let Some(b) = usage.as_ref() {
+                            if let Err(e) =
+                                right_agent::usage::insert::insert_learning_curator(conn, b).await
+                            {
+                                tracing::warn!(agent = %ctx.agent_name, "report-only usage insert failed: {e:#}");
+                            }
+                        }
+                        let plan =
+                            parse_curator_plan(&stdout).unwrap_or(CuratorPlan { actions: vec![] });
+                        let count = plan.actions.len() as i64;
+                        let json = serde_json::to_string(&plan.actions)
+                            .unwrap_or_else(|_| "[]".to_owned());
+                        let (cost_v, cr, cc) = usage
+                            .map(|b| {
+                                (
+                                    b.total_cost_usd,
+                                    b.cache_read_tokens as i64,
+                                    b.cache_creation_tokens as i64,
+                                )
+                            })
+                            .unwrap_or((0.0, 0, 0));
+                        (json, count, cost_v, cr, cc)
+                    }
+                    _ => ("[]".to_owned(), 0, 0.0, 0, 0),
+                }
+            }
+            Err(e) => {
+                tracing::warn!(agent = %ctx.agent_name, "report-only spawn failed: {e:#}");
+                ("[]".to_owned(), 0, 0.0, 0, 0)
+            }
+        };
+    active.cleanup().await;
+
+    let record = CuratorRunRecord {
+        run_at: now.to_rfc3339(),
+        trigger: trigger_label(trigger).to_owned(),
+        trigger_evidence_json: state.last_spike_evidence_json.clone(),
+        mode: "report_only".to_owned(),
+        status: "proposed".to_owned(),
+        cost_usd: cost,
+        cache_read: cache_r,
+        cache_creation: cache_c,
+        consolidations: 0,
+        archives: 0,
+        summary: Some(format!("{action_count} proposals")),
+        actions_json,
+        invocation_id: None,
+    };
+    if let Err(e) = insert_curator_run(conn, &record).await {
+        tracing::warn!(agent = %ctx.agent_name, "report-only curator_runs insert failed: {e:#}");
+    }
+    // Report-only never writes lifecycle/disk; still advance the gate clock.
+    state.last_run_at = Some(now.to_rfc3339());
+    state.last_run_status = Some("proposed".to_owned());
+    if let Err(e) = save_state_db(conn, state).await {
+        tracing::warn!(agent = %ctx.agent_name, "report-only save state failed: {e:#}");
+    }
+}
+
+fn build_report_only_invocation(
+    ctx: &CuratorContext,
+    lifecycle_rows: &[right_lifecycle::SkillLifecycleRow],
+    mcp_config_path: String,
+) -> crate::cc::invocation::ClaudeInvocation {
+    use crate::cc::invocation::{ClaudeInvocation, OutputFormat};
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let user_prompt = format!(
+        "{system}\n\n{candidates}",
+        system = right_codegen::CURATOR_REPORT_PROMPT,
+        candidates = render_candidate_list(lifecycle_rows),
+    );
+    ClaudeInvocation {
+        mcp_config_path: Some(mcp_config_path),
+        json_schema: Some(right_codegen::CURATOR_PLAN_SCHEMA.to_owned()),
+        output_format: OutputFormat::StreamJson,
+        model: Some(ctx.model.clone()),
+        max_budget_usd: None,
+        max_turns: Some(CURATOR_MAX_TURNS),
+        resume_session_id: None,
+        new_session_id: Some(session_id),
+        fork_session: false,
+        allowed_tools: vec!["Read".into()],
+        disallowed_tools: vec![],
+        extra_args: vec![],
+        prompt: Some(user_prompt),
+        debug_flag: Some(Arc::clone(&ctx.debug_flag)),
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct CuratorPlanAction {
+    pub kind: String,
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct CuratorPlan {
+    pub actions: Vec<CuratorPlanAction>,
+}
+
+/// Parse the structured curator plan from a report-only fork's stdout. Reads the
+/// terminal result line and prefers `structured_output`, falling back to
+/// `result` (same convention as `worker_reply::parse_reply_output`).
+pub(crate) fn parse_curator_plan(stdout: &str) -> Option<CuratorPlan> {
+    let line = crate::cc::stream::last_result_line(stdout)?;
+    let v: serde_json::Value = serde_json::from_str(&line).ok()?;
+    let plan_val = v
+        .get("structured_output")
+        .filter(|x| !x.is_null())
+        .or_else(|| v.get("result"))?;
+    serde_json::from_value::<CuratorPlan>(plan_val.clone()).ok()
+}
+
 fn build_curator_invocation(
     ctx: &CuratorContext,
     lifecycle_rows: &[right_lifecycle::SkillLifecycleRow],
@@ -963,6 +1150,7 @@ mod tests {
             skill_change_threshold: 3,
             circuit_failure_threshold: 3,
             circuit_cooldown_hours: 24,
+            mode: right_agent_config::CuratorMode::Apply,
         }
     }
 
@@ -1287,5 +1475,22 @@ mod tests {
     fn idle_secs_positive_converts_to_utc() {
         let got = idle_secs_to_activity(1_700_000_000).unwrap();
         assert_eq!(got, DateTime::from_timestamp(1_700_000_000, 0).unwrap());
+    }
+
+    #[test]
+    fn parse_curator_plan_extracts_actions_from_result_line() {
+        let stdout = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"result\",\"structured_output\":{\"actions\":[{\"kind\":\"merge\",\"skills\":[\"rightx-a\",\"rightx-b\"],\"target\":\"rightx-u\",\"rationale\":\"dupes\"}]}}\n",
+        );
+        let plan = parse_curator_plan(stdout).unwrap();
+        assert_eq!(plan.actions.len(), 1);
+        assert_eq!(plan.actions[0].kind, "merge");
+        assert_eq!(plan.actions[0].target.as_deref(), Some("rightx-u"));
+    }
+
+    #[test]
+    fn parse_curator_plan_none_when_no_result() {
+        assert!(parse_curator_plan("{\"type\":\"system\"}\n").is_none());
     }
 }

@@ -323,6 +323,24 @@ pub(crate) fn parse_usage(result_json: &str) -> StreamUsage {
     }
 }
 
+/// Return the last `{"type":"result", …}` NDJSON line from a stream-json
+/// stdout, if any.
+pub(crate) fn last_result_line(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .rfind(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| {
+                    v.get("type")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t == "result")
+                })
+                .unwrap_or(false)
+        })
+        .map(ToOwned::to_owned)
+}
+
 /// Parse the full `result` event JSON into `UsageBreakdown`. Returns `None` if
 /// required fields (`total_cost_usd`, `num_turns`, `session_id`) are missing or
 /// the JSON is malformed. The `modelUsage` object is preserved as a JSON string

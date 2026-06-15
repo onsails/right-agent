@@ -1090,6 +1090,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         circuit_failure_threshold: curator_learning
                             .curator_circuit_failure_threshold,
                         circuit_cooldown_hours: curator_learning.curator_circuit_cooldown_hours,
+                        mode: curator_learning.curator_mode,
                     },
                 };
                 let latest_activity = crate::learning_curator::idle_secs_to_activity(
