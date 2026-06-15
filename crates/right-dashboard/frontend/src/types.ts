@@ -611,3 +611,30 @@ export interface ProviderCreateBody {
   credential: string
   generic?: ProviderGenericBody
 }
+
+export interface PeerProvider {
+  name: string
+  type: string
+  env_var: string
+  label: string | null
+  generic: ProviderGenericBody | null
+}
+
+export interface ProviderPeer {
+  agent: string
+  network_policy: 'permissive' | 'restrictive'
+  providers: PeerProvider[]
+}
+
+export interface ProviderImportBody {
+  source_agent: string
+  source_provider: string
+  label?: string
+  overwrite: boolean
+}
+
+export interface ProviderExportBody {
+  provider: string
+  dest_agent: string
+  overwrite: boolean
+}
