@@ -351,23 +351,24 @@ handlers. Composition success MUST be confirmed by
 `openshell::wait_for_provider_composed*`, which reads the **effective** policy
 (`get_effective_policy` = `GetSandboxConfig`) for the composed `_provider_<name>`
 rule; generic paths MUST use the endpoint-aware variant that also matches the
-expected upstream host/path. Composition is visible only in the effective policy
-— the stored revision (`get_active_policy` = `GetSandboxPolicyStatus`) never
-carries authored generic provider rules. Never infer success from
-`policy set --wait`. This applies to built-in and generic providers.
+expected upstream host/path. Composition is visible only in the effective policy, not the stored
+revision (`get_active_policy`); never infer success from `policy set --wait`.
 Multi-host generic providers MUST confirm every declared upstream host/path
 before writing config or reporting success.
 
-`ensure_profiles` is create-or-skip and MUST NOT re-import an existing id
-(OpenShell rejects duplicate import; a referenced profile cannot be
-deleted) — it reports `DriftedSkipped`. Updating a referenced managed
-profile MUST go through `providers::update_referenced_profile`
-(detach→delete→import→re-attach, secret-preserving). The inert credential
-fields `auth_style`/`header_name`/`query_param` are excluded from the drift
-fingerprint.
+`ensure_profiles` is create-or-skip and MUST NOT re-import an existing id —
+it reports `DriftedSkipped`. Updating a referenced managed profile MUST go
+through `providers::update_referenced_profile`
+(detach→delete→import→re-attach, secret-preserving).
+
+Cross-agent copy (`provider_copy`, dashboard import/export) is copy-only,
+requires the actor trusted in **both** agents' allowlists, and reads the
+source secret only via `get_provider_credentials` (sole read-back, never
+logged or persisted).
 
 See: `docs/architecture/providers.md` for the placeholder mechanism,
-substitution flow, reconciler walkthrough, and policy interaction.
+substitution flow, reconciler walkthrough, cross-agent import/export, and
+policy interaction.
 
 ## External Integrations
 
