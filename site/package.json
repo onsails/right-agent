@@ -6,7 +6,8 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "check": "astro check"
+    "check": "astro check",
+    "test:analytics": "node ./scripts/assert-posthog-build.mjs"
   },
   "dependencies": {
     "@astrojs/sitemap": "^3.7.3",
