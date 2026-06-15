@@ -130,10 +130,36 @@ function toggleDisplayMode(): void {
 
 <style>
 :root {
-  --token-input: #6b7b88;
-  --token-output: #2481cc;
-  --token-create: #b87900;
-  --token-read: #0d7a45;
+  --jewel-base: #121016;
+  --jewel-panel: #201a26;
+  --jewel-line: #2d2533;
+  --jewel-line-2: #3e3146;
+  --jewel-ruby: #c75f88;
+  --jewel-teal: #3bb0c4;
+  --jewel-gold: #cda14b;
+  --jewel-text: #f1ece9;
+  --jewel-muted: #b6a8b0;
+  --jewel-dim: #6f6169;
+  --jewel-ok: #6bbf59;
+  --jewel-warn: #e6c06a;
+  --jewel-err: #e2556a;
+  --jewel-info: #3bb0c4;
+  --jewel-ok-bg: rgba(107, 191, 89, 0.16);
+  --jewel-warn-bg: rgba(230, 192, 106, 0.16);
+  --jewel-err-bg: rgba(226, 85, 106, 0.16);
+  --token-input: #b6a8b0;
+  --token-output: #3bb0c4;
+  --token-create: #cda14b;
+  --token-read: #6bbf59;
+  --tg-theme-bg-color: var(--jewel-base);
+  --tg-theme-secondary-bg-color: var(--jewel-panel);
+  --tg-theme-text-color: var(--jewel-text);
+  --tg-theme-hint-color: var(--jewel-muted);
+  --tg-theme-hint_color: var(--jewel-muted);
+  --tg-theme-link-color: var(--jewel-teal);
+  --tg-theme-button_color: var(--jewel-teal);
+  --tg-theme-section_separator_color: var(--jewel-line);
+  --danger: var(--jewel-err);
 }
 
 * {
@@ -230,23 +256,23 @@ h3 {
 }
 
 .status-pill.ok {
-  color: #0d7a45;
-  background: #dff5e8;
+  color: var(--jewel-ok);
+  background: var(--jewel-ok-bg);
 }
 
 .status-pill.active {
-  color: #8a5a00;
-  background: #fff0c2;
+  color: var(--jewel-gold);
+  background: var(--jewel-warn-bg);
 }
 
 .status-pill.warn {
-  color: #8a5a00;
-  background: #fff0c2;
+  color: var(--jewel-warn);
+  background: var(--jewel-warn-bg);
 }
 
 .status-pill.bad {
-  color: #a42323;
-  background: #ffe1de;
+  color: var(--jewel-err);
+  background: var(--jewel-err-bg);
 }
 
 .status-pill.muted {
@@ -320,8 +346,8 @@ dt,
 
 .tab-button.active,
 .segment-button.active {
-  border-color: var(--tg-theme-button_color, #2481cc);
-  color: var(--tg-theme-button_color, #2481cc);
+  border-color: var(--tg-theme-button_color, var(--jewel-teal));
+  color: var(--tg-theme-button_color, var(--jewel-teal));
   font-weight: 700;
 }
 
@@ -376,15 +402,15 @@ dt,
 }
 
 .metric-card.ok strong {
-  color: #0d7a45;
+  color: var(--jewel-ok);
 }
 
 .metric-card.active strong {
-  color: #8a5a00;
+  color: var(--jewel-gold);
 }
 
 .metric-card.bad strong {
-  color: #a42323;
+  color: var(--jewel-err);
 }
 
 .two-column {
@@ -417,8 +443,8 @@ dt,
   font-size: 0.75rem;
   padding: 0.2rem 0.5rem;
   border-radius: 0.4rem;
-  border: 1px solid var(--danger, #c0392b);
-  color: var(--danger, #c0392b);
+  border: 1px solid var(--danger, var(--jewel-err));
+  color: var(--danger, var(--jewel-err));
   background: transparent;
   cursor: pointer;
 }
@@ -485,8 +511,8 @@ dd {
 }
 
 .data-row.selected {
-  border-color: var(--tg-theme-button_color, #2481cc);
-  box-shadow: inset 0 0 0 1px var(--tg-theme-button_color, #2481cc);
+  border-color: var(--tg-theme-button_color, var(--jewel-teal));
+  box-shadow: inset 0 0 0 1px var(--tg-theme-button_color, var(--jewel-teal));
 }
 
 .row-main,
@@ -523,15 +549,15 @@ dd {
 }
 
 .status-dot.ok {
-  background: #0d7a45;
+  background: var(--jewel-ok);
 }
 
 .status-dot.active {
-  background: #b87900;
+  background: var(--jewel-gold);
 }
 
 .status-dot.bad {
-  background: #b92b27;
+  background: var(--jewel-err);
 }
 
 .run-delivery-badge {
@@ -549,18 +575,18 @@ dd {
 }
 
 .run-delivery-badge.ok {
-  color: #0d7a45;
-  background: #dff5e8;
+  color: var(--jewel-ok);
+  background: var(--jewel-ok-bg);
 }
 
 .run-delivery-badge.active {
-  color: #8a5a00;
-  background: #fff0c2;
+  color: var(--jewel-gold);
+  background: var(--jewel-warn-bg);
 }
 
 .run-delivery-badge.bad {
-  color: #a42323;
-  background: #ffe1de;
+  color: var(--jewel-err);
+  background: var(--jewel-err-bg);
 }
 
 .run-note-preview {

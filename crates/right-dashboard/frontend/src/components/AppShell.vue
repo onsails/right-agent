@@ -68,3 +68,9 @@ const emit = defineEmits<{
     <slot />
   </main>
 </template>
+
+<style scoped>
+.topbar h1 {
+  color: var(--jewel-ruby);
+}
+</style>
