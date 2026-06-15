@@ -77,9 +77,11 @@ export const HOSTS_MICROCOPY =
   'Hosts the agent may call. The agent uses $ENV_VAR and writes auth exactly as the API docs say; Right stores the secret and allows these hosts.'
 
 /** Copying a provider with `envVar` into an agent whose providers are
- *  `localProviders`: overwrite if that env var is already used, else create. */
+ *  `localProviders`: overwrite if that env var is already used, else create.
+ *  Accepts any provider shape carrying `env_var` (local `ProviderView` or
+ *  peer `PeerProvider`). */
 export function copyTargetMode(
-  localProviders: ProviderView[],
+  localProviders: readonly { env_var: string }[],
   envVar: string,
 ): 'create' | 'overwrite' {
   return localProviders.some((p) => p.env_var === envVar) ? 'overwrite' : 'create'
@@ -95,8 +97,5 @@ export function exportTargetState(
   if (isGeneric && peer.network_policy === 'restrictive') {
     return { mode: 'create', blocked: 'restrictive policy cannot accept generic providers' }
   }
-  const mode = peer.providers.some((p) => p.env_var === provider.env_var)
-    ? 'overwrite'
-    : 'create'
-  return { mode, blocked: null }
+  return { mode: copyTargetMode(peer.providers, provider.env_var), blocked: null }
 }

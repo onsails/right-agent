@@ -146,7 +146,17 @@ async function refresh(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    const [listRes, typesRes, peersRes] = await Promise.all([providerList(), providerTypes(), providerPeers()])
+    // Peers power the secondary import/export feature only; a peer-discovery
+    // failure must not blank the primary providers list, so it degrades to an
+    // empty peer set rather than rejecting the whole refresh.
+    const [listRes, typesRes, peersRes] = await Promise.all([
+      providerList(),
+      providerTypes(),
+      providerPeers().catch((err) => {
+        console.warn('provider peers unavailable:', err)
+        return { peers: [] }
+      }),
+    ])
     if (disposed) return
     providers.value = listRes.providers
     types.value = typesRes.types
@@ -481,6 +491,10 @@ async function runExport(t: ExportTarget): Promise<void> {
   exportError.value = null
   try {
     await providerExport({ provider: p.name, dest_agent: t.agent, overwrite: t.mode === 'overwrite' })
+    // Keep the modal open for further targets, but refresh peer state so the
+    // just-exported target now reflects 'Update' (overwrite) instead of a
+    // stale 'Export' that would 409 on a second click.
+    await refresh()
   } catch (err) {
     exportError.value = err instanceof Error ? err.message : 'Export failed'
   } finally {

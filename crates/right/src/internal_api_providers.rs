@@ -1222,6 +1222,11 @@ pub(crate) fn plan_copy(
         .find_map(|p| match extract_env_var(p) {
             Ok(e) if e == env_var => Some(Ok(p)),
             Ok(_) => None,
+            // A stale `unknown_builtin` row has no resolvable env var, so it
+            // cannot be the entry this copy matches on — skip it rather than
+            // aborting the whole copy (mirrors the collision scan in
+            // `handle_provider_create`). Other extract errors still propagate.
+            Err(ProviderApiError::UnknownBuiltinSlug { .. }) => None,
             Err(e) => Some(Err(e)),
         })
         .transpose()?;
@@ -1486,6 +1491,17 @@ mod plan_copy_tests {
         };
         let err = plan_copy("agent-a", &src, "FAL_KEY", &[], false, None).unwrap_err();
         assert!(matches!(err, ProviderApiError::InvalidName { .. }));
+    }
+
+    #[test]
+    fn unknown_builtin_dest_entry_does_not_abort_unrelated_copy() {
+        // A destination provider whose slug is no longer in the catalog has no
+        // resolvable env var; it must be skipped during the env-var scan, not
+        // abort an unrelated copy into that agent.
+        let src = builtin("agent-a-provider", "right-fal");
+        let dest = vec![builtin("other-stale", "totally-unknown-slug-xyz")];
+        let plan = plan_copy("agent-a", &src, "FAL_KEY", &dest, false, None).unwrap();
+        assert!(matches!(plan, CopyPlan::Create { .. }));
     }
 }
 
@@ -2663,6 +2679,15 @@ pub(crate) async fn handle_provider_copy(
     // Actor must be trusted on BOTH sides.
     require_trusted(&state.agents_dir, &req.source_agent, req.actor_user_id)?;
     require_trusted(&state.agents_dir, &req.dest_agent, req.actor_user_id)?;
+
+    // A copy to oneself is nonsensical (and would self-rotate a live
+    // credential). The UI never produces it — `build_peers` excludes the
+    // current agent — but the internal handler must reject it directly.
+    if req.source_agent == req.dest_agent {
+        return Err(ProviderApiError::CopyConflict {
+            reason: "source and destination agent are the same".into(),
+        });
+    }
 
     // Resolve the source provider entry + its env var.
     let source_cfg = load_agent_config(&state.agents_dir, &req.source_agent)
@@ -3849,8 +3874,20 @@ pub(crate) fn build_peers(
     let mut peers = Vec::new();
     for name in names {
         let agent_dir = agents_dir.join(&name);
-        if !is_trusted(agents_dir, &name, actor_user_id)? {
-            continue;
+        // Discovery is tolerant: a peer whose allowlist can't be read can't be
+        // authorized, so it is excluded rather than failing the whole listing.
+        // (Trust for the *current* agent is enforced separately, fail-closed,
+        // by `require_trusted` in the handler.)
+        match is_trusted(agents_dir, &name, actor_user_id) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    agent = %name,
+                    "skipping peer with unreadable allowlist.yaml: {e:#}"
+                );
+                continue;
+            }
         }
         let cfg = match right_agent::agent::discovery::parse_agent_config(&agent_dir) {
             Ok(Some(c)) => c,
@@ -3995,6 +4032,41 @@ mod peers_tests {
 
         let peers = build_peers(tmp.path(), 7, "current").unwrap();
         assert!(peers.is_empty(), "peer with no allowlist must be excluded");
+    }
+
+    #[test]
+    fn build_peers_skips_peer_with_corrupt_allowlist_not_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent(tmp.path(), "current", &[7], "  providers: []\n");
+        // A healthy, trusted peer that must still be returned.
+        write_agent(
+            tmp.path(),
+            "healthy",
+            &[7],
+            "  providers:\n    - name: healthy-fal\n      type: right-fal\n",
+        );
+        // A peer whose allowlist.yaml is corrupt (users is not a sequence):
+        // it must be skipped, never abort the whole listing.
+        let bad_dir = tmp.path().join("corrupt");
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        std::fs::write(
+            bad_dir.join("allowlist.yaml"),
+            "version: 2\nusers: not-a-list\n",
+        )
+        .unwrap();
+        std::fs::write(
+            bad_dir.join("agent.yaml"),
+            "sandbox:\n  mode: openshell\n  providers: []\n",
+        )
+        .unwrap();
+
+        let peers = build_peers(tmp.path(), 7, "current").unwrap();
+        assert_eq!(
+            peers.len(),
+            1,
+            "corrupt-allowlist peer skipped, healthy kept"
+        );
+        assert_eq!(peers[0].agent, "healthy");
     }
 
     #[test]
