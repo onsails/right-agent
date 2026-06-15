@@ -1,4 +1,79 @@
 # Changelog
+## [0.4.1] - 2026-06-15
+
+
+### Bug Fixes
+
+- **bot**: /set_focus opens focus Mini App from groups via /start deep-link
+- **cron**: Correct then doc-comment test ref + thread-id precedence test
+- **bot**: Keep attachments-only delivery failure fatal despite status header
+- **bot,right-mcp,right-db**: Close notice-token race + delivery-header review findings
+- **bot**: Stop double-posting when content duplicates attachment caption
+- **right-agent**: Log linked_skills lookup error instead of silent drop
+- **right**: Aggregator opens data.db per-op, no connection cache (turso#769)
+- **cron**: Normalize thread-0 origin, fire then on parse-failure, honest notify desc
+- **right**: Drop misleading partial cron block from aggregator instructions
+- **cron-skill-linking**: Pre-validate skills on create, drop unused jobs_for_skill, fix doc wording
+- **cron-skill-linking**: De-gate auto-link seams, atomic cron_create, tx rollback, dedup, redirect self-ref guard
+
+### Documentation
+
+- **skill**: Right-cron then continuation, extra_instruction, report-here
+- **prompt**: Authenticated SYSTEM_NOTICE token rule
+- Cron↔skill linking (right-cron skill, architecture, prompt system)
+- **right-db**: Link WAL-desync workaround to tracker #127 / turso#769
+- **prompt**: Cron_trigger extra_instruction + then descriptions
+
+### Features
+
+- **right-mcp**: Get_or_create_notice_token helper
+- **right-db**: Detect recoverable WAL-sidecar desync (turso#769)
+- **right-db**: Self-heal WAL-sidecar desync on open (turso#769)
+- **db**: V45 cron_specs trigger transient columns (extra_instruction, then, origin)
+- **right-db**: V45 notice_token table
+- **right-db**: Add cron_skill_links table (migration v47)
+- **cron**: Prepend ephemeral extra_instruction to triggered run
+- **cron**: Runtime-guaranteed then continuation forks the run's session
+- **bot**: Pure render_delivery_header for async delivery
+- **bot**: Prepend_delivery_header helper
+- **bot**: Prepend platform status header to async delivery messages
+- **bot**: Tokened wrap_system_notice marker helper
+- **bot**: Emit per-agent notice token into composite prompt
+- **bot**: Stamp notice token into reflection prompt
+- **bot**: Stamp notice token into cron manual-trigger prompt
+- **bot**: Stamp notice token into background continuation prompt
+- **bot**: Thread origin_cron_job through ProbeAnchor
+- **bot**: Auto-link probe-writer-authored skills to originating cron
+- **bot**: Auto-link inline-authored cron skills
+- **bot**: Name live linked skills in the cron run prompt
+- **bot**: Curator redirects/drops cron links on absorb/archive
+- **cron**: ThenSpec + RunOn types with required run_on
+- **cron**: CronSpec transient then/extra/origin fields (excluded from eq)
+- **cron**: Trigger_spec/clear_triggered_at/load_specs_from_db carry trigger transient fields
+- **right-agent**: Cron_skill_link module (link CRUD + validated link/unlink)
+- **right-agent**: Successful_finishes_for_invocation helper
+- **right-agent**: Cron_list includes linked_skills
+- **right-agent**: Cascade link deletion in delete_spec (tool + one-shot)
+- **mcp**: Cron_trigger extra_instruction + then input params
+- **mcp**: Foreground-scoped conversation_scope_opt accessor
+- **mcp**: Cron_trigger resolves origin + persists then/extra_instruction
+- **right**: Cron skill linking MCP surface (skill_names on create + cron_link_skill/unlink)
+
+### Refactor
+
+- **right-db**: Honest SidecarRemove error + WAL-recovery docs
+
+### Testing
+
+- **right-db**: Fixture-gated WAL-desync self-heal integration test
+- **bot**: Ci-claude authenticated SYSTEM_NOTICE channel
+- **bot**: Cover created+updated+no-op and invocation-id partition for cron auto-link
+- **bot**: Cron learned skill is auto-linked then named on next run
+
+### Polish
+
+- **right-db**: Log removed sidecars + explicit SidecarRemove negative test
+
 ## [0.4.0] - 2026-06-13
 
 ### Learning & Skills
