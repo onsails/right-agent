@@ -458,6 +458,13 @@ impl RightBackend {
             && let Err(e) =
                 right_agent::cron_skill_link::link_agent(&conn, &params.job_name, skills).await
         {
+            // Compensate: the spec is already committed; remove it so the agent
+            // gets a clean failure and can retry without hitting "already exists".
+            if let Err(de) =
+                right_agent::cron_spec::delete_spec(&conn, &params.job_name, agent_dir).await
+            {
+                tracing::warn!(job = %params.job_name, "rollback of cron after link failure failed: {de:#}");
+            }
             return Ok(tool_error("cron_link_failed", format!("{e:#}"), None));
         }
         Ok(CallToolResult::success(vec![Content::text(

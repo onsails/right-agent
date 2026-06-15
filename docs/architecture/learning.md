@@ -262,11 +262,12 @@ The agent MCP surface exposes three link operations:
 `right-cron` skill documents this surface and the prompt-evolution guidance
 (slim "fat" cron prompts toward the "what" once skills cover the "how").
 
-When the curator archives a skill, it redirects existing links to the
-absorbing skill (`absorbed_into`) or drops them if there is no absorber.
-The runtime's live-state filter (`state != 'archived'`) is the correctness
-backstop: even a stale link to an archived skill is harmless because the
-runtime simply omits it from the `## Linked skills` block.
+When the curator archives a skill, it redirects existing links only when the
+skill records a successor (`absorbed_into`); a self-referential redirect is a
+no-op. Without a successor the links are dropped. The runtime's live-state
+filter (`state != 'archived'`) is the correctness backstop: even a stale link
+to an archived skill is harmless because the runtime simply omits it from the
+`## Linked skills` block.
 
 Prompt evolution via cron linking is agent-driven only. The platform never
 rewrites a cron's `prompt` field automatically. A proactive nudge to guide
