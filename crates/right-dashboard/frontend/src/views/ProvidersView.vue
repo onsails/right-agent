@@ -8,10 +8,15 @@ import {
   providerRotate,
   providerConfigUpdate,
   providerRemove,
+  providerPeers,
+  providerImport,
+  providerExport,
 } from '../api'
 import type {
   ProviderView,
   ProviderProfileView,
+  ProviderPeer,
+  PeerProvider,
 } from '../types'
 import SecretInput from '../components/SecretInput.vue'
 import ProviderTypeList from './ProviderTypeList.vue'
@@ -24,6 +29,8 @@ import {
   providerCompositionLabel,
   CREDENTIAL_HINT,
   HOSTS_MICROCOPY,
+  copyTargetMode,
+  exportTargetState,
 } from './providersViewModel'
 
 const providers = ref<ProviderView[]>([])
@@ -139,10 +146,11 @@ async function refresh(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    const [listRes, typesRes] = await Promise.all([providerList(), providerTypes()])
+    const [listRes, typesRes, peersRes] = await Promise.all([providerList(), providerTypes(), providerPeers()])
     if (disposed) return
     providers.value = listRes.providers
     types.value = typesRes.types
+    peers.value = peersRes.peers
   } catch (err) {
     if (disposed) return
     error.value = err instanceof Error ? err.message : 'Providers unavailable'
@@ -385,6 +393,101 @@ function isGhost(provider: ProviderView): boolean {
   return provider.status.kind === 'missing' || provider.status.kind === 'gateway_error'
 }
 
+// Peer (other-agent) state for import/export
+const peers = ref<ProviderPeer[]>([])
+
+// Import flow
+const importOpen = ref(false)
+const importBusy = ref<string | null>(null)
+const importError = ref<string | null>(null)
+
+// Export flow
+const exportOpen = ref(false)
+const exportProvider = ref<ProviderView | null>(null)
+const exportBusy = ref<string | null>(null)
+const exportError = ref<string | null>(null)
+
+function openImport(): void {
+  importError.value = null
+  importOpen.value = true
+}
+function closeImport(): void {
+  importOpen.value = false
+  importError.value = null
+}
+
+interface ImportCandidate {
+  agent: string
+  provider: PeerProvider
+  mode: 'create' | 'overwrite'
+}
+function importCandidates(): ImportCandidate[] {
+  const out: ImportCandidate[] = []
+  for (const peer of peers.value) {
+    for (const p of peer.providers) {
+      out.push({ agent: peer.agent, provider: p, mode: copyTargetMode(providers.value, p.env_var) })
+    }
+  }
+  return out
+}
+
+async function runImport(c: ImportCandidate): Promise<void> {
+  importBusy.value = `${c.agent}/${c.provider.name}`
+  importError.value = null
+  try {
+    await providerImport({
+      source_agent: c.agent,
+      source_provider: c.provider.name,
+      overwrite: c.mode === 'overwrite',
+    })
+    closeImport()
+    await refresh()
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : 'Import failed'
+  } finally {
+    importBusy.value = null
+  }
+}
+
+function openExport(provider: ProviderView): void {
+  exportProvider.value = provider
+  exportError.value = null
+  exportOpen.value = true
+}
+function closeExport(): void {
+  exportOpen.value = false
+  exportProvider.value = null
+  exportError.value = null
+}
+
+interface ExportTarget {
+  agent: string
+  mode: 'create' | 'overwrite'
+  blocked: string | null
+}
+function exportTargets(): ExportTarget[] {
+  const p = exportProvider.value
+  if (!p) return []
+  return peers.value.map((peer) => {
+    const s = exportTargetState(peer, p)
+    return { agent: peer.agent, mode: s.mode, blocked: s.blocked }
+  })
+}
+
+async function runExport(t: ExportTarget): Promise<void> {
+  const p = exportProvider.value
+  if (!p || t.blocked) return
+  exportBusy.value = t.agent
+  exportError.value = null
+  try {
+    await providerExport({ provider: p.name, dest_agent: t.agent, overwrite: t.mode === 'overwrite' })
+  } catch (err) {
+    exportError.value = err instanceof Error ? err.message : 'Export failed'
+  } finally {
+    exportBusy.value = null
+  }
+}
+
 // Editing the credential re-arms the soft prefix warning.
 watch(addCredential, () => {
   addWarnAck.value = false
@@ -405,6 +508,9 @@ watch(rotateCredential, () => {
       </div>
       <button class="tool-button" type="button" @click="addOpen ? closeAdd() : openAdd()">
         {{ addOpen ? 'Close' : '+ Add' }}
+      </button>
+      <button class="tool-button" type="button" @click="importOpen ? closeImport() : openImport()">
+        {{ importOpen ? 'Close' : 'Import' }}
       </button>
     </header>
 
@@ -566,6 +672,64 @@ watch(rotateCredential, () => {
       </div>
     </section>
 
+    <!-- Import modal -->
+    <section v-if="importOpen" class="providers-section">
+      <p class="muted-line">Import a provider from another agent you manage:</p>
+      <p v-if="importCandidates().length === 0" class="muted-line">No importable providers</p>
+      <article
+        v-for="c in importCandidates()"
+        :key="`${c.agent}/${c.provider.name}`"
+        class="data-row providers-row static"
+      >
+        <div class="row-main providers-row-main">
+          <strong>{{ c.provider.label ?? c.provider.name }}</strong>
+          <small>from {{ c.agent }}</small>
+          <small>{{ c.provider.env_var }}</small>
+        </div>
+        <div class="button-row row-actions">
+          <button
+            class="tool-button"
+            type="button"
+            :disabled="importBusy === `${c.agent}/${c.provider.name}`"
+            @click="runImport(c)"
+          >
+            {{ importBusy === `${c.agent}/${c.provider.name}` ? 'Working' : (c.mode === 'overwrite' ? 'Update' : 'Import') }}
+          </button>
+        </div>
+      </article>
+      <p v-if="importError" class="notice inline">{{ importError }}</p>
+    </section>
+
+    <!-- Export modal -->
+    <section v-if="exportOpen && exportProvider" class="providers-section">
+      <p class="muted-line">Export <strong>{{ exportProvider.name }}</strong> to:</p>
+      <p v-if="exportTargets().length === 0" class="muted-line">No eligible agents</p>
+      <article
+        v-for="t in exportTargets()"
+        :key="t.agent"
+        class="data-row providers-row static"
+      >
+        <div class="row-main providers-row-main">
+          <strong>{{ t.agent }}</strong>
+          <small v-if="t.blocked">{{ t.blocked }}</small>
+        </div>
+        <div class="button-row row-actions">
+          <button
+            class="tool-button"
+            type="button"
+            :disabled="t.blocked !== null || exportBusy === t.agent"
+            @click="runExport(t)"
+          >
+            {{ exportBusy === t.agent ? 'Working' : (t.mode === 'overwrite' ? 'Update' : 'Export') }}
+          </button>
+        </div>
+      </article>
+      <p v-if="exportError" class="notice inline">{{ exportError }}</p>
+      <div class="button-row">
+        <button class="tool-button" type="button" @click="closeExport">Close</button>
+      </div>
+    </section>
+
     <p v-if="error" class="notice inline">{{ error }}</p>
     <p v-if="loading" class="muted-line">Loading</p>
 
@@ -618,6 +782,14 @@ watch(rotateCredential, () => {
             @click="deleteProvider(provider)"
           >
             {{ busyDelete === provider.name ? 'Removing' : 'Remove' }}
+          </button>
+          <button
+            v-if="!isGhost(provider)"
+            class="tool-button"
+            type="button"
+            @click="openExport(provider)"
+          >
+            Export
           </button>
         </div>
       </article>
