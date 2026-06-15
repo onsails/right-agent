@@ -11,6 +11,11 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'right agent',
+      // Docs-portal-only banner (overrides Starlight's frontmatter-only Banner so the
+      // notice is global). Does not touch the landing.
+      components: {
+        Banner: './src/components/DocsBanner.astro',
+      },
       // Docs live at src/content/docs/docs/* -> /docs/* (Starlight subpath pattern).
       customCss: [
         './src/styles/tokens.css',
