@@ -232,7 +232,7 @@ Four writers, four `kind` values:
 |------|--------|-----------------|
 | `create` | probe-writer | exact cost of a create invocation, via `skill_learning_events` finish-row joined by `invocation_id` |
 | `patch` | probe-writer | same, for a patch invocation |
-| `maintain` | curator | pass cost split evenly across the skills the pass archived (determined by set-diff, not timestamp equality — see Run history above), cost/N each in one transaction; no archived skill → no row |
+| `maintain` | curator | pass cost split evenly across the skills the deterministic `apply_automatic_transitions` pass archived (identified by the `archived_at = now` timestamp query, which stays in sync with the transition stamp; the set-diff used for run-history counts is a separate computation and does NOT drive `maintain`, so LLM-fork merges get a `curator_runs` consolidation count but no per-skill `maintain` row), cost/N each in one transaction; no archived skill → no row |
 | `usage` | worker (post-turn) | one row per rightx skill in the turn's `ProbeAnchor.used_skill_receipts`, each carrying the turn's cost/cache — attributed (overlaps when multiple skills used) |
 
 The prefilter's own cost is NOT attributed to any skill (agent-level
