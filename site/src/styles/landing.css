@@ -276,6 +276,61 @@ h2 { font-family: var(--display); font-size: clamp(1.6rem, 3vw, 2.1rem); letter-
 .cmd-desc { font-size:.9rem; color:var(--muted); flex:1; }
 .ma { font-family:var(--mono); font-size:.58rem; letter-spacing:.12em; text-transform:uppercase; color:var(--accent-soft); border:1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius:100px; padding:.16rem .5rem; background: color-mix(in srgb, var(--accent) 10%, transparent); white-space:nowrap; }
 
+/* FX-EXPERIMENT:start */
+.fxswitch {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 30;
+  display: grid;
+  gap: .7rem;
+  min-width: min(19rem, calc(100vw - 2rem));
+  padding: .85rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-2) 84%, transparent);
+  backdrop-filter: blur(18px) saturate(1.05);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 24px 60px -32px rgba(0,0,0,.92);
+}
+.fxswitch-labels { display:flex; align-items:baseline; justify-content:space-between; gap:1rem; }
+.fxswitch-kicker { font-family:var(--mono); font-size:.62rem; letter-spacing:.18em; text-transform:uppercase; color:var(--accent-soft); }
+.fxswitch-note { font-family:var(--mono); font-size:.58rem; letter-spacing:.12em; text-transform:uppercase; color:var(--dim); }
+.fxswitch-actions { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:.5rem; }
+.fxswitch-btn {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: .72rem .65rem;
+  display: grid;
+  gap: .18rem;
+  justify-items: start;
+  background: color-mix(in srgb, var(--panel) 66%, transparent);
+  color: var(--muted);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+  transition: border-color .2s ease, background .2s ease, color .2s ease, box-shadow .2s ease;
+}
+.fxswitch-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  color: var(--text);
+}
+.fxswitch-btn[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+  background: color-mix(in srgb, var(--accent) 13%, var(--panel));
+  color: var(--text);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 0 24px -16px var(--accent);
+}
+.fxswitch-key { font-family:var(--mono); font-size:.78rem; letter-spacing:.12em; text-transform:uppercase; color:var(--accent-soft); }
+.fxswitch-text { font-size:.76rem; line-height:1.15; }
+@media (max-width: 720px) {
+  .fxswitch {
+    left: 1rem;
+    right: 1rem;
+    bottom: .9rem;
+    min-width: 0;
+  }
+}
+/* FX-EXPERIMENT:end */
+
 footer.sitefooter { border-top:1px solid var(--line); margin-top:3rem; padding:2.5rem 0 4rem; position:relative; z-index:1; }
 footer.sitefooter .row { display:flex; gap:1.5rem; flex-wrap:wrap; align-items:center; color:var(--dim); font-size:.85rem; }
 footer.sitefooter a { color:var(--muted); }
@@ -285,9 +340,39 @@ footer.sitefooter a { color:var(--muted); }
 .rev.in { opacity:1; transform:none; }
 .rev.d1{transition-delay:.06s}.rev.d2{transition-delay:.16s}.rev.d3{transition-delay:.26s}.rev.d4{transition-delay:.36s}.rev.d5{transition-delay:.46s}
 
+/* FX-EXPERIMENT:start */
+:root[data-fx="a"] .card.rev,
+:root[data-fx="a"] .flow.rev,
+:root[data-fx="a"] .evolve.rev,
+:root[data-fx="a"] .section h2.rev {
+  scale: .94;
+  transition-property: opacity, transform, scale;
+}
+:root[data-fx="a"] .card.rev.in,
+:root[data-fx="a"] .flow.rev.in,
+:root[data-fx="a"] .evolve.rev.in,
+:root[data-fx="a"] .section h2.rev.in { scale: 1; }
+
+:root[data-fx="c"] .section {
+  opacity: .55;
+  scale: .985;
+  transition: opacity .55s cubic-bezier(.2,.7,.2,1), scale .55s cubic-bezier(.2,.7,.2,1);
+}
+:root[data-fx="c"] .section[data-active] {
+  opacity: 1;
+  scale: 1.02;
+}
+/* FX-EXPERIMENT:end */
+
 @media (prefers-reduced-motion: reduce){
   .stars-far,.stars-near,.scan,.claw,.clawwrap::after,.pdot,.horizon,.ceiling,.twinkle,.packet,.loopspark,.statusnote .sdot,.learn-dots i{ animation:none !important; }
   .rev{ opacity:1 !important; transform:none !important; }
+  .fxswitch{ display:none !important; } /* FX-EXPERIMENT */
+  :root[data-fx] .card,
+  :root[data-fx] .flow,
+  :root[data-fx] .evolve,
+  :root[data-fx] .section h2,
+  :root[data-fx="c"] .section{ opacity:1 !important; scale:1 !important; } /* FX-EXPERIMENT */
   .learn-dots i:nth-child(-n+4) {
     background: var(--cyan);
     box-shadow: 0 0 .42em color-mix(in srgb, var(--cyan) 48%, transparent);

@@ -60,10 +60,83 @@ const starLabel = formatStars(await getStars());
 
     <slot />
 
+    <!-- FX-EXPERIMENT:start -->
+    <div class="fxswitch" data-fx-switcher aria-label="Scroll effect comparison">
+      <div class="fxswitch-labels">
+        <span class="fxswitch-kicker">scroll fx</span>
+        <span class="fxswitch-note">live compare</span>
+      </div>
+      <div class="fxswitch-actions" role="group" aria-label="Scroll effect variants">
+        <button type="button" class="fxswitch-btn" data-fx-choice="a" aria-pressed="false">
+          <span class="fxswitch-key">A</span>
+          <span class="fxswitch-text">scale-in</span>
+        </button>
+        <button type="button" class="fxswitch-btn" data-fx-choice="b" aria-pressed="false">
+          <span class="fxswitch-key">B</span>
+          <span class="fxswitch-text">focus</span>
+        </button>
+        <button type="button" class="fxswitch-btn" data-fx-choice="c" aria-pressed="false">
+          <span class="fxswitch-key">C</span>
+          <span class="fxswitch-text">spotlight</span>
+        </button>
+      </div>
+    </div>
+    <!-- FX-EXPERIMENT:end -->
+
     <script>
       const layers = Array.from(document.querySelectorAll('.fx[data-depth]')) as HTMLElement[];
+      const zoomTargets = Array.from(document.querySelectorAll('.card, .flow, .evolve, .section h2')) as HTMLElement[];
+      const sections = Array.from(document.querySelectorAll('.section')) as HTMLElement[];
+      const switcher = document.querySelector('[data-fx-switcher]') as HTMLElement | null;
+      const switcherButtons = Array.from(document.querySelectorAll('[data-fx-choice]')) as HTMLButtonElement[];
       let mx = 0, my = 0, sy = 0, tmx = 0, tmy = 0;
       const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      /* FX-EXPERIMENT:start */
+      const FX_KEY = 'fx';
+      const FX_DEFAULT = 'a';
+      const isFxChoice = (value: string | null | undefined): value is 'a' | 'b' | 'c' => value === 'a' || value === 'b' || value === 'c';
+      const getStoredFx = () => {
+        const value = localStorage.getItem(FX_KEY);
+        return isFxChoice(value) ? value : FX_DEFAULT;
+      };
+      const clearZoomTargets = () => {
+        for (const el of zoomTargets) el.style.scale = '';
+      };
+      let activeSection: HTMLElement | null = null;
+      const clearActiveSection = () => {
+        if (activeSection) {
+          activeSection.removeAttribute('data-active');
+          activeSection = null;
+        }
+        for (const section of sections) section.removeAttribute('data-active');
+      };
+      let activeFx: 'a' | 'b' | 'c' = FX_DEFAULT;
+      const setFx = (nextFx: 'a' | 'b' | 'c') => {
+        const prevFx = activeFx;
+        activeFx = nextFx;
+        document.documentElement.dataset.fx = nextFx;
+        localStorage.setItem(FX_KEY, nextFx);
+        for (const btn of switcherButtons) btn.setAttribute('aria-pressed', String(btn.dataset.fxChoice === nextFx));
+        if (prevFx === 'b' && nextFx !== 'b') clearZoomTargets();
+        if (prevFx === 'c' && nextFx !== 'c') clearActiveSection();
+      };
+      if (switcher) {
+        if (reduce) {
+          switcher.hidden = true;
+        } else {
+          setFx(getStoredFx());
+          switcher.addEventListener('click', (event) => {
+            const button = (event.target as HTMLElement | null)?.closest('[data-fx-choice]') as HTMLButtonElement | null;
+            const nextFx = button?.dataset.fxChoice;
+            if (!isFxChoice(nextFx) || nextFx === activeFx) return;
+            setFx(nextFx);
+          });
+        }
+      }
+      if (!switcher && !reduce) setFx(getStoredFx());
+      /* FX-EXPERIMENT:end */
+
       addEventListener('scroll', () => { sy = scrollY; }, { passive: true });
       if (!reduce) {
         addEventListener('mousemove', (e) => {
@@ -76,6 +149,42 @@ const starLabel = formatStars(await getStars());
             const d = parseFloat(el.dataset.depth || '0');
             el.style.transform = `translate3d(${(-mx * d).toFixed(2)}px, ${(-my * d - sy * (d / 90)).toFixed(2)}px, 0)`;
           }
+
+          if (activeFx === 'b') {
+            const viewportCenter = innerHeight / 2;
+            const scales = zoomTargets.map((el) => {
+              const rect = el.getBoundingClientRect();
+              const center = rect.top + rect.height / 2;
+              const distance = Math.min(Math.abs(center - viewportCenter) / (innerHeight * .72), 1);
+              const focus = 1 - distance;
+              const eased = focus * focus * (3 - 2 * focus);
+              return 0.96 + eased * 0.08;
+            });
+            for (const [index, el] of zoomTargets.entries()) el.style.scale = scales[index].toFixed(4);
+          }
+
+          if (activeFx === 'c') {
+            const viewportCenter = innerHeight / 2;
+            let nearest: HTMLElement | null = null;
+            let nearestDistance = Number.POSITIVE_INFINITY;
+            for (const section of sections) {
+              const rect = section.getBoundingClientRect();
+              const center = rect.top + rect.height / 2;
+              const distance = Math.abs(center - viewportCenter);
+              if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = section;
+              }
+            }
+            if (nearest !== activeSection) {
+              clearActiveSection();
+              if (nearest) {
+                nearest.dataset.active = 'true';
+                activeSection = nearest;
+              }
+            }
+          }
+
           requestAnimationFrame(tick);
         };
         requestAnimationFrame(tick);
