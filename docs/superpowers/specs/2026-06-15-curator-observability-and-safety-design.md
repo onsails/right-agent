@@ -241,7 +241,7 @@ run.
 
 - **Intermediate (per slice):**
   - `cargo nextest run -p right-db` — v48 migration idempotency + round-trip.
-  - `cargo nextest run -p bot learning_curator` — `next_circuit_open_until` pure
+  - `cargo nextest run -p right-bot learning_curator` — `next_circuit_open_until` pure
     fn; circuit opens after threshold and resets on success; `report_only` gate
     produces a `proposed` row and writes nothing; idle gate fed a real timestamp
     skips when active.
