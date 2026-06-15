@@ -373,6 +373,22 @@ export interface LearningCapabilities {
   learning_commands: boolean
 }
 
+export interface CuratorRunSummary {
+  run_at: string
+  trigger: string
+  mode: string
+  status: string
+  cost_usd: number
+  consolidations: number
+  archives: number
+  summary: string | null
+}
+
+export interface CuratorConsolidation {
+  absorbed: string
+  umbrella: string
+}
+
 export interface LearningOverviewResponse {
   agent: string
   generated_at: string
@@ -383,6 +399,8 @@ export interface LearningOverviewResponse {
   flow_edges: LearningFlowEdge[]
   recent_learning_signals: LearningSignalPoint[]
   warnings: DashboardDataWarning[]
+  curator_runs: CuratorRunSummary[]
+  curator_consolidations: CuratorConsolidation[]
 }
 
 export interface LearningFlowNode {
