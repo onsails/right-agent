@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["skip", "patch_existing", "create_new"]
+    },
+    "target_skill": {
+      "type": "string",
+      "pattern": "^rightx-[a-z0-9-]+$"
+    },
+    "topic_hint": {
+      "type": "string",
+      "maxLength": 120
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 400
+    }
+  },
+  "required": ["decision", "reason"]
+}
