@@ -62,8 +62,9 @@ Replaces the prior fork-probe classifier.
 
    **Run history (`curator_runs`, migration v48):** Every executed pass
    appends one row to `data.db.curator_runs` (append-only). Columns: `run_at`,
-   `trigger`, `mode` (`apply` | `report_only` | `proposed`), `status`,
-   `cost_usd`, `cache_read`, `cache_creation`, `consolidations`, `archives`,
+   `trigger`, `mode` (`apply` | `report_only`), `status` (`success` |
+   `failed` | `proposed`), `cost_usd`, `cache_read`, `cache_creation`,
+   `consolidations`, `archives`,
    `summary`, `actions_json`. This is distinct from the `curator_state`
    singleton, which holds gate working state (`last_run_at`,
    `consecutive_failures`, `circuit_open_until`, etc.).
