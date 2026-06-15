@@ -370,3 +370,85 @@ relies on the gateway to contribute its endpoints to the effective sandbox
 policy automatically on attach. `policy.yaml` for each agent is never
 touched. Git LFS is a separate sandbox-tooling concern and is out of scope
 for this subsystem.
+
+## Managed-profile update invariants
+
+`ensure_profiles` is create-or-skip and MUST NOT re-import an existing
+profile id: OpenShell rejects a duplicate import, and a referenced profile
+cannot be deleted. Updating a referenced managed profile therefore goes
+through `providers::update_referenced_profile`
+(detach → delete → import → re-attach, secret-preserving). The inert
+credential fields `auth_style` / `header_name` / `query_param` are excluded
+from the drift fingerprint (they never affect composed policy).
+
+Composition is observable only in the **effective** policy
+(`get_effective_policy` = `GetSandboxConfig`); the stored revision
+(`get_active_policy` = `GetSandboxPolicyStatus`) never carries authored
+generic provider rules. Never infer composition success from
+`policy set --wait`.
+
+## Cross-agent provider sharing (import / export)
+
+A trusted operator can copy a provider — credential included — from one
+host-local agent to another instead of re-entering the API key. One
+internal primitive backs both directions:
+
+```
+provider_copy(actor_user_id, source_agent, source_provider, dest_agent, label?, overwrite)
+```
+
+The single-agent dashboard pins one side to its own agent and forwards the
+authenticated Telegram user id:
+
+| Dashboard action | source_agent | dest_agent |
+|---|---|---|
+| Import | another agent | current agent |
+| Export | current agent | another agent |
+
+**Discovery.** `provider_peers(actor_user_id, for_agent)` enumerates
+host-local agents (excluding `for_agent`) where the actor is trusted and the
+sandbox mode is `openshell`, returning each peer's providers (name, type,
+env_var, label, generic) — never credentials. `build_peers` tolerates an
+unreadable peer `agent.yaml` (skips it with a warning) and skips providers
+whose env var can't resolve.
+
+**Authorization.** The actor MUST be in the allowlist (`allowlist.yaml`
+`users[].id`) of BOTH the source and the destination agent. The dashboard
+proves identity + own-agent trust via `authenticate_api`; the internal
+Unix-socket API (host-only) re-checks the other agent from disk
+(`require_trusted`; secure default = deny on missing/empty allowlist).
+`actor_user_id` always comes from the authenticated user, never the request
+body. The dashboard handlers pin the current agent as the non-actor side
+(import → dest, export → source).
+
+**Create vs overwrite (match key = `env_var`).** `plan_copy` (pure) resolves
+the destination provider by `env_var`:
+
+- env_var absent on dest → **create** a new `<dest>-<slug>` via the full
+  create flow with the copied credential. The new label defaults to the
+  source name minus its `"{source_agent}-"` prefix unless overridden.
+- env_var present + `overwrite=true` → **overwrite in place**: rotate the
+  existing dest provider's credential, and (generic only) re-sync upstream
+  hosts / path when they differ from the source. The dest provider name is
+  unchanged.
+- env_var present + `overwrite=false` → `EnvVarCollision`.
+- `overwrite=true` with no match, or a type-incompatible match (built-in vs
+  generic) → `CopyConflict`.
+
+**Credential read-back.** `provider_copy` reads the source credential from
+the gateway via `right_openshell::providers::get_provider_credentials` — the
+sole sanctioned credential read-back. The value is held in `SecretString`,
+written straight into the destination create/rotate request, and never
+logged, persisted to `agent.yaml`/backups, or returned in any list/detail
+response.
+
+**Execution.** `handle_provider_copy` delegates to the existing
+`handle_provider_create` / `handle_provider_rotate` /
+`handle_provider_config_update` handlers (each independently locked), so the
+copy reuses the tested compose/attach/policy paths. There is no outer lock
+across plan → execute; a concurrent change to the destination surfaces as an
+observable `409`/`404`, never silent corruption.
+
+Backend: `internal_api_providers::{handle_provider_copy, handle_provider_peers,
+plan_copy, build_peers, require_trusted}`. Dashboard routes:
+`/dashboard/{agent}/api/v1/providers/{peers,import,export}`.
