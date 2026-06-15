@@ -395,6 +395,36 @@ async fn ci_openshell_provider_rotate_no_restart() {
 
 #[tokio::test]
 #[ignore = "ci-openshell: requires a live OpenShell gateway"]
+async fn ci_openshell_get_provider_credentials_returns_stored_secret() {
+    use right_openshell::providers::*;
+    use secrecy::ExposeSecret;
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
+        .await
+        .unwrap();
+
+    let name = format!("rightprobe-{}-getcreds", std::process::id());
+    let mut creds = std::collections::HashMap::new();
+    creds.insert("FAL_KEY".to_string(), "live-secret-xyz".to_string());
+    let spec = ProviderSpec {
+        name: name.clone(),
+        type_: "generic".into(),
+        credentials: creds,
+        config: Default::default(),
+    };
+    create_provider(&mut client, &spec).await.unwrap();
+
+    let out = get_provider_credentials(&mut client, &name).await.unwrap();
+    assert_eq!(
+        out.get("FAL_KEY").unwrap().expose_secret(),
+        "live-secret-xyz"
+    );
+
+    delete_provider(&mut client, &name).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "ci-openshell: requires a live OpenShell gateway"]
 async fn ci_openshell_provider_destroy_cascade() {
     use right_openshell::providers::*;
     let mtls_dir = right_openshell::openshell::default_mtls_dir();
