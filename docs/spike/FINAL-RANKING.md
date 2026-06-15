@@ -25,6 +25,9 @@ Capstone tying together the whole arc (rounds 1–12 + the hands-on spikes). Per
 
 ## Consolidated ranking (RightClaw: Rust shop, OpenShell isolation, needs skills+subagents+forks+MCP+multi-model, already owns its loop)
 
+> **⚠️ SUPERSEDED — read the CONSTRAINT UPDATE at the end of this file as authoritative.** This ranking assumes RightClaw is *willing to build* MCP and the skills plumbing, so it places the build-your-own (EMBED) options high (rig #1, vanilla-Pi #3). The user's hard constraint — **"won't build MCP or skills myself"** — overrides it: it **drops rig and vanilla-Pi** (rig has no skill system; vanilla-Pi has no MCP) and selects ADOPT-a-complete-harness. **Authoritative rank under the constraint: 1) Goose, 2) opencode/MiMo, 3) oh-my-pi; rig & vanilla-Pi excluded.** Note: it is *vanilla* Pi that drops; *oh-my-pi* (the fork, which DOES ship MCP) survives at #3.
+
+
 **#1 — rig.** Only true Rust EMBED; owns the loop, fits RightClaw's existing `ClaudeInvocation` architecture. You implement signaling (mechanism C cleanly) and build forks/skills/subagents/learning — but RightClaw has **already built** most of that around `claude -p`, so the cost is largely sunk. Thin, **narrowing** margin. Borrow a coerce/repair layer + fork primitive. Caveat: rig fork = clone-the-vec (Pi's session-tree is nicer); pre-1.0 churn; most code to write.
 
 **#2 — Goose** *(strong; the pick if delegating the loop is acceptable).* Best **complete** option; **dethrones the TS harnesses** on language (Rust subprocess) + governance (Linux Foundation, beats every single-maintainer). Skills/subagents/forks/MCP-superset/multi-model/caching out of the box. But **ADOPT-as-subprocess, not embeddable** (`Config::global()`×171, unpublished crate, edition 2021, ACP/goosed drive) → cede the loop, contradicting RightClaw's design.
