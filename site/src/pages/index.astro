@@ -4,6 +4,8 @@ import Hero from '../components/Hero.astro';
 import FeatureCard from '../components/FeatureCard.astro';
 import CompareTable from '../components/CompareTable.astro';
 import Diagram from '../components/Diagram.astro';
+import SelfEvolve from '../components/SelfEvolve.astro';
+import ControlPlane from '../components/ControlPlane.astro';
 import Roadmap from '../components/Roadmap.astro';
 import InstallBlock from '../components/InstallBlock.astro';
 import Footer from '../components/Footer.astro';
@@ -38,6 +40,17 @@ const base = import.meta.env.BASE_URL;
     <h2 class="rev d1">a message routes through three tiers</h2>
     <p class="lead rev d1" style="margin-bottom:2rem;">a message reaches the host through Cloudflare, the bot routes it to that chat's Claude Code session inside the agent's sandbox, and replies. credentials are injected at the proxy on the way out, never inside the box.</p>
     <Diagram />
+  </div></section>
+
+  <section class="section"><div class="wrap">
+    <div class="label rev">self-evolution</div>
+    <h2 class="rev d1">it gets better at your work, on its own</h2>
+    <p class="lead rev d1" style="margin-bottom:2.4rem;">most agents learn from every "hard-looking" turn, or never. right agent does neither. a small, cheap model watches each turn as it lands, and a smarter model only steps in to learn when a turn is actually worth it.</p>
+    <SelfEvolve />
+  </div></section>
+
+  <section class="section"><div class="wrap">
+    <ControlPlane />
   </div></section>
 
   <section class="section"><div class="wrap">
