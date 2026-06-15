@@ -1,12 +1,13 @@
 # Landing page polish (site/, Astro) — Sprint
 
 Integration: claude/festive-feynman-235990  ·  Base: master
-Engine: mimo
+Engine: mimo (model: openai/gpt-5.4, variant: max, pinned)
 Legend: todo · brainstorming · planned · executing · review · blocked · done
 
 ## Stages
 1. [done] Telemetry meaning — Hero `sig ●●●●○` → animated `learning` indicator (ties to self-evolution); removed `obs · deep-field` HUD readout + orphaned `.r-tr` CSS. spec:01-telemetry-spec.md plan:01-telemetry-plan.md (merged @5e397a3f · stage @03b024d7 · bun build green 7 pages · grep gates clean · mimo telemetry-4b7q openai/gpt-5.4 max)
-2. [todo]    Scroll FX / zoom — scroll-driven zoom/scale on significant sections, on top of existing parallax + `.rev` reveal. Needs its own brainstorm (user wants to experiment).
+2. [done] Scroll FX / zoom — EXPERIMENT shipped: 3 switchable variants (A soft scale-in · B scroll-scrubbed focus · C active-section spotlight) behind a temporary `FX-EXPERIMENT`-delimited dev switcher, applied to feature `.card`s, `.flow`, `.evolve`, and `.section h2`. spec:02-scrollfx-spec.md plan:02-scrollfx-plan.md (merged @aca58b63 · stage @4bdf6f5a · npm build + astro check green · single shared rAF, zoom via `scale:` not transform, reduced-motion inert · mimo scrollfx-9m4k openai/gpt-5.4 max). **AWAITING USER PICK (A/B/C) → feeds stage 03.**
+3. [todo]    Lock-in chosen FX — remove the two un-chosen variants + the switcher, keep only the picked effect. (Brainstorm trivial; gated on stage 02 pick.)
 
 ## Context
 - Target is the marketing site at `site/` (Astro), NOT right-ui or right-dashboard. The jewel-brand-sprint (CLI + dashboard) is a separate, completed milestone.
@@ -27,5 +28,7 @@ Legend: todo · brainstorming · planned · executing · review · blocked · do
   - mimo's first run hit a transient OpenAI `server_error` (empty diff) → resumed the same handle once → completed.
   - `prek` pre-commit hook aborted on a missing `.pre-commit-config.yaml` (untracked on this branch, pre-existing env condition) → used `PREK_ALLOW_NO_CONFIG=1` escape hatch.
 
+- Stage 02 stage-runner ran WITHOUT the `Agent` tool again — now confirmed systemic ("Agent is not available inside subagents"). Executor driven via `mimo-run.mjs` foreground; `/code-review` performed inline against rubric (2 real findings caught + fixed: variant CSS now `FX-EXPERIMENT`-delimited; `isFxChoice` guard widened for `astro check`). For higher-risk future stages, consider running `/code-review` from the conductor (main) instead, since the stage-runner can't isolate it.
+
 ## Open questions
-- (Stage 02) exact zoom character — user leaning to experiment; brainstorm when reached. Earlier options surfaced: soft scale-in vs scroll-scrubbed vs pinned/cinematic.
+- **Stage 03 gate: user must PICK A / B / C** after comparing in the local preview. The pick determines which effect stays; the other two + the `FX-EXPERIMENT` switcher get removed in stage 03.
