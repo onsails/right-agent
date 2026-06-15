@@ -4,6 +4,17 @@
 
 use chrono::{DateTime, Duration, Utc};
 
+/// Convert the delivery idle timestamp (unix seconds, from `IdleTimestamp`)
+/// into the chat-activity instant the curator idle gate consumes. 0/negative
+/// means "uninitialized" → `None` (gate treats absence as "idle enough").
+pub(crate) fn idle_secs_to_activity(secs: i64) -> Option<DateTime<Utc>> {
+    if secs <= 0 {
+        None
+    } else {
+        DateTime::from_timestamp(secs, 0)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CuratorState {
     pub last_run_at: Option<String>,
@@ -1007,5 +1018,17 @@ mod tests {
             vec!["rightx-successor".to_string()],
             "absorbed skill redirected to successor, retired skill dropped"
         );
+    }
+
+    #[test]
+    fn idle_secs_zero_or_negative_is_none() {
+        assert_eq!(idle_secs_to_activity(0), None);
+        assert_eq!(idle_secs_to_activity(-5), None);
+    }
+
+    #[test]
+    fn idle_secs_positive_converts_to_utc() {
+        let got = idle_secs_to_activity(1_700_000_000).unwrap();
+        assert_eq!(got, DateTime::from_timestamp(1_700_000_000, 0).unwrap());
     }
 }
