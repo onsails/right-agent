@@ -2642,6 +2642,123 @@ pub(crate) async fn handle_provider_config_update(
     }))
 }
 
+// ── Task 5: /provider-copy ───────────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProviderCopyReq {
+    pub actor_user_id: i64,
+    pub source_agent: String,
+    pub source_provider: String,
+    pub dest_agent: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+pub(crate) async fn handle_provider_copy(
+    axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
+    axum::Json(req): axum::Json<ProviderCopyReq>,
+) -> Result<axum::Json<ProviderView>, ProviderApiError> {
+    // Actor must be trusted on BOTH sides.
+    require_trusted(&state.agents_dir, &req.source_agent, req.actor_user_id)?;
+    require_trusted(&state.agents_dir, &req.dest_agent, req.actor_user_id)?;
+
+    // Resolve the source provider entry + its env var.
+    let source_cfg = load_agent_config(&state.agents_dir, &req.source_agent)
+        .map_err(ProviderApiError::AgentYamlWrite)?;
+    let source_sandbox = source_cfg
+        .sandbox
+        .as_ref()
+        .ok_or(ProviderApiError::SandboxModeNone)?;
+    let source_entry = source_sandbox
+        .providers
+        .iter()
+        .find(|p| p.name == req.source_provider)
+        .cloned()
+        .ok_or_else(|| ProviderApiError::NotFound {
+            name: req.source_provider.clone(),
+        })?;
+    let env_var = extract_env_var(&source_entry)?;
+
+    // Resolve the destination's current providers, then plan.
+    let dest_cfg = load_agent_config(&state.agents_dir, &req.dest_agent)
+        .map_err(ProviderApiError::AgentYamlWrite)?;
+    let dest_sandbox = dest_cfg
+        .sandbox
+        .as_ref()
+        .ok_or(ProviderApiError::SandboxModeNone)?;
+    let plan = plan_copy(
+        &req.source_agent,
+        &source_entry,
+        &env_var,
+        &dest_sandbox.providers,
+        req.overwrite,
+        req.label.as_deref(),
+    )?;
+
+    // Read the source credential from the gateway (the one deliberate read-back).
+    let mut client = open_openshell_client().await?;
+    let mut creds =
+        right_openshell::providers::get_provider_credentials(&mut client, &req.source_provider)
+            .await
+            .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+    let credential = creds.remove(&env_var).ok_or_else(|| {
+        ProviderApiError::Gateway(format!(
+            "source provider \"{}\" has no stored credential for env var \"{env_var}\"",
+            req.source_provider
+        ))
+    })?;
+
+    match plan {
+        CopyPlan::Create {
+            type_,
+            label,
+            generic,
+        } => {
+            let create_req = ProviderCreateReq {
+                agent: req.dest_agent.clone(),
+                type_,
+                label,
+                credential,
+                generic,
+            };
+            handle_provider_create(axum::extract::State(state), axum::Json(create_req)).await
+        }
+        CopyPlan::Overwrite {
+            dest_name,
+            resync_generic,
+        } => {
+            let rotate_req = ProviderRotateReq {
+                agent: req.dest_agent.clone(),
+                name: dest_name.clone(),
+                credential,
+            };
+            let view =
+                handle_provider_rotate(axum::extract::State(state.clone()), axum::Json(rotate_req))
+                    .await?;
+            if let Some(g) = resync_generic {
+                let cfg_req = ProviderConfigUpdateReq {
+                    agent: req.dest_agent.clone(),
+                    name: dest_name,
+                    generic: ProviderConfigUpdateGeneric {
+                        env_var: Some(g.env_var.clone()),
+                        upstream_host: None,
+                        upstream_hosts: Some(g.upstream_hosts.clone()),
+                        upstream_path_prefix: Some(g.upstream_path_prefix.clone()),
+                    },
+                };
+                return handle_provider_config_update(
+                    axum::extract::State(state),
+                    axum::Json(cfg_req),
+                )
+                .await;
+            }
+            Ok(view)
+        }
+    }
+}
+
 /// Replace an existing provider entry by name. Line-walking YAML mutator.
 fn replace_provider_in_yaml(
     agents_dir: &std::path::Path,
