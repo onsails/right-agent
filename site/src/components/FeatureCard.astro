@@ -1,8 +1,9 @@
 ---
-interface Props { title: string; }
-const { title } = Astro.props;
+interface Props { title: string; tick?: string; }
+const { title, tick } = Astro.props;
 ---
-<article class="ra-card">
+<article class="card rev">
+  {tick && <div class="tick">{tick}</div>}
   <h3>{title}</h3>
   <p><slot /></p>
 </article>

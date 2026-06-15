@@ -1,27 +1,47 @@
 ---
 import { Image } from 'astro:assets';
-import lockup from '../assets/lockup-horizontal.svg';
 import screenshot from '../assets/screenshot.png';
+import { getStars, formatStars } from '../lib/github';
+const base = import.meta.env.BASE_URL;
+const starLabel = formatStars(await getStars());
 ---
-<header class="ra-section" style="border-top:none; padding-top:3rem;">
-  <div class="ra-wrap">
-    <Image src={lockup} alt="right agent" height={28} />
-    <h1 style="font-size:2.6rem; line-height:1.2; margin:1.5rem 0 1rem; max-width:34ch;">
-      an ai agent you run by messaging it
-    </h1>
-    <p style="font-size:1.15rem; color:var(--ra-parchment); max-width:60ch;">
-      you can give it real credentials without handing them to the model. every
-      agent runs in its own sandbox, every credential lives outside it. the box is
-      closed; you just use it.
-    </p>
-    <p style="margin:1.75rem 0;">
-      <a class="ra-btn" href="#install">install</a>
-      <a href={`${import.meta.env.BASE_URL}/docs/`} style="margin-left:1rem;">read the docs</a>
-    </p>
-    <p style="font-size:0.9rem; color:var(--ra-muted);">
-      today every agent runs on Claude Code, so you need a Claude subscription.
-    </p>
-    <Image src={screenshot} alt="right agent in Telegram" width={900}
-           style="width:100%; max-width:720px; margin-top:2rem; border:1px solid var(--ra-coal-600); border-radius:var(--ra-radius);" />
+<header class="hero">
+  <div class="wrap">
+    <svg class="constellation" viewBox="0 0 1200 420" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+      <g stroke-width="1" opacity="0.6" fill="none">
+        <path d="M120 90 L360 180 L300 320 M360 180 L640 120 L900 220 M640 120 L760 300 M900 220 L1080 140"/>
+      </g>
+      <g>
+        <circle cx="120" cy="90" r="2"/><circle cx="300" cy="320" r="1.6"/><circle cx="640" cy="120" r="2.2"/>
+        <circle cx="760" cy="300" r="1.6"/><circle cx="900" cy="220" r="2"/><circle cx="1080" cy="140" r="1.6"/>
+      </g>
+      <circle class="node" cx="360" cy="180" r="4"><animate attributeName="opacity" values="1;0.35;1" dur="3.5s" repeatCount="indefinite"/></circle>
+    </svg>
+
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <div class="eyebrow rev d1">
+          <span>▸ sandboxed multi-agent runtime</span>
+          <span class="sep">·</span><span class="sig">sig ●●●●○</span>
+        </div>
+        <h1 class="rev d2">an ai agent you run by <span class="glow">messaging it</span></h1>
+        <p class="sub rev d3">you can give it real credentials without handing them to the model. every
+          agent runs in its own sandbox, every credential lives outside it. the box is
+          closed; you just use it.</p>
+        <div class="cta rev d4">
+          <a class="btn" href="#install">install</a>
+          <a class="starbtn" href="https://github.com/onsails/right-agent">
+            <svg class="ico" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.7 1.6 7L12 18.3 5.8 21.2l1.6-7L2 9.5l7.1-.6z"/></svg>
+            star on github{starLabel && <span class="cnt">{starLabel}</span>}
+          </a>
+          <a class="ghost" href={`${base}/docs/`}>read the docs <span>→</span></a>
+        </div>
+        <p class="note rev d4">today every agent runs on Claude Code, so you need a Claude subscription.</p>
+      </div>
+
+      <div class="shot rev d5">
+        <Image src={screenshot} alt="right agent in Telegram" width={900} />
+      </div>
+    </div>
   </div>
 </header>

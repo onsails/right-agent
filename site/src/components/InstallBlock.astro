@@ -1,11 +1,11 @@
 ---
 const cmd = 'curl -LsSf https://raw.githubusercontent.com/onsails/right-agent/master/install.sh | sh';
 ---
-<div class="ra-card" style="display:flex; gap:1rem; align-items:center; justify-content:space-between; flex-wrap:wrap;">
-  <code id="ra-install-cmd" style="overflow-x:auto;">{cmd}</code>
-  <button id="ra-copy" class="ra-btn" type="button" style="border:none; cursor:pointer;">copy</button>
+<div class="cmd rev">
+  <span><span class="p">$</span> <span id="ra-install-cmd">{cmd}</span></span>
+  <button id="ra-copy" class="copy" type="button">copy</button>
 </div>
-<p style="color:var(--ra-parchment);">then open a new shell and run <code>right up</code>, then message your bot.</p>
+<p class="note">then open a new shell and run <code>right up</code>, then message your bot.</p>
 <script>
   const btn = document.getElementById('ra-copy');
   const src = document.getElementById('ra-install-cmd');

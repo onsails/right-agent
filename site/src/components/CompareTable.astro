@@ -10,9 +10,9 @@ const rows = [
   ['recovery', 'manual fixes, often from scratch', 'self-heals; data is preserved'],
 ];
 ---
-<table class="ra-compare">
+<table class="compare rev">
   <thead><tr><td></td><th scope="col">typical agent setup</th><th scope="col">right agent</th></tr></thead>
   <tbody>
-    {rows.map(([k, a, b]) => (<tr><td><strong>{k}</strong></td><td>{a}</td><td>{b}</td></tr>))}
+    {rows.map(([k, a, b]) => (<tr><td>{k}</td><td>{a}</td><td>{b}</td></tr>))}
   </tbody>
 </table>

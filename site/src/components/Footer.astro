@@ -1,8 +1,11 @@
-<footer class="ra-section">
-  <div class="ra-wrap" style="color:var(--ra-muted); display:flex; gap:1.5rem; flex-wrap:wrap;">
+---
+const base = import.meta.env.BASE_URL;
+---
+<footer class="sitefooter">
+  <div class="wrap row">
     <a href="https://github.com/onsails/right-agent">GitHub</a>
     <a href="https://t.me/rightagent">Telegram</a>
-    <a href={`${import.meta.env.BASE_URL}/docs/`}>Docs</a>
+    <a href={`${base}/docs/`}>Docs</a>
     <span>built on Claude Code, NVIDIA OpenShell, process-compose. Apache-2.0.</span>
   </div>
 </footer>
