@@ -3633,3 +3633,199 @@ mod copy_error_status_tests {
         );
     }
 }
+
+// ── Task 4: provider_peers discovery ─────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)] // wired in Task 6
+pub struct ProviderPeersReq {
+    pub actor_user_id: i64,
+    pub for_agent: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PeerProvider {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub env_var: String,
+    pub label: Option<String>,
+    pub generic: Option<right_agent_config::GenericProvider>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProviderPeer {
+    pub agent: String,
+    pub network_policy: String,
+    pub providers: Vec<PeerProvider>,
+}
+
+/// Require that `actor_user_id` is in `agent`'s allowlist. Missing/empty
+/// allowlist = not trusted (secure default).
+fn require_trusted(
+    agents_dir: &std::path::Path,
+    agent: &str,
+    actor_user_id: i64,
+) -> Result<(), ProviderApiError> {
+    let agent_dir = agents_dir.join(agent);
+    let file =
+        right_agent::agent::allowlist::read_file(&agent_dir).map_err(ProviderApiError::Internal)?;
+    let trusted = file
+        .map(|f| f.users.iter().any(|u| u.id == actor_user_id))
+        .unwrap_or(false);
+    if trusted {
+        Ok(())
+    } else {
+        Err(ProviderApiError::Unauthorized {
+            agent: agent.to_string(),
+        })
+    }
+}
+
+/// Enumerate host-local agents (except `for_agent`) where `actor_user_id`
+/// is trusted and the sandbox mode is openshell. Returns each peer's
+/// providers (no credentials). Tolerant: a peer with an unreadable
+/// `agent.yaml` is skipped, not fatal.
+pub(crate) fn build_peers(
+    agents_dir: &std::path::Path,
+    actor_user_id: i64,
+    for_agent: &str,
+) -> Result<Vec<ProviderPeer>, ProviderApiError> {
+    let mut names: Vec<String> = Vec::new();
+    let entries = std::fs::read_dir(agents_dir)
+        .map_err(|e| ProviderApiError::Internal(format!("read agents dir: {e}")))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| ProviderApiError::Internal(format!("read agents dir entry: {e}")))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+        else {
+            continue;
+        };
+        if name == for_agent || !path.join("agent.yaml").exists() {
+            continue;
+        }
+        names.push(name);
+    }
+    names.sort();
+
+    let mut peers = Vec::new();
+    for name in names {
+        let agent_dir = agents_dir.join(&name);
+        let trusted = right_agent::agent::allowlist::read_file(&agent_dir)
+            .map_err(ProviderApiError::Internal)?
+            .map(|f| f.users.iter().any(|u| u.id == actor_user_id))
+            .unwrap_or(false);
+        if !trusted {
+            continue;
+        }
+        let cfg = match right_agent::agent::discovery::parse_agent_config(&agent_dir) {
+            Ok(Some(c)) => c,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(agent = %name, "skipping peer with unreadable agent.yaml: {e:#}");
+                continue;
+            }
+        };
+        let Some(sandbox) = cfg.sandbox.as_ref() else {
+            continue;
+        };
+        if sandbox.mode != right_agent_config::SandboxMode::Openshell {
+            continue;
+        }
+        let network_policy = match cfg.network_policy {
+            right_agent_config::NetworkPolicy::Permissive => "permissive",
+            right_agent_config::NetworkPolicy::Restrictive => "restrictive",
+        }
+        .to_string();
+        let mut providers = Vec::new();
+        for entry in &sandbox.providers {
+            let env_var = match extract_env_var(entry) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            providers.push(PeerProvider {
+                name: entry.name.clone(),
+                type_: provider_view_type(entry),
+                env_var,
+                label: entry.label.clone(),
+                generic: entry.generic.clone(),
+            });
+        }
+        peers.push(ProviderPeer {
+            agent: name,
+            network_policy,
+            providers,
+        });
+    }
+    Ok(peers)
+}
+
+#[allow(dead_code)] // wired in Task 6
+pub(crate) async fn handle_provider_peers(
+    axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
+    axum::Json(req): axum::Json<ProviderPeersReq>,
+) -> Result<axum::Json<Vec<ProviderPeer>>, ProviderApiError> {
+    build_peers(&state.agents_dir, req.actor_user_id, &req.for_agent).map(axum::Json)
+}
+
+#[cfg(test)]
+mod peers_tests {
+    use super::*;
+
+    fn write_agent(dir: &std::path::Path, name: &str, allow_ids: &[i64], providers_yaml: &str) {
+        let agent_dir = dir.join(name);
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let users = allow_ids
+            .iter()
+            .map(|id| format!("  - id: {id}\n    added_at: 2026-01-01T00:00:00Z"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            agent_dir.join("allowlist.yaml"),
+            format!("version: 2\nusers:\n{users}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            format!("sandbox:\n  mode: openshell\n{providers_yaml}"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn require_trusted_accepts_member_rejects_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent(tmp.path(), "riskoff", &[7], "  providers: []\n");
+        assert!(require_trusted(tmp.path(), "riskoff", 7).is_ok());
+        let err = require_trusted(tmp.path(), "riskoff", 99).unwrap_err();
+        assert!(matches!(err, ProviderApiError::Unauthorized { .. }));
+    }
+
+    #[test]
+    fn build_peers_excludes_self_and_untrusted_and_reports_providers() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent(tmp.path(), "current", &[7], "  providers: []\n");
+        write_agent(
+            tmp.path(),
+            "riskoff",
+            &[7],
+            "  providers:\n    - name: riskoff-fal\n      type: right-fal\n",
+        );
+        write_agent(tmp.path(), "secret", &[42], "  providers: []\n");
+
+        let peers = build_peers(tmp.path(), 7, "current").unwrap();
+        let names: Vec<&str> = peers.iter().map(|p| p.agent.as_str()).collect();
+        assert_eq!(names, vec!["riskoff"]); // self + untrusted filtered
+        assert_eq!(peers[0].providers.len(), 1);
+        assert_eq!(peers[0].providers[0].name, "riskoff-fal");
+        assert_eq!(peers[0].providers[0].env_var, "FAL_KEY");
+        assert_eq!(peers[0].network_policy, "permissive");
+    }
+}
