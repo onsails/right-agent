@@ -9,7 +9,13 @@ Legend: todo · brainstorming · planned · executing · review · blocked · do
 1. [done] CLI       — right-ui (Rust): orange→jewel; rail/mark→ruby, cursor→teal, glyphs→semantic, splash wordmark right=ruby/agent=muted. spec:01-cli-spec.md plan:01-cli-plan.md (merged @809d6e3c · review clean · 55/55 right-ui tests)
 2. [done] Dashboard — right-dashboard (Vue): FIXED jewel-dark; --jewel-* tokens + --tg-theme-* override (applyJewelTheme defeats TG inline injection), recolored semantics, ruby identity (AppShell agent name), ECharts jewel theme on all 3 chart consumers. spec:02-dashboard-spec.md plan:02-dashboard-plan.md (merged @964e15de · review clean · 209/209 tests · typecheck+build green · grep gates empty)
 
-## Status: COMPLETE — both stages landed on claude/strange-borg-9c9f27. Final full-workspace verification pending.
+## Status: COMPLETE — both stages landed on claude/strange-borg-9c9f27.
+
+### Final full-workspace verification
+- `cargo nextest` (workspace minus 3 contended `right` binaries): **2866/2866 pass** (50 ignored live tests skipped), incl. new `right-ui splash_color_wordmark_is_ruby_and_muted`.
+- `right` integration binaries run serially: **53/53 pass** (`cli_integration` 40, `home_isolation` 2, `wizard_brand` 11).
+- `cargo test --doc --workspace`: green.
+- **Pre-existing flakiness (not from this sprint):** a fully-parallel `cargo nextest run --workspace` shows ~12 `right`-crate init/destroy failures from concurrent `cloudflared` tunnel-name collisions + missing local OAuth creds. All pass serially/in isolation; the recolor touches only color values in `right-ui` + dashboard frontend, nothing near tunnels/init/credentials.
 
 ## Brand reference (authoritative: docs/brand-guidelines.html, v2 jewel)
 - base plum `#121016`, panel `#201a26`, lines `#2d2533` / `#3e3146`
