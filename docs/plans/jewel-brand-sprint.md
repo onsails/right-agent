@@ -7,7 +7,7 @@ Legend: todo · brainstorming · planned · executing · review · blocked · do
 
 ## Stages
 1. [done] CLI       — right-ui (Rust): orange→jewel; rail/mark→ruby, cursor→teal, glyphs→semantic, splash wordmark right=ruby/agent=muted. spec:01-cli-spec.md plan:01-cli-plan.md (merged @809d6e3c · review clean · 55/55 right-ui tests)
-2. [todo] Dashboard — right-dashboard (Vue): introduce jewel palette tokens; accent→teal, identity→ruby, warm→gold; replace ad-hoc Telegram-blue/scattered hexes.
+2. [planned] Dashboard — right-dashboard (Vue): FIXED jewel-dark (brand-forward); --jewel-* tokens as source of truth, override --tg-theme-* → jewel (defeat TG inline injection), recolor semantics, ruby identity, ECharts dark theme. spec:02-dashboard-spec.md plan:02-dashboard-plan.md
 
 ## Brand reference (authoritative: docs/brand-guidelines.html, v2 jewel)
 - base plum `#121016`, panel `#201a26`, lines `#2d2533` / `#3e3146`
