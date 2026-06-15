@@ -15,6 +15,9 @@ const apiMocks = vi.hoisted(() => ({
   providerRotate: vi.fn(),
   providerConfigUpdate: vi.fn(),
   providerRemove: vi.fn(),
+  providerPeers: vi.fn(),
+  providerImport: vi.fn(),
+  providerExport: vi.fn(),
 }))
 
 vi.mock('../api', () => apiMocks)
@@ -111,6 +114,9 @@ beforeEach(() => {
   apiMocks.providerRotate.mockResolvedValue({})
   apiMocks.providerConfigUpdate.mockResolvedValue({})
   apiMocks.providerRemove.mockResolvedValue({})
+  apiMocks.providerPeers.mockResolvedValue({ peers: [] })
+  apiMocks.providerImport.mockResolvedValue({})
+  apiMocks.providerExport.mockResolvedValue({})
 })
 
 afterEach(() => {
@@ -235,6 +241,19 @@ describe('ProvidersView', () => {
     } finally {
       app.unmount()
     }
+  })
+
+  it('renders Import and per-row Export entry points', async () => {
+    apiMocks.providerList.mockResolvedValue({ providers: [provider()] })
+    const { app, root } = mountProvidersView()
+    await flushAsync()
+
+    // Header-level Import button.
+    expect(buttonsByText(root, 'Import').length).toBeGreaterThan(0)
+    // Per-row Export button (one provider row).
+    expect(buttonsByText(root, 'Export').length).toBe(1)
+
+    app.unmount()
   })
 
   it('pre-fills generic re-create forms with the prior upstream_hosts', async () => {
