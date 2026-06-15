@@ -1304,6 +1304,9 @@ fn learning_setup(
         curator_cost_spike_min_floor_usd,
         curator_skill_change_threshold,
         curator_min_cooldown_hours,
+        curator_circuit_failure_threshold: existing.curator_circuit_failure_threshold,
+        curator_circuit_cooldown_hours: existing.curator_circuit_cooldown_hours,
+        curator_mode: existing.curator_mode,
         baseline_window_days,
         baseline_min_sample,
         // Deprecated fields — leave at None.

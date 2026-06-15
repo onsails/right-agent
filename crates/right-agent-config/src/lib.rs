@@ -133,6 +133,12 @@ fn default_curator_skill_change_threshold() -> u32 {
 fn default_curator_min_cooldown_hours() -> u32 {
     12
 }
+fn default_curator_circuit_failure_threshold() -> u32 {
+    3
+}
+fn default_curator_circuit_cooldown_hours() -> u32 {
+    24
+}
 fn default_baseline_window_days() -> u32 {
     14
 }
@@ -448,6 +454,17 @@ impl Default for MemoryConfig {
     }
 }
 
+/// Curator execution mode. `Apply` (default) writes consolidations to disk and
+/// the lifecycle DB; `ReportOnly` runs a read-only LLM pass that proposes
+/// consolidations without writing anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CuratorMode {
+    #[default]
+    Apply,
+    ReportOnly,
+}
+
 /// Learning-loop configuration (probe-writer + curator pipeline).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
@@ -524,6 +541,21 @@ pub struct LearningConfig {
         deserialize_with = "deserialize_positive_u32"
     )]
     pub curator_min_cooldown_hours: u32,
+    /// Consecutive failed curator passes before the circuit opens.
+    #[serde(
+        default = "default_curator_circuit_failure_threshold",
+        deserialize_with = "deserialize_positive_u32"
+    )]
+    pub curator_circuit_failure_threshold: u32,
+    /// Fixed cooldown (hours) the circuit stays open once tripped.
+    #[serde(
+        default = "default_curator_circuit_cooldown_hours",
+        deserialize_with = "deserialize_positive_u32"
+    )]
+    pub curator_circuit_cooldown_hours: u32,
+    /// `apply` (write) or `report_only` (propose without writing).
+    #[serde(default)]
+    pub curator_mode: CuratorMode,
 
     /// Window for prefilter per-agent turn baselines.
     #[serde(
@@ -587,6 +619,9 @@ impl Default for LearningConfig {
             curator_cost_spike_min_floor_usd: default_curator_cost_spike_min_floor_usd(),
             curator_skill_change_threshold: default_curator_skill_change_threshold(),
             curator_min_cooldown_hours: default_curator_min_cooldown_hours(),
+            curator_circuit_failure_threshold: default_curator_circuit_failure_threshold(),
+            curator_circuit_cooldown_hours: default_curator_circuit_cooldown_hours(),
+            curator_mode: CuratorMode::default(),
             baseline_window_days: default_baseline_window_days(),
             baseline_min_sample: default_baseline_min_sample(),
             max_daily_budget_usd: default_max_daily_budget_usd_v2(),
@@ -919,6 +954,9 @@ mod tests {
         assert_eq!(cfg.curator_min_cooldown_hours, 12);
         assert_eq!(cfg.baseline_window_days, 14);
         assert_eq!(cfg.baseline_min_sample, 20);
+        assert_eq!(cfg.curator_circuit_failure_threshold, 3);
+        assert_eq!(cfg.curator_circuit_cooldown_hours, 24);
+        assert_eq!(cfg.curator_mode, CuratorMode::Apply);
     }
 
     #[test]
