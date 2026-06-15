@@ -7,6 +7,7 @@ import FailedSkillList from '../../components/FailedSkillList.vue'
 import MetricCard from '../../components/MetricCard.vue'
 import { failureMetric } from '../../components/failureMetric'
 import type { LearningOverviewResponse } from '../../types'
+import CuratorRunsPanel from './CuratorRunsPanel.vue'
 
 const props = defineProps<{
   learning: LearningOverviewResponse | null
@@ -48,6 +49,11 @@ const refusedCount = computed(() => props.learning?.lifecycle.refused_7d ?? 0)
   <p v-if="refusedCount > 0" class="muted-line refusals-caption">
     Refused {{ refusedCount }} - the skill already covered the request; nothing changed.
   </p>
+
+  <CuratorRunsPanel
+    :runs="learning?.curator_runs ?? null"
+    :consolidations="learning?.curator_consolidations ?? null"
+  />
 </template>
 
 <style scoped>
