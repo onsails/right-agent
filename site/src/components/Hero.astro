@@ -2,7 +2,6 @@
 import { Image } from 'astro:assets';
 import screenshot from '../assets/screenshot.png';
 import { getStars, formatStars } from '../lib/github';
-const base = import.meta.env.BASE_URL;
 const starLabel = formatStars(await getStars());
 ---
 <header class="hero">
@@ -34,7 +33,7 @@ const starLabel = formatStars(await getStars());
             <svg class="ico" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.7 1.6 7L12 18.3 5.8 21.2l1.6-7L2 9.5l7.1-.6z"/></svg>
             star on github{starLabel && <span class="cnt">{starLabel}</span>}
           </a>
-          <a class="ghost" href={`${base}/docs/`}>read the docs <span>→</span></a>
+          <a class="ghost" href="/docs/">read the docs <span>→</span></a>
         </div>
         <p class="note rev d4">today every agent runs on Claude Code, so you need a Claude subscription.</p>
       </div>

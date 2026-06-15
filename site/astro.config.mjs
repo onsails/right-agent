@@ -4,10 +4,10 @@ import starlight from '@astrojs/starlight';
 import sitemap from '@astrojs/sitemap';
 import starlightLinksValidator from 'starlight-links-validator';
 
-// GitHub Pages project page. Switch `site`/`base` (and add public/CNAME) for a custom domain.
+// Custom apex domain on GitHub Pages. The domain lives in public/CNAME and the
+// site serves from the root, so no `base` is set (defaults to '/').
 export default defineConfig({
-  site: 'https://onsails.github.io',
-  base: '/right-agent',
+  site: 'https://right-agent.ai',
   integrations: [
     starlight({
       title: 'right agent',

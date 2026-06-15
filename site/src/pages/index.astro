@@ -9,7 +9,6 @@ import ControlPlane from '../components/ControlPlane.astro';
 import Roadmap from '../components/Roadmap.astro';
 import InstallBlock from '../components/InstallBlock.astro';
 import Footer from '../components/Footer.astro';
-const base = import.meta.env.BASE_URL;
 ---
 <Landing>
   <Hero />
@@ -62,7 +61,7 @@ const base = import.meta.env.BASE_URL;
   <section class="section" id="security"><div class="wrap">
     <div class="label rev">security</div>
     <h2 class="rev d1">security by default</h2>
-    <p class="lead rev d1">sandboxed by default, credentials on the host, fails closed on a backend outage. read the full <a href={`${base}/docs/security/`}>security model</a>.</p>
+    <p class="lead rev d1">sandboxed by default, credentials on the host, fails closed on a backend outage. read the full <a href="/docs/security/">security model</a>.</p>
   </div></section>
 
   <section class="section"><div class="wrap">
