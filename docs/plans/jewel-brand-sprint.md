@@ -6,7 +6,7 @@ Issue: https://github.com/onsails/right-agent/issues/130 (follow-up to #129)
 Legend: todo · brainstorming · planned · executing · review · blocked · done
 
 ## Stages
-1. [planned] CLI    — right-ui (Rust): replace orange accents → jewel semantic hexes; keep NO_COLOR/TERM=dumb fallbacks. spec:01-cli-spec.md plan:01-cli-plan.md
+1. [done] CLI       — right-ui (Rust): orange→jewel; rail/mark→ruby, cursor→teal, glyphs→semantic, splash wordmark right=ruby/agent=muted. spec:01-cli-spec.md plan:01-cli-plan.md (merged @809d6e3c · review clean · 55/55 right-ui tests)
 2. [todo] Dashboard — right-dashboard (Vue): introduce jewel palette tokens; accent→teal, identity→ruby, warm→gold; replace ad-hoc Telegram-blue/scattered hexes.
 
 ## Brand reference (authoritative: docs/brand-guidelines.html, v2 jewel)
@@ -25,7 +25,8 @@ Legend: todo · brainstorming · planned · executing · review · blocked · do
 ## Decisions log
 - 2-stage decomposition (CLI then dashboard); CLI first fixes canonical jewel hexes the dashboard reuses.
 - Integration branch = current worktree branch `claude/strange-borg-9c9f27` (no new branch, per user rule).
-- Engine: mimo, not pinned → resolve model per stage via mimo-resolve.
+- Engine: mimo, not pinned → resolve model per stage via mimo-resolve. Per user: always most-capable model + highest effort → openai/gpt-5.4 variant max (review max).
+- Stage 01: mimo's first session stalled empty; resume (same handle) completed. A pre-commit hook reformats (rustfmt) — re-stage + retry the commit if it rewrites files.
 
 ## Open questions
 - (none yet)
