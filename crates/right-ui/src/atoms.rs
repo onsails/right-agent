@@ -1,7 +1,7 @@
 //! Brand atoms — rail (`▐`), mark (`▐✓`), and semantic glyphs (`✓ ! ✗ …`).
 //!
 //! Color values come from the brand guide. Three render tiers:
-//! * `Color`: orange rail + colored Unicode glyphs via owo-colors truecolor
+//! * `Color`: ruby rail + colored Unicode glyphs via owo-colors truecolor
 //! * `Mono`: same glyphs without ANSI
 //! * `Ascii`: `|` rail + bracketed text (`[ok]/[warn]/[err]/[…]`)
 
@@ -9,11 +9,13 @@ use owo_colors::OwoColorize;
 
 use crate::theme::Theme;
 
-pub(crate) const ORANGE: (u8, u8, u8) = (0xE8, 0x63, 0x2A);
+pub(crate) const RUBY: (u8, u8, u8) = (0xC7, 0x5F, 0x88);
+pub(crate) const MUTED: (u8, u8, u8) = (0xB6, 0xA8, 0xB0);
+pub(crate) const TEAL: (u8, u8, u8) = (0x3B, 0xB0, 0xC4);
 const OK: (u8, u8, u8) = (0x6B, 0xBF, 0x59);
-const WARN: (u8, u8, u8) = (0xD9, 0xA8, 0x2A);
-const ERR: (u8, u8, u8) = (0xE0, 0x3C, 0x3C);
-const INFO: (u8, u8, u8) = (0x4A, 0x90, 0xE2);
+const WARN: (u8, u8, u8) = (0xE6, 0xC0, 0x6A);
+const ERR: (u8, u8, u8) = (0xE2, 0x55, 0x6A);
+const INFO: (u8, u8, u8) = (0x3B, 0xB0, 0xC4);
 
 pub struct Rail;
 
@@ -21,7 +23,7 @@ impl Rail {
     /// `"▐  "` (Color/Mono) or `"|  "` (Ascii). Always 4 visible cells.
     pub fn prefix(theme: Theme) -> String {
         match theme {
-            Theme::Color => format!("{}  ", "▐".truecolor(ORANGE.0, ORANGE.1, ORANGE.2)),
+            Theme::Color => format!("{}  ", "▐".truecolor(RUBY.0, RUBY.1, RUBY.2)),
             Theme::Mono => "▐  ".to_string(),
             Theme::Ascii => "|  ".to_string(),
         }
@@ -30,7 +32,7 @@ impl Rail {
     /// `"▐✓"` (Color/Mono) or `"|*"` (Ascii). 2 visible cells.
     pub fn mark(theme: Theme) -> String {
         match theme {
-            Theme::Color => format!("{}", "▐✓".truecolor(ORANGE.0, ORANGE.1, ORANGE.2)),
+            Theme::Color => format!("{}", "▐✓".truecolor(RUBY.0, RUBY.1, RUBY.2)),
             Theme::Mono => "▐✓".to_string(),
             Theme::Ascii => "|*".to_string(),
         }
@@ -39,7 +41,7 @@ impl Rail {
     /// `"▐"` (Color/Mono) or `"|"` (Ascii). For blank rail rows.
     pub fn blank(theme: Theme) -> String {
         match theme {
-            Theme::Color => format!("{}", "▐".truecolor(ORANGE.0, ORANGE.1, ORANGE.2)),
+            Theme::Color => format!("{}", "▐".truecolor(RUBY.0, RUBY.1, RUBY.2)),
             Theme::Mono => "▐".to_string(),
             Theme::Ascii => "|".to_string(),
         }

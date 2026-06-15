@@ -4,30 +4,30 @@
 //! options LightCyan — both clash with the rail-and-glyph palette. The brand
 //! reads "interactive prompts stay plain" (spec Decision #1) literally: no
 //! color injected into the prompt chrome — except the `>` highlighted-option
-//! cursor, which uses brand orange so the active selection is the focal point.
+//! cursor, which uses brand teal so the active selection is the focal point.
 //! (Color::DarkGrey was tried for the rest and rendered as pastel blue on the
 //! macOS Terminal default palette, defeating the purpose.)
 
 use inquire::ui::{Color, RenderConfig, Styled};
 
 use crate::Theme;
-use crate::atoms::ORANGE;
+use crate::atoms::TEAL;
 
-const BRAND_ORANGE: Color = Color::Rgb {
-    r: ORANGE.0,
-    g: ORANGE.1,
-    b: ORANGE.2,
+const CURSOR_TEAL: Color = Color::Rgb {
+    r: TEAL.0,
+    g: TEAL.1,
+    b: TEAL.2,
 };
 
 /// Returns the brand `RenderConfig` for the given theme.
 ///
-/// `Color`: `empty()` chrome plus the orange `>` highlighted-option cursor.
+/// `Color`: `empty()` chrome plus the teal `>` highlighted-option cursor.
 /// `Mono` / `Ascii`: `RenderConfig::empty()` — no styling at all.
 pub fn render_config(theme: Theme) -> RenderConfig<'static> {
     match theme {
         Theme::Mono | Theme::Ascii => RenderConfig::empty(),
         Theme::Color => RenderConfig::empty()
-            .with_highlighted_option_prefix(Styled::new(">").with_fg(BRAND_ORANGE)),
+            .with_highlighted_option_prefix(Styled::new(">").with_fg(CURSOR_TEAL)),
     }
 }
 
@@ -63,8 +63,8 @@ mod tests {
         assert!(cfg.answered_prompt_prefix.style.fg.is_none());
         assert!(cfg.help_message.fg.is_none());
         assert!(cfg.canceled_prompt_indicator.style.fg.is_none());
-        // Only the highlighted cursor gets brand orange.
+        // Only the highlighted cursor gets brand teal.
         assert_eq!(cfg.highlighted_option_prefix.content, ">");
-        assert_eq!(cfg.highlighted_option_prefix.style.fg, Some(BRAND_ORANGE));
+        assert_eq!(cfg.highlighted_option_prefix.style.fg, Some(CURSOR_TEAL));
     }
 }
