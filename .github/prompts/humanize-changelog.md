@@ -58,7 +58,27 @@ covered:
 Bucket these by scope/area. Any `feat`/`fix` bucket with operator-visible
 behavior that no spec cluster already covers becomes its own cluster.
 
-Your index is: **(spec/plan clusters) ∪ (orphan feat/fix clusters)**.
+**Treat shipped agent-facing templates as behavior, not docs.** Built-in
+skills and prompt/schema templates change what deployed agents do, even
+when the commit type is `docs:` or `chore:`. After the commit scan, also
+inspect changed files under these paths and add any operator-visible
+behavior that no cluster already covers:
+
+    git diff --name-only "$range" -- \
+      'crates/right-codegen/skills/**' \
+      'crates/right-codegen/templates/right/**' \
+      'templates/right/**' \
+      'crates/right-codegen/src/agent_def.rs' \
+      'crates/right-codegen/src/mcp_instructions.rs'
+
+Examples: a `right-cron` skill update that makes agents edit cron prompts
+differently is behavior; a compiled prompt template that changes delivery
+rules is behavior; a generated JSON schema change is behavior. Supporting
+operator docs such as `PROMPT_SYSTEM.md` can explain the behavior but do
+not create a changelog item by themselves.
+
+Your index is: **(spec/plan clusters) ∪ (orphan feat/fix clusters) ∪
+(shipped agent-facing template behavior)**.
 
 ## Phase 2 — Map: one cluster at a time
 
@@ -78,8 +98,10 @@ Go through the index cluster by cluster. For each cluster:
 **Drop only truly internal clusters** — apply the internal/visible test
 at the *cluster* level, not per commit. A user-visible feature whose
 commits are mostly `refactor`/`feat(db)`/`test` is still user-visible;
-keep it. Things to drop: test-only work, internal renames/moves, CI/lint
-fixups, schema-version bumps with no behavior change, dev-only paths.
+keep it. Do not drop built-in skill or prompt-template changes as
+"documentation-only" when they alter agent behavior. Things to drop:
+test-only work, internal renames/moves, CI/lint fixups, schema-version
+bumps with no behavior change, contributor-only docs, dev-only paths.
 
 ## Phase 3 — Reduce: assemble the section
 
@@ -111,6 +133,7 @@ one line instead:
 | Drop JOIN to cron_specs in cron_runs delivery query            | Cron deliveries no longer get sent to the wrong chat when an agent's Telegram thread changes between schedule and run  |
 | Restore ssh_exec cancel-safety via RAII pid guard              | Cancelling an in-flight agent command no longer leaves zombie ssh processes inside the sandbox                         |
 | Extract shared post-turn learning pipeline module              | Agents now learn skills from recurring cron runs, not just live chats                                                  |
+| Document right-cron prompt evolution                           | The built-in `right-cron` skill now checks linked skills before editing a cron and can simplify old step-by-step prompts into thinner goals that reuse those skills |
 
 **Mark breaking changes** with a leading `**Breaking:**`. A commit is
 breaking if it has `!` in the conventional-commit type (e.g. `feat!:`)
