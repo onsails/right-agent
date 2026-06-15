@@ -338,10 +338,22 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
                 tracing::warn!(agent = %agent_name, "probe-writer usage insert failed: {e:#}");
             }
             record_probe_writer_spend(&conn, &agent_name, &invocation_id, &b).await;
-            if let Some(job) = origin_cron_job.as_deref()
-                && let Err(e) = link_cron_authored(&conn, job, &invocation_id).await
-            {
-                tracing::warn!(agent = %agent_name, job = %job, "cron auto-link failed: {e:#}");
+        }
+
+        // Auto-link runs regardless of usage-line parseability: a skill the
+        // probe-writer authored is recorded in skill_learning_events independent
+        // of the terminal result line, so gating the link on usage parsing would
+        // silently drop links on truncated/missing result events.
+        if let Some(job) = origin_cron_job.as_deref() {
+            match right_db::open_connection(&agent_db_dir, false).await {
+                Ok(conn) => {
+                    if let Err(e) = link_cron_authored(&conn, job, &invocation_id).await {
+                        tracing::warn!(agent = %agent_name, job = %job, "cron auto-link failed: {e:#}");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(agent = %agent_name, job = %job, "cron auto-link open_connection failed: {e:#}")
+                }
             }
         }
 
@@ -408,12 +420,14 @@ pub(crate) async fn link_cron_authored(
     job: &str,
     invocation_id: &str,
 ) -> Result<usize, right_db::DbError> {
-    let authored: Vec<String> =
+    let mut authored: Vec<String> =
         right_agent::learned_skills::successful_finishes_for_invocation(conn, invocation_id)
             .await?
             .into_iter()
             .map(|(name, _status)| name)
             .collect();
+    authored.sort();
+    authored.dedup();
     let n = authored.len();
     right_agent::cron_skill_link::link_auto(conn, job, &authored).await?;
     Ok(n)
@@ -656,5 +670,30 @@ mod tests {
             linked,
             vec!["rightx-async".to_string(), "rightx-inline".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn link_cron_authored_dedups_repeated_skill_in_one_invocation() {
+        // One invocation can finish the SAME skill twice (created then updated).
+        // The count must be the distinct skill count, with a single link row.
+        let (_t, c) = right_db::test_support::migrated_connection().await;
+        c.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
+             VALUES ('j','17 9 * * *','x',2.0,'t','t')",
+            (),
+        ).await.unwrap();
+        for status in ["created", "updated"] {
+            c.execute(
+                "INSERT INTO skill_learning_events (invocation_id, agent_name, action, skill_name, phase, status, created_at) \
+                 VALUES ('inv','a','create','rightx-dup','finish',?1,'t')",
+                right_db::params![status],
+            ).await.unwrap();
+        }
+        let n = link_cron_authored(&c, "j", "inv").await.unwrap();
+        assert_eq!(n, 1, "two finishes for one skill collapse to one");
+        let linked = right_agent::cron_skill_link::list_for_job(&c, "j")
+            .await
+            .unwrap();
+        assert_eq!(linked, vec!["rightx-dup".to_string()]);
     }
 }

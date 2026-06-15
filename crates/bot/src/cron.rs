@@ -1264,8 +1264,23 @@ async fn execute_job(
                                 // shared pipeline (prefilter → probe-writer fork
                                 // of this run's session). Fire-and-forget; never
                                 // affects delivery or the run record.
-                                if learning.prefilter_enabled
-                                    && schedule_kind_feeds_learning(&spec.schedule_kind)
+                                let learning_eligible = learning.prefilter_enabled
+                                    && schedule_kind_feeds_learning(&spec.schedule_kind);
+                                // Inline auto-link: independent of result-line parseability. Inline-authored
+                                // skills are recorded under cron_invocation_id during the turn; link them even
+                                // if the terminal result line is missing/unparseable. Disjoint from the async
+                                // probe-writer seam (different invocation_id) so no double-linking.
+                                if learning_eligible
+                                    && let Some(inv) = cron_invocation_id.as_deref()
+                                    && let Err(e) =
+                                        crate::learning_probe_writer::link_cron_authored(
+                                            &conn, job_name, inv,
+                                        )
+                                        .await
+                                {
+                                    tracing::warn!(job = %job_name, "cron inline auto-link failed: {e:#}");
+                                }
+                                if learning_eligible
                                     && let Some((reply_text, num_turns, cost_usd)) =
                                         parse_result_stats(&collected_lines)
                                 {
@@ -1323,21 +1338,6 @@ async fn execute_job(
                                         crate::learning_pipeline::run_post_turn(learn_ctx, anchor)
                                             .await;
                                     });
-                                    // No double-linking is guaranteed by disjoint
-                                    // invocation_ids: this seam links only skills authored
-                                    // under cron_invocation_id, the async probe-writer seam
-                                    // links only its own probe id. The async pipeline's
-                                    // authored_skill_this_turn skip is merely a cost
-                                    // optimization, not the guard. No-op when nothing authored.
-                                    if let Some(inv) = cron_invocation_id.as_deref()
-                                        && let Err(e) =
-                                            crate::learning_probe_writer::link_cron_authored(
-                                                &conn, job_name, inv,
-                                            )
-                                            .await
-                                    {
-                                        tracing::warn!(job = %job_name, "cron inline auto-link failed: {e:#}");
-                                    }
                                 }
                             }
                             Err(e) => {

@@ -87,6 +87,17 @@ async fn redirect_moves_links_pk_safe() {
 }
 
 #[tokio::test]
+async fn redirect_skill_self_reference_is_noop() {
+    // old == new: INSERT OR IGNORE is a no-op and the DELETE would wipe every
+    // link, so the guard must short-circuit and leave the link intact.
+    let (_t, c) = conn().await;
+    seed_job(&c, "j").await;
+    link_auto(&c, "j", &["rightx-x".into()]).await.unwrap();
+    redirect_skill(&c, "rightx-x", "rightx-x").await.unwrap();
+    assert_eq!(list_for_job(&c, "j").await.unwrap(), vec!["rightx-x"]);
+}
+
+#[tokio::test]
 async fn unlink_and_drop() {
     let (_t, c) = conn().await;
     seed_job(&c, "j").await;

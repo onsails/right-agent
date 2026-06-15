@@ -714,12 +714,18 @@ pub async fn delete_spec(
         return Err(format!("job '{job_name}' not found"));
     }
 
-    tx.execute(
-        "DELETE FROM cron_skill_links WHERE job_name = ?1",
-        params![job_name],
-    )
-    .await
-    .map_err(|e| format!("delete failed: {e:#}"))?;
+    if let Err(e) = tx
+        .execute(
+            "DELETE FROM cron_skill_links WHERE job_name = ?1",
+            params![job_name],
+        )
+        .await
+    {
+        if let Err(re) = tx.rollback().await {
+            tracing::warn!(job = %job_name, "rollback after link-delete failure failed: {re:#}");
+        }
+        return Err(format!("delete failed: {e:#}"));
+    }
     tx.commit()
         .await
         .map_err(|e| format!("delete failed: {e:#}"))?;

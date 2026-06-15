@@ -119,8 +119,9 @@ pub async fn list_live_for_job(conn: &Connection, job_name: &str) -> Result<Vec<
 }
 
 /// Validate every skill exists and is not archived. Used by `cron_create` to
-/// pre-check before persisting the spec, so a link failure never leaves a
-/// created-but-unlinked cron behind a failed response.
+/// fail fast on missing/archived skills before persisting the spec. A post-create
+/// link failure (transient error or a concurrent archive) is compensated by the
+/// caller removing the spec.
 pub async fn ensure_skills_live(
     conn: &Connection,
     skill_names: &[String],
@@ -134,6 +135,9 @@ pub async fn ensure_skills_live(
 /// Repoint every link from `old` to `new` (skill absorbed). PK-safe: copy then
 /// drop, ignoring rows where the job already links `new`.
 pub async fn redirect_skill(conn: &Connection, old: &str, new: &str) -> Result<(), DbError> {
+    if old == new {
+        return Ok(());
+    }
     let tx = conn.transaction().await?;
     tx.execute(
         "INSERT OR IGNORE INTO cron_skill_links (job_name, skill_name, origin, created_at) \
