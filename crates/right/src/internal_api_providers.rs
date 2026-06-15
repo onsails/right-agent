@@ -2691,6 +2691,9 @@ pub(crate) async fn handle_provider_copy(
         .sandbox
         .as_ref()
         .ok_or(ProviderApiError::SandboxModeNone)?;
+    if dest_sandbox.mode != right_agent_config::SandboxMode::Openshell {
+        return Err(ProviderApiError::SandboxModeNone);
+    }
     let plan = plan_copy(
         &req.source_agent,
         &source_entry,
@@ -3757,7 +3760,6 @@ mod copy_error_status_tests {
 // ── Task 4: provider_peers discovery ─────────────────────────────────────────
 
 #[derive(Debug, serde::Deserialize)]
-#[allow(dead_code)] // wired in Task 6
 pub struct ProviderPeersReq {
     pub actor_user_id: i64,
     pub for_agent: String,
@@ -3899,7 +3901,6 @@ pub(crate) fn build_peers(
     Ok(peers)
 }
 
-#[allow(dead_code)] // wired in Task 6
 pub(crate) async fn handle_provider_peers(
     axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
     axum::Json(req): axum::Json<ProviderPeersReq>,
