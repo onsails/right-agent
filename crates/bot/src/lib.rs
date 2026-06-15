@@ -854,6 +854,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         telegram::dashboard::build_dashboard_router(telegram::dashboard::DashboardState {
             agent_name: args.agent.clone(),
             bot_token: token.clone(),
+            focus_notifier: telegram::dashboard::FocusNotifier::telegram(telegram::bot::build_bot(
+                token.clone(),
+            )),
             home: home.clone(),
             agent_dir: agent_dir.clone(),
             resolved_sandbox: resolved_sandbox.clone(),

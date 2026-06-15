@@ -2,6 +2,8 @@
 //! direct `data.db` access (like `handle_delete_cron`); no internal socket -
 //! `thread_focus` is bot-owned runtime state, not aggregator state.
 
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+
 use axum::{
     Json,
     body::Bytes,
@@ -10,6 +12,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
+use teloxide::{
+    payloads::SendMessageSetters as _,
+    prelude::Requester as _,
+    types::{ChatId, MessageId, ThreadId},
+};
 
 use super::mcp::parse_json_body;
 use super::{DashboardState, authenticate_api, json_error};
@@ -20,6 +27,119 @@ use super::{DashboardState, authenticate_api, json_error};
 /// generous than the agent's self-set cap (`THREAD_FOCUS_MAX_CHARS` = 2000) but
 /// still bounded.
 pub(super) const OPERATOR_FOCUS_MAX_CHARS: usize = 4000;
+
+const FOCUS_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+type FocusNotificationFuture =
+    Pin<Box<dyn Future<Output = Result<(), FocusNotificationError>> + Send + 'static>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FocusNotification {
+    pub(crate) chat_id: i64,
+    pub(crate) thread_id: i64,
+    pub(crate) text: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FocusNotificationError {
+    detail: String,
+}
+
+impl FocusNotificationError {
+    fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for FocusNotificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for FocusNotificationError {}
+
+#[derive(Clone)]
+pub(crate) struct FocusNotifier {
+    send_fn: Arc<dyn Fn(FocusNotification) -> FocusNotificationFuture + Send + Sync>,
+}
+
+impl FocusNotifier {
+    fn new<F>(send_fn: F) -> Self
+    where
+        F: Fn(FocusNotification) -> FocusNotificationFuture + Send + Sync + 'static,
+    {
+        Self {
+            send_fn: Arc::new(send_fn),
+        }
+    }
+
+    pub(crate) fn telegram(bot: crate::telegram::BotType) -> Self {
+        Self::new(move |notification| {
+            let bot = bot.clone();
+            Box::pin(async move { send_focus_notification_with_bot(&bot, notification).await })
+        })
+    }
+
+    pub(crate) async fn send(
+        &self,
+        notification: FocusNotification,
+    ) -> Result<(), FocusNotificationError> {
+        (self.send_fn)(notification).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn noop() -> Self {
+        Self::new(|_| Box::pin(async { Ok(()) }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture(sent: Arc<tokio::sync::Mutex<Vec<FocusNotification>>>) -> Self {
+        Self::new(move |notification| {
+            let sent = Arc::clone(&sent);
+            Box::pin(async move {
+                sent.lock().await.push(notification);
+                Ok(())
+            })
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail(detail: &'static str) -> Self {
+        let detail = detail.to_string();
+        Self::new(move |_| {
+            let detail = detail.clone();
+            Box::pin(async move { Err(FocusNotificationError::new(detail)) })
+        })
+    }
+}
+
+async fn send_focus_notification_with_bot(
+    bot: &crate::telegram::BotType,
+    notification: FocusNotification,
+) -> Result<(), FocusNotificationError> {
+    let mut send = bot.send_message(ChatId(notification.chat_id), notification.text);
+    if notification.thread_id != 0 {
+        send = send.message_thread_id(ThreadId(MessageId(notification.thread_id as i32)));
+    }
+
+    tokio::time::timeout(FOCUS_NOTIFICATION_TIMEOUT, send)
+        .await
+        .map_err(|_| FocusNotificationError::new("telegram focus notification timed out"))?
+        .map(|_| ())
+        .map_err(|error| {
+            FocusNotificationError::new(format!("telegram focus notification failed: {error:#}"))
+        })
+}
+
+fn focus_notification_text(value: Option<&str>) -> String {
+    match value {
+        Some(focus) => format!("Focus set: {focus}"),
+        None => "Focus cleared".to_string(),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct FocusScopeQuery {
@@ -145,5 +265,25 @@ pub(crate) async fn handle_update(
             Some("failed to write focus"),
         );
     }
+
+    let notification = FocusNotification {
+        chat_id: req.chat_id,
+        thread_id: req.thread_id,
+        text: focus_notification_text(value),
+    };
+    if let Err(error) = state.focus_notifier.send(notification).await {
+        tracing::warn!(
+            agent = %state.agent_name,
+            chat_id = req.chat_id,
+            thread_id = req.thread_id,
+            "focus update: notification failed after save: {error:#}"
+        );
+        return json_error(
+            StatusCode::BAD_GATEWAY,
+            "focus_notification_failed",
+            Some("Focus saved, but notification could not be sent"),
+        );
+    }
+
     Json(serde_json::json!({ "operator_focus": value })).into_response()
 }
