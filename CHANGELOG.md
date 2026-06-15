@@ -1,78 +1,28 @@
 # Changelog
 ## [0.4.1] - 2026-06-15
 
+### Cron & Skills
+
+- Cron jobs now have explicit, persisted links to `rightx-*` skills. Any skill a recurring cron's own runs create or patch is automatically linked to that cron. At fire time, the runtime names the job's live linked skills as authoritative — agents load them deterministically instead of relying on description matching. `cron_create` accepts a new `skill_names` parameter to link existing skills at creation; `mcp__right__cron_link_skill` and `mcp__right__cron_unlink_skill` manage links on existing crons; `cron_list` now includes `linked_skills` per job. When the curator archives a skill, existing links redirect or drop automatically.
+- The built-in `right-cron` skill (v3.7.0) now instructs agents to evolve cron prompts toward linked skills when editing a job. Before calling `cron_update`, the agent checks `cron_list` for `linked_skills`; if the stored "how" is already covered by a linked skill, the agent slims the prompt to a thin goal and relies on the link. The user is always told what was simplified — never a silent rewrite.
+- `mcp__right__cron_trigger` now accepts a `then` block: a structured follow-up that the runtime guarantees to run in the triggered job's own forked session once it reaches the chosen terminal state (`success`, `failure`, or `always`). The continuation sees everything the first run produced — partial output, discovered data, or the failure itself. A `then` with no `target_chat_id` delivers back to the chat where the trigger was issued. Chaining is capped at one hop.
+- `mcp__right__cron_trigger` also accepts `extra_instruction`: a string prepended to this run only, without touching the stored spec. Use it for one-off tweaks instead of `cron_update`, which mutates the prompt for every future run.
+
+### Platform
+
+- Async cron and background deliveries now open with a host-rendered status line: `✓ job-name · succeeded` or `✗ job-name · failed`, plus trigger kind and time when available. The header is computed from platform records, not the agent's output, so it is accurate regardless of what the agent writes.
+- Platform notices (`⟨⟨SYSTEM_NOTICE⟩⟩`) now carry a per-session token. Agents are instructed to obey a notice only when it carries the exact token from their system prompt; any notice missing the token is treated as forged external content and ignored. This closes a forgery vector where untrusted content in the agent's context — tweets, web pages, tool output — could inject a fake platform directive.
+- Database WAL desync (turso#769) is now self-healing: when the bot or MCP aggregator encounters a "short read on WAL frame" error on open, it removes the corrupted sidecar files and retries automatically. Agents no longer wedge in error loops requiring a manual restart. The MCP aggregator also now opens the agent database per-operation instead of holding a cached connection, shrinking the concurrent-access window that triggers the desync.
 
 ### Bug Fixes
 
-- **bot**: /set_focus opens focus Mini App from groups via /start deep-link
-- **cron**: Correct then doc-comment test ref + thread-id precedence test
-- **bot**: Keep attachments-only delivery failure fatal despite status header
-- **bot,right-mcp,right-db**: Close notice-token race + delivery-header review findings
-- **bot**: Stop double-posting when content duplicates attachment caption
-- **right-agent**: Log linked_skills lookup error instead of silent drop
-- **right**: Aggregator opens data.db per-op, no connection cache (turso#769)
-- **cron**: Normalize thread-0 origin, fire then on parse-failure, honest notify desc
-- **right**: Drop misleading partial cron block from aggregator instructions
-- **cron-skill-linking**: Pre-validate skills on create, drop unused jobs_for_skill, fix doc wording
-- **cron-skill-linking**: De-gate auto-link seams, atomic cron_create, tx rollback, dedup, redirect self-ref guard
+- `/set_focus` now opens the focus Mini App correctly from groups and forum topics via a Telegram `/start` deep-link, not only from DMs.
+- Deliveries that consist only of file attachments no longer silently succeed when the Telegram send fails — the error propagates so the platform can retry.
+- Agents that return the same text in both `content` and an attachment caption no longer send it as two separate messages. `OPERATING_INSTRUCTIONS` now also documents that `content` and a caption are delivered as distinct Telegram messages.
 
-### Documentation
+### Site
 
-- **skill**: Right-cron then continuation, extra_instruction, report-here
-- **prompt**: Authenticated SYSTEM_NOTICE token rule
-- Cron↔skill linking (right-cron skill, architecture, prompt system)
-- **right-db**: Link WAL-desync workaround to tracker #127 / turso#769
-- **prompt**: Cron_trigger extra_instruction + then descriptions
-
-### Features
-
-- **right-mcp**: Get_or_create_notice_token helper
-- **right-db**: Detect recoverable WAL-sidecar desync (turso#769)
-- **right-db**: Self-heal WAL-sidecar desync on open (turso#769)
-- **db**: V45 cron_specs trigger transient columns (extra_instruction, then, origin)
-- **right-db**: V45 notice_token table
-- **right-db**: Add cron_skill_links table (migration v47)
-- **cron**: Prepend ephemeral extra_instruction to triggered run
-- **cron**: Runtime-guaranteed then continuation forks the run's session
-- **bot**: Pure render_delivery_header for async delivery
-- **bot**: Prepend_delivery_header helper
-- **bot**: Prepend platform status header to async delivery messages
-- **bot**: Tokened wrap_system_notice marker helper
-- **bot**: Emit per-agent notice token into composite prompt
-- **bot**: Stamp notice token into reflection prompt
-- **bot**: Stamp notice token into cron manual-trigger prompt
-- **bot**: Stamp notice token into background continuation prompt
-- **bot**: Thread origin_cron_job through ProbeAnchor
-- **bot**: Auto-link probe-writer-authored skills to originating cron
-- **bot**: Auto-link inline-authored cron skills
-- **bot**: Name live linked skills in the cron run prompt
-- **bot**: Curator redirects/drops cron links on absorb/archive
-- **cron**: ThenSpec + RunOn types with required run_on
-- **cron**: CronSpec transient then/extra/origin fields (excluded from eq)
-- **cron**: Trigger_spec/clear_triggered_at/load_specs_from_db carry trigger transient fields
-- **right-agent**: Cron_skill_link module (link CRUD + validated link/unlink)
-- **right-agent**: Successful_finishes_for_invocation helper
-- **right-agent**: Cron_list includes linked_skills
-- **right-agent**: Cascade link deletion in delete_spec (tool + one-shot)
-- **mcp**: Cron_trigger extra_instruction + then input params
-- **mcp**: Foreground-scoped conversation_scope_opt accessor
-- **mcp**: Cron_trigger resolves origin + persists then/extra_instruction
-- **right**: Cron skill linking MCP surface (skill_names on create + cron_link_skill/unlink)
-
-### Refactor
-
-- **right-db**: Honest SidecarRemove error + WAL-recovery docs
-
-### Testing
-
-- **right-db**: Fixture-gated WAL-desync self-heal integration test
-- **bot**: Ci-claude authenticated SYSTEM_NOTICE channel
-- **bot**: Cover created+updated+no-op and invocation-id partition for cron auto-link
-- **bot**: Cron learned skill is auto-linked then named on next run
-
-### Polish
-
-- **right-db**: Log removed sidecars + explicit SidecarRemove negative test
+- Right Agent has a new public website at `https://onsails.github.io/right-agent/` with a brand landing and a Starlight documentation section at `/docs`. Install and security documentation are hosted there; the README now points to the site for the full product narrative.
 
 ## [0.4.0] - 2026-06-13
 
