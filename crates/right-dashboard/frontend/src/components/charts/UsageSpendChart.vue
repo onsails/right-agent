@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import AsyncVChart from './AsyncVChart.vue'
+import { jewelAxis, jewelChartBase } from './jewelChart'
 import { money } from '../../format'
 import type { UsageDailyPoint } from '../../types'
 
@@ -70,22 +71,32 @@ function barDatum(point: UsageDailyPoint, source: string): BarDatum {
   return {
     value,
     itemStyle: {
-      borderColor: '#111827',
+      borderColor: '#f1ece9',
       borderWidth: 1,
     },
   }
 }
 
 const option = computed(() => ({
+  ...jewelChartBase,
   tooltip: {
+    ...jewelChartBase.tooltip,
     trigger: 'axis',
     axisPointer: { type: 'shadow' },
     formatter: formatTooltip,
   },
-  legend: { type: 'scroll', bottom: 0 },
+  legend: { ...jewelChartBase.legend, type: 'scroll', bottom: 0 },
   grid: { left: 44, right: 12, top: 18, bottom: 54 },
-  xAxis: { type: 'category', data: props.points.map((point) => point.date), axisLabel: { hideOverlap: true } },
-  yAxis: { type: 'value' },
+  xAxis: {
+    ...jewelAxis,
+    type: 'category',
+    data: props.points.map((point) => point.date),
+    axisLabel: { ...jewelAxis.axisLabel, hideOverlap: true },
+  },
+  yAxis: {
+    ...jewelAxis,
+    type: 'value',
+  },
   series: sources.value.map((source) => ({
     name: source,
     type: 'bar',

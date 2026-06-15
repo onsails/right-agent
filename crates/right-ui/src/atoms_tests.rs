@@ -118,3 +118,42 @@ fn no_ansi_in_mono_or_ascii() {
         }
     }
 }
+
+// --- jewel palette regression (truecolor escapes) ---
+
+#[test]
+fn rail_is_ruby() {
+    // ruby #c75f88 = (199, 95, 136)
+    let s = Rail::prefix(Theme::Color);
+    assert!(s.contains("\x1b[38;2;199;95;136m"), "rail not ruby: {s:?}");
+}
+
+#[test]
+fn mark_is_ruby() {
+    let s = Rail::mark(Theme::Color);
+    assert!(s.contains("\x1b[38;2;199;95;136m"), "mark not ruby: {s:?}");
+}
+
+#[test]
+fn glyph_semantic_hexes() {
+    assert!(
+        Glyph::Ok
+            .render(Theme::Color)
+            .contains("\x1b[38;2;107;191;89m")
+    );
+    assert!(
+        Glyph::Warn
+            .render(Theme::Color)
+            .contains("\x1b[38;2;230;192;106m")
+    );
+    assert!(
+        Glyph::Err
+            .render(Theme::Color)
+            .contains("\x1b[38;2;226;85;106m")
+    );
+    assert!(
+        Glyph::Info
+            .render(Theme::Color)
+            .contains("\x1b[38;2;59;176;196m")
+    );
+}

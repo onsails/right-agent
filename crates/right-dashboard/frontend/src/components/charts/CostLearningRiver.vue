@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import AsyncVChart from './AsyncVChart.vue'
+import { jewelChartBase } from './jewelChart'
 import { money } from '../../format'
 import type { CostLearningRiver } from '../../types'
 
@@ -54,12 +55,15 @@ const option = computed(() => {
   }
 
   return {
+    ...jewelChartBase,
     tooltip: {
+      ...jewelChartBase.tooltip,
       trigger: 'axis',
       renderMode: 'richText',
       formatter: formatTooltip,
     },
     legend: {
+      ...jewelChartBase.legend,
       type: 'scroll',
       bottom: 0,
     },
@@ -67,7 +71,9 @@ const option = computed(() => {
       type: 'time',
       top: 16,
       bottom: 52,
-      axisLabel: { hideOverlap: true },
+      axisLine: { lineStyle: { color: '#2d2533' } },
+      axisLabel: { color: '#b6a8b0', hideOverlap: true },
+      splitLine: { lineStyle: { color: '#2d2533' } },
     },
     dataZoom: [
       {
