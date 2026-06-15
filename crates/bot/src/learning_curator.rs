@@ -631,10 +631,9 @@ pub(crate) async fn run_if_due(
     };
     active_invocation.cleanup().await;
 
-    let status_for_run = run_status.clone();
     if run_status == "success" {
         state.last_run_at = Some(now.to_rfc3339());
-        state.last_run_status = Some(run_status);
+        state.last_run_status = Some(run_status.clone());
         state.consecutive_failures = 0;
         state.circuit_open_until = None;
     } else {
@@ -700,22 +699,13 @@ pub(crate) async fn run_if_due(
             .collect::<Vec<_>>(),
     )
     .unwrap_or_else(|_| "[]".to_owned());
-    let (cost_usd, cache_read, cache_creation) = usage_for_run
-        .as_ref()
-        .map(|b| {
-            (
-                b.total_cost_usd,
-                b.cache_read_tokens as i64,
-                b.cache_creation_tokens as i64,
-            )
-        })
-        .unwrap_or((0.0, 0, 0));
+    let (cost_usd, cache_read, cache_creation) = usage_triple(usage_for_run.as_ref());
     let record = CuratorRunRecord {
         run_at: now.to_rfc3339(),
         trigger: trigger_label(&trigger).to_owned(),
         trigger_evidence_json: state.last_spike_evidence_json.clone(),
         mode: "apply".to_owned(),
-        status: status_for_run,
+        status: run_status,
         cost_usd,
         cache_read,
         cache_creation,
@@ -835,15 +825,7 @@ async fn run_report_only_pass(
                         let count = plan.actions.len() as i64;
                         let json = serde_json::to_string(&plan.actions)
                             .unwrap_or_else(|_| "[]".to_owned());
-                        let (cost_v, cr, cc) = usage
-                            .map(|b| {
-                                (
-                                    b.total_cost_usd,
-                                    b.cache_read_tokens as i64,
-                                    b.cache_creation_tokens as i64,
-                                )
-                            })
-                            .unwrap_or((0.0, 0, 0));
+                        let (cost_v, cr, cc) = usage_triple(usage.as_ref());
                         (json, count, cost_v, cr, cc)
                     }
                     _ => ("[]".to_owned(), 0, 0.0, 0, 0),
@@ -887,16 +869,37 @@ fn build_report_only_invocation(
     lifecycle_rows: &[right_lifecycle::SkillLifecycleRow],
     mcp_config_path: String,
 ) -> crate::cc::invocation::ClaudeInvocation {
+    build_curator_pass_invocation(
+        ctx,
+        lifecycle_rows,
+        mcp_config_path,
+        right_codegen::CURATOR_REPORT_PROMPT,
+        Some(right_codegen::CURATOR_PLAN_SCHEMA.to_owned()),
+        vec!["Read".into()],
+    )
+}
+
+/// Shared `ClaudeInvocation` builder for both curator passes. The apply pass and
+/// the report-only pass differ only in system prompt, structured-output schema,
+/// and the tool allowlist; session id, model, turn cap, and stream-json format
+/// are identical, so they live here rather than being duplicated per pass.
+fn build_curator_pass_invocation(
+    ctx: &CuratorContext,
+    lifecycle_rows: &[right_lifecycle::SkillLifecycleRow],
+    mcp_config_path: String,
+    system_prompt: &str,
+    json_schema: Option<String>,
+    allowed_tools: Vec<String>,
+) -> crate::cc::invocation::ClaudeInvocation {
     use crate::cc::invocation::{ClaudeInvocation, OutputFormat};
     let session_id = uuid::Uuid::new_v4().to_string();
     let user_prompt = format!(
-        "{system}\n\n{candidates}",
-        system = right_codegen::CURATOR_REPORT_PROMPT,
+        "{system_prompt}\n\n{candidates}",
         candidates = render_candidate_list(lifecycle_rows),
     );
     ClaudeInvocation {
         mcp_config_path: Some(mcp_config_path),
-        json_schema: Some(right_codegen::CURATOR_PLAN_SCHEMA.to_owned()),
+        json_schema,
         output_format: OutputFormat::StreamJson,
         model: Some(ctx.model.clone()),
         max_budget_usd: None,
@@ -904,7 +907,7 @@ fn build_report_only_invocation(
         resume_session_id: None,
         new_session_id: Some(session_id),
         fork_session: false,
-        allowed_tools: vec!["Read".into()],
+        allowed_tools,
         disallowed_tools: vec![],
         extra_args: vec![],
         prompt: Some(user_prompt),
@@ -935,6 +938,21 @@ fn curator_usage_from_stdout(stdout: &str) -> Option<right_agent::usage::UsageBr
     crate::cc::stream::parse_usage_full(&line)
 }
 
+/// Flatten an optional usage breakdown into the `(cost_usd, cache_read,
+/// cache_creation)` triple persisted in a `curator_runs` row. Absent usage maps
+/// to zeros.
+fn usage_triple(usage: Option<&right_agent::usage::UsageBreakdown>) -> (f64, i64, i64) {
+    usage
+        .map(|b| {
+            (
+                b.total_cost_usd,
+                b.cache_read_tokens as i64,
+                b.cache_creation_tokens as i64,
+            )
+        })
+        .unwrap_or((0.0, 0, 0))
+}
+
 /// Parse the structured curator plan from a report-only fork's stdout. Reads the
 /// terminal result line and prefers `structured_output`, falling back to
 /// `result` (same convention as `worker_reply::parse_reply_output`).
@@ -953,35 +971,19 @@ fn build_curator_invocation(
     lifecycle_rows: &[right_lifecycle::SkillLifecycleRow],
     mcp_config_path: String,
 ) -> crate::cc::invocation::ClaudeInvocation {
-    use crate::cc::invocation::{ClaudeInvocation, OutputFormat};
-    let curator_session_id = uuid::Uuid::new_v4().to_string();
-    let candidate_list = render_candidate_list(lifecycle_rows);
-    let user_prompt = format!(
-        "{system}\n\n{candidates}",
-        system = right_codegen::CURATOR_SYSTEM_PROMPT,
-        candidates = candidate_list,
-    );
-    ClaudeInvocation {
-        mcp_config_path: Some(mcp_config_path),
-        json_schema: None,
-        output_format: OutputFormat::StreamJson,
-        model: Some(ctx.model.clone()),
-        max_budget_usd: None,
-        max_turns: Some(CURATOR_MAX_TURNS),
-        resume_session_id: None,
-        new_session_id: Some(curator_session_id),
-        fork_session: false,
-        allowed_tools: vec![
+    build_curator_pass_invocation(
+        ctx,
+        lifecycle_rows,
+        mcp_config_path,
+        right_codegen::CURATOR_SYSTEM_PROMPT,
+        None,
+        vec![
             "Read".into(),
             "Bash".into(),
             "mcp__right__skill_learning_start".into(),
             "mcp__right__skill_learning_finish".into(),
         ],
-        disallowed_tools: vec![],
-        extra_args: vec![],
-        prompt: Some(user_prompt),
-        debug_flag: Some(Arc::clone(&ctx.debug_flag)),
-    }
+    )
 }
 
 fn render_candidate_list(lifecycle_rows: &[right_lifecycle::SkillLifecycleRow]) -> String {
