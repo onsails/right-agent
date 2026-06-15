@@ -1,29 +1,35 @@
-/* Right Agent brand tokens. Source: docs/brand-guidelines.html */
+/* Right Agent brand tokens — Observatory / jewel. Source: docs/brand-guidelines.html */
 :root {
-  /* coal */
-  --ra-coal-900: #0a0a0a;
-  --ra-coal-800: #0f0f0f;
-  --ra-coal-700: #161616;
-  --ra-coal-600: #1a1a1a;
+  /* jewel palette (deep plum base · teal accent · ruby ink · gold warmth) */
+  --bg: #121016;
+  --bg-2: #18141c;
+  --panel: #201a26;
+  --line: #2d2533;
+  --line-2: #3e3146;
 
-  /* fire (accent) */
-  --ra-fire: #e8632a;
-  --ra-fire-soft: #1a1108;
+  --accent: #3bb0c4;       /* teal — structure, links, buttons */
+  --accent-soft: #79cdda;
+  --ink: #c75f88;          /* ruby — display accent word */
+  --ink-soft: #e08bab;
+  --warm: #cda14b;         /* gold — secondary highlight */
+  --warm-soft: #e6cf8e;
+  --cyan: #3bb0c4;         /* live status */
+  --btn-ink: #08151a;      /* text on accent fills */
 
-  /* cream / parchment */
-  --ra-cream: #f2ede4;
-  --ra-parchment: #ddd6c9;
-  --ra-muted: #948a79; /* lightened from #776e5e for WCAG AA on coal (>=4.5:1) */
+  --text: #f1ece9;
+  --muted: #b6a8b0;
+  --dim: #6f6169;
 
-  /* semantic */
-  --ra-red: #e03c3c;
-  --ra-amber: #d9a82a;
-  --ra-green: #6bbf59;
-  --ra-blue: #4a90e2;
+  /* type */
+  --display: 'Chakra Petch', system-ui, sans-serif;
+  --sans: 'Saira Variable', system-ui, -apple-system, sans-serif;
+  --mono: 'Martian Mono Variable', ui-monospace, monospace;
+  --mono-code: 'JetBrains Mono Variable', ui-monospace, monospace;
 
-  --ra-font-sans: 'Inter Variable', system-ui, -apple-system, sans-serif;
-  --ra-font-mono: 'JetBrains Mono Variable', ui-monospace, monospace;
+  /* legacy aliases kept for any unmigrated references */
+  --ra-font-sans: var(--sans);
+  --ra-font-mono: var(--mono);
 
-  --ra-maxw: 72rem;
-  --ra-radius: 10px;
+  --maxw: 76rem;
+  --radius: 14px;
 }
