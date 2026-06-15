@@ -37,6 +37,8 @@ pub(crate) struct CuratorConfig {
     pub cost_spike_baseline_days: u32,
     pub cost_spike_min_floor_usd: f64,
     pub skill_change_threshold: u32,
+    pub circuit_failure_threshold: u32,
+    pub circuit_cooldown_hours: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -769,6 +771,8 @@ mod tests {
             cost_spike_baseline_days: 14,
             cost_spike_min_floor_usd: 0.05,
             skill_change_threshold: 3,
+            circuit_failure_threshold: 3,
+            circuit_cooldown_hours: 24,
         }
     }
 
