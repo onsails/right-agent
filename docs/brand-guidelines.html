@@ -2,77 +2,114 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Right Agent — Brand Guide v1</title>
+<title>Right Agent — Brand Guide v2 · jewel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Saira:wght@400;500;600;700&family=Martian+Mono:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --bg: #0f0f0f;
-    --panel: #161616;
-    --line: #222;
-    --line-soft: #1a1a1a;
-    --orange: #E8632A;
-    --cream: #f2ede4;
+    /* core surfaces — deep-space plum */
+    --bg: #121016;
+    --bg-2: #18141c;
+    --panel: #201a26;
+    --line: #2d2533;
+    --line-2: #3e3146;
+    /* brand roles */
+    --ruby: #c75f88;        /* IDENTITY — "right" + claw */
+    --ruby-soft: #e08bab;
+    --teal: #3bb0c4;        /* ACTION / structure */
+    --teal-soft: #79cdda;
+    --gold: #cda14b;        /* WARMTH / secondary */
+    --gold-soft: #e6cf8e;
+    --on-teal: #08151a;     /* text on teal fills */
+    /* text */
+    --text: #f1ece9;
+    --muted: #b6a8b0;
+    --dim: #6f6169;
+    /* semantic */
     --ok: #6bbf59;
-    --warn: #d9a82a;
-    --err: #e03c3c;
-    --dim: #666;
-    --muted: #888;
-    --text: #ddd;
-    --heading: #eee;
+    --warn: #e6c06a;
+    --err: #e2556a;
+    --info: #3bb0c4;
+    --heading: #f1ece9;
   }
   html { scroll-behavior: smooth; }
   body {
-    background: var(--bg);
+    background:
+      radial-gradient(1200px 700px at 78% -8%, rgba(205,161,75,0.10), transparent 60%),
+      radial-gradient(1000px 800px at 8% 16%, rgba(59,176,196,0.10), transparent 60%),
+      var(--bg);
+    background-attachment: fixed;
     color: var(--text);
-    font-family: 'Inter', -apple-system, system-ui, sans-serif;
+    font-family: 'Saira', -apple-system, system-ui, sans-serif;
     padding: 0;
     line-height: 1.55;
   }
   code, .mono { font-family: 'JetBrains Mono', 'Fira Mono', ui-monospace, monospace; }
+  .ui-mono { font-family: 'Martian Mono', 'JetBrains Mono', ui-monospace, monospace; }
   code {
-    background: #0a0a0a; border: 1px solid var(--line);
+    background: var(--bg-2); border: 1px solid var(--line);
     padding: 1px 6px; border-radius: 3px;
-    color: var(--heading); font-size: 0.9em;
+    color: var(--heading); font-size: 0.88em;
   }
 
   /* layout */
   .shell { max-width: 1200px; margin: 0 auto; padding: 48px 56px 120px; }
   header.top {
     display: flex; justify-content: space-between; align-items: baseline;
-    padding-bottom: 24px; border-bottom: 1px solid var(--line-soft);
+    padding-bottom: 24px; border-bottom: 1px solid var(--line);
     margin-bottom: 40px;
   }
-  header.top h1 { font-size: 28px; font-weight: 800; color: var(--orange); letter-spacing: -0.02em; }
-  header.top .meta { font-size: 12px; color: var(--muted); letter-spacing: 0.05em; }
-  header.top .meta b { color: var(--text); }
+  header.top h1 {
+    font-family: 'Chakra Petch', system-ui, sans-serif;
+    font-size: 28px; font-weight: 700; letter-spacing: -0.02em;
+    color: var(--text);
+  }
+  header.top h1 .right { color: var(--ruby); }
+  header.top .meta { font-family: 'Martian Mono', monospace; font-size: 11px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }
+  header.top .meta b { color: var(--gold); font-weight: 600; }
+
+  /* HUD telemetry strip */
+  .hud {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    font-family: 'Martian Mono', monospace; font-size: 10px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--teal);
+    margin-bottom: 40px;
+  }
+  .hud .lat { color: var(--gold); }
+  .hud .sep { color: var(--dim); }
+  .hud .sig b { color: var(--gold); }
 
   /* TOC */
   .toc {
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
     padding: 22px 28px; margin-bottom: 56px;
     display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 32px;
-    font-size: 13px;
+    font-size: 13px; position: relative; overflow: hidden;
   }
   .toc a { color: var(--text); text-decoration: none; padding: 4px 0; display: block; }
-  .toc a:hover { color: var(--orange); }
-  .toc a .num { color: var(--muted); margin-right: 10px; font-variant-numeric: tabular-nums; }
+  .toc a:hover { color: var(--teal); }
+  .toc a .num { color: var(--gold); margin-right: 10px; font-family: 'Martian Mono', monospace; font-size: 11px; font-variant-numeric: tabular-nums; }
 
   /* sections */
   section { margin-bottom: 72px; scroll-margin-top: 24px; }
   section > h2 {
+    font-family: 'Martian Mono', monospace;
     font-size: 11px; color: var(--muted); letter-spacing: 0.25em;
-    text-transform: uppercase; border-bottom: 1px solid var(--line-soft);
+    text-transform: uppercase; border-bottom: 1px solid var(--line);
     padding-bottom: 10px; margin-bottom: 28px;
-    font-weight: 600;
+    font-weight: 500;
   }
-  section > h2 b { color: var(--heading); font-weight: 700; margin-right: 10px; }
-  section > h2 span.sub { color: var(--muted); letter-spacing: 0.02em; text-transform: none; margin-left: 14px; font-size: 12px; font-weight: 400; }
+  section > h2 b { color: var(--gold); font-weight: 600; margin-right: 12px; }
+  section > h2 span.sub { color: var(--muted); letter-spacing: 0.02em; text-transform: none; margin-left: 14px; font-size: 11px; font-weight: 400; font-family: 'Saira', sans-serif; }
 
   h3 {
+    font-family: 'Martian Mono', monospace;
     font-size: 10px; color: var(--muted); letter-spacing: 0.2em;
-    text-transform: uppercase; margin: 0 0 10px 0; font-weight: 600;
+    text-transform: uppercase; margin: 0 0 10px 0; font-weight: 500;
   }
-  h3 b { color: var(--heading); font-weight: 700; margin-right: 8px; }
+  h3 b { color: var(--gold); font-weight: 600; margin-right: 8px; }
 
   p.lead { font-size: 14px; color: var(--text); max-width: 820px; margin-bottom: 20px; line-height: 1.7; }
   p.note { font-size: 12px; color: var(--muted); max-width: 720px; margin-top: 6px; line-height: 1.6; }
@@ -87,28 +124,37 @@
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
     padding: 24px 22px 18px;
     display: flex; flex-direction: column; gap: 12px;
+    position: relative;
+  }
+  /* index tick — gold corner readout */
+  .card[data-tick]::before {
+    content: attr(data-tick);
+    position: absolute; top: 10px; right: 12px;
+    font-family: 'Martian Mono', monospace; font-size: 9px; letter-spacing: 0.12em;
+    color: var(--gold); opacity: 0.7;
   }
   .card.centered { align-items: center; }
-  .card.light { background: var(--cream); border-color: #ddd6c9; }
+  .card.light { background: #efe7ec; border-color: #d8cad2; }
   .card .label {
-    font-size: 10px; color: var(--muted); letter-spacing: 0.1em;
+    font-family: 'Martian Mono', monospace;
+    font-size: 10px; color: var(--gold); letter-spacing: 0.12em;
     text-transform: uppercase;
   }
-  .card.light .label { color: #776e5e; }
+  .card.light .label { color: #9a6a82; }
   .card .caption {
     font-size: 12px; color: var(--muted); line-height: 1.6;
   }
-  .card.light .caption { color: #776e5e; }
+  .card.light .caption { color: #7a6470; }
   .card .caption b { color: var(--text); display: block; font-size: 12px; margin-bottom: 3px; }
-  .card.light .caption b { color: #1a1108; }
+  .card.light .caption b { color: #2a1620; }
 
-  /* wordmark display — canonical: right=orange + agent=dim */
+  /* wordmark display — canonical: right=ruby + agent=muted */
   .wm {
-    font-family: 'Inter', system-ui, sans-serif;
-    font-weight: 800; letter-spacing: -0.025em;
-    color: #666;  /* default agent color = dim */
+    font-family: 'Chakra Petch', system-ui, sans-serif;
+    font-weight: 700; letter-spacing: -0.02em;
+    color: var(--muted);  /* default agent color */
   }
-  .wm .right { color: var(--orange); }
+  .wm .right { color: var(--ruby); }
   .wm-48 { font-size: 48px; }
   .wm-36 { font-size: 36px; }
   .wm-28 { font-size: 28px; }
@@ -116,34 +162,65 @@
   .wm-18 { font-size: 18px; }
   .wm-14 { font-size: 14px; }
 
-  .wm.light { color: #776e5e; }  /* dim-on-cream */
-  .wm.light .right { color: var(--orange); }
+  .wm.light { color: #9a6a82; }
+  .wm.light .right { color: var(--ruby); }
+
+  /* signature accent — slanted ruby + teal underline bar */
+  .sig-accent {
+    display: inline-block; position: relative;
+    color: var(--ruby); transform: skewX(-18deg);
+    transform-origin: left bottom;
+    padding: 0 0.04em 0.10em;
+  }
+  .sig-accent::after {
+    content: ''; position: absolute;
+    left: 0.04em; right: -0.02em; bottom: 0;
+    height: 0.08em; background: var(--teal);
+    border-radius: 1px;
+  }
 
   /* swatch tiles */
   .swatch {
     border-radius: 6px; padding: 18px 16px;
     display: flex; flex-direction: column; gap: 6px;
-    min-height: 120px; justify-content: flex-end;
+    min-height: 122px; justify-content: flex-end;
   }
   .swatch .hex { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; font-weight: 600; }
-  .swatch .name { font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 600; opacity: 0.8; }
-  .swatch .use { font-size: 11px; opacity: 0.7; }
+  .swatch .name { font-family: 'Martian Mono', monospace; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; font-weight: 500; opacity: 0.85; }
+  .swatch .role { font-family: 'Martian Mono', monospace; font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; opacity: 0.6; }
+  .swatch .use { font-size: 11px; opacity: 0.78; }
 
   /* terminal */
   .term {
-    background: #0a0a0a; border: 1px solid var(--line); border-radius: 6px;
+    background: #0c0a10; border: 1px solid var(--line); border-radius: 6px;
     padding: 18px 20px; font-size: 13px; line-height: 1.65;
-    color: #c8c8c8; white-space: pre;
+    color: #cabfc4; white-space: pre;
     font-family: 'JetBrains Mono', 'Fira Mono', ui-monospace, monospace;
   }
   .term .ok { color: var(--ok); }
   .term .warn { color: var(--warn); }
   .term .err { color: var(--err); }
-  .term .orange { color: var(--orange); }
+  .term .ruby { color: var(--ruby); }
+  .term .teal { color: var(--teal); }
+  .term .gold { color: var(--gold); }
   .term .dim { color: var(--dim); }
   .term .white { color: var(--heading); font-weight: 700; }
   .term .muted { color: var(--muted); }
   .term .prompt { color: var(--dim); }
+
+  /* technical chip button */
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--teal); color: var(--on-teal);
+    font-family: 'Martian Mono', monospace; font-size: 12px; font-weight: 500;
+    letter-spacing: 0.04em; text-transform: lowercase;
+    padding: 9px 16px; border-radius: 4px;
+    border: 1px solid var(--teal-soft);
+  }
+  .chip.ghost {
+    background: transparent; color: var(--teal);
+    border: 1px solid var(--line-2);
+  }
 
   /* do/don't */
   .do-dont { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -153,7 +230,7 @@
   }
   .dd-panel.do   { border-left: 3px solid var(--ok); }
   .dd-panel.dont { border-left: 3px solid var(--err); }
-  .dd-panel h4 { font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase; margin-bottom: 14px; font-weight: 700; }
+  .dd-panel h4 { font-family: 'Martian Mono', monospace; font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase; margin-bottom: 14px; font-weight: 600; }
   .dd-panel.do h4   { color: var(--ok); }
   .dd-panel.dont h4 { color: var(--err); }
   .dd-panel .item { margin-bottom: 16px; font-size: 12px; color: var(--muted); line-height: 1.6; }
@@ -164,23 +241,24 @@
   .clearspace-box {
     position: relative; background: var(--panel); border: 1px solid var(--line);
     padding: 60px; display: flex; justify-content: center; align-items: center;
-    border-radius: 6px;
+    border-radius: 6px; overflow: hidden;
   }
   .clearspace-grid {
     position: absolute; inset: 0;
     background-image:
-      linear-gradient(to right, rgba(232,99,42,0.08) 1px, transparent 1px),
-      linear-gradient(to bottom, rgba(232,99,42,0.08) 1px, transparent 1px);
+      linear-gradient(to right, rgba(59,176,196,0.08) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(59,176,196,0.08) 1px, transparent 1px);
     background-size: 20px 20px;
   }
   .clearspace-frame {
-    border: 1px dashed rgba(232,99,42,0.5); padding: 20px;
+    border: 1px dashed rgba(59,176,196,0.55); padding: 20px;
     position: relative;
   }
   .clearspace-label {
     position: absolute; top: -12px; left: 12px;
     background: var(--panel); padding: 0 6px;
-    font-size: 9px; color: var(--orange); letter-spacing: 0.15em; text-transform: uppercase;
+    font-family: 'Martian Mono', monospace;
+    font-size: 9px; color: var(--teal); letter-spacing: 0.15em; text-transform: uppercase;
   }
 
   /* applications */
@@ -190,12 +268,13 @@
     display: flex; flex-direction: column;
   }
   .app-mock .chrome {
-    background: #0a0a0a; padding: 10px 14px; border-bottom: 1px solid var(--line);
+    background: #0c0a10; padding: 10px 14px; border-bottom: 1px solid var(--line);
+    font-family: 'Martian Mono', monospace;
     font-size: 10px; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase;
     display: flex; align-items: center; gap: 8px;
   }
   .app-mock .dots { display: flex; gap: 5px; }
-  .app-mock .dot { width: 9px; height: 9px; border-radius: 50%; background: #2a2a2a; }
+  .app-mock .dot { width: 9px; height: 9px; border-radius: 50%; background: #342a3c; }
   .app-mock .body { padding: 28px 24px; }
   .app-mock .footer { padding: 12px 20px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
 
@@ -205,24 +284,27 @@
     padding: 14px 16px; display: flex; flex-direction: column; gap: 6px;
   }
   .hex-tile .hex-title {
-    font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;
-    font-weight: 600;
+    font-family: 'Martian Mono', monospace;
+    font-size: 10px; color: var(--muted); letter-spacing: 0.12em; text-transform: uppercase;
+    font-weight: 500;
   }
   .hex-tile .hex-val {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 12px; color: var(--heading);
   }
 
-  /* rule */
+  /* rule callout */
   .rule {
-    background: linear-gradient(180deg, #1a1108 0%, var(--panel) 100%);
-    border: 1px solid #3a2010;
-    border-left: 3px solid var(--orange);
+    background: linear-gradient(180deg, rgba(199,95,136,0.10) 0%, var(--panel) 100%);
+    border: 1px solid var(--line-2);
+    border-left: 3px solid var(--ruby);
     padding: 18px 22px; border-radius: 4px;
     font-size: 13px; line-height: 1.7; max-width: 860px;
   }
-  .rule b { color: var(--orange); }
+  .rule b { color: var(--ruby); }
   .rule p + p { margin-top: 8px; }
+  .rule.teal { background: linear-gradient(180deg, rgba(59,176,196,0.10) 0%, var(--panel) 100%); border-left-color: var(--teal); }
+  .rule.teal b { color: var(--teal); }
 
   /* anchor jump links */
   .anchor {
@@ -234,12 +316,13 @@
   /* tables */
   table { width: 100%; border-collapse: collapse; font-size: 12px; max-width: 900px; }
   table th {
-    text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line);
+    text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line-2);
+    font-family: 'Martian Mono', monospace;
     font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;
-    font-weight: 600;
+    font-weight: 500;
   }
   table td {
-    padding: 12px; border-bottom: 1px solid var(--line-soft);
+    padding: 12px; border-bottom: 1px solid var(--line);
     color: var(--text); vertical-align: top;
   }
   table td.mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; color: var(--heading); }
@@ -251,21 +334,56 @@
     padding: 28px 28px 16px; display: flex; flex-direction: column; gap: 10px;
     position: relative;
   }
-  .wm-option.recommended { border: 1px solid var(--orange); }
+  .wm-option.recommended { border: 1px solid var(--teal); }
   .wm-option.recommended::before {
     content: 'recommended'; position: absolute; top: -9px; left: 18px;
-    background: var(--orange); color: #1a1108; font-size: 9px; font-weight: 700;
+    background: var(--teal); color: var(--on-teal);
+    font-family: 'Martian Mono', monospace;
+    font-size: 9px; font-weight: 600;
     padding: 2px 8px; border-radius: 3px; letter-spacing: 0.1em; text-transform: uppercase;
+  }
+
+  /* observatory deep-field motif panel */
+  .deepfield {
+    position: relative; overflow: hidden; border-radius: 8px;
+    border: 1px solid var(--line);
+    background:
+      radial-gradient(520px 320px at 72% 18%, rgba(205,161,75,0.16), transparent 60%),
+      radial-gradient(560px 380px at 18% 80%, rgba(59,176,196,0.16), transparent 60%),
+      var(--bg);
+    padding: 0;
+  }
+  .deepfield .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(to right, rgba(241,236,233,0.04) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(241,236,233,0.04) 1px, transparent 1px);
+    background-size: 32px 32px;
+    -webkit-mask-image: radial-gradient(120% 100% at 50% 0%, #000 30%, transparent 90%);
+            mask-image: radial-gradient(120% 100% at 50% 0%, #000 30%, transparent 90%);
+  }
+  /* HUD corner ticks */
+  .hud-frame { position: absolute; inset: 14px; pointer-events: none; }
+  .hud-frame .tk { position: absolute; width: 18px; height: 18px; border: 1px solid var(--teal); opacity: 0.7; }
+  .hud-frame .tl { top: 0; left: 0; border-right: none; border-bottom: none; }
+  .hud-frame .tr { top: 0; right: 0; border-left: none; border-bottom: none; }
+  .hud-frame .bl { bottom: 0; left: 0; border-right: none; border-top: none; }
+  .hud-frame .br { bottom: 0; right: 0; border-left: none; border-top: none; }
+  .hud-read {
+    position: absolute; font-family: 'Martian Mono', monospace;
+    font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--gold);
   }
 
   /* svg claw container */
   .mark-svg { display: block; }
 
   footer.bottom {
-    border-top: 1px solid var(--line-soft); padding-top: 24px; margin-top: 40px;
+    border-top: 1px solid var(--line); padding-top: 24px; margin-top: 40px;
+    font-family: 'Martian Mono', monospace;
     font-size: 11px; color: var(--muted); letter-spacing: 0.05em;
     display: flex; justify-content: space-between;
   }
+  footer.bottom .tag { color: var(--gold); }
 
 </style>
 </head>
@@ -273,24 +391,39 @@
 <div class="shell">
 
 <header class="top">
-  <h1>Right Agent · Brand Guide</h1>
-  <div class="meta">v1.0 · <b>lock</b> · 2026-04-27</div>
+  <h1><span class="right">right</span> agent · Brand Guide</h1>
+  <div class="meta">v2.0 · <b>jewel</b> · 2026-06-15</div>
 </header>
+
+<!-- HUD telemetry strip -->
+<div class="hud">
+  <span>&#9656; sandboxed multi-agent runtime</span>
+  <span class="sep">·</span>
+  <span class="sig">sig <b>&#9679;&#9679;&#9679;&#9679;&#9675;</b></span>
+  <span class="sep">·</span>
+  <span class="lat">lat 12ms</span>
+  <span class="sep">·</span>
+  <span>obs · deep-field</span>
+  <span class="sep">·</span>
+  <span>secure-by-default</span>
+</div>
 
 <!-- ========================= TOC ========================= -->
 <nav class="toc">
   <a href="#essence"><span class="num">00</span>Essence</a>
   <a href="#logo"><span class="num">01</span>Logo system</a>
   <a href="#wordmark"><span class="num">02</span>Wordmark &amp; accent</a>
-  <a href="#clearspace"><span class="num">03</span>Clear space &amp; minimums</a>
-  <a href="#color"><span class="num">04</span>Color</a>
-  <a href="#typography"><span class="num">05</span>Typography</a>
-  <a href="#voice"><span class="num">06</span>Voice &amp; tone</a>
-  <a href="#character"><span class="num">07</span>Character usage</a>
-  <a href="#applications"><span class="num">08</span>Applications</a>
-  <a href="#terminal"><span class="num">09</span>Terminal</a>
-  <a href="#dodont"><span class="num">10</span>Do / Don't</a>
-  <a href="#assets"><span class="num">11</span>Assets manifest</a>
+  <a href="#signature"><span class="num">03</span>Signature accent</a>
+  <a href="#observatory"><span class="num">04</span>Observatory motifs</a>
+  <a href="#clearspace"><span class="num">05</span>Clear space &amp; minimums</a>
+  <a href="#color"><span class="num">06</span>Color</a>
+  <a href="#typography"><span class="num">07</span>Typography</a>
+  <a href="#voice"><span class="num">08</span>Voice &amp; tone</a>
+  <a href="#character"><span class="num">09</span>Character usage</a>
+  <a href="#applications"><span class="num">10</span>Applications</a>
+  <a href="#terminal"><span class="num">11</span>Terminal</a>
+  <a href="#dodont"><span class="num">12</span>Do / Don't</a>
+  <a href="#assets"><span class="num">13</span>Assets manifest</a>
 </nav>
 
 <!-- ========================= 00 ESSENCE ========================= -->
@@ -298,24 +431,28 @@
   <h2><b>00</b> Essence <span class="sub">what we are</span></h2>
 
   <p class="lead">
-    <b style="color:var(--heading);">Right Agent</b> — a multi-agent runtime for Claude Code, built on NVIDIA OpenShell.
+    <b style="color:var(--heading);">Right Agent</b> — a sandboxed multi-agent runtime for Claude Code, built on NVIDIA OpenShell.
     Each agent runs as its own Claude Code session inside its own OpenShell sandbox with a declarative YAML policy.
     A Rust CLI orchestrates lifecycles via process-compose.
   </p>
 
+  <p class="lead" style="color:var(--muted);">
+    The brand looks into deep space through a precise instrument. Mood: <b style="color:var(--gold);">research</b>, <b style="color:var(--gold);">mystery</b>, <b style="color:var(--gold);">efficiency</b>. Warm-but-cool — a deep jewel palette: warm-neutral plum base, cool teal action, ruby identity, gold warmth.
+  </p>
+
   <div class="grid-2" style="max-width: 860px; margin-top: 16px;">
-    <div class="card">
+    <div class="card" data-tick="00.1">
       <div class="label">double meaning</div>
       <p style="font-size: 13px; color: var(--text); line-height: 1.7;">
-        <b style="color:var(--orange);">right</b> = proper (security-first, sandboxed by default)<br>
-        <b style="color:var(--orange);">right</b> = the one that fits (the right agent for the job)
+        <b style="color:var(--ruby);">right</b> = proper (security-first, sandboxed by default)<br>
+        <b style="color:var(--ruby);">right</b> = the one that fits (the right agent for the job)
       </p>
     </div>
-    <div class="card">
+    <div class="card" data-tick="00.2">
       <div class="label">heritage mark</div>
       <p style="font-size: 13px; color: var(--text); line-height: 1.7;">
         The claw is a visual signature inherited from the project's original name.<br>
-        Read it as a metaphor for <b style="color:var(--orange);">grip</b>: the runtime holds agents inside their sandboxes.
+        Read it as a metaphor for <b style="color:var(--ruby);">grip</b>: the runtime holds agents inside their sandboxes — a tracked object in the field.
       </p>
     </div>
   </div>
@@ -333,55 +470,55 @@
 
   <p class="lead">
     The brand has three marks: <b>primary</b> (strict, functional), <b>character</b> (friendly, for stage), <b>wordmark</b> (anywhere text is needed).
-    They don't compete — they cover different sizes and registers.
+    They don't compete — they cover different sizes and registers. The mark is always rendered in <b style="color:var(--ruby);">ruby</b> — the identity color.
   </p>
 
   <!-- 1.1 PRIMARY -->
   <h3 style="margin-top: 32px;"><b>1.1</b> Primary mark</h3>
   <div class="grid-3">
-    <div class="card centered">
+    <div class="card centered" data-tick="ruby">
       <svg width="140" height="140" viewBox="0 0 100 100" class="mark-svg">
-        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
-        <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
+        <path d="M38 50 L46 58 L64 40" stroke="#ffffff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
       </svg>
-      <div class="caption"><b>Primary on dark</b>Orange claw on #0f0f0f. Primary context — dev tools, terminals, dark UI.</div>
+      <div class="caption"><b>Primary on deep-field</b>Ruby claw + white check on #121016. Primary context — dev tools, terminals, dark UI.</div>
     </div>
     <div class="card light centered">
       <svg width="140" height="140" viewBox="0 0 100 100" class="mark-svg">
-        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
-        <path d="M38 50 L46 58 L64 40" stroke="#1a1108" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
+        <path d="M38 50 L46 58 L64 40" stroke="#2a1620" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
       </svg>
-      <div class="caption"><b>Primary on cream</b>Orange claw on #f2ede4. For docs, print, light web pages.</div>
+      <div class="caption"><b>Primary on light</b>Ruby claw on pale plum #efe7ec. For docs, print, light web pages.</div>
     </div>
-    <div class="card centered" style="background:#E8632A; border-color:#E8632A;">
+    <div class="card centered" style="background:#3bb0c4; border-color:#3bb0c4;">
       <svg width="140" height="140" viewBox="0 0 100 100" class="mark-svg">
-        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#fff" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#fff" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#fff"/>
-        <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#ffffff" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#ffffff" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#ffffff"/>
+        <path d="M38 50 L46 58 L64 40" stroke="#08151a" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
       </svg>
-      <div class="caption" style="color:#1a1108;"><b style="color:#1a1108;">Primary reversed</b>White claw + white check on brand orange. Stickers, merch, accents.</div>
+      <div class="caption" style="color:#08151a;"><b style="color:#08151a;">On teal — reversed</b>On any teal/colored fill the claw goes white. Stickers, merch, action surfaces.</div>
     </div>
   </div>
-  <p class="note">The claw always faces <b>right</b>. The check sits <b>inside the upper-right claw</b>, never outside. Proportions are locked — never stretch or tilt.</p>
+  <p class="note">The claw always faces <b>right</b>. The check sits <b>inside the upper-right claw</b>, never outside. Proportions are locked — never stretch or tilt. On a colored background the claw is white.</p>
 
   <!-- 1.2 CHARACTER -->
   <h3 style="margin-top: 36px;"><b>1.2</b> Character · C1 (smile-check)</h3>
   <div class="grid-3">
     <div class="card centered">
       <svg width="180" height="180" viewBox="0 0 100 100" class="mark-svg">
-        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
         <circle cx="42" cy="45" r="5" fill="#fff"/>
-        <circle cx="42.8" cy="45" r="2.5" fill="#161616"/>
+        <circle cx="42.8" cy="45" r="2.5" fill="#201a26"/>
         <circle cx="44" cy="43.8" r="0.9" fill="#fff"/>
         <circle cx="55" cy="45" r="3.8" fill="#fff"/>
-        <circle cx="55.5" cy="45" r="1.9" fill="#161616"/>
+        <circle cx="55.5" cy="45" r="1.9" fill="#201a26"/>
         <circle cx="56.3" cy="44" r="0.7" fill="#fff"/>
         <path d="M40 58 L46 64 L62 52" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
       </svg>
@@ -389,14 +526,14 @@
     </div>
     <div class="card centered">
       <svg width="180" height="180" viewBox="0 0 100 100" class="mark-svg">
-        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
         <circle cx="42" cy="45" r="5" fill="#fff"/>
-        <circle cx="42.8" cy="45" r="2.5" fill="#161616"/>
+        <circle cx="42.8" cy="45" r="2.5" fill="#201a26"/>
         <circle cx="44" cy="43.8" r="0.9" fill="#fff"/>
         <circle cx="55" cy="45" r="3.8" fill="#fff"/>
-        <circle cx="55.5" cy="45" r="1.9" fill="#161616"/>
+        <circle cx="55.5" cy="45" r="1.9" fill="#201a26"/>
         <circle cx="56.3" cy="44" r="0.7" fill="#fff"/>
         <path d="M40 58 L46 64 L62 52" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
       </svg>
@@ -404,75 +541,75 @@
     </div>
     <div class="card light centered">
       <svg width="180" height="180" viewBox="0 0 100 100" class="mark-svg">
-        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
         <circle cx="42" cy="45" r="5" fill="#fff"/>
-        <circle cx="42.8" cy="45" r="2.5" fill="#1a1108"/>
+        <circle cx="42.8" cy="45" r="2.5" fill="#2a1620"/>
         <circle cx="44" cy="43.8" r="0.9" fill="#fff"/>
         <circle cx="55" cy="45" r="3.8" fill="#fff"/>
-        <circle cx="55.5" cy="45" r="1.9" fill="#1a1108"/>
+        <circle cx="55.5" cy="45" r="1.9" fill="#2a1620"/>
         <circle cx="56.3" cy="44" r="0.7" fill="#fff"/>
-        <path d="M40 58 L46 64 L62 52" stroke="#1a1108" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <path d="M40 58 L46 64 L62 52" stroke="#2a1620" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
       </svg>
-      <div class="caption"><b>C1 · on cream</b>For light backgrounds: eye whites stay white, pupils and smile go dark.</div>
+      <div class="caption"><b>C1 · on light</b>For light backgrounds: eye whites stay white, pupils and smile go dark plum.</div>
     </div>
   </div>
-  <p class="note">Character is used only at ≥ 48px. Below that — primary mark only (no eyes).</p>
+  <p class="note">Character is used only at &#8805; 48px. Below that — primary mark only (no eyes).</p>
 
-  <!-- 1.3 WORDMARK FAMILY (6 variants from v11) -->
+  <!-- 1.3 WORDMARK FAMILY -->
   <h3 style="margin-top: 36px;"><b>1.3</b> Wordmark family</h3>
   <p class="lead" style="max-width: 760px;">
     Six canonical variants. All used contextually — this is not "pick one," this is a family.
-    Accent always lands on the word boundary: all of <code>right</code>, all of <code>agent</code>. Never inside "right".
+    Accent always lands on the word boundary: all of <code>right</code> in ruby, all of <code>agent</code> in muted. Never inside "right".
   </p>
 
   <!-- row 1: W1, W2, W3 -->
   <div class="grid-3" style="margin-top: 16px;">
 
     <div class="wm-option recommended">
-      <div class="label" style="font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;">W1 · default inline</div>
+      <div class="label" style="font-family:'Martian Mono',monospace; font-size: 10px; color: var(--gold); letter-spacing: 0.15em; text-transform: uppercase;">W1 · default inline</div>
       <div style="display:flex; align-items:center; gap:12px;">
         <svg width="44" height="44" viewBox="0 0 100 100">
-          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
           <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
-        <div class="wm wm-28"><span style="color:#E8632A;">right</span> <span style="color:#666;">agent</span></div>
+        <div class="wm wm-28"><span style="color:var(--ruby);">right</span> <span style="color:var(--muted);">agent</span></div>
       </div>
-      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;"><code>right</code> orange + <code>agent</code> dim. Default for nav, headers, docs. <b style="color:var(--heading); display:block; margin-top:4px;">Canonical.</b></p>
+      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;"><code>right</code> ruby + <code>agent</code> muted. Default for nav, headers, docs. <b style="color:var(--heading); display:block; margin-top:4px;">Canonical.</b></p>
     </div>
 
     <div class="wm-option">
-      <div class="label" style="font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;">W2 · white-right</div>
+      <div class="label" style="font-family:'Martian Mono',monospace; font-size: 10px; color: var(--gold); letter-spacing: 0.15em; text-transform: uppercase;">W2 · white-right</div>
       <div style="display:flex; align-items:center; gap:12px;">
         <svg width="44" height="44" viewBox="0 0 100 100">
-          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
           <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
-        <div class="wm wm-28"><span style="color:#eee;">right</span> <span style="color:#666;">agent</span></div>
+        <div class="wm wm-28"><span style="color:var(--text);">right</span> <span style="color:var(--muted);">agent</span></div>
       </div>
-      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">When there's too much orange around (next to the mark). For docs, README.</p>
+      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">When there's too much ruby around (next to the mark). For docs, README.</p>
     </div>
 
     <div class="wm-option">
-      <div class="label" style="font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;">W3 · with tagline</div>
+      <div class="label" style="font-family:'Martian Mono',monospace; font-size: 10px; color: var(--gold); letter-spacing: 0.15em; text-transform: uppercase;">W3 · with tagline</div>
       <div style="display:flex; align-items:center; gap:14px;">
         <svg width="50" height="50" viewBox="0 0 100 100">
-          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
           <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
         <div>
-          <div class="wm wm-28"><span style="color:#E8632A;">right</span> <span style="color:#666;">agent</span></div>
-          <div style="font-size: 9px; color: #666; letter-spacing: 0.15em; text-transform: uppercase; margin-top: 3px;">the proper claude code runtime</div>
+          <div class="wm wm-28"><span style="color:var(--ruby);">right</span> <span style="color:var(--muted);">agent</span></div>
+          <div class="ui-mono" style="font-size: 9px; color: var(--gold); letter-spacing: 0.15em; text-transform: uppercase; margin-top: 4px;">the proper claude code runtime</div>
         </div>
       </div>
-      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">For hero, landing, first screen. Wordmark + tagline in one block.</p>
+      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">For hero, landing, first screen. Wordmark + mono tagline in one block.</p>
     </div>
 
   </div>
@@ -481,53 +618,53 @@
   <div class="grid-3" style="margin-top: 18px;">
 
     <div class="wm-option">
-      <div class="label" style="font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;">W4 · underline-check</div>
+      <div class="label" style="font-family:'Martian Mono',monospace; font-size: 10px; color: var(--gold); letter-spacing: 0.15em; text-transform: uppercase;">W4 · teal underline</div>
       <div style="display:flex; align-items:flex-start; gap:14px;">
         <svg width="56" height="56" viewBox="0 0 100 100">
-          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
           <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
         <div style="display: flex; flex-direction: column; gap: 2px;">
-          <div class="wm wm-36" style="line-height: 1;"><span style="color:#E8632A;">right</span> <span style="color:#666;">agent</span></div>
-          <svg width="140" height="12" viewBox="0 0 140 12" style="margin-top: 2px;">
-            <path d="M2 7 L22 3 L36 9 L58 4 L78 8 L102 2 L128 6" stroke="#E8632A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <div class="wm wm-36" style="line-height: 1;"><span style="color:var(--ruby);">right</span> <span style="color:var(--muted);">agent</span></div>
+          <svg width="140" height="8" viewBox="0 0 140 8" style="margin-top: 4px;">
+            <rect x="2" y="3" width="126" height="2.4" rx="1.2" fill="#3bb0c4"/>
           </svg>
         </div>
       </div>
-      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">An uneven check-stroke underline — rhymes with the check inside the mark. For posters, covers, presentations.</p>
+      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">A crisp teal telemetry rule beneath the mark — the action color framing the identity. For posters, covers, presentations.</p>
     </div>
 
     <div class="wm-option">
-      <div class="label" style="font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;">W5 · dot-compact</div>
+      <div class="label" style="font-family:'Martian Mono',monospace; font-size: 10px; color: var(--gold); letter-spacing: 0.15em; text-transform: uppercase;">W5 · dot-compact</div>
       <div style="display:flex; align-items:center; gap:12px;">
         <svg width="38" height="38" viewBox="0 0 100 100">
-          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
           <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
-        <div class="wm wm-18" style="letter-spacing: 0.01em;"><span style="color:#E8632A;">right</span> <span style="color:#666;">·</span> <span style="color:#666;">agent</span></div>
+        <div class="wm wm-18" style="letter-spacing: 0.01em;"><span style="color:var(--ruby);">right</span> <span style="color:var(--gold);">·</span> <span style="color:var(--muted);">agent</span></div>
       </div>
-      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">With a middle dot, smaller. For sidebar, footer, captions in dense layouts.</p>
+      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">With a gold middle dot, smaller. For sidebar, footer, captions in dense layouts.</p>
     </div>
 
     <div class="wm-option">
-      <div class="label" style="font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;">W6 · stacked · square</div>
+      <div class="label" style="font-family:'Martian Mono',monospace; font-size: 10px; color: var(--gold); letter-spacing: 0.15em; text-transform: uppercase;">W6 · stacked · square</div>
       <div style="display:flex; align-items:center; gap:14px;">
         <svg width="48" height="48" viewBox="0 0 100 100">
-          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
           <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
         <div style="display: flex; flex-direction: column; gap: 0; line-height: 1;">
-          <div class="wm wm-28" style="color:#E8632A; letter-spacing: -0.03em;">right</div>
-          <div style="font-size: 11px; color: #666; letter-spacing: 0.25em; margin-top: 3px; font-weight: 700;">AGENT</div>
+          <div class="wm wm-28" style="color:var(--ruby); letter-spacing: -0.03em;">right</div>
+          <div class="ui-mono" style="font-size: 11px; color: var(--muted); letter-spacing: 0.25em; margin-top: 4px; font-weight: 600;">AGENT</div>
         </div>
       </div>
-      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">Two lines — big orange <code>right</code> + small spaced <code>AGENT</code>. For square formats: social avatar, favicon 512, sticker.</p>
+      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">Two lines — big ruby <code>right</code> + small spaced mono <code>AGENT</code>. For square formats: social avatar, favicon 512, sticker.</p>
     </div>
 
   </div>
@@ -535,8 +672,8 @@
   <div class="rule" style="margin-top: 28px;">
     <p><b>Wordmark rules.</b></p>
     <p>1. Always lowercase (except <code>AGENT</code> in W6 — that's an intentional stencil device).</p>
-    <p>2. Accent — only the whole word <code>right</code>. Never <code>r·igh·t</code>, <code>ri·ght</code> — it breaks the word.</p>
-    <p>3. <code>agent</code> in dim (<code>#666</code>) — canonical. On light — <code>#776e5e</code>.</p>
+    <p>2. Accent — only the whole word <code>right</code>, in ruby. Never <code>r·igh·t</code>, <code>ri·ght</code> — it breaks the word.</p>
+    <p>3. <code>agent</code> in muted (<code>#b6a8b0</code>) — canonical. On light — <code>#9a6a82</code>.</p>
     <p>4. In prose: <code>Right Agent</code> (Title Case, two words with a space) — that's a mention, not the wordmark. CLI binary: <code>rightagent</code> (one token).</p>
   </div>
 
@@ -546,9 +683,9 @@
     <div class="card centered">
       <div style="display: flex; align-items: center; gap: 14px;">
         <svg width="48" height="48" viewBox="0 0 100 100">
-          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
           <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
         <div class="wm wm-28"><span class="right">right</span> agent</div>
@@ -557,9 +694,9 @@
     </div>
     <div class="card centered">
       <svg width="64" height="64" viewBox="0 0 100 100">
-        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
         <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
       </svg>
       <div class="wm wm-22" style="margin-top: 8px;"><span class="right">right</span> agent</div>
@@ -568,9 +705,9 @@
     <div class="card centered">
       <div style="display: flex; align-items: baseline; gap: 10px;">
         <div class="wm wm-28"><span class="right">right</span> agent</div>
-        <div style="font-size: 11px; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase;">v0.1.0</div>
+        <div class="ui-mono" style="font-size: 11px; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase;">v0.1.0</div>
       </div>
-      <div class="caption"><b>L3 · with version</b>Wordmark + version. Version in <code>--muted</code>, monospace, two steps smaller.</div>
+      <div class="caption"><b>L3 · with version</b>Wordmark + version. Version in <code>--muted</code>, mono, two steps smaller.</div>
     </div>
   </div>
 
@@ -583,40 +720,173 @@
   <div class="grid-2">
     <div class="card">
       <h3>anatomy</h3>
-      <div class="wm wm-48" style="margin: 12px 0;"><span style="color:#E8632A;">right</span> <span style="color:#666;">agent</span></div>
+      <div class="wm wm-48" style="margin: 12px 0;"><span style="color:var(--ruby);">right</span> <span style="color:var(--muted);">agent</span></div>
       <div style="display: flex; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); letter-spacing: 0.05em; padding: 0 4px;">
-        <span style="color: var(--orange); flex: 0 0 auto;">└──right──┘</span>
+        <span style="color: var(--ruby); flex: 0 0 auto;">└──right──┘</span>
         <span style="margin-left: 4px; flex: 0 0 auto;">└─agent─┘</span>
       </div>
-      <p class="caption" style="margin-top: 16px;">The accent covers <b>5 letters</b>: <code>r·i·g·h·t</code>. No more, no less.</p>
+      <p class="caption" style="margin-top: 16px;">The ruby accent covers <b>5 letters</b>: <code>r·i·g·h·t</code>. No more, no less.</p>
     </div>
 
     <div class="card">
       <h3>color values</h3>
       <table style="font-size: 11px;">
-        <tr><td style="padding: 6px 8px; color: var(--muted);">right</td><td class="mono" style="padding: 6px 8px;">#E8632A</td><td style="padding: 6px 8px; color: var(--muted); font-size: 10px;">orange-500</td></tr>
-        <tr><td style="padding: 6px 8px; color: var(--muted);">agent (on dark)</td><td class="mono" style="padding: 6px 8px;">#666666</td><td style="padding: 6px 8px; color: var(--muted); font-size: 10px;">dim — canonical</td></tr>
-        <tr><td style="padding: 6px 8px; color: var(--muted);">agent (on light)</td><td class="mono" style="padding: 6px 8px;">#776E5E</td><td style="padding: 6px 8px; color: var(--muted); font-size: 10px;">dim-on-cream</td></tr>
-        <tr><td style="padding: 6px 8px; color: var(--muted);">agent · W2 white</td><td class="mono" style="padding: 6px 8px;">#EEEEEE</td><td style="padding: 6px 8px; color: var(--muted); font-size: 10px;">W2 only</td></tr>
+        <tr><td style="padding: 6px 8px; color: var(--muted);">right</td><td class="mono" style="padding: 6px 8px;">#c75f88</td><td style="padding: 6px 8px; color: var(--muted); font-size: 10px;">ruby — identity</td></tr>
+        <tr><td style="padding: 6px 8px; color: var(--muted);">agent (on dark)</td><td class="mono" style="padding: 6px 8px;">#b6a8b0</td><td style="padding: 6px 8px; color: var(--muted); font-size: 10px;">muted — canonical</td></tr>
+        <tr><td style="padding: 6px 8px; color: var(--muted);">agent (on light)</td><td class="mono" style="padding: 6px 8px;">#9a6a82</td><td style="padding: 6px 8px; color: var(--muted); font-size: 10px;">dim-on-light</td></tr>
+        <tr><td style="padding: 6px 8px; color: var(--muted);">agent · W2 white</td><td class="mono" style="padding: 6px 8px;">#f1ece9</td><td style="padding: 6px 8px; color: var(--muted); font-size: 10px;">W2 only</td></tr>
       </table>
     </div>
   </div>
 
   <h3 style="margin-top: 36px;">scale behaviour</h3>
   <div class="card" style="padding: 32px 28px;">
-    <div class="wm wm-48"><span style="color:#E8632A;">right</span> <span style="color:#666;">agent</span></div>
-    <div class="wm wm-36" style="margin-top: 14px;"><span style="color:#E8632A;">right</span> <span style="color:#666;">agent</span></div>
-    <div class="wm wm-28" style="margin-top: 12px;"><span style="color:#E8632A;">right</span> <span style="color:#666;">agent</span></div>
-    <div class="wm wm-22" style="margin-top: 10px;"><span style="color:#E8632A;">right</span> <span style="color:#666;">agent</span></div>
-    <div class="wm wm-18" style="margin-top: 8px;"><span style="color:#E8632A;">right</span> <span style="color:#666;">agent</span></div>
-    <div class="wm wm-14" style="margin-top: 6px;"><span style="color:#E8632A;">right</span> <span style="color:#666;">agent</span></div>
+    <div class="wm wm-48"><span style="color:var(--ruby);">right</span> <span style="color:var(--muted);">agent</span></div>
+    <div class="wm wm-36" style="margin-top: 14px;"><span style="color:var(--ruby);">right</span> <span style="color:var(--muted);">agent</span></div>
+    <div class="wm wm-28" style="margin-top: 12px;"><span style="color:var(--ruby);">right</span> <span style="color:var(--muted);">agent</span></div>
+    <div class="wm wm-22" style="margin-top: 10px;"><span style="color:var(--ruby);">right</span> <span style="color:var(--muted);">agent</span></div>
+    <div class="wm wm-18" style="margin-top: 8px;"><span style="color:var(--ruby);">right</span> <span style="color:var(--muted);">agent</span></div>
+    <div class="wm wm-14" style="margin-top: 6px;"><span style="color:var(--ruby);">right</span> <span style="color:var(--muted);">agent</span></div>
   </div>
-  <p class="note">Letter-spacing: <code>-0.025em</code> down to 28px, <code>-0.02em</code> at 22–18px, <code>-0.01em</code> at 14px and below. Under 14px — wordmark without accent (contrast falls off).</p>
+  <p class="note">Letter-spacing: <code>-0.02em</code> down to 28px, <code>-0.018em</code> at 22–18px, <code>-0.01em</code> at 14px and below. Under 14px — wordmark without accent (contrast falls off).</p>
 </section>
 
-<!-- ========================= 03 CLEAR SPACE ========================= -->
+<!-- ========================= 03 SIGNATURE ACCENT ========================= -->
+<section id="signature">
+  <h2><b>03</b> Signature accent <span class="sub">the headline device</span></h2>
+
+  <p class="lead">
+    The brand's headline-accent device. The display accent word gets a steep oblique slant in <b style="color:var(--ruby);">ruby</b> (<code>transform: skewX(-18deg)</code>), with a crisp <b style="color:var(--teal);">teal</b> underline bar beneath it (~0.08em tall) that follows the slant.
+    <b style="color:var(--heading);">No blur. No glow.</b> The slant + underline is the only sanctioned emphasis on a hero headline. It reads as a tracked, instrument-measured object.
+  </p>
+
+  <div class="deepfield" style="padding: 56px 48px; margin-top: 8px;">
+    <div class="grid"></div>
+    <div class="hud-frame"><span class="tk tl"></span><span class="tk tr"></span><span class="tk bl"></span><span class="tk br"></span></div>
+    <span class="hud-read" style="top: 10px; left: 18px;">obs · deep-field</span>
+    <span class="hud-read" style="bottom: 10px; right: 18px;">secure-by-default</span>
+    <div style="position: relative; z-index: 2;">
+      <div style="font-family:'Chakra Petch',sans-serif; font-weight:700; font-size: 52px; line-height: 1.08; letter-spacing: -0.02em; color: var(--heading);">
+        stop babysitting agents.<br>start <span class="sig-accent">trusting</span> them.
+      </div>
+      <div class="ui-mono" style="margin-top: 22px; font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--gold);">&#9656; sandboxed multi-agent runtime · sig &#9679;&#9679;&#9679;&#9679;&#9675; · lat 12ms</div>
+    </div>
+  </div>
+
+  <div class="grid-2" style="margin-top: 20px;">
+    <div class="card" data-tick="03.1">
+      <h3>construction</h3>
+      <ul style="list-style: none; padding: 0; font-size: 12px; line-height: 1.9; color: var(--text);">
+        <li>· word color = ruby <code>#c75f88</code></li>
+        <li>· <code>transform: skewX(-18deg)</code>, origin left-bottom</li>
+        <li>· underline = teal <code>#3bb0c4</code> bar, ~0.08em tall</li>
+        <li>· bar follows the slant (skewed with the word)</li>
+        <li>· no <code>filter: blur()</code>, no text-shadow glow</li>
+      </ul>
+    </div>
+    <div class="card" data-tick="03.2">
+      <h3>where it lives</h3>
+      <p class="caption">Exactly one accent word per headline. Use it on the hero verb or noun that carries the promise — never on a function word, never on more than one phrase per view. Body copy and UI never use the slant; they stay upright.</p>
+      <div style="margin-top: 6px; font-family:'Chakra Petch',sans-serif; font-weight:700; font-size: 26px; color: var(--heading);">run agents. <span class="sig-accent">safely.</span></div>
+    </div>
+  </div>
+
+  <div class="rule teal" style="margin-top: 24px;">
+    <p><b>Signature rule.</b> The accent word is the only place the two lead colors touch: ruby word, teal bar. It is the brand's "instrument reading" of a single important word. Keep it sharp — the slant carries the energy, not a glow.</p>
+  </div>
+</section>
+
+<!-- ========================= 04 OBSERVATORY MOTIFS ========================= -->
+<section id="observatory">
+  <h2><b>04</b> Observatory motifs <span class="sub">atmosphere &amp; instrument</span></h2>
+
+  <p class="lead">
+    The brand's atmosphere is a research instrument pointed at deep space. These motifs are part of the brand, not decoration — use them to frame heroes, covers, and dashboards. The mood is precise, quiet, and a little mysterious.
+  </p>
+
+  <!-- 4.1 deep-field background -->
+  <h3 style="margin-top: 8px;"><b>4.1</b> Deep-field background</h3>
+  <div class="deepfield" style="height: 240px; position: relative;">
+    <div class="grid"></div>
+    <svg width="100%" height="100%" viewBox="0 0 800 240" preserveAspectRatio="xMidYMid slice" style="position:absolute; inset:0;">
+      <!-- star-field: gold + cool glints -->
+      <circle cx="70" cy="50" r="1.2" fill="#e6cf8e" opacity="0.9"/>
+      <circle cx="150" cy="120" r="0.9" fill="#79cdda" opacity="0.8"/>
+      <circle cx="220" cy="38" r="1.4" fill="#cda14b" opacity="0.85"/>
+      <circle cx="300" cy="180" r="1" fill="#f1ece9" opacity="0.7"/>
+      <circle cx="380" cy="80" r="1.6" fill="#e6cf8e" opacity="0.95"/>
+      <circle cx="450" cy="150" r="0.8" fill="#79cdda" opacity="0.75"/>
+      <circle cx="520" cy="40" r="1.1" fill="#f1ece9" opacity="0.6"/>
+      <circle cx="600" cy="110" r="1.5" fill="#cda14b" opacity="0.9"/>
+      <circle cx="660" cy="200" r="0.9" fill="#79cdda" opacity="0.8"/>
+      <circle cx="730" cy="70" r="1.3" fill="#e6cf8e" opacity="0.9"/>
+      <circle cx="110" cy="200" r="1" fill="#cda14b" opacity="0.7"/>
+      <circle cx="500" cy="210" r="1.2" fill="#79cdda" opacity="0.7"/>
+      <!-- starlight glint -->
+      <g transform="translate(380 80)" opacity="0.9">
+        <path d="M0 -7 L0 7 M-7 0 L7 0" stroke="#e6cf8e" stroke-width="0.8" stroke-linecap="round"/>
+      </g>
+      <g transform="translate(600 110)" opacity="0.85">
+        <path d="M0 -8 L0 8 M-8 0 L8 0" stroke="#cda14b" stroke-width="0.8" stroke-linecap="round"/>
+      </g>
+      <!-- tracked object: the claw with orbit -->
+      <g transform="translate(640 130)">
+        <ellipse cx="0" cy="0" rx="62" ry="24" fill="none" stroke="#3bb0c4" stroke-width="0.8" opacity="0.4"/>
+        <circle cx="0" cy="0" r="40" fill="none" stroke="#3bb0c4" stroke-width="0.6" opacity="0.25"/>
+      </g>
+    </svg>
+    <div class="hud-frame"><span class="tk tl"></span><span class="tk tr"></span><span class="tk bl"></span><span class="tk br"></span></div>
+    <span class="hud-read" style="top: 12px; left: 20px;">obs · deep-field</span>
+    <span class="hud-read" style="top: 12px; right: 20px; color: var(--teal);">track lock</span>
+    <span class="hud-read" style="bottom: 12px; left: 20px;">grid · coord</span>
+    <!-- claw as tracked object -->
+    <svg width="64" height="64" viewBox="0 0 100 100" style="position:absolute; right:54px; top:50%; transform: translateY(-50%);">
+      <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+      <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+      <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
+      <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </svg>
+  </div>
+  <p class="note">Deep plum base · faint star-field mixing gold and cool glints · low-opacity coordinate grid (masked to fade) · soft radial nebula blooms (warm gold + cool teal). The claw reads as a <b>tracked object</b> with a subtle orbit ring.</p>
+
+  <!-- 4.2 HUD frame + telemetry -->
+  <div class="grid-2" style="margin-top: 28px;">
+    <div class="card" data-tick="4.2">
+      <h3>HUD frame</h3>
+      <p class="caption">Thin corner ticks frame the viewport, with small uppercase mono readouts. Use them to bound a hero or a dashboard panel. The ticks are <code>--teal</code>; readouts are <code>--gold</code> (status) or <code>--teal</code> (live).</p>
+      <div style="position: relative; height: 96px; border-radius: 6px; background: var(--bg-2); margin-top: 4px;">
+        <div class="hud-frame"><span class="tk tl"></span><span class="tk tr"></span><span class="tk bl"></span><span class="tk br"></span></div>
+        <span class="hud-read" style="top: 22px; left: 28px;">obs · deep-field</span>
+        <span class="hud-read" style="bottom: 22px; right: 28px; color: var(--teal);">secure-by-default</span>
+      </div>
+    </div>
+    <div class="card" data-tick="4.3">
+      <h3>telemetry labels</h3>
+      <p class="caption">Mono, uppercase, letter-spaced. Status segments separated by <code>·</code>. Signal bars use filled/empty dots; gold for warmth markers, teal for live rails.</p>
+      <div class="ui-mono" style="font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--teal); line-height: 2;">
+        &#9656; sandboxed multi-agent runtime<br>
+        <span style="color:var(--gold);">sig &#9679;&#9679;&#9679;&#9679;&#9675;</span> · <span style="color:var(--gold);">lat 12ms</span> · <span style="color:var(--teal);">3 agents online</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4.3 buttons -->
+  <h3 style="margin-top: 28px;"><b>4.4</b> Technical chip buttons</h3>
+  <div class="card" style="flex-direction: row; align-items: center; gap: 16px; flex-wrap: wrap;">
+    <span class="chip">get started &#8594;</span>
+    <span class="chip">cargo install rightagent</span>
+    <span class="chip ghost">read docs</span>
+    <p class="caption" style="flex: 1 1 220px; margin: 0;">Buttons are crisp technical chips: flat teal fill, dark text on teal (<code>#08151a</code>), small radius (~4px), thin border, mono lowercase label. <b style="color:var(--text);">Never</b> rounded/glossy/glowing.</p>
+  </div>
+
+  <div class="rule" style="margin-top: 24px;">
+    <p><b>Motif rule.</b> Atmosphere serves legibility. Star-field and nebula stay low-opacity; the grid fades at the edges; telemetry never competes with the headline. The instrument is precise, not busy.</p>
+  </div>
+</section>
+
+<!-- ========================= 05 CLEAR SPACE ========================= -->
 <section id="clearspace">
-  <h2><b>03</b> Clear space &amp; minimum sizes</h2>
+  <h2><b>05</b> Clear space &amp; minimum sizes</h2>
 
   <div class="grid-2">
     <div>
@@ -626,9 +896,9 @@
         <div class="clearspace-frame">
           <span class="clearspace-label">X</span>
           <svg width="80" height="80" viewBox="0 0 100 100">
-            <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-            <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-            <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+            <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+            <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+            <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
             <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
           </svg>
         </div>
@@ -641,7 +911,7 @@
       <table>
         <tr><th>Context</th><th>Min size</th><th>What</th></tr>
         <tr><td>Web / digital</td><td class="mono">24×24 px</td><td>primary mark</td></tr>
-        <tr><td>Favicon</td><td class="mono">16×16 px</td><td>simplified (see 08.1)</td></tr>
+        <tr><td>Favicon</td><td class="mono">16×16 px</td><td>simplified (see 10.1)</td></tr>
         <tr><td>Character C1</td><td class="mono">48×48 px</td><td>eyes vanish below</td></tr>
         <tr><td>Wordmark w/ accent</td><td class="mono">14 px</td><td>below — no accent</td></tr>
         <tr><td>Print</td><td class="mono">8 mm</td><td>primary mark</td></tr>
@@ -651,31 +921,78 @@
   </div>
 </section>
 
-<!-- ========================= 04 COLOR ========================= -->
+<!-- ========================= 06 COLOR ========================= -->
 <section id="color">
-  <h2><b>04</b> Color</h2>
+  <h2><b>06</b> Color</h2>
 
-  <h3>core palette</h3>
+  <h3>brand roles</h3>
+  <p class="note" style="margin-bottom: 14px;">Each color has one job. Ruby is identity, teal is action, gold is warmth. Don't trade them around.</p>
+  <div class="grid-3">
+    <div class="swatch" style="background: #c75f88; color: #2a0e1a;">
+      <div class="role">identity</div>
+      <div class="name">ruby</div>
+      <div class="hex">#c75f88</div>
+      <div class="use">"right" · the claw mark</div>
+    </div>
+    <div class="swatch" style="background: #3bb0c4; color: #08151a;">
+      <div class="role">action / structure</div>
+      <div class="name">teal</div>
+      <div class="hex">#3bb0c4</div>
+      <div class="use">buttons · links · focus · rails · underline</div>
+    </div>
+    <div class="swatch" style="background: #cda14b; color: #241a06;">
+      <div class="role">warmth / secondary</div>
+      <div class="name">gold</div>
+      <div class="hex">#cda14b</div>
+      <div class="use">eyebrows · index ticks · star glints</div>
+    </div>
+  </div>
+
+  <h3 style="margin-top: 28px;">soft tints + on-teal text</h3>
   <div class="grid-4">
-    <div class="swatch" style="background: #E8632A; color: #1a1108;">
-      <div class="name">orange / brand</div>
-      <div class="hex">#E8632A</div>
-      <div class="use">primary · accent · "right"</div>
+    <div class="swatch" style="background: #e08bab; color: #2a0e1a;">
+      <div class="name">ruby soft</div>
+      <div class="hex">#e08bab</div>
+      <div class="use">hover · highlight</div>
     </div>
-    <div class="swatch" style="background: #0f0f0f; color: #ddd; border: 1px solid var(--line);">
-      <div class="name">coal</div>
-      <div class="hex">#0F0F0F</div>
-      <div class="use">primary background (dark)</div>
+    <div class="swatch" style="background: #79cdda; color: #08151a;">
+      <div class="name">teal soft</div>
+      <div class="hex">#79cdda</div>
+      <div class="use">hover · star glint</div>
     </div>
-    <div class="swatch" style="background: #161616; color: #ddd; border: 1px solid var(--line);">
+    <div class="swatch" style="background: #e6cf8e; color: #241a06;">
+      <div class="name">gold soft</div>
+      <div class="hex">#e6cf8e</div>
+      <div class="use">starlight · accents</div>
+    </div>
+    <div class="swatch" style="background: #08151a; color: #79cdda; border: 1px solid var(--line);">
+      <div class="name">on-teal</div>
+      <div class="hex">#08151a</div>
+      <div class="use">text on teal fills</div>
+    </div>
+  </div>
+
+  <h3 style="margin-top: 28px;">core surfaces</h3>
+  <div class="grid-4">
+    <div class="swatch" style="background: #121016; color: #f1ece9; border: 1px solid var(--line);">
+      <div class="name">bg</div>
+      <div class="hex">#121016</div>
+      <div class="use">deep plum-charcoal base</div>
+    </div>
+    <div class="swatch" style="background: #18141c; color: #f1ece9; border: 1px solid var(--line);">
+      <div class="name">bg-2</div>
+      <div class="hex">#18141C</div>
+      <div class="use">recessed surfaces</div>
+    </div>
+    <div class="swatch" style="background: #201a26; color: #f1ece9; border: 1px solid var(--line);">
       <div class="name">panel</div>
-      <div class="hex">#161616</div>
+      <div class="hex">#201A26</div>
       <div class="use">cards, surfaces</div>
     </div>
-    <div class="swatch" style="background: #f2ede4; color: #1a1108; border: 1px solid #ddd6c9;">
-      <div class="name">cream</div>
-      <div class="hex">#F2EDE4</div>
-      <div class="use">primary background (light)</div>
+    <div class="swatch" style="background: #efe7ec; color: #2a1620; border: 1px solid #d8cad2;">
+      <div class="name">light bg</div>
+      <div class="hex">#EFE7EC</div>
+      <div class="use">light backgrounds</div>
     </div>
   </div>
 
@@ -686,93 +1003,99 @@
       <div class="hex">#6BBF59</div>
       <div class="use">✓ success · ready</div>
     </div>
-    <div class="swatch" style="background: #d9a82a; color: #2a1f05;">
+    <div class="swatch" style="background: #e6c06a; color: #2a1f05;">
       <div class="name">warn</div>
-      <div class="hex">#D9A82A</div>
+      <div class="hex">#E6C06A</div>
       <div class="use">! caution · degraded</div>
     </div>
-    <div class="swatch" style="background: #e03c3c; color: #2a0505;">
+    <div class="swatch" style="background: #e2556a; color: #2a0508;">
       <div class="name">err</div>
-      <div class="hex">#E03C3C</div>
+      <div class="hex">#E2556A</div>
       <div class="use">✗ fail · fatal</div>
     </div>
-    <div class="swatch" style="background: #4a90e2; color: #05152a;">
+    <div class="swatch" style="background: #3bb0c4; color: #08151a;">
       <div class="name">info</div>
-      <div class="hex">#4A90E2</div>
+      <div class="hex">#3BB0C4</div>
       <div class="use">… running · pending</div>
     </div>
   </div>
 
   <h3 style="margin-top: 28px;">neutral ladder</h3>
   <div class="grid-4">
-    <div class="hex-tile"><div class="hex-title">heading</div><div style="background:#EEEEEE; height: 32px; border-radius: 3px;"></div><div class="hex-val">#EEEEEE</div></div>
-    <div class="hex-tile"><div class="hex-title">text</div><div style="background:#DDDDDD; height: 32px; border-radius: 3px;"></div><div class="hex-val">#DDDDDD</div></div>
-    <div class="hex-tile"><div class="hex-title">muted</div><div style="background:#888888; height: 32px; border-radius: 3px;"></div><div class="hex-val">#888888</div></div>
-    <div class="hex-tile"><div class="hex-title">dim</div><div style="background:#666666; height: 32px; border-radius: 3px;"></div><div class="hex-val">#666666</div></div>
-    <div class="hex-tile"><div class="hex-title">line</div><div style="background:#222222; height: 32px; border-radius: 3px;"></div><div class="hex-val">#222222</div></div>
-    <div class="hex-tile"><div class="hex-title">line-soft</div><div style="background:#1A1A1A; height: 32px; border-radius: 3px;"></div><div class="hex-val">#1A1A1A</div></div>
-    <div class="hex-tile"><div class="hex-title">dark-text</div><div style="background:#1A1108; height: 32px; border-radius: 3px;"></div><div class="hex-val">#1A1108</div></div>
-    <div class="hex-tile"><div class="hex-title">cream-line</div><div style="background:#DDD6C9; height: 32px; border-radius: 3px;"></div><div class="hex-val">#DDD6C9</div></div>
+    <div class="hex-tile"><div class="hex-title">text</div><div style="background:#F1ECE9; height: 32px; border-radius: 3px;"></div><div class="hex-val">#F1ECE9</div></div>
+    <div class="hex-tile"><div class="hex-title">muted</div><div style="background:#B6A8B0; height: 32px; border-radius: 3px;"></div><div class="hex-val">#B6A8B0</div></div>
+    <div class="hex-tile"><div class="hex-title">dim</div><div style="background:#6F6169; height: 32px; border-radius: 3px;"></div><div class="hex-val">#6F6169</div></div>
+    <div class="hex-tile"><div class="hex-title">line</div><div style="background:#2D2533; height: 32px; border-radius: 3px;"></div><div class="hex-val">#2D2533</div></div>
+    <div class="hex-tile"><div class="hex-title">line-2</div><div style="background:#3E3146; height: 32px; border-radius: 3px;"></div><div class="hex-val">#3E3146</div></div>
+    <div class="hex-tile"><div class="hex-title">bg-2</div><div style="background:#18141C; height: 32px; border-radius: 3px;"></div><div class="hex-val">#18141C</div></div>
+    <div class="hex-tile"><div class="hex-title">dark-text</div><div style="background:#08151A; height: 32px; border-radius: 3px;"></div><div class="hex-val">#08151A</div></div>
+    <div class="hex-tile"><div class="hex-title">light-line</div><div style="background:#D8CAD2; height: 32px; border-radius: 3px;"></div><div class="hex-val">#D8CAD2</div></div>
   </div>
 
   <div class="rule" style="margin-top: 28px;">
     <p><b>Color rules.</b></p>
-    <p>1. <code>#E8632A</code> — the only brand accent. Don't shift the hue. Don't substitute "some orange."</p>
-    <p>2. Orange is not used for semantic states. <code>warn</code> — yellow, <code>err</code> — red.</p>
-    <p>3. Orange on orange — forbidden. On a brand-orange background, the claw goes white.</p>
-    <p>4. Minimum text contrast — WCAG AA (4.5:1). White check on brand-orange passes.</p>
+    <p>1. <b>Ruby</b> <code>#c75f88</code> is identity-only: the word <code>right</code> and the claw. Don't use it for buttons or links.</p>
+    <p>2. <b>Teal</b> <code>#3bb0c4</code> is action/structure: buttons, links, focus, telemetry rails, the signature underline. <b>Gold</b> <code>#cda14b</code> is warmth: eyebrows, ticks, star glints.</p>
+    <p>3. None of the three lead colors is a semantic state. <code>warn</code> = gold-yellow, <code>err</code> = ruby-red, <code>ok</code> = green, <code>info</code> = teal.</p>
+    <p>4. Ruby on teal or teal on ruby as large fills — forbidden. On a teal fill, the claw goes white.</p>
+    <p>5. Minimum text contrast — WCAG AA (4.5:1). Dark text <code>#08151a</code> on teal passes; white check on teal passes.</p>
   </div>
 </section>
 
-<!-- ========================= 05 TYPOGRAPHY ========================= -->
+<!-- ========================= 07 TYPOGRAPHY ========================= -->
 <section id="typography">
-  <h2><b>05</b> Typography</h2>
+  <h2><b>07</b> Typography</h2>
 
   <div class="grid-3">
     <div class="card">
       <div class="label">display / wordmark</div>
-      <div style="font-family: Inter, system-ui, sans-serif; font-weight: 800; font-size: 36px; letter-spacing: -0.025em; color: #666; margin: 8px 0;"><span style="color: var(--orange);">right</span> agent</div>
-      <p class="caption"><b>Inter</b> 800 · SIL Open Font License. Free, stable, broad coverage.</p>
-      <p style="font-size: 11px; color: var(--muted); margin-top: 4px;">fallback: <code>-apple-system, system-ui, sans-serif</code></p>
+      <div style="font-family:'Chakra Petch',sans-serif; font-weight: 700; font-size: 36px; letter-spacing: -0.02em; color: var(--muted); margin: 8px 0;"><span style="color: var(--ruby);">right</span> agent</div>
+      <p class="caption"><b>Chakra Petch</b> 500/600/700 · angular techno. Headings use 700, tracking slightly negative.</p>
+      <p style="font-size: 11px; color: var(--muted); margin-top: 4px;">fallback: <code>system-ui, sans-serif</code></p>
     </div>
     <div class="card">
       <div class="label">ui / body</div>
-      <p style="font-family: Inter, system-ui, sans-serif; font-size: 14px; line-height: 1.6; color: var(--text); margin: 8px 0;">Multi-agent runtime for Claude Code. Each agent in its own sandbox.</p>
-      <p class="caption"><b>Inter</b> 400 / 500 / 600 / 700 · size 13–16px, line-height 1.5–1.65.</p>
+      <p style="font-family:'Saira',sans-serif; font-size: 14px; line-height: 1.6; color: var(--text); margin: 8px 0;">Sandboxed multi-agent runtime for Claude Code. Each agent in its own sandbox.</p>
+      <p class="caption"><b>Saira</b> 400/500/600/700 · squared grotesque. Shares Chakra's angular DNA — size 13–16px, line-height 1.5–1.65.</p>
     </div>
     <div class="card">
-      <div class="label">mono / terminal / code</div>
-      <div style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px; color: var(--text); margin: 8px 0;"><span style="color:var(--orange);">▐✓</span> <span style="color:var(--orange);">right</span> <span style="color:#666;">agent</span> <span style="color:var(--dim);">v0.1.0</span></div>
-      <p class="caption"><b>JetBrains Mono</b> · Apache 2.0. Renders <code>▐</code>, <code>✓</code> and box-drawing crisply.</p>
-      <p style="font-size: 11px; color: var(--muted); margin-top: 4px;">fallback: <code>Fira Mono, Menlo, ui-monospace, monospace</code></p>
+      <div class="label">mono · telemetry / code</div>
+      <div class="ui-mono" style="font-size: 12px; color: var(--teal); letter-spacing: 0.12em; text-transform: uppercase; margin: 8px 0;">&#9656; sig &#9679;&#9679;&#9679;&#9679;&#9675; · lat 12ms</div>
+      <div style="font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--text); margin: 4px 0;"><span style="color:var(--teal);">▐✓</span> <span style="color:var(--ruby);">right</span> <span style="color:var(--muted);">agent</span> <span style="color:var(--dim);">v0.1.0</span></div>
+      <p class="caption"><b>Martian Mono</b> · telemetry &amp; UI labels. <b>JetBrains Mono</b> · code blocks.</p>
     </div>
+  </div>
+
+  <div class="rule teal" style="margin-top: 24px;">
+    <p><b>Pairing rule.</b> The body face (Saira) must share the display's squared, angular temperament — <b>never</b> a round humanist sans (no Inter, no Open Sans, no Nunito). Chakra Petch + Saira is the intentional pairing; mono telemetry is Martian Mono, code is JetBrains Mono.</p>
   </div>
 
   <h3 style="margin-top: 32px;">scale</h3>
   <table>
-    <tr><th>Role</th><th>Size</th><th>Weight</th><th>Tracking</th><th>Example</th></tr>
-    <tr><td>Hero wordmark</td><td class="mono">48–64 px</td><td class="mono">800</td><td class="mono">-0.025em</td><td style="font-family: Inter; font-size: 18px; font-weight: 800; letter-spacing: -0.025em;"><span style="color:var(--orange);">right</span> <span style="color:#666;">agent</span></td></tr>
-    <tr><td>Page title</td><td class="mono">28–36 px</td><td class="mono">800</td><td class="mono">-0.02em</td><td class="dim">Right Agent</td></tr>
-    <tr><td>Section H2</td><td class="mono">10–11 px</td><td class="mono">600</td><td class="mono">0.2em</td><td class="mono">ESSENCE</td></tr>
-    <tr><td>Body</td><td class="mono">14 px</td><td class="mono">400</td><td class="mono">0</td><td class="dim">body text</td></tr>
-    <tr><td>Caption</td><td class="mono">11–12 px</td><td class="mono">400</td><td class="mono">0</td><td class="dim">caption</td></tr>
-    <tr><td>Mono / code</td><td class="mono">12–13 px</td><td class="mono">400</td><td class="mono">0</td><td class="mono">rightagent up</td></tr>
+    <tr><th>Role</th><th>Face</th><th>Size</th><th>Weight</th><th>Tracking</th><th>Example</th></tr>
+    <tr><td>Hero wordmark</td><td class="dim">Chakra Petch</td><td class="mono">48–64 px</td><td class="mono">700</td><td class="mono">-0.02em</td><td style="font-family:'Chakra Petch'; font-size: 18px; font-weight: 700; letter-spacing: -0.02em;"><span style="color:var(--ruby);">right</span> <span style="color:var(--muted);">agent</span></td></tr>
+    <tr><td>Page title</td><td class="dim">Chakra Petch</td><td class="mono">28–36 px</td><td class="mono">700</td><td class="mono">-0.02em</td><td class="dim">Right Agent</td></tr>
+    <tr><td>Section H2</td><td class="dim">Martian Mono</td><td class="mono">10–11 px</td><td class="mono">500</td><td class="mono">0.25em</td><td class="ui-mono" style="font-size:11px; letter-spacing:0.2em; text-transform:uppercase;">ESSENCE</td></tr>
+    <tr><td>Body</td><td class="dim">Saira</td><td class="mono">14 px</td><td class="mono">400</td><td class="mono">0</td><td class="dim">body text</td></tr>
+    <tr><td>Caption</td><td class="dim">Saira</td><td class="mono">11–12 px</td><td class="mono">400</td><td class="mono">0</td><td class="dim">caption</td></tr>
+    <tr><td>Telemetry</td><td class="dim">Martian Mono</td><td class="mono">9–11 px</td><td class="mono">500</td><td class="mono">0.16em</td><td class="ui-mono" style="font-size:10px; letter-spacing:0.16em; text-transform:uppercase; color:var(--gold);">lat 12ms</td></tr>
+    <tr><td>Code</td><td class="dim">JetBrains Mono</td><td class="mono">12–13 px</td><td class="mono">400</td><td class="mono">0</td><td class="mono">rightagent up</td></tr>
   </table>
 </section>
 
-<!-- ========================= 06 VOICE ========================= -->
+<!-- ========================= 08 VOICE ========================= -->
 <section id="voice">
-  <h2><b>06</b> Voice &amp; tone</h2>
+  <h2><b>08</b> Voice &amp; tone</h2>
 
   <div class="grid-2">
     <div class="card">
       <h3>voice attributes</h3>
       <ul style="list-style: none; padding: 0; font-size: 13px; line-height: 1.9;">
-        <li><b style="color:var(--orange);">precise</b> <span class="dim">— technical accuracy, no handwaving</span></li>
-        <li><b style="color:var(--orange);">lowercase-first</b> <span class="dim">— like rust/go tools</span></li>
-        <li><b style="color:var(--orange);">serious-friendly</b> <span class="dim">— not corporate, not hipster</span></li>
-        <li><b style="color:var(--orange);">opinionated</b> <span class="dim">— has a position on security</span></li>
-        <li><b style="color:var(--orange);">terse</b> <span class="dim">— the tool does the work, doesn't talk about it</span></li>
+        <li><b style="color:var(--ruby);">precise</b> <span class="dim">— technical accuracy, no handwaving</span></li>
+        <li><b style="color:var(--ruby);">lowercase-first</b> <span class="dim">— like rust/go tools</span></li>
+        <li><b style="color:var(--ruby);">serious-friendly</b> <span class="dim">— not corporate, not hipster</span></li>
+        <li><b style="color:var(--ruby);">opinionated</b> <span class="dim">— has a position on security</span></li>
+        <li><b style="color:var(--ruby);">terse</b> <span class="dim">— the tool does the work, doesn't talk about it</span></li>
       </ul>
     </div>
 
@@ -804,15 +1127,15 @@
     <div class="dd-panel dont">
       <h4>✗ don't</h4>
       <div class="item">
-        <div class="demo mono" style="color: #777;">oops! something went wrong :(</div>
+        <div class="demo mono" style="color: var(--dim);">oops! something went wrong :(</div>
         <span>Apologies, emotions, emoji. Not our voice.</span>
       </div>
       <div class="item">
-        <div class="demo mono" style="color: #777;">Successfully Initialized!</div>
+        <div class="demo mono" style="color: var(--dim);">Successfully Initialized!</div>
         <span>Title Case, exclamation. Sounds like Windows.</span>
       </div>
       <div class="item">
-        <div class="demo" style="color: #777;">Revolutionize Your AI Workflow 🚀</div>
+        <div class="demo" style="color: var(--dim);">Revolutionize Your AI Workflow 🚀</div>
         <span>Marketing-speak. Rockets. No.</span>
       </div>
     </div>
@@ -822,15 +1145,15 @@
   <table style="max-width: 700px;">
     <tr><th>Level</th><th>Glyph</th><th>Color</th><th>Pattern</th></tr>
     <tr><td>ok</td><td class="mono" style="color: var(--ok);">✓</td><td class="mono">#6BBF59</td><td class="mono">✓ {noun} {past-verb}</td></tr>
-    <tr><td>warn</td><td class="mono" style="color: var(--warn);">!</td><td class="mono">#D9A82A</td><td class="mono">! {subject} {concern}</td></tr>
-    <tr><td>err</td><td class="mono" style="color: var(--err);">✗</td><td class="mono">#E03C3C</td><td class="mono">✗ {subject} {failure}</td></tr>
-    <tr><td>info</td><td class="mono" style="color: #4a90e2;">…</td><td class="mono">#4A90E2</td><td class="mono">… {subject} {ing-verb}</td></tr>
+    <tr><td>warn</td><td class="mono" style="color: var(--warn);">!</td><td class="mono">#E6C06A</td><td class="mono">! {subject} {concern}</td></tr>
+    <tr><td>err</td><td class="mono" style="color: var(--err);">✗</td><td class="mono">#E2556A</td><td class="mono">✗ {subject} {failure}</td></tr>
+    <tr><td>info</td><td class="mono" style="color: var(--info);">…</td><td class="mono">#3BB0C4</td><td class="mono">… {subject} {ing-verb}</td></tr>
   </table>
 </section>
 
-<!-- ========================= 07 CHARACTER USAGE ========================= -->
+<!-- ========================= 09 CHARACTER USAGE ========================= -->
 <section id="character">
-  <h2><b>07</b> Character usage</h2>
+  <h2><b>09</b> Character usage</h2>
 
   <p class="lead">The character (C1) is <b>not a replacement for primary</b>. It's for places that need stage and emotion: hero, cover, sticker, README illustration. Don't use the character in UI chrome, don't use it as a favicon.</p>
 
@@ -859,60 +1182,60 @@
   </div>
 </section>
 
-<!-- ========================= 08 APPLICATIONS ========================= -->
+<!-- ========================= 10 APPLICATIONS ========================= -->
 <section id="applications">
-  <h2><b>08</b> Applications</h2>
+  <h2><b>10</b> Applications</h2>
 
-  <!-- 8.1 FAVICON -->
-  <h3 style="margin-top: 8px;"><b>8.1</b> Favicon</h3>
+  <!-- 10.1 FAVICON -->
+  <h3 style="margin-top: 8px;"><b>10.1</b> Favicon</h3>
   <div class="grid-4">
     <div class="card centered">
-      <div style="background: #0f0f0f; width: 64px; height: 64px; display: flex; align-items: center; justify-content: center; border-radius: 8px; border: 1px solid var(--line);">
+      <div style="background: #121016; width: 64px; height: 64px; display: flex; align-items: center; justify-content: center; border-radius: 8px; border: 1px solid var(--line);">
         <svg width="48" height="48" viewBox="0 0 100 100">
-          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="10" stroke-linecap="round" fill="none"/>
-          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="10" stroke-linecap="round" fill="none"/>
-          <rect x="8" y="38" width="12" height="24" rx="6" fill="#E8632A"/>
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="10" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="10" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="12" height="24" rx="6" fill="#c75f88"/>
           <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
       </div>
       <div class="caption" style="text-align:center;"><b>64×64</b>full primary</div>
     </div>
     <div class="card centered">
-      <div style="background: #0f0f0f; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; border-radius: 6px; border: 1px solid var(--line);">
+      <div style="background: #121016; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; border-radius: 6px; border: 1px solid var(--line);">
         <svg width="36" height="36" viewBox="0 0 100 100">
-          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="11" stroke-linecap="round" fill="none"/>
-          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="11" stroke-linecap="round" fill="none"/>
-          <rect x="8" y="38" width="13" height="24" rx="6.5" fill="#E8632A"/>
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="11" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="11" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="13" height="24" rx="6.5" fill="#c75f88"/>
           <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
       </div>
       <div class="caption" style="text-align:center;"><b>32×32</b>thicker strokes</div>
     </div>
     <div class="card centered">
-      <div style="background: #0f0f0f; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 4px; border: 1px solid var(--line);">
+      <div style="background: #121016; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 4px; border: 1px solid var(--line);">
         <svg width="24" height="24" viewBox="0 0 100 100">
-          <path d="M12 42 L48 20 Q56 15 64 20 L86 36" stroke="#E8632A" stroke-width="13" stroke-linecap="round" fill="none"/>
-          <path d="M12 58 L48 80 Q56 85 64 80 L86 64" stroke="#E8632A" stroke-width="13" stroke-linecap="round" fill="none"/>
-          <rect x="4" y="36" width="14" height="28" rx="7" fill="#E8632A"/>
+          <path d="M12 42 L48 20 Q56 15 64 20 L86 36" stroke="#c75f88" stroke-width="13" stroke-linecap="round" fill="none"/>
+          <path d="M12 58 L48 80 Q56 85 64 80 L86 64" stroke="#c75f88" stroke-width="13" stroke-linecap="round" fill="none"/>
+          <rect x="4" y="36" width="14" height="28" rx="7" fill="#c75f88"/>
         </svg>
       </div>
       <div class="caption" style="text-align:center;"><b>16×16</b>claw only, no check</div>
     </div>
-    <div class="card centered" style="background: #E8632A; border-color: #E8632A;">
-      <div style="background: #fff; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 6px;">
+    <div class="card centered" style="background: #3bb0c4; border-color: #3bb0c4;">
+      <div style="background: #121016; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 6px;">
         <svg width="24" height="24" viewBox="0 0 100 100">
-          <path d="M12 42 L48 20 Q56 15 64 20 L86 36" stroke="#E8632A" stroke-width="13" stroke-linecap="round" fill="none"/>
-          <path d="M12 58 L48 80 Q56 85 64 80 L86 64" stroke="#E8632A" stroke-width="13" stroke-linecap="round" fill="none"/>
-          <rect x="4" y="36" width="14" height="28" rx="7" fill="#E8632A"/>
+          <path d="M12 42 L48 20 Q56 15 64 20 L86 36" stroke="#c75f88" stroke-width="13" stroke-linecap="round" fill="none"/>
+          <path d="M12 58 L48 80 Q56 85 64 80 L86 64" stroke="#c75f88" stroke-width="13" stroke-linecap="round" fill="none"/>
+          <rect x="4" y="36" width="14" height="28" rx="7" fill="#c75f88"/>
         </svg>
       </div>
-      <div class="caption" style="text-align:center; color: #1a1108;"><b style="color:#1a1108;">apple touch</b>orange bg, inset white</div>
+      <div class="caption" style="text-align:center; color: #08151a;"><b style="color:#08151a;">apple touch</b>teal bg, inset deep-field tile</div>
     </div>
   </div>
-  <p class="note">At 16×16 — claw only, no check (check disappears). At 32+ — full version. Apple touch icon: white inset on brand-orange.</p>
+  <p class="note">At 16×16 — claw only, no check (check disappears). At 32+ — full version. Apple touch icon: deep-field inset tile on teal.</p>
 
-  <!-- 8.2 README -->
-  <h3 style="margin-top: 36px;"><b>8.2</b> README header</h3>
+  <!-- 10.2 README -->
+  <h3 style="margin-top: 36px;"><b>10.2</b> README header</h3>
   <div class="app-mock">
     <div class="chrome">
       <div class="dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
@@ -921,9 +1244,9 @@
     <div class="body" style="padding: 32px 40px;">
       <div style="display: flex; align-items: center; gap: 18px; margin-bottom: 14px;">
         <svg width="60" height="60" viewBox="0 0 100 100">
-          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
           <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
         <div>
@@ -932,88 +1255,97 @@
         </div>
       </div>
       <div style="display: flex; gap: 6px; margin: 16px 0 18px;">
-        <span style="background: #1a1a1a; border: 1px solid var(--line); padding: 2px 8px; border-radius: 3px; font-size: 10px; color: var(--muted); font-family: monospace;">crates.io v0.1.0</span>
-        <span style="background: #1a1a1a; border: 1px solid var(--line); padding: 2px 8px; border-radius: 3px; font-size: 10px; color: var(--muted); font-family: monospace;">ci passing</span>
-        <span style="background: #1a1a1a; border: 1px solid var(--line); padding: 2px 8px; border-radius: 3px; font-size: 10px; color: var(--muted); font-family: monospace;">license MIT</span>
+        <span class="ui-mono" style="background: var(--bg-2); border: 1px solid var(--line); padding: 2px 8px; border-radius: 3px; font-size: 10px; color: var(--muted);">crates.io v0.1.0</span>
+        <span class="ui-mono" style="background: var(--bg-2); border: 1px solid var(--line); padding: 2px 8px; border-radius: 3px; font-size: 10px; color: var(--muted);">ci passing</span>
+        <span class="ui-mono" style="background: var(--bg-2); border: 1px solid var(--line); padding: 2px 8px; border-radius: 3px; font-size: 10px; color: var(--muted);">license MIT</span>
       </div>
       <p style="color: var(--text); font-size: 14px; line-height: 1.6;">
-        Run multiple Claude Code agents safely — each sandboxed by <a style="color: var(--orange); text-decoration: none;">OpenShell</a> policies, orchestrated by one CLI.
+        Run multiple Claude Code agents safely — each sandboxed by <a style="color: var(--teal); text-decoration: none;">OpenShell</a> policies, orchestrated by one CLI.
       </p>
     </div>
   </div>
 
-  <!-- 8.3 GITHUB SOCIAL -->
-  <h3 style="margin-top: 36px;"><b>8.3</b> GitHub social preview · 1280×640</h3>
-  <div style="background: #0f0f0f; border: 1px solid var(--line); padding: 60px 80px; border-radius: 8px; position: relative; aspect-ratio: 1280/640; max-width: 860px;">
-    <div style="position: absolute; top: 40px; left: 80px; display: flex; align-items: center; gap: 18px;">
+  <!-- 10.3 GITHUB SOCIAL -->
+  <h3 style="margin-top: 36px;"><b>10.3</b> GitHub social preview · 1280×640</h3>
+  <div class="deepfield" style="padding: 60px 80px; aspect-ratio: 1280/640; max-width: 860px; position: relative;">
+    <div class="grid"></div>
+    <div class="hud-frame"><span class="tk tl"></span><span class="tk tr"></span><span class="tk bl"></span><span class="tk br"></span></div>
+    <span class="hud-read" style="top: 26px; right: 32px;">obs · deep-field</span>
+    <div style="position: absolute; top: 40px; left: 80px; display: flex; align-items: center; gap: 18px; z-index: 2;">
       <svg width="56" height="56" viewBox="0 0 100 100">
-        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
         <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
       </svg>
       <div class="wm" style="font-size: 42px;"><span class="right">right</span> agent</div>
     </div>
-    <div style="position: absolute; bottom: 60px; left: 80px; right: 80px;">
-      <div style="font-size: 48px; font-weight: 800; color: var(--heading); letter-spacing: -0.02em; line-height: 1.1; margin-bottom: 10px;">sandboxed multi-agent<br>runtime for claude code.</div>
-      <div style="font-size: 16px; color: var(--muted); font-family: monospace;">cargo install rightagent</div>
+    <div style="position: absolute; bottom: 60px; left: 80px; right: 80px; z-index: 2;">
+      <div style="font-family:'Chakra Petch',sans-serif; font-size: 46px; font-weight: 700; color: var(--heading); letter-spacing: -0.02em; line-height: 1.12; margin-bottom: 12px;">run agents.<br>keep them <span class="sig-accent">sandboxed.</span></div>
+      <div class="mono" style="font-size: 16px; color: var(--teal);">cargo install rightagent</div>
     </div>
-    <div style="position: absolute; top: 50%; right: 60px; transform: translateY(-30%); opacity: 0.12;">
+    <div style="position: absolute; top: 50%; right: 60px; transform: translateY(-30%); opacity: 0.16; z-index: 1;">
       <svg width="320" height="320" viewBox="0 0 100 100">
-        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
       </svg>
     </div>
   </div>
 
-  <!-- 8.4 WEBSITE HERO -->
-  <h3 style="margin-top: 36px;"><b>8.4</b> Website hero</h3>
+  <!-- 10.4 WEBSITE HERO -->
+  <h3 style="margin-top: 36px;"><b>10.4</b> Website hero</h3>
   <div class="app-mock">
     <div class="chrome">
       <div class="dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
       <span>rightagent.dev</span>
     </div>
-    <div style="background: #0f0f0f; padding: 0;">
+    <div class="deepfield" style="border: none; border-radius: 0; position: relative;">
+      <div class="grid"></div>
       <!-- nav -->
-      <div style="padding: 20px 48px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line);">
+      <div style="padding: 20px 48px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line); position: relative; z-index: 2;">
         <div style="display: flex; align-items: center; gap: 12px;">
           <svg width="28" height="28" viewBox="0 0 100 100">
-            <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-            <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-            <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+            <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+            <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+            <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
             <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
           </svg>
           <div class="wm wm-18"><span class="right">right</span> agent</div>
         </div>
         <div style="display: flex; gap: 24px; font-size: 13px; color: var(--muted);">
-          <span>docs</span><span>github</span><span>install</span>
+          <span>docs</span><span>github</span><span style="color: var(--teal);">install</span>
         </div>
       </div>
       <!-- hero -->
-      <div style="padding: 80px 48px; display: grid; grid-template-columns: 1.2fr 1fr; gap: 48px; align-items: center;">
+      <div style="padding: 80px 48px; display: grid; grid-template-columns: 1.2fr 1fr; gap: 48px; align-items: center; position: relative; z-index: 2;">
         <div>
-          <div style="font-size: 56px; font-weight: 800; letter-spacing: -0.025em; line-height: 1.05; color: var(--heading); margin-bottom: 20px;">
-            run agents.<br><span style="color: var(--orange);">safely.</span>
+          <div class="ui-mono" style="font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--gold); margin-bottom: 16px;">&#9656; sandboxed multi-agent runtime · sig &#9679;&#9679;&#9679;&#9679;&#9675;</div>
+          <div style="font-family:'Chakra Petch',sans-serif; font-size: 56px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.06; color: var(--heading); margin-bottom: 20px;">
+            run agents.<br><span class="sig-accent">safely.</span>
           </div>
           <div style="font-size: 17px; color: var(--muted); line-height: 1.6; margin-bottom: 32px; max-width: 440px;">
             multi-agent runtime for claude code. each agent in its own openshell sandbox. declarative policies. one cli.
           </div>
           <div style="display: flex; gap: 12px; align-items: center;">
-            <div style="background: var(--orange); color: #1a1108; padding: 12px 22px; border-radius: 4px; font-weight: 600; font-size: 14px;">get started →</div>
-            <div style="font-family: monospace; color: var(--muted); font-size: 13px; padding: 12px 18px; border: 1px solid var(--line); border-radius: 4px;">$ cargo install rightagent</div>
+            <span class="chip">get started &#8594;</span>
+            <span class="chip ghost mono" style="font-family:'JetBrains Mono',monospace;">$ cargo install rightagent</span>
           </div>
         </div>
-        <div style="display: flex; justify-content: center;">
-          <svg width="240" height="240" viewBox="0 0 100 100">
-            <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-            <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-            <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <div style="display: flex; justify-content: center; position: relative;">
+          <svg width="200" height="200" viewBox="0 0 240 240" style="position:absolute; top:50%; left:50%; transform: translate(-50%,-50%);">
+            <ellipse cx="120" cy="120" rx="110" ry="46" fill="none" stroke="#3bb0c4" stroke-width="1" opacity="0.35"/>
+            <circle cx="120" cy="120" r="78" fill="none" stroke="#3bb0c4" stroke-width="0.8" opacity="0.2"/>
+          </svg>
+          <svg width="240" height="240" viewBox="0 0 100 100" style="position:relative;">
+            <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+            <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+            <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
             <circle cx="42" cy="45" r="5" fill="#fff"/>
-            <circle cx="42.8" cy="45" r="2.5" fill="#161616"/>
+            <circle cx="42.8" cy="45" r="2.5" fill="#201a26"/>
             <circle cx="44" cy="43.8" r="0.9" fill="#fff"/>
             <circle cx="55" cy="45" r="3.8" fill="#fff"/>
-            <circle cx="55.5" cy="45" r="1.9" fill="#161616"/>
+            <circle cx="55.5" cy="45" r="1.9" fill="#201a26"/>
             <circle cx="56.3" cy="44" r="0.7" fill="#fff"/>
             <path d="M40 58 L46 64 L62 52" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
           </svg>
@@ -1022,104 +1354,105 @@
     </div>
   </div>
 
-  <!-- 8.5 SOCIAL -->
-  <h3 style="margin-top: 36px;"><b>8.5</b> Social · avatar + banner</h3>
+  <!-- 10.5 SOCIAL -->
+  <h3 style="margin-top: 36px;"><b>10.5</b> Social · avatar + banner</h3>
   <div class="grid-2">
     <div class="card centered">
-      <div style="background: #0f0f0f; width: 160px; height: 160px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line);">
+      <div style="background: #121016; width: 160px; height: 160px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line);">
         <svg width="110" height="110" viewBox="0 0 100 100">
-          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#c75f88" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#c75f88"/>
           <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
       </div>
-      <div class="caption" style="text-align:center;"><b>avatar · 400×400</b>primary mark on coal, centered. Circle-crop ready.</div>
+      <div class="caption" style="text-align:center;"><b>avatar · 400×400</b>ruby mark on deep-field, centered. Circle-crop ready.</div>
     </div>
     <div class="card centered">
-      <div style="background: #E8632A; width: 160px; height: 160px; border-radius: 50%; display: flex; align-items: center; justify-content: center;">
+      <div style="background: #3bb0c4; width: 160px; height: 160px; border-radius: 50%; display: flex; align-items: center; justify-content: center;">
         <svg width="110" height="110" viewBox="0 0 100 100">
           <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#fff" stroke-width="8.5" stroke-linecap="round" fill="none"/>
           <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#fff" stroke-width="8.5" stroke-linecap="round" fill="none"/>
           <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#fff"/>
-          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#08151a" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
         </svg>
       </div>
-      <div class="caption" style="text-align:center;"><b>avatar · alt</b>reversed — on orange. For contexts with many dark avatars in a row.</div>
+      <div class="caption" style="text-align:center;"><b>avatar · alt</b>reversed — white claw on teal. For contexts with many dark avatars in a row.</div>
     </div>
   </div>
 </section>
 
-<!-- ========================= 09 TERMINAL ========================= -->
+<!-- ========================= 11 TERMINAL ========================= -->
 <section id="terminal">
-  <h2><b>09</b> Terminal <span class="sub">brief — full spec lives in v13</span></h2>
+  <h2><b>11</b> Terminal <span class="sub">brief — full spec lives in the CLI guide</span></h2>
 
   <div class="grid-2">
     <div class="card">
       <h3>three atoms</h3>
       <table>
-        <tr><td class="mono" style="color: var(--orange); font-size: 18px;">▐✓</td><td>ASCII mark · the only one · 2 cells</td></tr>
-        <tr><td class="mono" style="color: var(--orange); font-size: 18px;">▐</td><td>bar element · "sandbox rail," log prefix</td></tr>
-        <tr><td style="font-family: 'JetBrains Mono', monospace; font-size: 14px;"><span style="color: var(--orange);">right</span> <span style="color:#666;">agent</span></td><td>wordmark · anywhere bigger than ▐✓</td></tr>
+        <tr><td class="mono" style="color: var(--teal); font-size: 18px;">▐✓</td><td>ASCII mark · the only one · 2 cells</td></tr>
+        <tr><td class="mono" style="color: var(--teal); font-size: 18px;">▐</td><td>bar element · telemetry rail, log prefix</td></tr>
+        <tr><td style="font-family: 'JetBrains Mono', monospace; font-size: 14px;"><span style="color: var(--ruby);">right</span> <span style="color:var(--muted);">agent</span></td><td>wordmark · anywhere bigger than ▐✓</td></tr>
       </table>
     </div>
     <div class="card">
       <h3>example · splash</h3>
-      <div class="term"><span class="orange">▐✓</span> <span style="color:#E8632A; font-weight:700;">right</span> <span style="color:#888; font-weight:700;">agent</span> <span class="dim">v0.1.0</span>
-<span class="orange">▐</span>  <span class="muted">sandboxed multi-agent runtime</span>
-<span class="orange">▐</span>
-<span class="orange">▐</span>  <span class="ok">✓</span> process-compose  <span class="dim">ready</span>
-<span class="orange">▐</span>  <span class="ok">✓</span> openshell        <span class="dim">ready</span>
-<span class="orange">▐</span>  <span class="ok">✓</span> 3 agents         <span class="dim">spawned</span></div>
+      <div class="term"><span class="teal">▐✓</span> <span style="color:#c75f88; font-weight:700;">right</span> <span style="color:#b6a8b0; font-weight:700;">agent</span> <span class="dim">v0.1.0</span>
+<span class="teal">▐</span>  <span class="muted">sandboxed multi-agent runtime</span>
+<span class="teal">▐</span>
+<span class="teal">▐</span>  <span class="ok">✓</span> process-compose  <span class="dim">ready</span>
+<span class="teal">▐</span>  <span class="ok">✓</span> openshell        <span class="dim">ready</span>
+<span class="teal">▐</span>  <span class="ok">✓</span> 3 agents         <span class="dim">spawned</span></div>
     </div>
   </div>
-  <p class="note">No large-format ASCII claw art. <code>NO_COLOR</code> / <code>TERM=dumb</code> — fall back to <code>[ok]</code>/<code>[warn]</code>/<code>[err]</code> without ANSI.</p>
+  <p class="note">The telemetry rail <code>▐</code> is teal — the structure/action color. No large-format ASCII claw art. <code>NO_COLOR</code> / <code>TERM=dumb</code> — fall back to <code>[ok]</code>/<code>[warn]</code>/<code>[err]</code> without ANSI.</p>
 </section>
 
-<!-- ========================= 10 DO / DON'T ========================= -->
+<!-- ========================= 12 DO / DON'T ========================= -->
 <section id="dodont">
-  <h2><b>10</b> Do / Don't <span class="sub">summary</span></h2>
+  <h2><b>12</b> Do / Don't <span class="sub">summary</span></h2>
 
   <div class="do-dont">
     <div class="dd-panel do">
       <h4>✓ do</h4>
-      <div class="item">Use <code>#E8632A</code> as the only orange. Period.</div>
-      <div class="item">Accent the whole word <code>right</code> — all of it, never a slice.</div>
-      <div class="item">Keep clear space ≥ 25% of mark height.</div>
-      <div class="item">Use the character (C1) only at 48px+ and only on stage.</div>
-      <div class="item">Add a fallback for <code>NO_COLOR</code> / <code>TERM=dumb</code>.</div>
+      <div class="item">Use ruby <code>#c75f88</code> only for the word <code>right</code> and the mark.</div>
+      <div class="item">Use teal <code>#3bb0c4</code> for action: buttons, links, focus, rails, the signature underline.</div>
+      <div class="item">Use gold <code>#cda14b</code> for warmth: eyebrows, index ticks, star glints.</div>
+      <div class="item">Accent a hero word with the slant + teal underline (<code>skewX(-18deg)</code>).</div>
+      <div class="item">Pair Chakra Petch display with Saira body — both squared and angular.</div>
+      <div class="item">Keep buttons as crisp teal chips — flat fill, small radius, mono label.</div>
       <div class="item">In prose use <code>Right Agent</code> (Title Case, two words). Wordmark — lowercase. CLI — <code>rightagent</code>.</div>
     </div>
     <div class="dd-panel dont">
       <h4>✗ don't</h4>
-      <div class="item">Shift the orange hue "brighter" or "warmer."</div>
+      <div class="item">Reintroduce orange, "fire," or "coal" — that palette is retired.</div>
+      <div class="item">Use ruby for buttons or links, or teal/gold for the word "right."</div>
+      <div class="item">Pair the angular display with a round humanist body (Inter, Nunito, Open Sans).</div>
+      <div class="item">Blur or glow the accent word — the slant + underline is the only emphasis.</div>
+      <div class="item">Make buttons rounded, glossy, or glowing.</div>
       <div class="item">Write <code>r·igh·t·agent</code> or <code>ri·ght·agent</code> — it breaks the word "right."</div>
-      <div class="item">Stretch, tilt, outline, or gradient the mark.</div>
-      <div class="item">Use the character in nav / favicon / small sizes.</div>
-      <div class="item">Draw the claw with ASCII block art.</div>
-      <div class="item">Write <code>RIGHTAGENT</code> in uppercase or <code>rightAgent</code> in camelCase.</div>
+      <div class="item">Write <code>RIGHTAGENT</code> uppercase or <code>rightAgent</code> camelCase.</div>
       <div class="item">Add 🚀 emoji to the tagline or marketing copy.</div>
-      <div class="item">Place the orange mark on an orange background.</div>
     </div>
   </div>
 </section>
 
-<!-- ========================= 11 ASSETS ========================= -->
+<!-- ========================= 13 ASSETS ========================= -->
 <section id="assets">
-  <h2><b>11</b> Assets manifest <span class="sub">what lives in the repo</span></h2>
+  <h2><b>13</b> Assets manifest <span class="sub">what lives in the repo</span></h2>
 
   <p class="lead">Canonical <code>assets/</code> structure at the root of <code>rightagent/</code>:</p>
 
-  <div class="code-block" style="background: #0a0a0a; border: 1px solid var(--line); border-radius: 6px; padding: 18px 22px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text); line-height: 1.7; max-width: 820px;"><span style="color: var(--orange);">assets/</span>
-├── <span style="color: var(--heading);">primary.svg</span>              <span style="color: var(--muted);"># claw + check, transparent bg</span>
-├── <span style="color: var(--heading);">primary-on-dark.svg</span>      <span style="color: var(--muted);"># with #0f0f0f background</span>
-├── <span style="color: var(--heading);">primary-on-light.svg</span>     <span style="color: var(--muted);"># with #f2ede4 background</span>
-├── <span style="color: var(--heading);">primary-reversed.svg</span>     <span style="color: var(--muted);"># white claw on orange</span>
+  <div class="code-block mono" style="background: #0c0a10; border: 1px solid var(--line); border-radius: 6px; padding: 18px 22px; font-size: 12px; color: var(--text); line-height: 1.7; max-width: 820px;"><span style="color: var(--teal);">assets/</span>
+├── <span style="color: var(--heading);">primary.svg</span>              <span style="color: var(--muted);"># ruby claw + check, transparent bg</span>
+├── <span style="color: var(--heading);">primary-on-deepfield.svg</span> <span style="color: var(--muted);"># with #121016 background</span>
+├── <span style="color: var(--heading);">primary-on-light.svg</span>     <span style="color: var(--muted);"># with #efe7ec background</span>
+├── <span style="color: var(--heading);">primary-on-teal.svg</span>      <span style="color: var(--muted);"># white claw on teal</span>
 ├── <span style="color: var(--heading);">character.svg</span>             <span style="color: var(--muted);"># C1 smile-check (thin)</span>
 ├── <span style="color: var(--heading);">character-bold.svg</span>        <span style="color: var(--muted);"># C1 bold smile for merch</span>
-├── <span style="color: var(--heading);">character-on-cream.svg</span>    <span style="color: var(--muted);"># C1 for light backgrounds</span>
-├── <span style="color: var(--heading);">wordmark.svg</span>              <span style="color: var(--muted);"># right · agent with accent</span>
-├── <span style="color: var(--heading);">wordmark-underline.svg</span>    <span style="color: var(--muted);"># W4 with uneven underline</span>
+├── <span style="color: var(--heading);">character-on-light.svg</span>    <span style="color: var(--muted);"># C1 for light backgrounds</span>
+├── <span style="color: var(--heading);">wordmark.svg</span>              <span style="color: var(--muted);"># right · agent with ruby accent</span>
+├── <span style="color: var(--heading);">wordmark-underline.svg</span>    <span style="color: var(--muted);"># W4 with teal underline</span>
 ├── <span style="color: var(--heading);">wordmark-stacked.svg</span>      <span style="color: var(--muted);"># W6 right · AGENT</span>
 ├── <span style="color: var(--heading);">lockup-horizontal.svg</span>    <span style="color: var(--muted);"># L1</span>
 ├── <span style="color: var(--heading);">lockup-stacked.svg</span>        <span style="color: var(--muted);"># L2</span>
@@ -1127,9 +1460,9 @@
 ├── <span style="color: var(--heading);">favicon-16.png</span>
 ├── <span style="color: var(--heading);">favicon-32.png</span>
 ├── <span style="color: var(--heading);">apple-touch-icon.png</span>      <span style="color: var(--muted);"># 180×180</span>
-├── <span style="color: var(--heading);">og-image.png</span>              <span style="color: var(--muted);"># 1280×640 social preview</span>
+├── <span style="color: var(--heading);">og-image.png</span>              <span style="color: var(--muted);"># 1280×640 deep-field social preview</span>
 ├── <span style="color: var(--heading);">avatar.png</span>                <span style="color: var(--muted);"># 400×400</span>
-└── <span style="color: var(--orange);">README.md</span>                 <span style="color: var(--muted);"># which file is for what</span></div>
+└── <span style="color: var(--teal);">README.md</span>                 <span style="color: var(--muted);"># which file is for what</span></div>
 
   <h3 style="margin-top: 32px;">naming convention</h3>
   <ul style="list-style: none; padding: 0; font-size: 13px; line-height: 1.9; color: var(--text); max-width: 820px;">
@@ -1142,8 +1475,8 @@
 </section>
 
 <footer class="bottom">
-  <span>Right Agent Brand Guide · v1.0 · 2026-04-27</span>
-  <span>one orange · two curves · one check</span>
+  <span>Right Agent Brand Guide · v2.0 · jewel · 2026-06-15</span>
+  <span class="tag">one ruby · one teal · deep field</span>
 </footer>
 
 </div>

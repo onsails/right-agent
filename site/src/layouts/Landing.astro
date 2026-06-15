@@ -1,10 +1,13 @@
 ---
 import '../styles/landing.css';
+import { getStars, formatStars } from '../lib/github';
 interface Props { title?: string; description?: string; }
 const {
   title = 'right agent',
   description = 'an ai agent you run by messaging it. credentials stay outside the box.',
 } = Astro.props;
+const base = import.meta.env.BASE_URL;
+const starLabel = formatStars(await getStars());
 ---
 <!doctype html>
 <html lang="en">
@@ -13,9 +16,83 @@ const {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
     <meta name="description" content={description} />
-    <link rel="icon" href={`${import.meta.env.BASE_URL}/favicon.svg`} />
+    <link rel="icon" href={`${base}/favicon.svg`} />
   </head>
   <body>
+    <div class="fx void"></div>
+    <div class="fx depthbloom" data-depth="4"></div>
+    <div class="fx nebula" data-depth="6"></div>
+    <div class="fx stars-far twinkle" data-depth="16"></div>
+    <div class="fx stars-near" data-depth="30"></div>
+    <div class="fx ceiling"></div>
+    <div class="fx horizon"></div>
+    <div class="fx horizon-glow"></div>
+    <div class="fx grain"></div>
+    <div class="fx scan"></div>
+
+    <div class="hud" aria-hidden="true">
+      <span class="edge tl"></span><span class="edge tr"></span><span class="edge bl"></span><span class="edge br"></span>
+      <span class="read r-tr">obs · deep-field</span>
+      <span class="read r-bl">secure-by-default</span>
+    </div>
+
+    <div class="wrap">
+      <nav class="topnav">
+        <a class="brand" href={base} aria-label="right agent">
+          <span class="clawwrap">
+            <svg class="claw" width="30" height="30" viewBox="0 0 100 100" aria-hidden="true">
+              <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+              <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+              <rect x="8" y="38" width="11" height="24" rx="5.5"/>
+              <path class="chk" d="M38 50 L46 58 L64 40" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            </svg>
+          </span>
+          <span class="wm"><span class="r">right</span> <span class="a">agent</span></span>
+        </a>
+        <div class="navlinks">
+          <a href={`${base}/docs/`}>docs</a>
+          <a href="#install">install</a>
+          <a class="starchip" href="https://github.com/onsails/right-agent" aria-label="Star right agent on GitHub">
+            <svg class="ico" viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.7 1.6 7L12 18.3 5.8 21.2l1.6-7L2 9.5l7.1-.6z"/></svg>
+            <span>{starLabel ? `star · ${starLabel}` : 'star'}</span>
+          </a>
+        </div>
+      </nav>
+    </div>
+
     <slot />
+
+    <script>
+      const layers = Array.from(document.querySelectorAll('.fx[data-depth]')) as HTMLElement[];
+      let mx = 0, my = 0, sy = 0, tmx = 0, tmy = 0;
+      const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      addEventListener('scroll', () => { sy = scrollY; }, { passive: true });
+      if (!reduce) {
+        addEventListener('mousemove', (e) => {
+          tmx = (e.clientX / innerWidth - .5) * 2;
+          tmy = (e.clientY / innerHeight - .5) * 2;
+        }, { passive: true });
+        const tick = () => {
+          mx += (tmx - mx) * .06; my += (tmy - my) * .06;
+          for (const el of layers) {
+            const d = parseFloat(el.dataset.depth || '0');
+            el.style.transform = `translate3d(${(-mx * d).toFixed(2)}px, ${(-my * d - sy * (d / 90)).toFixed(2)}px, 0)`;
+          }
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      }
+      const io = new IntersectionObserver((es) => {
+        for (const e of es) if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+      }, { threshold: .12 });
+      document.querySelectorAll('.rev:not(.in)').forEach((el) => io.observe(el));
+      document.querySelectorAll<HTMLElement>('.card').forEach((c) => {
+        c.addEventListener('mousemove', (e) => {
+          const r = c.getBoundingClientRect();
+          c.style.setProperty('--gx', (e.clientX - r.left) + 'px');
+          c.style.setProperty('--gy', (e.clientY - r.top) + 'px');
+        }, { passive: true });
+      });
+    </script>
   </body>
 </html>

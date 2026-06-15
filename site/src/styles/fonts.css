@@ -1,3 +1,10 @@
-/* Self-hosted variable fonts (no Google CDN). Vite resolves these bare specifiers. */
-@import '@fontsource-variable/inter';
+/* Self-hosted variable/static fonts (no Google CDN). Vite resolves these bare specifiers. */
+/* Display — Chakra Petch (angular techno). Static weights. */
+@import '@fontsource/chakra-petch/500.css';
+@import '@fontsource/chakra-petch/600.css';
+@import '@fontsource/chakra-petch/700.css';
+/* Body / UI — Saira (squared grotesque). */
+@import '@fontsource-variable/saira';
+/* Mono — Martian Mono for telemetry/UI labels, JetBrains Mono for code blocks. */
+@import '@fontsource-variable/martian-mono';
 @import '@fontsource-variable/jetbrains-mono';
