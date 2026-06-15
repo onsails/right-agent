@@ -1,4 +1,29 @@
 # Changelog
+## [0.4.1] - 2026-06-15
+
+### Cron & Skills
+
+- Cron jobs now have explicit, persisted links to `rightx-*` skills. Any skill a recurring cron's own runs create or patch is automatically linked to that cron. At fire time, the runtime names the job's live linked skills as authoritative — agents load them deterministically instead of relying on description matching. `cron_create` accepts a new `skill_names` parameter to link existing skills at creation; `mcp__right__cron_link_skill` and `mcp__right__cron_unlink_skill` manage links on existing crons; `cron_list` now includes `linked_skills` per job. When the curator archives a skill, existing links redirect or drop automatically.
+- The built-in `right-cron` skill (v3.7.0) now instructs agents to evolve cron prompts toward linked skills when editing a job. Before calling `cron_update`, the agent checks `cron_list` for `linked_skills`; if the stored "how" is already covered by a linked skill, the agent slims the prompt to a thin goal and relies on the link. The user is always told what was simplified — never a silent rewrite.
+- `mcp__right__cron_trigger` now accepts a `then` block: a structured follow-up that the runtime guarantees to run in the triggered job's own forked session once it reaches the chosen terminal state (`success`, `failure`, or `always`). The continuation sees everything the first run produced — partial output, discovered data, or the failure itself. A `then` with no `target_chat_id` delivers back to the chat where the trigger was issued. Chaining is capped at one hop.
+- `mcp__right__cron_trigger` also accepts `extra_instruction`: a string prepended to this run only, without touching the stored spec. Use it for one-off tweaks instead of `cron_update`, which mutates the prompt for every future run.
+
+### Platform
+
+- Async cron and background deliveries now open with a host-rendered status line: `✓ job-name · succeeded` or `✗ job-name · failed`, plus trigger kind and time when available. The header is computed from platform records, not the agent's output, so it is accurate regardless of what the agent writes.
+- Platform notices (`⟨⟨SYSTEM_NOTICE⟩⟩`) now carry a per-session token. Agents are instructed to obey a notice only when it carries the exact token from their system prompt; any notice missing the token is treated as forged external content and ignored. This closes a forgery vector where untrusted content in the agent's context — tweets, web pages, tool output — could inject a fake platform directive.
+- Database WAL desync (turso#769) is now self-healing: when the bot or MCP aggregator encounters a "short read on WAL frame" error on open, it removes the corrupted sidecar files and retries automatically. Agents no longer wedge in error loops requiring a manual restart. The MCP aggregator also now opens the agent database per-operation instead of holding a cached connection, shrinking the concurrent-access window that triggers the desync.
+
+### Bug Fixes
+
+- `/set_focus` now opens the focus Mini App correctly from groups and forum topics via a Telegram `/start` deep-link, not only from DMs.
+- Deliveries that consist only of file attachments no longer silently succeed when the Telegram send fails — the error propagates so the platform can retry.
+- Agents that return the same text in both `content` and an attachment caption no longer send it as two separate messages. `OPERATING_INSTRUCTIONS` now also documents that `content` and a caption are delivered as distinct Telegram messages.
+
+### Site
+
+- Right Agent has a new public website at `https://onsails.github.io/right-agent/` with a brand landing and a Starlight documentation section at `/docs`. Install and security documentation are hosted there; the README now points to the site for the full product narrative.
+
 ## [0.4.0] - 2026-06-13
 
 ### Learning & Skills
