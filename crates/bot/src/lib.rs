@@ -1087,6 +1087,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         cost_spike_baseline_days: curator_learning.curator_cost_spike_baseline_days,
                         cost_spike_min_floor_usd: curator_learning.curator_cost_spike_min_floor_usd,
                         skill_change_threshold: curator_learning.curator_skill_change_threshold,
+                        circuit_failure_threshold: curator_learning
+                            .curator_circuit_failure_threshold,
+                        circuit_cooldown_hours: curator_learning.curator_circuit_cooldown_hours,
                     },
                 };
                 let latest_activity = crate::learning_curator::idle_secs_to_activity(
