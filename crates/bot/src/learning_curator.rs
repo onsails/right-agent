@@ -95,6 +95,24 @@ fn cheap_skip(
     None
 }
 
+/// Circuit-breaker decision: once `consecutive_failures >= threshold`, the
+/// circuit opens for a FIXED `cooldown_hours` (not exponential). Failures
+/// persist across opens, so a permanently-broken curator re-opens at this
+/// cadence rather than hammering every cooldown. Returns the new
+/// `circuit_open_until`, or `None` to leave the circuit closed.
+pub(crate) fn next_circuit_open_until(
+    consecutive_failures: u32,
+    threshold: u32,
+    cooldown_hours: u32,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    if consecutive_failures >= threshold {
+        Some(now + Duration::hours(cooldown_hours as i64))
+    } else {
+        None
+    }
+}
+
 /// Pure gate decision. No I/O.
 pub(crate) fn should_run_now(
     config: CuratorConfig,
@@ -1018,6 +1036,26 @@ mod tests {
             vec!["rightx-successor".to_string()],
             "absorbed skill redirected to successor, retired skill dropped"
         );
+    }
+
+    #[test]
+    fn circuit_stays_closed_below_threshold() {
+        let now = dt("2026-05-22T00:00:00Z");
+        assert_eq!(next_circuit_open_until(2, 3, 24, now), None);
+    }
+
+    #[test]
+    fn circuit_opens_at_threshold() {
+        let now = dt("2026-05-22T00:00:00Z");
+        let got = next_circuit_open_until(3, 3, 24, now).unwrap();
+        assert_eq!(got, now + Duration::hours(24));
+    }
+
+    #[test]
+    fn circuit_stays_open_above_threshold_fixed_cooldown() {
+        let now = dt("2026-05-22T00:00:00Z");
+        let got = next_circuit_open_until(5, 3, 24, now).unwrap();
+        assert_eq!(got, now + Duration::hours(24));
     }
 
     #[test]
