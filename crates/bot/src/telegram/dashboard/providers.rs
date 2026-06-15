@@ -53,6 +53,24 @@ pub(crate) struct ProviderRotateBody {
     pub credential: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProviderImportBody {
+    pub source_agent: String,
+    pub source_provider: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProviderExportBody {
+    pub provider: String,
+    pub dest_agent: String,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
 pub(crate) async fn handle_list(
     AxumPath(agent): AxumPath<String>,
     State(state): State<DashboardState>,
@@ -209,9 +227,110 @@ pub(crate) async fn handle_config_update(
     }
 }
 
+pub(crate) async fn handle_peers(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> Response {
+    let user = match authenticate_api(&state, &agent, &headers) {
+        Ok(u) => u,
+        Err(error) => return error.into_response(),
+    };
+    match state
+        .internal_client
+        .provider_peers(user.id, &state.agent_name)
+        .await
+    {
+        Ok(peers) => Json(serde_json::json!({ "peers": peers })).into_response(),
+        Err(error) => internal_api_error_response(error, "provider_peers_failed"),
+    }
+}
+
+pub(crate) async fn handle_import(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let user = match authenticate_api(&state, &agent, &headers) {
+        Ok(u) => u,
+        Err(error) => return error.into_response(),
+    };
+    let body: ProviderImportBody = match parse_json_body(&body) {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
+    let req = right_mcp::internal_client::ProviderCopyRequest {
+        actor_user_id: user.id,
+        source_agent: &body.source_agent,
+        source_provider: &body.source_provider,
+        dest_agent: &state.agent_name,
+        label: body.label.as_deref(),
+        overwrite: body.overwrite,
+    };
+    match state.internal_client.provider_copy(&req).await {
+        Ok(view) => Json(view).into_response(),
+        Err(error) => internal_api_error_response(error, "provider_import_failed"),
+    }
+}
+
+pub(crate) async fn handle_export(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let user = match authenticate_api(&state, &agent, &headers) {
+        Ok(u) => u,
+        Err(error) => return error.into_response(),
+    };
+    let body: ProviderExportBody = match parse_json_body(&body) {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
+    let req = right_mcp::internal_client::ProviderCopyRequest {
+        actor_user_id: user.id,
+        source_agent: &state.agent_name,
+        source_provider: &body.provider,
+        dest_agent: &body.dest_agent,
+        label: None,
+        overwrite: body.overwrite,
+    };
+    match state.internal_client.provider_copy(&req).await {
+        Ok(view) => Json(view).into_response(),
+        Err(error) => internal_api_error_response(error, "provider_export_failed"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_body_defaults_overwrite_false() {
+        let b: ProviderImportBody = serde_json::from_value(serde_json::json!({
+            "source_agent": "agent-a",
+            "source_provider": "agent-a-provider"
+        }))
+        .unwrap();
+        assert_eq!(b.source_agent, "agent-a");
+        assert_eq!(b.source_provider, "agent-a-provider");
+        assert!(b.label.is_none());
+        assert!(!b.overwrite);
+    }
+
+    #[test]
+    fn export_body_parses_overwrite() {
+        let b: ProviderExportBody = serde_json::from_value(serde_json::json!({
+            "provider": "current-fal",
+            "dest_agent": "agent-a",
+            "overwrite": true
+        }))
+        .unwrap();
+        assert_eq!(b.provider, "current-fal");
+        assert_eq!(b.dest_agent, "agent-a");
+        assert!(b.overwrite);
+    }
 
     #[test]
     fn provider_create_generic_body_accepts_legacy_upstream_host() {
