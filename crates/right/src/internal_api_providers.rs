@@ -30,6 +30,12 @@ pub enum ProviderApiError {
         "provider \"{name}\" references unknown built-in slug \"{slug}\" — the profile catalog no longer recognizes it; config migration required"
     )]
     UnknownBuiltinSlug { name: String, slug: String },
+    #[error("not a trusted dashboard user on agent \"{agent}\"")]
+    Unauthorized { agent: String },
+    #[error("copy conflict: {reason}")]
+    CopyConflict { reason: String },
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl axum::response::IntoResponse for ProviderApiError {
@@ -54,6 +60,9 @@ impl axum::response::IntoResponse for ProviderApiError {
             Self::UnknownBuiltinSlug { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "unknown_builtin_slug")
             }
+            Self::Unauthorized { .. } => (StatusCode::FORBIDDEN, "unauthorized"),
+            Self::CopyConflict { .. } => (StatusCode::CONFLICT, "copy_conflict"),
+            Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         (
             status,
@@ -3293,5 +3302,34 @@ mod provider_types_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod copy_error_status_tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    #[test]
+    fn new_error_variants_map_to_expected_status() {
+        assert_eq!(
+            ProviderApiError::Unauthorized { agent: "a".into() }
+                .into_response()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            ProviderApiError::CopyConflict { reason: "x".into() }
+                .into_response()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            ProviderApiError::Internal("boom".into())
+                .into_response()
+                .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }
