@@ -1,0 +1,36 @@
+---
+const cmds = [
+  { c: '/model', d: 'switch the Claude model', mini: false },
+  { c: '/mcp', d: 'MCP servers', mini: true },
+  { c: '/providers', d: 'providers & credentials', mini: true },
+  { c: '/cron', d: 'scheduled jobs', mini: false },
+  { c: '/usage', d: 'usage & cost', mini: false },
+  { c: '/dashboard', d: 'the full dashboard', mini: true },
+];
+---
+<div class="cplane">
+  <div class="cp-copy">
+    <div class="label rev">control plane</div>
+    <h2 class="rev d1">you run all of it from Telegram</h2>
+    <p class="lead rev d1">no separate dashboard to host, no second login. switch models, wire up
+      MCP servers, and manage providers and the credentials behind them straight from chat.
+      some commands open a built-in Mini App right inside Telegram, where you are already the
+      allowed user.</p>
+  </div>
+
+  <div class="cp-card rev d2" aria-hidden="true">
+    <div class="cp-head">
+      <span class="cp-dot"></span><span class="cp-dot"></span><span class="cp-dot"></span>
+      <span class="cp-title">commands</span>
+    </div>
+    <ul class="cmds">
+      {cmds.map((x) => (
+        <li class="cmdrow">
+          <span class="cmd-name">{x.c}</span>
+          <span class="cmd-desc">{x.d}</span>
+          {x.mini && <span class="ma">mini app</span>}
+        </li>
+      ))}
+    </ul>
+  </div>
+</div>

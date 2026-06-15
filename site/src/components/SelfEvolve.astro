@@ -1,0 +1,38 @@
+---
+const steps = [
+  {
+    n: '01',
+    title: 'every turn, a quick look',
+    body: 'after each reply, a small, cheap model reads how that turn went. the routine ones it lets pass.',
+    tag: 'cheap model',
+    kind: 'watch',
+  },
+  {
+    n: '02',
+    title: 'learn only when it counts',
+    body: 'when a turn was genuinely hard, or you corrected it, a smarter model forks just that conversation, with the whole thread already in view, and writes a reusable skill. your chat keeps moving.',
+    tag: 'smart model · forked',
+    kind: 'gate',
+  },
+  {
+    n: '03',
+    title: 'kept tidy on its own',
+    body: 'skills you stop using fade away, your corrections sharpen the ones you keep, and you pin the best from the dashboard.',
+    tag: 'curator',
+    kind: 'curate',
+  },
+];
+---
+<div class="loop rev">
+  <div class="looptrack"></div>
+  <div class="loopspark"></div>
+  {steps.map((s) => (
+    <div class={`step ${s.kind}`}>
+      <div class="snum">{s.n}</div>
+      <div class="stitle">{s.title}</div>
+      <p>{s.body}</p>
+      <div class="model">{s.tag}</div>
+    </div>
+  ))}
+</div>
+<p class="loopnote rev d1">no learning on every message, and no rigid rule like "five steps means save it". the cheap model watches every turn; the costly one runs only when it pays off, inside a daily budget you set.</p>
