@@ -268,6 +268,23 @@ pub(crate) struct CuratorContext {
     pub config: CuratorConfig,
 }
 
+/// Apply a failed-pass state transition: bump `consecutive_failures`, stamp
+/// `last_run_at`/`last_run_status`, and open the circuit when the threshold is
+/// reached (B1). Mutates `state` in place; the caller persists it.
+fn mark_failed_run(state: &mut CuratorState, config: CuratorConfig, now: DateTime<Utc>) {
+    state.last_run_at = Some(now.to_rfc3339());
+    state.last_run_status = Some("failed".to_owned());
+    state.consecutive_failures += 1;
+    if let Some(open_until) = next_circuit_open_until(
+        state.consecutive_failures,
+        config.circuit_failure_threshold,
+        config.circuit_cooldown_hours,
+        now,
+    ) {
+        state.circuit_open_until = Some(open_until.to_rfc3339());
+    }
+}
+
 /// Gate, snapshot, transitions, and LLM fork. Best-effort: every failure path
 /// logs a warn and continues. Updates state after a Run-gated invocation.
 pub(crate) async fn run_if_due(
@@ -445,10 +462,7 @@ pub(crate) async fn run_if_due(
         Ok(active) => active,
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "curator invocation registration failed: {e:#}");
-            let run_status = "failed".to_owned();
-            state.last_run_at = Some(now.to_rfc3339());
-            state.last_run_status = Some(run_status);
-            state.consecutive_failures += 1;
+            mark_failed_run(&mut state, ctx.config, now);
             if let Err(e) = save_state_db(&conn, &state).await {
                 tracing::warn!(agent = %ctx.agent_name, "curator save state failed: {e:#}");
             }
@@ -474,9 +488,7 @@ pub(crate) async fn run_if_due(
         Err(e) => {
             tracing::warn!(agent = %ctx.agent_name, "skipping curator: {e:#}");
             active_invocation.cleanup().await;
-            state.last_run_at = Some(now.to_rfc3339());
-            state.last_run_status = Some("failed".to_owned());
-            state.consecutive_failures += 1;
+            mark_failed_run(&mut state, ctx.config, now);
             if let Err(e) = save_state_db(&conn, &state).await {
                 tracing::warn!(agent = %ctx.agent_name, "curator save state failed: {e:#}");
             }
@@ -532,16 +544,13 @@ pub(crate) async fn run_if_due(
     };
     active_invocation.cleanup().await;
 
-    state.last_run_at = Some(now.to_rfc3339());
-    state.last_run_status = Some(run_status.clone());
     if run_status == "success" {
+        state.last_run_at = Some(now.to_rfc3339());
+        state.last_run_status = Some(run_status);
         state.consecutive_failures = 0;
         state.circuit_open_until = None;
     } else {
-        // TODO(Phase-2): set circuit_open_until when consecutive_failures crosses a
-        // threshold. Today the gate checks circuit_open_until but no runtime path
-        // opens the circuit — it's only set by direct DB writes (tests).
-        state.consecutive_failures += 1;
+        mark_failed_run(&mut state, ctx.config, now);
     }
     // Retry once on transient DbError (BUSY/BUSY_SNAPSHOT). The save is a
     // cheap UPSERT on a singleton row and idempotent, so re-running it is
@@ -1040,6 +1049,31 @@ mod tests {
             vec!["rightx-successor".to_string()],
             "absorbed skill redirected to successor, retired skill dropped"
         );
+    }
+
+    #[test]
+    fn mark_failed_run_opens_circuit_at_threshold() {
+        let now = dt("2026-05-22T00:00:00Z");
+        let mut s = CuratorState {
+            consecutive_failures: 2,
+            ..Default::default()
+        };
+        mark_failed_run(&mut s, cfg(), now);
+        assert_eq!(s.consecutive_failures, 3);
+        assert_eq!(
+            s.circuit_open_until.as_deref(),
+            Some((now + Duration::hours(24)).to_rfc3339().as_str())
+        );
+        assert_eq!(s.last_run_status.as_deref(), Some("failed"));
+    }
+
+    #[test]
+    fn mark_failed_run_keeps_circuit_closed_below_threshold() {
+        let now = dt("2026-05-22T00:00:00Z");
+        let mut s = CuratorState::default();
+        mark_failed_run(&mut s, cfg(), now);
+        assert_eq!(s.consecutive_failures, 1);
+        assert_eq!(s.circuit_open_until, None);
     }
 
     #[test]
