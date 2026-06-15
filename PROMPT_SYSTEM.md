@@ -532,6 +532,22 @@ duplicates by merging into an umbrella, creating a new umbrella, or
 demoting to references — and archives originals with `absorbed_into`.
 It NEVER deletes a skill. Constant is `right_codegen::CURATOR_SYSTEM_PROMPT`.
 
+### CURATOR_REPORT_PROMPT + CURATOR_PLAN_SCHEMA (report-only mode)
+
+When `curator_mode = report_only`, the ticker runs a separate read-only
+invocation instead of `CURATOR_SYSTEM_PROMPT`. This is a non-session-bearing
+`claude -p --json-schema <CURATOR_PLAN_SCHEMA> --output-format json
+--allowedTools Read` call — no `Bash`, no `skill_learning_start/finish`.
+`--mcp-config` is still present (session-bearing invariant). The system
+prompt is `CURATOR_REPORT_PROMPT`, which instructs the model to read skills
+from the inventory and propose a consolidation plan without writing anything.
+The structured output is validated against `CURATOR_PLAN_SCHEMA` (a JSON
+schema describing an `actions` array with `kind`, `skills`, and `target`
+fields). On success, one `curator_runs` row with `mode = 'proposed'` is
+appended — no `skill_lifecycle` rows are written, no skill files are touched.
+Constants are `right_codegen::CURATOR_REPORT_PROMPT` and
+`right_codegen::CURATOR_PLAN_SCHEMA`.
+
 ### `used_skill_receipts` (required in REPLY_SCHEMA_JSON)
 
 Every reply MUST include `used_skill_receipts` (array, possibly empty).

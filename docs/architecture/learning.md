@@ -60,6 +60,48 @@ Replaces the prior fork-probe classifier.
    `min_cooldown_hours` floor blocks all triggers including the time
    fallback. Trigger evidence is captured in `last_spike_evidence_json`.
 
+   **Run history (`curator_runs`, migration v48):** Every executed pass
+   appends one row to `data.db.curator_runs` (append-only). Columns: `run_at`,
+   `trigger`, `mode` (`apply` | `report_only` | `proposed`), `status`,
+   `cost_usd`, `cache_read`, `cache_creation`, `consolidations`, `archives`,
+   `summary`, `actions_json`. This is distinct from the `curator_state`
+   singleton, which holds gate working state (`last_run_at`,
+   `consecutive_failures`, `circuit_open_until`, etc.).
+
+   **Per-pass counts via set-diff:** `archives` = number of skills newly
+   archived during this pass; `consolidations` = the subset of those archives
+   that carry an `absorbed_into` target (umbrella merges). Both are computed
+   by snapshotting the archived-skill set BEFORE `apply_automatic_transitions`
+   runs, then diffing against the set AFTER the LLM fork completes. A
+   timestamp-equality query (`WHERE archived_at = now`) is NOT used because
+   the LLM fork archives at its own wall-clock time, not the pass start time —
+   that query would always return 0 for fork consolidations.
+
+   **Circuit breaker (live as of this feature):** After
+   `curator_circuit_failure_threshold` (default 3) consecutive failed passes,
+   `circuit_open_until` is set to `now + curator_circuit_cooldown_hours`
+   (default 24h, fixed — not exponential). A subsequent success resets
+   `consecutive_failures = 0` and `circuit_open_until = None`. Failures
+   accumulate across circuit opens, so a permanently broken curator re-opens
+   at the fixed cooldown cadence until fixed. (Previously `consecutive_failures`
+   incremented but `circuit_open_until` was never written.)
+
+   **Idle gate (live as of this feature):** The ticker feeds the real
+   `IdleTimestamp` (delivery idle clock) into `run_if_due`, so the
+   `min_idle_hours` gate now actually fires. (Previously the ticker passed
+   `None`, making the idle gate a no-op.)
+
+   **`curator_mode: apply | report_only` (config, CLI-exposed):** In
+   `apply` mode (default) the curator runs the full consolidation pass, writes
+   to `skill_lifecycle` and skill files, and appends an `apply` `curator_runs`
+   row. In `report_only` mode, `run_if_due` dispatches a read-only LLM
+   invocation (`CURATOR_REPORT_PROMPT` + `CURATOR_PLAN_SCHEMA` structured
+   output) that carries `--mcp-config` (session-bearing invariant) but is
+   granted ONLY the `Read` tool — it proposes consolidations without writing
+   to any skill file or `skill_lifecycle` row. The result is persisted as a
+   single `proposed` `curator_runs` row and the gate clock advances. The
+   archive-not-delete invariant is preserved in both modes.
+
 ## Inline authoring (agent self-judgment)
 
 Besides the async probe, the agent may author/patch a `rightx-*` skill mid-turn
@@ -134,12 +176,13 @@ Two independent gates run today.
 2. **Curator gate** (periodic, agent ticker, pure logic in
    `bot::learning_curator::should_run_now`): order is `enabled` → `!paused`
    → `circuit_open_until` (skip if in future) → `min_idle_hours` (skip if
-   any chat activity within window) → `min_cooldown_hours` (blocks ALL
-   triggers below) → trigger priority **CostSpike > SkillChangeCount >
-   TimeFallback**. First-ever runs seed `last_run_at` in `curator_state` and
-   defer (Hermes pattern). State (`last_run_at`, `last_run_status`,
-   `consecutive_failures`, `circuit_open_until`, `last_spike_evidence_json`)
-   lives in the per-agent `curator_state` singleton row.
+   any chat activity within window, checked against live `IdleTimestamp`) →
+   `min_cooldown_hours` (blocks ALL triggers below) → trigger priority
+   **CostSpike > SkillChangeCount > TimeFallback**. First-ever runs seed
+   `last_run_at` in `curator_state` and defer (Hermes pattern). State
+   (`last_run_at`, `last_run_status`, `consecutive_failures`,
+   `circuit_open_until`, `last_spike_evidence_json`) lives in the per-agent
+   `curator_state` singleton row.
 
 ## Lifecycle storage
 
@@ -169,6 +212,13 @@ The Overview cost river is cost-only. Learning outcomes and curator evidence
 remain in the signal timeline, while the river's marker field is left empty so
 raw skill slugs do not appear as chart chips or pins.
 
+The `learning_overview` API now includes two additional projections:
+`curator_runs` (list of `CuratorRunSummary` — recent pass history, at most 20
+rows) and `curator_consolidations` (list of `CuratorConsolidation` — recently
+archived skills with an `absorbed_into` successor, at most 50 rows). Both are
+surfaced in the dashboard `CuratorRunsPanel` (run list + consolidation
+lineage).
+
 ## Spend ledger & skip accounting
 
 `data.db.skill_spend(skill_name, kind, cost_usd, cache_read, cache_creation,
@@ -181,7 +231,7 @@ Four writers, four `kind` values:
 |------|--------|-----------------|
 | `create` | probe-writer | exact cost of a create invocation, via `skill_learning_events` finish-row joined by `invocation_id` |
 | `patch` | probe-writer | same, for a patch invocation |
-| `maintain` | curator | pass cost split evenly across the skills the pass archived (`archived_at == this run's ts`), cost/N each in one transaction; no archived skill → no row |
+| `maintain` | curator | pass cost split evenly across the skills the pass archived (determined by set-diff, not timestamp equality — see Run history above), cost/N each in one transaction; no archived skill → no row |
 | `usage` | worker (post-turn) | one row per rightx skill in the turn's `ProbeAnchor.used_skill_receipts`, each carrying the turn's cost/cache — attributed (overlaps when multiple skills used) |
 
 The prefilter's own cost is NOT attributed to any skill (agent-level

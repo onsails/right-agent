@@ -669,6 +669,16 @@ git commit -m "feat(curator): CuratorRunRecord + insert_curator_run writer"
 
 ### Task 10: Write a `curator_runs` row at the end of an apply pass
 
+**Correction (applied during execution):** Step 2 of this task used
+`WHERE archived_at = ?1` with `now.to_rfc3339()` to query which skills were
+archived this pass. This timestamp-equality query always returns 0 results for
+skills archived by the LLM fork, because the fork runs at its own wall-clock
+time, not the pass start time. The implemented approach instead uses a
+**set-diff**: snapshot the set of already-archived `skill_name`s BEFORE
+`apply_automatic_transitions` runs, re-query the full archived set AFTER the
+fork completes, and compute the diff. `archives` = new entries in the post-fork
+set; `consolidations` = the subset of those with a non-NULL `absorbed_into`.
+
 **Files:**
 - Modify: `crates/bot/src/learning_curator.rs` (`run_if_due` apply tail)
 
@@ -1612,6 +1622,16 @@ Expected: all green. Re-run any parallel-load-flaky test in isolation before con
 git add docs/architecture/learning.md PROMPT_SYSTEM.md ARCHITECTURE.md
 git commit -m "docs(curator): document run history, circuit breaker, idle gate, report-only mode"
 ```
+
+### Task 17: Fix curator usage parsing (cost telemetry follow-up)
+
+**Note (follow-up fix, commit `393048ed`):** The original apply path called
+`parse_usage_full(&full_stdout)` on the full NDJSON output of the curator fork.
+This always returned `None` for multi-line NDJSON because `parse_usage_full`
+expects a single `result` line. The fix extracts the last `result` line via
+`last_result_line(&stdout)` first, then passes that single line to
+`parse_usage_full`. Without this fix `curator_runs.cost_usd`, `cache_read`,
+and `cache_creation` were always 0.
 
 ---
 
