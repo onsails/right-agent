@@ -25,6 +25,9 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 mod focus;
+#[cfg(test)]
+pub(crate) use focus::FocusNotification;
+pub(crate) use focus::FocusNotifier;
 mod health;
 mod identity;
 mod mcp;
@@ -146,6 +149,7 @@ pub(crate) fn focus_scope_token_valid(
 pub(crate) struct DashboardState {
     pub agent_name: String,
     pub bot_token: String,
+    pub focus_notifier: FocusNotifier,
     pub home: PathBuf,
     pub agent_dir: PathBuf,
     pub resolved_sandbox: Option<String>,
@@ -1023,6 +1027,7 @@ mod tests {
         super::DashboardState {
             agent_name: "alpha".to_string(),
             bot_token: BOT_TOKEN.to_string(),
+            focus_notifier: super::FocusNotifier::noop(),
             home: agent_dir.clone(),
             agent_dir: agent_dir.clone(),
             resolved_sandbox: None,
@@ -1062,6 +1067,15 @@ mod tests {
                 },
             ]),
         }
+    }
+
+    fn test_state_with_focus_notifier(
+        agent_dir: std::path::PathBuf,
+        focus_notifier: super::FocusNotifier,
+    ) -> super::DashboardState {
+        let mut state = test_state(agent_dir);
+        state.focus_notifier = focus_notifier;
+        state
     }
 
     fn signed_init_data(user_id: i64) -> String {
@@ -1244,6 +1258,40 @@ mod tests {
         body: serde_json::Value,
     ) -> (StatusCode, serde_json::Value) {
         let router = super::build_dashboard_router(test_state(agent_dir));
+        let mut builder = Request::builder()
+            .uri(path)
+            .method("PATCH")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(auth) = auth {
+            builder = builder.header(header::AUTHORIZATION, format!("tma {auth}"));
+        }
+        let response = router
+            .oneshot(
+                builder
+                    .body(Body::from(body.to_string()))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .expect("body bytes");
+        let value = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).expect("json response")
+        };
+        (status, value)
+    }
+
+    async fn patch_json_with_state(
+        path: &str,
+        auth: Option<String>,
+        state: super::DashboardState,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let router = super::build_dashboard_router(state);
         let mut builder = Request::builder()
             .uri(path)
             .method("PATCH")
@@ -3153,6 +3201,135 @@ mod tests {
             .expect("focus row");
         assert_eq!(row.operator_focus, None);
         assert_eq!(row.agent_focus.as_deref(), Some("agent-managed focus"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_focus_patch_sends_notification_to_scope() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+
+        let sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let state = test_state_with_focus_notifier(
+            temp.path().to_path_buf(),
+            super::FocusNotifier::capture(Arc::clone(&sent)),
+        );
+        let token = signed_focus_scope_token("alpha", 7, 11, chrono::Utc::now().timestamp() + 60);
+
+        let (status, body) = patch_json_with_state(
+            "/dashboard/alpha/api/v1/focus",
+            Some(signed_init_data(42)),
+            state,
+            json!({
+                "chat_id": 7,
+                "thread_id": 11,
+                "token": token,
+                "operator_focus": "  operator focus  ",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "operator_focus": "operator focus" }));
+
+        let sent = sent.lock().await.clone();
+        assert_eq!(
+            sent,
+            vec![super::FocusNotification {
+                chat_id: 7,
+                thread_id: 11,
+                text: "Focus set: operator focus".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn dashboard_focus_patch_sends_clear_notification_to_scope() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let conn = right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+        right_db::thread_focus::set_operator(&conn, 7, 11, Some("old focus"))
+            .await
+            .expect("seed operator focus");
+        drop(conn);
+
+        let sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let state = test_state_with_focus_notifier(
+            temp.path().to_path_buf(),
+            super::FocusNotifier::capture(Arc::clone(&sent)),
+        );
+        let token = signed_focus_scope_token("alpha", 7, 11, chrono::Utc::now().timestamp() + 60);
+
+        let (status, body) = patch_json_with_state(
+            "/dashboard/alpha/api/v1/focus",
+            Some(signed_init_data(42)),
+            state,
+            json!({
+                "chat_id": 7,
+                "thread_id": 11,
+                "token": token,
+                "operator_focus": " \n\t ",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "operator_focus": null }));
+
+        let sent = sent.lock().await.clone();
+        assert_eq!(
+            sent,
+            vec![super::FocusNotification {
+                chat_id: 7,
+                thread_id: 11,
+                text: "Focus cleared".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn dashboard_focus_patch_reports_notification_failure_after_saving() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        right_db::open_connection(temp.path(), true)
+            .await
+            .expect("open migrated db");
+
+        let state = test_state_with_focus_notifier(
+            temp.path().to_path_buf(),
+            super::FocusNotifier::fail("telegram unavailable"),
+        );
+        let token = signed_focus_scope_token("alpha", 7, 11, chrono::Utc::now().timestamp() + 60);
+
+        let (status, body) = patch_json_with_state(
+            "/dashboard/alpha/api/v1/focus",
+            Some(signed_init_data(42)),
+            state,
+            json!({
+                "chat_id": 7,
+                "thread_id": 11,
+                "token": token,
+                "operator_focus": "operator focus",
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "focus_notification_failed");
+        assert_eq!(
+            body["detail"],
+            "Focus saved, but notification could not be sent"
+        );
+
+        let conn = right_db::open_connection(temp.path(), false)
+            .await
+            .expect("reopen db");
+        let row = right_db::thread_focus::get(&conn, 7, 11)
+            .await
+            .expect("read focus")
+            .expect("focus row");
+        assert_eq!(row.operator_focus.as_deref(), Some("operator focus"));
     }
 
     #[tokio::test]
