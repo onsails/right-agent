@@ -3660,6 +3660,21 @@ pub struct ProviderPeer {
     pub providers: Vec<PeerProvider>,
 }
 
+/// Whether `actor_user_id` is in `agent`'s allowlist. Missing/empty allowlist
+/// = not trusted (secure default).
+fn is_trusted(
+    agents_dir: &std::path::Path,
+    agent: &str,
+    actor_user_id: i64,
+) -> Result<bool, ProviderApiError> {
+    let agent_dir = agents_dir.join(agent);
+    let file =
+        right_agent::agent::allowlist::read_file(&agent_dir).map_err(ProviderApiError::Internal)?;
+    Ok(file
+        .map(|f| f.users.iter().any(|u| u.id == actor_user_id))
+        .unwrap_or(false))
+}
+
 /// Require that `actor_user_id` is in `agent`'s allowlist. Missing/empty
 /// allowlist = not trusted (secure default).
 fn require_trusted(
@@ -3667,13 +3682,7 @@ fn require_trusted(
     agent: &str,
     actor_user_id: i64,
 ) -> Result<(), ProviderApiError> {
-    let agent_dir = agents_dir.join(agent);
-    let file =
-        right_agent::agent::allowlist::read_file(&agent_dir).map_err(ProviderApiError::Internal)?;
-    let trusted = file
-        .map(|f| f.users.iter().any(|u| u.id == actor_user_id))
-        .unwrap_or(false);
-    if trusted {
+    if is_trusted(agents_dir, agent, actor_user_id)? {
         Ok(())
     } else {
         Err(ProviderApiError::Unauthorized {
@@ -3693,10 +3702,10 @@ pub(crate) fn build_peers(
 ) -> Result<Vec<ProviderPeer>, ProviderApiError> {
     let mut names: Vec<String> = Vec::new();
     let entries = std::fs::read_dir(agents_dir)
-        .map_err(|e| ProviderApiError::Internal(format!("read agents dir: {e}")))?;
+        .map_err(|e| ProviderApiError::Internal(format!("read agents dir: {e:#}")))?;
     for entry in entries {
-        let entry =
-            entry.map_err(|e| ProviderApiError::Internal(format!("read agents dir entry: {e}")))?;
+        let entry = entry
+            .map_err(|e| ProviderApiError::Internal(format!("read agents dir entry: {e:#}")))?;
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -3718,11 +3727,7 @@ pub(crate) fn build_peers(
     let mut peers = Vec::new();
     for name in names {
         let agent_dir = agents_dir.join(&name);
-        let trusted = right_agent::agent::allowlist::read_file(&agent_dir)
-            .map_err(ProviderApiError::Internal)?
-            .map(|f| f.users.iter().any(|u| u.id == actor_user_id))
-            .unwrap_or(false);
-        if !trusted {
+        if !is_trusted(agents_dir, &name, actor_user_id)? {
             continue;
         }
         let cfg = match right_agent::agent::discovery::parse_agent_config(&agent_dir) {
@@ -3748,7 +3753,14 @@ pub(crate) fn build_peers(
         for entry in &sandbox.providers {
             let env_var = match extract_env_var(entry) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %name,
+                        provider = %entry.name,
+                        "skipping peer provider with unresolvable env var: {e:#}"
+                    );
+                    continue;
+                }
             };
             providers.push(PeerProvider {
                 name: entry.name.clone(),
@@ -3772,6 +3784,7 @@ pub(crate) async fn handle_provider_peers(
     axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
     axum::Json(req): axum::Json<ProviderPeersReq>,
 ) -> Result<axum::Json<Vec<ProviderPeer>>, ProviderApiError> {
+    require_trusted(&state.agents_dir, &req.for_agent, req.actor_user_id)?;
     build_peers(&state.agents_dir, req.actor_user_id, &req.for_agent).map(axum::Json)
 }
 
@@ -3806,6 +3819,61 @@ mod peers_tests {
         assert!(require_trusted(tmp.path(), "riskoff", 7).is_ok());
         let err = require_trusted(tmp.path(), "riskoff", 99).unwrap_err();
         assert!(matches!(err, ProviderApiError::Unauthorized { .. }));
+    }
+
+    #[test]
+    fn require_trusted_rejects_when_no_allowlist() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create agent dir + agent.yaml but NO allowlist.yaml
+        let agent_dir = tmp.path().join("nolst");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            "sandbox:\n  mode: openshell\n  providers: []\n",
+        )
+        .unwrap();
+        // Missing allowlist = secure default: deny all
+        let err = require_trusted(tmp.path(), "nolst", 7).unwrap_err();
+        assert!(matches!(err, ProviderApiError::Unauthorized { .. }));
+    }
+
+    #[test]
+    fn build_peers_excludes_non_openshell_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent(tmp.path(), "current", &[7], "  providers: []\n");
+        // trusted peer, but host-mode sandbox → must be excluded
+        let agent_dir = tmp.path().join("hostmode");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("allowlist.yaml"),
+            "version: 2\nusers:\n  - id: 7\n    added_at: 2026-01-01T00:00:00Z\n",
+        )
+        .unwrap();
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            "sandbox:\n  mode: none\n  providers: []\n",
+        )
+        .unwrap();
+
+        let peers = build_peers(tmp.path(), 7, "current").unwrap();
+        assert!(peers.iter().all(|p| p.agent != "hostmode"));
+    }
+
+    #[test]
+    fn build_peers_excludes_agent_with_no_allowlist() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent(tmp.path(), "current", &[7], "  providers: []\n");
+        // Peer with no allowlist.yaml at all
+        let no_allow_dir = tmp.path().join("nolst");
+        std::fs::create_dir_all(&no_allow_dir).unwrap();
+        std::fs::write(
+            no_allow_dir.join("agent.yaml"),
+            "sandbox:\n  mode: openshell\n  providers:\n    - name: nolst-fal\n      type: right-fal\n",
+        )
+        .unwrap();
+
+        let peers = build_peers(tmp.path(), 7, "current").unwrap();
+        assert!(peers.is_empty(), "peer with no allowlist must be excluded");
     }
 
     #[test]
