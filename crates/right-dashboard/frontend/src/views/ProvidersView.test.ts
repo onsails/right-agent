@@ -243,6 +243,53 @@ describe('ProvidersView', () => {
     }
   })
 
+  it('keeps the providers list when peer discovery fails', async () => {
+    apiMocks.providerList.mockResolvedValue({ providers: [provider()] })
+    apiMocks.providerPeers.mockRejectedValue(new Error('peers boom'))
+
+    const { app, root } = mountProvidersView()
+    await flushAsync()
+
+    try {
+      // The primary list still renders despite the peer-discovery failure;
+      // the failure is not surfaced as a fatal view error.
+      expect(buttonsByText(root, 'Export').length).toBe(1)
+      expect(root.textContent).not.toContain('peers boom')
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it('refreshes peer state after a successful export', async () => {
+    apiMocks.providerList.mockResolvedValue({ providers: [provider()] })
+    apiMocks.providerPeers.mockResolvedValue({
+      peers: [{ agent: 'beta', network_policy: 'permissive', providers: [] }],
+    })
+
+    const { app, root } = mountProvidersView()
+    await flushAsync()
+
+    try {
+      const peersCallsAtMount = apiMocks.providerPeers.mock.calls.length
+      clickButton(root, 'Export') // open the export modal for the single row
+      await flushAsync()
+
+      const betaRow = Array
+        .from(root.querySelectorAll<HTMLElement>('article'))
+        .find((el) => el.textContent?.includes('beta'))
+      expect(betaRow).toBeDefined()
+      betaRow!.querySelector('button')!.click()
+      await flushAsync()
+      await flushAsync()
+
+      expect(apiMocks.providerExport).toHaveBeenCalledTimes(1)
+      // A successful export refreshes peers so the target flips to 'Update'.
+      expect(apiMocks.providerPeers.mock.calls.length).toBe(peersCallsAtMount + 1)
+    } finally {
+      app.unmount()
+    }
+  })
+
   it('renders Import and per-row Export entry points', async () => {
     apiMocks.providerList.mockResolvedValue({ providers: [provider()] })
     const { app, root } = mountProvidersView()
