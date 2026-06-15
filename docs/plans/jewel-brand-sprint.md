@@ -6,7 +6,7 @@ Issue: https://github.com/onsails/right-agent/issues/130 (follow-up to #129)
 Legend: todo · brainstorming · planned · executing · review · blocked · done
 
 ## Stages
-1. [todo] CLI       — right-ui (Rust): replace orange accents → jewel semantic hexes; keep NO_COLOR/TERM=dumb fallbacks.
+1. [planned] CLI    — right-ui (Rust): replace orange accents → jewel semantic hexes; keep NO_COLOR/TERM=dumb fallbacks. spec:01-cli-spec.md plan:01-cli-plan.md
 2. [todo] Dashboard — right-dashboard (Vue): introduce jewel palette tokens; accent→teal, identity→ruby, warm→gold; replace ad-hoc Telegram-blue/scattered hexes.
 
 ## Brand reference (authoritative: docs/brand-guidelines.html, v2 jewel)
