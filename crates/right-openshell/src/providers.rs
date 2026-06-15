@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use secrecy::SecretString;
 use thiserror::Error;
 use tonic::transport::Channel;
 
@@ -258,6 +259,28 @@ pub async fn get_provider(
     get_provider_proto(client, name)
         .await
         .map(provider_from_proto)
+}
+
+/// Wrap each gateway-stored credential value in `SecretString`.
+fn credentials_from_proto(p: &datamodel::Provider) -> HashMap<String, SecretString> {
+    p.credentials
+        .iter()
+        .map(|(k, v)| (k.clone(), SecretString::from(v.clone())))
+        .collect()
+}
+
+/// Read a provider's stored credentials back from the gateway.
+///
+/// Unlike [`get_provider`], this exposes the credential bytes — the single
+/// sanctioned read-back, used only to copy a provider between agents on the
+/// host. Values are `SecretString`; never log them, never persist them to
+/// `agent.yaml`, backups, or list/detail responses.
+pub async fn get_provider_credentials(
+    client: &mut OpenShellClient<Channel>,
+    name: &str,
+) -> Result<HashMap<String, SecretString>, ProviderError> {
+    let proto = get_provider_proto(client, name).await?;
+    Ok(credentials_from_proto(&proto))
 }
 
 async fn get_provider_proto(
@@ -871,6 +894,28 @@ mod tests {
             debug_output.contains("upstream_host"),
             "Debug output should show config keys/values; got: {debug_output}"
         );
+    }
+
+    #[test]
+    fn credentials_from_proto_wraps_each_value_as_secret() {
+        use secrecy::ExposeSecret;
+        let mut credentials = HashMap::new();
+        credentials.insert("FAL_KEY".to_string(), "secret-abc".to_string());
+        let p = datamodel::Provider {
+            metadata: Some(datamodel::ObjectMeta {
+                name: "agent-fal".into(),
+                ..Default::default()
+            }),
+            r#type: "right-fal".into(),
+            credentials,
+            config: Default::default(),
+            credential_expires_at_ms: Default::default(),
+        };
+
+        let out = credentials_from_proto(&p);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.get("FAL_KEY").unwrap().expose_secret(), "secret-abc");
     }
 
     #[test]

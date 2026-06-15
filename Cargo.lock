@@ -3971,6 +3971,7 @@ dependencies = [
  "right-agent-config",
  "right-codegen",
  "right-process",
+ "secrecy",
  "semver",
  "serde-saphyr",
  "serde_json",
