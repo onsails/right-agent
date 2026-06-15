@@ -152,23 +152,6 @@ fn finish_status_to_spend_kind(status: &str) -> Option<&'static str> {
     }
 }
 
-/// Return the last `{"type":"result",...}` line from a stream-json stdout dump.
-fn last_result_line(stdout: &str) -> Option<String> {
-    stdout
-        .lines()
-        .rfind(|l| {
-            serde_json::from_str::<serde_json::Value>(l)
-                .ok()
-                .and_then(|v| {
-                    v.get("type")
-                        .and_then(|t| t.as_str())
-                        .map(|t| t == "result")
-                })
-                .unwrap_or(false)
-        })
-        .map(ToOwned::to_owned)
-}
-
 /// Spawn the probe-writer fork. Holds session mutex during fork init only.
 /// Returns when fork is established (system/init received); detached task drains
 /// the remainder.
@@ -326,7 +309,7 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
         }
 
         // Record usage + per-skill create/patch spend from the captured result.
-        if let Some(result_line) = last_result_line(&tail)
+        if let Some(result_line) = crate::cc::stream::last_result_line(&tail)
             && let Some(b) = crate::cc::stream::parse_usage_full(&result_line)
             && let Ok(conn) = right_db::open_connection(&agent_db_dir, false).await
         {
@@ -451,7 +434,7 @@ mod tests {
 {\"type\":\"system\",\"subtype\":\"init\"}\n\
 {\"type\":\"assistant\"}\n\
 {\"type\":\"result\",\"num_turns\":3,\"total_cost_usd\":0.2,\"session_id\":\"s\"}\n";
-        let line = last_result_line(stream).unwrap();
+        let line = crate::cc::stream::last_result_line(stream).unwrap();
         assert!(line.contains("\"type\":\"result\""));
         assert!(line.contains("\"total_cost_usd\":0.2"));
     }
