@@ -253,6 +253,65 @@ pub(crate) async fn save_state_db(
     Ok(())
 }
 
+/// One append-only `curator_runs` history row (A1 observability).
+#[derive(Debug, Clone)]
+pub(crate) struct CuratorRunRecord {
+    pub run_at: String,
+    pub trigger: String,
+    pub trigger_evidence_json: Option<String>,
+    pub mode: String,
+    pub status: String,
+    pub cost_usd: f64,
+    pub cache_read: i64,
+    pub cache_creation: i64,
+    pub consolidations: i64,
+    pub archives: i64,
+    pub summary: Option<String>,
+    pub actions_json: String,
+    pub invocation_id: Option<String>,
+}
+
+/// Append a curator run-history row. Best-effort at the learning boundary —
+/// callers log-and-continue on error; never abort a pass over telemetry.
+pub(crate) async fn insert_curator_run(
+    conn: &right_db::Connection,
+    rec: &CuratorRunRecord,
+) -> Result<(), right_db::DbError> {
+    conn.execute(
+        "INSERT INTO curator_runs \
+            (run_at, trigger, trigger_evidence_json, mode, status, cost_usd, \
+             cache_read, cache_creation, consolidations, archives, summary, \
+             actions_json, invocation_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        right_db::params![
+            rec.run_at.as_str(),
+            rec.trigger.as_str(),
+            rec.trigger_evidence_json.as_deref(),
+            rec.mode.as_str(),
+            rec.status.as_str(),
+            rec.cost_usd,
+            rec.cache_read,
+            rec.cache_creation,
+            rec.consolidations,
+            rec.archives,
+            rec.summary.as_deref(),
+            rec.actions_json.as_str(),
+            rec.invocation_id.as_deref(),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Map a `CuratorTrigger` to its `curator_runs.trigger` string.
+fn trigger_label(trigger: &CuratorTrigger) -> &'static str {
+    match trigger {
+        CuratorTrigger::CostSpike(_) => "cost_spike",
+        CuratorTrigger::SkillChangeCount { .. } => "skill_change",
+        CuratorTrigger::TimeFallback { .. } => "time_fallback",
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct CuratorContext {
     pub agent_dir: PathBuf,
@@ -712,6 +771,39 @@ mod tests {
         let conn = right_db::Connection::open_in_memory().await.unwrap();
         right_db::MIGRATIONS.to_latest(&conn).await.unwrap();
         conn
+    }
+
+    #[tokio::test]
+    async fn insert_curator_run_round_trips() {
+        let conn = open_test_conn().await;
+        let rec = CuratorRunRecord {
+            run_at: "2026-06-15T00:00:00Z".into(),
+            trigger: "time_fallback".into(),
+            trigger_evidence_json: Some("{\"trigger\":\"time_fallback\"}".into()),
+            mode: "apply".into(),
+            status: "success".into(),
+            cost_usd: 0.42,
+            cache_read: 10,
+            cache_creation: 5,
+            consolidations: 1,
+            archives: 2,
+            summary: Some("merged 1, archived 2".into()),
+            actions_json: "[]".into(),
+            invocation_id: Some("inv-1".into()),
+        };
+        insert_curator_run(&conn, &rec).await.unwrap();
+        let (trigger, status, archives): (String, String, i64) = conn
+            .query_row(
+                "SELECT trigger, status, archives FROM curator_runs WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (trigger.as_str(), status.as_str(), archives),
+            ("time_fallback", "success", 2)
+        );
     }
 
     #[tokio::test]
