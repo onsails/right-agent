@@ -2081,6 +2081,21 @@ fn update_agent_yaml_learning(
         learning.curator_min_cooldown_hours
     ));
     lines.push(format!(
+        "  curator_circuit_failure_threshold: {}",
+        learning.curator_circuit_failure_threshold
+    ));
+    lines.push(format!(
+        "  curator_circuit_cooldown_hours: {}",
+        learning.curator_circuit_cooldown_hours
+    ));
+    lines.push(format!(
+        "  curator_mode: {}",
+        match learning.curator_mode {
+            right_agent::agent::types::CuratorMode::Apply => "apply",
+            right_agent::agent::types::CuratorMode::ReportOnly => "report_only",
+        }
+    ));
+    lines.push(format!(
         "  baseline_window_days: {}",
         learning.baseline_window_days
     ));
@@ -2179,6 +2194,33 @@ mod learning_yaml_tests {
         assert_eq!(
             parsed.learning.curator_interval_hours,
             LearningConfig::default().curator_interval_hours
+        );
+    }
+
+    #[test]
+    fn update_agent_yaml_learning_persists_circuit_knobs_and_mode() {
+        let dir = tempdir().unwrap();
+        let path = write_yaml(dir.path(), "model: \"sonnet\"\n");
+        let learning = LearningConfig {
+            curator_circuit_failure_threshold: 7,
+            curator_circuit_cooldown_hours: 6,
+            curator_mode: right_agent::agent::types::CuratorMode::ReportOnly,
+            ..LearningConfig::default()
+        };
+        update_agent_yaml_learning(&path, &learning).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("curator_circuit_failure_threshold: 7"));
+        assert!(content.contains("curator_circuit_cooldown_hours: 6"));
+        assert!(content.contains("curator_mode: report_only"));
+        // Round-trip: the operator's non-default choices must survive a parse,
+        // not silently fall back to serde defaults (apply / 3 / 24).
+        let parsed: right_agent::agent::AgentConfig = serde_saphyr::from_str(&content).unwrap();
+        assert_eq!(parsed.learning.curator_circuit_failure_threshold, 7);
+        assert_eq!(parsed.learning.curator_circuit_cooldown_hours, 6);
+        assert_eq!(
+            parsed.learning.curator_mode,
+            right_agent::agent::types::CuratorMode::ReportOnly
         );
     }
 
