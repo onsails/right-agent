@@ -335,6 +335,26 @@ pub struct LearningCapabilities {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CuratorRunSummary {
+    pub run_at: String,
+    pub trigger: String,
+    pub mode: String,
+    pub status: String,
+    pub cost_usd: f64,
+    pub consolidations: i64,
+    pub archives: i64,
+    pub summary: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CuratorConsolidation {
+    /// Skill that was absorbed (archived).
+    pub absorbed: String,
+    /// Umbrella it was merged into.
+    pub umbrella: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LearningOverviewResponse {
     pub agent: String,
     pub generated_at: String,
@@ -344,6 +364,8 @@ pub struct LearningOverviewResponse {
     pub flow_nodes: Vec<LearningFlowNode>,
     pub flow_edges: Vec<LearningFlowEdge>,
     pub recent_learning_signals: Vec<LearningSignalPoint>,
+    pub curator_runs: Vec<CuratorRunSummary>,
+    pub curator_consolidations: Vec<CuratorConsolidation>,
     pub warnings: Vec<DashboardDataWarning>,
 }
 
@@ -1050,6 +1072,8 @@ mod learning_tests {
                 skill_name: Some("rightx-oauth-debugging".to_owned()),
                 count: 1,
             }],
+            curator_runs: vec![],
+            curator_consolidations: vec![],
             warnings: vec![],
         };
 

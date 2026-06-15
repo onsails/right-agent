@@ -1,6 +1,7 @@
 use crate::api_types::{
-    DashboardDataWarning, LearningCapabilities, LearningEventSummary, LearningFlowEdge,
-    LearningFlowNode, LearningLifecycle, LearningOverviewResponse, LearningSignalPoint,
+    CuratorConsolidation, CuratorRunSummary, DashboardDataWarning, LearningCapabilities,
+    LearningEventSummary, LearningFlowEdge, LearningFlowNode, LearningLifecycle,
+    LearningOverviewResponse, LearningSignalPoint,
 };
 use std::collections::BTreeMap;
 
@@ -55,6 +56,8 @@ pub async fn learning_overview(
             message: "writer transitions are aggregate-only and partially inferred".to_owned(),
         });
     }
+    let curator_runs = curator_runs(conn, 20).await?;
+    let curator_consolidations = curator_consolidations(conn).await?;
     Ok(LearningOverviewResponse {
         agent: agent_name,
         generated_at,
@@ -64,6 +67,8 @@ pub async fn learning_overview(
         flow_nodes,
         flow_edges,
         recent_learning_signals,
+        curator_runs,
+        curator_consolidations,
         warnings,
     })
 }
@@ -899,6 +904,52 @@ async fn recent_refused_events(
     .await
 }
 
+async fn curator_runs(
+    conn: &Connection,
+    limit: i64,
+) -> Result<Vec<CuratorRunSummary>, ReadModelError> {
+    let rows = conn
+        .query_all(
+            "SELECT run_at, trigger, mode, status, cost_usd, consolidations, archives, summary \
+             FROM curator_runs ORDER BY run_at DESC LIMIT ?1",
+            params![limit],
+            |r| {
+                Ok(CuratorRunSummary {
+                    run_at: r.get(0)?,
+                    trigger: r.get(1)?,
+                    mode: r.get(2)?,
+                    status: r.get(3)?,
+                    cost_usd: r.get(4)?,
+                    consolidations: r.get(5)?,
+                    archives: r.get(6)?,
+                    summary: r.get(7)?,
+                })
+            },
+        )
+        .await?;
+    Ok(rows)
+}
+
+async fn curator_consolidations(
+    conn: &Connection,
+) -> Result<Vec<CuratorConsolidation>, ReadModelError> {
+    let rows = conn
+        .query_all(
+            "SELECT skill_name, absorbed_into FROM skill_lifecycle \
+             WHERE state = 'archived' AND absorbed_into IS NOT NULL \
+             ORDER BY archived_at DESC LIMIT 50",
+            (),
+            |r| {
+                Ok(CuratorConsolidation {
+                    absorbed: r.get(0)?,
+                    umbrella: r.get(1)?,
+                })
+            },
+        )
+        .await?;
+    Ok(rows)
+}
+
 async fn candidate_skill_names(
     conn: &Connection,
     agent: &str,
@@ -1351,5 +1402,35 @@ mod tests {
 
         assert_eq!(response.lifecycle.failed_7d, 51);
         assert_eq!(response.lifecycle.recent_failed_events.len(), 50);
+    }
+
+    #[tokio::test]
+    async fn curator_runs_and_lineage_projection() {
+        let (_dir, conn) = fixture().await;
+        conn.execute(
+            "INSERT INTO curator_runs (run_at, trigger, mode, status, cost_usd, consolidations, archives, summary) \
+             VALUES ('2026-06-15T00:00:00Z','time_fallback','apply','success',0.5,1,2,'merged 1, archived 2')",
+            [],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_lifecycle (skill_name, state, created_by, absorbed_into) \
+             VALUES ('rightx-a','archived','curator','rightx-umbrella')",
+            [],
+        )
+        .await
+        .unwrap();
+        let runs = curator_runs(&conn, 20).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].archives, 2);
+        let lineage = curator_consolidations(&conn).await.unwrap();
+        assert_eq!(
+            lineage,
+            vec![CuratorConsolidation {
+                absorbed: "rightx-a".into(),
+                umbrella: "rightx-umbrella".into(),
+            }]
+        );
     }
 }
