@@ -1048,6 +1048,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let curator_model = Arc::clone(&model_arc);
         let curator_shutdown = shutdown.clone();
         let curator_internal_client = Arc::clone(&internal_client);
+        let curator_idle_ts = std::sync::Arc::clone(&idle_timestamp);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1088,8 +1089,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         skill_change_threshold: curator_learning.curator_skill_change_threshold,
                     },
                 };
-                // latest_user_activity_at hookup deferred — pass None for v1.
-                crate::learning_curator::run_if_due(ctx, None).await;
+                let latest_activity = crate::learning_curator::idle_secs_to_activity(
+                    curator_idle_ts.0.load(std::sync::atomic::Ordering::Relaxed),
+                );
+                crate::learning_curator::run_if_due(ctx, latest_activity).await;
             }
         });
     }
