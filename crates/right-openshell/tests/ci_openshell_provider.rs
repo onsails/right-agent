@@ -423,6 +423,271 @@ async fn ci_openshell_get_provider_credentials_returns_stored_secret() {
     delete_provider(&mut client, &name).await.unwrap();
 }
 
+/// Same filesystem/landlock section as `test_support::MINIMAL_POLICY` so a
+/// later `policy set --wait` (composition reload) is accepted on the live
+/// sandbox. Network section is intentionally minimal — provider-profile
+/// composition adds the upstream endpoint.
+const EXPERIMENT_POLICY: &str = "\
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_write:
+    - /tmp
+    - /sandbox
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+network_policies:
+  outbound:
+    endpoints:
+      - port: 443
+        allowed_ips:
+          - \"1.1.1.1/32\"
+        protocol: rest
+        access: full
+    binaries:
+      - path: \"**\"
+";
+
+// Echo host reflects the received Authorization header. Hardcoded (no string
+// interpolation) so the egress probe argv is a fixed literal.
+const ECHO_HOST: &str = "postman-echo.com";
+const PROBE_ENV_VAR: &str = "PROBE_TOKEN";
+const EGRESS_PROBE_CMD: &str =
+    "curl -sk --max-time 30 -H \"Authorization: Bearer $PROBE_TOKEN\" https://postman-echo.com/get";
+
+/// End-to-end RESOLUTION guard for a generic provider. The pre-existing tests
+/// only asserted the `openshell:resolve:env:` placeholder becomes *visible*
+/// after attach — they never verified the proxy actually *substitutes* it on
+/// egress. A provider can compose and inject a visible placeholder yet still
+/// fail to resolve (the production symptom that motivated these tests: a 401
+/// because the placeholder reached the upstream unsubstituted). This test
+/// composes a generic provider for a header-reflecting echo host and asserts
+/// the egress request carries the real credential, not the placeholder.
+#[tokio::test]
+#[ignore = "ci-openshell: requires a live OpenShell gateway"]
+async fn ci_openshell_generic_provider_substitutes_on_egress() {
+    use right_openshell::managed_profiles::{
+        author_generic_profile, delete_profile, generic_provider_profile_id, lint_and_import,
+    };
+    use right_openshell::providers::*;
+    use right_openshell::test_support::TestSandbox;
+
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
+        .await
+        .unwrap();
+    ensure_v2_enabled(&mut client).await.unwrap();
+
+    let pid = std::process::id();
+    let secret = format!("rightprobe-SECRET-{pid}");
+    let prov = format!("rightprobe-{pid}-egress");
+    let profile_id = generic_provider_profile_id(&prov);
+
+    let _ = delete_provider(&mut client, &prov).await;
+    let _ = delete_profile(&mut client, &profile_id).await;
+
+    lint_and_import(
+        &mut client,
+        author_generic_profile(&profile_id, &[ECHO_HOST.to_string()], None, PROBE_ENV_VAR),
+    )
+    .await
+    .expect("import echo profile");
+
+    let mut creds = std::collections::HashMap::new();
+    creds.insert(PROBE_ENV_VAR.to_string(), secret.clone());
+    create_provider(
+        &mut client,
+        &ProviderSpec {
+            name: prov.clone(),
+            type_: profile_id.clone(),
+            credentials: creds,
+            config: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let sandbox =
+        TestSandbox::create_with_policy("ci-openshell-egress-experiment", EXPERIMENT_POLICY).await;
+    attach_to_sandbox(&mut client, sandbox.name(), &prov)
+        .await
+        .unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let policy_path = tmp.path().join("policy.yaml");
+    std::fs::write(&policy_path, EXPERIMENT_POLICY).unwrap();
+    right_openshell::openshell::ensure_provider_policy_loaded(sandbox.name(), &policy_path)
+        .await
+        .expect("reload composition");
+    right_openshell::openshell::wait_for_provider_composed_with_endpoint(
+        &mut client,
+        sandbox.name(),
+        &prov,
+        ECHO_HOST,
+        "",
+    )
+    .await
+    .expect("composition confirmed");
+
+    // Placeholder must be visible (the weak guarantee current code gives).
+    let placeholder = poll_sandbox_env(&sandbox, PROBE_ENV_VAR, 30, is_provider_placeholder)
+        .await
+        .expect("placeholder visible after attach");
+    eprintln!("PLACEHOLDER: {placeholder}");
+
+    // END-TO-END: does the proxy actually substitute on egress? The echo host
+    // reflects the received Authorization header back to us.
+    let (out, rc) = sandbox.exec(&["sh", "-c", EGRESS_PROBE_CMD]).await;
+    eprintln!("EGRESS rc={rc} body:\n{out}");
+
+    let substituted = out.contains(&secret);
+    let placeholder_leaked = out.contains("openshell:resolve:env:");
+    eprintln!("SUBSTITUTED={substituted} PLACEHOLDER_LEAKED={placeholder_leaked}");
+
+    detach_from_sandbox(&mut client, sandbox.name(), &prov)
+        .await
+        .ok();
+    delete_provider(&mut client, &prov).await.ok();
+    delete_profile(&mut client, &profile_id).await.ok();
+
+    assert!(
+        substituted && !placeholder_leaked,
+        "proxy must substitute the placeholder on egress (substituted={substituted}, leaked={placeholder_leaked})"
+    );
+}
+
+// Probe FAL_KEY (built-in provider) via the echo host: substitution is keyed
+// by env-var name on ANY terminated host, so a built-in credential's value is
+// observable through the generic echo endpoint.
+const EGRESS_PROBE_FAL_CMD: &str =
+    "curl -sk --max-time 30 -H \"Authorization: Key $FAL_KEY\" https://postman-echo.com/get";
+
+/// End-to-end RESOLUTION guard for a BUILT-IN provider (`right-fal`), the
+/// category that failed in production. `FAL_KEY` is observed through the echo
+/// host because substitution is keyed by env-var name on any terminated
+/// endpoint (documented quirk), and `fal.run` itself does not reflect headers.
+/// Asserts a built-in credential resolves on egress, not just that its
+/// placeholder is visible.
+#[tokio::test]
+#[ignore = "ci-openshell: requires a live OpenShell gateway"]
+async fn ci_openshell_builtin_provider_substitutes_on_egress() {
+    use right_openshell::managed_profiles::{
+        author_generic_profile, delete_profile, generic_provider_profile_id, lint_and_import,
+    };
+    use right_openshell::providers::*;
+    use right_openshell::test_support::TestSandbox;
+
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
+        .await
+        .unwrap();
+    ensure_v2_enabled(&mut client).await.unwrap();
+
+    let pid = std::process::id();
+    let fal_secret = format!("falsecret-{pid}");
+    let echo_prov = format!("rightprobe-{pid}-echo");
+    let echo_profile_id = generic_provider_profile_id(&echo_prov);
+    let fal_prov = format!("rightprobe-{pid}-fal");
+
+    let _ = delete_provider(&mut client, &echo_prov).await;
+    let _ = delete_provider(&mut client, &fal_prov).await;
+    let _ = delete_profile(&mut client, &echo_profile_id).await;
+
+    // Observation endpoint: generic echo provider (env var unused by us, but it
+    // composes postman-echo.com as a terminated L7 endpoint).
+    lint_and_import(
+        &mut client,
+        author_generic_profile(&echo_profile_id, &[ECHO_HOST.to_string()], None, "ECHO_OBS"),
+    )
+    .await
+    .expect("import echo profile");
+    let mut echo_creds = std::collections::HashMap::new();
+    echo_creds.insert("ECHO_OBS".to_string(), "unused".to_string());
+    create_provider(
+        &mut client,
+        &ProviderSpec {
+            name: echo_prov.clone(),
+            type_: echo_profile_id.clone(),
+            credentials: echo_creds,
+            config: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Subject: BUILT-IN fal provider (the right-fal profile already exists on
+    // the gateway). Same path the import uses.
+    let mut fal_creds = std::collections::HashMap::new();
+    fal_creds.insert("FAL_KEY".to_string(), fal_secret.clone());
+    create_provider(
+        &mut client,
+        &ProviderSpec {
+            name: fal_prov.clone(),
+            type_: "right-fal".into(),
+            credentials: fal_creds,
+            config: Default::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let sandbox =
+        TestSandbox::create_with_policy("ci-openshell-builtin-fal-experiment", EXPERIMENT_POLICY)
+            .await;
+    attach_to_sandbox(&mut client, sandbox.name(), &echo_prov)
+        .await
+        .unwrap();
+    attach_to_sandbox(&mut client, sandbox.name(), &fal_prov)
+        .await
+        .unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let policy_path = tmp.path().join("policy.yaml");
+    std::fs::write(&policy_path, EXPERIMENT_POLICY).unwrap();
+    right_openshell::openshell::ensure_provider_policy_loaded(sandbox.name(), &policy_path)
+        .await
+        .expect("reload composition");
+    right_openshell::openshell::wait_for_provider_composed_with_endpoint(
+        &mut client,
+        sandbox.name(),
+        &echo_prov,
+        ECHO_HOST,
+        "",
+    )
+    .await
+    .expect("echo composition confirmed");
+    right_openshell::openshell::wait_for_provider_composed(&mut client, sandbox.name(), &fal_prov)
+        .await
+        .expect("fal composition confirmed");
+
+    let placeholder = poll_sandbox_env(&sandbox, "FAL_KEY", 30, is_provider_placeholder)
+        .await
+        .expect("FAL_KEY placeholder visible after attach");
+    eprintln!("FAL_KEY PLACEHOLDER: {placeholder}");
+
+    let (out, rc) = sandbox.exec(&["sh", "-c", EGRESS_PROBE_FAL_CMD]).await;
+    eprintln!("FAL EGRESS rc={rc} body:\n{out}");
+    let substituted = out.contains(&fal_secret);
+    let placeholder_leaked = out.contains("openshell:resolve:env:");
+    eprintln!("FAL SUBSTITUTED={substituted} PLACEHOLDER_LEAKED={placeholder_leaked}");
+
+    detach_from_sandbox(&mut client, sandbox.name(), &fal_prov)
+        .await
+        .ok();
+    detach_from_sandbox(&mut client, sandbox.name(), &echo_prov)
+        .await
+        .ok();
+    delete_provider(&mut client, &fal_prov).await.ok();
+    delete_provider(&mut client, &echo_prov).await.ok();
+    delete_profile(&mut client, &echo_profile_id).await.ok();
+
+    assert!(
+        substituted && !placeholder_leaked,
+        "built-in fal FAL_KEY must substitute on egress (substituted={substituted}, leaked={placeholder_leaked})"
+    );
+}
+
 #[tokio::test]
 #[ignore = "ci-openshell: requires a live OpenShell gateway"]
 async fn ci_openshell_provider_destroy_cascade() {
