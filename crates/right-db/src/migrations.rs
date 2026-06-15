@@ -37,8 +37,9 @@ const V43_SCHEMA: &str = include_str!("sql/v43_thread_focus.sql");
 const V44_SCHEMA: &str = include_str!("sql/v44_skill_lifecycle_cron.sql");
 const V46_NOTICE_TOKEN: &str = include_str!("sql/v46_notice_token.sql");
 const V47_CRON_SKILL_LINKS: &str = include_str!("sql/v47_cron_skill_links.sql");
+const V48_CURATOR_RUNS: &str = include_str!("sql/v48_curator_runs.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 47;
+pub const LATEST_SCHEMA_VERSION: u32 = 48;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type MigrationHook =
@@ -1090,6 +1091,11 @@ pub static MIGRATIONS: Migrations = Migrations {
         Migration {
             version: 47,
             sql: V47_CRON_SKILL_LINKS,
+            hook: None,
+        },
+        Migration {
+            version: 48,
+            sql: V48_CURATOR_RUNS,
             hook: None,
         },
     ],
@@ -3859,5 +3865,35 @@ continue background work',
             .await
             .unwrap();
         assert_eq!(count, 7, "forum_topics must have all 7 columns");
+    }
+
+    #[tokio::test]
+    async fn v48_curator_runs_round_trip_and_idempotent() {
+        let conn = Connection::open_in_memory().await.unwrap();
+        MIGRATIONS.to_latest(&conn).await.unwrap();
+
+        conn.execute(
+            "INSERT INTO curator_runs (run_at, trigger, mode, status) \
+             VALUES ('2026-06-15T00:00:00Z','time_fallback','apply','success')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM curator_runs", [], |r| r.get(0))
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "curator_runs must have exactly one row");
+
+        // Re-running to_latest is a no-op — the CREATE TABLE IF NOT EXISTS is
+        // idempotent and the existing row is not disturbed.
+        MIGRATIONS.to_latest(&conn).await.unwrap();
+
+        let count2: i64 = conn
+            .query_row("SELECT COUNT(*) FROM curator_runs", [], |r| r.get(0))
+            .await
+            .unwrap();
+        assert_eq!(count2, 1, "row count must be unchanged after re-migration");
     }
 }
