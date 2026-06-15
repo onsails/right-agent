@@ -2671,6 +2671,9 @@ pub(crate) async fn handle_provider_copy(
         .sandbox
         .as_ref()
         .ok_or(ProviderApiError::SandboxModeNone)?;
+    if source_sandbox.mode != right_agent_config::SandboxMode::Openshell {
+        return Err(ProviderApiError::SandboxModeNone);
+    }
     let source_entry = source_sandbox
         .providers
         .iter()
@@ -2742,7 +2745,7 @@ pub(crate) async fn handle_provider_copy(
                     agent: req.dest_agent.clone(),
                     name: dest_name,
                     generic: ProviderConfigUpdateGeneric {
-                        env_var: Some(g.env_var.clone()),
+                        env_var: None, // env_var already matches; updating it would be rejected by validate_generic_env_var_unchanged
                         upstream_host: None,
                         upstream_hosts: Some(g.upstream_hosts.clone()),
                         upstream_path_prefix: Some(g.upstream_path_prefix.clone()),
