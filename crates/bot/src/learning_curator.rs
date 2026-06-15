@@ -454,6 +454,25 @@ pub(crate) async fn run_if_due(
         tracing::warn!(agent = %ctx.agent_name, "curator snapshot failed: {e:#}");
     }
 
+    // A1: snapshot which skills are already archived BEFORE this pass mutates
+    // anything, so we can attribute exactly what THIS pass archived/merged.
+    // (Auto-transitions stamp archived_at = now; the fork stamps its own time,
+    // so a timestamp-equality query would miss fork consolidations.)
+    let pre_pass_archived: std::collections::HashSet<String> = match conn
+        .query_all(
+            "SELECT skill_name FROM skill_lifecycle WHERE state = 'archived'",
+            (),
+            |r| r.get::<_, String>(0),
+        )
+        .await
+    {
+        Ok(rows) => rows.into_iter().collect(),
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator pre-pass archived snapshot failed: {e:#}");
+            std::collections::HashSet::new()
+        }
+    };
+
     let transition_changes = match crate::lifecycle::transitions::apply_automatic_transitions(
         &conn,
         now,
@@ -558,6 +577,8 @@ pub(crate) async fn run_if_due(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
+    let mut usage_for_run: Option<right_agent::usage::UsageBreakdown> = None;
+
     let run_status = match right_process::ProcessGroupChild::spawn(cmd) {
         Ok(child) => {
             match crate::cc::invocation::wait_with_output_or_kill(child, CURATOR_TIMEOUT).await {
@@ -570,6 +591,7 @@ pub(crate) async fn run_if_due(
                             tracing::warn!(agent = %ctx.agent_name, "curator usage insert failed: {e:#}");
                         }
                         record_curator_maintain_spend(&conn, &archived_skill_names, &b, None).await;
+                        usage_for_run = Some(b);
                     }
                     if output.status.success() {
                         "success".to_owned()
@@ -603,6 +625,7 @@ pub(crate) async fn run_if_due(
     };
     active_invocation.cleanup().await;
 
+    let status_for_run = run_status.clone();
     if run_status == "success" {
         state.last_run_at = Some(now.to_rfc3339());
         state.last_run_status = Some(run_status);
@@ -632,6 +655,72 @@ pub(crate) async fn run_if_due(
                 "curator save state failed: {e:#}",
             );
         }
+    }
+
+    // A1: append one curator_runs history row for this executed apply pass.
+    let post_pass_archived: Vec<(String, Option<String>)> = match conn
+        .query_all(
+            "SELECT skill_name, absorbed_into FROM skill_lifecycle WHERE state = 'archived'",
+            (),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "curator post-pass archived query failed: {e:#}");
+            Vec::new()
+        }
+    };
+    let this_pass: Vec<(String, Option<String>)> = post_pass_archived
+        .into_iter()
+        .filter(|(name, _)| !pre_pass_archived.contains(name))
+        .collect();
+    let consolidations = this_pass
+        .iter()
+        .filter(|(_, target)| target.is_some())
+        .count() as i64;
+    let archives = this_pass.len() as i64;
+    let actions_json = serde_json::to_string(
+        &this_pass
+            .iter()
+            .map(|(name, target)| {
+                serde_json::json!({
+                    "kind": if target.is_some() { "merge" } else { "archive" },
+                    "skills": [name],
+                    "target": target,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_owned());
+    let (cost_usd, cache_read, cache_creation) = usage_for_run
+        .as_ref()
+        .map(|b| {
+            (
+                b.total_cost_usd,
+                b.cache_read_tokens as i64,
+                b.cache_creation_tokens as i64,
+            )
+        })
+        .unwrap_or((0.0, 0, 0));
+    let record = CuratorRunRecord {
+        run_at: now.to_rfc3339(),
+        trigger: trigger_label(&trigger).to_owned(),
+        trigger_evidence_json: state.last_spike_evidence_json.clone(),
+        mode: "apply".to_owned(),
+        status: status_for_run,
+        cost_usd,
+        cache_read,
+        cache_creation,
+        consolidations,
+        archives,
+        summary: Some(format!("merged {consolidations}, archived {archives}")),
+        actions_json,
+        invocation_id: None,
+    };
+    if let Err(e) = insert_curator_run(&conn, &record).await {
+        tracing::warn!(agent = %ctx.agent_name, "curator_runs insert failed: {e:#}");
     }
 }
 
