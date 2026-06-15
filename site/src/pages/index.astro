@@ -7,45 +7,60 @@ import Diagram from '../components/Diagram.astro';
 import Roadmap from '../components/Roadmap.astro';
 import InstallBlock from '../components/InstallBlock.astro';
 import Footer from '../components/Footer.astro';
+const base = import.meta.env.BASE_URL;
 ---
 <Landing>
   <Hero />
 
-  <section class="ra-section"><div class="ra-wrap">
-    <h2>what you get</h2>
-    <div class="ra-grid">
-      <FeatureCard title="credentials stay outside the box">the secret bytes never enter the sandbox; the proxy substitutes them on outbound requests.</FeatureCard>
-      <FeatureCard title="every agent in its own sandbox">scoped filesystem, network, and a tls-terminating proxy per agent.</FeatureCard>
-      <FeatureCard title="memory is untrusted data">incoming memory is sanitized; recalled memory is framed as information, not commands.</FeatureCard>
-      <FeatureCard title="skills it learns on its own">reusable skills captured from real use, pruned by a curator, pinned from the dashboard.</FeatureCard>
-      <FeatureCard title="one bot per agent">message it like a person; each chat is its own session over one shared memory.</FeatureCard>
-      <FeatureCard title="many agents, one subscription">cost scales with subscriptions, not agent count.</FeatureCard>
+  <div class="wrap">
+    <div class="telem rev">
+      <div class="cell"><div class="k">isolation</div><div class="v"><b>per-agent</b> sandbox by default</div></div>
+      <div class="cell"><div class="k">credentials</div><div class="v">held on host, <b>injected at proxy</b></div></div>
+      <div class="cell"><div class="k">on failure</div><div class="v">fails closed · <b>self-heals</b></div></div>
+    </div>
+  </div>
+
+  <section class="section"><div class="wrap">
+    <div class="label rev">what you get</div>
+    <h2 class="rev d1">the box is closed; you just use it</h2>
+    <div class="grid">
+      <FeatureCard tick="◤ 01 · isolation" title="credentials stay outside the box">the secret bytes never enter the sandbox; the proxy substitutes them on outbound requests.</FeatureCard>
+      <FeatureCard tick="◤ 02 · sandbox" title="every agent in its own sandbox">scoped filesystem, network, and a tls-terminating proxy per agent.</FeatureCard>
+      <FeatureCard tick="◤ 03 · memory" title="memory is untrusted data">incoming memory is sanitized; recalled memory is framed as information, not commands.</FeatureCard>
+      <FeatureCard tick="◤ 04 · skills" title="skills it learns on its own">reusable skills captured from real use, pruned by a curator, pinned from the dashboard.</FeatureCard>
+      <FeatureCard tick="◤ 05 · chat" title="one bot per agent">message it like a person; each chat is its own session over one shared memory.</FeatureCard>
+      <FeatureCard tick="◤ 06 · cost" title="many agents, one subscription">cost scales with subscriptions, not agent count.</FeatureCard>
     </div>
   </div></section>
 
-  <section class="ra-section"><div class="ra-wrap">
-    <h2>how it works</h2>
-    <p style="color:var(--ra-parchment); max-width:65ch;">a message reaches the host through Cloudflare, the bot routes it to that chat's Claude Code session inside the agent's sandbox, and replies. credentials are injected at the proxy on the way out, never inside the box.</p>
-    <div style="margin-top:2rem;"><Diagram /></div>
+  <section class="section"><div class="wrap">
+    <div class="label rev">how it works</div>
+    <h2 class="rev d1">a message routes through three tiers</h2>
+    <p class="lead rev d1" style="margin-bottom:2rem;">a message reaches the host through Cloudflare, the bot routes it to that chat's Claude Code session inside the agent's sandbox, and replies. credentials are injected at the proxy on the way out, never inside the box.</p>
+    <Diagram />
   </div></section>
 
-  <section class="ra-section"><div class="ra-wrap">
-    <h2>how it compares</h2>
+  <section class="section"><div class="wrap">
+    <div class="label rev">how it compares</div>
+    <h2 class="rev d1">opinionated where it counts</h2>
     <CompareTable />
   </div></section>
 
-  <section class="ra-section" id="security"><div class="ra-wrap">
-    <h2>security by default</h2>
-    <p style="color:var(--ra-parchment); max-width:65ch;">sandboxed by default, credentials on the host, fails closed on a backend outage. read the full <a href={`${import.meta.env.BASE_URL}/docs/security/`}>security model</a>.</p>
+  <section class="section" id="security"><div class="wrap">
+    <div class="label rev">security</div>
+    <h2 class="rev d1">security by default</h2>
+    <p class="lead rev d1">sandboxed by default, credentials on the host, fails closed on a backend outage. read the full <a href={`${base}/docs/security/`}>security model</a>.</p>
   </div></section>
 
-  <section class="ra-section"><div class="ra-wrap">
-    <h2>roadmap</h2>
+  <section class="section"><div class="wrap">
+    <div class="label rev">roadmap</div>
+    <h2 class="rev d1">shipped, and what's next</h2>
     <Roadmap />
   </div></section>
 
-  <section class="ra-section" id="install"><div class="ra-wrap">
-    <h2>install</h2>
+  <section class="section" id="install"><div class="wrap">
+    <div class="label rev">install</div>
+    <h2 class="rev d1">one command to start</h2>
     <InstallBlock />
   </div></section>
 

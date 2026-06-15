@@ -1,15 +1,16 @@
 ---
 const tiers = [
-  { label: 'Cloud', items: ['Telegram', 'Cloudflare', 'Anthropic', 'Hindsight', 'Linear / Notion / Gmail'] },
-  { label: 'Host', items: ['Bot per agent', 'MCP aggregator (holds credentials)', 'OpenShell gateway', 'cloudflared'] },
-  { label: 'Sandbox per agent', items: ['Claude Code', 'Identity', 'scoped fs + network + tls proxy'] },
+  { label: 'cloud', items: ['Telegram', 'Cloudflare', 'Anthropic · Hindsight', 'Linear / Notion / Gmail'] },
+  { label: 'host', items: ['bot per agent', 'mcp aggregator · holds creds', 'OpenShell gateway', 'cloudflared'] },
+  { label: 'sandbox · per agent', items: ['Claude Code', 'identity + memory', 'scoped fs · net · tls proxy'] },
 ];
 ---
-<div style="display:grid; gap:1rem;">
+<div class="flow rev">
+  <div class="flowtrack"></div><div class="packet"></div>
   {tiers.map((t) => (
-    <div class="ra-card">
-      <h3 style="color:var(--ra-fire);">{t.label}</h3>
-      <p style="color:var(--ra-parchment);">{t.items.join('  ·  ')}</p>
+    <div class="node">
+      <div class="tier">{t.label}</div>
+      <ul>{t.items.map((i) => <li>{i}</li>)}</ul>
     </div>
   ))}
 </div>
