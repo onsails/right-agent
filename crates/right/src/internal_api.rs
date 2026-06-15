@@ -243,6 +243,14 @@ pub(crate) fn internal_router(
             "/provider-remove",
             post(crate::internal_api_providers::handle_provider_remove),
         )
+        .route(
+            "/provider-peers",
+            post(crate::internal_api_providers::handle_provider_peers),
+        )
+        .route(
+            "/provider-copy",
+            post(crate::internal_api_providers::handle_provider_copy),
+        )
         .with_state(state)
 }
 
