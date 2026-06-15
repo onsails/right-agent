@@ -8,6 +8,17 @@ type FullscreenChangedEvent = typeof FULLSCREEN_CHANGED_EVENT
 type DashboardDisplayModeStorage = Pick<Storage, 'getItem' | 'setItem'>
 type TelegramFullscreenChangedHandler = () => void
 
+const JEWEL_THEME_VARS: ReadonlyArray<[string, string]> = [
+  ['--tg-theme-bg-color', 'var(--jewel-base)'],
+  ['--tg-theme-secondary-bg-color', 'var(--jewel-panel)'],
+  ['--tg-theme-text-color', 'var(--jewel-text)'],
+  ['--tg-theme-hint-color', 'var(--jewel-muted)'],
+  ['--tg-theme-hint_color', 'var(--jewel-muted)'],
+  ['--tg-theme-link-color', 'var(--jewel-teal)'],
+  ['--tg-theme-button_color', 'var(--jewel-teal)'],
+  ['--tg-theme-section_separator_color', 'var(--jewel-line)'],
+]
+
 export interface TelegramWebApp {
   initData?: string
   ready?: () => void
@@ -119,11 +130,23 @@ export function initializeTelegramWebApp(
 ): DashboardDisplayMode {
   webApp?.ready?.()
   webApp?.expand?.()
+  applyJewelTheme()
 
   if (preferredMode !== 'fullscreen') {
     return actualDisplayMode(webApp, 'normal')
   }
   return tryRequestFullscreen(webApp)
+}
+
+export function applyJewelTheme(
+  root: HTMLElement | undefined = typeof document === 'undefined' ? undefined : document.documentElement,
+): void {
+  if (!root) {
+    return
+  }
+  for (const [name, value] of JEWEL_THEME_VARS) {
+    root.style.setProperty(name, value)
+  }
 }
 
 export function applyTelegramDisplayMode(

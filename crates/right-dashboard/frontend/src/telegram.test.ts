@@ -5,6 +5,7 @@ import { initialDashboardTabFromLocation } from './format'
 import {
   alertMessage,
   applyTelegramDisplayMode,
+  applyJewelTheme,
   confirmAction,
   DASHBOARD_DISPLAY_MODE_STORAGE_KEY,
   initializeTelegramWebApp,
@@ -260,6 +261,20 @@ describe('Telegram dashboard display mode helpers', () => {
     const unsubscribe = subscribeTelegramFullscreenChanges(webApp, vi.fn())
 
     expect(() => unsubscribe()).not.toThrow()
+  })
+})
+
+describe('applyJewelTheme', () => {
+  it('repoints tg-theme vars at jewel tokens', () => {
+    const setProperty = vi.fn()
+    const root = { style: { setProperty } } as unknown as HTMLElement
+
+    applyJewelTheme(root)
+
+    expect(setProperty).toHaveBeenCalledWith('--tg-theme-bg-color', 'var(--jewel-base)')
+    expect(setProperty).toHaveBeenCalledWith('--tg-theme-button_color', 'var(--jewel-teal)')
+    expect(setProperty).toHaveBeenCalledWith('--tg-theme-text-color', 'var(--jewel-text)')
+    expect(setProperty).toHaveBeenCalledWith('--tg-theme-secondary-bg-color', 'var(--jewel-panel)')
   })
 })
 

@@ -44,7 +44,7 @@ function select(t: ProviderProfileView): void {
 }
 
 .type-card:hover {
-  border-color: var(--tg-theme-button_color, #2481cc);
+  border-color: var(--tg-theme-button_color, var(--jewel-teal));
 }
 
 .type-card strong {

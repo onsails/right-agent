@@ -650,13 +650,13 @@ function resetAdd(): void {
 }
 
 .oauth-status-succeeded {
-  border-color: rgba(25, 135, 84, 0.35);
+  border-color: rgba(107, 191, 89, 0.4);
 }
 
 .oauth-status-failed,
 .oauth-status-expired,
 .oauth-status-unknown {
-  border-color: rgba(176, 42, 55, 0.35);
+  border-color: rgba(226, 85, 106, 0.4);
 }
 
 .server-header-editor {
@@ -671,8 +671,8 @@ function resetAdd(): void {
 
 .notice.warn {
   color: var(--tg-theme-text-color, #17212b);
-  background: rgba(214, 165, 26, 0.14);
-  border: 1px solid rgba(214, 165, 26, 0.4);
+  background: rgba(205, 161, 75, 0.14);
+  border: 1px solid rgba(205, 161, 75, 0.4);
   border-radius: 7px;
   padding: 6px 8px;
 }
