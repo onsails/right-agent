@@ -1,4 +1,4 @@
-import type { ProviderView } from '../types'
+import type { ProviderPeer, ProviderView } from '../types'
 
 export function validateSlug(s: string): string | null {
   if (!s) return 'required'
@@ -75,3 +75,28 @@ export const CREDENTIAL_HINT =
 /** Microcopy shown under the Upstream hosts field (add/edit generic). */
 export const HOSTS_MICROCOPY =
   'Hosts the agent may call. The agent uses $ENV_VAR and writes auth exactly as the API docs say; Right stores the secret and allows these hosts.'
+
+/** Copying a provider with `envVar` into an agent whose providers are
+ *  `localProviders`: overwrite if that env var is already used, else create. */
+export function copyTargetMode(
+  localProviders: ProviderView[],
+  envVar: string,
+): 'create' | 'overwrite' {
+  return localProviders.some((p) => p.env_var === envVar) ? 'overwrite' : 'create'
+}
+
+/** For exporting `provider` to `peer`: whether the peer can accept it and
+ *  whether it would create or overwrite. */
+export function exportTargetState(
+  peer: ProviderPeer,
+  provider: ProviderView,
+): { mode: 'create' | 'overwrite'; blocked: string | null } {
+  const isGeneric = provider.generic !== null
+  if (isGeneric && peer.network_policy === 'restrictive') {
+    return { mode: 'create', blocked: 'restrictive policy cannot accept generic providers' }
+  }
+  const mode = peer.providers.some((p) => p.env_var === provider.env_var)
+    ? 'overwrite'
+    : 'create'
+  return { mode, blocked: null }
+}

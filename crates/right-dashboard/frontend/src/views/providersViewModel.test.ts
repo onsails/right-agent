@@ -1,15 +1,17 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  copyTargetMode,
   detectCredentialPrefix,
   evaluateCredentialSubmit,
+  exportTargetState,
   providerCompositionClass,
   providerCompositionLabel,
   validateUpstreamHosts,
   CREDENTIAL_HINT,
   HOSTS_MICROCOPY,
 } from './providersViewModel'
-import type { ProviderView } from '../types'
+import type { ProviderPeer, ProviderView } from '../types'
 
 function providerView(overrides: Partial<ProviderView> = {}): ProviderView {
   return {
@@ -108,5 +110,41 @@ describe('microcopy', () => {
     expect(HOSTS_MICROCOPY).toContain('$ENV_VAR')
     expect(HOSTS_MICROCOPY).toContain('API docs')
     expect(HOSTS_MICROCOPY).toContain('Right stores')
+  })
+})
+
+describe('copyTargetMode', () => {
+  it('overwrite when an env var already exists locally, else create', () => {
+    const local = [providerView({ env_var: 'FAL_KEY' })]
+    expect(copyTargetMode(local, 'FAL_KEY')).toBe('overwrite')
+    expect(copyTargetMode(local, 'OPENAI_API_KEY')).toBe('create')
+  })
+})
+
+describe('exportTargetState', () => {
+  function peer(overrides: Partial<ProviderPeer> = {}): ProviderPeer {
+    return { agent: 'agent-a', network_policy: 'permissive', providers: [], ...overrides }
+  }
+
+  it('blocks a generic provider when the peer is restrictive', () => {
+    const p = providerView({ generic: { env_var: 'FAL_KEY', upstream_hosts: ['fal.run'] } })
+    const state = exportTargetState(peer({ network_policy: 'restrictive' }), p)
+    expect(state.blocked).not.toBeNull()
+  })
+
+  it('marks overwrite when the peer already has the env var', () => {
+    const p = providerView({ env_var: 'FAL_KEY', generic: null })
+    const target = peer({
+      providers: [{ name: 'agent-a-provider', type: 'right-fal', env_var: 'FAL_KEY', label: null, generic: null }],
+    })
+    const state = exportTargetState(target, p)
+    expect(state.blocked).toBeNull()
+    expect(state.mode).toBe('overwrite')
+  })
+
+  it('marks create when the peer lacks the env var', () => {
+    const p = providerView({ env_var: 'FAL_KEY', generic: null })
+    const state = exportTargetState(peer(), p)
+    expect(state.mode).toBe('create')
   })
 })
