@@ -77,6 +77,14 @@ rules is behavior; a generated JSON schema change is behavior. Supporting
 operator docs such as `PROMPT_SYSTEM.md` can explain the behavior but do
 not create a changelog item by themselves.
 
+Do not hide shipped agent-behavior changes inside an overloaded parent
+cluster bullet. If a built-in skill or prompt template changes how an
+agent handles a user command, it needs its own visible claim unless the
+cluster has no other observable behavior. Example: "cron runs now name
+linked skills" and "`right-cron` now slims old cron prompts toward those
+skills when editing jobs" are two behaviors: runtime execution vs.
+agent-mediated cron maintenance.
+
 Your index is: **(spec/plan clusters) ∪ (orphan feat/fix clusters) ∪
 (shipped agent-facing template behavior)**.
 
@@ -106,7 +114,9 @@ bumps with no behavior change, contributor-only docs, dev-only paths.
 ## Phase 3 — Reduce: assemble the section
 
 1. Deduplicate bullets that describe the same observable change reached
-   from different clusters.
+   from different clusters. Agent-facing template changes are not
+   duplicates of the runtime/storage feature they support when they change
+   a different operator workflow.
 2. Order from most to least impactful.
 3. **Group by area when the release is large.** If you have more than
    ~8 bullets, put them under `### <Area>` headings (e.g. `### Learning &
