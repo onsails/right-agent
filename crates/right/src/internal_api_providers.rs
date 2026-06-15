@@ -1189,6 +1189,306 @@ fn extract_env_var(entry: &right_agent_config::ProviderEntry) -> Result<String, 
     }
 }
 
+/// What a copy resolves to once the source provider and the destination's
+/// existing providers are known. Carries everything except the credential
+/// (read separately from the gateway).
+#[derive(Debug)]
+pub(crate) enum CopyPlan {
+    Create {
+        type_: String,
+        label: Option<String>,
+        generic: Option<ProviderCreateGeneric>,
+    },
+    Overwrite {
+        dest_name: String,
+        /// `Some` → re-sync the destination generic config to this; `None`
+        /// → credential-only rotate.
+        resync_generic: Option<right_agent_config::GenericProvider>,
+    },
+}
+
+/// Decide how copying `source_entry` (using `env_var`) into a destination
+/// whose current providers are `dest_providers` should proceed. Pure.
+pub(crate) fn plan_copy(
+    source_agent: &str,
+    source_entry: &right_agent_config::ProviderEntry,
+    env_var: &str,
+    dest_providers: &[right_agent_config::ProviderEntry],
+    overwrite: bool,
+    label_override: Option<&str>,
+) -> Result<CopyPlan, ProviderApiError> {
+    let existing = dest_providers
+        .iter()
+        .find_map(|p| match extract_env_var(p) {
+            Ok(e) if e == env_var => Some(Ok(p)),
+            Ok(_) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .transpose()?;
+
+    if overwrite {
+        let dest_entry = existing.ok_or_else(|| ProviderApiError::CopyConflict {
+            reason: format!("nothing to overwrite: no provider uses env var \"{env_var}\""),
+        })?;
+        // Only checks the Generic-vs-BuiltIn category, NOT slug-level
+        // compatibility (e.g. right-github→right-fal passes here); slug
+        // compat, if any, is the caller's concern.
+        let compatible = matches!(
+            (&source_entry.type_, &dest_entry.type_),
+            (
+                right_agent_config::ProviderType::Generic,
+                right_agent_config::ProviderType::Generic
+            ) | (
+                right_agent_config::ProviderType::BuiltIn(_),
+                right_agent_config::ProviderType::BuiltIn(_)
+            )
+        );
+        if !compatible {
+            return Err(ProviderApiError::CopyConflict {
+                reason: format!(
+                    "existing provider \"{}\" has an incompatible type; remove it first",
+                    dest_entry.name
+                ),
+            });
+        }
+        let resync_generic = match (&source_entry.type_, &source_entry.generic) {
+            (right_agent_config::ProviderType::Generic, Some(src_g)) => {
+                let differs = dest_entry
+                    .generic
+                    .as_ref()
+                    .map(|d| {
+                        d.upstream_hosts != src_g.upstream_hosts
+                            || d.upstream_path_prefix != src_g.upstream_path_prefix
+                    })
+                    .unwrap_or(true);
+                if differs { Some(src_g.clone()) } else { None }
+            }
+            _ => None,
+        };
+        Ok(CopyPlan::Overwrite {
+            dest_name: dest_entry.name.clone(),
+            resync_generic,
+        })
+    } else {
+        if existing.is_some() {
+            return Err(ProviderApiError::EnvVarCollision {
+                env_var: env_var.to_string(),
+            });
+        }
+        let label = label_override.map(|s| s.to_string()).or_else(|| {
+            source_entry
+                .name
+                .strip_prefix(&format!("{source_agent}-"))
+                .map(|s| s.to_string())
+        });
+        let (type_, generic) =
+            match &source_entry.type_ {
+                right_agent_config::ProviderType::Generic => {
+                    let g = source_entry.generic.clone().ok_or_else(|| {
+                        ProviderApiError::InvalidName {
+                            name: source_entry.name.clone(),
+                            reason: "generic source provider missing 'generic:' block".into(),
+                        }
+                    })?;
+                    (
+                        "generic".to_string(),
+                        Some(ProviderCreateGeneric {
+                            env_var: g.env_var,
+                            upstream_host: None,
+                            upstream_hosts: Some(g.upstream_hosts),
+                            upstream_path_prefix: g.upstream_path_prefix,
+                        }),
+                    )
+                }
+                right_agent_config::ProviderType::BuiltIn(slug) => (slug.clone(), None),
+            };
+        Ok(CopyPlan::Create {
+            type_,
+            label,
+            generic,
+        })
+    }
+}
+
+#[cfg(test)]
+mod plan_copy_tests {
+    use super::*;
+
+    fn generic(
+        name: &str,
+        env: &str,
+        hosts: &[&str],
+        path: Option<&str>,
+    ) -> right_agent_config::ProviderEntry {
+        right_agent_config::ProviderEntry {
+            name: name.into(),
+            type_: right_agent_config::ProviderType::Generic,
+            label: None,
+            generic: Some(right_agent_config::GenericProvider {
+                env_var: env.into(),
+                upstream_hosts: hosts.iter().map(|h| h.to_string()).collect(),
+                upstream_path_prefix: path.map(|p| p.to_string()),
+            }),
+        }
+    }
+    fn builtin(name: &str, slug: &str) -> right_agent_config::ProviderEntry {
+        right_agent_config::ProviderEntry {
+            name: name.into(),
+            type_: right_agent_config::ProviderType::BuiltIn(slug.into()),
+            label: None,
+            generic: None,
+        }
+    }
+
+    #[test]
+    fn create_when_no_env_var_match() {
+        let src = builtin("agent-a-provider", "right-fal");
+        let plan = plan_copy("agent-a", &src, "FAL_KEY", &[], false, None).unwrap();
+        match plan {
+            CopyPlan::Create {
+                type_,
+                label,
+                generic,
+            } => {
+                assert_eq!(type_, "right-fal");
+                assert_eq!(label.as_deref(), Some("fal"));
+                assert!(generic.is_none());
+            }
+            _ => panic!("expected Create"),
+        }
+    }
+
+    #[test]
+    fn create_label_override_wins() {
+        let src = builtin("agent-a-provider", "right-fal");
+        let plan = plan_copy("agent-a", &src, "FAL_KEY", &[], false, Some("media")).unwrap();
+        match plan {
+            CopyPlan::Create { label, .. } => assert_eq!(label.as_deref(), Some("media")),
+            _ => panic!("expected Create"),
+        }
+    }
+
+    #[test]
+    fn create_collision_without_overwrite_errors() {
+        let src = builtin("agent-a-provider", "right-fal");
+        let dest = vec![builtin("other-fal", "right-fal")];
+        let err = plan_copy("agent-a", &src, "FAL_KEY", &dest, false, None).unwrap_err();
+        assert!(matches!(err, ProviderApiError::EnvVarCollision { .. }));
+    }
+
+    #[test]
+    fn overwrite_without_match_errors() {
+        let src = builtin("agent-a-provider", "right-fal");
+        let err = plan_copy("agent-a", &src, "FAL_KEY", &[], true, None).unwrap_err();
+        assert!(matches!(err, ProviderApiError::CopyConflict { .. }));
+    }
+
+    #[test]
+    fn overwrite_type_mismatch_errors() {
+        let src = generic("agent-a-provider", "FAL_KEY", &["fal.run"], Some("/v1"));
+        let dest = vec![builtin("other-fal", "right-fal")];
+        let err = plan_copy("agent-a", &src, "FAL_KEY", &dest, true, None).unwrap_err();
+        assert!(matches!(err, ProviderApiError::CopyConflict { .. }));
+    }
+
+    #[test]
+    fn overwrite_builtin_is_credential_only() {
+        let src = builtin("agent-a-provider", "right-fal");
+        let dest = vec![builtin("other-fal", "right-fal")];
+        let plan = plan_copy("agent-a", &src, "FAL_KEY", &dest, true, None).unwrap();
+        match plan {
+            CopyPlan::Overwrite {
+                dest_name,
+                resync_generic,
+            } => {
+                assert_eq!(dest_name, "other-fal");
+                assert!(resync_generic.is_none());
+            }
+            _ => panic!("expected Overwrite"),
+        }
+    }
+
+    #[test]
+    fn overwrite_generic_resyncs_only_when_config_differs() {
+        let src = generic(
+            "agent-a-provider",
+            "FAL_KEY",
+            &["fal.run", "queue.fal.run"],
+            Some("/v1"),
+        );
+        let same = vec![generic(
+            "other-fal",
+            "FAL_KEY",
+            &["fal.run", "queue.fal.run"],
+            Some("/v1"),
+        )];
+        match plan_copy("agent-a", &src, "FAL_KEY", &same, true, None).unwrap() {
+            CopyPlan::Overwrite { resync_generic, .. } => assert!(resync_generic.is_none()),
+            _ => panic!("expected Overwrite"),
+        }
+        let diff = vec![generic("other-fal", "FAL_KEY", &["fal.run"], Some("/v1"))];
+        match plan_copy("agent-a", &src, "FAL_KEY", &diff, true, None).unwrap() {
+            CopyPlan::Overwrite { resync_generic, .. } => {
+                let g = resync_generic.expect("resync");
+                assert_eq!(g.upstream_hosts, vec!["fal.run", "queue.fal.run"]);
+            }
+            _ => panic!("expected Overwrite"),
+        }
+    }
+
+    #[test]
+    fn create_generic_source_maps_config() {
+        let src = generic(
+            "agent-a-provider",
+            "FAL_KEY",
+            &["fal.run", "queue.fal.run"],
+            Some("/v1"),
+        );
+        let plan = plan_copy("agent-a", &src, "FAL_KEY", &[], false, None).unwrap();
+        match plan {
+            CopyPlan::Create {
+                type_,
+                label,
+                generic,
+            } => {
+                assert_eq!(type_, "generic");
+                assert_eq!(label.as_deref(), Some("fal"));
+                let g = generic.expect("generic create body");
+                assert_eq!(g.env_var, "FAL_KEY");
+                assert_eq!(
+                    g.upstream_hosts,
+                    Some(vec!["fal.run".to_string(), "queue.fal.run".to_string()])
+                );
+                assert_eq!(g.upstream_path_prefix, Some("/v1".to_string()));
+                assert!(g.upstream_host.is_none());
+            }
+            _ => panic!("expected Create"),
+        }
+    }
+
+    #[test]
+    fn create_label_none_when_name_lacks_agent_prefix() {
+        let src = builtin("alice-fal", "right-fal");
+        let plan = plan_copy("bob", &src, "FAL_KEY", &[], false, None).unwrap();
+        match plan {
+            CopyPlan::Create { label, .. } => assert!(label.is_none()),
+            _ => panic!("expected Create"),
+        }
+    }
+
+    #[test]
+    fn create_generic_source_missing_block_errors() {
+        let src = right_agent_config::ProviderEntry {
+            name: "agent-a-provider".into(),
+            type_: right_agent_config::ProviderType::Generic,
+            label: None,
+            generic: None,
+        };
+        let err = plan_copy("agent-a", &src, "FAL_KEY", &[], false, None).unwrap_err();
+        assert!(matches!(err, ProviderApiError::InvalidName { .. }));
+    }
+}
+
 fn provider_gateway_type(entry: &right_agent_config::ProviderEntry) -> String {
     match &entry.type_ {
         right_agent_config::ProviderType::Generic => {
