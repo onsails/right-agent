@@ -22,10 +22,19 @@ fn splash_ascii() {
 }
 
 #[test]
-fn splash_color_has_ansi_no_unicode_loss() {
+fn splash_color_wordmark_is_ruby_and_muted() {
     let s = splash(Theme::Color, "0.10.2", "tagline");
     assert!(s.contains(ESC), "color splash should emit ANSI");
-    assert!(s.contains("right agent v0.10.2"));
+    // "right" in ruby, "agent" in muted; version stays plain.
+    assert!(
+        s.contains("\x1b[38;2;199;95;136m"),
+        "wordmark 'right' not ruby: {s:?}"
+    );
+    assert!(
+        s.contains("\x1b[38;2;182;168;176m"),
+        "wordmark 'agent' not muted: {s:?}"
+    );
+    assert!(s.contains("v0.10.2"), "version text missing: {s:?}");
 }
 
 #[test]
