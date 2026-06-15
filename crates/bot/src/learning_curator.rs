@@ -590,7 +590,7 @@ pub(crate) async fn run_if_due(
             match crate::cc::invocation::wait_with_output_or_kill(child, CURATOR_TIMEOUT).await {
                 Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
                     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                    if let Some(b) = crate::cc::stream::parse_usage_full(&stdout) {
+                    if let Some(b) = curator_usage_from_stdout(&stdout) {
                         if let Err(e) =
                             right_agent::usage::insert::insert_learning_curator(&conn, &b).await
                         {
@@ -822,7 +822,7 @@ async fn run_report_only_pass(
                 {
                     Ok(crate::cc::invocation::ChildOutput::Completed(output)) => {
                         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                        let usage = crate::cc::stream::parse_usage_full(&stdout);
+                        let usage = curator_usage_from_stdout(&stdout);
                         if let Some(b) = usage.as_ref() {
                             if let Err(e) =
                                 right_agent::usage::insert::insert_learning_curator(conn, b).await
@@ -925,6 +925,14 @@ pub(crate) struct CuratorPlanAction {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct CuratorPlan {
     pub actions: Vec<CuratorPlanAction>,
+}
+
+/// Parse the usage breakdown from a curator fork's multi-line stream-json
+/// stdout. `parse_usage_full` expects a single result-line object, so extract
+/// the terminal result line first. (Passing full NDJSON directly always fails.)
+fn curator_usage_from_stdout(stdout: &str) -> Option<right_agent::usage::UsageBreakdown> {
+    let line = crate::cc::stream::last_result_line(stdout)?;
+    crate::cc::stream::parse_usage_full(&line)
 }
 
 /// Parse the structured curator plan from a report-only fork's stdout. Reads the
@@ -1475,6 +1483,24 @@ mod tests {
     fn idle_secs_positive_converts_to_utc() {
         let got = idle_secs_to_activity(1_700_000_000).unwrap();
         assert_eq!(got, DateTime::from_timestamp(1_700_000_000, 0).unwrap());
+    }
+
+    #[test]
+    fn curator_usage_from_multiline_stdout_extracts_cost() {
+        let stdout = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\"}}\n",
+            "{\"type\":\"result\",\"total_cost_usd\":0.123,\"num_turns\":2,\"session_id\":\"s1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":7,\"cache_creation_input_tokens\":3}}\n",
+        );
+        let b = curator_usage_from_stdout(stdout).expect("usage parsed from result line");
+        assert!((b.total_cost_usd - 0.123).abs() < 1e-9);
+        assert_eq!(b.cache_read_tokens, 7);
+        assert_eq!(b.cache_creation_tokens, 3);
+    }
+
+    #[test]
+    fn curator_usage_from_stdout_none_without_result_line() {
+        assert!(curator_usage_from_stdout("{\"type\":\"system\"}\n").is_none());
     }
 
     #[test]
