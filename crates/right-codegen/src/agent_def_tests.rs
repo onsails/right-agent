@@ -1,7 +1,7 @@
 use crate::{
-    BG_CONTINUATION_SCHEMA_JSON, BOOTSTRAP_SCHEMA_JSON, CRON_SCHEMA_JSON, CURATOR_SYSTEM_PROMPT,
-    PROBE_WRITER_ANCHOR_TEMPLATE, PROBE_WRITER_INSTRUCTIONS, REPLY_SCHEMA_JSON,
-    generate_system_prompt,
+    BG_CONTINUATION_SCHEMA_JSON, BOOTSTRAP_SCHEMA_JSON, CRON_SCHEMA_JSON, CURATOR_PLAN_SCHEMA,
+    CURATOR_REPORT_PROMPT, CURATOR_SYSTEM_PROMPT, PROBE_WRITER_ANCHOR_TEMPLATE,
+    PROBE_WRITER_INSTRUCTIONS, REPLY_SCHEMA_JSON, generate_system_prompt,
 };
 
 #[test]
@@ -819,4 +819,17 @@ fn curator_system_prompt_mentions_consolidation_and_archive_only() {
             .contains("never delete")
     );
     assert!(CURATOR_SYSTEM_PROMPT.contains("rightx-"));
+}
+
+#[test]
+fn curator_plan_schema_is_valid_json_with_actions() {
+    let v: serde_json::Value = serde_json::from_str(CURATOR_PLAN_SCHEMA).unwrap();
+    assert!(v["properties"]["actions"].is_object());
+}
+
+#[test]
+fn curator_report_prompt_forbids_writes() {
+    let p = CURATOR_REPORT_PROMPT;
+    assert!(p.contains("MUST NOT write"));
+    assert!(p.contains("Read"));
 }

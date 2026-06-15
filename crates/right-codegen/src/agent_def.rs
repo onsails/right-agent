@@ -180,6 +180,45 @@ Tools available: Read, Bash (for `mv` into `.archive/`), \
 other tools.
 ";
 
+/// JSON schema for the read-only `report_only` curator pass: a list of proposed
+/// consolidation actions. The model writes nothing; it returns this plan.
+pub const CURATOR_PLAN_SCHEMA: &str = r#"{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "type": "string", "enum": ["merge", "demote", "archive"] },
+          "skills": { "type": "array", "items": { "type": "string" } },
+          "target": { "type": ["string", "null"] },
+          "rationale": { "type": "string" }
+        },
+        "required": ["kind", "skills", "rationale"]
+      }
+    }
+  },
+  "required": ["actions"]
+}"#;
+
+/// System prompt for the read-only `report_only` curator pass. Same analysis as
+/// `CURATOR_SYSTEM_PROMPT`, but the model PROPOSES instead of writing.
+pub const CURATOR_REPORT_PROMPT: &str = "\
+You are the Right Agent skill CURATOR in REPORT-ONLY mode. Analyze the \
+inventory and propose consolidations of agent-created `rightx-*` skills. \
+Prefer broader umbrella skills over narrow near-duplicates.
+
+You MUST NOT write, move, archive, or edit any file. Use only the `Read` tool \
+to inspect specific `SKILL.md` bodies. Return your plan as JSON matching the \
+provided schema: a list of proposed actions, each with `kind` \
+(merge|demote|archive), the `skills` involved, an optional umbrella `target`, \
+and a one-sentence `rationale`. Do NOT propose touching skills with \
+`created_by=\"foreground\"`, `\"bundled\"`, or `pinned=true`.
+";
+
 /// Generate the base system prompt for all agent modes.
 ///
 /// This replaces CC's default system prompt via `--system-prompt-file`.
