@@ -670,8 +670,8 @@ watch(rotateCredential, () => {
 
 .notice.warn {
   color: var(--tg-theme-text-color, #17212b);
-  background: rgba(214, 165, 26, 0.14);
-  border: 1px solid rgba(214, 165, 26, 0.4);
+  background: rgba(205, 161, 75, 0.14);
+  border: 1px solid rgba(205, 161, 75, 0.4);
   border-radius: 7px;
   padding: 6px 8px;
 }

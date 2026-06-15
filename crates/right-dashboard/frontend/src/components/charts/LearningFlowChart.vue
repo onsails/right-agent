@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { ComposeOption, SankeySeriesOption, TooltipComponentOption } from 'echarts'
 import AsyncVChart from './AsyncVChart.vue'
+import { jewelChartBase } from './jewelChart'
 import type { LearningFlowEdge, LearningFlowNode } from '../../types'
 
 type LearningFlowChartOption = ComposeOption<SankeySeriesOption | TooltipComponentOption>
@@ -30,7 +31,8 @@ function selectNode(event: ChartClickEvent): void {
 }
 
 const option = computed<LearningFlowChartOption>(() => ({
-  tooltip: { trigger: 'item' },
+  ...jewelChartBase,
+  tooltip: { ...jewelChartBase.tooltip, trigger: 'item' },
   series: [
     {
       type: 'sankey',
