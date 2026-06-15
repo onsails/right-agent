@@ -19,7 +19,10 @@ import type {
   PinSkillRequest,
   PinSkillResponse,
   ProviderCreateBody,
+  ProviderExportBody,
   ProviderGenericBody,
+  ProviderImportBody,
+  ProviderPeer,
   ProviderProfileView,
   ProviderView,
   RunDetailResponse,
@@ -199,6 +202,24 @@ export function providerConfigUpdate(name: string, body: Partial<ProviderGeneric
 export function providerRemove(name: string): Promise<void> {
   return requestJson<void>(`api/v1/providers/${encodeURIComponent(name)}`, {
     method: 'DELETE',
+  })
+}
+
+export function providerPeers(): Promise<{ peers: ProviderPeer[] }> {
+  return requestJson<{ peers: ProviderPeer[] }>('api/v1/providers/peers')
+}
+
+export function providerImport(body: ProviderImportBody): Promise<ProviderView> {
+  return requestJson<ProviderView>('api/v1/providers/import', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function providerExport(body: ProviderExportBody): Promise<ProviderView> {
+  return requestJson<ProviderView>('api/v1/providers/export', {
+    method: 'POST',
+    body: JSON.stringify(body),
   })
 }
 
