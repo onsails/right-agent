@@ -52,6 +52,9 @@ pub(crate) const PROMPT_LABELS: &[&str] = &[
     "curator min idle hours:",
     "curator stale after days:",
     "curator archive after days:",
+    "curator circuit: consecutive failures before the circuit opens:",
+    "curator circuit: cooldown hours while open:",
+    "curator mode (apply | report_only):",
     // sandbox mode — label + options (shared with init.rs)
     "sandbox mode:",
     "openshell — isolated container (recommended)",
@@ -1286,6 +1289,54 @@ fn learning_setup(
         "prefilter baseline minimum sample size",
     )?;
 
+    // curator_circuit_failure_threshold
+    let Some(curator_circuit_failure_threshold_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("curator circuit: consecutive failures before the circuit opens:")
+            .with_default(&existing.curator_circuit_failure_threshold.to_string())
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_circuit_failure_threshold = parse_u32_positive(
+        curator_circuit_failure_threshold_input.trim(),
+        existing.curator_circuit_failure_threshold,
+        "curator circuit failure threshold",
+    )?;
+
+    // curator_circuit_cooldown_hours
+    let Some(curator_circuit_cooldown_hours_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("curator circuit: cooldown hours while open:")
+            .with_default(&existing.curator_circuit_cooldown_hours.to_string())
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_circuit_cooldown_hours = parse_u32_positive(
+        curator_circuit_cooldown_hours_input.trim(),
+        existing.curator_circuit_cooldown_hours,
+        "curator circuit cooldown hours",
+    )?;
+
+    // curator_mode
+    let mode_default = match existing.curator_mode {
+        right_agent::agent::types::CuratorMode::Apply => "apply",
+        right_agent::agent::types::CuratorMode::ReportOnly => "report_only",
+    };
+    let Some(curator_mode_input) = right_agent::init::inquire_back(|| {
+        inquire::Text::new("curator mode (apply | report_only):")
+            .with_default(mode_default)
+            .prompt()
+    })?
+    else {
+        return Ok(None);
+    };
+    let curator_mode = match curator_mode_input.trim() {
+        "report_only" => right_agent::agent::types::CuratorMode::ReportOnly,
+        _ => right_agent::agent::types::CuratorMode::Apply,
+    };
+
     Ok(Some(right_agent::agent::types::LearningConfig {
         prefilter_enabled,
         prefilter_model,
@@ -1304,9 +1355,9 @@ fn learning_setup(
         curator_cost_spike_min_floor_usd,
         curator_skill_change_threshold,
         curator_min_cooldown_hours,
-        curator_circuit_failure_threshold: existing.curator_circuit_failure_threshold,
-        curator_circuit_cooldown_hours: existing.curator_circuit_cooldown_hours,
-        curator_mode: existing.curator_mode,
+        curator_circuit_failure_threshold,
+        curator_circuit_cooldown_hours,
+        curator_mode,
         baseline_window_days,
         baseline_min_sample,
         // Deprecated fields — leave at None.
