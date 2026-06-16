@@ -9,7 +9,7 @@ const {
 const starLabel = formatStars(await getStars());
 ---
 <!doctype html>
-<html lang="en" data-tex="cardstock" data-tone="plum">
+<html lang="en" data-tex="cardstock" data-tone="plum" data-accent="champagne">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -274,6 +274,18 @@ const starLabel = formatStars(await getStars());
           <button type="button" class="paper-chip" data-tone-choice="ink" aria-pressed="false">ink</button>
         </div>
       </div>
+      <div class="paper-row">
+        <span class="paper-label">accent</span>
+        <div class="paper-choices">
+          <button type="button" class="paper-chip" data-accent-choice="gold" aria-pressed="false">gold</button>
+          <button type="button" class="paper-chip" data-accent-choice="champagne" aria-pressed="false">champagne</button>
+          <button type="button" class="paper-chip" data-accent-choice="amber" aria-pressed="false">amber</button>
+          <button type="button" class="paper-chip" data-accent-choice="rose" aria-pressed="false">rose</button>
+          <button type="button" class="paper-chip" data-accent-choice="coral" aria-pressed="false">coral</button>
+          <button type="button" class="paper-chip" data-accent-choice="sage" aria-pressed="false">sage</button>
+          <button type="button" class="paper-chip" data-accent-choice="lilac" aria-pressed="false">lilac</button>
+        </div>
+      </div>
     </div>
     <!-- PAPER-EXPERIMENT:end -->
 
@@ -309,8 +321,10 @@ const starLabel = formatStars(await getStars());
       const root = document.documentElement;
       const texChoices = ['cardstock', 'halftone', 'crosshatch', 'concrete', 'canvas', 'grunge', 'speckle', 'kraft', 'coldpress', 'letterpress', 'corrugated', 'deckle', 'sandpaper', 'burlap', 'slate', 'leather', 'cork'];
       const toneChoices = ['plum', 'kraft', 'slate', 'sepia', 'olive', 'wine', 'ink'];
+      const accentChoices = ['gold', 'champagne', 'amber', 'rose', 'coral', 'sage', 'lilac'];
       const texButtons = Array.from(document.querySelectorAll('[data-tex-choice]')) as HTMLButtonElement[];
       const toneButtons = Array.from(document.querySelectorAll('[data-tone-choice]')) as HTMLButtonElement[];
+      const accentButtons = Array.from(document.querySelectorAll('[data-accent-choice]')) as HTMLButtonElement[];
       const setTexChoice = (next: string, persist = true) => {
         const choice = texChoices.includes(next) ? next : 'cardstock';
         root.dataset.tex = choice;
@@ -331,19 +345,35 @@ const starLabel = formatStars(await getStars());
           } catch {}
         }
       };
+      const setAccentChoice = (next: string, persist = true) => {
+        const choice = accentChoices.includes(next) ? next : 'champagne';
+        root.dataset.accent = choice;
+        for (const button of accentButtons) button.setAttribute('aria-pressed', String(button.dataset.accentChoice === choice));
+        if (persist) {
+          try {
+            localStorage.setItem('accent', choice);
+          } catch {}
+        }
+      };
       let storedTex = 'cardstock';
       let storedTone = 'plum';
+      let storedAccent = 'champagne';
       try {
         storedTex = localStorage.getItem('tex') || 'cardstock';
         storedTone = localStorage.getItem('tone') || 'plum';
+        storedAccent = localStorage.getItem('accent') || 'champagne';
       } catch {}
       setTexChoice(storedTex, false);
       setToneChoice(storedTone, false);
+      setAccentChoice(storedAccent, false);
       for (const button of texButtons) {
         button.addEventListener('click', () => setTexChoice(button.dataset.texChoice || 'cardstock'));
       }
       for (const button of toneButtons) {
         button.addEventListener('click', () => setToneChoice(button.dataset.toneChoice || 'plum'));
+      }
+      for (const button of accentButtons) {
+        button.addEventListener('click', () => setAccentChoice(button.dataset.accentChoice || 'champagne'));
       }
       /* PAPER-EXPERIMENT:end */
       let activeSection: HTMLElement | null = null;
