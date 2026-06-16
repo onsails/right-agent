@@ -110,6 +110,11 @@ fn generic_provider_profiles_for_config(
 
     let mut providers = Vec::new();
     for entry in config.providers() {
+        // Borrowed (shared) records reference a profile owned & imported by the
+        // owner agent; never import/own it here.
+        if entry.is_borrowed() {
+            continue;
+        }
         match &entry.type_ {
             right_agent_config::ProviderType::Generic => {
                 let generic = entry.generic.as_ref().ok_or_else(|| {
@@ -163,6 +168,9 @@ async fn heal_drifted_generic_profiles(
 ) -> miette::Result<()> {
     use right_openshell::managed_profiles::EnsureOutcome;
     for entry in config.providers() {
+        if entry.is_borrowed() {
+            continue;
+        }
         let right_agent_config::ProviderType::Generic = entry.type_ else {
             continue;
         };
@@ -1094,5 +1102,56 @@ mod tests {
             ..empty
         };
         assert!(provider_policy_reload_needed(&[], &detached, &unchanged));
+    }
+
+    #[test]
+    fn generic_profiles_skip_borrowed_entries() {
+        // owned generic provider + borrowed generic provider (shared_from set)
+        // only the owned one must appear in the returned profile list.
+        let config = AgentConfig {
+            sandbox: Some(right_agent_config::SandboxConfig {
+                providers: vec![
+                    right_agent_config::ProviderEntry {
+                        name: "acme-aaaaaa".into(),
+                        type_: right_agent_config::ProviderType::Generic,
+                        label: None,
+                        generic: Some(right_agent_config::GenericProvider {
+                            env_var: "ACME_KEY".into(),
+                            upstream_hosts: vec!["api.acme.com".into()],
+                            upstream_path_prefix: None,
+                        }),
+                        shared_from: None,
+                    },
+                    right_agent_config::ProviderEntry {
+                        name: "fal-bbbbbb".into(),
+                        type_: right_agent_config::ProviderType::Generic,
+                        label: None,
+                        generic: Some(right_agent_config::GenericProvider {
+                            env_var: "FAL_KEY".into(),
+                            upstream_hosts: vec!["fal.run".into()],
+                            upstream_path_prefix: None,
+                        }),
+                        shared_from: Some("riskoff".into()),
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let profiles = generic_provider_profiles_for_config("borrower", &config).unwrap();
+        let owned_id =
+            right_openshell::managed_profiles::generic_provider_profile_id("acme-aaaaaa");
+        let borrowed_id =
+            right_openshell::managed_profiles::generic_provider_profile_id("fal-bbbbbb");
+
+        assert!(
+            profiles.iter().any(|p| p.id() == owned_id),
+            "owned profile must be ensured; got: {profiles:?}"
+        );
+        assert!(
+            !profiles.iter().any(|p| p.id() == borrowed_id),
+            "borrowed profile must NOT be ensured; got: {profiles:?}"
+        );
     }
 }

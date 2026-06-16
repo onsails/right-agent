@@ -54,6 +54,10 @@ required-features = ["test-support"]
 name = "ci_openshell_provider_multi_attach"
 required-features = ["test-support"]
 
+[[test]]
+name = "ci_openshell_provider_borrowed_reconcile"
+required-features = ["test-support"]
+
 [package.metadata.cargo-machete]
 ignored = ["prost", "prost-types", "tonic-prost", "tonic-prost-build"]
 # prost/prost-types/tonic-prost: used via fully-qualified paths inside code
