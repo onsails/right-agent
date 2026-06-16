@@ -3689,6 +3689,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
  "walkdir",
  "which 8.0.3",
 ]
