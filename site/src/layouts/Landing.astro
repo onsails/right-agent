@@ -21,19 +21,46 @@ const starLabel = formatStars(await getStars());
   </head>
   <body>
     <div class="fx void"></div>
-    <div class="fx depthbloom" data-depth="4"></div>
-    <div class="fx nebula" data-depth="6"></div>
-    <div class="fx stars-far twinkle" data-depth="16"></div>
-    <div class="fx stars-near" data-depth="30"></div>
-    <div class="fx ceiling"></div>
-    <div class="fx horizon"></div>
-    <div class="fx horizon-glow"></div>
-    <div class="fx grain"></div>
-    <div class="fx scan"></div>
-
+    <div class="fx paper" aria-hidden="true"></div>
+    <div class="fx bgfx bgfx-telemetry bgfx-telemetry-1" aria-hidden="true">
+      <div class="bgtelem-col">
+        <span>obs · deep-field</span>
+        <span>sig <i class="bgtelem-flicker">●●●●●</i></span>
+        <span>lat 12ms</span>
+        <span>0x7f3a · sandbox</span>
+        <span>RA 14h · DEC +12°</span>
+        <span>coord 41.2 / 73.9</span>
+      </div>
+      <div class="bgtelem-col">
+        <span>agent runtime · nominal</span>
+        <span>hex 4d 41 50 2f 31</span>
+        <span>vault ext · sealed</span>
+        <span>sig <i class="bgtelem-flicker bgtelem-flicker-alt">●●●●●</i></span>
+        <span>obs · low-noise</span>
+        <span>0x11bd · host rail</span>
+      </div>
+      <div class="bgtelem-col">
+        <span>RA 02h · DEC -04°</span>
+        <span>lat 09ms · stable</span>
+        <span>coord 08.6 / 12.4</span>
+        <span>sig ●●●○○</span>
+        <span>obs · deep-field</span>
+        <span>0x92aa · link clear</span>
+      </div>
+    </div>
+    <div class="fx bgfx bgfx-telemetry bgfx-telemetry-2" aria-hidden="true">
+      <div class="bgtelem-row">
+        <span>north vector · 18.4</span><span>RA 14h · DEC +12°</span><span>lat 12ms</span><span>sig <i class="bgtelem-flicker">●●●●●</i></span><span>obs · deep-field</span><span>0x7f3a · nominal</span>
+      </div>
+      <div class="bgtelem-row">
+        <span>coord 41.2 / 73.9</span><span>channel · sealed</span><span>lat 09ms</span><span>obs · quiet-band</span><span>0x4be1 · uplink</span><span>sig ●●●○○</span>
+      </div>
+      <div class="bgtelem-row">
+        <span>fig 02 · proxy rail</span><span>RA 02h · DEC -04°</span><span>hex 5a 31 63</span><span>obs · deep-field</span><span>lat 16ms</span><span>sig <i class="bgtelem-flicker bgtelem-flicker-alt">●●●●○</i></span>
+      </div>
+    </div>
     <div class="hud" aria-hidden="true">
       <span class="edge tl"></span><span class="edge tr"></span><span class="edge bl"></span><span class="edge br"></span>
-      <span class="read r-tr">obs · deep-field</span>
       <span class="read r-bl">secure-by-default</span>
     </div>
 
@@ -64,31 +91,50 @@ const starLabel = formatStars(await getStars());
     <slot />
 
     <script>
-      const layers = Array.from(document.querySelectorAll('.fx[data-depth]')) as HTMLElement[];
-      let mx = 0, my = 0, sy = 0, tmx = 0, tmy = 0;
-      const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
-      addEventListener('scroll', () => { sy = scrollY; }, { passive: true });
-      if (!reduce) {
-        addEventListener('mousemove', (e) => {
-          tmx = (e.clientX / innerWidth - .5) * 2;
-          tmy = (e.clientY / innerHeight - .5) * 2;
-        }, { passive: true });
-        const tick = () => {
-          mx += (tmx - mx) * .06; my += (tmy - my) * .06;
-          for (const el of layers) {
-            const d = parseFloat(el.dataset.depth || '0');
-            el.style.transform = `translate3d(${(-mx * d).toFixed(2)}px, ${(-my * d - sy * (d / 90)).toFixed(2)}px, 0)`;
+      const sections = Array.from(document.querySelectorAll('.section')) as HTMLElement[];
+      let activeSection: HTMLElement | null = null;
+      const clearActiveSection = () => {
+        if (activeSection) {
+          activeSection.removeAttribute('data-active');
+          activeSection = null;
+        }
+        for (const section of sections) section.removeAttribute('data-active');
+      };
+      const updateActiveSection = () => {
+        const viewportCenter = innerHeight / 2;
+        let nearest: HTMLElement | null = null;
+        let nearestDistance = Number.POSITIVE_INFINITY;
+        for (const section of sections) {
+          const rect = section.getBoundingClientRect();
+          const center = rect.top + rect.height / 2;
+          const distance = Math.abs(center - viewportCenter);
+          if (distance < nearestDistance) {
+            nearestDistance = distance;
+            nearest = section;
           }
-          requestAnimationFrame(tick);
-        };
+        }
+        if (nearest !== activeSection) {
+          clearActiveSection();
+          if (nearest) {
+            nearest.dataset.active = 'true';
+            activeSection = nearest;
+          }
+        }
+      };
+
+      const tick = () => {
+        updateActiveSection();
+
         requestAnimationFrame(tick);
-      }
+      };
+      updateActiveSection();
+      requestAnimationFrame(tick);
       const io = new IntersectionObserver((es) => {
         for (const e of es) if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
       }, { threshold: .12 });
       document.querySelectorAll('.rev:not(.in)').forEach((el) => io.observe(el));
       document.querySelectorAll<HTMLElement>('.card').forEach((c) => {
-        c.addEventListener('mousemove', (e) => {
+        c.addEventListener('pointermove', (e) => {
           const r = c.getBoundingClientRect();
           c.style.setProperty('--gx', (e.clientX - r.left) + 'px');
           c.style.setProperty('--gy', (e.clientY - r.top) + 'px');
