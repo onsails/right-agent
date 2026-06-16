@@ -976,6 +976,7 @@ mod tests {
                         type_: right_agent_config::ProviderType::BuiltIn("right-github".into()),
                         label: None,
                         generic: None,
+                        shared_from: None,
                     },
                     right_agent_config::ProviderEntry {
                         name: "right-acme".into(),
@@ -986,6 +987,7 @@ mod tests {
                             upstream_hosts: vec!["api.acme.test".into(), "queue.acme.test".into()],
                             upstream_path_prefix: Some("/v1".into()),
                         }),
+                        shared_from: None,
                     },
                 ],
                 ..Default::default()
@@ -1011,6 +1013,7 @@ mod tests {
                     type_: right_agent_config::ProviderType::Generic,
                     label: None,
                     generic: None,
+                    shared_from: None,
                 }],
                 ..Default::default()
             }),
@@ -1035,6 +1038,7 @@ mod tests {
                 upstream_hosts: vec!["api.acme.test".into(), "queue.acme.test".into()],
                 upstream_path_prefix: Some("/v1".into()),
             }),
+            shared_from: None,
         };
 
         match provider_composition_expectation("right", &entry).unwrap() {
@@ -1057,6 +1061,7 @@ mod tests {
             type_: right_agent_config::ProviderType::BuiltIn("right-github".into()),
             label: None,
             generic: None,
+            shared_from: None,
         };
 
         assert!(matches!(
