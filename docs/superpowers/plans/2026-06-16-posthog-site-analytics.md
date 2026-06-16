@@ -6,7 +6,7 @@
 
 **Architecture:** A shared `PostHog.astro` component renders the official inline browser snippet only in production builds when public build-time env vars are present. The landing layout imports that component directly; Starlight gets it through a `Head` component override that preserves Starlight's default head content. A small Node assertion script checks built HTML for enabled and disabled builds, including both `/` and `/docs/`.
 
-**Tech Stack:** Astro 6, Starlight, Bun, GitHub Pages Actions variables, PostHog browser snippet.
+**Tech Stack:** Astro 6, Starlight, Bun, GitHub Pages Actions variables with secrets fallback, PostHog browser snippet.
 
 ---
 
@@ -18,7 +18,7 @@
 - Modify `site/src/layouts/Landing.astro`: import and render `PostHog` in `<head>`.
 - Modify `site/astro.config.mjs`: register the Starlight `Head` override without removing the existing `Banner` override.
 - Modify `site/package.json`: add a `test:analytics` script.
-- Modify `.github/workflows/static.yml`: pass repository Actions variables into the site build step.
+- Modify `.github/workflows/static.yml`: pass repository Actions variables, or matching Actions secrets as fallback, into the site build step.
 
 ## Task 1: Add Build-Output Assertions
 
@@ -304,8 +304,10 @@ In `.github/workflows/static.yml`, change the `Build site (Bun, in the devenv si
 ```yaml
       - name: Build site (Bun, in the devenv site profile)
         env:
-          PUBLIC_POSTHOG_KEY: ${{ vars.PUBLIC_POSTHOG_KEY }}
-          PUBLIC_POSTHOG_HOST: ${{ vars.PUBLIC_POSTHOG_HOST }}
+          # Prefer repository variables; fall back to secrets because these
+          # values are public browser config and may have been entered there.
+          PUBLIC_POSTHOG_KEY: ${{ vars.PUBLIC_POSTHOG_KEY || secrets.PUBLIC_POSTHOG_KEY }}
+          PUBLIC_POSTHOG_HOST: ${{ vars.PUBLIC_POSTHOG_HOST || secrets.PUBLIC_POSTHOG_HOST }}
         run: |
           devenv --profile site shell -- bash -lc \
             'cd site && bun install --frozen-lockfile && bun run build'

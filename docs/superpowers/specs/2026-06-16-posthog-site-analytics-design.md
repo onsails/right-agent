@@ -44,12 +44,14 @@ PUBLIC_POSTHOG_KEY=phc_...
 PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
 ```
 
-Production GitHub Pages uses repository-level Actions variables with the same
-names. The Pages workflow exposes them to the Astro build environment.
+Production GitHub Pages prefers repository-level Actions variables with the same
+names. The Pages workflow falls back to Actions secrets to tolerate existing
+repository setup, then exposes the resolved values to the Astro build
+environment.
 
-The PostHog project key is public browser configuration, not a secret. It still
-must not be hard-coded into committed source because each deploy target should
-control its own project.
+The PostHog project key and host are public browser configuration, not secrets.
+They still must not be hard-coded into committed source because each deploy
+target should control its own project.
 
 ## Tracking Scope
 
