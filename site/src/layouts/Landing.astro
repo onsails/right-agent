@@ -9,7 +9,7 @@ const {
 const starLabel = formatStars(await getStars());
 ---
 <!doctype html>
-<html lang="en" data-tex="fiber" data-tone="dark">
+<html lang="en" data-tex="cardstock" data-tone="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -23,32 +23,65 @@ const starLabel = formatStars(await getStars());
     <div class="fx paper" aria-hidden="true"></div>
     <svg class="paper-defs" width="0" height="0" aria-hidden="true" focusable="false">
       <defs>
-        <filter id="paper-fiber" x="0" y="0" width="100%" height="100%">
-          <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch" result="noise" />
-          <feColorMatrix in="noise" type="saturate" values="0" result="mono" />
-          <feComponentTransfer in="mono">
-            <feFuncR type="gamma" amplitude="1" exponent="0.9" offset="0" />
-            <feFuncG type="gamma" amplitude="1" exponent="0.9" offset="0" />
-            <feFuncB type="gamma" amplitude="1" exponent="0.9" offset="0" />
-            <feFuncA type="table" tableValues="0 0.72" />
-          </feComponentTransfer>
-        </filter>
+        <!-- PAPER-EXPERIMENT:cardstock:start -->
         <filter id="paper-cardstock" x="0" y="0" width="100%" height="100%">
-          <feTurbulence type="fractalNoise" baseFrequency="0.4" numOctaves="2" stitchTiles="stitch" result="noise" />
+          <feTurbulence type="fractalNoise" baseFrequency="0.56" numOctaves="3" stitchTiles="stitch" result="noise" />
           <feColorMatrix in="noise" type="saturate" values="0" result="mono" />
           <feComponentTransfer in="mono">
-            <feFuncR type="gamma" amplitude="1.18" exponent="0.82" offset="0" />
-            <feFuncG type="gamma" amplitude="1.18" exponent="0.82" offset="0" />
-            <feFuncB type="gamma" amplitude="1.18" exponent="0.82" offset="0" />
-            <feFuncA type="table" tableValues="0 0.86" />
+            <feFuncR type="gamma" amplitude="1.28" exponent="0.72" offset="0" />
+            <feFuncG type="gamma" amplitude="1.28" exponent="0.72" offset="0" />
+            <feFuncB type="gamma" amplitude="1.28" exponent="0.72" offset="0" />
+            <feFuncA type="table" tableValues="0 0.94" />
           </feComponentTransfer>
         </filter>
+        <!-- PAPER-EXPERIMENT:cardstock:end -->
+        <!-- PAPER-EXPERIMENT:concrete:start -->
+        <filter id="paper-concrete" x="0" y="0" width="100%" height="100%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.022 0.035" numOctaves="3" stitchTiles="stitch" result="noise" />
+          <feColorMatrix in="noise" type="saturate" values="0" result="mono" />
+          <feComponentTransfer in="mono">
+            <feFuncR type="gamma" amplitude="1.1" exponent="0.88" offset="0" />
+            <feFuncG type="gamma" amplitude="1.1" exponent="0.88" offset="0" />
+            <feFuncB type="gamma" amplitude="1.1" exponent="0.88" offset="0" />
+            <feFuncA type="table" tableValues="0 0.84" />
+          </feComponentTransfer>
+        </filter>
+        <!-- PAPER-EXPERIMENT:concrete:end -->
+        <!-- PAPER-EXPERIMENT:grunge:start -->
+        <filter id="paper-grunge" x="0" y="0" width="100%" height="100%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.015 0.08" numOctaves="5" stitchTiles="stitch" result="noise" />
+          <feColorMatrix
+            in="noise"
+            type="matrix"
+            values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1.4 -0.32"
+            result="boost"
+          />
+          <feComponentTransfer in="boost">
+            <feFuncR type="gamma" amplitude="1.18" exponent="0.66" offset="0" />
+            <feFuncG type="gamma" amplitude="1.18" exponent="0.66" offset="0" />
+            <feFuncB type="gamma" amplitude="1.18" exponent="0.66" offset="0" />
+            <feFuncA type="table" tableValues="0 0.12 0.74 0.98" />
+          </feComponentTransfer>
+        </filter>
+        <!-- PAPER-EXPERIMENT:grunge:end -->
+        <!-- PAPER-EXPERIMENT:speckle:start -->
+        <filter id="paper-speckle" x="0" y="0" width="100%" height="100%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.62" numOctaves="2" stitchTiles="stitch" result="noise" />
+          <feColorMatrix in="noise" type="saturate" values="0" result="mono" />
+          <feComponentTransfer in="mono">
+            <feFuncR type="table" tableValues="0 0 0 0.82 1" />
+            <feFuncG type="table" tableValues="0 0 0 0.82 1" />
+            <feFuncB type="table" tableValues="0 0 0 0.82 1" />
+            <feFuncA type="table" tableValues="0 0 0.72 0.96 1" />
+          </feComponentTransfer>
+        </filter>
+        <!-- PAPER-EXPERIMENT:speckle:end -->
       </defs>
     </svg>
     <!-- PAPER-EXPERIMENT:end -->
-    <div class="fx depthbloom" data-depth="4"></div>
-    <div class="fx nebula" data-depth="6"></div>
-    <div class="fx bgfx bgfx-telemetry bgfx-telemetry-1" data-depth="10" aria-hidden="true">
+    <div class="fx depthbloom"></div>
+    <div class="fx nebula"></div>
+    <div class="fx bgfx bgfx-telemetry bgfx-telemetry-1" aria-hidden="true">
       <div class="bgtelem-col">
         <span>obs · deep-field</span>
         <span>sig <i class="bgtelem-flicker">●●●●●</i></span>
@@ -74,7 +107,7 @@ const starLabel = formatStars(await getStars());
         <span>0x92aa · link clear</span>
       </div>
     </div>
-    <div class="fx bgfx bgfx-telemetry bgfx-telemetry-2" data-depth="18" aria-hidden="true">
+    <div class="fx bgfx bgfx-telemetry bgfx-telemetry-2" aria-hidden="true">
       <div class="bgtelem-row">
         <span>north vector · 18.4</span><span>RA 14h · DEC +12°</span><span>lat 12ms</span><span>sig <i class="bgtelem-flicker">●●●●●</i></span><span>obs · deep-field</span><span>0x7f3a · nominal</span>
       </div>
@@ -100,10 +133,13 @@ const starLabel = formatStars(await getStars());
       <div class="paper-row">
         <span class="paper-label">texture</span>
         <div class="paper-choices">
-          <button type="button" class="paper-chip" data-tex-choice="fiber" aria-pressed="false">fiber</button>
           <button type="button" class="paper-chip" data-tex-choice="cardstock" aria-pressed="false">cardstock</button>
           <button type="button" class="paper-chip" data-tex-choice="halftone" aria-pressed="false">halftone</button>
           <button type="button" class="paper-chip" data-tex-choice="crosshatch" aria-pressed="false">crosshatch</button>
+          <button type="button" class="paper-chip" data-tex-choice="concrete" aria-pressed="false">concrete</button>
+          <button type="button" class="paper-chip" data-tex-choice="canvas" aria-pressed="false">canvas</button>
+          <button type="button" class="paper-chip" data-tex-choice="grunge" aria-pressed="false">grunge</button>
+          <button type="button" class="paper-chip" data-tex-choice="speckle" aria-pressed="false">speckle</button>
         </div>
       </div>
       <div class="paper-row">
@@ -143,16 +179,15 @@ const starLabel = formatStars(await getStars());
     <slot />
 
     <script>
-      const layers = Array.from(document.querySelectorAll('.fx[data-depth]')) as HTMLElement[];
       const sections = Array.from(document.querySelectorAll('.section')) as HTMLElement[];
       /* PAPER-EXPERIMENT:start */
       const root = document.documentElement;
-      const texChoices = ['fiber', 'cardstock', 'halftone', 'crosshatch'];
+      const texChoices = ['cardstock', 'halftone', 'crosshatch', 'concrete', 'canvas', 'grunge', 'speckle'];
       const toneChoices = ['dark', 'warm'];
       const texButtons = Array.from(document.querySelectorAll('[data-tex-choice]')) as HTMLButtonElement[];
       const toneButtons = Array.from(document.querySelectorAll('[data-tone-choice]')) as HTMLButtonElement[];
       const setTexChoice = (next: string, persist = true) => {
-        const choice = texChoices.includes(next) ? next : 'fiber';
+        const choice = texChoices.includes(next) ? next : 'cardstock';
         root.dataset.tex = choice;
         for (const button of texButtons) button.setAttribute('aria-pressed', String(button.dataset.texChoice === choice));
         if (persist) {
@@ -171,23 +206,21 @@ const starLabel = formatStars(await getStars());
           } catch {}
         }
       };
-      let storedTex = 'fiber';
+      let storedTex = 'cardstock';
       let storedTone = 'dark';
       try {
-        storedTex = localStorage.getItem('tex') || 'fiber';
+        storedTex = localStorage.getItem('tex') || 'cardstock';
         storedTone = localStorage.getItem('tone') || 'dark';
       } catch {}
       setTexChoice(storedTex, false);
       setToneChoice(storedTone, false);
       for (const button of texButtons) {
-        button.addEventListener('click', () => setTexChoice(button.dataset.texChoice || 'fiber'));
+        button.addEventListener('click', () => setTexChoice(button.dataset.texChoice || 'cardstock'));
       }
       for (const button of toneButtons) {
         button.addEventListener('click', () => setToneChoice(button.dataset.toneChoice || 'dark'));
       }
       /* PAPER-EXPERIMENT:end */
-      let mx = 0, my = 0, sy = 0, tmx = 0, tmy = 0;
-      const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
       let activeSection: HTMLElement | null = null;
       const clearActiveSection = () => {
         if (activeSection) {
@@ -218,22 +251,7 @@ const starLabel = formatStars(await getStars());
         }
       };
 
-      addEventListener('scroll', () => { sy = scrollY; }, { passive: true });
-      if (!reduce) {
-        addEventListener('mousemove', (e) => {
-          tmx = (e.clientX / innerWidth - .5) * 2;
-          tmy = (e.clientY / innerHeight - .5) * 2;
-        }, { passive: true });
-      }
-
       const tick = () => {
-        if (!reduce) {
-          mx += (tmx - mx) * .06; my += (tmy - my) * .06;
-          for (const el of layers) {
-            const d = parseFloat(el.dataset.depth || '0');
-            el.style.transform = `translate3d(${(-mx * d).toFixed(2)}px, ${(-my * d - sy * (d / 90)).toFixed(2)}px, 0)`;
-          }
-        }
         updateActiveSection();
 
         requestAnimationFrame(tick);
@@ -245,7 +263,7 @@ const starLabel = formatStars(await getStars());
       }, { threshold: .12 });
       document.querySelectorAll('.rev:not(.in)').forEach((el) => io.observe(el));
       document.querySelectorAll<HTMLElement>('.card').forEach((c) => {
-        c.addEventListener('mousemove', (e) => {
+        c.addEventListener('pointermove', (e) => {
           const r = c.getBoundingClientRect();
           c.style.setProperty('--gx', (e.clientX - r.left) + 'px');
           c.style.setProperty('--gy', (e.clientY - r.top) + 'px');
