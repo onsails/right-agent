@@ -46,10 +46,6 @@ code, pre { font-family: var(--mono-code); }
   mask-image: linear-gradient(to bottom, #000 0%, rgba(0,0,0,.4) 30%, transparent 76%); }
 @keyframes flow { to { background-position-y: 64px; } }
 .horizon-glow { bottom: 0; left: 0; right: 0; height: 1px; background: color-mix(in srgb, var(--warm-soft) 55%, transparent); box-shadow: 0 0 60px 8px color-mix(in srgb, var(--warm) 30%, transparent); }
-.grain {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
-  opacity: .045; mix-blend-mode: screen;
-}
 .scan { height: 240px; top: -240px; background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--warm-soft) 6%, transparent) 50%, transparent); animation: sweep 11s cubic-bezier(.6,0,.4,1) infinite; }
 @keyframes sweep { 0%{ top:-240px; opacity:0 } 12%{opacity:1} 88%{opacity:1} 100%{ top:100vh; opacity:0 } }
 
@@ -82,119 +78,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 .pdot { width: 6px; height: 6px; border-radius:50%; background: var(--cyan); box-shadow: 0 0 8px var(--cyan); animation: blink 2.4s ease-in-out infinite; }
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
 
-/* BG-EXPERIMENT:start */
-.bgfx {
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity .35s ease, visibility .35s ease;
-}
-:root[data-bg="a"] .bgfx-wordmark,
-:root[data-bg="b"] .bgfx-telemetry,
-:root[data-bg="c"] .bgfx-manifesto,
-:root[data-bg="d"] .bgfx-blueprint-grid,
-:root[data-bg="d"] .bgfx-blueprint-captions,
-:root[data-bg="d"] .bgfx-blueprint-numerals {
-  opacity: 1;
-  visibility: visible;
-}
-
-.bgswitch {
-  position: fixed;
-  left: 1rem;
-  bottom: 1rem;
-  z-index: 3;
-  display: grid;
-  gap: .4rem;
-  padding: .7rem;
-  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--panel) 72%, transparent);
-  backdrop-filter: blur(14px) saturate(1.05);
-  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent), 0 22px 42px -28px color-mix(in srgb, var(--ink) 55%, transparent);
-}
-.bgswitch-btn {
-  appearance: none;
-  display: grid;
-  grid-template-columns: 1.4rem auto;
-  align-items: center;
-  gap: .6rem;
-  min-width: 12rem;
-  padding: .5rem .65rem;
-  border: 1px solid color-mix(in srgb, var(--line-2) 78%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--bg-2) 68%, transparent);
-  color: var(--muted);
-  font: inherit;
-  font-size: .76rem;
-  text-transform: lowercase;
-  cursor: pointer;
-  transition: border-color .18s ease, color .18s ease, background .18s ease, transform .12s ease;
-}
-.bgswitch-btn:hover {
-  color: var(--text);
-  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
-}
-.bgswitch-btn[aria-pressed="true"] {
-  color: var(--text);
-  border-color: color-mix(in srgb, var(--warm) 42%, transparent);
-  background: color-mix(in srgb, var(--warm) 10%, transparent);
-  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--warm-soft) 14%, transparent);
-}
-.bgswitch-key {
-  display: grid;
-  place-items: center;
-  width: 1.4rem;
-  height: 1.4rem;
-  border-radius: 50%;
-  border: 1px solid color-mix(in srgb, var(--line-2) 84%, transparent);
-  font-family: var(--mono);
-  font-size: .66rem;
-  letter-spacing: .12em;
-  color: var(--warm-soft);
-}
-
-.bgfx-wordmark {
-  inset: -12%;
-  display: grid;
-  align-content: space-between;
-  font-family: var(--display);
-  font-weight: 700;
-  letter-spacing: -.06em;
-  line-height: .8;
-  text-transform: uppercase;
-  white-space: nowrap;
-  mix-blend-mode: screen;
-}
-.bgfx-wordmark span {
-  display: block;
-  width: max-content;
-  color: color-mix(in srgb, var(--text) 7%, transparent);
-  text-shadow: 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent);
-}
-.bgfx-wordmark-1 {
-  padding: 4vh 0 10vh 3vw;
-  font-size: clamp(6rem, 16vw, 18rem);
-}
-.bgfx-wordmark-1 span:nth-child(1) { margin-left: -4vw; }
-.bgfx-wordmark-1 span:nth-child(2) { margin-left: 24vw; color: color-mix(in srgb, var(--warm) 6%, transparent); }
-.bgfx-wordmark-1 span:nth-child(3) { margin-left: 8vw; }
-.bgfx-wordmark-2 {
-  padding: 14vh 0 18vh 12vw;
-  font-size: clamp(5rem, 13vw, 14rem);
-  justify-content: space-around;
-}
-.bgfx-wordmark-2 span:nth-child(1) { margin-left: 26vw; color: color-mix(in srgb, var(--accent) 6%, transparent); }
-.bgfx-wordmark-2 span:nth-child(2) { margin-left: -8vw; }
-.bgfx-wordmark-3 {
-  padding: 8vh 0 12vh 18vw;
-  font-size: clamp(4.4rem, 10vw, 10rem);
-  justify-content: center;
-  gap: 9vh;
-}
-.bgfx-wordmark-3 span:nth-child(2) { margin-left: 34vw; }
-.bgfx-wordmark-3 span:nth-child(3) { margin-left: -10vw; color: color-mix(in srgb, var(--warm) 8%, transparent); }
-
+/* ==================== background telemetry ==================== */
 .bgfx-telemetry {
   inset: 0;
   padding: 6vh 4vw;
@@ -250,117 +134,146 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
   64% { opacity: .72; transform: translate3d(-.12rem, .06rem, 0); }
 }
 
-.bgfx-manifesto {
-  inset: auto 0;
-  height: 18vh;
-  display: flex;
-  align-items: center;
+/* PAPER-EXPERIMENT:start */
+.paper-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
   overflow: hidden;
 }
-.bgfx-manifesto-1 { top: 14vh; }
-.bgfx-manifesto-2 { top: 32vh; }
-.bgfx-manifesto-3 { top: 52vh; }
-.bgfx-manifesto-4 { top: 72vh; }
-.bgband {
-  display: flex;
-  width: max-content;
-  white-space: nowrap;
-  font-family: var(--display);
-  font-size: clamp(2.6rem, 5.6vw, 6rem);
-  font-weight: 700;
-  letter-spacing: -.04em;
-  text-transform: lowercase;
-  color: color-mix(in srgb, var(--text) 6%, transparent);
+.paper {
+  --paper-tint: color-mix(in srgb, var(--bg) 82%, var(--text) 18%);
+  --paper-sheen: color-mix(in srgb, var(--warm-soft) 12%, transparent);
+  --paper-shadow: color-mix(in srgb, var(--ink) 18%, transparent);
+  z-index: 0;
+  opacity: .9;
 }
-.bgband span {
-  display: block;
-  padding-right: 3.5rem;
+.paper::before,
+.paper::after {
+  content: '';
+  position: absolute;
+  inset: 0;
 }
-.bgband-left { animation: bgbandLeft 44s linear infinite; }
-.bgband-right { animation: bgbandRight 52s linear infinite; color: color-mix(in srgb, var(--warm) 7%, transparent); }
-@keyframes bgbandLeft { from { transform: translateX(0); } to { transform: translateX(-50%); } }
-@keyframes bgbandRight { from { transform: translateX(-50%); } to { transform: translateX(0); } }
+.paper::before {
+  background:
+    radial-gradient(120% 95% at 50% 0%, color-mix(in srgb, var(--paper-sheen) 70%, transparent), transparent 58%),
+    radial-gradient(130% 120% at 50% 100%, color-mix(in srgb, var(--paper-shadow) 78%, transparent), transparent 62%),
+    linear-gradient(180deg, color-mix(in srgb, var(--paper-tint) 92%, transparent), color-mix(in srgb, var(--paper-tint) 72%, var(--bg) 28%));
+  mix-blend-mode: screen;
+  opacity: .34;
+}
+.paper::after {
+  background-position: center;
+  background-repeat: repeat;
+}
 
-.bgfx-blueprint-grid,
-.bgfx-blueprint-captions,
-.bgfx-blueprint-numerals { inset: 0; }
-.bgfx-blueprint-grid {
+:root[data-tone="dark"] .paper {
+  --paper-tint: color-mix(in srgb, var(--bg) 84%, var(--text) 16%);
+  --paper-sheen: color-mix(in srgb, var(--warm-soft) 10%, transparent);
+  --paper-shadow: color-mix(in srgb, var(--ink) 16%, transparent);
+}
+:root[data-tone="warm"] .paper {
+  --paper-tint: color-mix(in srgb, var(--bg) 70%, var(--warm) 30%);
+  --paper-sheen: color-mix(in srgb, var(--warm-soft) 26%, transparent);
+  --paper-shadow: color-mix(in srgb, var(--warm) 14%, var(--ink) 86%);
+}
+
+:root[data-tex="fiber"] .paper::after {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220' viewBox='0 0 220 220'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23f)' opacity='0.8'/%3E%3C/svg%3E");
+  background-size: 220px 220px;
+  filter: url(#paper-fiber);
+  mix-blend-mode: soft-light;
+  opacity: .09;
+}
+:root[data-tex="cardstock"] .paper::after {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='280' height='280' viewBox='0 0 280 280'%3E%3Cfilter id='c'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.4' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='280' height='280' filter='url(%23c)' opacity='0.9'/%3E%3C/svg%3E");
+  background-size: 280px 280px;
+  filter: url(#paper-cardstock);
+  mix-blend-mode: overlay;
+  opacity: .14;
+}
+:root[data-tex="halftone"] .paper::after {
   background-image:
-    linear-gradient(color-mix(in srgb, var(--text) 5%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in srgb, var(--text) 4%, transparent) 1px, transparent 1px),
-    linear-gradient(color-mix(in srgb, var(--accent) 6%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in srgb, var(--accent) 5%, transparent) 1px, transparent 1px);
-  background-size: 36px 36px, 36px 36px, 144px 144px, 144px 144px;
-  opacity: .65;
-  -webkit-mask-image: radial-gradient(circle at center, var(--text) 0%, color-mix(in srgb, var(--text) 72%, transparent) 48%, transparent 82%);
-  mask-image: radial-gradient(circle at center, var(--text) 0%, color-mix(in srgb, var(--text) 72%, transparent) 48%, transparent 82%);
+    radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--text) 28%, transparent) 0 1px, transparent 1.15px),
+    radial-gradient(circle at 3px 3px, color-mix(in srgb, var(--warm) 18%, transparent) 0 .9px, transparent 1.05px);
+  background-size: 5px 5px, 5px 5px;
+  mix-blend-mode: soft-light;
+  opacity: .1;
 }
-.bgfx-blueprint-captions {
+:root[data-tex="crosshatch"] .paper::after {
+  background-image:
+    repeating-linear-gradient(45deg, color-mix(in srgb, var(--text) 16%, transparent) 0 1px, transparent 1px 7px),
+    repeating-linear-gradient(-45deg, color-mix(in srgb, var(--warm) 14%, transparent) 0 1px, transparent 1px 8px),
+    linear-gradient(180deg, color-mix(in srgb, var(--text) 4%, transparent), transparent 22%, transparent 78%, color-mix(in srgb, var(--text) 5%, transparent));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent), inset 0 -1px 0 color-mix(in srgb, var(--ink) 10%, transparent);
+  mix-blend-mode: soft-light;
+  opacity: .085;
+}
+
+.paper-switch {
+  position: fixed;
+  left: 1rem;
+  bottom: 1rem;
+  z-index: 3;
+  display: grid;
+  gap: .65rem;
+  width: min(28rem, calc(100vw - 2rem));
+  padding: .8rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 74%, transparent);
+  backdrop-filter: blur(14px) saturate(1.05);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent), 0 22px 42px -28px color-mix(in srgb, var(--ink) 55%, transparent);
+}
+.paper-row {
+  display: grid;
+  gap: .45rem;
+}
+.paper-label {
   font-family: var(--mono);
-  font-size: .72rem;
-  letter-spacing: .22em;
+  font-size: .62rem;
+  letter-spacing: .2em;
   text-transform: uppercase;
-  color: color-mix(in srgb, var(--warm) 7%, transparent);
+  color: var(--warm-soft);
 }
-.bgfx-blueprint-captions span {
-  position: absolute;
-  transform-origin: left top;
+.paper-choices {
+  display: flex;
+  gap: .45rem;
+  flex-wrap: wrap;
 }
-.bgfx-blueprint-captions span:nth-child(1) { top: 18vh; left: 10vw; transform: rotate(-90deg); }
-.bgfx-blueprint-captions span:nth-child(2) { top: 22vh; right: 18vw; transform: rotate(-90deg); }
-.bgfx-blueprint-captions span:nth-child(3) { bottom: 16vh; left: 18vw; }
-.bgfx-blueprint-captions span:nth-child(4) { bottom: 12vh; right: 9vw; transform: rotate(-90deg); }
-.bgfx-blueprint-numerals {
-  font-family: var(--display);
-  font-weight: 700;
-  letter-spacing: -.08em;
-  text-transform: uppercase;
-  color: color-mix(in srgb, var(--text) 7%, transparent);
+.paper-chip {
+  appearance: none;
+  min-width: 0;
+  padding: .48rem .72rem;
+  border: 1px solid color-mix(in srgb, var(--line-2) 78%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-2) 68%, transparent);
+  color: var(--muted);
+  font: inherit;
+  font-size: .76rem;
+  line-height: 1;
+  text-transform: lowercase;
+  cursor: pointer;
+  transition: border-color .18s ease, color .18s ease, background .18s ease, transform .12s ease;
 }
-.bgfx-blueprint-numerals span {
-  position: absolute;
-  line-height: .86;
+.paper-chip:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
-.bgfx-blueprint-numerals span:first-child {
-  top: 10vh;
-  right: 8vw;
-  font-size: clamp(10rem, 24vw, 26rem);
+.paper-chip[aria-pressed="true"] {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--warm) 42%, transparent);
+  background: color-mix(in srgb, var(--warm) 10%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--warm-soft) 14%, transparent);
 }
-.bgfx-blueprint-numerals span:last-child {
-  bottom: 2vh;
-  left: 6vw;
-  font-size: clamp(6rem, 14vw, 14rem);
-  color: color-mix(in srgb, var(--accent) 6%, transparent);
+.paper-chip:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 58%, transparent);
+  outline-offset: 2px;
 }
-
-:root[data-bg="b"] .nebula,
-:root[data-bg="d"] .nebula {
-  opacity: .55;
-}
-:root[data-bg="b"] .depthbloom,
-:root[data-bg="d"] .depthbloom {
-  opacity: .4;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .bgfx-wordmark-1 span { animation: bgwordDriftA 44s ease-in-out infinite alternate; }
-  .bgfx-wordmark-2 span { animation: bgwordDriftB 54s ease-in-out infinite alternate; }
-  .bgfx-wordmark-3 span { animation: bgwordDriftC 46s ease-in-out infinite alternate; }
-}
-@keyframes bgwordDriftA { from { transform: translate3d(0, 0, 0); } to { transform: translate3d(1.2vw, -1.4vh, 0); } }
-@keyframes bgwordDriftB { from { transform: translate3d(0, 0, 0); } to { transform: translate3d(-1vw, 1.1vh, 0); } }
-@keyframes bgwordDriftC { from { transform: translate3d(0, 0, 0); } to { transform: translate3d(.8vw, .9vh, 0); } }
+/* PAPER-EXPERIMENT:end */
 
 @media (max-width: 900px) {
-  .bgswitch {
-    left: .8rem;
-    right: .8rem;
-    bottom: .8rem;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .bgswitch-btn {
-    min-width: 0;
-  }
   .bgfx-telemetry-1 {
     grid-template-columns: 1fr;
   }
@@ -373,14 +286,19 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
     grid-auto-columns: auto;
     gap: .8rem;
   }
-  .bgfx-manifesto {
-    height: 14vh;
+  /* PAPER-EXPERIMENT:start */
+  .paper-switch {
+    left: .8rem;
+    right: .8rem;
+    bottom: .8rem;
+    width: auto;
   }
-  .bgband {
-    font-size: clamp(2rem, 7vw, 3.6rem);
+  .paper-chip {
+    flex: 1 1 calc(50% - .45rem);
+    justify-content: center;
   }
+  /* PAPER-EXPERIMENT:end */
 }
-/* BG-EXPERIMENT:end */
 
 /* ==================== hero ==================== */
 .hero { padding: 4.5rem 0 4rem; position: relative; }
@@ -603,7 +521,7 @@ footer.sitefooter a { color:var(--muted); }
 .rev.d1{transition-delay:.06s}.rev.d2{transition-delay:.16s}.rev.d3{transition-delay:.26s}.rev.d4{transition-delay:.36s}.rev.d5{transition-delay:.46s}
 
 @media (prefers-reduced-motion: reduce){
-  .scan,.claw,.clawwrap::after,.pdot,.horizon,.ceiling,.packet,.loopspark,.statusnote .sdot,.learn-dots i,.bgfx-wordmark span,.bgtelem-flicker,.bgband{ animation:none !important; }
+  .scan,.claw,.clawwrap::after,.pdot,.horizon,.ceiling,.packet,.loopspark,.statusnote .sdot,.learn-dots i,.bgtelem-flicker{ animation:none !important; }
   .rev{ opacity:1 !important; transform:none !important; }
   .section{ opacity:1 !important; scale:1 !important; }
   .learn-dots i:nth-child(-n+3) {

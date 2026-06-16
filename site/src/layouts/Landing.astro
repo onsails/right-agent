@@ -9,7 +9,7 @@ const {
 const starLabel = formatStars(await getStars());
 ---
 <!doctype html>
-<html lang="en" data-bg="a">
+<html lang="en" data-tex="fiber" data-tone="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -19,24 +19,35 @@ const starLabel = formatStars(await getStars());
   </head>
   <body>
     <div class="fx void"></div>
+    <!-- PAPER-EXPERIMENT:start -->
+    <div class="fx paper" aria-hidden="true"></div>
+    <svg class="paper-defs" width="0" height="0" aria-hidden="true" focusable="false">
+      <defs>
+        <filter id="paper-fiber" x="0" y="0" width="100%" height="100%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch" result="noise" />
+          <feColorMatrix in="noise" type="saturate" values="0" result="mono" />
+          <feComponentTransfer in="mono">
+            <feFuncR type="gamma" amplitude="1" exponent="0.9" offset="0" />
+            <feFuncG type="gamma" amplitude="1" exponent="0.9" offset="0" />
+            <feFuncB type="gamma" amplitude="1" exponent="0.9" offset="0" />
+            <feFuncA type="table" tableValues="0 0.72" />
+          </feComponentTransfer>
+        </filter>
+        <filter id="paper-cardstock" x="0" y="0" width="100%" height="100%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.4" numOctaves="2" stitchTiles="stitch" result="noise" />
+          <feColorMatrix in="noise" type="saturate" values="0" result="mono" />
+          <feComponentTransfer in="mono">
+            <feFuncR type="gamma" amplitude="1.18" exponent="0.82" offset="0" />
+            <feFuncG type="gamma" amplitude="1.18" exponent="0.82" offset="0" />
+            <feFuncB type="gamma" amplitude="1.18" exponent="0.82" offset="0" />
+            <feFuncA type="table" tableValues="0 0.86" />
+          </feComponentTransfer>
+        </filter>
+      </defs>
+    </svg>
+    <!-- PAPER-EXPERIMENT:end -->
     <div class="fx depthbloom" data-depth="4"></div>
     <div class="fx nebula" data-depth="6"></div>
-    <!-- BG-EXPERIMENT:start -->
-    <div class="fx bgfx bgfx-wordmark bgfx-wordmark-1" data-depth="12" aria-hidden="true">
-      <span>RIGHT</span>
-      <span>AGENT</span>
-      <span>SECURE</span>
-    </div>
-    <div class="fx bgfx bgfx-wordmark bgfx-wordmark-2" data-depth="18" aria-hidden="true">
-      <span>SANDBOXED</span>
-      <span>ISOLATED</span>
-    </div>
-    <div class="fx bgfx bgfx-wordmark bgfx-wordmark-3" data-depth="24" aria-hidden="true">
-      <span>RIGHT</span>
-      <span>AGENT</span>
-      <span>SANDBOXED</span>
-    </div>
-
     <div class="fx bgfx bgfx-telemetry bgfx-telemetry-1" data-depth="10" aria-hidden="true">
       <div class="bgtelem-col">
         <span>obs · deep-field</span>
@@ -74,36 +85,9 @@ const starLabel = formatStars(await getStars());
         <span>fig 02 · proxy rail</span><span>RA 02h · DEC -04°</span><span>hex 5a 31 63</span><span>obs · deep-field</span><span>lat 16ms</span><span>sig <i class="bgtelem-flicker bgtelem-flicker-alt">●●●●○</i></span>
       </div>
     </div>
-
-    <div class="fx bgfx bgfx-manifesto bgfx-manifesto-1" data-depth="8" aria-hidden="true">
-      <div class="bgband bgband-left"><span>sandboxed multi-agent runtime</span><span>sandboxed multi-agent runtime</span></div>
-    </div>
-    <div class="fx bgfx bgfx-manifesto bgfx-manifesto-2" data-depth="14" aria-hidden="true">
-      <div class="bgband bgband-right"><span>credentials stay outside the box</span><span>credentials stay outside the box</span></div>
-    </div>
-    <div class="fx bgfx bgfx-manifesto bgfx-manifesto-3" data-depth="20" aria-hidden="true">
-      <div class="bgband bgband-left"><span>secure by default</span><span>secure by default</span></div>
-    </div>
-    <div class="fx bgfx bgfx-manifesto bgfx-manifesto-4" data-depth="26" aria-hidden="true">
-      <div class="bgband bgband-right"><span>the box is closed; you just use it</span><span>the box is closed; you just use it</span></div>
-    </div>
-
-    <div class="fx bgfx bgfx-blueprint-grid" data-depth="8" aria-hidden="true"></div>
-    <div class="fx bgfx bgfx-blueprint-captions" data-depth="14" aria-hidden="true">
-      <span>fig.01 · runtime</span>
-      <span>scale 1:1</span>
-      <span>rev a</span>
-      <span>host rail · sealed</span>
-    </div>
-    <div class="fx bgfx bgfx-blueprint-numerals" data-depth="20" aria-hidden="true">
-      <span data-bg-numeral>01</span>
-      <span>04</span>
-    </div>
-    <!-- BG-EXPERIMENT:end -->
     <div class="fx ceiling"></div>
     <div class="fx horizon"></div>
     <div class="fx horizon-glow"></div>
-    <div class="fx grain"></div>
     <div class="fx scan"></div>
 
     <div class="hud" aria-hidden="true">
@@ -111,14 +95,26 @@ const starLabel = formatStars(await getStars());
       <span class="read r-bl">secure-by-default</span>
     </div>
 
-    <!-- BG-EXPERIMENT:start -->
-    <div class="bgswitch" aria-label="Background experiment switcher">
-      <button type="button" class="bgswitch-btn" data-bg-choice="a" aria-pressed="false"><span class="bgswitch-key">A</span><span>wordmark</span></button>
-      <button type="button" class="bgswitch-btn" data-bg-choice="b" aria-pressed="false"><span class="bgswitch-key">B</span><span>telemetry</span></button>
-      <button type="button" class="bgswitch-btn" data-bg-choice="c" aria-pressed="false"><span class="bgswitch-key">C</span><span>manifesto</span></button>
-      <button type="button" class="bgswitch-btn" data-bg-choice="d" aria-pressed="false"><span class="bgswitch-key">D</span><span>blueprint</span></button>
+    <!-- PAPER-EXPERIMENT:start -->
+    <div class="paper-switch" aria-label="Paper experiment switcher">
+      <div class="paper-row">
+        <span class="paper-label">texture</span>
+        <div class="paper-choices">
+          <button type="button" class="paper-chip" data-tex-choice="fiber" aria-pressed="false">fiber</button>
+          <button type="button" class="paper-chip" data-tex-choice="cardstock" aria-pressed="false">cardstock</button>
+          <button type="button" class="paper-chip" data-tex-choice="halftone" aria-pressed="false">halftone</button>
+          <button type="button" class="paper-chip" data-tex-choice="crosshatch" aria-pressed="false">crosshatch</button>
+        </div>
+      </div>
+      <div class="paper-row">
+        <span class="paper-label">tone</span>
+        <div class="paper-choices">
+          <button type="button" class="paper-chip" data-tone-choice="dark" aria-pressed="false">dark</button>
+          <button type="button" class="paper-chip" data-tone-choice="warm" aria-pressed="false">warm</button>
+        </div>
+      </div>
     </div>
-    <!-- BG-EXPERIMENT:end -->
+    <!-- PAPER-EXPERIMENT:end -->
 
     <div class="wrap">
       <nav class="topnav">
@@ -149,30 +145,47 @@ const starLabel = formatStars(await getStars());
     <script>
       const layers = Array.from(document.querySelectorAll('.fx[data-depth]')) as HTMLElement[];
       const sections = Array.from(document.querySelectorAll('.section')) as HTMLElement[];
-      /* BG-EXPERIMENT:start */
+      /* PAPER-EXPERIMENT:start */
       const root = document.documentElement;
-      const bgChoices = ['a', 'b', 'c', 'd'];
-      const bgButtons = Array.from(document.querySelectorAll('[data-bg-choice]')) as HTMLButtonElement[];
-      const bgNumeral = document.querySelector('[data-bg-numeral]');
-      const setBgChoice = (next: string, persist = true) => {
-        const choice = bgChoices.includes(next) ? next : 'a';
-        root.dataset.bg = choice;
-        for (const button of bgButtons) button.setAttribute('aria-pressed', String(button.dataset.bgChoice === choice));
+      const texChoices = ['fiber', 'cardstock', 'halftone', 'crosshatch'];
+      const toneChoices = ['dark', 'warm'];
+      const texButtons = Array.from(document.querySelectorAll('[data-tex-choice]')) as HTMLButtonElement[];
+      const toneButtons = Array.from(document.querySelectorAll('[data-tone-choice]')) as HTMLButtonElement[];
+      const setTexChoice = (next: string, persist = true) => {
+        const choice = texChoices.includes(next) ? next : 'fiber';
+        root.dataset.tex = choice;
+        for (const button of texButtons) button.setAttribute('aria-pressed', String(button.dataset.texChoice === choice));
         if (persist) {
           try {
-            localStorage.setItem('bg', choice);
+            localStorage.setItem('tex', choice);
           } catch {}
         }
       };
-      let storedBg = 'a';
+      const setToneChoice = (next: string, persist = true) => {
+        const choice = toneChoices.includes(next) ? next : 'dark';
+        root.dataset.tone = choice;
+        for (const button of toneButtons) button.setAttribute('aria-pressed', String(button.dataset.toneChoice === choice));
+        if (persist) {
+          try {
+            localStorage.setItem('tone', choice);
+          } catch {}
+        }
+      };
+      let storedTex = 'fiber';
+      let storedTone = 'dark';
       try {
-        storedBg = localStorage.getItem('bg') || 'a';
+        storedTex = localStorage.getItem('tex') || 'fiber';
+        storedTone = localStorage.getItem('tone') || 'dark';
       } catch {}
-      setBgChoice(storedBg, false);
-      for (const button of bgButtons) {
-        button.addEventListener('click', () => setBgChoice(button.dataset.bgChoice || 'a'));
+      setTexChoice(storedTex, false);
+      setToneChoice(storedTone, false);
+      for (const button of texButtons) {
+        button.addEventListener('click', () => setTexChoice(button.dataset.texChoice || 'fiber'));
       }
-      /* BG-EXPERIMENT:end */
+      for (const button of toneButtons) {
+        button.addEventListener('click', () => setToneChoice(button.dataset.toneChoice || 'dark'));
+      }
+      /* PAPER-EXPERIMENT:end */
       let mx = 0, my = 0, sy = 0, tmx = 0, tmy = 0;
       const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
       let activeSection: HTMLElement | null = null;
@@ -205,14 +218,6 @@ const starLabel = formatStars(await getStars());
         }
       };
 
-      /* BG-EXPERIMENT:start */
-      const updateBlueprintNumeral = () => {
-        if (reduce || root.dataset.bg !== 'd' || !(bgNumeral instanceof HTMLElement)) return;
-        const index = activeSection ? Math.max(0, sections.indexOf(activeSection)) : 0;
-        bgNumeral.textContent = String(index + 1).padStart(2, '0');
-      };
-      /* BG-EXPERIMENT:end */
-
       addEventListener('scroll', () => { sy = scrollY; }, { passive: true });
       if (!reduce) {
         addEventListener('mousemove', (e) => {
@@ -230,9 +235,6 @@ const starLabel = formatStars(await getStars());
           }
         }
         updateActiveSection();
-        /* BG-EXPERIMENT:start */
-        updateBlueprintNumeral();
-        /* BG-EXPERIMENT:end */
 
         requestAnimationFrame(tick);
       };
