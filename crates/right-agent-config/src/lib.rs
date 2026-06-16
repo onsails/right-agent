@@ -354,6 +354,21 @@ pub struct ProviderEntry {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generic: Option<GenericProvider>,
+    /// Present ⇒ this entry is a *borrowed* reference to a record owned by the
+    /// named agent. Absent ⇒ this agent owns the record. Owned vs borrowed
+    /// drives rotation rights, UI read-only state, and the destroy cascade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_from: Option<String>,
+}
+
+impl ProviderEntry {
+    pub fn is_borrowed(&self) -> bool {
+        self.shared_from.is_some()
+    }
+
+    pub fn is_owned(&self) -> bool {
+        self.shared_from.is_none()
+    }
 }
 
 /// Per-agent sandbox configuration in agent.yaml.
@@ -1081,5 +1096,28 @@ prefilter_enabled: false
         let yaml = "sandbox: { mode: openshell }";
         let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert!(cfg.sandbox.unwrap().providers.is_empty());
+    }
+
+    #[test]
+    fn provider_entry_shared_from_round_trips_and_defaults_absent() {
+        // Absent shared_from = owned (backward compatible).
+        let owned: ProviderEntry =
+            serde_saphyr::from_str("name: fal-a1b2c3\ntype: right-fal\n").unwrap();
+        assert!(owned.shared_from.is_none());
+        assert!(owned.is_owned() && !owned.is_borrowed());
+
+        // Present shared_from = borrowed.
+        let borrowed: ProviderEntry =
+            serde_saphyr::from_str("name: fal-a1b2c3\ntype: right-fal\nshared_from: agent-a\n")
+                .unwrap();
+        assert_eq!(borrowed.shared_from.as_deref(), Some("agent-a"));
+        assert!(borrowed.is_borrowed() && !borrowed.is_owned());
+
+        // Serialization omits shared_from when None.
+        let s = serde_saphyr::to_string(&owned).unwrap();
+        assert!(
+            !s.contains("shared_from"),
+            "owned entry must not emit shared_from; got: {s}"
+        );
     }
 }
