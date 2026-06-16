@@ -15,6 +15,7 @@ export default defineConfig({
       // notice is global). Does not touch the landing.
       components: {
         Banner: './src/components/DocsBanner.astro',
+        Head: './src/components/StarlightHead.astro',
       },
       // Docs live at src/content/docs/docs/* -> /docs/* (Starlight subpath pattern).
       customCss: [

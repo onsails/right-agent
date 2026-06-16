@@ -1,5 +1,6 @@
 ---
 import '../styles/landing.css';
+import PostHog from '../components/PostHog.astro';
 import { getStars, formatStars } from '../lib/github';
 interface Props { title?: string; description?: string; }
 const {
@@ -16,6 +17,7 @@ const starLabel = formatStars(await getStars());
     <title>{title}</title>
     <meta name="description" content={description} />
     <link rel="icon" href="/favicon.svg" />
+    <PostHog />
   </head>
   <body>
     <div class="fx void"></div>
