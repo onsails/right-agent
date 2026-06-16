@@ -5390,6 +5390,7 @@ mod tests {
                 upstream_hosts: vec!["api.acme.com".to_string()],
                 upstream_path_prefix: None,
             }),
+            shared_from: None,
         }
     }
 
@@ -5449,6 +5450,7 @@ mod tests {
             type_: ProviderType::BuiltIn("anthropic".to_string()),
             label: None,
             generic: None,
+            shared_from: None,
         });
 
         let profiles = generic_provider_profiles(&[("agent-a".to_string(), config)]).unwrap();
@@ -5463,6 +5465,7 @@ mod tests {
             type_: ProviderType::Generic,
             label: None,
             generic: None,
+            shared_from: None,
         });
 
         let err = generic_provider_profiles(&[("agent-a".to_string(), config)])

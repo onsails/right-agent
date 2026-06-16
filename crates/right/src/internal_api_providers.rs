@@ -409,6 +409,7 @@ mod provider_validation_tests {
                 upstream_hosts: vec!["api.example.com".to_string()],
                 upstream_path_prefix: None,
             }),
+            shared_from: None,
         }
     }
 
@@ -418,6 +419,7 @@ mod provider_validation_tests {
             type_: right_agent_config::ProviderType::BuiltIn(slug.to_string()),
             label: None,
             generic: None,
+            shared_from: None,
         }
     }
 
@@ -583,6 +585,7 @@ mod provider_validation_tests {
                 upstream_hosts: vec!["api.acme.com".to_string()],
                 upstream_path_prefix: Some("/v1".to_string()),
             }),
+            shared_from: None,
         };
         let serialized = serialize_provider_entry(&entry);
         // Sanity: the serializer single-quotes string scalars now.
@@ -618,6 +621,7 @@ mod provider_validation_tests {
                 upstream_hosts: vec!["api.example.com".to_string()],
                 upstream_path_prefix: None,
             }),
+            shared_from: None,
         };
         let serialized = serialize_provider_entry(&entry);
         assert!(
@@ -756,6 +760,7 @@ mod provider_view_tests {
             type_: right_agent_config::ProviderType::BuiltIn("right-github".into()),
             label: None,
             generic: None,
+            shared_from: None,
         };
         let policy = policy_with_provider_endpoint("hostagent-gh", "api.github.com", "");
 
@@ -773,6 +778,7 @@ mod provider_view_tests {
                 upstream_hosts: vec!["api.acme.test".into()],
                 upstream_path_prefix: Some("/v1".into()),
             }),
+            shared_from: None,
         };
         let policy = policy_with_provider_endpoint("hostagent-acme", "old.acme.test", "/v1");
 
@@ -793,6 +799,7 @@ mod provider_view_tests {
                 upstream_hosts: vec!["fal.run".into(), "queue.fal.run".into()],
                 upstream_path_prefix: Some("/v1".into()),
             }),
+            shared_from: None,
         };
         let policy = policy_with_provider_endpoint("hostagent-fal", "fal.run", "/v1");
 
@@ -813,6 +820,7 @@ mod provider_view_tests {
                 upstream_hosts: vec!["fal.run".into()],
                 upstream_path_prefix: Some("/v1".into()),
             }),
+            shared_from: None,
         };
         let policy = policy_with_provider_endpoints(
             "hostagent-fal",
@@ -1120,6 +1128,7 @@ pub(crate) async fn handle_provider_create(
         type_: right_agent_config::ProviderType::BuiltIn(req.type_.clone()),
         label: req.label.clone(),
         generic: None,
+        shared_from: None,
     };
     if let Err(e) = append_provider_to_yaml(&state.agents_dir, &req.agent, &entry) {
         rollback_attached_provider(
@@ -1342,6 +1351,7 @@ mod plan_copy_tests {
                 upstream_hosts: hosts.iter().map(|h| h.to_string()).collect(),
                 upstream_path_prefix: path.map(|p| p.to_string()),
             }),
+            shared_from: None,
         }
     }
     fn builtin(name: &str, slug: &str) -> right_agent_config::ProviderEntry {
@@ -1350,6 +1360,7 @@ mod plan_copy_tests {
             type_: right_agent_config::ProviderType::BuiltIn(slug.into()),
             label: None,
             generic: None,
+            shared_from: None,
         }
     }
 
@@ -1519,6 +1530,7 @@ mod plan_copy_tests {
             type_: right_agent_config::ProviderType::Generic,
             label: None,
             generic: None,
+            shared_from: None,
         };
         let err = plan_copy("riskoff", &src, "FAL_KEY", &[], false, None).unwrap_err();
         assert!(matches!(err, ProviderApiError::InvalidName { .. }));
@@ -1974,6 +1986,7 @@ async fn create_generic_provider(
         type_: right_agent_config::ProviderType::Generic,
         label: req.label.clone(),
         generic: Some(generic_entry.clone()),
+        shared_from: None,
     };
     if let Err(e) = append_provider_to_yaml(&state.agents_dir, &req.agent, &entry) {
         rollback_attached_provider(
@@ -2079,6 +2092,7 @@ mod generic_provider_spec_tests {
                 upstream_hosts: vec!["fal.run".into(), "queue.fal.run".into()],
                 upstream_path_prefix: Some("/v1".into()),
             }),
+            shared_from: None,
         };
 
         let serialized = serialize_provider_entry(&entry);
@@ -2138,6 +2152,7 @@ mod generic_provider_spec_tests {
                 upstream_hosts: vec!["api.acme.invalid".into()],
                 upstream_path_prefix: Some("/v1".into()),
             }),
+            shared_from: None,
         };
 
         let expected_profile_id =
@@ -2647,6 +2662,7 @@ pub(crate) async fn handle_provider_config_update(
         type_: right_agent_config::ProviderType::Generic,
         label: entry.label.clone(),
         generic: Some(updated_generic.clone()),
+        shared_from: None,
     };
     if let Err(e) = replace_provider_in_yaml(&state.agents_dir, &req.agent, &updated) {
         // Gateway profile accepted the new config but agent.yaml is now stale.
@@ -3641,6 +3657,7 @@ mod sandbox_mode_tests {
                     upstream_hosts: vec![format!("api{i:02}.example.com")],
                     upstream_path_prefix: None,
                 }),
+                shared_from: None,
             })
             .collect();
 
