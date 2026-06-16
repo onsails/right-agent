@@ -31,6 +31,7 @@ Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw
 - During implementation, prefer the narrowest useful command (`devenv shell -- cargo nextest run -p <crate> <filter>`, package-level tests, or a targeted build/check) after a TDD red/green loop or a coherent feature slice. `cargo nextest run` is the recommended runner; doctests run only under `cargo test --doc`.
 - At the end of all code work, including work done inside a worktree, `devenv shell -- cargo nextest run --workspace` plus `devenv shell -- cargo test --doc --workspace` is mandatory. Targeted tests do not replace the final full workspace test.
 - New `docs/superpowers/` plans must encode this cadence: targeted intermediate verification and one final full workspace test, not full workspace tests after every task.
+- **Website-only work skips Rust tests.** When a change touches only the website (`site/`) and no Rust crate, do not run `cargo` tests, checks, or builds — they verify nothing relevant. Verify with the website's own tooling (build/lint/preview under `site/`) instead. The Rust full-workspace mandate above applies only when Rust code changed.
 
 ## Conventions
 
