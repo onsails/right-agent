@@ -29,6 +29,18 @@ function assert(condition, message) {
   }
 }
 
+function countOccurrences(haystack, needle) {
+  return haystack.split(needle).length - 1;
+}
+
+function assertOccurrenceCount(name, html, needle, expectedCount) {
+  const actualCount = countOccurrences(html, needle);
+  assert(
+    actualCount === expectedCount,
+    `${name}: expected ${expectedCount} occurrence(s) of ${needle}, found ${actualCount}`,
+  );
+}
+
 for (const [name, path] of pages) {
   assert(existsSync(path), `${name}: missing built file at ${path}`);
   if (!existsSync(path)) continue;
@@ -36,16 +48,31 @@ for (const [name, path] of pages) {
   const html = readFileSync(path, 'utf8');
 
   if (expectDisabled) {
-    assert(!html.includes('window.posthog'), `${name}: PostHog snippet should be absent when env is missing`);
-    assert(!html.includes('posthog.init'), `${name}: PostHog init should be absent when env is missing`);
+    const absent = [
+      'window.posthog',
+      'posthog.init',
+      'data-posthog-key=',
+    ];
+
+    for (const needle of absent) {
+      assertOccurrenceCount(name, html, needle, 0);
+    }
+
     continue;
   }
 
-  const required = [
+  const singletons = [
     'window.posthog',
     'posthog.init',
     `data-posthog-key="${expectedKey}"`,
     `data-posthog-host="${expectedHost}"`,
+  ];
+
+  for (const needle of singletons) {
+    assertOccurrenceCount(name, html, needle, 1);
+  }
+
+  const required = [
     "defaults: '2026-01-30'",
     "capture_pageview: 'history_change'",
     'autocapture: true',
