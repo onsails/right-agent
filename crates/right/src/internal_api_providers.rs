@@ -34,6 +34,10 @@ pub enum ProviderApiError {
     Unauthorized { agent: String },
     #[error("copy conflict: {reason}")]
     CopyConflict { reason: String },
+    #[error(
+        "source provider \"{source_provider}\" credential cannot be read back: OpenShell redacts stored secrets, so cross-agent copy cannot transfer the key. Add the provider on the destination agent and enter the credential directly."
+    )]
+    SourceCredentialUnreadable { source_provider: String },
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -62,6 +66,10 @@ impl axum::response::IntoResponse for ProviderApiError {
             }
             Self::Unauthorized { .. } => (StatusCode::FORBIDDEN, "unauthorized"),
             Self::CopyConflict { .. } => (StatusCode::CONFLICT, "copy_conflict"),
+            Self::SourceCredentialUnreadable { .. } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "source_credential_unreadable",
+            ),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         (
@@ -1343,6 +1351,29 @@ mod plan_copy_tests {
             label: None,
             generic: None,
         }
+    }
+
+    #[test]
+    fn source_credential_readable_rejects_redaction_sentinel() {
+        // OpenShell GetProvider returns the literal "REDACTED"; copying it would
+        // write a broken credential that fails on egress (HTTP 401).
+        let err = check_source_credential_readable(REDACTION_SENTINEL, "riskoff-right-fal")
+            .expect_err("redacted credential must be rejected");
+        assert!(matches!(
+            err,
+            ProviderApiError::SourceCredentialUnreadable { .. }
+        ));
+    }
+
+    #[test]
+    fn source_credential_readable_rejects_empty() {
+        assert!(check_source_credential_readable("", "riskoff-right-fal").is_err());
+    }
+
+    #[test]
+    fn source_credential_readable_accepts_real_value() {
+        check_source_credential_readable("falid-aaaa-bbbb:0123456789abcdef", "riskoff-right-fal")
+            .expect("a real credential value must be accepted");
     }
 
     #[test]
@@ -2672,10 +2703,32 @@ pub struct ProviderCopyReq {
     pub overwrite: bool,
 }
 
+/// OpenShell `GetProvider` redacts credential values, returning the literal
+/// sentinel `"REDACTED"`. The cross-agent copy path reads the source secret via
+/// that RPC, so on a redacting gateway it would write `"REDACTED"` (or an empty
+/// value) as the destination credential — which the sandbox resolver then
+/// substitutes verbatim on egress, yielding an upstream 401. Reject that case
+/// with actionable guidance instead of silently writing a broken value. On a
+/// non-redacting gateway the real value passes through and copy still works.
+const REDACTION_SENTINEL: &str = "REDACTED";
+
+fn check_source_credential_readable(
+    value: &str,
+    source_provider: &str,
+) -> Result<(), ProviderApiError> {
+    if value.is_empty() || value == REDACTION_SENTINEL {
+        return Err(ProviderApiError::SourceCredentialUnreadable {
+            source_provider: source_provider.to_string(),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_provider_copy(
     axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
     axum::Json(req): axum::Json<ProviderCopyReq>,
 ) -> Result<axum::Json<ProviderView>, ProviderApiError> {
+    use secrecy::ExposeSecret;
     // Actor must be trusted on BOTH sides.
     require_trusted(&state.agents_dir, &req.source_agent, req.actor_user_id)?;
     require_trusted(&state.agents_dir, &req.dest_agent, req.actor_user_id)?;
@@ -2740,6 +2793,9 @@ pub(crate) async fn handle_provider_copy(
             req.source_provider
         ))
     })?;
+    // Fail fast if the gateway redacted the read-back: writing it would silently
+    // break the destination (resolver substitutes "REDACTED" verbatim -> 401).
+    check_source_credential_readable(credential.expose_secret(), &req.source_provider)?;
 
     match plan {
         CopyPlan::Create {
