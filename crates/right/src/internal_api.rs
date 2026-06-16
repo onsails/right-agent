@@ -251,6 +251,14 @@ pub(crate) fn internal_router(
             "/provider-copy",
             post(crate::internal_api_providers::handle_provider_copy),
         )
+        .route(
+            "/provider-share",
+            post(crate::internal_api_providers::handle_provider_share),
+        )
+        .route(
+            "/provider-unshare",
+            post(crate::internal_api_providers::handle_provider_unshare),
+        )
         .with_state(state)
 }
 

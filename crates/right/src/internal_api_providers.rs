@@ -1405,6 +1405,94 @@ pub(crate) fn plan_copy(
     }
 }
 
+/// Validate a share request against pure inputs. Rejects sharing into self and
+/// sharing a record the destination already declares.
+pub(crate) fn plan_share(
+    owner_agent: &str,
+    dest_agent: &str,
+    provider: &str,
+    dest_providers: &[right_agent_config::ProviderEntry],
+) -> Result<(), ProviderApiError> {
+    if owner_agent == dest_agent {
+        return Err(ProviderApiError::CopyConflict {
+            reason: "cannot share a provider with the owning agent itself".into(),
+        });
+    }
+    if dest_providers.iter().any(|p| p.name == provider) {
+        return Err(ProviderApiError::CopyConflict {
+            reason: format!("destination agent already has provider \"{provider}\""),
+        });
+    }
+    Ok(())
+}
+
+/// A borrowed entry can be unshared; an owned one cannot (use Remove instead).
+pub(crate) fn plan_unshare(
+    entry: &right_agent_config::ProviderEntry,
+) -> Result<(), ProviderApiError> {
+    if entry.is_owned() {
+        return Err(ProviderApiError::CopyConflict {
+            reason: format!(
+                "provider \"{}\" is owned by this agent, not borrowed; use remove, not unshare",
+                entry.name
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod plan_share_tests {
+    use super::*;
+
+    #[test]
+    fn plan_share_rejects_self() {
+        let e = plan_share("right", "right", "fal-a1b2c3", &[]).unwrap_err();
+        assert!(matches!(e, ProviderApiError::CopyConflict { .. }));
+    }
+    #[test]
+    fn plan_share_rejects_dup_when_dest_already_has_record() {
+        let existing = vec![right_agent_config::ProviderEntry {
+            name: "fal-a1b2c3".into(),
+            type_: right_agent_config::ProviderType::BuiltIn("right-fal".into()),
+            label: None,
+            generic: None,
+            shared_from: Some("riskoff".into()),
+        }];
+        let e = plan_share("riskoff", "right", "fal-a1b2c3", &existing).unwrap_err();
+        assert!(matches!(e, ProviderApiError::CopyConflict { .. }));
+    }
+    #[test]
+    fn plan_share_accepts_new_record() {
+        plan_share("riskoff", "right", "fal-a1b2c3", &[]).expect("share into a fresh dest is ok");
+    }
+    #[test]
+    fn plan_unshare_rejects_owned_entry() {
+        let owned = right_agent_config::ProviderEntry {
+            name: "fal-a1b2c3".into(),
+            type_: right_agent_config::ProviderType::BuiltIn("right-fal".into()),
+            label: None,
+            generic: None,
+            shared_from: None,
+        };
+        assert!(matches!(
+            plan_unshare(&owned).unwrap_err(),
+            ProviderApiError::CopyConflict { .. }
+        ));
+    }
+    #[test]
+    fn plan_unshare_accepts_borrowed_entry() {
+        let borrowed = right_agent_config::ProviderEntry {
+            name: "fal-a1b2c3".into(),
+            type_: right_agent_config::ProviderType::BuiltIn("right-fal".into()),
+            label: None,
+            generic: None,
+            shared_from: Some("riskoff".into()),
+        };
+        plan_unshare(&borrowed).expect("borrowed entry can be unshared");
+    }
+}
+
 #[cfg(test)]
 mod plan_copy_tests {
     use super::*;
@@ -1906,6 +1994,37 @@ async fn rollback_attached_provider(
             original_err,
             rollback_reason,
             "provider rollback failed: could not delete provider: {rollback_err:#}"
+        );
+    }
+    ensure_provider_policy_loaded_after_rollback(
+        provider_name,
+        sandbox_name,
+        policy_path,
+        original_err.to_string(),
+        rollback_reason,
+    )
+    .await;
+}
+
+/// Roll back a SHARE attachment: detach the borrowed record from the
+/// destination sandbox and reload policy. Unlike `rollback_attached_provider`,
+/// this MUST NOT `delete_provider` — the record is owned by another agent and
+/// may be attached to other sandboxes; deleting it would destroy the owner's
+/// credential for everyone.
+async fn rollback_shared_attachment(
+    client: &mut OpenShellClient,
+    provider_name: &str,
+    sandbox_name: &str,
+    policy_path: &std::path::Path,
+    original_err: &str,
+    rollback_reason: &str,
+) {
+    if let Err(rollback_err) =
+        right_openshell::providers::detach_from_sandbox(client, sandbox_name, provider_name).await
+    {
+        tracing::warn!(
+            provider = %provider_name, original_err, rollback_reason,
+            "share rollback failed: could not detach borrowed provider: {rollback_err:#}"
         );
     }
     ensure_provider_policy_loaded_after_rollback(
@@ -2939,6 +3058,286 @@ pub(crate) async fn handle_provider_copy(
             Ok(view)
         }
     }
+}
+
+// ── Provider sharing (multi-attach) ───────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProviderShareReq {
+    pub actor_user_id: i64,
+    pub owner_agent: String,
+    pub provider: String,
+    pub dest_agent: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProviderUnshareReq {
+    pub actor_user_id: i64,
+    pub borrower_agent: String,
+    pub provider: String,
+}
+
+/// Share the owner's gateway record with `dest_agent`: attach the SAME record to
+/// the destination's sandbox and record a *borrowed* reference in the
+/// destination's agent.yaml. No secret is read back or copied — the credential
+/// stays in the gateway, owned by `owner_agent`.
+pub(crate) async fn handle_provider_share(
+    axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
+    axum::Json(req): axum::Json<ProviderShareReq>,
+) -> Result<axum::Json<ProviderView>, ProviderApiError> {
+    // Actor must be trusted on BOTH sides.
+    require_trusted(&state.agents_dir, &req.owner_agent, req.actor_user_id)?;
+    require_trusted(&state.agents_dir, &req.dest_agent, req.actor_user_id)?;
+
+    // Resolve the owner's entry (the record being shared).
+    let owner_cfg = load_agent_config(&state.agents_dir, &req.owner_agent)
+        .map_err(ProviderApiError::AgentYamlWrite)?;
+    let owner_sandbox = owner_cfg
+        .sandbox
+        .as_ref()
+        .ok_or(ProviderApiError::SandboxModeNone)?;
+    if owner_sandbox.mode != right_agent_config::SandboxMode::Openshell {
+        return Err(ProviderApiError::SandboxModeNone);
+    }
+    let owner_entry = owner_sandbox
+        .providers
+        .iter()
+        .find(|p| p.name == req.provider)
+        .cloned()
+        .ok_or_else(|| ProviderApiError::NotFound {
+            name: req.provider.clone(),
+        })?;
+
+    // Resolve the destination's current providers, then plan.
+    let dest_cfg = load_agent_config(&state.agents_dir, &req.dest_agent)
+        .map_err(ProviderApiError::AgentYamlWrite)?;
+    let dest_sandbox = dest_cfg
+        .sandbox
+        .as_ref()
+        .ok_or(ProviderApiError::SandboxModeNone)?;
+    if dest_sandbox.mode != right_agent_config::SandboxMode::Openshell {
+        return Err(ProviderApiError::SandboxModeNone);
+    }
+    plan_share(
+        &req.owner_agent,
+        &req.dest_agent,
+        &req.provider,
+        &dest_sandbox.providers,
+    )?;
+
+    // Build the borrowed entry. Re-sharing a borrowed record points the new
+    // borrower at the *true* owner, not the intermediary, so the destroy cascade
+    // and rotation rights always resolve to one authoritative owner.
+    let true_owner = owner_entry
+        .shared_from
+        .clone()
+        .unwrap_or_else(|| req.owner_agent.clone());
+    let borrowed_entry = right_agent_config::ProviderEntry {
+        name: req.provider.clone(),
+        type_: owner_entry.type_.clone(),
+        label: owner_entry.label.clone(),
+        generic: owner_entry.generic.clone(),
+        shared_from: Some(true_owner),
+    };
+
+    let _guard = provider_lock(&state, &req.dest_agent).await;
+    let mut client = open_openshell_client().await?;
+    ensure_v2_for_mutation(&mut client).await?;
+    let dest_sandbox_name = dest_sandbox
+        .name
+        .clone()
+        .unwrap_or_else(|| req.dest_agent.clone());
+    let policy_path = state.agents_dir.join(&req.dest_agent).join(
+        dest_sandbox
+            .policy_file
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("policy.yaml")),
+    );
+
+    // Attach the existing gateway record to the destination's sandbox. The record
+    // already exists in the gateway (owned by the owner), so there is no create
+    // step — just attach. On failure, nothing to roll back.
+    right_openshell::providers::attach_to_sandbox(&mut client, &dest_sandbox_name, &req.provider)
+        .await
+        .map_err(|e| ProviderApiError::Gateway(format!("{e:#}")))?;
+
+    if let Err(ensure_err) =
+        right_openshell::openshell::ensure_provider_policy_loaded(&dest_sandbox_name, &policy_path)
+            .await
+    {
+        rollback_shared_attachment(
+            &mut client,
+            &req.provider,
+            &dest_sandbox_name,
+            &policy_path,
+            &format!("{ensure_err:#}"),
+            "policy-load failure",
+        )
+        .await;
+        return Err(ProviderApiError::Gateway(format!(
+            "policy load: {ensure_err:#}"
+        )));
+    }
+
+    // Confirm composition into the destination's effective policy. Generic
+    // providers must match every declared upstream host/path; built-ins use the
+    // name-only check.
+    let compose_result = match &borrowed_entry.generic {
+        Some(g) => {
+            let expected =
+                generic_expected_endpoints(&g.upstream_hosts, g.upstream_path_prefix.as_deref());
+            right_openshell::openshell::wait_for_provider_composed_with_exact_endpoints(
+                &mut client,
+                &dest_sandbox_name,
+                &req.provider,
+                expected,
+            )
+            .await
+        }
+        None => {
+            right_openshell::openshell::wait_for_provider_composed(
+                &mut client,
+                &dest_sandbox_name,
+                &req.provider,
+            )
+            .await
+        }
+    };
+    if let Err(compose_err) = compose_result {
+        rollback_shared_attachment(
+            &mut client,
+            &req.provider,
+            &dest_sandbox_name,
+            &policy_path,
+            &format!("{compose_err:#}"),
+            "composition not confirmed",
+        )
+        .await;
+        return Err(ProviderApiError::Gateway(format!("{compose_err:#}")));
+    }
+
+    // Write the borrowed entry to the destination's agent.yaml LAST. On failure,
+    // roll back the gateway attach so we never leave an attached-but-unrecorded
+    // record.
+    if let Err(e) = append_provider_to_yaml(&state.agents_dir, &req.dest_agent, &borrowed_entry) {
+        rollback_shared_attachment(
+            &mut client,
+            &req.provider,
+            &dest_sandbox_name,
+            &policy_path,
+            &format!("{e:#}"),
+            "yaml-write failure",
+        )
+        .await;
+        return Err(ProviderApiError::AgentYamlWrite(format!("{e:#}")));
+    }
+
+    let view_type = provider_view_type(&borrowed_entry);
+    let env_var = extract_env_var(&borrowed_entry)?;
+    Ok(axum::Json(ProviderView {
+        name: req.provider,
+        type_: view_type,
+        label: borrowed_entry.label,
+        env_var,
+        generic: borrowed_entry.generic,
+        updated_at: Some(chrono::Utc::now()),
+        status: ProviderStatus::Healthy,
+        composed: Some(true),
+    }))
+}
+
+/// Unshare a *borrowed* provider from `borrower_agent`: detach the record from
+/// the borrower's sandbox and drop the borrowed agent.yaml entry. The gateway
+/// record is NOT deleted — it belongs to the owner.
+pub(crate) async fn handle_provider_unshare(
+    axum::extract::State(state): axum::extract::State<crate::internal_api::InternalState>,
+    axum::Json(req): axum::Json<ProviderUnshareReq>,
+) -> Result<axum::Json<ProviderRemoveResp>, ProviderApiError> {
+    require_trusted(&state.agents_dir, &req.borrower_agent, req.actor_user_id)?;
+    let _guard = provider_lock(&state, &req.borrower_agent).await;
+
+    let cfg = load_agent_config(&state.agents_dir, &req.borrower_agent)
+        .map_err(ProviderApiError::AgentYamlWrite)?;
+    let sandbox = cfg
+        .sandbox
+        .as_ref()
+        .ok_or(ProviderApiError::SandboxModeNone)?;
+    if sandbox.mode != right_agent_config::SandboxMode::Openshell {
+        return Err(ProviderApiError::SandboxModeNone);
+    }
+    let entry = sandbox
+        .providers
+        .iter()
+        .find(|p| p.name == req.provider)
+        .ok_or_else(|| ProviderApiError::NotFound {
+            name: req.provider.clone(),
+        })?
+        .clone();
+    plan_unshare(&entry)?;
+
+    let mut client = open_openshell_client().await?;
+    let sandbox_name = sandbox
+        .name
+        .clone()
+        .unwrap_or_else(|| req.borrower_agent.clone());
+    let policy_path = state.agents_dir.join(&req.borrower_agent).join(
+        sandbox
+            .policy_file
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("policy.yaml")),
+    );
+
+    // Detach from the borrower's sandbox. Already-detached is fine.
+    // DO NOT delete the gateway record — the owner keeps it.
+    match right_openshell::providers::detach_from_sandbox(&mut client, &sandbox_name, &req.provider)
+        .await
+    {
+        Ok(()) => {}
+        Err(right_openshell::providers::ProviderError::NotFound(_)) => {
+            tracing::info!(provider = %req.provider, "detach: provider already not attached");
+        }
+        Err(e) => return Err(ProviderApiError::Gateway(format!("{e:#}"))),
+    }
+
+    // Drop the borrowed agent.yaml entry, then reload provider-profile
+    // composition so the active policy no longer references it.
+    remove_provider_from_yaml(&state.agents_dir, &req.borrower_agent, &req.provider)
+        .map_err(|e| ProviderApiError::AgentYamlWrite(format!("{e:#}")))?;
+
+    let mut composition_reloaded = false;
+    if let Some(g) = &entry.generic {
+        // Strip the `_provider_<name>` stanza only when at least one of this
+        // provider's hosts is not still required by another provider's stanza;
+        // shared hosts stay reachable through those other stanzas.
+        let any_host_exclusive = g.upstream_hosts.iter().any(|host| {
+            !sandbox.providers.iter().any(|p| {
+                p.name != req.provider
+                    && p.generic
+                        .as_ref()
+                        .is_some_and(|gp| gp.upstream_hosts.iter().any(|other| other == host))
+            })
+        });
+        if any_host_exclusive {
+            let prior = std::fs::read_to_string(&policy_path)
+                .map_err(|e| ProviderApiError::AgentYamlWrite(format!("read policy: {e:#}")))?;
+            let stripped = right_codegen::policy::providers_strip(&prior, &req.provider, "");
+            right_codegen::contract::write_and_apply_sandbox_policy(
+                &sandbox_name,
+                &policy_path,
+                &stripped,
+            )
+            .await
+            .map_err(|e| ProviderApiError::Gateway(format!("policy apply: {e:#}")))?;
+            composition_reloaded = true;
+        }
+    }
+    if !composition_reloaded {
+        right_openshell::openshell::ensure_provider_policy_loaded(&sandbox_name, &policy_path)
+            .await
+            .map_err(|e| ProviderApiError::Gateway(format!("policy apply: {e:#}")))?;
+    }
+
+    Ok(axum::Json(ProviderRemoveResp { removed: true }))
 }
 
 /// Replace an existing provider entry by name. Line-walking YAML mutator.
