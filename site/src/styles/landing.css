@@ -17,34 +17,7 @@ code, pre { font-family: var(--mono-code); }
 
 /* ==================== atmosphere ==================== */
 .fx { position: fixed; inset: 0; z-index: 0; pointer-events: none; will-change: transform; }
-.void {
-  background:
-    radial-gradient(120% 82% at 50% -22%, color-mix(in srgb, var(--warm) 15%, transparent), transparent 56%),
-    radial-gradient(90% 60% at 84% 6%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 60%),
-    radial-gradient(80% 80% at 8% 98%, color-mix(in srgb, var(--ink) 9%, transparent), transparent 60%),
-    radial-gradient(150% 130% at 50% 42%, transparent 46%, rgba(0,0,0,.72) 100%),
-    var(--bg);
-}
-.depthbloom { background: radial-gradient(42% 36% at 50% 30%, color-mix(in srgb, var(--warm) 14%, transparent), transparent 70%); }
-.nebula {
-  background:
-    radial-gradient(38% 30% at 28% 22%, color-mix(in srgb, var(--warm) 20%, transparent), transparent 70%),
-    radial-gradient(32% 26% at 76% 56%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 72%),
-    radial-gradient(30% 24% at 55% 88%, color-mix(in srgb, var(--ink) 12%, transparent), transparent 72%);
-  filter: blur(30px); opacity: .9;
-}
-.horizon, .ceiling { left: 50%; width: 260%; height: 60vh; transform-origin: bottom center;
-  background-image:
-    linear-gradient(color-mix(in srgb, var(--accent) 20%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in srgb, var(--accent) 12%, transparent) 1px, transparent 1px);
-  background-size: 64px 64px; opacity: .5; }
-.horizon { bottom: -2px; transform: translateX(-50%) perspective(440px) rotateX(74deg);
-  -webkit-mask-image: linear-gradient(to top, #000 0%, rgba(0,0,0,.5) 32%, transparent 80%);
-  mask-image: linear-gradient(to top, #000 0%, rgba(0,0,0,.5) 32%, transparent 80%); }
-.ceiling { top: -2px; transform-origin: top center; transform: translateX(-50%) perspective(440px) rotateX(-74deg); opacity: .22;
-  -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgba(0,0,0,.4) 30%, transparent 76%);
-  mask-image: linear-gradient(to bottom, #000 0%, rgba(0,0,0,.4) 30%, transparent 76%); }
-.horizon-glow { bottom: 0; left: 0; right: 0; height: 1px; background: color-mix(in srgb, var(--warm-soft) 55%, transparent); box-shadow: 0 0 60px 8px color-mix(in srgb, var(--warm) 30%, transparent); }
+.void { background: var(--bg); }
 
 /* ==================== HUD frame ==================== */
 .hud { position: fixed; inset: 14px; z-index: 2; pointer-events: none; }
@@ -140,8 +113,6 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 }
 .paper {
   --paper-tint: color-mix(in srgb, var(--bg) 82%, var(--text) 18%);
-  --paper-sheen: color-mix(in srgb, var(--warm-soft) 12%, transparent);
-  --paper-shadow: color-mix(in srgb, var(--ink) 18%, transparent);
   z-index: 0;
   opacity: .9;
 }
@@ -152,12 +123,8 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
   inset: 0;
 }
 .paper::before {
-  background:
-    radial-gradient(120% 95% at 50% 0%, color-mix(in srgb, var(--paper-sheen) 70%, transparent), transparent 58%),
-    radial-gradient(130% 120% at 50% 100%, color-mix(in srgb, var(--paper-shadow) 78%, transparent), transparent 62%),
-    linear-gradient(180deg, color-mix(in srgb, var(--paper-tint) 92%, transparent), color-mix(in srgb, var(--paper-tint) 72%, var(--bg) 28%));
-  mix-blend-mode: screen;
-  opacity: .34;
+  background: var(--paper-tint);
+  opacity: .24;
 }
 .paper::after {
   background-position: center;
@@ -166,38 +133,24 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 
 :root[data-tone="plum"] .paper {
   --paper-tint: color-mix(in srgb, var(--bg) 84%, var(--ink) 16%);
-  --paper-sheen: color-mix(in srgb, var(--bg) 76%, var(--ink-soft) 24%);
-  --paper-shadow: color-mix(in srgb, var(--bg) 74%, var(--ink) 26%);
 }
 :root[data-tone="kraft"] .paper {
   --paper-tint: color-mix(in srgb, var(--bg) 72%, var(--warm) 28%);
-  --paper-sheen: color-mix(in srgb, var(--bg) 68%, var(--warm-soft) 32%);
-  --paper-shadow: color-mix(in srgb, var(--bg) 72%, color-mix(in srgb, var(--warm) 55%, var(--ink) 45%) 28%);
 }
 :root[data-tone="slate"] .paper {
   --paper-tint: color-mix(in srgb, var(--bg) 78%, var(--accent) 22%);
-  --paper-sheen: color-mix(in srgb, var(--bg) 70%, var(--accent-soft) 30%);
-  --paper-shadow: color-mix(in srgb, var(--bg) 74%, var(--accent) 26%);
 }
 :root[data-tone="sepia"] .paper {
   --paper-tint: color-mix(in srgb, var(--bg) 74%, color-mix(in srgb, var(--warm) 70%, var(--ink) 30%) 26%);
-  --paper-sheen: color-mix(in srgb, var(--bg) 70%, color-mix(in srgb, var(--warm-soft) 74%, var(--ink-soft) 26%) 30%);
-  --paper-shadow: color-mix(in srgb, var(--bg) 72%, color-mix(in srgb, var(--warm) 48%, var(--ink) 52%) 28%);
 }
 :root[data-tone="olive"] .paper {
   --paper-tint: color-mix(in srgb, var(--bg) 76%, color-mix(in srgb, var(--warm) 52%, var(--accent) 48%) 24%);
-  --paper-sheen: color-mix(in srgb, var(--bg) 72%, color-mix(in srgb, var(--warm-soft) 46%, var(--accent-soft) 54%) 28%);
-  --paper-shadow: color-mix(in srgb, var(--bg) 74%, color-mix(in srgb, var(--warm) 44%, var(--accent) 56%) 26%);
 }
 :root[data-tone="wine"] .paper {
   --paper-tint: color-mix(in srgb, var(--bg) 80%, var(--ink) 20%);
-  --paper-sheen: color-mix(in srgb, var(--bg) 74%, color-mix(in srgb, var(--ink-soft) 42%, var(--warm-soft) 58%) 26%);
-  --paper-shadow: color-mix(in srgb, var(--bg) 68%, var(--ink) 32%);
 }
 :root[data-tone="ink"] .paper {
   --paper-tint: color-mix(in srgb, var(--bg) 82%, var(--accent-soft) 18%);
-  --paper-sheen: color-mix(in srgb, var(--bg) 74%, var(--accent-soft) 26%);
-  --paper-shadow: color-mix(in srgb, var(--bg) 72%, var(--accent) 28%);
 }
 
 /* PAPER-EXPERIMENT:cardstock:start */
@@ -213,7 +166,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="halftone"] .paper::after {
   background-image:
     radial-gradient(circle at 1.2px 1.2px, color-mix(in srgb, var(--text) 42%, transparent) 0 1.2px, transparent 1.45px),
-    radial-gradient(circle at 4px 4px, color-mix(in srgb, var(--warm) 24%, transparent) 0 1px, transparent 1.22px),
+    radial-gradient(circle at 4px 4px, color-mix(in srgb, var(--text) 24%, transparent) 0 1px, transparent 1.22px),
     radial-gradient(circle at 0 0, color-mix(in srgb, var(--ink) 14%, transparent) 0 .7px, transparent .9px);
   background-size: 6px 6px, 6px 6px, 9px 9px;
   mix-blend-mode: overlay;
@@ -224,7 +177,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="crosshatch"] .paper::after {
   background-image:
     repeating-linear-gradient(45deg, color-mix(in srgb, var(--text) 22%, transparent) 0 1px, transparent 1px 6px),
-    repeating-linear-gradient(-45deg, color-mix(in srgb, var(--warm) 18%, transparent) 0 1px, transparent 1px 7px),
+    repeating-linear-gradient(-45deg, color-mix(in srgb, var(--ink) 18%, transparent) 0 1px, transparent 1px 7px),
     repeating-linear-gradient(0deg, color-mix(in srgb, var(--ink) 8%, transparent) 0 1px, transparent 1px 18px),
     linear-gradient(180deg, color-mix(in srgb, var(--text) 5%, transparent), transparent 22%, transparent 78%, color-mix(in srgb, var(--text) 7%, transparent));
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 7%, transparent), inset 0 -1px 0 color-mix(in srgb, var(--ink) 14%, transparent);
@@ -236,7 +189,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="concrete"] .paper::after {
   background-image:
     radial-gradient(120% 100% at 20% 18%, color-mix(in srgb, var(--text) 9%, transparent), transparent 48%),
-    radial-gradient(95% 85% at 78% 74%, color-mix(in srgb, var(--warm) 12%, transparent), transparent 52%),
+    radial-gradient(95% 85% at 78% 74%, color-mix(in srgb, var(--ink) 12%, transparent), transparent 52%),
     linear-gradient(180deg, color-mix(in srgb, var(--ink) 8%, transparent), transparent 30%, transparent 70%, color-mix(in srgb, var(--text) 9%, transparent));
   background-size: cover;
   filter: url(#paper-concrete);
@@ -248,7 +201,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="canvas"] .paper::after {
   background-image:
     repeating-linear-gradient(0deg, color-mix(in srgb, var(--text) 18%, transparent) 0 1px, transparent 1px 7px),
-    repeating-linear-gradient(90deg, color-mix(in srgb, var(--warm) 14%, transparent) 0 1px, transparent 1px 8px),
+    repeating-linear-gradient(90deg, color-mix(in srgb, var(--ink) 14%, transparent) 0 1px, transparent 1px 8px),
     repeating-linear-gradient(0deg, transparent 0 3px, color-mix(in srgb, var(--ink) 6%, transparent) 3px 4px, transparent 4px 9px),
     repeating-linear-gradient(90deg, transparent 0 4px, color-mix(in srgb, var(--text) 7%, transparent) 4px 5px, transparent 5px 10px);
   background-position: center, 1px 2px, 0 2px, 2px 0;
@@ -260,10 +213,10 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 /* PAPER-EXPERIMENT:grunge:start */
 :root[data-tex="grunge"] .paper::after {
   background-image:
-    linear-gradient(12deg, transparent 0 46%, color-mix(in srgb, var(--warm) 12%, transparent) 46% 48%, transparent 48% 100%),
+    linear-gradient(12deg, transparent 0 46%, color-mix(in srgb, var(--ink) 12%, transparent) 46% 48%, transparent 48% 100%),
     linear-gradient(-18deg, transparent 0 62%, color-mix(in srgb, var(--text) 10%, transparent) 62% 63%, transparent 63% 100%),
     radial-gradient(140% 120% at 18% 12%, color-mix(in srgb, var(--ink) 14%, transparent), transparent 48%),
-    radial-gradient(110% 90% at 84% 78%, color-mix(in srgb, var(--warm) 16%, transparent), transparent 50%);
+    radial-gradient(110% 90% at 84% 78%, color-mix(in srgb, var(--text) 16%, transparent), transparent 50%);
   background-size: cover;
   filter: url(#paper-grunge);
   mix-blend-mode: multiply;
@@ -274,7 +227,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="speckle"] .paper::after {
   background-image:
     radial-gradient(circle at 16% 24%, color-mix(in srgb, var(--text) 30%, transparent) 0 1px, transparent 1.3px),
-    radial-gradient(circle at 74% 38%, color-mix(in srgb, var(--warm) 22%, transparent) 0 1.2px, transparent 1.55px),
+    radial-gradient(circle at 74% 38%, color-mix(in srgb, var(--text) 22%, transparent) 0 1.2px, transparent 1.55px),
     radial-gradient(circle at 48% 70%, color-mix(in srgb, var(--ink) 26%, transparent) 0 1.4px, transparent 1.8px),
     radial-gradient(circle at 84% 82%, color-mix(in srgb, var(--text) 24%, transparent) 0 .8px, transparent 1.1px);
   background-size: 120px 120px, 150px 150px, 190px 190px, 90px 90px;
@@ -287,7 +240,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="kraft"] .paper::after {
   background-image:
     radial-gradient(130% 100% at 18% 12%, color-mix(in srgb, var(--text) 12%, transparent), transparent 48%),
-    radial-gradient(140% 110% at 78% 76%, color-mix(in srgb, var(--warm) 18%, transparent), transparent 52%),
+    radial-gradient(140% 110% at 78% 76%, color-mix(in srgb, var(--ink) 18%, transparent), transparent 52%),
     repeating-linear-gradient(78deg, color-mix(in srgb, var(--text) 10%, transparent) 0 1px, transparent 1px 10px),
     repeating-linear-gradient(102deg, color-mix(in srgb, var(--ink) 8%, transparent) 0 1px, transparent 1px 14px);
   background-size: cover, cover, 28px 28px, 34px 34px;
@@ -305,7 +258,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="coldpress"] .paper::after {
   background-image:
     radial-gradient(150% 120% at 24% 18%, color-mix(in srgb, var(--text) 10%, transparent), transparent 54%),
-    radial-gradient(140% 110% at 74% 80%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 56%),
+    radial-gradient(140% 110% at 74% 80%, color-mix(in srgb, var(--ink) 10%, transparent), transparent 56%),
     linear-gradient(180deg, color-mix(in srgb, var(--text) 6%, transparent), transparent 24%, transparent 76%, color-mix(in srgb, var(--ink) 8%, transparent));
   background-size: cover;
   filter: url(#paper-coldpress);
@@ -344,7 +297,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
       color-mix(in srgb, var(--ink) 8%, transparent) 3px 8px,
       color-mix(in srgb, var(--text) 5%, transparent) 8px 15px,
       transparent 15px 22px),
-    linear-gradient(180deg, color-mix(in srgb, var(--warm) 10%, transparent), transparent 28%, transparent 72%, color-mix(in srgb, var(--ink) 10%, transparent));
+    linear-gradient(180deg, color-mix(in srgb, var(--text) 10%, transparent), transparent 28%, transparent 72%, color-mix(in srgb, var(--ink) 10%, transparent));
   background-size: 42px 100%, cover;
   filter: url(#paper-corrugated);
   box-shadow:
@@ -360,7 +313,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="deckle"] .paper::after {
   background-image:
     radial-gradient(120% 100% at 16% 16%, color-mix(in srgb, var(--text) 10%, transparent), transparent 46%),
-    radial-gradient(130% 110% at 82% 78%, color-mix(in srgb, var(--warm) 12%, transparent), transparent 52%),
+    radial-gradient(130% 110% at 82% 78%, color-mix(in srgb, var(--ink) 12%, transparent), transparent 52%),
     radial-gradient(circle at 24% 28%, color-mix(in srgb, var(--text) 16%, transparent) 0 2px, transparent 2.8px),
     radial-gradient(circle at 72% 62%, color-mix(in srgb, var(--ink) 12%, transparent) 0 2.2px, transparent 3px);
   background-size: cover, cover, 110px 110px, 140px 140px;
@@ -378,7 +331,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="sandpaper"] .paper::after {
   background-image:
     radial-gradient(circle at 18% 20%, color-mix(in srgb, var(--text) 24%, transparent) 0 1.1px, transparent 1.5px),
-    radial-gradient(circle at 62% 38%, color-mix(in srgb, var(--warm) 18%, transparent) 0 1.2px, transparent 1.65px),
+    radial-gradient(circle at 62% 38%, color-mix(in srgb, var(--text) 18%, transparent) 0 1.2px, transparent 1.65px),
     radial-gradient(circle at 38% 78%, color-mix(in srgb, var(--ink) 24%, transparent) 0 1.3px, transparent 1.8px),
     linear-gradient(180deg, color-mix(in srgb, var(--text) 6%, transparent), color-mix(in srgb, var(--ink) 6%, transparent));
   background-size: 22px 22px, 28px 28px, 24px 24px, cover;
@@ -395,7 +348,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="burlap"] .paper::after {
   background-image:
     repeating-linear-gradient(0deg, color-mix(in srgb, var(--text) 18%, transparent) 0 3px, transparent 3px 13px),
-    repeating-linear-gradient(90deg, color-mix(in srgb, var(--warm) 16%, transparent) 0 4px, transparent 4px 15px),
+    repeating-linear-gradient(90deg, color-mix(in srgb, var(--ink) 16%, transparent) 0 4px, transparent 4px 15px),
     repeating-linear-gradient(0deg, transparent 0 8px, color-mix(in srgb, var(--ink) 12%, transparent) 8px 10px, transparent 10px 20px),
     repeating-linear-gradient(90deg, transparent 0 9px, color-mix(in srgb, var(--text) 9%, transparent) 9px 11px, transparent 11px 22px);
   background-size: 24px 24px, 28px 28px, 30px 30px, 32px 32px;
@@ -412,14 +365,14 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="slate"] .paper::after {
   background-image:
     repeating-linear-gradient(172deg, color-mix(in srgb, var(--text) 12%, transparent) 0 2px, transparent 2px 12px),
-    repeating-linear-gradient(176deg, color-mix(in srgb, var(--accent) 12%, transparent) 0 1px, transparent 1px 18px),
+    repeating-linear-gradient(176deg, color-mix(in srgb, var(--ink) 12%, transparent) 0 1px, transparent 1px 18px),
     linear-gradient(180deg, color-mix(in srgb, var(--text) 7%, transparent), transparent 34%, transparent 66%, color-mix(in srgb, var(--ink) 10%, transparent));
   background-size: 100% 30px, 100% 54px, cover;
   filter: url(#paper-slate);
   box-shadow:
     inset 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent),
     inset 0 -1px 0 color-mix(in srgb, var(--ink) 16%, transparent),
-    inset 0 0 24px color-mix(in srgb, var(--accent) 5%, transparent);
+    inset 0 0 24px color-mix(in srgb, var(--ink) 5%, transparent);
   mix-blend-mode: soft-light;
   opacity: .22;
 }
@@ -428,7 +381,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="leather"] .paper::after {
   background-image:
     radial-gradient(circle at 14% 18%, color-mix(in srgb, var(--text) 16%, transparent) 0 3px, transparent 3.8px),
-    radial-gradient(circle at 56% 34%, color-mix(in srgb, var(--warm) 12%, transparent) 0 4px, transparent 4.8px),
+    radial-gradient(circle at 56% 34%, color-mix(in srgb, var(--ink) 12%, transparent) 0 4px, transparent 4.8px),
     radial-gradient(circle at 72% 72%, color-mix(in srgb, var(--ink) 18%, transparent) 0 3.4px, transparent 4.4px),
     linear-gradient(145deg, color-mix(in srgb, var(--text) 6%, transparent), transparent 42%, color-mix(in srgb, var(--ink) 9%, transparent));
   background-size: 48px 48px, 62px 62px, 54px 54px, cover;
@@ -446,7 +399,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 :root[data-tex="cork"] .paper::after {
   background-image:
     radial-gradient(circle at 20% 22%, color-mix(in srgb, var(--text) 20%, transparent) 0 2px, transparent 2.8px),
-    radial-gradient(circle at 68% 32%, color-mix(in srgb, var(--warm) 18%, transparent) 0 2.4px, transparent 3.2px),
+    radial-gradient(circle at 68% 32%, color-mix(in srgb, var(--ink) 18%, transparent) 0 2.4px, transparent 3.2px),
     radial-gradient(circle at 44% 74%, color-mix(in srgb, var(--ink) 18%, transparent) 0 2.2px, transparent 3px),
     radial-gradient(circle at 82% 82%, color-mix(in srgb, var(--text) 14%, transparent) 0 1.8px, transparent 2.5px);
   background-size: 36px 36px, 44px 44px, 40px 40px, 28px 28px;
@@ -774,7 +727,7 @@ footer.sitefooter a { color:var(--muted); }
 .rev.d1{transition-delay:.06s}.rev.d2{transition-delay:.16s}.rev.d3{transition-delay:.26s}.rev.d4{transition-delay:.36s}.rev.d5{transition-delay:.46s}
 
 @media (prefers-reduced-motion: reduce){
-  .claw,.clawwrap::after,.pdot,.horizon,.ceiling,.packet,.loopspark,.statusnote .sdot,.learn-dots i,.bgtelem-flicker{ animation:none !important; }
+  .claw,.clawwrap::after,.pdot,.packet,.loopspark,.statusnote .sdot,.learn-dots i,.bgtelem-flicker{ animation:none !important; }
   .rev{ opacity:1 !important; transform:none !important; }
   .section{ opacity:1 !important; scale:1 !important; }
   .learn-dots i:nth-child(-n+3) {
