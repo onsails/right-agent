@@ -1046,3 +1046,43 @@ async fn update_referenced_profile_reattaches_on_midloop_detach_failure() {
         "the first (successful) detach must be re-attached on bailout"
     );
 }
+
+#[tokio::test]
+async fn reconcile_detaches_undeclared_regardless_of_prefix() {
+    // Attached: ["fal-a1b2c3"] — agent-agnostic name, no "{agent}-" prefix.
+    // Declared: [] → it must be detached under the declared-list rule even
+    // though it lacks the "right-" prefix the old code keyed on.
+    let mock = MockOpenShell {
+        mock_list_sandbox_providers: Some(Box::new(|_| {
+            Ok(proto_v1::ListSandboxProvidersResponse {
+                providers: vec![datamodel::Provider {
+                    metadata: Some(datamodel::ObjectMeta {
+                        name: "fal-a1b2c3".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            })
+        })),
+        mock_detach_sandbox_provider: Some(Box::new(|_| {
+            Ok(proto_v1::DetachSandboxProviderResponse {
+                sandbox: None,
+                detached: true,
+            })
+        })),
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    // agent_prefix is "right" — "fal-a1b2c3" does NOT start with "right-",
+    // so the old prefix guard would skip it. The new declared-list rule must
+    // detach it because it is absent from declared (empty slice).
+    let report = reconcile_for_sandbox(&mut client, "sbox", "right", &[])
+        .await
+        .unwrap();
+    assert_eq!(report.detached, vec!["fal-a1b2c3".to_string()]);
+    assert!(report.attached.is_empty());
+    assert!(report.missing.is_empty());
+    assert!(report.errors.is_empty());
+}
