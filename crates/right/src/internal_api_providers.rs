@@ -134,8 +134,6 @@ pub fn validate_name(agent: &str, name: &str) -> Result<(), ProviderApiError> {
 
 /// Agent-agnostic record id: `{type-slug}-{6 hex}`. `type_slug` is the gateway
 /// type (built-in slug like `right-fal` → `fal`; generic profile id → `generic`).
-// wired into the create path in a later task (provider_share)
-#[allow(dead_code)]
 fn new_record_name(type_slug: &str) -> String {
     let base = type_slug.strip_prefix("right-").unwrap_or(type_slug);
     let base = if base.is_empty() || base.starts_with("generic") {
@@ -672,6 +670,44 @@ mod provider_validation_tests {
         assert_eq!(suffix.len(), 6);
         assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()), "got {n}");
     }
+
+    #[test]
+    fn serialize_provider_entry_emits_shared_from_only_when_borrowed() {
+        let borrowed = right_agent_config::ProviderEntry {
+            name: "fal-a1b2c3".into(),
+            type_: right_agent_config::ProviderType::BuiltIn("right-fal".into()),
+            label: None,
+            generic: None,
+            shared_from: Some("riskoff".into()),
+        };
+        let s = serialize_provider_entry(&borrowed);
+        assert!(s.contains("shared_from: 'riskoff'"), "got: {s}");
+
+        let owned = right_agent_config::ProviderEntry {
+            shared_from: None,
+            ..borrowed.clone()
+        };
+        let s2 = serialize_provider_entry(&owned);
+        assert!(
+            !s2.contains("shared_from"),
+            "owned entry must not emit shared_from; got: {s2}"
+        );
+
+        // Round-trip: the serialized borrowed entry must parse back via serde_saphyr.
+        let yaml = format!("sandbox:\n  mode: openshell\n  providers:\n{s}");
+        let cfg: right_agent_config::AgentConfig = serde_saphyr::from_str(&yaml)
+            .expect("serialized borrowed entry must round-trip through serde_saphyr");
+        let entry_back = &cfg.sandbox.unwrap().providers[0];
+        assert_eq!(
+            entry_back.shared_from.as_deref(),
+            Some("riskoff"),
+            "shared_from must round-trip"
+        );
+        assert!(
+            entry_back.is_borrowed(),
+            "round-tripped entry must report is_borrowed()"
+        );
+    }
 }
 
 // ── Task 15: /provider-list ───────────────────────────────────────────────────
@@ -1017,8 +1053,7 @@ pub(crate) async fn handle_provider_create(
     } else {
         None
     };
-    let label_slug = req.label.clone().unwrap_or_else(|| req.type_.clone());
-    let name = format!("{}-{}", req.agent, label_slug);
+    let name = new_record_name(&req.type_);
     validate_name(&req.agent, &name)?;
     let _guard = provider_lock(&state, &req.agent).await;
 
@@ -1690,6 +1725,12 @@ fn serialize_provider_entry(entry: &right_agent_config::ProviderEntry) -> String
                 yaml_single_quote(prefix)
             ));
         }
+    }
+    if let Some(owner) = &entry.shared_from {
+        out.push_str(&format!(
+            "      shared_from: {}\n",
+            yaml_single_quote(owner)
+        ));
     }
     out
 }
