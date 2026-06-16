@@ -9,7 +9,7 @@ const {
 const starLabel = formatStars(await getStars());
 ---
 <!doctype html>
-<html lang="en">
+<html lang="en" data-bg="a">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -21,8 +21,85 @@ const starLabel = formatStars(await getStars());
     <div class="fx void"></div>
     <div class="fx depthbloom" data-depth="4"></div>
     <div class="fx nebula" data-depth="6"></div>
-    <div class="fx stars-far twinkle" data-depth="16"></div>
-    <div class="fx stars-near" data-depth="30"></div>
+    <!-- BG-EXPERIMENT:start -->
+    <div class="fx bgfx bgfx-wordmark bgfx-wordmark-1" data-depth="12" aria-hidden="true">
+      <span>RIGHT</span>
+      <span>AGENT</span>
+      <span>SECURE</span>
+    </div>
+    <div class="fx bgfx bgfx-wordmark bgfx-wordmark-2" data-depth="18" aria-hidden="true">
+      <span>SANDBOXED</span>
+      <span>ISOLATED</span>
+    </div>
+    <div class="fx bgfx bgfx-wordmark bgfx-wordmark-3" data-depth="24" aria-hidden="true">
+      <span>RIGHT</span>
+      <span>AGENT</span>
+      <span>SANDBOXED</span>
+    </div>
+
+    <div class="fx bgfx bgfx-telemetry bgfx-telemetry-1" data-depth="10" aria-hidden="true">
+      <div class="bgtelem-col">
+        <span>obs · deep-field</span>
+        <span>sig <i class="bgtelem-flicker">●●●●●</i></span>
+        <span>lat 12ms</span>
+        <span>0x7f3a · sandbox</span>
+        <span>RA 14h · DEC +12°</span>
+        <span>coord 41.2 / 73.9</span>
+      </div>
+      <div class="bgtelem-col">
+        <span>agent runtime · nominal</span>
+        <span>hex 4d 41 50 2f 31</span>
+        <span>vault ext · sealed</span>
+        <span>sig <i class="bgtelem-flicker bgtelem-flicker-alt">●●●●●</i></span>
+        <span>obs · low-noise</span>
+        <span>0x11bd · host rail</span>
+      </div>
+      <div class="bgtelem-col">
+        <span>RA 02h · DEC -04°</span>
+        <span>lat 09ms · stable</span>
+        <span>coord 08.6 / 12.4</span>
+        <span>sig ●●●○○</span>
+        <span>obs · deep-field</span>
+        <span>0x92aa · link clear</span>
+      </div>
+    </div>
+    <div class="fx bgfx bgfx-telemetry bgfx-telemetry-2" data-depth="18" aria-hidden="true">
+      <div class="bgtelem-row">
+        <span>north vector · 18.4</span><span>RA 14h · DEC +12°</span><span>lat 12ms</span><span>sig <i class="bgtelem-flicker">●●●●●</i></span><span>obs · deep-field</span><span>0x7f3a · nominal</span>
+      </div>
+      <div class="bgtelem-row">
+        <span>coord 41.2 / 73.9</span><span>channel · sealed</span><span>lat 09ms</span><span>obs · quiet-band</span><span>0x4be1 · uplink</span><span>sig ●●●○○</span>
+      </div>
+      <div class="bgtelem-row">
+        <span>fig 02 · proxy rail</span><span>RA 02h · DEC -04°</span><span>hex 5a 31 63</span><span>obs · deep-field</span><span>lat 16ms</span><span>sig <i class="bgtelem-flicker bgtelem-flicker-alt">●●●●○</i></span>
+      </div>
+    </div>
+
+    <div class="fx bgfx bgfx-manifesto bgfx-manifesto-1" data-depth="8" aria-hidden="true">
+      <div class="bgband bgband-left"><span>sandboxed multi-agent runtime</span><span>sandboxed multi-agent runtime</span></div>
+    </div>
+    <div class="fx bgfx bgfx-manifesto bgfx-manifesto-2" data-depth="14" aria-hidden="true">
+      <div class="bgband bgband-right"><span>credentials stay outside the box</span><span>credentials stay outside the box</span></div>
+    </div>
+    <div class="fx bgfx bgfx-manifesto bgfx-manifesto-3" data-depth="20" aria-hidden="true">
+      <div class="bgband bgband-left"><span>secure by default</span><span>secure by default</span></div>
+    </div>
+    <div class="fx bgfx bgfx-manifesto bgfx-manifesto-4" data-depth="26" aria-hidden="true">
+      <div class="bgband bgband-right"><span>the box is closed; you just use it</span><span>the box is closed; you just use it</span></div>
+    </div>
+
+    <div class="fx bgfx bgfx-blueprint-grid" data-depth="8" aria-hidden="true"></div>
+    <div class="fx bgfx bgfx-blueprint-captions" data-depth="14" aria-hidden="true">
+      <span>fig.01 · runtime</span>
+      <span>scale 1:1</span>
+      <span>rev a</span>
+      <span>host rail · sealed</span>
+    </div>
+    <div class="fx bgfx bgfx-blueprint-numerals" data-depth="20" aria-hidden="true">
+      <span data-bg-numeral>01</span>
+      <span>04</span>
+    </div>
+    <!-- BG-EXPERIMENT:end -->
     <div class="fx ceiling"></div>
     <div class="fx horizon"></div>
     <div class="fx horizon-glow"></div>
@@ -33,6 +110,15 @@ const starLabel = formatStars(await getStars());
       <span class="edge tl"></span><span class="edge tr"></span><span class="edge bl"></span><span class="edge br"></span>
       <span class="read r-bl">secure-by-default</span>
     </div>
+
+    <!-- BG-EXPERIMENT:start -->
+    <div class="bgswitch" aria-label="Background experiment switcher">
+      <button type="button" class="bgswitch-btn" data-bg-choice="a" aria-pressed="false"><span class="bgswitch-key">A</span><span>wordmark</span></button>
+      <button type="button" class="bgswitch-btn" data-bg-choice="b" aria-pressed="false"><span class="bgswitch-key">B</span><span>telemetry</span></button>
+      <button type="button" class="bgswitch-btn" data-bg-choice="c" aria-pressed="false"><span class="bgswitch-key">C</span><span>manifesto</span></button>
+      <button type="button" class="bgswitch-btn" data-bg-choice="d" aria-pressed="false"><span class="bgswitch-key">D</span><span>blueprint</span></button>
+    </div>
+    <!-- BG-EXPERIMENT:end -->
 
     <div class="wrap">
       <nav class="topnav">
@@ -63,6 +149,30 @@ const starLabel = formatStars(await getStars());
     <script>
       const layers = Array.from(document.querySelectorAll('.fx[data-depth]')) as HTMLElement[];
       const sections = Array.from(document.querySelectorAll('.section')) as HTMLElement[];
+      /* BG-EXPERIMENT:start */
+      const root = document.documentElement;
+      const bgChoices = ['a', 'b', 'c', 'd'];
+      const bgButtons = Array.from(document.querySelectorAll('[data-bg-choice]')) as HTMLButtonElement[];
+      const bgNumeral = document.querySelector('[data-bg-numeral]');
+      const setBgChoice = (next: string, persist = true) => {
+        const choice = bgChoices.includes(next) ? next : 'a';
+        root.dataset.bg = choice;
+        for (const button of bgButtons) button.setAttribute('aria-pressed', String(button.dataset.bgChoice === choice));
+        if (persist) {
+          try {
+            localStorage.setItem('bg', choice);
+          } catch {}
+        }
+      };
+      let storedBg = 'a';
+      try {
+        storedBg = localStorage.getItem('bg') || 'a';
+      } catch {}
+      setBgChoice(storedBg, false);
+      for (const button of bgButtons) {
+        button.addEventListener('click', () => setBgChoice(button.dataset.bgChoice || 'a'));
+      }
+      /* BG-EXPERIMENT:end */
       let mx = 0, my = 0, sy = 0, tmx = 0, tmy = 0;
       const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
       let activeSection: HTMLElement | null = null;
@@ -95,25 +205,39 @@ const starLabel = formatStars(await getStars());
         }
       };
 
+      /* BG-EXPERIMENT:start */
+      const updateBlueprintNumeral = () => {
+        if (reduce || root.dataset.bg !== 'd' || !(bgNumeral instanceof HTMLElement)) return;
+        const index = activeSection ? Math.max(0, sections.indexOf(activeSection)) : 0;
+        bgNumeral.textContent = String(index + 1).padStart(2, '0');
+      };
+      /* BG-EXPERIMENT:end */
+
       addEventListener('scroll', () => { sy = scrollY; }, { passive: true });
       if (!reduce) {
         addEventListener('mousemove', (e) => {
           tmx = (e.clientX / innerWidth - .5) * 2;
           tmy = (e.clientY / innerHeight - .5) * 2;
         }, { passive: true });
-        const tick = () => {
+      }
+
+      const tick = () => {
+        if (!reduce) {
           mx += (tmx - mx) * .06; my += (tmy - my) * .06;
           for (const el of layers) {
             const d = parseFloat(el.dataset.depth || '0');
             el.style.transform = `translate3d(${(-mx * d).toFixed(2)}px, ${(-my * d - sy * (d / 90)).toFixed(2)}px, 0)`;
           }
-          updateActiveSection();
-
-          requestAnimationFrame(tick);
-        };
+        }
         updateActiveSection();
+        /* BG-EXPERIMENT:start */
+        updateBlueprintNumeral();
+        /* BG-EXPERIMENT:end */
+
         requestAnimationFrame(tick);
-      }
+      };
+      updateActiveSection();
+      requestAnimationFrame(tick);
       const io = new IntersectionObserver((es) => {
         for (const e of es) if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
       }, { threshold: .12 });
