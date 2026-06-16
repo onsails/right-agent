@@ -105,43 +105,51 @@ async fn ensure_v2_for_mutation(client: &mut OpenShellClient) -> Result<(), Prov
 }
 
 pub fn validate_name(agent: &str, name: &str) -> Result<(), ProviderApiError> {
-    let expected_prefix = format!("{agent}-");
-    if !name.starts_with(&expected_prefix) {
+    // Accept either legacy "{agent}-{slug}" or agent-agnostic "{type-slug}-{uuid}".
+    let slug = name.strip_prefix(&format!("{agent}-")).unwrap_or(name);
+    if slug.is_empty() || slug.len() > 40 {
         return Err(ProviderApiError::InvalidName {
             name: name.into(),
-            reason: format!("must start with \"{expected_prefix}\""),
+            reason: "1-40 chars after optional agent prefix".into(),
         });
-    }
-    let slug = &name[expected_prefix.len()..];
-    if slug.is_empty() || slug.len() > 32 {
-        return Err(ProviderApiError::InvalidName {
-            name: name.into(),
-            reason: "slug must be 1-32 chars".into(),
-        });
-    }
-    let mut chars = slug.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_lowercase() {
-        return Err(ProviderApiError::InvalidName {
-            name: name.into(),
-            reason: "slug must start with a-z".into(),
-        });
-    }
-    for c in chars {
-        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
-            return Err(ProviderApiError::InvalidName {
-                name: name.into(),
-                reason: "slug allows [a-z0-9-]".into(),
-            });
-        }
     }
     if name.len() > 64 {
         return Err(ProviderApiError::InvalidName {
             name: name.into(),
-            reason: "total length > 64".into(),
+            reason: "name too long (max 64)".into(),
+        });
+    }
+    let first_ok = name.chars().next().is_some_and(|c| c.is_ascii_lowercase());
+    let rest_ok = name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !first_ok || !rest_ok {
+        return Err(ProviderApiError::InvalidName {
+            name: name.into(),
+            reason: "lowercase a-z/0-9/'-', must start a-z".into(),
         });
     }
     Ok(())
+}
+
+/// Agent-agnostic record id: `{type-slug}-{6 hex}`. `type_slug` is the gateway
+/// type (built-in slug like `right-fal` → `fal`; generic profile id → `generic`).
+// wired into the create path in a later task (provider_share)
+#[allow(dead_code)]
+fn new_record_name(type_slug: &str) -> String {
+    let base = type_slug.strip_prefix("right-").unwrap_or(type_slug);
+    let base = if base.is_empty() || base.starts_with("generic") {
+        "generic"
+    } else {
+        base
+    };
+    let hex: String = uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .chars()
+        .take(6)
+        .collect();
+    format!("{base}-{hex}")
 }
 
 pub fn validate_env_var(name: &str) -> Result<(), ProviderApiError> {
@@ -338,9 +346,10 @@ mod provider_validation_tests {
 
     #[test]
     fn name_must_match_agent_prefix() {
+        // Legacy {agent}-{slug} form must still validate.
         assert!(validate_name("myagent", "myagent-anthropic").is_ok());
-        let err = validate_name("myagent", "other-anthropic").unwrap_err();
-        assert!(matches!(err, ProviderApiError::InvalidName { .. }));
+        // Agent-agnostic form (no agent prefix) is now also valid.
+        assert!(validate_name("myagent", "other-anthropic").is_ok());
     }
 
     #[test]
@@ -633,6 +642,35 @@ mod provider_validation_tests {
             .expect("single-quoted reserved-word label must still parse as Option<String>::Some");
         let entry_back = &cfg.sandbox.unwrap().providers[0];
         assert_eq!(entry_back.label.as_deref(), Some("no"));
+    }
+
+    #[test]
+    fn validate_name_accepts_legacy_agent_prefixed() {
+        validate_name("riskoff", "riskoff-fal").expect("legacy {agent}-{slug} must validate");
+    }
+
+    #[test]
+    fn validate_name_accepts_agent_agnostic_uuid_form() {
+        // No agent prefix required for the new form.
+        validate_name("riskoff", "fal-a1b2c3").expect("agent-agnostic name must validate");
+    }
+
+    #[test]
+    fn validate_name_rejects_bad_agnostic_forms() {
+        // Uppercase, leading digit, and empty are all rejected even without an agent prefix.
+        assert!(validate_name("riskoff", "Fal-a1b2c3").is_err()); // uppercase
+        assert!(validate_name("riskoff", "1fal-a1b2c3").is_err()); // leading digit
+        assert!(validate_name("riskoff", "").is_err()); // empty
+        assert!(validate_name("riskoff", &"f".repeat(41)).is_err()); // over 40-char slug cap
+    }
+
+    #[test]
+    fn new_record_name_has_type_slug_and_hex_suffix() {
+        let n = new_record_name("right-fal");
+        assert!(n.starts_with("fal-"), "got {n}");
+        let suffix = n.rsplit('-').next().unwrap();
+        assert_eq!(suffix.len(), 6);
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()), "got {n}");
     }
 }
 
