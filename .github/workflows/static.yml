@@ -34,6 +34,9 @@ jobs:
       # Determinate Nix + devenv + FlakeHub cache, matching tests.yml.
       - uses: onsails/nix-action@v2.2.0
       - name: Build site (Bun, in the devenv site profile)
+        env:
+          PUBLIC_POSTHOG_KEY: ${{ vars.PUBLIC_POSTHOG_KEY }}
+          PUBLIC_POSTHOG_HOST: ${{ vars.PUBLIC_POSTHOG_HOST }}
         run: |
           devenv --profile site shell -- bash -lc \
             'cd site && bun install --frozen-lockfile && bun run build'
