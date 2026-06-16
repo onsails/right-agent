@@ -447,6 +447,16 @@ impl ToolDispatcher {
         args: serde_json::Value,
         context: crate::progress::ToolCallContext,
     ) -> Result<CallToolResult, anyhow::Error> {
+        let argument_count = args.as_object().map_or(0, serde_json::Map::len);
+        tracing::info!(
+            agent = %agent_name,
+            mcp_method = %"tools/call",
+            tool = %tool_name,
+            has_arguments = argument_count > 0,
+            argument_count,
+            "mcp request"
+        );
+
         let registry = self
             .agents
             .get(agent_name)
@@ -481,6 +491,12 @@ impl ToolDispatcher {
 
     /// Merge tool lists from all backends for a given agent.
     pub(crate) async fn tools_list(&self, agent_name: &str) -> Vec<Tool> {
+        tracing::info!(
+            agent = %agent_name,
+            mcp_method = %"tools/list",
+            "mcp request"
+        );
+
         let Some(registry) = self.agents.get(agent_name) else {
             return Vec::new();
         };
@@ -814,6 +830,42 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
 
+    #[derive(Clone)]
+    struct SharedLogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn capture_aggregator_log<F, Fut>(f: F) -> String
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = SharedLogWriter(Arc::clone(&buffer));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_target(false)
+            .without_time()
+            .finish();
+
+        let guard = tracing::subscriber::set_default(subscriber);
+        f().await;
+        drop(guard);
+
+        let bytes = buffer.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
     fn aggregator_test_body(result: &rmcp::model::CallToolResult) -> serde_json::Value {
         let rmcp::model::RawContent::Text(t) = &result.content[0].raw else {
             panic!("expected text content, got {:?}", result.content[0].raw);
@@ -920,6 +972,22 @@ mod tests {
             names, sorted,
             "advertised tools must be in canonical (sorted) order"
         );
+    }
+
+    #[tokio::test]
+    async fn tools_list_logs_secret_safe_request_metadata_at_info() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dispatcher = make_dispatcher(tmp.path());
+
+        let log = capture_aggregator_log(|| async {
+            let _ = dispatcher.tools_list("test-agent").await;
+        })
+        .await;
+
+        assert!(log.contains("INFO"), "{log}");
+        assert!(log.contains("mcp request"), "{log}");
+        assert!(log.contains("mcp_method=tools/list"), "{log}");
+        assert!(log.contains("agent=test-agent"), "{log}");
     }
 
     #[test]
@@ -1040,6 +1108,37 @@ mod tests {
                 .contains("Server 'notion' not found"),
             "unexpected message: {body:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_logs_tool_request_without_arguments_or_secret_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dispatcher = make_dispatcher(tmp.path());
+        let secret = "secret-token-should-not-appear";
+
+        let log = capture_aggregator_log(|| async {
+            let _ = dispatcher
+                .dispatch(
+                    "test-agent",
+                    "notion__search",
+                    serde_json::json!({
+                        "api_key": secret,
+                        "query": "sensitive user search",
+                    }),
+                    crate::progress::ToolCallContext::default(),
+                )
+                .await;
+        })
+        .await;
+
+        assert!(log.contains("INFO"), "{log}");
+        assert!(log.contains("mcp request"), "{log}");
+        assert!(log.contains("mcp_method=tools/call"), "{log}");
+        assert!(log.contains("agent=test-agent"), "{log}");
+        assert!(log.contains("tool=notion__search"), "{log}");
+        assert!(!log.contains(secret), "{log}");
+        assert!(!log.contains("api_key"), "{log}");
+        assert!(!log.contains("sensitive user search"), "{log}");
     }
 
     #[tokio::test]

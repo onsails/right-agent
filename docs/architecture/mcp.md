@@ -76,6 +76,13 @@ OAuth callback (bot) → POST /set-token to Aggregator (Unix socket)
   → no .mcp.json writes, no sandbox uploads
 ```
 
+### Request logging
+
+The HTTP aggregator logs MCP `tools/list` and `tools/call` requests at
+`info` with only safe routing metadata: agent name, MCP method, tool name for
+tool calls, and argument presence/count. It does not log bearer tokens,
+headers, raw request bodies, tool arguments, or argument keys.
+
 ### OAuth callback readiness
 
 The bot callback handler only acknowledges that the provider redirected with an
