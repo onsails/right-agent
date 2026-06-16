@@ -35,8 +35,10 @@ jobs:
       - uses: onsails/nix-action@v2.2.0
       - name: Build site (Bun, in the devenv site profile)
         env:
-          PUBLIC_POSTHOG_KEY: ${{ vars.PUBLIC_POSTHOG_KEY }}
-          PUBLIC_POSTHOG_HOST: ${{ vars.PUBLIC_POSTHOG_HOST }}
+          # Prefer repository variables; fall back to secrets because these
+          # values are public browser config and may have been entered there.
+          PUBLIC_POSTHOG_KEY: ${{ vars.PUBLIC_POSTHOG_KEY || secrets.PUBLIC_POSTHOG_KEY }}
+          PUBLIC_POSTHOG_HOST: ${{ vars.PUBLIC_POSTHOG_HOST || secrets.PUBLIC_POSTHOG_HOST }}
         run: |
           devenv --profile site shell -- bash -lc \
             'cd site && bun install --frozen-lockfile && bun run build'
