@@ -697,8 +697,8 @@ async fn recreate_legacy_generic_provider(
 ///
 /// - Attaches any declared provider that exists on the gateway but is not yet
 ///   attached to the sandbox.
-/// - Detaches any provider whose name starts with `<agent_prefix>-` that is
-///   currently attached but is not in `declared` (stale after a config change).
+/// - Detaches any attached provider not present in `declared`; `agent.yaml` is
+///   the source of truth and name prefixes are no longer load-bearing.
 /// - Records providers that are declared but not yet created on the gateway
 ///   in `missing` (not an error — they may be created later by the user).
 ///
@@ -716,7 +716,7 @@ async fn recreate_legacy_generic_provider(
 pub async fn reconcile_for_sandbox(
     client: &mut OpenShellClient<Channel>,
     sandbox_name: &str,
-    agent_prefix: &str,
+    _agent_prefix: &str,
     declared: &[String],
 ) -> Result<ReconcileReport, ProviderError> {
     // Provider composition is gated by the gateway-global providers_v2_enabled
@@ -775,10 +775,10 @@ pub async fn reconcile_for_sandbox(
             Err(e) => report.errors.push((name.clone(), format!("get: {e:#}"))),
         }
     }
-    // Detach prefixed providers that are no longer declared.
-    let prefix = format!("{agent_prefix}-");
+    // Detach anything attached that this agent no longer declares. agent.yaml is
+    // the source of truth; name prefixes are no longer load-bearing for ownership.
     for name in &attached {
-        if name.starts_with(&prefix) && !declared_set.contains(name) {
+        if !declared_set.contains(name) {
             match detach_from_sandbox(client, sandbox_name, name).await {
                 Ok(()) => report.detached.push(name.clone()),
                 Err(e) => report.errors.push((name.clone(), format!("detach: {e:#}"))),
