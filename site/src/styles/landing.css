@@ -178,37 +178,89 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
   --paper-shadow: color-mix(in srgb, var(--warm) 14%, var(--ink) 86%);
 }
 
-:root[data-tex="fiber"] .paper::after {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220' viewBox='0 0 220 220'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23f)' opacity='0.8'/%3E%3C/svg%3E");
-  background-size: 220px 220px;
-  filter: url(#paper-fiber);
-  mix-blend-mode: soft-light;
-  opacity: .09;
-}
+/* PAPER-EXPERIMENT:cardstock:start */
 :root[data-tex="cardstock"] .paper::after {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='280' height='280' viewBox='0 0 280 280'%3E%3Cfilter id='c'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.4' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='280' height='280' filter='url(%23c)' opacity='0.9'/%3E%3C/svg%3E");
   background-size: 280px 280px;
   filter: url(#paper-cardstock);
   mix-blend-mode: overlay;
-  opacity: .14;
+  opacity: .22;
 }
+/* PAPER-EXPERIMENT:cardstock:end */
+/* PAPER-EXPERIMENT:halftone:start */
 :root[data-tex="halftone"] .paper::after {
   background-image:
-    radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--text) 28%, transparent) 0 1px, transparent 1.15px),
-    radial-gradient(circle at 3px 3px, color-mix(in srgb, var(--warm) 18%, transparent) 0 .9px, transparent 1.05px);
-  background-size: 5px 5px, 5px 5px;
-  mix-blend-mode: soft-light;
-  opacity: .1;
+    radial-gradient(circle at 1.2px 1.2px, color-mix(in srgb, var(--text) 42%, transparent) 0 1.2px, transparent 1.45px),
+    radial-gradient(circle at 4px 4px, color-mix(in srgb, var(--warm) 24%, transparent) 0 1px, transparent 1.22px),
+    radial-gradient(circle at 0 0, color-mix(in srgb, var(--ink) 14%, transparent) 0 .7px, transparent .9px);
+  background-size: 6px 6px, 6px 6px, 9px 9px;
+  mix-blend-mode: overlay;
+  opacity: .18;
 }
+/* PAPER-EXPERIMENT:halftone:end */
+/* PAPER-EXPERIMENT:crosshatch:start */
 :root[data-tex="crosshatch"] .paper::after {
   background-image:
-    repeating-linear-gradient(45deg, color-mix(in srgb, var(--text) 16%, transparent) 0 1px, transparent 1px 7px),
-    repeating-linear-gradient(-45deg, color-mix(in srgb, var(--warm) 14%, transparent) 0 1px, transparent 1px 8px),
-    linear-gradient(180deg, color-mix(in srgb, var(--text) 4%, transparent), transparent 22%, transparent 78%, color-mix(in srgb, var(--text) 5%, transparent));
-  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent), inset 0 -1px 0 color-mix(in srgb, var(--ink) 10%, transparent);
-  mix-blend-mode: soft-light;
-  opacity: .085;
+    repeating-linear-gradient(45deg, color-mix(in srgb, var(--text) 22%, transparent) 0 1px, transparent 1px 6px),
+    repeating-linear-gradient(-45deg, color-mix(in srgb, var(--warm) 18%, transparent) 0 1px, transparent 1px 7px),
+    repeating-linear-gradient(0deg, color-mix(in srgb, var(--ink) 8%, transparent) 0 1px, transparent 1px 18px),
+    linear-gradient(180deg, color-mix(in srgb, var(--text) 5%, transparent), transparent 22%, transparent 78%, color-mix(in srgb, var(--text) 7%, transparent));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 7%, transparent), inset 0 -1px 0 color-mix(in srgb, var(--ink) 14%, transparent);
+  mix-blend-mode: overlay;
+  opacity: .16;
 }
+/* PAPER-EXPERIMENT:crosshatch:end */
+/* PAPER-EXPERIMENT:concrete:start */
+:root[data-tex="concrete"] .paper::after {
+  background-image:
+    radial-gradient(120% 100% at 20% 18%, color-mix(in srgb, var(--text) 9%, transparent), transparent 48%),
+    radial-gradient(95% 85% at 78% 74%, color-mix(in srgb, var(--warm) 12%, transparent), transparent 52%),
+    linear-gradient(180deg, color-mix(in srgb, var(--ink) 8%, transparent), transparent 30%, transparent 70%, color-mix(in srgb, var(--text) 9%, transparent));
+  background-size: cover;
+  filter: url(#paper-concrete);
+  mix-blend-mode: soft-light;
+  opacity: .18;
+}
+/* PAPER-EXPERIMENT:concrete:end */
+/* PAPER-EXPERIMENT:canvas:start */
+:root[data-tex="canvas"] .paper::after {
+  background-image:
+    repeating-linear-gradient(0deg, color-mix(in srgb, var(--text) 18%, transparent) 0 1px, transparent 1px 7px),
+    repeating-linear-gradient(90deg, color-mix(in srgb, var(--warm) 14%, transparent) 0 1px, transparent 1px 8px),
+    repeating-linear-gradient(0deg, transparent 0 3px, color-mix(in srgb, var(--ink) 6%, transparent) 3px 4px, transparent 4px 9px),
+    repeating-linear-gradient(90deg, transparent 0 4px, color-mix(in srgb, var(--text) 7%, transparent) 4px 5px, transparent 5px 10px);
+  background-position: center, 1px 2px, 0 2px, 2px 0;
+  background-size: 10px 10px, 10px 10px, 12px 12px, 12px 12px;
+  mix-blend-mode: overlay;
+  opacity: .17;
+}
+/* PAPER-EXPERIMENT:canvas:end */
+/* PAPER-EXPERIMENT:grunge:start */
+:root[data-tex="grunge"] .paper::after {
+  background-image:
+    linear-gradient(12deg, transparent 0 46%, color-mix(in srgb, var(--warm) 12%, transparent) 46% 48%, transparent 48% 100%),
+    linear-gradient(-18deg, transparent 0 62%, color-mix(in srgb, var(--text) 10%, transparent) 62% 63%, transparent 63% 100%),
+    radial-gradient(140% 120% at 18% 12%, color-mix(in srgb, var(--ink) 14%, transparent), transparent 48%),
+    radial-gradient(110% 90% at 84% 78%, color-mix(in srgb, var(--warm) 16%, transparent), transparent 50%);
+  background-size: cover;
+  filter: url(#paper-grunge);
+  mix-blend-mode: multiply;
+  opacity: .2;
+}
+/* PAPER-EXPERIMENT:grunge:end */
+/* PAPER-EXPERIMENT:speckle:start */
+:root[data-tex="speckle"] .paper::after {
+  background-image:
+    radial-gradient(circle at 16% 24%, color-mix(in srgb, var(--text) 30%, transparent) 0 1px, transparent 1.3px),
+    radial-gradient(circle at 74% 38%, color-mix(in srgb, var(--warm) 22%, transparent) 0 1.2px, transparent 1.55px),
+    radial-gradient(circle at 48% 70%, color-mix(in srgb, var(--ink) 26%, transparent) 0 1.4px, transparent 1.8px),
+    radial-gradient(circle at 84% 82%, color-mix(in srgb, var(--text) 24%, transparent) 0 .8px, transparent 1.1px);
+  background-size: 120px 120px, 150px 150px, 190px 190px, 90px 90px;
+  filter: url(#paper-speckle);
+  mix-blend-mode: overlay;
+  opacity: .16;
+}
+/* PAPER-EXPERIMENT:speckle:end */
 
 .paper-switch {
   position: fixed;
@@ -217,7 +269,7 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
   z-index: 3;
   display: grid;
   gap: .65rem;
-  width: min(28rem, calc(100vw - 2rem));
+  width: min(34rem, calc(100vw - 2rem));
   padding: .8rem;
   border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
   border-radius: 14px;
@@ -238,13 +290,15 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 }
 .paper-choices {
   display: flex;
+  align-items: center;
   gap: .45rem;
   flex-wrap: wrap;
 }
 .paper-chip {
   appearance: none;
+  flex: 0 0 auto;
   min-width: 0;
-  padding: .48rem .72rem;
+  padding: .52rem .78rem;
   border: 1px solid color-mix(in srgb, var(--line-2) 78%, transparent);
   border-radius: 999px;
   background: color-mix(in srgb, var(--bg-2) 68%, transparent);
