@@ -62,7 +62,7 @@ for (const [name, path] of pages) {
   }
 
   const singletons = [
-    'window.posthog',
+    'window.posthog=e',
     'posthog.init',
     `data-posthog-key="${expectedKey}"`,
     `data-posthog-host="${expectedHost}"`,
