@@ -280,6 +280,14 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
             post(providers::handle_export),
         )
         .route(
+            "/dashboard/{agent}/api/v1/providers/share",
+            post(providers::handle_share),
+        )
+        .route(
+            "/dashboard/{agent}/api/v1/providers/unshare",
+            post(providers::handle_unshare),
+        )
+        .route(
             "/dashboard/{agent}/api/v1/providers/{provider_name}",
             delete(providers::handle_remove),
         )

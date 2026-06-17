@@ -369,6 +369,24 @@ impl InternalClient {
     ) -> Result<serde_json::Value, InternalClientError> {
         self.post("/provider-copy", req).await
     }
+
+    /// Share the owner agent's gateway record with a destination agent (no
+    /// credential read-back — the record is attached in-place).
+    pub async fn provider_share(
+        &self,
+        req: &ProviderShareRequest<'_>,
+    ) -> Result<serde_json::Value, InternalClientError> {
+        self.post("/provider-share", req).await
+    }
+
+    /// Unshare a borrowed provider from the borrower agent (detach and remove
+    /// the borrowed agent.yaml entry; gateway record is not deleted).
+    pub async fn provider_unshare(
+        &self,
+        req: &ProviderUnshareRequest<'_>,
+    ) -> Result<serde_json::Value, InternalClientError> {
+        self.post("/provider-unshare", req).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +468,21 @@ pub struct ProviderCopyRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<&'a str>,
     pub overwrite: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProviderShareRequest<'a> {
+    pub actor_user_id: i64,
+    pub owner_agent: &'a str,
+    pub provider: &'a str,
+    pub dest_agent: &'a str,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ProviderUnshareRequest<'a> {
+    pub actor_user_id: i64,
+    pub borrower_agent: &'a str,
+    pub provider: &'a str,
 }
 
 // ---------------------------------------------------------------------------
