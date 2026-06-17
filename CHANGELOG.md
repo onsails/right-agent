@@ -1,4 +1,62 @@
 # Changelog
+## [0.4.2] - 2026-06-17
+
+
+### Bug Fixes
+
+- **curator**: Parse usage from the result line so curator_runs cost is recorded
+- **providers**: Reconcile skips legacy-recreate for borrowed records (attach-only)
+- **wizard**: Persist curator circuit knobs + mode in emitted agent.yaml
+- **providers**: Require_trusted in handler + no-allowlist secure-default tests
+- **providers**: Validate source sandbox mode in handle_provider_copy; clarify env_var in resync
+- **providers**: Drop stale dead_code allows; check dest sandbox mode on copy
+- **providers**: Address xhigh code-review findings
+- **providers**: Reject redacted credential read-back on cross-agent copy
+- **providers**: Reject mutations on borrowed providers; refcount fails closed on unreadable sibling
+- **providers**: Use expect() instead of unwrap_or_default() in borrowed guard
+
+### Features
+
+- **codegen**: Curator report-only plan schema + prompt
+- **providers**: InternalClient provider_peers + provider_copy
+- **db**: V48 curator_runs history table
+- **focus**: Notify chat on focus update
+- **curator**: Pure idle_secs_to_activity helper for the idle gate
+- **curator**: Wire IdleTimestamp into the ticker so min_idle_hours works
+- **curator**: Pure next_circuit_open_until circuit-breaker decision
+- **curator**: Thread circuit knobs into CuratorConfig and the ticker
+- **curator**: Open circuit_open_until on repeated failures (B1)
+- **curator**: CuratorRunRecord + insert_curator_run writer
+- **curator**: Record a curator_runs row per executed apply pass
+- **curator**: Report_only mode — read-only plan pass, proposed curator_runs row, no writes
+- **dashboard**: Provider peers/import/export handlers
+- **dashboard**: Register provider peers/import/export routes
+- **providers**: Borrowed entries are attach-only (no profile import/repair)
+- **providers**: Dashboard Borrow (pull) — mirror of Share from the destination
+- **providers**: Refcount provider deletion + re-home owner on agent destroy
+- **config**: CuratorMode + circuit threshold/cooldown knobs (defaults preserve behavior)
+- **wizard**: Prompt for curator circuit knobs + mode
+- **providers**: Add error variants for cross-agent copy
+- **providers**: Pure plan_copy decision logic for cross-agent copy
+- **providers**: Provider_peers discovery + require_trusted
+- **providers**: Handle_provider_copy executor (import/export core)
+- **providers**: Register provider-peers and provider-copy routes
+- **mcp**: Log aggregator requests
+- **providers**: Agent-agnostic record names; relax validate_name (legacy still valid)
+- **providers**: Persist shared_from; agent-agnostic names for new records
+- **providers**: Internal provider_share/provider_unshare (multi-attach, trust both sides)
+- **dashboard**: Backend wiring for provider share/unshare + shared_from in ProviderView
+
+### Miscellaneous
+
+- **providers**: Backfill shared_from: None on existing ProviderEntry literals
+
+### Refactor
+
+- **curator**: Dedup invocation builders, usage triple, last_result_line
+- **providers**: Retire copy-by-readback in favor of sharing
+- **providers**: Centralize borrowed-mutation guard; dedupe reconcile split
+
 ## [0.4.1] - 2026-06-15
 
 ### Cron & Skills
