@@ -343,6 +343,8 @@ h2 { font-family: var(--display); font-size: clamp(1.6rem, 3vw, 2.1rem); letter-
 .credkey b{ color:var(--text); }
 .crednote { max-width:72ch; margin:1.1rem 0 0; color:var(--muted); font-size:.95rem; border-left:2px solid color-mix(in srgb,var(--accent) 45%,transparent); padding-left:1rem; }
 .crednote b{ color:var(--text); }
+.flownote { max-width:72ch; margin:1.2rem 0 0; color:var(--dim); font-size:.9rem; }
+.flownote b{ color:var(--text); }
 
 /* icon badges across blocks */
 .card .cardicon { display:inline-flex; width:38px; height:38px; align-items:center; justify-content:center; border:1px solid var(--line-2); border-radius:11px; color:var(--accent); background:var(--bg); margin-bottom:1rem; box-shadow:0 0 18px -10px var(--accent); }
@@ -350,12 +352,6 @@ h2 { font-family: var(--display); font-size: clamp(1.6rem, 3vw, 2.1rem); letter-
 .step .stitle { display:flex; align-items:center; gap:.55rem; }
 .step .stepic { flex:0 0 auto; color:var(--accent); }
 .step.curate .stepic { color:var(--warm); }
-
-.card ul.rmlist { list-style:none; padding-left:0; }
-.card ul.rmlist li { display:flex; align-items:flex-start; gap:.6rem; padding:.22rem 0; }
-.rmic { flex:0 0 auto; margin-top:.16rem; }
-.rmic.ok { color:var(--accent); }
-.rmic.next { color:var(--warm); }
 
 .cmd-ic { display:inline-flex; align-self:center; flex:0 0 auto; color:var(--accent); }
 

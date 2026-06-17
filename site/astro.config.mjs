@@ -43,6 +43,7 @@ export default defineConfig({
         { label: 'Start', link: '/docs/' },
         { label: 'Install', link: '/docs/install/' },
         { label: 'Concepts', link: '/docs/concepts/' },
+        { label: 'Self-evolution', link: '/docs/self-evolution/' },
         { label: 'Scheduled jobs', link: '/docs/scheduled-jobs/' },
         { label: 'Security model', link: '/docs/security/' },
         { label: 'Telegram commands', link: '/docs/commands/' },

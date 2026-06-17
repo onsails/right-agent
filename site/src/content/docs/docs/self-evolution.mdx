@@ -1,0 +1,40 @@
+---
+title: Self-evolution
+description: How an agent improves as you use it — skills it learns, jobs that ride them — and why nothing durable changes behind your back.
+---
+
+An agent gets better at your work the more you use it. It learns the procedures you
+rely on, and its scheduled jobs ride those procedures as they sharpen. One rule
+holds it together: nothing durable changes without telling you.
+
+## Two ways it improves
+
+**Skills it learns.** When the agent works out a real procedure during a task, an
+API quirk or a multi-step workflow, it captures that procedure as a reusable skill
+and loads it in later sessions. You solve it once; the agent keeps the method.
+
+**Jobs that ride those skills.** A [scheduled job](/docs/scheduled-jobs/) states a
+goal and leans on the agent's skills for the steps. Improve a skill once, and every
+job that links it inherits the improvement on its next run, with no edit to the job.
+
+The two share one library of skills. Sharpen a procedure in one place, and every
+session and every job that uses it grows sharper too.
+
+## The line it holds
+
+The platform never rewrites your durable settings on its own. A skill changes
+between runs and a job picks up that change automatically, because the runtime reads
+the live skill on every run. A job's saved instructions are different: they change
+only when the agent makes a deliberate edit, and when it does, it tells you what it
+simplified. You see the change, and you can ask for the original back.
+
+## Why it works this way
+
+Software that edits its own configuration silently becomes a moving target, and you
+can no longer reason about what it will do next. Freezing the configuration would
+kill the improvement. So the platform does neither: it lets the agent improve and
+makes every durable change legible. Months in, you still know exactly what each job
+does.
+
+That audit trail is the feature, not a logging detail. It is what lets you run an
+agent unattended and keep trusting it.

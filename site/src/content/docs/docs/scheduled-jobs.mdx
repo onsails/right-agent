@@ -57,11 +57,9 @@ But a job's own stored prompt changes only when the agent makes a deliberate edi
 and when it does, it tells you what it simplified. You see what changed, and you
 can ask for the original back.
 
-The reason is trust. Software that edits its own configuration without telling you
-leaves you unable to reason about what it will do next, debugging a moving target.
-Locking the configuration would kill the improvement; the answer is to let it
-improve and make every durable change legible. Months in, you still know exactly
-what each job does.
+This is the same guarantee that holds across the whole platform. See
+[Self-evolution](/docs/self-evolution/) for why an agent that improves on its own
+is still one you can trust.
 
 ## It stays consistent
 
