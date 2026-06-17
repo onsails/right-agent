@@ -1,12 +1,11 @@
 ---
 import Landing from '../layouts/Landing.astro';
 import Hero from '../components/Hero.astro';
-import FeatureCard from '../components/FeatureCard.astro';
+import FlowStrip from '../components/FlowStrip.astro';
 import CompareTable from '../components/CompareTable.astro';
 import Diagram from '../components/Diagram.astro';
 import SelfEvolve from '../components/SelfEvolve.astro';
 import ControlPlane from '../components/ControlPlane.astro';
-import Roadmap from '../components/Roadmap.astro';
 import InstallBlock from '../components/InstallBlock.astro';
 import Footer from '../components/Footer.astro';
 ---
@@ -22,23 +21,42 @@ import Footer from '../components/Footer.astro';
   </div>
 
   <section class="section"><div class="wrap">
-    <div class="label rev">what you get</div>
-    <h2 class="rev d1">the box is closed; you just use it</h2>
-    <div class="grid">
-      <FeatureCard icon="lock" tick="◤ 01 · isolation" title="credentials stay outside the box">the secret bytes never enter the sandbox; the proxy substitutes them on outbound requests.</FeatureCard>
-      <FeatureCard icon="shield" tick="◤ 02 · sandbox" title="every agent in its own sandbox">scoped filesystem, network, and a tls-terminating proxy per agent.</FeatureCard>
-      <FeatureCard icon="database" tick="◤ 03 · memory" title="memory is untrusted data">incoming memory is sanitized; recalled memory is framed as information, not commands.</FeatureCard>
-      <FeatureCard icon="lightbulb" tick="◤ 04 · skills" title="skills it learns on its own">reusable skills captured from real use, pruned by a curator, pinned from the dashboard.</FeatureCard>
-      <FeatureCard icon="message" tick="◤ 05 · chat" title="one bot per agent">message it like a person; each chat is its own session over one shared memory.</FeatureCard>
-      <FeatureCard icon="card" tick="◤ 06 · cost" title="many agents, one subscription">cost scales with subscriptions, not agent count.</FeatureCard>
-    </div>
+    <div class="label rev">one bot per agent</div>
+    <h2 class="rev d1">message it like a person</h2>
+    <p class="lead rev d1" style="margin-bottom:2.4rem;">you talk to your agent in Telegram. every chat — a dm, a group, or a topic inside a group — is its own Claude Code session, and they all share one memory.</p>
+    <FlowStrip
+      cap="every chat, its own session"
+      capIcon="message"
+      note="start a fresh named session any time with /new, and move between them with /switch."
+      nodes={[
+        { icon: 'message', tint: 't-teal', name: 'your chats', note: 'a dm, a group, or a topic inside a group' },
+        { icon: 'claude', tint: 't-gold', name: 'a session each', note: 'every chat runs its own Claude Code session, keyed by chat and thread' },
+        { icon: 'database', tint: 't-ruby', name: 'one shared memory', note: 'separate working contexts, one chat-tagged memory they all read and write' },
+      ]}
+    />
   </div></section>
 
   <section class="section"><div class="wrap">
-    <div class="label rev">how it works</div>
-    <h2 class="rev d1">your keys stay outside the box</h2>
-    <p class="lead rev d1" style="margin-bottom:2.4rem;">a message goes in, a reply comes out, and the agent uses your accounts along the way — without ever holding the keys. here is the whole path.</p>
+    <div class="label rev">the closed box</div>
+    <h2 class="rev d1">every agent sealed, every key outside it</h2>
+    <p class="lead rev d1" style="margin-bottom:2.4rem;">each agent runs in its own sandbox — its own files, its own scoped network, a tls-terminating proxy. it uses your accounts along the way without ever holding the keys. here is the whole path.</p>
     <Diagram />
+    <p class="flownote rev d1" style="margin-top:1.4rem;">the full <a href="/docs/security/">security model</a> covers the sandbox, credentials, network policy, and how it fails closed on a backend outage.</p>
+  </div></section>
+
+  <section class="section"><div class="wrap">
+    <div class="label rev">memory</div>
+    <h2 class="rev d1">memory it can trust</h2>
+    <p class="lead rev d1" style="margin-bottom:2.4rem;">memory persists across every session and chat, and the agent treats it as untrusted data: what goes in is sanitized, what comes back is framed as information, never commands. recall shows when each memory formed and lets the model judge relevance, with no hidden staleness rules.</p>
+    <FlowStrip
+      cap="how a memory is handled"
+      capIcon="database"
+      nodes={[
+        { icon: 'shield', tint: 't-teal', name: 'on the way in', note: 'incoming memory is sanitized before it is ever stored' },
+        { icon: 'database', tint: 't-gold', name: 'where it lives', note: 'Hindsight by default, with an agent-managed MEMORY.md file as fallback' },
+        { icon: 'eye', tint: 't-ruby', name: 'on recall', note: 'framed as information, not commands, and stamped with when it formed' },
+      ]}
+    />
   </div></section>
 
   <section class="section"><div class="wrap">
@@ -46,6 +64,7 @@ import Footer from '../components/Footer.astro';
     <h2 class="rev d1">it gets better at your work, on its own</h2>
     <p class="lead rev d1" style="margin-bottom:2.4rem;">most agents learn from every "hard-looking" turn, or never. right agent does neither. a small, cheap model watches each turn as it lands, and a smarter model only steps in to learn when a turn is actually worth it. your scheduled jobs improve the same way, and never change what you set up without telling you.</p>
     <SelfEvolve />
+    <p class="lead rev d1" style="margin-top:1.8rem;">one rule sits under all of it: nothing durable changes without telling you. <a href="/docs/self-evolution/">how self-evolution works →</a></p>
   </div></section>
 
   <section class="section"><div class="wrap">
@@ -58,22 +77,11 @@ import Footer from '../components/Footer.astro';
     <CompareTable />
   </div></section>
 
-  <section class="section" id="security"><div class="wrap">
-    <div class="label rev">security</div>
-    <h2 class="rev d1">security by default</h2>
-    <p class="lead rev d1">sandboxed by default, credentials on the host, fails closed on a backend outage. read the full <a href="/docs/security/">security model</a>.</p>
-  </div></section>
-
-  <section class="section"><div class="wrap">
-    <div class="label rev">roadmap</div>
-    <h2 class="rev d1">shipped, and what's next</h2>
-    <Roadmap />
-  </div></section>
-
   <section class="section" id="install"><div class="wrap">
     <div class="label rev">install</div>
     <h2 class="rev d1">one command to start</h2>
     <InstallBlock />
+    <p class="note rev d1" style="margin-top:1.4rem;">one Claude subscription covers it: run as many agents as you want — cost scales with subscriptions, not agent count.</p>
   </div></section>
 
   <Footer />

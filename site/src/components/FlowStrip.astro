@@ -1,0 +1,31 @@
+---
+// A single horizontal flow of icon nodes, reusing the `.how` vocabulary from
+// Diagram.astro. Used by the pillar sections that need one strip (not the
+// two-strip credential diagram).
+import { icons as icon } from '../lib/icons';
+interface Node { icon: string; tint: string; name: string; note: string; }
+interface Props { cap: string; capIcon: string; nodes: Node[]; note?: string; }
+const { cap, capIcon, nodes, note } = Astro.props;
+const svg = (name: string, w = 1.6) =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round">${icon[name] ?? ''}</svg>`;
+---
+<div class="how rev">
+  <div class="how-strip">
+    <div class="how-cap"><span class="ic-sm" set:html={svg(capIcon, 1.7)} />{cap}</div>
+    <div class="how-path">
+      {nodes.map((n, i) => (
+        <>
+          <div class="hnode">
+            <span class={`hicon ${n.tint}`} set:html={svg(n.icon)} />
+            <div class="hname">{n.name}</div>
+            <p class="hnote">{n.note}</p>
+          </div>
+          {i < nodes.length - 1 && (
+            <span class="harrow" set:html={svg('arrow', 1.7)} />
+          )}
+        </>
+      ))}
+    </div>
+    {note && <p class="flownote">{note}</p>}
+  </div>
+</div>
