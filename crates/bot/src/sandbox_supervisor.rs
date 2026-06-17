@@ -297,6 +297,22 @@ fn provider_policy_reload_needed(
 /// composition on a cold gateway is self-healing, and a hard `Err` from
 /// `bring_up_sandbox` lands on `recovery_step`'s `Err => Break` arm and
 /// permanently stops auto-recovery (see the contract on [`bring_up_sandbox`]).
+/// Split a sandbox's declared providers into `(all names, borrowed names)` for
+/// `reconcile_for_sandbox`: the full declared list drives attach/detach, while
+/// the borrowed set marks records the owner — not this agent — must migrate, so
+/// the reconciler attaches them but never recreates/deletes them.
+fn declared_and_borrowed(
+    providers: &[right_agent_config::ProviderEntry],
+) -> (Vec<String>, std::collections::HashSet<String>) {
+    let declared = providers.iter().map(|p| p.name.clone()).collect();
+    let borrowed = providers
+        .iter()
+        .filter(|p| p.is_borrowed())
+        .map(|p| p.name.clone())
+        .collect();
+    (declared, borrowed)
+}
+
 async fn reconcile_and_confirm_providers(
     client: &mut right_openshell::managed_profiles::OpenShellGrpcClient,
     agent: &str,
@@ -308,17 +324,7 @@ async fn reconcile_and_confirm_providers(
     let profile_outcomes =
         ensure_generic_provider_profiles_for_config(client, agent, config).await?;
     heal_drifted_generic_profiles(client, sandbox, agent, config, &profile_outcomes).await?;
-    let declared: Vec<String> = sandbox_cfg
-        .providers
-        .iter()
-        .map(|p| p.name.clone())
-        .collect();
-    let borrowed: std::collections::HashSet<String> = sandbox_cfg
-        .providers
-        .iter()
-        .filter(|p| p.is_borrowed())
-        .map(|p| p.name.clone())
-        .collect();
+    let (declared, borrowed) = declared_and_borrowed(&sandbox_cfg.providers);
     let report = right_openshell::providers::reconcile_for_sandbox(
         client, sandbox, agent, &declared, &borrowed,
     )
@@ -638,12 +644,7 @@ pub(crate) async fn hot_reconcile_providers(
     )
     .await?;
 
-    let declared: Vec<String> = providers.iter().map(|p| p.name.clone()).collect();
-    let borrowed: std::collections::HashSet<String> = providers
-        .iter()
-        .filter(|p| p.is_borrowed())
-        .map(|p| p.name.clone())
-        .collect();
+    let (declared, borrowed) = declared_and_borrowed(providers);
     let report = right_openshell::providers::reconcile_for_sandbox(
         &mut client,
         resolved_sandbox,
