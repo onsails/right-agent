@@ -1,4 +1,26 @@
 # Changelog
+## [0.4.2] - 2026-06-17
+
+### Skill Curator
+
+- The curator's circuit breaker and idle gate now work correctly. The circuit breaker was never actually triggered at runtime — a persistently-failing curator retried every cooldown cycle and kept billing learning budget indefinitely. The idle gate always passed because the ticker supplied `None` for last user activity, meaning the curator could modify the skill directory during active foreground turns. Both are fixed: the circuit breaker opens after consecutive failures (default: 3, configurable via `curator_circuit_failure_threshold`) and stays closed for a configurable cooldown (default: 24 h, `curator_circuit_cooldown_hours`). The `right agent init` wizard now prompts for these knobs alongside the curator mode.
+- The curator records every apply pass in a new `curator_runs` history table, replacing the previous single-row "last run" state. The Knowledge dashboard can now show what each pass consolidated or archived, the cost incurred, and the reason.
+- New `curator_mode: report_only` in `agent.yaml` puts the curator in cautious mode: it produces a proposed consolidation plan without modifying the skill directory. Switch to `curator_mode: apply` (the default) to execute. The init wizard includes a mode prompt for new agents.
+
+### Providers & Dashboard
+
+- Operators running multiple agents can now share a provider between them. A shared provider record stays in the OpenShell gateway — no credential value is copied or read back. From the owning agent's dashboard, select "Share"; from the borrowing agent's dashboard, select "Borrow" to pull from another agent you are trusted on both sides of. The credential and its rotation are always controlled by the owner; borrowers see the provider as read-only, labeled "shared from `{owner}`". Rotating the key on the owner propagates to all borrowers automatically.
+- Deleting an agent that owns a shared provider re-homes ownership to a surviving borrower rather than deleting the gateway record. The record is only deleted when the last referencing agent is destroyed.
+- New providers are created with agent-agnostic names (`{type}-{uuid}`, e.g. `fal-a1b2c3`) instead of `{agent}-{slug}`. Existing provider names remain valid and continue to work.
+
+### Agents & Conversations
+
+- When an operator saves conversation focus via the `/set_focus` Mini App, the bot now sends a confirmation message ("Focus set: ..." or "Focus cleared") to the affected chat, group, or forum topic — giving an auditable signal that standing context changed.
+
+### Site
+
+- A new self-evolution documentation page on the public site covers how Right Agent learns and evolves skills automatically. The landing page is reorganized into distinct pillar sections.
+
 ## [0.4.1] - 2026-06-15
 
 ### Cron & Skills
