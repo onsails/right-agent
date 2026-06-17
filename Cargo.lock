@@ -161,7 +161,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -172,7 +172,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -774,7 +774,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1177,7 +1177,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1305,7 +1305,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2260,7 +2260,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.2",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2799,7 +2799,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3691,7 +3691,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "walkdir",
- "which 8.0.3",
+ "which 8.0.4",
 ]
 
 [[package]]
@@ -3730,7 +3730,7 @@ dependencies = [
  "tonic",
  "tracing",
  "uuid",
- "which 8.0.3",
+ "which 8.0.4",
  "wiremock",
 ]
 
@@ -3803,7 +3803,7 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
- "which 8.0.3",
+ "which 8.0.4",
  "whisper-rs",
 ]
 
@@ -3831,7 +3831,7 @@ dependencies = [
  "tokio",
  "tracing",
  "walkdir",
- "which 8.0.3",
+ "which 8.0.4",
 ]
 
 [[package]]
@@ -3986,7 +3986,7 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "walkdir",
- "which 8.0.3",
+ "which 8.0.4",
 ]
 
 [[package]]
@@ -4046,7 +4046,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "which 8.0.3",
+ "which 8.0.4",
 ]
 
 [[package]]
@@ -4265,7 +4265,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4324,7 +4324,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4752,7 +4752,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5195,7 +5195,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5205,7 +5205,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5613,9 +5613,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "turso"
-version = "0.7.0-pre.7"
+version = "0.7.0-pre.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4d02bd33b543bc3a60742e92d11bba3fe4d437cd41ed18af323bb9118347725"
+checksum = "534be3e7925e2bf9ef6116aa1b1bbc8011b6caac86c7a4058f3370f617f1599f"
 dependencies = [
  "bytes",
  "http-body-util",
@@ -5634,9 +5634,9 @@ dependencies = [
 
 [[package]]
 name = "turso_core"
-version = "0.7.0-pre.7"
+version = "0.7.0-pre.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4369542c603074d922c96530b3c1dac3a2a80d6e72485b641be871ec6ee69760"
+checksum = "8be521a2df9c237ae8d04328e5d1538a2af5574d305768b6f3c4ddb4e0f7dedc"
 dependencies = [
  "aegis",
  "aes",
@@ -5704,9 +5704,9 @@ dependencies = [
 
 [[package]]
 name = "turso_ext"
-version = "0.7.0-pre.7"
+version = "0.7.0-pre.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33472b0688e9aa6f676563a3633d31061d06e94b0669ee7789eaf8e907f1c508"
+checksum = "e1fbbde1226378fffc1c170c218ec8947e20629e24c4ab95ede5b4781d4101af"
 dependencies = [
  "chrono",
  "getrandom 0.4.2",
@@ -5715,9 +5715,9 @@ dependencies = [
 
 [[package]]
 name = "turso_macros"
-version = "0.7.0-pre.7"
+version = "0.7.0-pre.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d3e5d933e3a9059f576bc264e1f39632771599dfb2d093f9e95ee912dabf458"
+checksum = "543b0481c02707381f169fbdda9f977f6f76954421773925f99d1190ba2d112b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5726,9 +5726,9 @@ dependencies = [
 
 [[package]]
 name = "turso_parser"
-version = "0.7.0-pre.7"
+version = "0.7.0-pre.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d869835fac76a515f417c86903e5094166e8be6b181c67100c921b78ad698a71"
+checksum = "129d3f27f5dfd2aee6f7fb65f5f7dae32b3c2875f591a1b82dcf0505651c17bf"
 dependencies = [
  "bitflags 2.11.0",
  "memchr",
@@ -5741,9 +5741,9 @@ dependencies = [
 
 [[package]]
 name = "turso_sdk_kit"
-version = "0.7.0-pre.7"
+version = "0.7.0-pre.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5ee898c71bd359199c816b1089db4e8e942c27dc9367c89eaa7eb76c233cc3e"
+checksum = "301dab6e7569c6f87a04664b7d19ff5d2c3d391c9377bb14042b076d7be31911"
 dependencies = [
  "bindgen 0.69.5",
  "env_logger",
@@ -5758,9 +5758,9 @@ dependencies = [
 
 [[package]]
 name = "turso_sdk_kit_macros"
-version = "0.7.0-pre.7"
+version = "0.7.0-pre.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49d0d9e393520782e97542aa18a4cd8b0087aabe9d24c4d456fb8038bcb54df8"
+checksum = "3068bbcb3a8dec8bca5c52b39c3e02ad00bb9d2378560e45d7a023c209873afb"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5769,9 +5769,9 @@ dependencies = [
 
 [[package]]
 name = "turso_sync_engine"
-version = "0.7.0-pre.7"
+version = "0.7.0-pre.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "577930512a2f93665256e34bc720dd6bb75d863c506d38b392988d25b68937e3"
+checksum = "c1eb07b89b700ee5e1c41f1a5f0610e764afc5b63df6ad204a9453e7596e5c2e"
 dependencies = [
  "base64",
  "bytes",
@@ -5791,9 +5791,9 @@ dependencies = [
 
 [[package]]
 name = "turso_sync_sdk_kit"
-version = "0.7.0-pre.7"
+version = "0.7.0-pre.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59b3ee2f82ebe2b7bf7e03ac6d056cd358cd573568e1f9d41226f3715c9992aa"
+checksum = "97f1b5bf9990ba8910835e12bd776fa7bfa0a6e51e5f4886a1bce91216237326"
 dependencies = [
  "bindgen 0.69.5",
  "env_logger",
@@ -6217,9 +6217,9 @@ dependencies = [
 
 [[package]]
 name = "which"
-version = "8.0.3"
+version = "8.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c789537cf2f7f55be8e6192f92e464174ee55f91af622777f7f1ceb0dbccd03e"
+checksum = "48d7cd18d4acb58fb3cdfe9ea54e6cd96a4e7d4cc45c56338b236e82dad47248"
 dependencies = [
  "libc",
 ]
@@ -6268,7 +6268,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
