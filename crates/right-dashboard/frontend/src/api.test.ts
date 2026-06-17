@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { browserUsageTimezone, focusGet, focusUpdate, providerExport, providerImport, providerPeers, usageOverview } from './api'
+import { browserUsageTimezone, focusGet, focusUpdate, providerPeers, usageOverview } from './api'
 
 function usagePayload() {
   return {
@@ -150,27 +150,4 @@ describe('provider sharing api', () => {
     expect(init?.method ?? 'GET').toBe('GET')
   })
 
-  it('providerImport POSTs the import body', async () => {
-    vi.stubGlobal('window', {})
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ name: 'cur-fal' }), { status: 200 }),
-    )
-    await providerImport({ source_agent: 'riskoff', source_provider: 'riskoff-fal', overwrite: false })
-    const [path, init] = fetchMock.mock.calls[0]
-    expect(path).toBe('api/v1/providers/import')
-    expect(init?.method).toBe('POST')
-    expect(JSON.parse(init?.body as string).source_agent).toBe('riskoff')
-  })
-
-  it('providerExport POSTs the export body', async () => {
-    vi.stubGlobal('window', {})
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ name: 'riskoff-fal' }), { status: 200 }),
-    )
-    await providerExport({ provider: 'cur-fal', dest_agent: 'riskoff', overwrite: true })
-    const [path, init] = fetchMock.mock.calls[0]
-    expect(path).toBe('api/v1/providers/export')
-    expect(init?.method).toBe('POST')
-    expect(JSON.parse(init?.body as string).overwrite).toBe(true)
-  })
 })
