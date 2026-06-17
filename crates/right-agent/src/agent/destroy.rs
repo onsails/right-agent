@@ -188,6 +188,7 @@ struct DestroyProviderPlan {
 fn plan_destroy_provider_cascade(
     deleting: &str,
     agents: &[(String, Vec<right_agent_config::ProviderEntry>)],
+    all_complete: bool,
 ) -> DestroyProviderPlan {
     let mut plan = DestroyProviderPlan::default();
     let Some((_, deleting_providers)) = agents.iter().find(|(a, _)| a == deleting) else {
@@ -195,6 +196,11 @@ fn plan_destroy_provider_cascade(
     };
     for entry in deleting_providers {
         plan.detach.push(entry.name.clone());
+        if !all_complete {
+            // Sibling enumeration was incomplete — skip delete/rehome to avoid
+            // removing a gateway record still referenced by an unread agent.
+            continue;
+        }
         // Other agents that still reference this record by name.
         let others: Vec<&str> = agents
             .iter()
@@ -332,7 +338,7 @@ fn set_provider_shared_from(yaml: &str, provider: &str, new_owner: Option<&str>)
 /// agent being deleted.
 fn load_agents_with_providers(
     agents_dir: &Path,
-) -> Vec<(String, Vec<right_agent_config::ProviderEntry>)> {
+) -> (Vec<(String, Vec<right_agent_config::ProviderEntry>)>, bool) {
     let entries = match std::fs::read_dir(agents_dir) {
         Ok(e) => e,
         Err(e) => {
@@ -341,10 +347,11 @@ fn load_agents_with_providers(
                 error = %format!("{e:#}"),
                 "could not read agents dir for provider refcount; treating as empty"
             );
-            return Vec::new();
+            return (Vec::new(), false);
         }
     };
     let mut agents = Vec::new();
+    let mut all_complete = true;
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -365,12 +372,13 @@ fn load_agents_with_providers(
                     error = %format!("{e:#}"),
                     "skipping sibling with unreadable agent.yaml during provider refcount"
                 );
+                all_complete = false;
                 Vec::new()
             }
         };
         agents.push((name, providers));
     }
-    agents
+    (agents, all_complete)
 }
 
 /// Re-home ownership of `record` from the deleted owner to `new_owner` by editing
@@ -579,7 +587,7 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         // Enumerate every sibling agent (including the one being deleted) and its
         // declared `sandbox.providers`. Tolerant like `build_peers`: a sibling
         // whose agent.yaml can't be read is skipped, not fatal.
-        let mut agents = load_agents_with_providers(&agents_dir);
+        let (mut agents, all_complete) = load_agents_with_providers(&agents_dir);
 
         // The deleting agent's own providers are authoritative from the in-memory
         // config; never depend on disk enumeration for them (a read_dir blip must
@@ -594,7 +602,7 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
             None => agents.push((options.agent_name.clone(), own_providers)),
         }
 
-        let plan = plan_destroy_provider_cascade(&options.agent_name, &agents);
+        let plan = plan_destroy_provider_cascade(&options.agent_name, &agents, all_complete);
 
         let mtls_dir = right_openshell::openshell::default_mtls_dir();
         match right_openshell::openshell::connect_grpc(&mtls_dir).await {

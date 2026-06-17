@@ -26,7 +26,7 @@ fn refcount_keeps_record_when_borrower_remains() {
         ("riskoff".to_string(), vec![owned("fal-a1b2c3")]),
         ("right".to_string(), vec![borrowed("fal-a1b2c3", "riskoff")]),
     ];
-    let plan = plan_destroy_provider_cascade("riskoff", &agents);
+    let plan = plan_destroy_provider_cascade("riskoff", &agents, true);
     assert!(plan.detach.contains(&"fal-a1b2c3".to_string()));
     assert!(
         !plan.delete.contains(&"fal-a1b2c3".to_string()),
@@ -41,7 +41,7 @@ fn refcount_keeps_record_when_borrower_remains() {
 #[test]
 fn refcount_deletes_record_when_last_reference() {
     let agents = vec![("riskoff".to_string(), vec![owned("fal-a1b2c3")])];
-    let plan = plan_destroy_provider_cascade("riskoff", &agents);
+    let plan = plan_destroy_provider_cascade("riskoff", &agents, true);
     assert!(plan.delete.contains(&"fal-a1b2c3".to_string()));
     assert!(plan.rehome_owner_to.is_empty());
 }
@@ -54,10 +54,31 @@ fn refcount_borrower_delete_keeps_record_no_rehome() {
         ("riskoff".to_string(), vec![owned("fal-a1b2c3")]),
         ("right".to_string(), vec![borrowed("fal-a1b2c3", "riskoff")]),
     ];
-    let plan = plan_destroy_provider_cascade("right", &agents);
+    let plan = plan_destroy_provider_cascade("right", &agents, true);
     assert!(plan.detach.contains(&"fal-a1b2c3".to_string()));
     assert!(!plan.delete.contains(&"fal-a1b2c3".to_string()));
     assert!(plan.rehome_owner_to.is_empty());
+}
+
+#[test]
+fn refcount_fails_closed_when_siblings_incomplete() {
+    // When sibling enumeration was incomplete (all_complete=false), the
+    // cascade must NOT delete or re-home gateway records — only detach.
+    // This prevents deleting a record still referenced by an unread agent.
+    let agents = vec![("riskoff".to_string(), vec![owned("fal-a1b2c3")])];
+    let plan = plan_destroy_provider_cascade("riskoff", &agents, false);
+    assert!(
+        plan.detach.contains(&"fal-a1b2c3".to_string()),
+        "detach must still be populated"
+    );
+    assert!(
+        plan.delete.is_empty(),
+        "delete must be empty when siblings incomplete"
+    );
+    assert!(
+        plan.rehome_owner_to.is_empty(),
+        "rehome must be empty when siblings incomplete"
+    );
 }
 
 #[test]
