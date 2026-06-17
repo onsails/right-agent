@@ -9,14 +9,13 @@ import {
   providerConfigUpdate,
   providerRemove,
   providerPeers,
-  providerImport,
-  providerExport,
+  providerShare,
+  providerUnshare,
 } from '../api'
 import type {
   ProviderView,
   ProviderProfileView,
   ProviderPeer,
-  PeerProvider,
 } from '../types'
 import SecretInput from '../components/SecretInput.vue'
 import ProviderTypeList from './ProviderTypeList.vue'
@@ -27,10 +26,11 @@ import {
   evaluateCredentialSubmit,
   providerCompositionClass,
   providerCompositionLabel,
+  isBorrowed,
+  borrowedOwnerLabel,
+  shareTargetState,
   CREDENTIAL_HINT,
   HOSTS_MICROCOPY,
-  copyTargetMode,
-  exportTargetState,
 } from './providersViewModel'
 
 const providers = ref<ProviderView[]>([])
@@ -146,7 +146,7 @@ async function refresh(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    // Peers power the secondary import/export feature only; a peer-discovery
+    // Peers power the secondary sharing feature only; a peer-discovery
     // failure must not blank the primary providers list, so it degrades to an
     // empty peer set rather than rejecting the whole refresh.
     const [listRes, typesRes, peersRes] = await Promise.all([
@@ -403,102 +403,70 @@ function isGhost(provider: ProviderView): boolean {
   return provider.status.kind === 'missing' || provider.status.kind === 'gateway_error'
 }
 
-// Peer (other-agent) state for import/export
+// Peer (other-agent) state for sharing
 const peers = ref<ProviderPeer[]>([])
 
-// Import flow
-const importOpen = ref(false)
-const importBusy = ref<string | null>(null)
-const importError = ref<string | null>(null)
+// Share flow (owned providers only): pick a trusted peer to share with.
+const shareOpen = ref(false)
+const shareProvider = ref<ProviderView | null>(null)
+const shareBusy = ref<string | null>(null)
+const shareError = ref<string | null>(null)
 
-// Export flow
-const exportOpen = ref(false)
-const exportProvider = ref<ProviderView | null>(null)
-const exportBusy = ref<string | null>(null)
-const exportError = ref<string | null>(null)
+// Per-row busy tracking for unshare (borrowed providers).
+const busyUnshare = ref<string | null>(null)
 
-function openImport(): void {
-  importError.value = null
-  importOpen.value = true
+function openShare(provider: ProviderView): void {
+  shareProvider.value = provider
+  shareError.value = null
+  shareOpen.value = true
 }
-function closeImport(): void {
-  importOpen.value = false
-  importError.value = null
+function closeShare(): void {
+  shareOpen.value = false
+  shareProvider.value = null
+  shareError.value = null
 }
 
-interface ImportCandidate {
+interface ShareTarget {
   agent: string
-  provider: PeerProvider
-  mode: 'create' | 'overwrite'
-}
-function importCandidates(): ImportCandidate[] {
-  const out: ImportCandidate[] = []
-  for (const peer of peers.value) {
-    for (const p of peer.providers) {
-      out.push({ agent: peer.agent, provider: p, mode: copyTargetMode(providers.value, p.env_var) })
-    }
-  }
-  return out
-}
-
-async function runImport(c: ImportCandidate): Promise<void> {
-  importBusy.value = `${c.agent}/${c.provider.name}`
-  importError.value = null
-  try {
-    await providerImport({
-      source_agent: c.agent,
-      source_provider: c.provider.name,
-      overwrite: c.mode === 'overwrite',
-    })
-    closeImport()
-    await refresh()
-  } catch (err) {
-    importError.value = err instanceof Error ? err.message : 'Import failed'
-  } finally {
-    importBusy.value = null
-  }
-}
-
-function openExport(provider: ProviderView): void {
-  exportProvider.value = provider
-  exportError.value = null
-  exportOpen.value = true
-}
-function closeExport(): void {
-  exportOpen.value = false
-  exportProvider.value = null
-  exportError.value = null
-}
-
-interface ExportTarget {
-  agent: string
-  mode: 'create' | 'overwrite'
   blocked: string | null
 }
-function exportTargets(): ExportTarget[] {
-  const p = exportProvider.value
+function shareTargets(): ShareTarget[] {
+  const p = shareProvider.value
   if (!p) return []
-  return peers.value.map((peer) => {
-    const s = exportTargetState(peer, p)
-    return { agent: peer.agent, mode: s.mode, blocked: s.blocked }
-  })
+  return peers.value.map((peer) => ({
+    agent: peer.agent,
+    blocked: shareTargetState(peer, p).blocked,
+  }))
 }
 
-async function runExport(t: ExportTarget): Promise<void> {
-  const p = exportProvider.value
+async function runShare(t: ShareTarget): Promise<void> {
+  const p = shareProvider.value
   if (!p || t.blocked) return
-  exportBusy.value = t.agent
-  exportError.value = null
+  shareBusy.value = t.agent
+  shareError.value = null
   try {
-    await providerExport({ provider: p.name, dest_agent: t.agent, overwrite: t.mode === 'overwrite' })
+    await providerShare({ provider: p.name, dest_agent: t.agent })
     // Keep the modal open for further targets, but refresh peer state so the
-    // just-exported target now reflects 'Update' (overwrite) instead of a
-    // stale 'Export' that would 409 on a second click.
+    // just-shared target now reports 'already shared' and disables its button.
     await refresh()
   } catch (err) {
-    exportError.value = err instanceof Error ? err.message : 'Export failed'
+    shareError.value = err instanceof Error ? err.message : 'Share failed'
   } finally {
-    exportBusy.value = null
+    shareBusy.value = null
+  }
+}
+
+// Unshare flow (borrowed providers): drop this agent's borrowed reference.
+async function unshareProvider(provider: ProviderView): Promise<void> {
+  busyUnshare.value = provider.name
+  error.value = null
+  try {
+    await providerUnshare({ provider: provider.name })
+    await refresh()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'Failed to unshare provider'
+  } finally {
+    busyUnshare.value = null
   }
 }
 
@@ -522,9 +490,6 @@ watch(rotateCredential, () => {
       </div>
       <button class="tool-button" type="button" @click="addOpen ? closeAdd() : openAdd()">
         {{ addOpen ? 'Close' : '+ Add' }}
-      </button>
-      <button class="tool-button" type="button" @click="importOpen ? closeImport() : openImport()">
-        {{ importOpen ? 'Close' : 'Import' }}
       </button>
     </header>
 
@@ -686,40 +651,12 @@ watch(rotateCredential, () => {
       </div>
     </section>
 
-    <!-- Import modal -->
-    <section v-if="importOpen" class="providers-section">
-      <p class="muted-line">Import a provider from another agent you manage:</p>
-      <p v-if="importCandidates().length === 0" class="muted-line">No importable providers</p>
+    <!-- Share modal -->
+    <section v-if="shareOpen && shareProvider" class="providers-section">
+      <p class="muted-line">Share <strong>{{ shareProvider.name }}</strong> with:</p>
+      <p v-if="shareTargets().length === 0" class="muted-line">No eligible agents</p>
       <article
-        v-for="c in importCandidates()"
-        :key="`${c.agent}/${c.provider.name}`"
-        class="data-row providers-row static"
-      >
-        <div class="row-main providers-row-main">
-          <strong>{{ c.provider.label ?? c.provider.name }}</strong>
-          <small>from {{ c.agent }}</small>
-          <small>{{ c.provider.env_var }}</small>
-        </div>
-        <div class="button-row row-actions">
-          <button
-            class="tool-button"
-            type="button"
-            :disabled="importBusy === `${c.agent}/${c.provider.name}`"
-            @click="runImport(c)"
-          >
-            {{ importBusy === `${c.agent}/${c.provider.name}` ? 'Working' : (c.mode === 'overwrite' ? 'Update' : 'Import') }}
-          </button>
-        </div>
-      </article>
-      <p v-if="importError" class="notice inline">{{ importError }}</p>
-    </section>
-
-    <!-- Export modal -->
-    <section v-if="exportOpen && exportProvider" class="providers-section">
-      <p class="muted-line">Export <strong>{{ exportProvider.name }}</strong> to:</p>
-      <p v-if="exportTargets().length === 0" class="muted-line">No eligible agents</p>
-      <article
-        v-for="t in exportTargets()"
+        v-for="t in shareTargets()"
         :key="t.agent"
         class="data-row providers-row static"
       >
@@ -731,16 +668,16 @@ watch(rotateCredential, () => {
           <button
             class="tool-button"
             type="button"
-            :disabled="t.blocked !== null || exportBusy === t.agent"
-            @click="runExport(t)"
+            :disabled="t.blocked !== null || shareBusy === t.agent"
+            @click="runShare(t)"
           >
-            {{ exportBusy === t.agent ? 'Working' : (t.mode === 'overwrite' ? 'Update' : 'Export') }}
+            {{ shareBusy === t.agent ? 'Working' : 'Share' }}
           </button>
         </div>
       </article>
-      <p v-if="exportError" class="notice inline">{{ exportError }}</p>
+      <p v-if="shareError" class="notice inline">{{ shareError }}</p>
       <div class="button-row">
-        <button class="tool-button" type="button" @click="closeExport">Close</button>
+        <button class="tool-button" type="button" @click="closeShare">Close</button>
       </div>
     </section>
 
@@ -754,6 +691,7 @@ watch(rotateCredential, () => {
           <small>{{ typeLabel(provider) }}</small>
           <small>{{ provider.env_var }}</small>
           <small v-if="provider.label">Label: {{ provider.label }}</small>
+          <small v-if="isBorrowed(provider)" class="borrowed-label">{{ borrowedOwnerLabel(provider) }}</small>
         </div>
         <div class="row-side">
           <span class="status-pill" :class="statusClass(provider)">
@@ -764,7 +702,18 @@ watch(rotateCredential, () => {
           </span>
           <small>{{ provider.updated_at ? new Date(provider.updated_at).toLocaleDateString() : '—' }}</small>
         </div>
-        <div class="button-row row-actions">
+        <!-- Borrowed providers are read-only: the owner controls the credential. -->
+        <div v-if="isBorrowed(provider)" class="button-row row-actions">
+          <button
+            class="tool-button"
+            type="button"
+            :disabled="busyUnshare === provider.name"
+            @click="unshareProvider(provider)"
+          >
+            {{ busyUnshare === provider.name ? 'Working' : 'Unshare' }}
+          </button>
+        </div>
+        <div v-else class="button-row row-actions">
           <button
             v-if="!isGhost(provider)"
             class="tool-button"
@@ -801,9 +750,9 @@ watch(rotateCredential, () => {
             v-if="!isGhost(provider)"
             class="tool-button"
             type="button"
-            @click="openExport(provider)"
+            @click="openShare(provider)"
           >
-            Export
+            Share with…
           </button>
         </div>
       </article>
@@ -911,6 +860,11 @@ watch(rotateCredential, () => {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
+}
+
+.borrowed-label {
+  color: var(--tg-theme-hint-color, #6b7b88);
+  font-weight: 700;
 }
 
 .row-actions {

@@ -76,26 +76,29 @@ export const CREDENTIAL_HINT =
 export const HOSTS_MICROCOPY =
   'Hosts the agent may call. The agent uses $ENV_VAR and writes auth exactly as the API docs say; Right stores the secret and allows these hosts.'
 
-/** Copying a provider with `envVar` into an agent whose providers are
- *  `localProviders`: overwrite if that env var is already used, else create.
- *  Accepts any provider shape carrying `env_var` (local `ProviderView` or
- *  peer `PeerProvider`). */
-export function copyTargetMode(
-  localProviders: readonly { env_var: string }[],
-  envVar: string,
-): 'create' | 'overwrite' {
-  return localProviders.some((p) => p.env_var === envVar) ? 'overwrite' : 'create'
+/** A provider is BORROWED (shared from another agent) when shared_from is set. */
+export function isBorrowed(provider: ProviderView): boolean {
+  return provider.shared_from != null && provider.shared_from !== ''
 }
 
-/** For exporting `provider` to `peer`: whether the peer can accept it and
- *  whether it would create or overwrite. */
-export function exportTargetState(
+/** Label for a borrowed provider, e.g. "Shared from agent-a". Null if owned. */
+export function borrowedOwnerLabel(provider: ProviderView): string | null {
+  return isBorrowed(provider) ? `Shared from ${provider.shared_from}` : null
+}
+
+/** Whether `provider` (owned) can be shared to `peer`, and why not.
+ *  Blocked if the peer already has a provider with the same NAME (already
+ *  shared there), or if a generic provider targets a restrictive-policy peer. */
+export function shareTargetState(
   peer: ProviderPeer,
   provider: ProviderView,
-): { mode: 'create' | 'overwrite'; blocked: string | null } {
-  const isGeneric = provider.generic !== null
-  if (isGeneric && peer.network_policy === 'restrictive') {
-    return { mode: 'create', blocked: 'restrictive policy cannot accept generic providers' }
+): { blocked: string | null } {
+  if (peer.providers.some((p) => p.name === provider.name)) {
+    return { blocked: 'already shared with this agent' }
   }
-  return { mode: copyTargetMode(peer.providers, provider.env_var), blocked: null }
+  const isGeneric = provider.generic != null
+  if (isGeneric && peer.network_policy === 'restrictive') {
+    return { blocked: 'restrictive policy cannot accept generic providers' }
+  }
+  return { blocked: null }
 }

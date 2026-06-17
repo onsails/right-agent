@@ -24,6 +24,8 @@ import type {
   ProviderImportBody,
   ProviderPeer,
   ProviderProfileView,
+  ProviderShareBody,
+  ProviderUnshareBody,
   ProviderView,
   RunDetailResponse,
   SkillDetailResponse,
@@ -218,6 +220,20 @@ export function providerImport(body: ProviderImportBody): Promise<ProviderView> 
 
 export function providerExport(body: ProviderExportBody): Promise<ProviderView> {
   return requestJson<ProviderView>('api/v1/providers/export', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function providerShare(body: ProviderShareBody): Promise<ProviderView> {
+  return requestJson<ProviderView>('api/v1/providers/share', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function providerUnshare(body: ProviderUnshareBody): Promise<ProviderView> {
+  return requestJson<ProviderView>('api/v1/providers/unshare', {
     method: 'POST',
     body: JSON.stringify(body),
   })
