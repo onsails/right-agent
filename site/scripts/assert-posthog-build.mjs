@@ -15,7 +15,8 @@ if (expectEnabled === expectDisabled) {
 }
 
 const expectedKey = process.env.PUBLIC_POSTHOG_KEY || 'phc_posthog_test_key';
-const expectedHost = process.env.PUBLIC_POSTHOG_HOST || 'https://us.i.posthog.com';
+// Host is hardcoded (reverse proxy) in src/components/PostHog.astro — keep in sync.
+const expectedHost = 'https://f.right-agent.ai';
 
 const pages = [
   ['landing', join(distRoot, 'index.html')],
