@@ -1,6 +1,9 @@
 ---
 const posthogKey = import.meta.env.PUBLIC_POSTHOG_KEY;
-const posthogHost = import.meta.env.PUBLIC_POSTHOG_HOST;
+// Reverse-proxy host (our own domain → PostHog) is a fixed, public value, so
+// it lives in code rather than an env var: this guarantees the deployed
+// api_host regardless of the PUBLIC_POSTHOG_HOST GitHub var.
+const posthogHost = 'https://f.right-agent.ai';
 const enabled = import.meta.env.PROD && Boolean(posthogKey && posthogHost);
 ---
 {enabled && (
