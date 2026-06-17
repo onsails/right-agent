@@ -35,6 +35,10 @@ pub enum ProviderApiError {
     #[error("copy conflict: {reason}")]
     CopyConflict { reason: String },
     #[error(
+        "provider \"{name}\" is borrowed (shared from \"{owner}\") and is read-only for this agent; the owner controls rotation/config, and \"unshare\" removes your reference"
+    )]
+    BorrowedProviderReadOnly { name: String, owner: String },
+    #[error(
         "source provider \"{source_provider}\" credential cannot be read back: OpenShell redacts stored secrets, so cross-agent copy cannot transfer the key. Add the provider on the destination agent and enter the credential directly."
     )]
     SourceCredentialUnreadable { source_provider: String },
@@ -66,6 +70,7 @@ impl axum::response::IntoResponse for ProviderApiError {
             }
             Self::Unauthorized { .. } => (StatusCode::FORBIDDEN, "unauthorized"),
             Self::CopyConflict { .. } => (StatusCode::CONFLICT, "copy_conflict"),
+            Self::BorrowedProviderReadOnly { .. } => (StatusCode::CONFLICT, "borrowed_read_only"),
             Self::SourceCredentialUnreadable { .. } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "source_credential_unreadable",
@@ -1376,7 +1381,7 @@ mod plan_share_tests {
 }
 
 #[cfg(test)]
-mod plan_copy_tests {
+mod credential_guard_tests {
     use super::*;
 
     #[test]
@@ -2310,6 +2315,13 @@ pub(crate) async fn handle_provider_rotate(
             name: req.name.clone(),
         })?;
 
+    if entry.is_borrowed() {
+        return Err(ProviderApiError::BorrowedProviderReadOnly {
+            name: entry.name.clone(),
+            owner: entry.shared_from.clone().unwrap_or_default(),
+        });
+    }
+
     let env_var = extract_env_var(entry)?;
     let mut client = open_openshell_client().await?;
     let mut creds = std::collections::HashMap::new();
@@ -2398,6 +2410,12 @@ pub(crate) async fn handle_provider_config_update(
         .ok_or_else(|| ProviderApiError::NotFound {
             name: req.name.clone(),
         })?;
+    if entry.is_borrowed() {
+        return Err(ProviderApiError::BorrowedProviderReadOnly {
+            name: entry.name.clone(),
+            owner: entry.shared_from.clone().unwrap_or_default(),
+        });
+    }
     if !matches!(entry.type_, right_agent_config::ProviderType::Generic) {
         return Err(ProviderApiError::InvalidName {
             name: req.name.clone(),
@@ -3015,6 +3033,12 @@ pub(crate) async fn handle_provider_remove(
             name: req.name.clone(),
         })?
         .clone();
+    if entry.is_borrowed() {
+        return Err(ProviderApiError::BorrowedProviderReadOnly {
+            name: entry.name.clone(),
+            owner: entry.shared_from.clone().unwrap_or_default(),
+        });
+    }
     let mut client = open_openshell_client().await?;
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
     let policy_path = state.agents_dir.join(&req.agent).join(
@@ -3141,6 +3165,12 @@ mod sandbox_mode_tests {
     use axum::http::Request;
     use axum::http::StatusCode;
     use tower::ServiceExt;
+
+    use super::{
+        ProviderApiError, ProviderConfigUpdateGeneric, ProviderConfigUpdateReq, ProviderRemoveReq,
+        ProviderRotateReq, handle_provider_config_update, handle_provider_remove,
+        handle_provider_rotate,
+    };
 
     /// Build a minimal internal router pointed at `agents_dir`, enough to
     /// exercise /provider-list. Mirrors `make_test_router` from internal_api.rs.
@@ -3751,6 +3781,89 @@ mod sandbox_mode_tests {
             names.len(),
             N,
             "expected exactly {N} providers after concurrent create, got: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_remove_rejects_borrowed_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_provider_test_state(tmp.path()).await;
+        let agent_dir = tmp.path().join("agents").join("hostagent");
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            "sandbox:\n  mode: openshell\n  name: hostagent\n  providers:\n    - name: 'shared-key'\n      type: 'right-fal'\n      shared_from: 'owner-agent'\n",
+        )
+        .unwrap();
+
+        let req = ProviderRemoveReq {
+            agent: "hostagent".into(),
+            name: "shared-key".into(),
+        };
+        let result = handle_provider_remove(axum::extract::State(state), axum::Json(req)).await;
+        assert!(
+            matches!(
+                result,
+                Err(ProviderApiError::BorrowedProviderReadOnly { .. })
+            ),
+            "borrowed entry must be rejected before gateway call: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_rotate_rejects_borrowed_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_provider_test_state(tmp.path()).await;
+        let agent_dir = tmp.path().join("agents").join("hostagent");
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            "sandbox:\n  mode: openshell\n  name: hostagent\n  providers:\n    - name: 'shared-key'\n      type: 'right-fal'\n      shared_from: 'owner-agent'\n",
+        )
+        .unwrap();
+
+        let req = ProviderRotateReq {
+            agent: "hostagent".into(),
+            name: "shared-key".into(),
+            credential: secrecy::SecretString::from("secret"),
+        };
+        let result = handle_provider_rotate(axum::extract::State(state), axum::Json(req)).await;
+        assert!(
+            matches!(
+                result,
+                Err(ProviderApiError::BorrowedProviderReadOnly { .. })
+            ),
+            "borrowed entry must be rejected before gateway call: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_config_update_rejects_borrowed_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_provider_test_state(tmp.path()).await;
+        let agent_dir = tmp.path().join("agents").join("hostagent");
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            "sandbox:\n  mode: openshell\n  name: hostagent\n  providers:\n    - name: 'shared-key'\n      type: 'generic'\n      shared_from: 'owner-agent'\n      generic:\n        env_var: 'SHARED_KEY'\n        upstream_host: 'api.example.com'\n",
+        )
+        .unwrap();
+
+        let req = ProviderConfigUpdateReq {
+            agent: "hostagent".into(),
+            name: "shared-key".into(),
+            generic: ProviderConfigUpdateGeneric {
+                env_var: None,
+                upstream_host: None,
+                upstream_hosts: None,
+                upstream_path_prefix: None,
+            },
+        };
+        let result =
+            handle_provider_config_update(axum::extract::State(state), axum::Json(req)).await;
+        assert!(
+            matches!(
+                result,
+                Err(ProviderApiError::BorrowedProviderReadOnly { .. })
+            ),
+            "borrowed entry must be rejected before gateway call: {result:?}"
         );
     }
 
