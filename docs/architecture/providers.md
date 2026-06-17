@@ -438,7 +438,14 @@ a warning.
 API re-checks the other agent from disk (`require_trusted`; secure default =
 deny). `actor_user_id` always comes from the authenticated user. The
 dashboard "Share with…" action pins `owner_agent = current agent`,
-`dest_agent = selected peer` (push).
+`dest_agent = selected peer` (push). The mirror-image "Borrow…" action
+(`handle_borrow` → same `provider_share` call) pins `owner_agent = selected
+peer`, `dest_agent = current agent` (pull). Direction is purely which dashboard
+the operator starts from; the backend re-checks the identical both-sides trust
+either way, so push and pull carry equal privilege. Borrow candidates come from
+`provider_peers` (the destination already receives each trusted peer's provider
+names, no secrets) and the UI pre-blocks any name the current agent already
+holds — the same collision `plan_share` rejects.
 
 **Share.** `handle_provider_share` (pure guard `plan_share`: reject self,
 reject a dest that already declares the record) resolves the owner's entry,
