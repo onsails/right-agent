@@ -272,14 +272,6 @@ pub(crate) fn build_dashboard_router(state: DashboardState) -> axum::Router {
             get(providers::handle_peers),
         )
         .route(
-            "/dashboard/{agent}/api/v1/providers/import",
-            post(providers::handle_import),
-        )
-        .route(
-            "/dashboard/{agent}/api/v1/providers/export",
-            post(providers::handle_export),
-        )
-        .route(
             "/dashboard/{agent}/api/v1/providers/share",
             post(providers::handle_share),
         )

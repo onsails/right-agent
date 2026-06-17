@@ -628,19 +628,6 @@ export interface ProviderPeer {
   providers: PeerProvider[]
 }
 
-export interface ProviderImportBody {
-  source_agent: string
-  source_provider: string
-  label?: string
-  overwrite: boolean
-}
-
-export interface ProviderExportBody {
-  provider: string
-  dest_agent: string
-  overwrite: boolean
-}
-
 export interface ProviderShareBody {
   provider: string
   dest_agent: string

@@ -362,14 +362,6 @@ impl InternalClient {
         .await
     }
 
-    /// Copy a provider (credential included) between two host-local agents.
-    pub async fn provider_copy(
-        &self,
-        req: &ProviderCopyRequest<'_>,
-    ) -> Result<serde_json::Value, InternalClientError> {
-        self.post("/provider-copy", req).await
-    }
-
     /// Share the owner agent's gateway record with a destination agent (no
     /// credential read-back — the record is attached in-place).
     pub async fn provider_share(
@@ -457,17 +449,6 @@ pub struct ProviderRemoveRequest<'a> {
 pub struct ProviderPeersRequest<'a> {
     pub actor_user_id: i64,
     pub for_agent: &'a str,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct ProviderCopyRequest<'a> {
-    pub actor_user_id: i64,
-    pub source_agent: &'a str,
-    pub source_provider: &'a str,
-    pub dest_agent: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<&'a str>,
-    pub overwrite: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1142,40 +1123,6 @@ mod tests {
         let s = format!("{req:?}");
         assert!(!s.contains("supersecret"), "Debug must redact token: {s}");
         assert!(s.contains("<redacted>"), "Debug must mark redaction: {s}");
-    }
-
-    #[test]
-    fn provider_copy_request_serializes_without_credential_field() {
-        let req = ProviderCopyRequest {
-            actor_user_id: 7,
-            source_agent: "agent-a",
-            source_provider: "agent-a-provider",
-            dest_agent: "other",
-            label: Some("fal"),
-            overwrite: true,
-        };
-        let v = serde_json::to_value(&req).unwrap();
-        assert_eq!(v["actor_user_id"], 7);
-        assert_eq!(v["source_agent"], "agent-a");
-        assert_eq!(v["source_provider"], "agent-a-provider");
-        assert_eq!(v["dest_agent"], "other");
-        assert_eq!(v["label"], "fal");
-        assert_eq!(v["overwrite"], true);
-        assert!(v.get("credential").is_none(), "copy carries no secret");
-    }
-
-    #[test]
-    fn provider_copy_request_omits_label_when_none() {
-        let req = ProviderCopyRequest {
-            actor_user_id: 1,
-            source_agent: "a",
-            source_provider: "a-prov",
-            dest_agent: "b",
-            label: None,
-            overwrite: false,
-        };
-        let v = serde_json::to_value(&req).unwrap();
-        assert!(v.get("label").is_none(), "None label must be omitted");
     }
 
     #[test]

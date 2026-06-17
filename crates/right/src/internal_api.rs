@@ -248,10 +248,6 @@ pub(crate) fn internal_router(
             post(crate::internal_api_providers::handle_provider_peers),
         )
         .route(
-            "/provider-copy",
-            post(crate::internal_api_providers::handle_provider_copy),
-        )
-        .route(
             "/provider-share",
             post(crate::internal_api_providers::handle_provider_share),
         )
