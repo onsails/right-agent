@@ -25,26 +25,26 @@ import Footer from '../components/Footer.astro';
     <div class="label rev">what you get</div>
     <h2 class="rev d1">the box is closed; you just use it</h2>
     <div class="grid">
-      <FeatureCard tick="◤ 01 · isolation" title="credentials stay outside the box">the secret bytes never enter the sandbox; the proxy substitutes them on outbound requests.</FeatureCard>
-      <FeatureCard tick="◤ 02 · sandbox" title="every agent in its own sandbox">scoped filesystem, network, and a tls-terminating proxy per agent.</FeatureCard>
-      <FeatureCard tick="◤ 03 · memory" title="memory is untrusted data">incoming memory is sanitized; recalled memory is framed as information, not commands.</FeatureCard>
-      <FeatureCard tick="◤ 04 · skills" title="skills it learns on its own">reusable skills captured from real use, pruned by a curator, pinned from the dashboard.</FeatureCard>
-      <FeatureCard tick="◤ 05 · chat" title="one bot per agent">message it like a person; each chat is its own session over one shared memory.</FeatureCard>
-      <FeatureCard tick="◤ 06 · cost" title="many agents, one subscription">cost scales with subscriptions, not agent count.</FeatureCard>
+      <FeatureCard icon="lock" tick="◤ 01 · isolation" title="credentials stay outside the box">the secret bytes never enter the sandbox; the proxy substitutes them on outbound requests.</FeatureCard>
+      <FeatureCard icon="shield" tick="◤ 02 · sandbox" title="every agent in its own sandbox">scoped filesystem, network, and a tls-terminating proxy per agent.</FeatureCard>
+      <FeatureCard icon="database" tick="◤ 03 · memory" title="memory is untrusted data">incoming memory is sanitized; recalled memory is framed as information, not commands.</FeatureCard>
+      <FeatureCard icon="lightbulb" tick="◤ 04 · skills" title="skills it learns on its own">reusable skills captured from real use, pruned by a curator, pinned from the dashboard.</FeatureCard>
+      <FeatureCard icon="message" tick="◤ 05 · chat" title="one bot per agent">message it like a person; each chat is its own session over one shared memory.</FeatureCard>
+      <FeatureCard icon="card" tick="◤ 06 · cost" title="many agents, one subscription">cost scales with subscriptions, not agent count.</FeatureCard>
     </div>
   </div></section>
 
   <section class="section"><div class="wrap">
     <div class="label rev">how it works</div>
-    <h2 class="rev d1">a message routes through three tiers</h2>
-    <p class="lead rev d1" style="margin-bottom:2rem;">a message reaches the host through Cloudflare, the bot routes it to that chat's Claude Code session inside the agent's sandbox, and replies. credentials are injected at the proxy on the way out, never inside the box.</p>
+    <h2 class="rev d1">your keys stay outside the box</h2>
+    <p class="lead rev d1" style="margin-bottom:2.4rem;">a message goes in, a reply comes out, and the agent uses your accounts along the way — without ever holding the keys. here is the whole path.</p>
     <Diagram />
   </div></section>
 
   <section class="section"><div class="wrap">
     <div class="label rev">self-evolution</div>
     <h2 class="rev d1">it gets better at your work, on its own</h2>
-    <p class="lead rev d1" style="margin-bottom:2.4rem;">most agents learn from every "hard-looking" turn, or never. right agent does neither. a small, cheap model watches each turn as it lands, and a smarter model only steps in to learn when a turn is actually worth it.</p>
+    <p class="lead rev d1" style="margin-bottom:2.4rem;">most agents learn from every "hard-looking" turn, or never. right agent does neither. a small, cheap model watches each turn as it lands, and a smarter model only steps in to learn when a turn is actually worth it. your scheduled jobs improve the same way, and never change what you set up without telling you.</p>
     <SelfEvolve />
   </div></section>
 

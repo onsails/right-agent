@@ -1,16 +1,64 @@
 ---
-const tiers = [
-  { label: 'cloud', items: ['Telegram', 'Cloudflare', 'Anthropic · Hindsight', 'Linear / Notion / Gmail'] },
-  { label: 'host', items: ['bot per agent', 'mcp aggregator · holds creds', 'OpenShell gateway', 'cloudflared'] },
-  { label: 'sandbox · per agent', items: ['Claude Code', 'identity + memory', 'scoped fs · net · tls proxy'] },
+// Icon path data lives in one shared module (see also Icon.astro).
+import { icons as icon } from '../lib/icons';
+
+// Row 1 — the round trip a message makes.
+const path = [
+  { icon: 'telegram', tint: 't-teal', name: 'Telegram', note: 'you message the agent like a person' },
+  { icon: 'cloudflare', tint: 't-gold', name: 'Cloudflare', note: 'a private tunnel to your host — no open ports' },
+  { icon: 'box', tint: 't-ruby', name: 'the box', brand: 'NVIDIA OpenShell', note: 'Claude Code runs sealed in its own sandbox: its own files, its own network' },
+];
+
+// Row 2 — the credential swap (the part that matters).
+const cred = [
+  { icon: 'claude', tint: 't-ruby', name: 'inside the box', note: 'the agent calls a service with a placeholder, not the real key' },
+  { icon: 'swap', tint: 't-gold', name: 'at the edge', note: 'the proxy swaps in your real credential on the way out' },
+  { icon: 'globe', tint: 't-teal', name: 'the service', note: 'Gmail · Linear · Notion · any API' },
 ];
 ---
-<div class="flow rev">
-  <div class="flowtrack"></div><div class="packet"></div>
-  {tiers.map((t) => (
-    <div class="node">
-      <div class="tier">{t.label}</div>
-      <ul>{t.items.map((i) => <li>{i}</li>)}</ul>
+<div class="how rev">
+
+  <div class="how-strip">
+    <div class="how-cap"><span class="ic-sm" set:html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icon.arrow}</svg>`} />the round trip</div>
+    <div class="how-path">
+      {path.map((n, i) => (
+        <>
+          <div class={`hnode ${i === 2 ? 'hbox' : ''}`}>
+            <span class={`hicon ${n.tint}`} set:html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${icon[n.icon]}</svg>`} />
+            <div class="hname">{n.name}{n.brand && <span class="hbrand">{n.brand}</span>}</div>
+            <p class="hnote">{n.note}</p>
+            {i === 2 && <span class="seal">sealed</span>}
+          </div>
+          {i < path.length - 1 && (
+            <span class="harrow" set:html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icon.arrow}</svg>`} />
+          )}
+        </>
+      ))}
     </div>
-  ))}
+    <p class="how-back"><span class="ic-sm" set:html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icon.reply}</svg>`} />the reply comes back the same way.</p>
+  </div>
+
+  <div class="how-strip cred">
+    <div class="how-cap"><span class="ic-sm" set:html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icon.key}</svg>`} />your credentials</div>
+    <div class="credkey">
+      <span class="hicon t-gold" set:html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${icon.key}</svg>`} />
+      <div><b>your keys stay on the host</b> — held outside the box, never uploaded into it.</div>
+    </div>
+    <div class="how-path">
+      {cred.map((n, i) => (
+        <>
+          <div class="hnode">
+            <span class={`hicon ${n.tint}`} set:html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${icon[n.icon]}</svg>`} />
+            <div class="hname">{n.name}</div>
+            <p class="hnote">{n.note}</p>
+          </div>
+          {i < cred.length - 1 && (
+            <span class="harrow" set:html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icon.arrow}</svg>`} />
+          )}
+        </>
+      ))}
+    </div>
+    <p class="crednote">the agent <b>uses</b> your credentials on every call. it can never <b>read</b> them — so a compromised agent still can't walk off with your keys.</p>
+  </div>
+
 </div>

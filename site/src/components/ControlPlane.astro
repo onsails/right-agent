@@ -1,11 +1,12 @@
 ---
+import Icon from './Icon.astro';
 const cmds = [
-  { c: '/model', d: 'switch the Claude model', mini: false },
-  { c: '/mcp', d: 'MCP servers', mini: true },
-  { c: '/providers', d: 'providers & credentials', mini: true },
-  { c: '/cron', d: 'scheduled jobs', mini: false },
-  { c: '/usage', d: 'usage & cost', mini: false },
-  { c: '/dashboard', d: 'the full dashboard', mini: true },
+  { c: '/model', d: 'switch the Claude model', mini: false, icon: 'cpu' },
+  { c: '/mcp', d: 'MCP servers', mini: true, icon: 'server' },
+  { c: '/providers', d: 'providers & credentials', mini: true, icon: 'key' },
+  { c: '/cron', d: 'scheduled jobs', mini: false, icon: 'clock' },
+  { c: '/usage', d: 'usage & cost', mini: false, icon: 'chart' },
+  { c: '/dashboard', d: 'the full dashboard', mini: true, icon: 'dashboard' },
 ];
 ---
 <div class="cplane">
@@ -26,6 +27,7 @@ const cmds = [
     <ul class="cmds">
       {cmds.map((x) => (
         <li class="cmdrow">
+          <span class="cmd-ic"><Icon name={x.icon} size={15} /></span>
           <span class="cmd-name">{x.c}</span>
           <span class="cmd-desc">{x.d}</span>
           {x.mini && <span class="ma">mini app</span>}
