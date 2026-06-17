@@ -155,6 +155,24 @@ fn new_record_name(type_slug: &str) -> String {
     format!("{base}-{hex}")
 }
 
+/// Reject any mutation against a borrowed (shared-from-another-agent) record.
+/// Borrowed records are attach-only; only the owning agent may rotate, update,
+/// or delete them. Every mutation handler MUST call this immediately after the
+/// entry lookup, before any gateway call — it is the single chokepoint that
+/// keeps a borrower from clobbering the owner's gateway record.
+fn reject_if_borrowed(entry: &right_agent_config::ProviderEntry) -> Result<(), ProviderApiError> {
+    if entry.is_borrowed() {
+        return Err(ProviderApiError::BorrowedProviderReadOnly {
+            name: entry.name.clone(),
+            owner: entry
+                .shared_from
+                .clone()
+                .expect("is_borrowed() implies shared_from is Some"),
+        });
+    }
+    Ok(())
+}
+
 pub fn validate_env_var(name: &str) -> Result<(), ProviderApiError> {
     if name.is_empty() || name.len() > 64 {
         return Err(ProviderApiError::InvalidEnvVar {
@@ -2315,15 +2333,7 @@ pub(crate) async fn handle_provider_rotate(
             name: req.name.clone(),
         })?;
 
-    if entry.is_borrowed() {
-        return Err(ProviderApiError::BorrowedProviderReadOnly {
-            name: entry.name.clone(),
-            owner: entry
-                .shared_from
-                .clone()
-                .expect("is_borrowed() implies shared_from is Some"),
-        });
-    }
+    reject_if_borrowed(entry)?;
 
     let env_var = extract_env_var(entry)?;
     let mut client = open_openshell_client().await?;
@@ -2413,15 +2423,7 @@ pub(crate) async fn handle_provider_config_update(
         .ok_or_else(|| ProviderApiError::NotFound {
             name: req.name.clone(),
         })?;
-    if entry.is_borrowed() {
-        return Err(ProviderApiError::BorrowedProviderReadOnly {
-            name: entry.name.clone(),
-            owner: entry
-                .shared_from
-                .clone()
-                .expect("is_borrowed() implies shared_from is Some"),
-        });
-    }
+    reject_if_borrowed(entry)?;
     if !matches!(entry.type_, right_agent_config::ProviderType::Generic) {
         return Err(ProviderApiError::InvalidName {
             name: req.name.clone(),
@@ -3039,15 +3041,7 @@ pub(crate) async fn handle_provider_remove(
             name: req.name.clone(),
         })?
         .clone();
-    if entry.is_borrowed() {
-        return Err(ProviderApiError::BorrowedProviderReadOnly {
-            name: entry.name.clone(),
-            owner: entry
-                .shared_from
-                .clone()
-                .expect("is_borrowed() implies shared_from is Some"),
-        });
-    }
+    reject_if_borrowed(&entry)?;
     let mut client = open_openshell_client().await?;
     let sandbox_name = sandbox.name.clone().unwrap_or_else(|| req.agent.clone());
     let policy_path = state.agents_dir.join(&req.agent).join(
