@@ -2318,7 +2318,10 @@ pub(crate) async fn handle_provider_rotate(
     if entry.is_borrowed() {
         return Err(ProviderApiError::BorrowedProviderReadOnly {
             name: entry.name.clone(),
-            owner: entry.shared_from.clone().unwrap_or_default(),
+            owner: entry
+                .shared_from
+                .clone()
+                .expect("is_borrowed() implies shared_from is Some"),
         });
     }
 
@@ -2413,7 +2416,10 @@ pub(crate) async fn handle_provider_config_update(
     if entry.is_borrowed() {
         return Err(ProviderApiError::BorrowedProviderReadOnly {
             name: entry.name.clone(),
-            owner: entry.shared_from.clone().unwrap_or_default(),
+            owner: entry
+                .shared_from
+                .clone()
+                .expect("is_borrowed() implies shared_from is Some"),
         });
     }
     if !matches!(entry.type_, right_agent_config::ProviderType::Generic) {
@@ -3036,7 +3042,10 @@ pub(crate) async fn handle_provider_remove(
     if entry.is_borrowed() {
         return Err(ProviderApiError::BorrowedProviderReadOnly {
             name: entry.name.clone(),
-            owner: entry.shared_from.clone().unwrap_or_default(),
+            owner: entry
+                .shared_from
+                .clone()
+                .expect("is_borrowed() implies shared_from is Some"),
         });
     }
     let mut client = open_openshell_client().await?;
