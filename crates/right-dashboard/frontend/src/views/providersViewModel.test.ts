@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  copyTargetMode,
+  borrowedOwnerLabel,
   detectCredentialPrefix,
   evaluateCredentialSubmit,
-  exportTargetState,
+  isBorrowed,
   providerCompositionClass,
   providerCompositionLabel,
+  shareTargetState,
   validateUpstreamHosts,
   CREDENTIAL_HINT,
   HOSTS_MICROCOPY,
@@ -113,38 +114,47 @@ describe('microcopy', () => {
   })
 })
 
-describe('copyTargetMode', () => {
-  it('overwrite when an env var already exists locally, else create', () => {
-    const local = [providerView({ env_var: 'FAL_KEY' })]
-    expect(copyTargetMode(local, 'FAL_KEY')).toBe('overwrite')
-    expect(copyTargetMode(local, 'OPENAI_API_KEY')).toBe('create')
+describe('isBorrowed / borrowedOwnerLabel', () => {
+  it('treats an absent or empty shared_from as owned', () => {
+    expect(isBorrowed(providerView())).toBe(false)
+    expect(isBorrowed(providerView({ shared_from: null }))).toBe(false)
+    expect(isBorrowed(providerView({ shared_from: '' }))).toBe(false)
+    expect(borrowedOwnerLabel(providerView())).toBeNull()
+  })
+
+  it('treats a non-empty shared_from as borrowed and builds the owner label', () => {
+    const p = providerView({ shared_from: 'riskoff' })
+    expect(isBorrowed(p)).toBe(true)
+    expect(borrowedOwnerLabel(p)).toBe('Shared from riskoff')
   })
 })
 
-describe('exportTargetState', () => {
+describe('shareTargetState', () => {
   function peer(overrides: Partial<ProviderPeer> = {}): ProviderPeer {
     return { agent: 'riskoff', network_policy: 'permissive', providers: [], ...overrides }
   }
 
-  it('blocks a generic provider when the peer is restrictive', () => {
-    const p = providerView({ generic: { env_var: 'FAL_KEY', upstream_hosts: ['fal.run'] } })
-    const state = exportTargetState(peer({ network_policy: 'restrictive' }), p)
-    expect(state.blocked).not.toBeNull()
+  it('allows sharing an owned provider to a peer that lacks it', () => {
+    const p = providerView({ name: 'fal', generic: null })
+    expect(shareTargetState(peer(), p).blocked).toBeNull()
   })
 
-  it('marks overwrite when the peer already has the env var', () => {
-    const p = providerView({ env_var: 'FAL_KEY', generic: null })
+  it('blocks when the peer already has a provider with the same name', () => {
+    const p = providerView({ name: 'fal', generic: null })
     const target = peer({
-      providers: [{ name: 'riskoff-fal', type: 'right-fal', env_var: 'FAL_KEY', label: null, generic: null }],
+      providers: [{ name: 'fal', type: 'right-fal', env_var: 'FAL_KEY', label: null, generic: null }],
     })
-    const state = exportTargetState(target, p)
-    expect(state.blocked).toBeNull()
-    expect(state.mode).toBe('overwrite')
+    expect(shareTargetState(target, p).blocked).toBe('already shared with this agent')
   })
 
-  it('marks create when the peer lacks the env var', () => {
-    const p = providerView({ env_var: 'FAL_KEY', generic: null })
-    const state = exportTargetState(peer(), p)
-    expect(state.mode).toBe('create')
+  it('blocks a generic provider when the peer is restrictive', () => {
+    const p = providerView({ name: 'fal', generic: { env_var: 'FAL_KEY', upstream_hosts: ['fal.run'] } })
+    const state = shareTargetState(peer({ network_policy: 'restrictive' }), p)
+    expect(state.blocked).toBe('restrictive policy cannot accept generic providers')
+  })
+
+  it('allows a non-generic provider to a restrictive peer', () => {
+    const p = providerView({ name: 'gh', generic: null })
+    expect(shareTargetState(peer({ network_policy: 'restrictive' }), p).blocked).toBeNull()
   })
 })

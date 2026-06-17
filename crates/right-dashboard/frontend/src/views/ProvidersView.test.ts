@@ -16,8 +16,8 @@ const apiMocks = vi.hoisted(() => ({
   providerConfigUpdate: vi.fn(),
   providerRemove: vi.fn(),
   providerPeers: vi.fn(),
-  providerImport: vi.fn(),
-  providerExport: vi.fn(),
+  providerShare: vi.fn(),
+  providerUnshare: vi.fn(),
 }))
 
 vi.mock('../api', () => apiMocks)
@@ -115,8 +115,8 @@ beforeEach(() => {
   apiMocks.providerConfigUpdate.mockResolvedValue({})
   apiMocks.providerRemove.mockResolvedValue({})
   apiMocks.providerPeers.mockResolvedValue({ peers: [] })
-  apiMocks.providerImport.mockResolvedValue({})
-  apiMocks.providerExport.mockResolvedValue({})
+  apiMocks.providerShare.mockResolvedValue({})
+  apiMocks.providerUnshare.mockResolvedValue({})
 })
 
 afterEach(() => {
@@ -253,14 +253,14 @@ describe('ProvidersView', () => {
     try {
       // The primary list still renders despite the peer-discovery failure;
       // the failure is not surfaced as a fatal view error.
-      expect(buttonsByText(root, 'Export').length).toBe(1)
+      expect(buttonsByText(root, 'Share with…').length).toBe(1)
       expect(root.textContent).not.toContain('peers boom')
     } finally {
       app.unmount()
     }
   })
 
-  it('refreshes peer state after a successful export', async () => {
+  it('shares an owned provider with a peer and refreshes peer state', async () => {
     apiMocks.providerList.mockResolvedValue({ providers: [provider()] })
     apiMocks.providerPeers.mockResolvedValue({
       peers: [{ agent: 'beta', network_policy: 'permissive', providers: [] }],
@@ -271,7 +271,7 @@ describe('ProvidersView', () => {
 
     try {
       const peersCallsAtMount = apiMocks.providerPeers.mock.calls.length
-      clickButton(root, 'Export') // open the export modal for the single row
+      clickButton(root, 'Share with…') // open the share modal for the single row
       await flushAsync()
 
       const betaRow = Array
@@ -282,25 +282,67 @@ describe('ProvidersView', () => {
       await flushAsync()
       await flushAsync()
 
-      expect(apiMocks.providerExport).toHaveBeenCalledTimes(1)
-      // A successful export refreshes peers so the target flips to 'Update'.
+      expect(apiMocks.providerShare).toHaveBeenCalledTimes(1)
+      expect(apiMocks.providerShare.mock.calls[0][0]).toEqual({ provider: 'fal', dest_agent: 'beta' })
+      // A successful share refreshes peers so the target now reports 'already shared'.
       expect(apiMocks.providerPeers.mock.calls.length).toBe(peersCallsAtMount + 1)
     } finally {
       app.unmount()
     }
   })
 
-  it('renders Import and per-row Export entry points', async () => {
+  it('renders a per-row Share entry point for owned providers', async () => {
     apiMocks.providerList.mockResolvedValue({ providers: [provider()] })
     const { app, root } = mountProvidersView()
     await flushAsync()
 
-    // Header-level Import button.
-    expect(buttonsByText(root, 'Import').length).toBeGreaterThan(0)
-    // Per-row Export button (one provider row).
-    expect(buttonsByText(root, 'Export').length).toBe(1)
+    // Per-row Share button (one owned provider row); the old Import/Export UI is gone.
+    expect(buttonsByText(root, 'Share with…').length).toBe(1)
+    expect(buttonsByText(root, 'Import').length).toBe(0)
+    expect(buttonsByText(root, 'Export').length).toBe(0)
 
     app.unmount()
+  })
+
+  it('renders a borrowed provider read-only: shared-from label + Unshare, no owner actions', async () => {
+    apiMocks.providerList.mockResolvedValue({
+      providers: [provider({ name: 'borrowed-fal', shared_from: 'riskoff' })],
+    })
+    const { app, root } = mountProvidersView()
+    await flushAsync()
+
+    try {
+      expect(root.textContent).toContain('Shared from riskoff')
+      expect(buttonsByText(root, 'Unshare').length).toBe(1)
+      // The owner-only actions must not render for a borrowed provider.
+      expect(buttonsByText(root, 'Rotate').length).toBe(0)
+      expect(buttonsByText(root, 'Edit').length).toBe(0)
+      expect(buttonsByText(root, 'Remove').length).toBe(0)
+      expect(buttonsByText(root, 'Share with…').length).toBe(0)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it('unshares a borrowed provider and refreshes', async () => {
+    apiMocks.providerList.mockResolvedValue({
+      providers: [provider({ name: 'borrowed-fal', shared_from: 'riskoff' })],
+    })
+    const { app, root } = mountProvidersView()
+    await flushAsync()
+
+    try {
+      const listCallsAtMount = apiMocks.providerList.mock.calls.length
+      clickButton(root, 'Unshare')
+      await flushAsync()
+      await flushAsync()
+
+      expect(apiMocks.providerUnshare).toHaveBeenCalledTimes(1)
+      expect(apiMocks.providerUnshare.mock.calls[0][0]).toEqual({ provider: 'borrowed-fal' })
+      expect(apiMocks.providerList.mock.calls.length).toBe(listCallsAtMount + 1)
+    } finally {
+      app.unmount()
+    }
   })
 
   it('pre-fills generic re-create forms with the prior upstream_hosts', async () => {

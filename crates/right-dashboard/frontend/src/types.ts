@@ -585,6 +585,8 @@ export interface ProviderView {
   generic: ProviderGenericBody | null
   updated_at: string | null
   composed: boolean | null
+  /** Owner agent this provider is BORROWED from. Absent/null ⇒ this agent OWNS it. */
+  shared_from?: string | null
   status:
     | { kind: 'healthy' }
     | { kind: 'missing' }
@@ -637,4 +639,13 @@ export interface ProviderExportBody {
   provider: string
   dest_agent: string
   overwrite: boolean
+}
+
+export interface ProviderShareBody {
+  provider: string
+  dest_agent: string
+}
+
+export interface ProviderUnshareBody {
+  provider: string
 }
