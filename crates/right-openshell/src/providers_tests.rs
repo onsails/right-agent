@@ -367,10 +367,16 @@ async fn reconcile_ensures_v2_before_touching_providers_when_declared() {
     let (addr, _shutdown) = start_mock_server(mock).await;
     let mut client = mock_client(addr).await;
 
-    let err = reconcile_for_sandbox(&mut client, "sbx", "agent", &["agent-x".to_string()])
-        .await
-        .err()
-        .expect("expected reconcile to fail before provider list/attach");
+    let err = reconcile_for_sandbox(
+        &mut client,
+        "sbx",
+        "agent",
+        &["agent-x".to_string()],
+        &std::collections::HashSet::new(),
+    )
+    .await
+    .err()
+    .expect("expected reconcile to fail before provider list/attach");
     match err {
         ProviderError::Grpc(msg) => assert!(msg.contains("v2-boom"), "{msg}"),
         other => panic!("expected Grpc from ensure_v2, got: {other:?}"),
@@ -391,9 +397,15 @@ async fn reconcile_skips_v2_when_nothing_declared() {
     let (addr, _shutdown) = start_mock_server(mock).await;
     let mut client = mock_client(addr).await;
 
-    let report = reconcile_for_sandbox(&mut client, "sbx", "agent", &[])
-        .await
-        .expect("empty declared reconcile must not require v2 enable");
+    let report = reconcile_for_sandbox(
+        &mut client,
+        "sbx",
+        "agent",
+        &[],
+        &std::collections::HashSet::new(),
+    )
+    .await
+    .expect("empty declared reconcile must not require v2 enable");
 
     assert!(report.attached.is_empty());
     assert!(report.detached.is_empty());
@@ -485,9 +497,15 @@ async fn reconcile_recreates_legacy_generic_provider_when_type_update_is_rejecte
     let (addr, _shutdown) = start_mock_server(mock).await;
     let mut client = mock_client(addr).await;
 
-    let report = reconcile_for_sandbox(&mut client, "sbx", "agent", &["agent-acme".to_string()])
-        .await
-        .unwrap();
+    let report = reconcile_for_sandbox(
+        &mut client,
+        "sbx",
+        "agent",
+        &["agent-acme".to_string()],
+        &std::collections::HashSet::new(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(report.repaired, vec!["agent-acme".to_string()]);
     assert_eq!(report.attached, vec!["agent-acme".to_string()]);
@@ -569,9 +587,15 @@ async fn reconcile_repairs_legacy_generic_provider_type_before_attaching() {
     let (addr, _shutdown) = start_mock_server(mock).await;
     let mut client = mock_client(addr).await;
 
-    let report = reconcile_for_sandbox(&mut client, "sbx", "agent", &["agent-acme".to_string()])
-        .await
-        .unwrap();
+    let report = reconcile_for_sandbox(
+        &mut client,
+        "sbx",
+        "agent",
+        &["agent-acme".to_string()],
+        &std::collections::HashSet::new(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(report.repaired, vec!["agent-acme".to_string()]);
     assert_eq!(report.attached, vec!["agent-acme".to_string()]);
@@ -664,9 +688,15 @@ async fn reconcile_repairs_already_attached_legacy_generic_provider_via_detach_r
     let (addr, _shutdown) = start_mock_server(mock).await;
     let mut client = mock_client(addr).await;
 
-    let report = reconcile_for_sandbox(&mut client, "sbx", "agent", &["agent-acme".to_string()])
-        .await
-        .unwrap();
+    let report = reconcile_for_sandbox(
+        &mut client,
+        "sbx",
+        "agent",
+        &["agent-acme".to_string()],
+        &std::collections::HashSet::new(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(report.repaired, vec!["agent-acme".to_string()]);
     assert_eq!(report.attached, vec!["agent-acme".to_string()]);
@@ -726,9 +756,15 @@ async fn reconcile_reports_legacy_generic_repair_errors_and_skips_attach() {
     let (addr, _shutdown) = start_mock_server(mock).await;
     let mut client = mock_client(addr).await;
 
-    let report = reconcile_for_sandbox(&mut client, "sbx", "agent", &["agent-acme".to_string()])
-        .await
-        .unwrap();
+    let report = reconcile_for_sandbox(
+        &mut client,
+        "sbx",
+        "agent",
+        &["agent-acme".to_string()],
+        &std::collections::HashSet::new(),
+    )
+    .await
+    .unwrap();
 
     assert!(report.repaired.is_empty());
     assert!(report.attached.is_empty());
@@ -747,6 +783,95 @@ async fn reconcile_reports_legacy_generic_repair_errors_and_skips_attach() {
         "repair failure detail must be preserved for logs: {:?}",
         report.errors
     );
+}
+
+#[tokio::test]
+async fn reconcile_skips_legacy_recreate_for_borrowed_record() {
+    // A borrowed record is owned by another agent. The borrower must NEVER
+    // recreate/delete it — only the owner migrates its own legacy generics.
+    // Borrowed records that are already attached require no action at all.
+    //
+    // If recreate were attempted, the mock's `mock_delete_provider` and
+    // `mock_detach_sandbox_provider` stubs would return `unimplemented("stub")`
+    // and the error would appear in `report.errors`. The `report.errors.is_empty()`
+    // assertion below therefore also proves delete was not called.
+    let mock = MockOpenShell {
+        mock_update_config: Some(Box::new(|_| {
+            Ok(proto_v1::UpdateConfigResponse {
+                version: 0,
+                policy_hash: String::new(),
+                settings_revision: 1,
+                deleted: false,
+            })
+        })),
+        // Record is already attached.
+        mock_list_sandbox_providers: Some(Box::new(|_| {
+            Ok(proto_v1::ListSandboxProvidersResponse {
+                providers: vec![datamodel::Provider {
+                    metadata: Some(datamodel::ObjectMeta {
+                        name: "agent-acme".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            })
+        })),
+        // Gateway record has type="generic" — the legacy sentinel that normally
+        // triggers recreate. The borrower must skip that path.
+        mock_get_provider: Some(Box::new(|req| {
+            let mut credentials = HashMap::new();
+            credentials.insert("ACME_TOKEN".into(), "gateway-held-secret".into());
+            let mut config = HashMap::new();
+            config.insert("origin".into(), "https://api.example.invalid".into());
+            Ok(proto_v1::ProviderResponse {
+                provider: Some(datamodel::Provider {
+                    metadata: Some(datamodel::ObjectMeta {
+                        name: req.name,
+                        ..Default::default()
+                    }),
+                    r#type: "generic".into(),
+                    config,
+                    credentials,
+                    credential_expires_at_ms: HashMap::new(),
+                }),
+            })
+        })),
+        // mock_detach_sandbox_provider and mock_delete_provider are intentionally
+        // left at their Default (None → unimplemented stub). Any call to detach
+        // or delete would produce a gRPC error that surfaces in report.errors,
+        // making the is_empty() assertions below fail — proving recreate was skipped.
+        ..Default::default()
+    };
+    let (addr, _shutdown) = start_mock_server(mock).await;
+    let mut client = mock_client(addr).await;
+
+    let mut borrowed = std::collections::HashSet::new();
+    borrowed.insert("agent-acme".to_string());
+
+    let report = reconcile_for_sandbox(
+        &mut client,
+        "sbx",
+        "agent",
+        &["agent-acme".to_string()],
+        &borrowed,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        report.repaired.is_empty(),
+        "borrowed legacy record must NOT be recreated/repaired; repaired={:?}",
+        report.repaired
+    );
+    assert!(
+        report.errors.is_empty(),
+        "no detach/delete should have been attempted for borrowed record; errors={:?}",
+        report.errors
+    );
+    // Already attached and not recreated → no new attach either.
+    assert!(report.attached.is_empty());
+    assert!(report.detached.is_empty());
+    assert!(report.missing.is_empty());
 }
 
 #[tokio::test]
@@ -1078,9 +1203,15 @@ async fn reconcile_detaches_undeclared_regardless_of_prefix() {
     // agent_prefix is "right" — "fal-a1b2c3" does NOT start with "right-",
     // so the old prefix guard would skip it. The new declared-list rule must
     // detach it because it is absent from declared (empty slice).
-    let report = reconcile_for_sandbox(&mut client, "sbox", "right", &[])
-        .await
-        .unwrap();
+    let report = reconcile_for_sandbox(
+        &mut client,
+        "sbox",
+        "right",
+        &[],
+        &std::collections::HashSet::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(report.detached, vec!["fal-a1b2c3".to_string()]);
     assert!(report.attached.is_empty());
     assert!(report.missing.is_empty());

@@ -702,6 +702,12 @@ async fn recreate_legacy_generic_provider(
 /// - Records providers that are declared but not yet created on the gateway
 ///   in `missing` (not an error — they may be created later by the user).
 ///
+/// **Borrowed records are attach-only.** Any name present in `borrowed` is a
+/// shared gateway record owned by another agent. The borrower must never
+/// recreate or delete it — only the owning agent migrates its own legacy
+/// generics. Borrowed names still participate in attach (and detach when
+/// removed from `declared`), but the legacy-recreate repair path is skipped.
+///
 /// The function is idempotent: calling it when everything is already in sync
 /// produces an empty report after checking the current sandbox attachments and,
 /// when declarations are non-empty, ensuring provider v2 is enabled.
@@ -718,6 +724,7 @@ pub async fn reconcile_for_sandbox(
     sandbox_name: &str,
     _agent_prefix: &str,
     declared: &[String],
+    borrowed: &std::collections::HashSet<String>,
 ) -> Result<ReconcileReport, ProviderError> {
     // Provider composition is gated by the gateway-global providers_v2_enabled
     // flag (default false on fresh gateways). Guarantee it before any attach so
@@ -743,7 +750,12 @@ pub async fn reconcile_for_sandbox(
             Ok(provider) => {
                 let already_attached = attached_set.contains(name);
                 let mut needs_reattach = false;
-                if legacy_generic_provider_recreate_payload(name, &provider).is_some() {
+                // A borrowed (shared) record is owned by another agent; the borrower
+                // must never recreate/delete it — only the owner migrates legacy
+                // generics. Borrowed records still get attached below (attach-only).
+                if !borrowed.contains(name)
+                    && legacy_generic_provider_recreate_payload(name, &provider).is_some()
+                {
                     match recreate_legacy_generic_provider(
                         client,
                         sandbox_name,
