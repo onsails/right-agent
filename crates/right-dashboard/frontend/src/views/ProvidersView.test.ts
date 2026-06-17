@@ -18,6 +18,7 @@ const apiMocks = vi.hoisted(() => ({
   providerPeers: vi.fn(),
   providerShare: vi.fn(),
   providerUnshare: vi.fn(),
+  providerBorrow: vi.fn(),
 }))
 
 vi.mock('../api', () => apiMocks)
@@ -117,6 +118,7 @@ beforeEach(() => {
   apiMocks.providerPeers.mockResolvedValue({ peers: [] })
   apiMocks.providerShare.mockResolvedValue({})
   apiMocks.providerUnshare.mockResolvedValue({})
+  apiMocks.providerBorrow.mockResolvedValue({})
 })
 
 afterEach(() => {
@@ -340,6 +342,64 @@ describe('ProvidersView', () => {
       expect(apiMocks.providerUnshare).toHaveBeenCalledTimes(1)
       expect(apiMocks.providerUnshare.mock.calls[0][0]).toEqual({ provider: 'borrowed-fal' })
       expect(apiMocks.providerList.mock.calls.length).toBe(listCallsAtMount + 1)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it('borrows a provider a peer shares and refreshes the list', async () => {
+    apiMocks.providerList.mockResolvedValue({ providers: [] })
+    apiMocks.providerPeers.mockResolvedValue({
+      peers: [{
+        agent: 'agent-a',
+        network_policy: 'permissive',
+        providers: [{ name: 'fal', type: 'right-fal', env_var: 'FAL_KEY', label: null, generic: null }],
+      }],
+    })
+
+    const { app, root } = mountProvidersView()
+    await flushAsync()
+
+    try {
+      const listCallsAtMount = apiMocks.providerList.mock.calls.length
+      clickButton(root, 'Borrow…') // open the borrow section from the header
+      await flushAsync()
+      expect(root.textContent).toContain('from agent-a')
+
+      clickButton(root, 'Borrow') // the per-candidate borrow button
+      await flushAsync()
+      await flushAsync()
+
+      expect(apiMocks.providerBorrow).toHaveBeenCalledTimes(1)
+      expect(apiMocks.providerBorrow.mock.calls[0][0]).toEqual({ owner_agent: 'agent-a', provider: 'fal' })
+      // A successful borrow refreshes the provider list (and peers).
+      expect(apiMocks.providerList.mock.calls.length).toBe(listCallsAtMount + 1)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it('blocks borrowing a provider name the current agent already holds', async () => {
+    apiMocks.providerList.mockResolvedValue({ providers: [provider({ name: 'fal' })] })
+    apiMocks.providerPeers.mockResolvedValue({
+      peers: [{
+        agent: 'agent-a',
+        network_policy: 'permissive',
+        providers: [{ name: 'fal', type: 'right-fal', env_var: 'FAL_KEY', label: null, generic: null }],
+      }],
+    })
+
+    const { app, root } = mountProvidersView()
+    await flushAsync()
+
+    try {
+      clickButton(root, 'Borrow…')
+      await flushAsync()
+
+      expect(root.textContent).toContain('already in this agent')
+      const borrowBtn = buttonsByText(root, 'Borrow')[0]
+      expect(borrowBtn).toBeDefined()
+      expect(borrowBtn.disabled).toBe(true)
     } finally {
       app.unmount()
     }

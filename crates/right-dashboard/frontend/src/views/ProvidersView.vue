@@ -11,6 +11,7 @@ import {
   providerPeers,
   providerShare,
   providerUnshare,
+  providerBorrow,
 } from '../api'
 import type {
   ProviderView,
@@ -29,9 +30,11 @@ import {
   isBorrowed,
   borrowedOwnerLabel,
   shareTargetState,
+  borrowCandidates,
   CREDENTIAL_HINT,
   HOSTS_MICROCOPY,
 } from './providersViewModel'
+import type { BorrowCandidate } from './providersViewModel'
 
 const providers = ref<ProviderView[]>([])
 const types = ref<ProviderProfileView[]>([])
@@ -470,6 +473,41 @@ async function unshareProvider(provider: ProviderView): Promise<void> {
   }
 }
 
+// Borrow flow (pull): attach a provider another agent shares into THIS agent.
+// Same backend call as Share with owner/dest swapped; gated by the same
+// both-sides trust. Busy is keyed by owner/name since a name may repeat across peers.
+const borrowOpen = ref(false)
+const borrowBusy = ref<string | null>(null)
+const borrowError = ref<string | null>(null)
+
+function borrowKey(c: BorrowCandidate): string {
+  return `${c.owner}/${c.provider.name}`
+}
+function borrowList(): BorrowCandidate[] {
+  return borrowCandidates(peers.value, providers.value)
+}
+function openBorrow(): void {
+  borrowError.value = null
+  borrowOpen.value = true
+}
+function closeBorrow(): void {
+  borrowOpen.value = false
+  borrowError.value = null
+}
+async function runBorrow(c: BorrowCandidate): Promise<void> {
+  if (c.blocked) return
+  borrowBusy.value = borrowKey(c)
+  borrowError.value = null
+  try {
+    await providerBorrow({ owner_agent: c.owner, provider: c.provider.name })
+    await refresh()
+  } catch (err) {
+    borrowError.value = err instanceof Error ? err.message : 'Borrow failed'
+  } finally {
+    borrowBusy.value = null
+  }
+}
+
 // Editing the credential re-arms the soft prefix warning.
 watch(addCredential, () => {
   addWarnAck.value = false
@@ -488,10 +526,46 @@ watch(rotateCredential, () => {
         <p class="eyebrow">Integrations</p>
         <h2>Providers</h2>
       </div>
-      <button class="tool-button" type="button" @click="addOpen ? closeAdd() : openAdd()">
-        {{ addOpen ? 'Close' : '+ Add' }}
-      </button>
+      <div class="button-row">
+        <button class="tool-button" type="button" @click="borrowOpen ? closeBorrow() : openBorrow()">
+          {{ borrowOpen ? 'Close' : 'Borrow…' }}
+        </button>
+        <button class="tool-button" type="button" @click="addOpen ? closeAdd() : openAdd()">
+          {{ addOpen ? 'Close' : '+ Add' }}
+        </button>
+      </div>
     </header>
+
+    <!-- Borrow modal: pull a provider another agent shares into this one. -->
+    <section v-if="borrowOpen" class="providers-section">
+      <p class="muted-line">Borrow a provider shared by another agent:</p>
+      <p v-if="borrowList().length === 0" class="muted-line">No providers available to borrow</p>
+      <article
+        v-for="c in borrowList()"
+        :key="borrowKey(c)"
+        class="data-row providers-row static"
+      >
+        <div class="row-main providers-row-main">
+          <strong>{{ c.provider.name }}</strong>
+          <small>from {{ c.owner }}</small>
+          <small v-if="c.blocked">{{ c.blocked }}</small>
+        </div>
+        <div class="button-row row-actions">
+          <button
+            class="tool-button"
+            type="button"
+            :disabled="c.blocked !== null || borrowBusy === borrowKey(c)"
+            @click="runBorrow(c)"
+          >
+            {{ borrowBusy === borrowKey(c) ? 'Working' : 'Borrow' }}
+          </button>
+        </div>
+      </article>
+      <p v-if="borrowError" class="notice inline">{{ borrowError }}</p>
+      <div class="button-row">
+        <button class="tool-button" type="button" @click="closeBorrow">Close</button>
+      </div>
+    </section>
 
     <!-- Add modal -->
     <section v-if="addOpen" class="providers-section">

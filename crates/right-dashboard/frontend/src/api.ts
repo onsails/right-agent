@@ -22,6 +22,7 @@ import type {
   ProviderGenericBody,
   ProviderPeer,
   ProviderProfileView,
+  ProviderBorrowBody,
   ProviderShareBody,
   ProviderUnshareBody,
   ProviderView,
@@ -218,6 +219,13 @@ export function providerShare(body: ProviderShareBody): Promise<ProviderView> {
 
 export function providerUnshare(body: ProviderUnshareBody): Promise<ProviderView> {
   return requestJson<ProviderView>('api/v1/providers/unshare', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function providerBorrow(body: ProviderBorrowBody): Promise<ProviderView> {
+  return requestJson<ProviderView>('api/v1/providers/borrow', {
     method: 'POST',
     body: JSON.stringify(body),
   })

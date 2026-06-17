@@ -64,6 +64,15 @@ pub(crate) struct ProviderUnshareBody {
     pub provider: String,
 }
 
+/// Pull (borrow) the inverse of share: `owner_agent` owns the record, the current
+/// dashboard agent becomes the borrower. Maps to the same `provider_share` call
+/// with owner/dest swapped — the backend enforces the identical both-sides trust.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProviderBorrowBody {
+    pub owner_agent: String,
+    pub provider: String,
+}
+
 pub(crate) async fn handle_list(
     AxumPath(agent): AxumPath<String>,
     State(state): State<DashboardState>,
@@ -290,6 +299,36 @@ pub(crate) async fn handle_unshare(
     }
 }
 
+/// Borrow (pull): the current dashboard agent becomes the destination, the
+/// body-supplied `owner_agent` is the source. This is `provider_share` with
+/// owner/dest swapped relative to `handle_share`; the backend re-checks that the
+/// actor is trusted on BOTH agents, so direction carries no extra privilege.
+pub(crate) async fn handle_borrow(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let user = match authenticate_api(&state, &agent, &headers) {
+        Ok(u) => u,
+        Err(error) => return error.into_response(),
+    };
+    let body: ProviderBorrowBody = match parse_json_body(&body) {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
+    let req = right_mcp::internal_client::ProviderShareRequest {
+        actor_user_id: user.id,
+        owner_agent: &body.owner_agent,
+        provider: &body.provider,
+        dest_agent: &state.agent_name,
+    };
+    match state.internal_client.provider_share(&req).await {
+        Ok(view) => Json(view).into_response(),
+        Err(error) => internal_api_error_response(error, "provider_borrow_failed"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +371,19 @@ mod tests {
             body.normalized_upstream_hosts(),
             ["fal.run", "queue.fal.run"]
         );
+    }
+
+    #[test]
+    fn provider_borrow_body_carries_owner_and_provider() {
+        // The borrow body names the SOURCE (owner) agent; the destination is the
+        // current dashboard agent, supplied server-side — never from the body.
+        let body: ProviderBorrowBody = serde_json::from_value(serde_json::json!({
+            "owner_agent": "agent-a",
+            "provider": "fal"
+        }))
+        .unwrap();
+
+        assert_eq!(body.owner_agent, "agent-a");
+        assert_eq!(body.provider, "fal");
     }
 }

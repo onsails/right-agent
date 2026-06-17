@@ -1,4 +1,4 @@
-import type { ProviderPeer, ProviderView } from '../types'
+import type { PeerProvider, ProviderPeer, ProviderView } from '../types'
 
 export function validateSlug(s: string): string | null {
   if (!s) return 'required'
@@ -101,4 +101,31 @@ export function shareTargetState(
     return { blocked: 'restrictive policy cannot accept generic providers' }
   }
   return { blocked: null }
+}
+
+/** One provider a peer agent exposes that the current agent could BORROW (pull),
+ *  tagged with its owning peer. `blocked` is set when the current agent already
+ *  holds a provider with that name — the same name-collision the backend
+ *  `plan_share` enforces, surfaced up front. */
+export interface BorrowCandidate {
+  owner: string
+  provider: PeerProvider
+  blocked: string | null
+}
+
+/** Flatten trusted peers' providers into the list the current agent can borrow.
+ *  Pull is just share with owner/dest swapped, gated by the same both-sides trust
+ *  on the backend; here we only pre-block names already present locally. */
+export function borrowCandidates(
+  peers: ProviderPeer[],
+  current: ProviderView[],
+): BorrowCandidate[] {
+  const held = new Set(current.map((p) => p.name))
+  return peers.flatMap((peer) =>
+    peer.providers.map((provider) => ({
+      owner: peer.agent,
+      provider,
+      blocked: held.has(provider.name) ? 'already in this agent' : null,
+    })),
+  )
 }

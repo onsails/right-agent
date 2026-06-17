@@ -636,3 +636,9 @@ export interface ProviderShareBody {
 export interface ProviderUnshareBody {
   provider: string
 }
+
+export interface ProviderBorrowBody {
+  /** The peer agent that OWNS (or already borrows) the record being pulled in. */
+  owner_agent: string
+  provider: string
+}

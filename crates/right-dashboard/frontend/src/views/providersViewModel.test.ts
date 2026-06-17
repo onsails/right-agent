@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  borrowCandidates,
   borrowedOwnerLabel,
   detectCredentialPrefix,
   evaluateCredentialSubmit,
@@ -12,7 +13,7 @@ import {
   CREDENTIAL_HINT,
   HOSTS_MICROCOPY,
 } from './providersViewModel'
-import type { ProviderPeer, ProviderView } from '../types'
+import type { PeerProvider, ProviderPeer, ProviderView } from '../types'
 
 function providerView(overrides: Partial<ProviderView> = {}): ProviderView {
   return {
@@ -156,5 +157,44 @@ describe('shareTargetState', () => {
   it('allows a non-generic provider to a restrictive peer', () => {
     const p = providerView({ name: 'gh', generic: null })
     expect(shareTargetState(peer({ network_policy: 'restrictive' }), p).blocked).toBeNull()
+  })
+})
+
+describe('borrowCandidates', () => {
+  function peerProvider(overrides: Partial<PeerProvider> = {}): PeerProvider {
+    return { name: 'fal', type: 'right-fal', env_var: 'FAL_KEY', label: null, generic: null, ...overrides }
+  }
+  function peer(overrides: Partial<ProviderPeer> = {}): ProviderPeer {
+    return { agent: 'agent-a', network_policy: 'permissive', providers: [], ...overrides }
+  }
+
+  it('flattens every peer provider into a candidate tagged with its owner agent', () => {
+    const peers = [
+      peer({ agent: 'agent-a', providers: [peerProvider({ name: 'fal' }), peerProvider({ name: 'openai' })] }),
+      peer({ agent: 'scout', providers: [peerProvider({ name: 'gh' })] }),
+    ]
+    const got = borrowCandidates(peers, [])
+    expect(got.map((c) => [c.owner, c.provider.name])).toEqual([
+      ['agent-a', 'fal'],
+      ['agent-a', 'openai'],
+      ['scout', 'gh'],
+    ])
+    expect(got.every((c) => c.blocked === null)).toBe(true)
+  })
+
+  it('blocks a candidate whose name the current agent already holds (owned or borrowed)', () => {
+    const peers = [peer({ providers: [peerProvider({ name: 'fal' }), peerProvider({ name: 'openai' })] })]
+    const current = [
+      providerView({ name: 'fal', shared_from: null }), // already owned here
+      providerView({ name: 'openai', shared_from: 'someone' }), // already borrowed here
+    ]
+    const got = borrowCandidates(peers, current)
+    expect(got.find((c) => c.provider.name === 'fal')?.blocked).toBe('already in this agent')
+    expect(got.find((c) => c.provider.name === 'openai')?.blocked).toBe('already in this agent')
+  })
+
+  it('returns an empty list when no peers expose providers', () => {
+    expect(borrowCandidates([], [])).toEqual([])
+    expect(borrowCandidates([peer({ providers: [] })], [])).toEqual([])
   })
 })
