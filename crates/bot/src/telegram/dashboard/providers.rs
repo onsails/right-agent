@@ -71,6 +71,17 @@ pub(crate) struct ProviderExportBody {
     pub overwrite: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProviderShareBody {
+    pub provider: String,
+    pub dest_agent: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProviderUnshareBody {
+    pub provider: String,
+}
+
 pub(crate) async fn handle_list(
     AxumPath(agent): AxumPath<String>,
     State(state): State<DashboardState>,
@@ -299,6 +310,57 @@ pub(crate) async fn handle_export(
     match state.internal_client.provider_copy(&req).await {
         Ok(view) => Json(view).into_response(),
         Err(error) => internal_api_error_response(error, "provider_export_failed"),
+    }
+}
+
+pub(crate) async fn handle_share(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let user = match authenticate_api(&state, &agent, &headers) {
+        Ok(u) => u,
+        Err(error) => return error.into_response(),
+    };
+    let body: ProviderShareBody = match parse_json_body(&body) {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
+    let req = right_mcp::internal_client::ProviderShareRequest {
+        actor_user_id: user.id,
+        owner_agent: &state.agent_name,
+        provider: &body.provider,
+        dest_agent: &body.dest_agent,
+    };
+    match state.internal_client.provider_share(&req).await {
+        Ok(view) => Json(view).into_response(),
+        Err(error) => internal_api_error_response(error, "provider_share_failed"),
+    }
+}
+
+pub(crate) async fn handle_unshare(
+    AxumPath(agent): AxumPath<String>,
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let user = match authenticate_api(&state, &agent, &headers) {
+        Ok(u) => u,
+        Err(error) => return error.into_response(),
+    };
+    let body: ProviderUnshareBody = match parse_json_body(&body) {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
+    let req = right_mcp::internal_client::ProviderUnshareRequest {
+        actor_user_id: user.id,
+        borrower_agent: &state.agent_name,
+        provider: &body.provider,
+    };
+    match state.internal_client.provider_unshare(&req).await {
+        Ok(view) => Json(view).into_response(),
+        Err(error) => internal_api_error_response(error, "provider_unshare_failed"),
     }
 }
 

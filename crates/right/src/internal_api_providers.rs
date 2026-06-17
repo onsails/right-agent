@@ -731,6 +731,10 @@ pub struct ProviderView {
     /// policy. `None` means the active policy could not be read.
     #[serde(default)]
     pub composed: Option<bool>,
+    /// Present ⇒ this provider is a *borrowed* reference shared from the named
+    /// owner agent (read-only for this agent). Absent ⇒ owned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_from: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -766,6 +770,7 @@ mod provider_view_tests {
                 updated_at: None,
                 status: ProviderStatus::Healthy,
                 composed: Some(composed),
+                shared_from: None,
             };
 
             let json = serde_json::to_value(view).unwrap();
@@ -785,6 +790,7 @@ mod provider_view_tests {
             updated_at: None,
             status: ProviderStatus::Healthy,
             composed: None,
+            shared_from: None,
         };
 
         let json = serde_json::to_value(view).unwrap();
@@ -1003,6 +1009,7 @@ pub(crate) async fn handle_provider_list(
             updated_at,
             status,
             composed,
+            shared_from: entry.shared_from.clone(),
         });
     }
     Ok(axum::Json(views))
@@ -1225,6 +1232,7 @@ pub(crate) async fn handle_provider_create(
         updated_at: None,
         status: ProviderStatus::Healthy,
         composed: Some(true),
+        shared_from: None,
     }))
 }
 
@@ -2208,6 +2216,7 @@ async fn create_generic_provider(
         updated_at: None,
         status: ProviderStatus::Healthy,
         composed: Some(true),
+        shared_from: None,
     }))
 }
 
@@ -2660,6 +2669,7 @@ pub(crate) async fn handle_provider_rotate(
         updated_at: Some(chrono::Utc::now()),
         status: ProviderStatus::Healthy,
         composed,
+        shared_from: entry.shared_from.clone(),
     }))
 }
 
@@ -2900,6 +2910,7 @@ pub(crate) async fn handle_provider_config_update(
         updated_at: Some(chrono::Utc::now()),
         status: ProviderStatus::Healthy,
         composed: Some(true),
+        shared_from: entry.shared_from.clone(),
     }))
 }
 
@@ -3243,6 +3254,7 @@ pub(crate) async fn handle_provider_share(
         updated_at: Some(chrono::Utc::now()),
         status: ProviderStatus::Healthy,
         composed: Some(true),
+        shared_from: borrowed_entry.shared_from,
     }))
 }
 
