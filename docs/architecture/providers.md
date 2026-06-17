@@ -387,68 +387,103 @@ Composition is observable only in the **effective** policy
 generic provider rules. Never infer composition success from
 `policy set --wait`.
 
-## Cross-agent provider sharing (import / export)
+## Cross-agent provider sharing (multi-attach)
 
-A trusted operator can copy a provider — credential included — from one
-host-local agent to another instead of re-entering the API key. One
-internal primitive backs both directions:
+A trusted operator can SHARE one provider account across several host-local
+agents: the *same* gateway record is attached to each agent's sandbox. The
+secret stays in the gateway and is never read back.
 
+**Why not copy.** The previous design copied the credential by reading it
+back from the gateway (`get_provider_credentials`) and writing it into a new
+record on the destination. OpenShell's `GetProvider` **redacts** stored
+secrets — it returns the literal string `"REDACTED"` — so the copy wrote
+`"REDACTED"` as the destination credential and the proxy substituted it
+verbatim on egress, yielding an upstream `401`. There is no host-side gRPC
+path to read a real credential back, so copy-by-readback was unfixable and is
+retired. Live canary: `crates/right-openshell/tests/ci_openshell_get_provider_redacts.rs`.
+Multi-attach is the supported replacement and is verified end-to-end by
+`ci_openshell_provider_multi_attach.rs` (one record resolves on two
+sandboxes) and `ci_openshell_provider_borrowed_reconcile.rs`.
+
+**Naming & ownership.** A record's NAME no longer encodes its owner. New
+records use an agent-agnostic `{type-slug}-{short-uuid}` id (e.g. `fal-a1b2c3`,
+from `new_record_name`); existing `{agent}-{slug}` records keep their names
+(unrenamable — recreate would need the unreadable credential). `validate_name`
+accepts both forms. Ownership moved into `agent.yaml` as explicit data:
+
+```yaml
+# owner (riskoff)               # borrower (right) — SAME record id
+sandbox:                        sandbox:
+  providers:                      providers:
+    - name: fal-a1b2c3              - name: fal-a1b2c3
+                                      shared_from: riskoff   # ⇒ borrowed
 ```
-provider_copy(actor_user_id, source_agent, source_provider, dest_agent, label?, overwrite)
-```
 
-The single-agent dashboard pins one side to its own agent and forwards the
-authenticated Telegram user id:
-
-| Dashboard action | source_agent | dest_agent |
-|---|---|---|
-| Import | another agent | current agent |
-| Export | current agent | another agent |
+`ProviderEntry::is_owned()` (`shared_from` absent) / `is_borrowed()` drive
+rotation rights, dashboard read-only state, reconcile, and the destroy
+cascade. The borrower's entry copies the owner's non-secret `type`/`label`/
+`generic` so composition still confirms its upstream hosts; only the
+credential stays gateway-side. `serialize_provider_entry` emits `shared_from`;
+serde parses it back.
 
 **Discovery.** `provider_peers(actor_user_id, for_agent)` enumerates
-host-local agents (excluding `for_agent`) where the actor is trusted and the
-sandbox mode is `openshell`, returning each peer's providers (name, type,
-env_var, label, generic) — never credentials. `build_peers` tolerates an
-unreadable peer `agent.yaml` (skips it with a warning) and skips providers
-whose env var can't resolve.
+host-local `openshell` agents (excluding `for_agent`) where the actor is
+trusted, returning each peer's providers (name, type, env_var, label, generic)
+— never credentials. `build_peers` skips an unreadable peer `agent.yaml` with
+a warning.
 
-**Authorization.** The actor MUST be in the allowlist (`allowlist.yaml`
-`users[].id`) of BOTH the source and the destination agent. The dashboard
-proves identity + own-agent trust via `authenticate_api`; the internal
-Unix-socket API (host-only) re-checks the other agent from disk
-(`require_trusted`; secure default = deny on missing/empty allowlist).
-`actor_user_id` always comes from the authenticated user, never the request
-body. The dashboard handlers pin the current agent as the non-actor side
-(import → dest, export → source).
+**Authorization.** The actor MUST be trusted in the allowlist
+(`allowlist.yaml` `users[].id`) of BOTH agents. The dashboard proves identity
++ own-agent trust via `authenticate_api`; the host-only internal Unix-socket
+API re-checks the other agent from disk (`require_trusted`; secure default =
+deny). `actor_user_id` always comes from the authenticated user. The
+dashboard "Share with…" action pins `owner_agent = current agent`,
+`dest_agent = selected peer` (push).
 
-**Create vs overwrite (match key = `env_var`).** `plan_copy` (pure) resolves
-the destination provider by `env_var`:
+**Share.** `handle_provider_share` (pure guard `plan_share`: reject self,
+reject a dest that already declares the record) resolves the owner's entry,
+builds the borrowed entry (re-sharing a borrowed record points `shared_from`
+at the *true* owner, not the intermediary), then: `ensure_v2` → attach the
+existing record to the dest sandbox → policy-load → confirm composition
+(endpoint-exact for generic, name-only for built-in) → append the borrowed
+entry to the dest `agent.yaml` **last**. Any post-attach failure rolls back
+via `rollback_shared_attachment`, which **detaches only** — it MUST NOT
+`delete_provider`, because the record belongs to the owner and may serve
+other sandboxes.
 
-- env_var absent on dest → **create** a new `<dest>-<slug>` via the full
-  create flow with the copied credential. The new label defaults to the
-  source name minus its `"{source_agent}-"` prefix unless overridden.
-- env_var present + `overwrite=true` → **overwrite in place**: rotate the
-  existing dest provider's credential, and (generic only) re-sync upstream
-  hosts / path when they differ from the source. The dest provider name is
-  unchanged.
-- env_var present + `overwrite=false` → `EnvVarCollision`.
-- `overwrite=true` with no match, or a type-incompatible match (built-in vs
-  generic) → `CopyConflict`.
+**Unshare.** `handle_provider_unshare` (pure guard `plan_unshare`: reject
+unsharing an OWNED record) detaches the record from the borrower's sandbox and
+removes the borrowed `agent.yaml` entry, then reloads policy. It NEVER
+`delete_provider`s — the owner keeps the record. Borrowed providers render
+read-only in the dashboard (no rotate/remove/edit/config; a single "Unshare"
+action + a "Shared from {owner}" label).
 
-**Credential read-back.** `provider_copy` reads the source credential from
-the gateway via `right_openshell::providers::get_provider_credentials` — the
-sole sanctioned credential read-back. The value is held in `SecretString`,
-written straight into the destination create/rotate request, and never
-logged, persisted to `agent.yaml`/backups, or returned in any list/detail
-response.
+**Reconcile.** The supervisor passes ALL declared names (owned + borrowed) to
+`reconcile_for_sandbox`, which detaches anything attached-but-not-declared
+(declared list is the source of truth, not the name prefix). Generic profile
+import/repair (`generic_provider_profiles_for_config`,
+`heal_drifted_generic_profiles`) skips borrowed entries — the owner owns and
+imported that managed profile; the borrower only attaches it.
 
-**Execution.** `handle_provider_copy` delegates to the existing
-`handle_provider_create` / `handle_provider_rotate` /
-`handle_provider_config_update` handlers (each independently locked), so the
-copy reuses the tested compose/attach/policy paths. There is no outer lock
-across plan → execute; a concurrent change to the destination surfaces as an
-observable `409`/`404`, never silent corruption.
+**Lifecycle (refcount).** On `agent destroy`, `plan_destroy_provider_cascade`
+(pure) decides per record: always detach from the deleting agent's sandbox;
+`delete_provider` only when NO other agent's `agent.yaml` references the
+record (refcount 0). If the deleted agent OWNED a record that borrowers still
+reference, ownership is **re-homed** to a surviving borrower
+(`set_provider_shared_from` clears the new owner's `shared_from` and repoints
+the others). The cascade is best-effort; a re-home failure is non-fatal since
+the delete-guard already kept the record alive.
 
-Backend: `internal_api_providers::{handle_provider_copy, handle_provider_peers,
-plan_copy, build_peers, require_trusted}`. Dashboard routes:
-`/dashboard/{agent}/api/v1/providers/{peers,import,export}`.
+**Connected rotation.** Rotating the owner's record updates every borrower's
+sandbox on the next gateway resolver refresh (~10s) — no restart.
+
+**Redaction guard (retained).** Even with copy retired,
+`check_source_credential_readable` + the `SourceCredentialUnreadable` (422)
+error remain (`#[allow(dead_code)]`) as defense-in-depth: any future host-side
+read-back caller must reject a redacted/empty value before writing it.
+
+Backend: `internal_api_providers::{handle_provider_share, handle_provider_unshare,
+plan_share, plan_unshare, handle_provider_peers, build_peers, require_trusted}`;
+`right_openshell::providers::reconcile_for_sandbox`;
+`right_agent::agent::destroy::plan_destroy_provider_cascade`. Dashboard routes:
+`/dashboard/{agent}/api/v1/providers/{peers,share,unshare}`.
