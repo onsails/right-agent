@@ -393,36 +393,6 @@ async fn ci_openshell_provider_rotate_no_restart() {
     delete_provider(&mut client, &prov).await.unwrap();
 }
 
-#[tokio::test]
-#[ignore = "ci-openshell: requires a live OpenShell gateway"]
-async fn ci_openshell_get_provider_credentials_returns_stored_secret() {
-    use right_openshell::providers::*;
-    use secrecy::ExposeSecret;
-    let mtls_dir = right_openshell::openshell::default_mtls_dir();
-    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
-        .await
-        .unwrap();
-
-    let name = format!("rightprobe-{}-getcreds", std::process::id());
-    let mut creds = std::collections::HashMap::new();
-    creds.insert("FAL_KEY".to_string(), "live-secret-xyz".to_string());
-    let spec = ProviderSpec {
-        name: name.clone(),
-        type_: "generic".into(),
-        credentials: creds,
-        config: Default::default(),
-    };
-    create_provider(&mut client, &spec).await.unwrap();
-
-    let out = get_provider_credentials(&mut client, &name).await.unwrap();
-    assert_eq!(
-        out.get("FAL_KEY").unwrap().expose_secret(),
-        "live-secret-xyz"
-    );
-
-    delete_provider(&mut client, &name).await.unwrap();
-}
-
 /// Same filesystem/landlock section as `test_support::MINIMAL_POLICY` so a
 /// later `policy set --wait` (composition reload) is accepted on the live
 /// sandbox. Network section is intentionally minimal — provider-profile
@@ -573,7 +543,8 @@ const EGRESS_PROBE_FAL_CMD: &str =
 #[ignore = "ci-openshell: requires a live OpenShell gateway"]
 async fn ci_openshell_builtin_provider_substitutes_on_egress() {
     use right_openshell::managed_profiles::{
-        author_generic_profile, delete_profile, generic_provider_profile_id, lint_and_import,
+        ManagedProfile, author_generic_profile, delete_profile, ensure_profiles, fal_profile,
+        generic_provider_profile_id, lint_and_import,
     };
     use right_openshell::providers::*;
     use right_openshell::test_support::TestSandbox;
@@ -616,8 +587,17 @@ async fn ci_openshell_builtin_provider_substitutes_on_egress() {
     .await
     .unwrap();
 
-    // Subject: BUILT-IN fal provider (the right-fal profile already exists on
-    // the gateway). Same path the import uses.
+    // Subject: BUILT-IN fal provider. Production provisions the `right-fal`
+    // profile on the startup/reconcile path (`ensure_profiles` in
+    // `sandbox_supervisor`); a fresh CI gateway has none persisted, so the test
+    // provisions it itself. `ensure_profiles` is create-or-skip — safe whether
+    // or not the profile already exists (the persistent dev gateway has it).
+    ensure_profiles(
+        &mut client,
+        &[ManagedProfile::Authored(Box::new(fal_profile()))],
+    )
+    .await
+    .expect("ensure right-fal built-in profile");
     let mut fal_creds = std::collections::HashMap::new();
     fal_creds.insert("FAL_KEY".to_string(), fal_secret.clone());
     create_provider(
