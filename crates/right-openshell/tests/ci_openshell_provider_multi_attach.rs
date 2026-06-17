@@ -73,10 +73,11 @@ async fn attach_and_probe(
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
     loop {
-        if let Ok((o, rc)) = exec_in_sandbox(client, sid, &["printenv", ENV_VAR], 30).await {
-            if rc == 0 && !o.trim().is_empty() {
-                break;
-            }
+        if let Ok((o, rc)) = exec_in_sandbox(client, sid, &["printenv", ENV_VAR], 30).await
+            && rc == 0
+            && !o.trim().is_empty()
+        {
+            break;
         }
         if std::time::Instant::now() >= deadline {
             panic!("{ENV_VAR} never propagated to sandbox {sandbox_name}");
