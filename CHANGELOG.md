@@ -1,61 +1,25 @@
 # Changelog
 ## [0.4.2] - 2026-06-17
 
+### Skill Curator
 
-### Bug Fixes
+- The curator's circuit breaker and idle gate now work correctly. The circuit breaker was never actually triggered at runtime — a persistently-failing curator retried every cooldown cycle and kept billing learning budget indefinitely. The idle gate always passed because the ticker supplied `None` for last user activity, meaning the curator could modify the skill directory during active foreground turns. Both are fixed: the circuit breaker opens after consecutive failures (default: 3, configurable via `curator_circuit_failure_threshold`) and stays closed for a configurable cooldown (default: 24 h, `curator_circuit_cooldown_hours`). The `right agent init` wizard now prompts for these knobs alongside the curator mode.
+- The curator records every apply pass in a new `curator_runs` history table, replacing the previous single-row "last run" state. The Knowledge dashboard can now show what each pass consolidated or archived, the cost incurred, and the reason.
+- New `curator_mode: report_only` in `agent.yaml` puts the curator in cautious mode: it produces a proposed consolidation plan without modifying the skill directory. Switch to `curator_mode: apply` (the default) to execute. The init wizard includes a mode prompt for new agents.
 
-- **curator**: Parse usage from the result line so curator_runs cost is recorded
-- **providers**: Reconcile skips legacy-recreate for borrowed records (attach-only)
-- **wizard**: Persist curator circuit knobs + mode in emitted agent.yaml
-- **providers**: Require_trusted in handler + no-allowlist secure-default tests
-- **providers**: Validate source sandbox mode in handle_provider_copy; clarify env_var in resync
-- **providers**: Drop stale dead_code allows; check dest sandbox mode on copy
-- **providers**: Address xhigh code-review findings
-- **providers**: Reject redacted credential read-back on cross-agent copy
-- **providers**: Reject mutations on borrowed providers; refcount fails closed on unreadable sibling
-- **providers**: Use expect() instead of unwrap_or_default() in borrowed guard
+### Providers & Dashboard
 
-### Features
+- Operators running multiple agents can now share a provider between them. A shared provider record stays in the OpenShell gateway — no credential value is copied or read back. From the owning agent's dashboard, select "Share"; from the borrowing agent's dashboard, select "Borrow" to pull from another agent you are trusted on both sides of. The credential and its rotation are always controlled by the owner; borrowers see the provider as read-only, labeled "shared from `{owner}`". Rotating the key on the owner propagates to all borrowers automatically.
+- Deleting an agent that owns a shared provider re-homes ownership to a surviving borrower rather than deleting the gateway record. The record is only deleted when the last referencing agent is destroyed.
+- New providers are created with agent-agnostic names (`{type}-{uuid}`, e.g. `fal-a1b2c3`) instead of `{agent}-{slug}`. Existing provider names remain valid and continue to work.
 
-- **codegen**: Curator report-only plan schema + prompt
-- **providers**: InternalClient provider_peers + provider_copy
-- **db**: V48 curator_runs history table
-- **focus**: Notify chat on focus update
-- **curator**: Pure idle_secs_to_activity helper for the idle gate
-- **curator**: Wire IdleTimestamp into the ticker so min_idle_hours works
-- **curator**: Pure next_circuit_open_until circuit-breaker decision
-- **curator**: Thread circuit knobs into CuratorConfig and the ticker
-- **curator**: Open circuit_open_until on repeated failures (B1)
-- **curator**: CuratorRunRecord + insert_curator_run writer
-- **curator**: Record a curator_runs row per executed apply pass
-- **curator**: Report_only mode — read-only plan pass, proposed curator_runs row, no writes
-- **dashboard**: Provider peers/import/export handlers
-- **dashboard**: Register provider peers/import/export routes
-- **providers**: Borrowed entries are attach-only (no profile import/repair)
-- **providers**: Dashboard Borrow (pull) — mirror of Share from the destination
-- **providers**: Refcount provider deletion + re-home owner on agent destroy
-- **config**: CuratorMode + circuit threshold/cooldown knobs (defaults preserve behavior)
-- **wizard**: Prompt for curator circuit knobs + mode
-- **providers**: Add error variants for cross-agent copy
-- **providers**: Pure plan_copy decision logic for cross-agent copy
-- **providers**: Provider_peers discovery + require_trusted
-- **providers**: Handle_provider_copy executor (import/export core)
-- **providers**: Register provider-peers and provider-copy routes
-- **mcp**: Log aggregator requests
-- **providers**: Agent-agnostic record names; relax validate_name (legacy still valid)
-- **providers**: Persist shared_from; agent-agnostic names for new records
-- **providers**: Internal provider_share/provider_unshare (multi-attach, trust both sides)
-- **dashboard**: Backend wiring for provider share/unshare + shared_from in ProviderView
+### Agents & Conversations
 
-### Miscellaneous
+- When an operator saves conversation focus via the `/set_focus` Mini App, the bot now sends a confirmation message ("Focus set: ..." or "Focus cleared") to the affected chat, group, or forum topic — giving an auditable signal that standing context changed.
 
-- **providers**: Backfill shared_from: None on existing ProviderEntry literals
+### Site
 
-### Refactor
-
-- **curator**: Dedup invocation builders, usage triple, last_result_line
-- **providers**: Retire copy-by-readback in favor of sharing
-- **providers**: Centralize borrowed-mutation guard; dedupe reconcile split
+- A new self-evolution documentation page on the public site covers how Right Agent learns and evolves skills automatically. The landing page is reorganized into distinct pillar sections.
 
 ## [0.4.1] - 2026-06-15
 
