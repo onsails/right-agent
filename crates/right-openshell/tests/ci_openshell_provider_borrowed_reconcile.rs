@@ -97,9 +97,14 @@ async fn ci_openshell_provider_borrowed_survives_reconcile() {
         .expect("resolve borrower sandbox id");
 
     // reconcile_for_sandbox with the record declared — it must attach and NOT detach.
-    let report = reconcile_for_sandbox(&mut client, sb.name(), "borrower", &[prov.clone()])
-        .await
-        .expect("reconcile_for_sandbox");
+    let report = reconcile_for_sandbox(
+        &mut client,
+        sb.name(),
+        "borrower",
+        std::slice::from_ref(&prov),
+    )
+    .await
+    .expect("reconcile_for_sandbox");
 
     // Write policy + wait for composition, then probe egress.
     let tmp = tempfile::tempdir().unwrap();
@@ -115,10 +120,11 @@ async fn ci_openshell_provider_borrowed_survives_reconcile() {
     // Wait for the env var to propagate, then probe egress.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
     loop {
-        if let Ok((o, rc)) = exec_in_sandbox(&mut client, &sid, &["printenv", ENV_VAR], 30).await {
-            if rc == 0 && !o.trim().is_empty() {
-                break;
-            }
+        if let Ok((o, rc)) = exec_in_sandbox(&mut client, &sid, &["printenv", ENV_VAR], 30).await
+            && rc == 0
+            && !o.trim().is_empty()
+        {
+            break;
         }
         if std::time::Instant::now() >= deadline {
             panic!(
