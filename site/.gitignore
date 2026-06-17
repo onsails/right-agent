@@ -1,3 +1,8 @@
 node_modules/
 dist/
 .astro/
+
+# Local-only env (dev allowed hosts, etc.) — never committed
+.env
+.env.local
+.env.*.local

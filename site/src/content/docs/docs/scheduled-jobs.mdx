@@ -1,0 +1,71 @@
+---
+title: Scheduled jobs
+description: How an agent runs recurring work, and how those jobs get better over time without silent rewrites.
+---
+
+An agent can run work on a schedule. You ask for it in chat, "every weekday at 9,
+send me a digest of new issues on my repo", and the agent sets up the job, picks a
+model for it, and delivers the result back to that chat. You never touch a crontab
+or a config file.
+
+## What a job is
+
+A job has a schedule, a goal, and a delivery target. The goal is an outcome you
+want, "report new issues", not a script of steps. Jobs come in three shapes: a
+recurring job, a one-shot that fires once at the next matching time, and a job
+that fires once at an exact time and then deletes itself.
+
+## Jobs reuse the agent's skills
+
+A job states the *what*; the agent's skills supply the *how*. When a procedure is
+non-trivial, the API quirks, the formatting, the order of operations, that lives
+in a reusable skill, and the job links to it. At each run the job loads its linked
+skills and follows them, so the job's own instructions stay short.
+
+Links form three ways:
+
+- the agent links a skill when it creates the job;
+- you, through the agent, link or unlink skills on a job that already exists; and
+- a job auto-links any skill its own runs work out, so when a run discovers a
+  better way and saves it, that skill attaches to the job with no extra step.
+
+At fire time the job treats its linked skills as authoritative and pulls them
+directly, rather than guessing from skill descriptions.
+
+## Improve once, everywhere
+
+A job reads the live version of each linked skill on every run. Improving a skill
+therefore improves every job that links it, on the very next run, with no edit to
+the job. Fix an API workaround in one skill and every scheduled job that depends
+on it inherits the fix immediately.
+
+## Prompts shrink as skills mature
+
+A job written before its skills existed often spells out every step inline. Once a
+skill covers those steps, the agent can slim the job's instructions to the bare
+goal and lean on the linked skill for the procedure, dropping a job from a
+thousand words to a sentence. The job keeps doing the same thing; the detail moves
+to where it can be improved centrally.
+
+## Evolution you can see
+
+This is the line the platform holds: **it never rewrites a job's saved
+instructions on its own.**
+
+Skills change freely at runtime, and that is how a job gets better between runs.
+But a job's own stored prompt changes only when the agent makes a deliberate edit,
+and when it does, it tells you what it simplified. You see what changed, and you
+can ask for the original back.
+
+The reason is trust. Software that edits its own configuration without telling you
+leaves you unable to reason about what it will do next, debugging a moving target.
+Locking the configuration would kill the improvement; the answer is to let it
+improve and make every durable change legible. Months in, you still know exactly
+what each job does.
+
+## It stays consistent
+
+- Delete a job and its skill links go with it. The skills themselves remain, since
+  other jobs may use them.
+- When the agent merges two skills, every job that linked the old one follows the
+  survivor, so no job is left pointing at a name that no longer exists.

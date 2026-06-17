@@ -1,4 +1,5 @@
 ---
+import Icon from './Icon.astro';
 const steps = [
   {
     n: '01',
@@ -6,6 +7,7 @@ const steps = [
     body: 'after each reply, a small, cheap model reads how that turn went. the routine ones it lets pass.',
     tag: 'cheap model',
     kind: 'watch',
+    icon: 'eye',
   },
   {
     n: '02',
@@ -13,6 +15,7 @@ const steps = [
     body: 'when a turn was genuinely hard, or you corrected it, a smarter model forks just that conversation, with the whole thread already in view, and writes a reusable skill. your chat keeps moving.',
     tag: 'smart model · forked',
     kind: 'gate',
+    icon: 'fork',
   },
   {
     n: '03',
@@ -20,6 +23,7 @@ const steps = [
     body: 'skills you stop using fade away, your corrections sharpen the ones you keep, and you pin the best from the dashboard.',
     tag: 'curator',
     kind: 'curate',
+    icon: 'sparkles',
   },
 ];
 ---
@@ -29,7 +33,7 @@ const steps = [
   {steps.map((s) => (
     <div class={`step ${s.kind}`}>
       <div class="snum">{s.n}</div>
-      <div class="stitle">{s.title}</div>
+      <div class="stitle"><Icon name={s.icon} class="stepic" size={18} />{s.title}</div>
       <p>{s.body}</p>
       <div class="model">{s.tag}</div>
     </div>
