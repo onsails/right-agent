@@ -346,8 +346,7 @@ through `right_openshell::managed_profiles`.
 
 Every provider attach path MUST guarantee `providers_v2_enabled` via
 `right_openshell::providers::ensure_v2_enabled`: the funnels are
-`reconcile_for_sandbox` (supervisor) and the dashboard create/config-update
-handlers. Composition success MUST be confirmed by
+`reconcile_for_sandbox` (supervisor) and the dashboard mutation handlers. Composition success MUST be confirmed by
 `openshell::wait_for_provider_composed*`, which reads the **effective** policy
 (`get_effective_policy` = `GetSandboxConfig`) for the composed `_provider_<name>`
 rule; generic paths MUST use the endpoint-aware variant that also matches the
@@ -358,16 +357,16 @@ before writing config or reporting success.
 
 `ensure_profiles` is create-or-skip and MUST NOT re-import an existing id —
 it reports `DriftedSkipped`. Updating a referenced managed profile MUST go
-through `providers::update_referenced_profile`
-(detach→delete→import→re-attach, secret-preserving).
+through `providers::update_referenced_profile` (secret-preserving).
 
-Cross-agent copy (`provider_copy`, dashboard import/export) is copy-only,
-requires the actor trusted in **both** agents' allowlists, and reads the
-source secret only via `get_provider_credentials` (sole read-back, never
-logged or persisted).
+Cross-agent SHARING (`provider_share`/`_unshare`) multi-attaches one gateway
+record to N agents (actor trusted in **both**); no secret is read back.
+`agent.yaml` `shared_from` ⇒ borrowed (read-only), absent ⇒ owned. Shared
+records are refcount-deleted (removed at zero refs; owner-deletion re-homes
+to a survivor).
 
 See: `docs/architecture/providers.md` for the placeholder mechanism,
-substitution flow, reconciler walkthrough, cross-agent import/export, and
+substitution flow, reconciler walkthrough, cross-agent sharing, and
 policy interaction.
 
 ## External Integrations
