@@ -170,6 +170,276 @@ async fn try_sandbox_backup(
     .is_ok()
 }
 
+/// What the destroy cascade must do to provider records when `deleting` is removed.
+#[derive(Debug, Default, PartialEq)]
+struct DestroyProviderPlan {
+    /// Records to detach from the deleting agent's sandbox (all of its own entries).
+    detach: Vec<String>,
+    /// Records to delete from the gateway (no surviving agent references them).
+    delete: Vec<String>,
+    /// record name -> surviving agent that should become the new OWNER (only when
+    /// the deleting agent OWNED a record still referenced by other agents).
+    rehome_owner_to: std::collections::HashMap<String, String>,
+}
+
+/// Decide the provider cascade for destroying `deleting`. `agents` is the full
+/// set of (agent_name, its sandbox.providers) including the agent being deleted.
+/// Pure — no gateway/fs.
+fn plan_destroy_provider_cascade(
+    deleting: &str,
+    agents: &[(String, Vec<right_agent_config::ProviderEntry>)],
+) -> DestroyProviderPlan {
+    let mut plan = DestroyProviderPlan::default();
+    let Some((_, deleting_providers)) = agents.iter().find(|(a, _)| a == deleting) else {
+        return plan;
+    };
+    for entry in deleting_providers {
+        plan.detach.push(entry.name.clone());
+        // Other agents that still reference this record by name.
+        let others: Vec<&str> = agents
+            .iter()
+            .filter(|(a, _)| a != deleting)
+            .filter(|(_, ps)| ps.iter().any(|p| p.name == entry.name))
+            .map(|(a, _)| a.as_str())
+            .collect();
+        if others.is_empty() {
+            plan.delete.push(entry.name.clone());
+        } else if entry.is_owned() {
+            // Deleting agent owned a still-referenced record: re-home to a survivor.
+            plan.rehome_owner_to
+                .insert(entry.name.clone(), others[0].to_string());
+        }
+        // borrowed + others remain: the true owner is elsewhere; do nothing.
+    }
+    plan
+}
+
+/// Set (or clear) the `shared_from:` line for the provider named `provider` in
+/// `agent`'s agent.yaml. `new_owner == None` removes the line (record becomes
+/// owned); `Some(owner)` rewrites/inserts it. Comment- and field-preserving:
+/// operates by line-walking the provider's block, like the rest of the platform's
+/// agent.yaml editors. Best-effort caller; returns the rewritten YAML.
+fn set_provider_shared_from(yaml: &str, provider: &str, new_owner: Option<&str>) -> String {
+    // List items under `    providers:` are 4-space-indented `- name:` entries;
+    // their fields are 6-space-indented. Match `serialize_provider_entry`.
+    const FIELD_INDENT: usize = 6;
+
+    let lines: Vec<&str> = yaml.split_inclusive('\n').collect();
+
+    // Find the `- name: <provider>` list item (value may be single-quoted).
+    let block_start = lines.iter().position(|l| {
+        let Some(rest) = l.trim_end_matches(['\n', '\r']).strip_prefix("    - name:") else {
+            return false;
+        };
+        let v = rest.trim();
+        let v = v
+            .strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+            .unwrap_or(v);
+        v == provider
+    });
+    let Some(block_start) = block_start else {
+        // Provider not found — return unchanged (best-effort).
+        return yaml.to_string();
+    };
+
+    // The block continues through more-indented lines until the next `    - `
+    // list item or a dedent (line indented < FIELD_INDENT and non-blank).
+    let mut block_end = lines.len();
+    for (i, line) in lines.iter().enumerate().skip(block_start + 1) {
+        let body = line.trim_end_matches(['\n', '\r']);
+        if body.trim().is_empty() {
+            // Blank line — stays part of the block (do not terminate on it).
+            continue;
+        }
+        let indent = body.len() - body.trim_start_matches(' ').len();
+        if body.starts_with("    - ") || indent < FIELD_INDENT {
+            block_end = i;
+            break;
+        }
+    }
+
+    // Within the block, find an existing `shared_from:` field line.
+    let existing = (block_start + 1..block_end).find(|&i| {
+        lines[i]
+            .trim_end_matches(['\n', '\r'])
+            .trim_start()
+            .starts_with("shared_from:")
+    });
+
+    let mut out = String::with_capacity(yaml.len() + 32);
+    match (existing, new_owner) {
+        (Some(idx), Some(owner)) => {
+            // Replace the existing line.
+            for (i, line) in lines.iter().enumerate() {
+                if i == idx {
+                    out.push_str(&format!(
+                        "{:indent$}shared_from: '{owner}'\n",
+                        "",
+                        indent = FIELD_INDENT
+                    ));
+                } else {
+                    out.push_str(line);
+                }
+            }
+        }
+        (Some(idx), None) => {
+            // Drop the existing line.
+            for (i, line) in lines.iter().enumerate() {
+                if i != idx {
+                    out.push_str(line);
+                }
+            }
+        }
+        (None, Some(owner)) => {
+            // Insert at the end of the block.
+            for (i, line) in lines.iter().enumerate() {
+                if i == block_end {
+                    out.push_str(&format!(
+                        "{:indent$}shared_from: '{owner}'\n",
+                        "",
+                        indent = FIELD_INDENT
+                    ));
+                }
+                out.push_str(line);
+            }
+            if block_end == lines.len() {
+                // Block runs to EOF — append after all lines. Guard against a
+                // missing trailing newline so we never glue two keys onto one
+                // line (mirrors `insert_provider_entry`).
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&format!(
+                    "{:indent$}shared_from: '{owner}'\n",
+                    "",
+                    indent = FIELD_INDENT
+                ));
+            }
+        }
+        (None, None) => {
+            // Nothing to clear.
+            return yaml.to_string();
+        }
+    }
+    out
+}
+
+/// Enumerate every agent directory under `agents_dir` and load its declared
+/// `sandbox.providers`. Tolerant like `build_peers`: a sibling whose directory
+/// or `agent.yaml` can't be read (or has no providers) contributes an empty list
+/// and is never fatal. Returns `(agent_name, providers)` pairs including the
+/// agent being deleted.
+fn load_agents_with_providers(
+    agents_dir: &Path,
+) -> Vec<(String, Vec<right_agent_config::ProviderEntry>)> {
+    let entries = match std::fs::read_dir(agents_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(
+                dir = %agents_dir.display(),
+                error = %format!("{e:#}"),
+                "could not read agents dir for provider refcount; treating as empty"
+            );
+            return Vec::new();
+        }
+    };
+    let mut agents = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(String::from) else {
+            continue;
+        };
+        if !path.join("agent.yaml").exists() {
+            continue;
+        }
+        let providers = match crate::agent::parse_agent_config(&path) {
+            Ok(Some(cfg)) => cfg.sandbox.map(|s| s.providers).unwrap_or_default(),
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                tracing::warn!(
+                    agent = %name,
+                    error = %format!("{e:#}"),
+                    "skipping sibling with unreadable agent.yaml during provider refcount"
+                );
+                Vec::new()
+            }
+        };
+        agents.push((name, providers));
+    }
+    agents
+}
+
+/// Re-home ownership of `record` from the deleted owner to `new_owner` by editing
+/// surviving agents' `agent.yaml`. The new owner has its `shared_from` line
+/// removed (becomes owned); every OTHER surviving borrower that pointed at the
+/// deleted owner is repointed to `new_owner`. Best-effort: any read/write failure
+/// logs a warning and the loop continues — the record stays alive regardless, so
+/// a missed edit only affects rotation-ownership display, never correctness.
+fn rehome_owner_in_agent_yaml(
+    agents_dir: &Path,
+    record: &str,
+    deleted_owner: &str,
+    new_owner: &str,
+    agents: &[(String, Vec<right_agent_config::ProviderEntry>)],
+) {
+    for (agent, providers) in agents {
+        if agent == deleted_owner {
+            continue; // its directory is about to be removed
+        }
+        // Does this agent reference `record`, and if so how?
+        let Some(entry) = providers.iter().find(|p| p.name == record) else {
+            continue;
+        };
+        // The new owner becomes owned (clear shared_from). Other borrowers that
+        // pointed at the deleted owner get repointed. A borrower already pointing
+        // elsewhere (a different owner) is left alone.
+        let new_value: Option<&str> = if agent == new_owner {
+            None
+        } else if entry.shared_from.as_deref() == Some(deleted_owner) {
+            Some(new_owner)
+        } else {
+            continue;
+        };
+
+        let yaml_path = agents_dir.join(agent).join("agent.yaml");
+        let original = match std::fs::read_to_string(&yaml_path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    agent = %agent,
+                    record = %record,
+                    error = %format!("{e:#}"),
+                    "re-home: could not read agent.yaml; continuing"
+                );
+                continue;
+            }
+        };
+        let rewritten = set_provider_shared_from(&original, record, new_value);
+        if rewritten == original {
+            continue; // no change needed
+        }
+        if let Err(e) = std::fs::write(&yaml_path, rewritten) {
+            tracing::warn!(
+                agent = %agent,
+                record = %record,
+                error = %format!("{e:#}"),
+                "re-home: could not write agent.yaml; continuing"
+            );
+        } else {
+            tracing::info!(
+                agent = %agent,
+                record = %record,
+                new_owner = %new_owner,
+                "re-homed provider ownership during destroy"
+            );
+        }
+    }
+}
+
 /// Destroy an agent: stop process, optionally backup, delete sandbox, remove directory, reload PC.
 ///
 /// Non-fatal steps (stop, sandbox delete, PC reload) warn and continue.
@@ -285,29 +555,57 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         None
     };
 
-    // Cascade-delete provider entries from the gateway (best-effort).
+    // Cascade-clean provider records on the gateway (best-effort).
     // `delete_sandbox` above SHOULD have removed attachments implicitly, but
     // it is fire-and-forget (returns `()`, logs on failure). If the CLI
     // silently failed (network blip, OpenShell down, exit code != 0), the
     // sandbox — and therefore the attachments — would still exist, and the
     // gateway would reject `DeleteProvider` with FailedPrecondition. To stay
-    // self-healing per AGENTS.md, we explicitly detach each provider first
-    // (NotFound = already detached, treat as success), mirroring
-    // `handle_provider_remove`. Failure is logged but non-fatal — the agent
-    // directory removal proceeds regardless.
+    // self-healing per AGENTS.md, we explicitly detach each of THIS agent's
+    // records first (NotFound = already detached, treat as success), mirroring
+    // `handle_provider_remove`.
+    //
+    // With cross-agent SHARING, a single gateway record may be referenced by
+    // several agents (owner declares it; borrowers declare it with
+    // `shared_from`). `plan_destroy_provider_cascade` REFCOUNTS references so a
+    // record is deleted ONLY when no surviving agent references it, and re-homes
+    // ownership to a surviving borrower when the deleting agent owned a still-
+    // referenced record. The whole block is best-effort: every failure logs and
+    // continues so the agent-directory removal below still runs.
     if let Some(sandbox) = config.as_ref().and_then(|c| c.sandbox.as_ref())
         && matches!(sandbox.mode, right_agent_config::SandboxMode::Openshell)
         && !sandbox.providers.is_empty()
     {
+        // Enumerate every sibling agent (including the one being deleted) and its
+        // declared `sandbox.providers`. Tolerant like `build_peers`: a sibling
+        // whose agent.yaml can't be read is skipped, not fatal.
+        let mut agents = load_agents_with_providers(&agents_dir);
+
+        // The deleting agent's own providers are authoritative from the in-memory
+        // config; never depend on disk enumeration for them (a read_dir blip must
+        // not skip detach/delete of this agent's records).
+        let own_providers = config
+            .as_ref()
+            .and_then(|c| c.sandbox.as_ref())
+            .map(|s| s.providers.clone())
+            .unwrap_or_default();
+        match agents.iter_mut().find(|(a, _)| a == &options.agent_name) {
+            Some((_, ps)) => *ps = own_providers,
+            None => agents.push((options.agent_name.clone(), own_providers)),
+        }
+
+        let plan = plan_destroy_provider_cascade(&options.agent_name, &agents);
+
         let mtls_dir = right_openshell::openshell::default_mtls_dir();
         match right_openshell::openshell::connect_grpc(&mtls_dir).await {
             Ok(mut client) => {
-                for entry in &sandbox.providers {
+                // Detach all of THIS agent's records from its sandbox.
+                for name in &plan.detach {
                     if let Some(sb_name) = sandbox_name_for_cascade.as_deref() {
                         match right_openshell::providers::detach_from_sandbox(
                             &mut client,
                             sb_name,
-                            &entry.name,
+                            name,
                         )
                         .await
                         {
@@ -316,22 +614,23 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
                                 // Already detached — expected when delete_sandbox succeeded.
                             }
                             Err(e) => tracing::warn!(
-                                name = %entry.name,
+                                name = %name,
                                 sandbox = %sb_name,
                                 error = %format!("{e:#}"),
-                                "failed to detach provider during destroy; continuing to delete"
+                                "failed to detach provider during destroy; continuing"
                             ),
                         }
                     }
-                    match right_openshell::providers::delete_provider(&mut client, &entry.name)
-                        .await
-                    {
+                }
+                // Delete ONLY records no surviving agent references.
+                for name in &plan.delete {
+                    match right_openshell::providers::delete_provider(&mut client, name).await {
                         Ok(()) => {}
                         Err(right_openshell::providers::ProviderError::NotFound(_)) => {
                             // Already gone — nothing to clean up.
                         }
                         Err(e) => tracing::warn!(
-                            name = %entry.name,
+                            name = %name,
                             error = %format!("{e:#}"),
                             "failed to delete provider during destroy; continuing"
                         ),
@@ -342,6 +641,20 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
                 error = %format!("{e:#}"),
                 "could not connect to openshell gateway for provider cleanup; continuing destroy"
             ),
+        }
+
+        // Re-home ownership of any still-referenced record the deleting agent
+        // owned. The record was kept alive by the delete-guard above, so a
+        // re-home failure is non-fatal (borrowers keep using it; only rotation-
+        // ownership display is affected). Filesystem-only — no gateway calls.
+        for (record, new_owner) in &plan.rehome_owner_to {
+            rehome_owner_in_agent_yaml(
+                &agents_dir,
+                record,
+                &options.agent_name,
+                new_owner,
+                &agents,
+            );
         }
     }
 
@@ -385,311 +698,5 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tar_entries(path: &Path) -> Vec<String> {
-        let output = std::process::Command::new("tar")
-            .args(["-tzf", path.to_str().unwrap()])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "tar -tzf failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .lines()
-            .map(str::to_owned)
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn destroy_nonsandboxed_agent_removes_dir() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let home = dir.path();
-
-        let agents_dir = home.join("agents").join("test-agent");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
-
-        let options = DestroyOptions {
-            agent_name: "test-agent".into(),
-            backup: false,
-        };
-
-        let result = destroy_agent(home, &options).await.unwrap();
-
-        assert!(
-            !result.agent_stopped,
-            "PC not running, should not have stopped"
-        );
-        assert!(
-            !result.sandbox_deleted,
-            "non-sandboxed agent, no sandbox to delete"
-        );
-        assert!(result.backup_path.is_none());
-        assert!(result.dir_removed);
-        assert!(
-            !result.pc_reloaded,
-            "PC not running, should not have reloaded"
-        );
-        assert!(!agents_dir.exists(), "agent dir should be deleted");
-    }
-
-    #[tokio::test]
-    async fn destroy_nonexistent_agent_errors() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let home = dir.path();
-        std::fs::create_dir_all(home.join("agents")).unwrap();
-
-        let options = DestroyOptions {
-            agent_name: "nonexistent".into(),
-            backup: false,
-        };
-
-        let result = destroy_agent(home, &options).await;
-        assert!(result.is_err());
-    }
-
-    /// Guards the `--home` isolation invariant: when `<home>/run/state.json`
-    /// does not exist, `destroy_agent` must not touch process-compose at all.
-    /// `PcClient::from_home` is the only public constructor, so there is no
-    /// way for destroy to contact the user's live PC from an isolated home.
-    #[tokio::test]
-    async fn destroy_skips_pc_when_no_runtime_state() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let home = dir.path();
-
-        let agents_dir = home.join("agents").join("isolated");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
-
-        // No <home>/run/state.json exists.
-        assert!(!home.join("run").join("state.json").exists());
-
-        let options = DestroyOptions {
-            agent_name: "isolated".into(),
-            backup: false,
-        };
-
-        let result = destroy_agent(home, &options).await.unwrap();
-
-        assert!(
-            !result.agent_stopped,
-            "no runtime state → PC skipped → agent not stopped"
-        );
-        assert!(
-            !result.pc_reloaded,
-            "no runtime state → PC skipped → not reloaded"
-        );
-        assert!(result.dir_removed, "agent dir should still be removed");
-        assert!(!agents_dir.exists(), "agent dir should be deleted");
-    }
-
-    #[tokio::test]
-    async fn destroy_with_backup_creates_backup_dir() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let home = dir.path();
-
-        let agents_dir = home.join("agents").join("backup-test");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
-        std::fs::write(agents_dir.join("IDENTITY.md"), "# Test agent").unwrap();
-
-        let options = DestroyOptions {
-            agent_name: "backup-test".into(),
-            backup: true,
-        };
-
-        let result = destroy_agent(home, &options).await.unwrap();
-
-        assert!(
-            result.backup_path.is_some(),
-            "backup should have been created"
-        );
-        let backup_path = result.backup_path.unwrap();
-        assert!(backup_path.exists(), "backup dir should exist");
-        assert!(
-            backup_path.join("sandbox.tar.gz").exists(),
-            "sandbox.tar.gz should exist"
-        );
-        assert!(
-            result.dir_removed,
-            "agent dir should be removed after backup"
-        );
-    }
-
-    #[tokio::test]
-    async fn destroy_with_backup_excludes_database_sidecars_from_no_sandbox_tar() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let home = dir.path();
-
-        let agents_dir = home.join("agents").join("backup-sidecars");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
-        std::fs::write(agents_dir.join("notes.txt"), "keep me").unwrap();
-        for sidecar in [
-            "data.db-wal",
-            "data.db-shm",
-            "data.db-tshm",
-            "data.db-future",
-        ] {
-            std::fs::write(agents_dir.join(sidecar), sidecar).unwrap();
-        }
-
-        let options = DestroyOptions {
-            agent_name: "backup-sidecars".into(),
-            backup: true,
-        };
-
-        let result = destroy_agent(home, &options).await.unwrap();
-        let backup_path = result.backup_path.expect("backup path must be recorded");
-        let entries = tar_entries(&backup_path.join("sandbox.tar.gz"));
-
-        assert!(
-            entries.contains(&"backup-sidecars/notes.txt".to_string()),
-            "regular no-sandbox files should still be archived"
-        );
-        for sidecar in [
-            "data.db-wal",
-            "data.db-shm",
-            "data.db-tshm",
-            "data.db-future",
-        ] {
-            assert!(
-                !entries.contains(&format!("backup-sidecars/{sidecar}")),
-                "pre-destroy no-sandbox backup tar must not contain database sidecar {sidecar}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn destroy_with_backup_vacuum_copies_data_db() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let home = dir.path();
-
-        let agents_dir = home.join("agents").join("backup-db");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
-        let conn = right_db::open_connection(&agents_dir, true).await.unwrap();
-        conn.execute(
-            "INSERT INTO auth_tokens (token) VALUES (?1)",
-            right_db::params!["token-for-backup"],
-        )
-        .await
-        .unwrap();
-        drop(conn);
-
-        let options = DestroyOptions {
-            agent_name: "backup-db".into(),
-            backup: true,
-        };
-
-        let result = destroy_agent(home, &options).await.unwrap();
-        let backup_path = result.backup_path.expect("backup path must be recorded");
-        let backup_conn = right_db::open_database_path_readonly(backup_path.join("data.db"))
-            .await
-            .expect("backup database must be readable");
-        let count: i64 = backup_conn
-            .query_row("SELECT COUNT(*) FROM auth_tokens", (), |row| row.get(0))
-            .await
-            .unwrap();
-
-        assert_eq!(count, 1);
-    }
-
-    #[tokio::test]
-    async fn destroy_with_backup_copies_allowlist_yaml() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let home = dir.path();
-
-        let agents_dir = home.join("agents").join("backup-allowlist");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
-        let allowlist = "\
-version: 1
-users:
-  - id: 111
-    label: alice
-    added_by: null
-    added_at: 2026-05-16T12:00:00Z
-groups:
-  - id: -222
-    label: ops
-    opened_by: null
-    opened_at: 2026-05-16T12:00:00Z
-";
-        std::fs::write(agents_dir.join("allowlist.yaml"), allowlist).unwrap();
-
-        let options = DestroyOptions {
-            agent_name: "backup-allowlist".into(),
-            backup: true,
-        };
-
-        let result = destroy_agent(home, &options).await.unwrap();
-        let backup_path = result.backup_path.expect("backup path must be recorded");
-
-        assert_eq!(
-            std::fs::read_to_string(backup_path.join("allowlist.yaml")).unwrap(),
-            allowlist,
-            "pre-destroy backup must preserve allowlist.yaml outside sandbox.tar.gz"
-        );
-    }
-
-    /// Guards that `sandbox.providers` in `agent.yaml` parses correctly for
-    /// both built-in and generic entries. This is the property a backup/restore
-    /// cycle depends on: the field must not be silently dropped when the YAML
-    /// is written to a backup tarball and re-read on restore.
-    #[test]
-    fn sandbox_providers_round_trip_parse() {
-        let yaml = r#"
-sandbox:
-  mode: none
-  providers:
-    - name: foo-anthropic
-      type: anthropic
-      label: anthropic
-    - name: foo-acme
-      type: generic
-      label: acme
-      generic:
-        env_var: ACME_TOKEN
-        header_name: X-Acme-Token
-        upstream_host: api.acme.com
-        upstream_path_prefix: /v1
-"#;
-        // Parse once — both entries must be present.
-        let cfg: right_agent_config::AgentConfig = serde_saphyr::from_str(yaml).unwrap();
-        let sandbox = cfg.sandbox.as_ref().expect("sandbox must be present");
-        assert_eq!(
-            sandbox.providers.len(),
-            2,
-            "expected 2 providers after parse"
-        );
-        assert_eq!(sandbox.providers[0].name, "foo-anthropic");
-        assert_eq!(sandbox.providers[1].name, "foo-acme");
-
-        // Parse again from the same source — simulates reading the backed-up agent.yaml.
-        // AgentConfig does not derive Serialize so we re-parse the original YAML string;
-        // this is identical to what backup/restore does (copy the file, re-read it).
-        let reparsed: right_agent_config::AgentConfig = serde_saphyr::from_str(yaml).unwrap();
-        let reparsed_sandbox = reparsed.sandbox.expect("sandbox must survive re-parse");
-        assert_eq!(
-            reparsed_sandbox.providers.len(),
-            2,
-            "providers must survive backup/restore re-parse"
-        );
-        assert_eq!(reparsed_sandbox.providers[0].name, "foo-anthropic");
-        assert_eq!(reparsed_sandbox.providers[1].name, "foo-acme");
-
-        // Verify generic entry fields survived.
-        let generic = reparsed_sandbox.providers[1]
-            .generic
-            .as_ref()
-            .expect("second provider must have generic config");
-        assert_eq!(generic.env_var, "ACME_TOKEN");
-        assert_eq!(generic.upstream_hosts, vec!["api.acme.com".to_string()]);
-    }
-}
+#[path = "destroy_tests.rs"]
+mod tests;
