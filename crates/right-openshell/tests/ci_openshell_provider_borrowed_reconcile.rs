@@ -96,12 +96,15 @@ async fn ci_openshell_provider_borrowed_survives_reconcile() {
         .await
         .expect("resolve borrower sandbox id");
 
-    // reconcile_for_sandbox with the record declared — it must attach and NOT detach.
+    // reconcile_for_sandbox with the record declared as borrowed — it must attach
+    // and NOT attempt any legacy-recreate on the owner's record.
+    let borrowed: std::collections::HashSet<String> = std::iter::once(prov.clone()).collect();
     let report = reconcile_for_sandbox(
         &mut client,
         sb.name(),
         "borrower",
         std::slice::from_ref(&prov),
+        &borrowed,
     )
     .await
     .expect("reconcile_for_sandbox");

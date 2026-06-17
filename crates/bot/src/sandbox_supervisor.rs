@@ -313,10 +313,17 @@ async fn reconcile_and_confirm_providers(
         .iter()
         .map(|p| p.name.clone())
         .collect();
-    let report =
-        right_openshell::providers::reconcile_for_sandbox(client, sandbox, agent, &declared)
-            .await
-            .map_err(|e| miette::miette!("provider reconcile failed: {e:#}"))?;
+    let borrowed: std::collections::HashSet<String> = sandbox_cfg
+        .providers
+        .iter()
+        .filter(|p| p.is_borrowed())
+        .map(|p| p.name.clone())
+        .collect();
+    let report = right_openshell::providers::reconcile_for_sandbox(
+        client, sandbox, agent, &declared, &borrowed,
+    )
+    .await
+    .map_err(|e| miette::miette!("provider reconcile failed: {e:#}"))?;
     tracing::info!(
         agent = %agent,
         attached = ?report.attached,
@@ -632,11 +639,17 @@ pub(crate) async fn hot_reconcile_providers(
     .await?;
 
     let declared: Vec<String> = providers.iter().map(|p| p.name.clone()).collect();
+    let borrowed: std::collections::HashSet<String> = providers
+        .iter()
+        .filter(|p| p.is_borrowed())
+        .map(|p| p.name.clone())
+        .collect();
     let report = right_openshell::providers::reconcile_for_sandbox(
         &mut client,
         resolved_sandbox,
         agent,
         &declared,
+        &borrowed,
     )
     .await
     .map_err(|e| miette::miette!("provider reconcile failed: {e:#}"))?;
