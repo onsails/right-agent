@@ -284,7 +284,7 @@ pub struct WorkerContext {
     pub agent_dir: PathBuf,
     /// Agent name for --agent flag on first CC invocation (AGDEF-02).
     pub agent_name: String,
-    pub bot: super::BotType,
+    pub(crate) bot: super::BotType,
     /// Agent directory, passed separately so worker opens its own DB connection.
     pub agent_db_dir: PathBuf,
     /// Hot-reloadable debug flag. When true, CC subprocesses run with --debug --debug-file=...
@@ -2572,7 +2572,7 @@ fn spawn_token_request(ctx: &WorkerContext, tg_chat_id: i64, eff_thread_id: i64)
         let send_result = bot
             .send_message_opts(
                 tg_chat_id,
-                &crate::login::auth_instruction_message(),
+                crate::login::auth_instruction_message(),
                 true,
                 thread,
                 None,

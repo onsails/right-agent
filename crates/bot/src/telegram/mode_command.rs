@@ -5,7 +5,7 @@
 use frankenstein::types::{
     InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage, Message,
 };
-use right_agent::agent::allowlist::{AllowlistHandle, AllowlistState, ResponseMode};
+use right_agent::agent::allowlist::{AllowlistState, ResponseMode};
 
 use super::router::HandlerCtx;
 use super::tg_bot::TgError;

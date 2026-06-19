@@ -751,7 +751,7 @@ pub fn extract_attachments(msg: &Message) -> Vec<InboundAttachment> {
 /// Returns `(resolved, voice_markers)`. Voice and VideoNote attachments are transcribed (when
 /// `stt` is `Some`) and emitted as text markers instead of `ResolvedAttachment` entries.
 #[allow(clippy::too_many_arguments)]
-pub async fn download_attachments(
+pub(crate) async fn download_attachments(
     attachments: &[InboundAttachment],
     message_id: i32,
     bot: &super::BotType,
@@ -844,7 +844,7 @@ pub async fn download_attachments(
 }
 
 /// Download outbound attachments from sandbox and send to Telegram.
-pub async fn send_attachments(
+pub(crate) async fn send_attachments(
     attachments: &[OutboundAttachment],
     bot: &super::BotType,
     chat_id: i64,

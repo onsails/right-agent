@@ -45,7 +45,7 @@ pub struct OAuthCallbackState {
     /// Agent name used in logs and internal API requests.
     pub agent_name: String,
     /// Telegram bot clone reused by the progress endpoint.
-    pub bot: super::BotType,
+    pub(crate) bot: super::BotType,
     /// Internal API client for delivering OAuth tokens to the aggregator
     pub internal_client: Arc<InternalClient>,
 }

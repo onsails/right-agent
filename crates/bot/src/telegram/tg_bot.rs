@@ -238,7 +238,9 @@ impl RightBot {
 
     /// Send an HTML-formatted message, optionally threaded, replying, and with
     /// an inline keyboard. Returns the sent [`Message`] (callers read
-    /// `message_id`).
+    /// `message_id`). Convenience wrapper over [`Self::send_message_opts`] with
+    /// `html = true`; retained as a named entry on the documented surface.
+    #[allow(dead_code)]
     pub(crate) async fn send_html(
         &self,
         chat_id: i64,
@@ -750,6 +752,7 @@ impl RightBot {
     // then drop it (which deletes it).
 
     /// Send an in-memory photo (spooled to a temp file for the upload).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_photo_bytes(
         &self,
         chat_id: i64,
@@ -770,6 +773,7 @@ impl RightBot {
     }
 
     /// Send an in-memory document (spooled to a temp file for the upload).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_document_bytes(
         &self,
         chat_id: i64,
