@@ -28,7 +28,9 @@ stage on the dev server before the next.
 1. [done] Background ornaments — removed both fake-telemetry layers, paper texture, HUD corner-frame + secure-by-default readout; flat calm var(--bg). spec:01-bg-ornaments-spec.md plan:01-bg-ornaments-plan.md (merged @0c40c819 · +1/−152 · 2 files · astro check 0 · bun build green 9 pages · grep gate clean · mimo bg-ornaments-3f9a). **Model: openai/gpt-5.3-codex REJECTED by OpenAI (codex unsupported on a ChatGPT-account) → mimo auto-substituted venice/claude-sonnet-4-6 high. Pin decision pending for stages 2–4.**
 2. [done] Motion restraint — removed scroll-zoom (JS active-section + .section scale/opacity), logo spin, claw pulse, learning-dots (+eyebrow sig), loopspark, card cursor-spotlight; hero static + visible on load; kept ONE below-fold .rev reveal. spec:02-motion-spec.md plan:02-motion-plan.md (merged @d5ebebef · +10/−143 · 4 files · astro check 0 · bun build green · grep gate clean · review clean · mimo motion-8b3k venice/openai-gpt-55 high — NO substitution this time).
 3. [done] Surface de-chrome — removed all neon glows (0 0 colored box-shadow + drop-shadow), heavy elevation + inset-gloss shadows, backdrop-blur; card hover → border-only; removed `.card::before` accent line; kept hairline borders + flat panel fills + brand colors. spec:03-dechrome-spec.md plan:03-dechrome-plan.md (merged @5e0ed452 · +29/−32 · 1 file landing.css · astro check 0 · bun build green · 3 grep gates empty · review xhigh clean · mimo dechrome-5d2c venice/openai-gpt-55 high).
-4. [todo] Rhythm & polish — whitespace + type scale, simplify mono eyebrow/label tags, prune dead CSS, final build + visual check.
+4. [planned] Reading column + narrow container + soften reveal — cap section `h2` + `.lead` to one ~66ch measure (fixes ragged full-width sprawl); `--maxw` 76rem→70rem; reveal translateY 24→8px & .9s→.35s. spec:04-rhythm-spec.md plan:04-rhythm-plan.md wt:.worktrees/04-rhythm mimo:rhythm-7e4a
+5. [todo] (deferred polish, post-stage-4 judgment) simplify mono eyebrow/`.label` tags; prune dead CSS (`.status`/`.pdot`/`.statusnote`/`.bk`/`.cmd` if unused); whitespace/vertical rhythm. — separate from #3.
+6. [todo] (#3 — brand, discuss separately) monospace headline like herdr (currently Chakra Petch display).
 
 Stages are coarse and reorderable; insert/split as the iteration reveals what
 still feels cluttered. Each stage is one visible, judgeable diff.
@@ -77,6 +79,15 @@ pass over landing + docs.
 - **Reveal still reads as motion on fast scroll.** The retained `.rev` fade-up
   (opacity 0→1, translateY 24px, .9s) dims large regions while they catch up,
   then settles to full opacity. PENDING USER: keep / soften / remove.
+
+## Width discussion (2026-06-19, with user)
+
+Measured ours vs herdr: outer container nearly equal (ours 76rem/1216px, herdr
+1160px) — sprawl is NOT outer width. Root cause: misaligned columns — our section
+`h2` + panels run full ~1142px while `.lead` is 65ch left-aligned → ragged right
+edge, content doesn't collect. herdr caps text tightly (h1 ≤760px, lede ≤520px),
+spends width deliberately. User agreed: option 1 (unified reading column) + light
+option 2 (narrow container) now; #3 (monospace headline) discussed separately.
 
 ## Open questions
 
