@@ -914,7 +914,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         config.allowed_chat_ids.clone(),
         agent_dir.clone(),
         Arc::clone(&debug_flag),
-        Arc::clone(&pending_auth),
         home.clone(),
         ssh_config_path.clone(),
         config.show_thinking,

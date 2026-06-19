@@ -41,14 +41,6 @@ pub struct SshConfigPath(pub Option<PathBuf>);
 #[derive(Clone)]
 pub struct RightHome(pub PathBuf);
 
-/// Compatibility dependency for the former Telegram MCP token prompt flow.
-#[derive(Clone)]
-pub struct PendingTokenSlot;
-
-/// Compatibility dependency for the former Telegram MCP auth-choice prompt flow.
-#[derive(Clone)]
-pub struct PendingMcpAuthChoiceSlot;
-
 /// Bundle of message-intercept slots to reduce dptree DI parameter count.
 /// Contains the auth code intercept slot plus the auth-watcher-active flag.
 #[derive(Clone)]

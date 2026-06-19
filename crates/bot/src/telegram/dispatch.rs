@@ -25,11 +25,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::BotType;
 use super::handler::{
-    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingMcpAuthChoiceSlot,
-    PendingTokenSlot, RightHome, SshConfigPath,
+    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, RightHome, SshConfigPath,
 };
 use super::mention::BotIdentity;
-use super::oauth_callback::PendingAuthMap;
 use super::router::HandlerCtx;
 use super::tg_bot::RightBot;
 use super::worker::{DebounceMsg, SessionKey};
@@ -89,7 +87,6 @@ pub(crate) async fn setup_telegram(
     legacy_chat_scope_ids: Vec<i64>,
     agent_dir: PathBuf,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pending_auth: PendingAuthMap,
     home: PathBuf,
     ssh_config_path: Option<PathBuf>,
     show_thinking: bool,
@@ -143,8 +140,6 @@ pub(crate) async fn setup_telegram(
         auth_code: Arc::clone(&auth_code_arc),
         auth_watcher: Arc::clone(&auth_watcher_arc),
     });
-    let pending_token_slot_arc: Arc<PendingTokenSlot> = Arc::new(PendingTokenSlot);
-    let pending_auth_choice_slot = Arc::new(PendingMcpAuthChoiceSlot);
     let internal_api_arc: Arc<InternalApi> = Arc::new(InternalApi(internal_client));
     let worker_shutdown = CancellationToken::new();
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
@@ -192,12 +187,9 @@ pub(crate) async fn setup_telegram(
         identity: Arc::clone(&identity_arc),
         worker_map,
         agent_dir: Arc::clone(&agent_dir_arc),
-        pending_auth,
         home: home_arc,
         ssh_config: ssh_config_arc,
         intercept_slots: intercept_slots_arc,
-        pending_token_slot: pending_token_slot_arc,
-        pending_auth_choice_slot,
         internal_api: internal_api_arc,
         settings: settings_arc,
         idle_ts,
