@@ -29,11 +29,11 @@ use tokio::time::Instant;
 use frankenstein::AsyncTelegramApi;
 use frankenstein::ParseMode;
 use frankenstein::client_reqwest::Bot as FBot;
-use frankenstein::input_file::FileUpload;
+use frankenstein::input_file::{FileUpload, InputFile};
 use frankenstein::input_media::MediaGroupInputMedia;
 use frankenstein::types::{
-    AllowedUpdate, BotCommand, BotCommandScope, ChatAction, InlineKeyboardMarkup, Message,
-    ReplyMarkup, ReplyParameters, User,
+    AllowedUpdate, BotCommand, BotCommandScope, ChatAction, InlineKeyboardMarkup, MenuButton,
+    MenuButtonWebApp, Message, ReplyMarkup, ReplyParameters, User, WebAppInfo,
 };
 
 /// Default global send rate (messages/second) across all chats. Matches the
@@ -151,6 +151,27 @@ where
     }
 }
 
+/// Placeholder identity for [`RightBot::new`] (no `get_me` round-trip). Never
+/// surfaced — auxiliary send-only bots never call [`RightBot::me`].
+fn placeholder_user() -> User {
+    User {
+        id: 0,
+        is_bot: true,
+        first_name: String::new(),
+        last_name: None,
+        username: None,
+        language_code: None,
+        is_premium: None,
+        added_to_attachment_menu: None,
+        can_join_groups: None,
+        can_read_all_group_messages: None,
+        supports_guest_queries: None,
+        supports_inline_queries: None,
+        can_connect_to_business: None,
+        has_main_web_app: None,
+    }
+}
+
 /// Thin, rate-limited, identity-cached wrapper over the frankenstein reqwest
 /// client. Cloneable: clones share the same `reqwest::Client`, cached identity,
 /// and throttle.
@@ -163,6 +184,24 @@ pub(crate) struct RightBot {
 }
 
 impl RightBot {
+    /// Construct without resolving identity. No network I/O. The cached
+    /// identity ([`Self::me`]) is a placeholder — only valid on a
+    /// `connect`-ed bot. Use this for auxiliary send-only bots (menu,
+    /// webhook-register, supervisor, delivery, focus notifier) that never call
+    /// [`Self::me`]; the identity-bearing dispatcher bot uses [`Self::connect`].
+    pub(crate) fn new(token: String) -> Self {
+        let bot = FBot::new(&token);
+        Self {
+            bot,
+            token: Arc::new(token),
+            me: Arc::new(placeholder_user()),
+            rate: Arc::new(Throttle::new(
+                DEFAULT_GLOBAL_PER_SEC,
+                DEFAULT_PER_CHAT_INTERVAL,
+            )),
+        }
+    }
+
     /// Construct and resolve identity (`get_me`) once — replaces teloxide
     /// `CacheMe`. Performs one live network round-trip; do not call in unit
     /// tests.
@@ -180,9 +219,16 @@ impl RightBot {
         })
     }
 
-    /// The bot's own resolved identity (cached at `connect` time).
+    /// The bot's own resolved identity (cached at `connect` time). On a bot
+    /// built via [`Self::new`] this is a placeholder — only the dispatcher bot
+    /// (built via [`Self::connect`]) has a meaningful identity.
     pub(crate) fn me(&self) -> &User {
         &self.me
+    }
+
+    /// The raw bot token. Used for token-derived focus-scope MACs. Never log.
+    pub(crate) fn token(&self) -> &str {
+        &self.token
     }
 
     // ---- core sends -------------------------------------------------------
@@ -219,6 +265,34 @@ impl RightBot {
         let params = frankenstein::methods::SendMessageParams::builder()
             .chat_id(chat_id)
             .text(text)
+            .build();
+        let resp = with_retry(|| self.bot.send_message(&params)).await?;
+        Ok(resp.result)
+    }
+
+    /// General message send. `html` selects `ParseMode::Html` (else no parse
+    /// mode); `thread`/`reply_to`/`markup` are optional. Returns the sent
+    /// [`Message`]. Covers every send call site that needs a mix of these
+    /// options (worker replies, delivery, progress, focus, alerts).
+    pub(crate) async fn send_message_opts(
+        &self,
+        chat_id: i64,
+        text: &str,
+        html: bool,
+        thread: Option<i32>,
+        reply_to: Option<i32>,
+        markup: Option<InlineKeyboardMarkup>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendMessageParams::builder()
+            .chat_id(chat_id)
+            .text(text)
+            .maybe_parse_mode(html.then_some(ParseMode::Html))
+            .maybe_message_thread_id(thread)
+            .maybe_reply_parameters(
+                reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
+            )
+            .maybe_reply_markup(markup.map(ReplyMarkup::InlineKeyboardMarkup))
             .build();
         let resp = with_retry(|| self.bot.send_message(&params)).await?;
         Ok(resp.result)
@@ -622,6 +696,124 @@ impl RightBot {
             .build();
         self.bot.edit_forum_topic(&params).await?;
         Ok(())
+    }
+
+    /// Create a forum topic; returns the new `message_thread_id`.
+    pub(crate) async fn create_forum_topic(
+        &self,
+        chat_id: i64,
+        name: String,
+        icon_color: Option<u32>,
+        icon_custom_emoji_id: Option<String>,
+    ) -> Result<i32, TgError> {
+        let params = frankenstein::methods::CreateForumTopicParams::builder()
+            .chat_id(chat_id)
+            .name(name)
+            .maybe_icon_color(icon_color)
+            .maybe_icon_custom_emoji_id(icon_custom_emoji_id)
+            .build();
+        let resp = self.bot.create_forum_topic(&params).await?;
+        Ok(resp.result.message_thread_id)
+    }
+
+    // ---- chat menu button -------------------------------------------------
+
+    /// Set the chat menu button to launch a Mini App at `url`.
+    pub(crate) async fn set_chat_menu_button_webapp(
+        &self,
+        text: &str,
+        url: String,
+    ) -> Result<(), TgError> {
+        let params = frankenstein::methods::SetChatMenuButtonParams::builder()
+            .menu_button(MenuButton::WebApp(MenuButtonWebApp {
+                text: text.to_string(),
+                web_app: WebAppInfo { url },
+            }))
+            .build();
+        self.bot.set_chat_menu_button(&params).await?;
+        Ok(())
+    }
+
+    // ---- in-memory uploads ------------------------------------------------
+    //
+    // frankenstein's `InputFile` is path-only (no in-memory variant), so these
+    // helpers spool bytes to a temp file kept alive for the multipart upload,
+    // then drop it (which deletes it).
+
+    /// Send an in-memory photo (spooled to a temp file for the upload).
+    pub(crate) async fn send_photo_bytes(
+        &self,
+        chat_id: i64,
+        bytes: &[u8],
+        filename: &str,
+        caption_html: Option<&str>,
+        thread: Option<i32>,
+        reply_to: Option<i32>,
+    ) -> Result<Message, TgError> {
+        let spool = SpooledUpload::new(bytes, filename)?;
+        let upload = FileUpload::InputFile(InputFile {
+            path: spool.path().to_path_buf(),
+        });
+        self.send_photo(chat_id, upload, caption_html, thread, reply_to)
+            .await
+        // `spool` (the TempDir) drops here, after the multipart upload completes.
+    }
+
+    /// Send an in-memory document (spooled to a temp file for the upload).
+    pub(crate) async fn send_document_bytes(
+        &self,
+        chat_id: i64,
+        bytes: &[u8],
+        filename: &str,
+        caption_html: Option<&str>,
+        thread: Option<i32>,
+        reply_to: Option<i32>,
+    ) -> Result<Message, TgError> {
+        let spool = SpooledUpload::new(bytes, filename)?;
+        let upload = FileUpload::InputFile(InputFile {
+            path: spool.path().to_path_buf(),
+        });
+        self.send_document(chat_id, upload, caption_html, thread, reply_to)
+            .await
+    }
+}
+
+/// An in-memory payload spooled to disk for a frankenstein multipart upload.
+/// The file lives at `<tempdir>/<filename>` so Telegram sees the exact
+/// `filename` as the sent file name. The backing temp dir (and file) is deleted
+/// when this drops — keep it alive for the full duration of the send.
+struct SpooledUpload {
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl SpooledUpload {
+    fn new(bytes: &[u8], filename: &str) -> Result<Self, TgError> {
+        let dir = tempfile::Builder::new()
+            .prefix("right-upload-")
+            .tempdir()
+            .map_err(|e| TgError::Other(format!("create temp upload dir: {e:#}")))?;
+        // Use only the basename of `filename` to keep the write inside `dir`.
+        let base = std::path::Path::new(filename)
+            .file_name()
+            .map(std::ffi::OsStr::to_owned)
+            .unwrap_or_else(|| std::ffi::OsString::from("upload.bin"));
+        let path = dir.path().join(base);
+        std::fs::write(&path, bytes)
+            .map_err(|e| TgError::Other(format!("write temp upload file: {e:#}")))?;
+        Ok(Self { _dir: dir, path })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl TgError {
+    /// True when the error is Telegram's 401 invalid-token API response. Used by
+    /// the webhook-register loop to fail fast on a bad bot token.
+    pub(crate) fn is_invalid_token(&self) -> bool {
+        matches!(self, TgError::Api(frankenstein::Error::Api(resp)) if resp.error_code == 401)
     }
 }
 
