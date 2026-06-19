@@ -24,7 +24,7 @@ Bot startup:
   │   ├─ filesystem policy drift: write policy.yaml and fail startup with migration guidance
   │   └─ no filesystem drift: write policy.yaml and hot-apply via openshell policy set --wait
   ├─ generate_ssh_config (on every startup, host-side file)
-  ├─ initial_sync (blocking — before teloxide starts)
+  ├─ initial_sync (blocking — before the Telegram bot starts)
   │   ├─ Deploy platform files to /sandbox/.platform/ (content-addressed + symlinks)
   │   ├─ Remove obsolete legacy built-in skill links from /sandbox/.claude/skills/
   │   └─ Download .claude.json, verify trust keys, fix if CC overwrote them

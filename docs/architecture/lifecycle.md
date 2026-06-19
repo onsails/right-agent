@@ -73,7 +73,7 @@ right bot --agent <name>  (spawned by process-compose)
   │   and legacy `allowed_chat_ids`, then register current command autocomplete
   │   in Default, AllPrivateChats, and AllGroupChats scopes; `/mcp` opens the
   │   dashboard MCP view
-  ├─ Start teloxide long-polling dispatcher
+  ├─ Start the Telegram update router (frankenstein webhook handler, nested on the bot UDS app) and register the webhook
   └─ On SIGINT/SIGTERM:
       ├─ Stop accepting Telegram updates
       ├─ Cancel workers that have not started foreground Claude work
