@@ -29,7 +29,7 @@ stage on the dev server before the next.
 2. [done] Motion restraint — removed scroll-zoom (JS active-section + .section scale/opacity), logo spin, claw pulse, learning-dots (+eyebrow sig), loopspark, card cursor-spotlight; hero static + visible on load; kept ONE below-fold .rev reveal. spec:02-motion-spec.md plan:02-motion-plan.md (merged @d5ebebef · +10/−143 · 4 files · astro check 0 · bun build green · grep gate clean · review clean · mimo motion-8b3k venice/openai-gpt-55 high — NO substitution this time).
 3. [done] Surface de-chrome — removed all neon glows (0 0 colored box-shadow + drop-shadow), heavy elevation + inset-gloss shadows, backdrop-blur; card hover → border-only; removed `.card::before` accent line; kept hairline borders + flat panel fills + brand colors. spec:03-dechrome-spec.md plan:03-dechrome-plan.md (merged @5e0ed452 · +29/−32 · 1 file landing.css · astro check 0 · bun build green · 3 grep gates empty · review xhigh clean · mimo dechrome-5d2c venice/openai-gpt-55 high).
 4. [done] Reading column + narrow container + soften reveal — section `h2` + `.lead` share `--readw` (46rem ≈736px), left+right aligned (verified: both left 59, right 795); `--maxw` 76→70rem (1120px); reveal translateY 24→8px & .9s→.35s. spec:04-rhythm-spec.md plan:04-rhythm-plan.md (merged @71fd041d). **04b correction:** stage 04's `66ch` cap on `h2` was inert (ch is font-size-relative → 66ch@33px ≈1250px > container); fixed to rem-based `--readw`. plan:04b-readwfix-plan.md (merged @9af263ca · astro check 0 · build green · review clean). **ENGINE: `venice/openai-gpt-55` errored at provider before any tool call on BOTH 04 and 04b → mimo-delegate hand-applied (sonnet); diffs were review+build verified. venice/openai-gpt-55 now flaky — switch model if a substantive stage follows.**
-5. [planned] herdr-style hairline frame — full-bleed rule under nav (`.topbar` wrapper), hero vertical divider (copy|shot) + bottom rule, `border-bottom` between sections (drop footer `border-top`), integrate screenshot (drop its border/radius). All `1px var(--line)`, no texture. spec:05-frame-spec.md plan:05-frame-plan.md wt:.worktrees/05-frame mimo:frame-9a1c
+5. [done] herdr-style hairline frame — `.topbar` wrapper + nav rule; hero vertical divider (copy|shot, gap:0 + align stretch + `.hero-copy` border-right) + `.hero` border-bottom; `.section` border-bottom (footer `border-top` dropped); screenshot integrated (border+radius removed). spec:05-frame-spec.md plan:05-frame-plan.md (merged @b7dfe320 · 2 files · astro check 0 · build green · review xhigh clean — fixed 2 layout bugs: mobile media-query ordering + `.shot` vertical align). venice errored → ran mimo default model (substitution).
 6. [todo] (deferred polish) simplify mono eyebrow/`.label` tags; prune dead CSS (`.status`/`.pdot`/`.statusnote`/`.bk`/`.cmd` if unused); whitespace/vertical rhythm.
 7. [todo] (#3 — brand, discuss separately) monospace headline like herdr (currently Chakra Petch display).
 
@@ -89,6 +89,18 @@ Measured ours vs herdr: outer container nearly equal (ours 76rem/1216px, herdr
 edge, content doesn't collect. herdr caps text tightly (h1 ≤760px, lede ≤520px),
 spends width deliberately. User agreed: option 1 (unified reading column) + light
 option 2 (narrow container) now; #3 (monospace headline) discussed separately.
+
+## Stage 5 findings (feed the polish stage)
+
+- **Hero `.rev` was never actually removed (stage-2 gap).** Stage 2 stripped only
+  the `dN` delay suffixes; `class="rev"` still sits on hero `h1`/`.sub`/`.cta`/
+  `.shot`, so the hero STILL fades in on load (the recurring "dim then settle"
+  in screenshots). Stage-2 "hero visible on load" is NOT actually met. Fix: drop
+  the bare `.rev` from those hero elements → truly static hero.
+- **a11y: two banner landmarks + no `<main>`.** `.topbar` (`<header>`) and the
+  hero (`<header class="hero">`) are both `banner`s; the page has no `<main>`.
+  Fix needs `Hero.astro`/`Landing.astro` (rename hero to `<section>`, wrap the
+  slot/content in `<main>`). Fold into the polish stage.
 
 ## Open questions
 
