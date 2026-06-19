@@ -44,7 +44,15 @@ pub(crate) async fn send_if_needed(
     let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
 
     match bot
-        .send_photo_bytes(chat_id, WELCOME_PNG, "welcome.png", caption, thread, reply_to)
+        .send_photo_bytes(
+            chat_id,
+            WELCOME_PNG,
+            "welcome.png",
+            caption,
+            true,
+            thread,
+            reply_to,
+        )
         .await
     {
         Ok(_) => caption_attached,

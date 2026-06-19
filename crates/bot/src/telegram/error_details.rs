@@ -170,7 +170,15 @@ pub(crate) async fn handle_error_details_callback(
         }
         DetailsPayload::File(bytes) => {
             if let Err(e) = bot
-                .send_document_bytes(chat, &bytes, "error.json", None, None, Some(reply_to_msg_id))
+                .send_document_bytes(
+                    chat,
+                    &bytes,
+                    "error.json",
+                    None,
+                    false,
+                    None,
+                    Some(reply_to_msg_id),
+                )
                 .await
             {
                 tracing::warn!(chat_id = chat, "details document send failed: {:#}", e);
