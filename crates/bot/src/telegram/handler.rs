@@ -131,7 +131,7 @@ async fn send_html_reply(
 ///
 /// Serialisation guarantee (SES-05): all messages to the same (chat_id, thread_id)
 /// go through the same mpsc channel -> worker processes them serially.
-pub async fn handle_message(
+pub(crate) async fn handle_message(
     ctx: &HandlerCtx,
     msg: &Message,
     decision: super::filter::RoutingDecision,
@@ -398,7 +398,7 @@ pub async fn handle_message(
 /// `/set_focus` in a group/topic) re-emits the focus Mini App button here in the
 /// DM, scoped to the originating conversation. Inline `web_app` buttons are
 /// private-chat-only, so the group bounces the operator through this DM path.
-pub async fn handle_start(
+pub(crate) async fn handle_start(
     ctx: &HandlerCtx,
     msg: &Message,
     payload: String,
@@ -463,7 +463,7 @@ fn url_keyboard(label: &str, url: url::Url) -> InlineKeyboardMarkup {
 }
 
 /// Handle the /dashboard command -- send a Telegram Mini App launch button.
-pub async fn handle_dashboard(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+pub(crate) async fn handle_dashboard(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let home = &ctx.home;
     let agent_dir = &ctx.agent_dir;
@@ -502,7 +502,7 @@ pub async fn handle_dashboard(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgE
 }
 
 /// Handle the /new command — start a new session.
-pub async fn handle_new(ctx: &HandlerCtx, msg: &Message, name: String) -> Result<(), TgError> {
+pub(crate) async fn handle_new(ctx: &HandlerCtx, msg: &Message, name: String) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let agent_dir = &ctx.agent_dir;
     if !is_private_chat(&msg.chat) {
@@ -555,7 +555,7 @@ pub async fn handle_new(ctx: &HandlerCtx, msg: &Message, name: String) -> Result
 }
 
 /// Handle the /list command — show all sessions for this chat+thread.
-pub async fn handle_list(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+pub(crate) async fn handle_list(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let agent_dir = &ctx.agent_dir;
     if !is_private_chat(&msg.chat) {
@@ -631,7 +631,7 @@ fn format_relative_time(iso_timestamp: &str) -> String {
 }
 
 /// Handle the /switch command — switch to a different session.
-pub async fn handle_switch(ctx: &HandlerCtx, msg: &Message, uuid: String) -> Result<(), TgError> {
+pub(crate) async fn handle_switch(ctx: &HandlerCtx, msg: &Message, uuid: String) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let agent_dir = &ctx.agent_dir;
     if !is_private_chat(&msg.chat) {
@@ -721,7 +721,7 @@ fn dashboard_mcp_button_label() -> &'static str {
 }
 
 /// Handle the /mcp command by opening the dashboard MCP view.
-pub async fn handle_mcp(ctx: &HandlerCtx, msg: &Message, _args: String) -> Result<(), TgError> {
+pub(crate) async fn handle_mcp(ctx: &HandlerCtx, msg: &Message, _args: String) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let agent_dir = &ctx.agent_dir;
     let home = &ctx.home;
@@ -760,7 +760,7 @@ pub async fn handle_mcp(ctx: &HandlerCtx, msg: &Message, _args: String) -> Resul
 // ---------------------------------------------------------------------------
 
 /// Handle the /providers command by opening the dashboard providers view.
-pub async fn handle_providers(
+pub(crate) async fn handle_providers(
     ctx: &HandlerCtx,
     msg: &Message,
     _args: String,
@@ -830,7 +830,7 @@ pub async fn handle_providers(
 /// `t.me/<bot>?start=<scope>` deep-link `url` button instead. Tapping it opens
 /// the DM and delivers `/start <scope>`, where `handle_start` re-emits the
 /// `web_app` button scoped to this conversation.
-pub async fn handle_set_focus(
+pub(crate) async fn handle_set_focus(
     ctx: &HandlerCtx,
     msg: &Message,
     _args: String,
@@ -925,7 +925,7 @@ async fn send_focus_webapp_button(
 // ---------------------------------------------------------------------------
 
 /// Handle the /cron command — routes to list (no args) or detail (job name).
-pub async fn handle_cron(ctx: &HandlerCtx, msg: &Message, args: String) -> Result<(), TgError> {
+pub(crate) async fn handle_cron(ctx: &HandlerCtx, msg: &Message, args: String) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let agent_dir = &ctx.agent_dir;
     if !is_private_chat(&msg.chat) {
@@ -1080,7 +1080,7 @@ fn format_duration(start_iso: &str, end_iso: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Handle the /doctor command -- run all doctor checks and return results.
-pub async fn handle_doctor(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+pub(crate) async fn handle_doctor(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let home = &ctx.home;
     if !is_private_chat(&msg.chat) {
@@ -1146,7 +1146,7 @@ fn format_doctor_result_body(checks: &[right_agent::doctor::DoctorCheck]) -> Str
 // ---------------------------------------------------------------------------
 
 /// Handle manual /usage compatibility by opening the dashboard.
-pub async fn handle_usage(ctx: &HandlerCtx, msg: &Message, _arg: String) -> Result<(), TgError> {
+pub(crate) async fn handle_usage(ctx: &HandlerCtx, msg: &Message, _arg: String) -> Result<(), TgError> {
     handle_dashboard(ctx, msg).await
 }
 
@@ -1158,7 +1158,7 @@ pub async fn handle_usage(ctx: &HandlerCtx, msg: &Message, _arg: String) -> Resu
 ///
 /// Callback data format: `stop:{chat_id}:{eff_thread_id}`
 /// Looks up the CancellationToken in StopTokens and cancels it.
-pub async fn handle_stop_callback(ctx: &HandlerCtx, q: &CallbackQuery) -> Result<(), TgError> {
+pub(crate) async fn handle_stop_callback(ctx: &HandlerCtx, q: &CallbackQuery) -> Result<(), TgError> {
     let worker_ctl = &ctx.worker_ctl;
     let data = q.data.as_deref().unwrap_or("");
     let parts: Vec<&str> = data.splitn(3, ':').collect();
@@ -1204,7 +1204,7 @@ fn apply_thinking_toggle_callback(
 /// Handle Show/Hide thinking callback queries from thinking messages.
 ///
 /// Callback data format: `think:{chat_id}:{eff_thread_id}:{show|hide}`.
-pub async fn handle_thinking_toggle_callback(
+pub(crate) async fn handle_thinking_toggle_callback(
     ctx: &HandlerCtx,
     q: &CallbackQuery,
 ) -> Result<(), TgError> {
@@ -1224,7 +1224,7 @@ pub async fn handle_thinking_toggle_callback(
 /// Callback data format: `bg:{chat_id}:{eff_thread_id}`
 /// Sets the bg flag in `BgRequests` and cancels the worker's stop token —
 /// the worker reads the flag after kill+wait and emits Backgrounded.
-pub async fn handle_bg_callback(ctx: &HandlerCtx, q: &CallbackQuery) -> Result<(), TgError> {
+pub(crate) async fn handle_bg_callback(ctx: &HandlerCtx, q: &CallbackQuery) -> Result<(), TgError> {
     let worker_ctl = &ctx.worker_ctl;
     let data = q.data.as_deref().unwrap_or("");
     let parts: Vec<&str> = data.splitn(3, ':').collect();

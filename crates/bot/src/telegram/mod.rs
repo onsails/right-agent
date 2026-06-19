@@ -35,7 +35,7 @@ pub use session::effective_thread_id;
 /// Bot client used by `WorkerContext` and routing — the frankenstein-backed
 /// [`tg_bot::RightBot`] wrapper (centralizes throttle, cached `get_me`, uniform
 /// error + parse-mode/thread defaults). Cloneable.
-pub type BotType = tg_bot::RightBot;
+pub(crate) type BotType = tg_bot::RightBot;
 
 /// Best-effort broadcast to a list of chat IDs. Errors are logged and swallowed
 /// (alerts shouldn't fail hard if one chat is unreachable).

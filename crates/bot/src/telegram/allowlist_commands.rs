@@ -139,7 +139,7 @@ async fn reply(bot: &super::BotType, msg: &Message, text: &str) -> Result<(), Tg
     Ok(())
 }
 
-pub async fn handle_allow(ctx: &HandlerCtx, msg: &Message, args: String) -> Result<(), TgError> {
+pub(crate) async fn handle_allow(ctx: &HandlerCtx, msg: &Message, args: String) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let allowlist = &ctx.allowlist;
     let agent_dir = &ctx.agent_dir;
@@ -214,7 +214,7 @@ pub async fn handle_allow(ctx: &HandlerCtx, msg: &Message, args: String) -> Resu
     Ok(())
 }
 
-pub async fn handle_deny(ctx: &HandlerCtx, msg: &Message, args: String) -> Result<(), TgError> {
+pub(crate) async fn handle_deny(ctx: &HandlerCtx, msg: &Message, args: String) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let allowlist = &ctx.allowlist;
     let agent_dir = &ctx.agent_dir;
@@ -278,7 +278,7 @@ pub async fn handle_deny(ctx: &HandlerCtx, msg: &Message, args: String) -> Resul
     Ok(())
 }
 
-pub async fn handle_allowed(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+pub(crate) async fn handle_allowed(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let allowlist = &ctx.allowlist;
     if !sender_is_trusted(msg, allowlist) {
@@ -313,7 +313,7 @@ pub async fn handle_allowed(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgErr
     Ok(())
 }
 
-pub async fn handle_allow_all(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+pub(crate) async fn handle_allow_all(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let allowlist = &ctx.allowlist;
     let agent_dir = &ctx.agent_dir;
@@ -357,7 +357,7 @@ pub async fn handle_allow_all(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgE
     Ok(())
 }
 
-pub async fn handle_deny_all(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+pub(crate) async fn handle_deny_all(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let allowlist = &ctx.allowlist;
     let agent_dir = &ctx.agent_dir;

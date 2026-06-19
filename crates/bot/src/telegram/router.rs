@@ -2,7 +2,6 @@
 //! classification fns here are unit-tested; `route_update` + [`HandlerCtx`] map
 //! an `UpdateContent` to a handler call.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -31,11 +30,17 @@ pub(crate) struct HandlerCtx {
     pub(crate) identity: Arc<BotIdentity>,
     pub(crate) worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     pub(crate) agent_dir: Arc<AgentDir>,
+    // The former Telegram-based MCP auth/token prompt deps. The MCP flow is now
+    // dashboard-managed, so handlers no longer read these — kept on the context
+    // for parity with the prior dptree dependency set (mirrors the old DI bag).
+    #[allow(dead_code)]
     pub(crate) pending_auth: PendingAuthMap,
     pub(crate) home: Arc<RightHome>,
     pub(crate) ssh_config: Arc<SshConfigPath>,
     pub(crate) intercept_slots: Arc<InterceptSlots>,
+    #[allow(dead_code)]
     pub(crate) pending_token_slot: Arc<PendingTokenSlot>,
+    #[allow(dead_code)]
     pub(crate) pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
     pub(crate) internal_api: Arc<InternalApi>,
     pub(crate) settings: Arc<AgentSettings>,

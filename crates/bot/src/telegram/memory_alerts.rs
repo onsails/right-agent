@@ -25,7 +25,7 @@ fn current_chats(allowlist: &AllowlistHandle) -> Vec<i64> {
         .collect()
 }
 
-pub fn spawn_watcher(
+pub(crate) fn spawn_watcher(
     bot: BotType,
     wrapper: Arc<ResilientHindsight>,
     agent_dir: PathBuf,
