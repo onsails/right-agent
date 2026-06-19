@@ -475,7 +475,8 @@ impl RightBot {
         &self,
         chat_id: i64,
         media: FileUpload,
-        caption_html: Option<&str>,
+        caption: Option<&str>,
+        html: bool,
         thread: Option<i32>,
         reply_to: Option<i32>,
     ) -> Result<Message, TgError> {
@@ -483,8 +484,8 @@ impl RightBot {
         let params = frankenstein::methods::SendPhotoParams::builder()
             .chat_id(chat_id)
             .photo(media)
-            .maybe_caption(caption_html)
-            .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
+            .maybe_caption(caption)
+            .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
             .maybe_message_thread_id(thread)
             .maybe_reply_parameters(
                 reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
@@ -499,7 +500,8 @@ impl RightBot {
         &self,
         chat_id: i64,
         media: FileUpload,
-        caption_html: Option<&str>,
+        caption: Option<&str>,
+        html: bool,
         thread: Option<i32>,
         reply_to: Option<i32>,
     ) -> Result<Message, TgError> {
@@ -507,8 +509,8 @@ impl RightBot {
         let params = frankenstein::methods::SendDocumentParams::builder()
             .chat_id(chat_id)
             .document(media)
-            .maybe_caption(caption_html)
-            .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
+            .maybe_caption(caption)
+            .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
             .maybe_message_thread_id(thread)
             .maybe_reply_parameters(
                 reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
@@ -523,15 +525,16 @@ impl RightBot {
         &self,
         chat_id: i64,
         media: FileUpload,
-        caption_html: Option<&str>,
+        caption: Option<&str>,
+        html: bool,
         thread: Option<i32>,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendVideoParams::builder()
             .chat_id(chat_id)
             .video(media)
-            .maybe_caption(caption_html)
-            .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
+            .maybe_caption(caption)
+            .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
             .maybe_message_thread_id(thread)
             .build();
         let resp = with_retry(|| self.bot.send_video(&params)).await?;
@@ -543,15 +546,16 @@ impl RightBot {
         &self,
         chat_id: i64,
         media: FileUpload,
-        caption_html: Option<&str>,
+        caption: Option<&str>,
+        html: bool,
         thread: Option<i32>,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendVoiceParams::builder()
             .chat_id(chat_id)
             .voice(media)
-            .maybe_caption(caption_html)
-            .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
+            .maybe_caption(caption)
+            .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
             .maybe_message_thread_id(thread)
             .build();
         let resp = with_retry(|| self.bot.send_voice(&params)).await?;
@@ -563,15 +567,16 @@ impl RightBot {
         &self,
         chat_id: i64,
         media: FileUpload,
-        caption_html: Option<&str>,
+        caption: Option<&str>,
+        html: bool,
         thread: Option<i32>,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendAudioParams::builder()
             .chat_id(chat_id)
             .audio(media)
-            .maybe_caption(caption_html)
-            .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
+            .maybe_caption(caption)
+            .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
             .maybe_message_thread_id(thread)
             .build();
         let resp = with_retry(|| self.bot.send_audio(&params)).await?;
@@ -583,15 +588,16 @@ impl RightBot {
         &self,
         chat_id: i64,
         media: FileUpload,
-        caption_html: Option<&str>,
+        caption: Option<&str>,
+        html: bool,
         thread: Option<i32>,
     ) -> Result<Message, TgError> {
         self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::SendAnimationParams::builder()
             .chat_id(chat_id)
             .animation(media)
-            .maybe_caption(caption_html)
-            .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
+            .maybe_caption(caption)
+            .maybe_parse_mode((caption.is_some() && html).then_some(ParseMode::Html))
             .maybe_message_thread_id(thread)
             .build();
         let resp = with_retry(|| self.bot.send_animation(&params)).await?;
@@ -746,7 +752,8 @@ impl RightBot {
         chat_id: i64,
         bytes: &[u8],
         filename: &str,
-        caption_html: Option<&str>,
+        caption: Option<&str>,
+        html: bool,
         thread: Option<i32>,
         reply_to: Option<i32>,
     ) -> Result<Message, TgError> {
@@ -754,7 +761,7 @@ impl RightBot {
         let upload = FileUpload::InputFile(InputFile {
             path: spool.path().to_path_buf(),
         });
-        self.send_photo(chat_id, upload, caption_html, thread, reply_to)
+        self.send_photo(chat_id, upload, caption, html, thread, reply_to)
             .await
         // `spool` (the TempDir) drops here, after the multipart upload completes.
     }
@@ -765,7 +772,8 @@ impl RightBot {
         chat_id: i64,
         bytes: &[u8],
         filename: &str,
-        caption_html: Option<&str>,
+        caption: Option<&str>,
+        html: bool,
         thread: Option<i32>,
         reply_to: Option<i32>,
     ) -> Result<Message, TgError> {
@@ -773,7 +781,7 @@ impl RightBot {
         let upload = FileUpload::InputFile(InputFile {
             path: spool.path().to_path_buf(),
         });
-        self.send_document(chat_id, upload, caption_html, thread, reply_to)
+        self.send_document(chat_id, upload, caption, html, thread, reply_to)
             .await
     }
 }
