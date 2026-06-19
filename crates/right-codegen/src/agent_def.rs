@@ -22,7 +22,7 @@ pub const BOOTSTRAP_INSTRUCTIONS: &str = include_str!("../templates/right/agent/
 /// Source: `templates/right/prompt/CRON_INSTRUCTIONS.md`
 pub const CRON_INSTRUCTIONS: &str = include_str!("../templates/right/prompt/CRON_INSTRUCTIONS.md");
 
-/// JSON schema for the structured reply format used by teloxide agents (D-02).
+/// JSON schema for the structured reply format used by the Telegram bot (D-02).
 ///
 /// Agents write replies as JSON conforming to this schema.
 /// `content` is required (may be null for media-only replies).

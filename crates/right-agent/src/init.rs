@@ -865,7 +865,7 @@ mod tests {
         // for getUpdates on the same token, causing intermittent message drops.
         assert!(
             !content.contains("enabledPlugins"),
-            "settings.json must NOT contain enabledPlugins — CC plugin races with native teloxide bot"
+            "settings.json must NOT contain enabledPlugins — CC plugin races with the native Telegram bot"
         );
         assert!(
             !content.contains("telegram@claude-plugins-official"),

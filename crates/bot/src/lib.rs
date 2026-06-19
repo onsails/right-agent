@@ -71,7 +71,7 @@ fn load_or_migrate_allowlist(
 ///
 /// Calls `setWebhook` with the derived URL, secret, and allowed updates.
 /// Retries with capped exponential backoff (2s → 60s, jittered) on transient
-/// errors. Exits with code 2 on `ApiError::InvalidToken` (invalid bot token).
+/// errors. Exits with code 2 on a 401 invalid-token API response.
 /// Cancels on shutdown.
 async fn webhook_register_loop(
     bot: telegram::BotType,
@@ -141,7 +141,7 @@ pub struct BotArgs {
 /// Entry point called from the right CLI.
 ///
 /// Resolves agent directory, opens data.db, resolves token, and starts
-/// the teloxide webhook dispatcher with graceful shutdown wiring.
+/// the webhook handler with graceful shutdown wiring.
 ///
 /// This is an async function. The caller (right CLI) runs inside a
 /// `#[tokio::main]` runtime and simply `.await`s this call. No nested
@@ -517,7 +517,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let debug_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(initial_debug));
 
     // Create the model swap cell here so both the watcher and the telegram
-    // dispatcher share the same Arc. The watcher writes; the dispatcher reads.
+    // handler share the same Arc. The watcher writes; the handler reads.
     let model_arc: Arc<arc_swap::ArcSwap<Option<String>>> =
         Arc::new(arc_swap::ArcSwap::from_pointee(config.model.clone()));
     let (providers_tx, providers_rx) =
@@ -567,7 +567,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         oauth_status.clone(),
     ));
 
-    // Spawn axum bot UDS server and wait for it to bind before starting teloxide
+    // Spawn axum bot UDS server and wait for it to bind before registering the webhook
     let socket_path = agent_dir.join("bot.sock");
     let started_at = std::time::Instant::now();
 
@@ -958,7 +958,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         )
         .await
     });
-    // Wait for axum to bind before starting teloxide (ensures callback socket is ready)
+    // Wait for axum to bind (ensures callback socket is ready) before registering the webhook
     let _ = axum_ready_rx.await;
 
     // Spawn periodic attachment cleanup task
@@ -1258,7 +1258,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     tracing::info!("graceful shutdown complete");
 
-    // Propagate any dispatcher/axum error first, then signal config restart.
+    // Propagate any telegram/axum error first, then signal config restart.
     result?;
 
     if config_changed.load(Ordering::Acquire) {
