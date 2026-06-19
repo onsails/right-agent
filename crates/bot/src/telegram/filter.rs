@@ -1,7 +1,8 @@
+use frankenstein::types::Message;
 use right_agent::agent::allowlist::{AllowlistHandle, ResponseMode};
-use teloxide::types::{ChatKind, Message};
 
 use super::mention::{AddressKind, BotIdentity, is_bot_addressed};
+use super::msg_ext;
 
 #[derive(Debug, Clone)]
 pub struct RoutingDecision {
@@ -25,8 +26,8 @@ pub fn make_routing_filter(
     move |msg: Message| {
         // No `from` means channel post or anonymous — ignore.
         let sender = msg.from.as_ref()?;
-        let sender_id = sender.id.0 as i64;
-        let chat_id = msg.chat.id.0;
+        let sender_id = sender.id as i64;
+        let chat_id = msg.chat.id;
 
         let state = allowlist.0.read().expect("allowlist lock poisoned");
         let sender_trusted = state.is_user_trusted(sender_id);
@@ -34,7 +35,7 @@ pub fn make_routing_filter(
         // Response mode is a group/topic concept; DMs are always `Addressed`, so
         // skip the per-message group lookup for private chats (the routing filter
         // runs on every update).
-        let response_mode = if matches!(msg.chat.kind, ChatKind::Private(_)) {
+        let response_mode = if msg_ext::is_private(&msg.chat) {
             ResponseMode::Addressed
         } else {
             state.response_mode(chat_id, super::session::effective_thread_id(&msg))
@@ -43,54 +44,48 @@ pub fn make_routing_filter(
 
         let addressed = is_bot_addressed(&msg, &identity);
 
-        match &msg.chat.kind {
-            ChatKind::Private(_) => {
-                if !sender_trusted {
-                    return None;
-                }
-                Some(RoutingDecision {
-                    address: Some(AddressKind::DirectMessage),
-                    response_mode: ResponseMode::Addressed,
-                    sender_trusted: true,
-                    group_open: false,
-                })
+        if msg_ext::is_private(&msg.chat) {
+            if !sender_trusted {
+                return None;
             }
-            _ => {
-                // Group contexts never route bot senders; this loop guard
-                // applies before both All-mode and addressed fallbacks.
-                if sender.is_bot {
-                    return None;
-                }
-                // `All` mode in an open group answers everyone, no addressing.
-                if response_mode == ResponseMode::All && group_open {
-                    return Some(RoutingDecision {
-                        address: addressed,
-                        response_mode,
-                        sender_trusted,
-                        group_open,
-                    });
-                }
-                if !sender_trusted && !group_open {
-                    return None;
-                }
-                // Non-album/non-forward group messages still require an explicit
-                // address. Album siblings and forwards are admitted unaddressed;
-                // the worker aggregates them and applies the post-debounce
-                // invocation gate before invoking CC.
-                if addressed.is_none()
-                    && msg.media_group_id().is_none()
-                    && msg.forward_origin().is_none()
-                {
-                    return None;
-                }
-                Some(RoutingDecision {
-                    address: addressed,
-                    response_mode,
-                    sender_trusted,
-                    group_open,
-                })
-            }
+            return Some(RoutingDecision {
+                address: Some(AddressKind::DirectMessage),
+                response_mode: ResponseMode::Addressed,
+                sender_trusted: true,
+                group_open: false,
+            });
         }
+
+        // Group contexts never route bot senders; this loop guard
+        // applies before both All-mode and addressed fallbacks.
+        if sender.is_bot {
+            return None;
+        }
+        // `All` mode in an open group answers everyone, no addressing.
+        if response_mode == ResponseMode::All && group_open {
+            return Some(RoutingDecision {
+                address: addressed,
+                response_mode,
+                sender_trusted,
+                group_open,
+            });
+        }
+        if !sender_trusted && !group_open {
+            return None;
+        }
+        // Non-album/non-forward group messages still require an explicit
+        // address. Album siblings and forwards are admitted unaddressed;
+        // the worker aggregates them and applies the post-debounce
+        // invocation gate before invoking CC.
+        if addressed.is_none() && msg.media_group_id.is_none() && msg.forward_origin.is_none() {
+            return None;
+        }
+        Some(RoutingDecision {
+            address: addressed,
+            response_mode,
+            sender_trusted,
+            group_open,
+        })
     }
 }
 
@@ -160,7 +155,7 @@ mod tests {
         media_group_id: Option<&str>,
         caption_with_mention: bool,
         bot_username: &str,
-    ) -> teloxide::types::Message {
+    ) -> frankenstein::types::Message {
         let mut payload = serde_json::json!({
             "message_id": 1,
             "date": 0,
@@ -187,7 +182,7 @@ mod tests {
         serde_json::from_value(payload).unwrap()
     }
 
-    fn plain_group_text(chat_id: i64, sender_id: i64, text: &str) -> teloxide::types::Message {
+    fn plain_group_text(chat_id: i64, sender_id: i64, text: &str) -> frankenstein::types::Message {
         serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,
@@ -198,7 +193,7 @@ mod tests {
         .unwrap()
     }
 
-    fn private_text_msg(chat_id: i64, sender_id: i64, text: &str) -> teloxide::types::Message {
+    fn private_text_msg(chat_id: i64, sender_id: i64, text: &str) -> frankenstein::types::Message {
         serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,
@@ -213,7 +208,7 @@ mod tests {
         chat_id: i64,
         sender_id: i64,
         caption: &str,
-    ) -> teloxide::types::Message {
+    ) -> frankenstein::types::Message {
         serde_json::from_value(serde_json::json!({
             "message_id": 2,
             "date": 0,
@@ -347,7 +342,7 @@ mod tests {
         };
         let chat_id = -1001;
         let allowlist = open_group_with_mode(chat_id, ResponseMode::All);
-        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+        let msg: frankenstein::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,
             "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
@@ -367,7 +362,7 @@ mod tests {
         };
         let chat_id = -1001;
         let allowlist = open_group_with_mode(chat_id, ResponseMode::All);
-        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+        let msg: frankenstein::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,
             "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
@@ -422,7 +417,7 @@ mod tests {
         let allowlist = allowlist_with(vec![], vec![chat_id]);
 
         // No media_group_id, no caption mention — a plain text post.
-        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+        let msg: frankenstein::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,
             "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
@@ -445,7 +440,7 @@ mod tests {
         let sender_id = 42;
         let allowlist = allowlist_with(vec![], vec![chat_id]);
 
-        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+        let msg: frankenstein::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,
             "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
@@ -557,7 +552,7 @@ mod tests {
         let allowlist = allowlist_with(vec![], vec![chat_id]);
 
         // Forwarded document, no caption, no @mention anywhere.
-        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+        let msg: frankenstein::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,
             "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
@@ -594,7 +589,7 @@ mod tests {
         // No trusted users, no open groups.
         let allowlist = allowlist_with(vec![], vec![]);
 
-        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+        let msg: frankenstein::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,
             "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
@@ -631,7 +626,7 @@ mod tests {
         // Forwarded message with a fresh user-typed caption containing @mention.
         // Address detection must win — `address` should be Some(GroupMentionText),
         // not None (which would mean "admitted only by forward gate").
-        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+        let msg: frankenstein::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,
             "chat": {"id": chat_id, "type": "supergroup", "title": "g"},

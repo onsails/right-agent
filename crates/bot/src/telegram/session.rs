@@ -2,7 +2,7 @@
 //!
 //! Supports multiple sessions per (chat_id, thread_id) with at most one active.
 
-use teloxide::types::{Message, MessageId, ThreadId};
+use frankenstein::types::Message;
 
 /// A session row from the `sessions` table.
 #[derive(Debug, Clone)]
@@ -19,11 +19,7 @@ pub struct SessionRow {
 
 /// Normalise Telegram thread_id for session keying and reply routing.
 pub fn effective_thread_id(msg: &Message) -> i64 {
-    match msg.thread_id {
-        Some(ThreadId(MessageId(1))) => 0,
-        Some(ThreadId(MessageId(n))) => i64::from(n),
-        None => 0,
-    }
+    super::msg_ext::effective_thread_id(msg)
 }
 
 /// Truncate a string to at most 60 chars for use as a session label.
@@ -187,17 +183,16 @@ mod tests {
         (dir, conn)
     }
 
-    fn normalise_thread_id(thread_id: Option<ThreadId>) -> i64 {
+    fn normalise_thread_id(thread_id: Option<i32>) -> i64 {
         match thread_id {
-            Some(ThreadId(MessageId(1))) => 0,
-            Some(ThreadId(MessageId(n))) => i64::from(n),
-            None => 0,
+            Some(1) | None => 0,
+            Some(n) => i64::from(n),
         }
     }
 
     #[tokio::test]
     async fn effective_thread_id_general_topic() {
-        assert_eq!(normalise_thread_id(Some(ThreadId(MessageId(1)))), 0);
+        assert_eq!(normalise_thread_id(Some(1)), 0);
     }
 
     #[tokio::test]
@@ -207,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn effective_thread_id_real_topic() {
-        assert_eq!(normalise_thread_id(Some(ThreadId(MessageId(5)))), 5);
+        assert_eq!(normalise_thread_id(Some(5)), 5);
     }
 
     #[tokio::test]
