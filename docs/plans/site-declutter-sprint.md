@@ -26,7 +26,7 @@ stage on the dev server before the next.
 ## Stages
 
 1. [done] Background ornaments — removed both fake-telemetry layers, paper texture, HUD corner-frame + secure-by-default readout; flat calm var(--bg). spec:01-bg-ornaments-spec.md plan:01-bg-ornaments-plan.md (merged @0c40c819 · +1/−152 · 2 files · astro check 0 · bun build green 9 pages · grep gate clean · mimo bg-ornaments-3f9a). **Model: openai/gpt-5.3-codex REJECTED by OpenAI (codex unsupported on a ChatGPT-account) → mimo auto-substituted venice/claude-sonnet-4-6 high. Pin decision pending for stages 2–4.**
-2. [planned] Motion restraint — drop scroll-zoom, logo spin, claw pulse, learning-dots, loopspark, card cursor-spotlight; hero visible on load; keep ONE subtle below-fold reveal. spec:02-motion-spec.md plan:02-motion-plan.md wt:.worktrees/02-motion mimo:motion-8b3k
+2. [done] Motion restraint — removed scroll-zoom (JS active-section + .section scale/opacity), logo spin, claw pulse, learning-dots (+eyebrow sig), loopspark, card cursor-spotlight; hero static + visible on load; kept ONE below-fold .rev reveal. spec:02-motion-spec.md plan:02-motion-plan.md (merged @d5ebebef · +10/−143 · 4 files · astro check 0 · bun build green · grep gate clean · review clean · mimo motion-8b3k venice/openai-gpt-55 high — NO substitution this time).
 3. [todo] Surface de-chrome — strip neon glows, heavy drop-shadows, backdrop-blur; hairline borders + flat panels across telem/cards/loop/diagram/control-plane.
 4. [todo] Rhythm & polish — whitespace + type scale, simplify mono eyebrow/label tags, prune dead CSS, final build + visual check.
 
@@ -66,6 +66,17 @@ pass over landing + docs.
   top on fresh load until the IntersectionObserver fires. Above-the-fold content
   must not require a scroll to appear — make the hero visible immediately;
   reveal only below-the-fold sections (or drop reveal entirely).
+
+## Stage 2 findings
+
+- **Branch-delete quirk (worktree-integration).** `git -C <main> branch -d <BR>`
+  checks reachability from `master` (where the stage merge does NOT live), so it
+  refuses with a false negative. Next stages: route the delete through the
+  integration worktree — `git -C <IWT> branch -d <BR>` — or `-D` after verifying
+  the merge commit is an ancestor of `feat/clean-site`.
+- **Reveal still reads as motion on fast scroll.** The retained `.rev` fade-up
+  (opacity 0→1, translateY 24px, .9s) dims large regions while they catch up,
+  then settles to full opacity. PENDING USER: keep / soften / remove.
 
 ## Open questions
 
