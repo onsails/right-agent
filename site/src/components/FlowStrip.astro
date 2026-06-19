@@ -4,14 +4,14 @@
 // two-strip credential diagram).
 import { icons as icon } from '../lib/icons';
 interface Node { icon: string; tint: string; name: string; note: string; }
-interface Props { cap: string; capIcon: string; nodes: Node[]; note?: string; }
-const { cap, capIcon, nodes, note } = Astro.props;
+interface Props { cap: string; nodes: Node[]; note?: string; }
+const { cap, nodes, note } = Astro.props;
 const svg = (name: string, w = 1.6) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round">${icon[name] ?? ''}</svg>`;
 ---
 <div class="how rev">
   <div class="how-strip">
-    <div class="how-cap"><span class="ic-sm" set:html={svg(capIcon, 1.7)} />{cap}</div>
+    <div class="how-cap">{cap}</div>
     <div class="how-path">
       {nodes.map((n, i) => (
         <>
