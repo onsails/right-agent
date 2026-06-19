@@ -51,10 +51,19 @@ pub(crate) struct HandlerCtx {
 /// Route one update to the matching handler. Best-effort: handler errors are
 /// logged, never propagated — a single failed update must not stop the webhook
 /// server.
+///
+/// Only fresh `Message` and `CallbackQuery` updates are routed. `EditedMessage`
+/// is deliberately ignored (falls through to `_ => {}`): the former teloxide
+/// dispatcher used `Update::filter_message()`, which matched only `Message` and
+/// had no edited-message branch — so edits were received (they're in
+/// `allowed_updates`) but silently dropped rather than starting a new agent
+/// turn. We preserve that. `EditedMessage` stays in
+/// `webhook::webhook_allowed_updates()` so `setWebhook` registration is
+/// byte-identical to before.
 pub(crate) async fn route_update(update: frankenstein::updates::Update, ctx: &HandlerCtx) {
     use frankenstein::updates::UpdateContent;
     match update.content {
-        UpdateContent::Message(m) | UpdateContent::EditedMessage(m) => {
+        UpdateContent::Message(m) => {
             on_message(ctx, *m).await;
         }
         UpdateContent::CallbackQuery(q) => {
@@ -215,6 +224,29 @@ pub(crate) mod test_support {
     /// (e.g. the webhook secret-rejection paths, which short-circuit before any
     /// handler runs). The bot is built via the sync `RightBot::new` (no network).
     pub(crate) fn placeholder_ctx() -> HandlerCtx {
+        placeholder_ctx_with_allowlist(AllowlistHandle::new(AllowlistState::default()))
+    }
+
+    /// Like [`placeholder_ctx`] but with `user_id` in the trusted-users
+    /// allowlist, so a DM from that user survives `make_routing_filter` and
+    /// reaches `handle_message` (used by the edited-message routing test).
+    pub(crate) fn placeholder_ctx_trusting(user_id: i64) -> HandlerCtx {
+        use chrono::Utc;
+        use right_agent::agent::allowlist::{AllowedUser, AllowlistFile};
+        let allowlist = AllowlistHandle::new(AllowlistState::from_file(AllowlistFile {
+            version: right_agent::agent::allowlist::CURRENT_VERSION,
+            users: vec![AllowedUser {
+                id: user_id,
+                label: None,
+                added_by: None,
+                added_at: Utc::now(),
+            }],
+            groups: vec![],
+        }));
+        placeholder_ctx_with_allowlist(allowlist)
+    }
+
+    fn placeholder_ctx_with_allowlist(allowlist: AllowlistHandle) -> HandlerCtx {
         let settings = Arc::new(AgentSettings {
             show_thinking: false,
             model: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
@@ -243,7 +275,7 @@ pub(crate) mod test_support {
         });
         HandlerCtx {
             bot: super::super::bot::build_bot("0:fake_token_for_router_tests".to_owned()),
-            allowlist: AllowlistHandle::new(AllowlistState::default()),
+            allowlist,
             identity: Arc::new(BotIdentity {
                 username: "test_bot".to_owned(),
                 user_id: 1,
@@ -291,6 +323,53 @@ mod tests {
         assert_eq!(
             classify_callback(Some("errdet:1")),
             CallbackRoute::ErrorDetails
+        );
+    }
+
+    /// Build a JSON update envelope of the given `content_key` ("message" or
+    /// "edited_message") carrying a content-less DM from `user_id` — content-less
+    /// so a routed `Message` reaches `handle_message`, sets `idle_ts`, and
+    /// returns early without spawning a worker.
+    #[cfg(test)]
+    fn dm_update(content_key: &str, user_id: i64) -> frankenstein::updates::Update {
+        serde_json::from_value(serde_json::json!({
+            "update_id": 1,
+            content_key: {
+                "message_id": 7,
+                "date": 0,
+                "chat": {"id": user_id, "type": "private", "first_name": "U"},
+                "from": {"id": user_id, "is_bot": false, "first_name": "U"}
+            }
+        }))
+        .unwrap()
+    }
+
+    /// A fresh `Message` from a trusted DM sender reaches `handle_message`, which
+    /// stamps `idle_ts` before its empty-content early return.
+    #[tokio::test]
+    async fn route_update_routes_fresh_message() {
+        use std::sync::atomic::Ordering;
+        let ctx = test_support::placeholder_ctx_trusting(42);
+        assert_eq!(ctx.idle_ts.0.load(Ordering::Relaxed), 0);
+        route_update(dm_update("message", 42), &ctx).await;
+        assert!(
+            ctx.idle_ts.0.load(Ordering::Relaxed) > 0,
+            "a fresh Message must be routed to handle_message"
+        );
+    }
+
+    /// An `EditedMessage` is ignored (former teloxide `filter_message()` had no
+    /// edited-message branch): it must NOT reach `handle_message`, so `idle_ts`
+    /// stays at its initial 0.
+    #[tokio::test]
+    async fn route_update_ignores_edited_message() {
+        use std::sync::atomic::Ordering;
+        let ctx = test_support::placeholder_ctx_trusting(42);
+        route_update(dm_update("edited_message", 42), &ctx).await;
+        assert_eq!(
+            ctx.idle_ts.0.load(Ordering::Relaxed),
+            0,
+            "an EditedMessage must NOT be routed to a handler"
         );
     }
 

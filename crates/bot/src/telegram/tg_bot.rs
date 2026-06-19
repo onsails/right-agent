@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use governor::clock::DefaultClock;
+use governor::state::keyed::DefaultKeyedStateStore;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
 use thiserror::Error;
@@ -44,6 +45,14 @@ const DEFAULT_GLOBAL_PER_SEC: u32 = 30;
 /// teloxide per-chat cap (~1 message/second/chat).
 const DEFAULT_PER_CHAT_INTERVAL: Duration = Duration::from_millis(1000);
 
+/// Default per-chat per-minute cap. teloxide `Limits::default()` enforced
+/// `messages_per_min_chat = 20` (private/group) and a stricter
+/// `messages_per_min_channel = 10` (channels/supergroups). `acquire(chat_id)`
+/// does not know the chat type, so we apply the uniform 20/min to every chat —
+/// supergroups/channels are thus capped at 20/min rather than teloxide's 10/min;
+/// the `with_retry` 429 backstop covers any residual flood the server rejects.
+const DEFAULT_PER_CHAT_PER_MIN: u32 = 20;
+
 /// Error type for every outbound Telegram operation routed through [`RightBot`].
 ///
 /// Both `frankenstein::Error` and `reqwest::Error` already implement `Display`
@@ -62,38 +71,52 @@ pub(crate) enum TgError {
 
 /// Global + per-chat outbound rate gate, approximating teloxide's `Limits`.
 ///
-/// The per-chat gate is a last-send timestamp map (keyed `tokio::time::Instant`)
+/// Reproduces teloxide `Limits::default()`'s caps:
+/// - global ~30 messages/second (`messages_per_sec_overall`),
+/// - per-chat ~1 message/second (`messages_per_sec_chat`), and
+/// - per-chat 20 messages/minute (`messages_per_min_chat`).
+///
+/// The per-chat 1s gate is a last-send timestamp map (keyed `tokio::time::Instant`)
 /// enforcing a minimum interval per chat; because it uses the tokio clock, it
 /// advances correctly under the tokio test clock (`start_paused = true`). The
-/// global limiter is a [`governor`] direct rate limiter on `DefaultClock`
-/// (governor's real monotonic wall-clock), so its `until_ready().await` sleeps
-/// in real time regardless of `start_paused` — it is therefore not exercised by
-/// the paused-clock unit tests (their volumes stay under the global cap, so it
-/// returns immediately).
+/// global limiter and the keyed per-minute limiter are [`governor`] rate limiters
+/// on `DefaultClock` (governor's real monotonic wall-clock), so their
+/// `until_ready().await` sleeps in real time regardless of `start_paused` — they
+/// are therefore not exercised by the paused-clock unit tests (those tests keep
+/// volumes under both caps, so the calls return immediately).
 pub(crate) struct Throttle {
     global: RateLimiter<NotKeyed, InMemoryState, DefaultClock>,
+    per_chat_per_min: RateLimiter<i64, DefaultKeyedStateStore<i64>, DefaultClock>,
     per_chat_interval: Duration,
     last_per_chat: DashMap<i64, Instant>,
 }
 
 impl Throttle {
-    pub(crate) fn new(global_per_sec: u32, per_chat_interval: Duration) -> Self {
-        let quota =
+    pub(crate) fn new(
+        global_per_sec: u32,
+        per_chat_interval: Duration,
+        per_chat_per_min: u32,
+    ) -> Self {
+        let global_quota =
             Quota::per_second(NonZeroU32::new(global_per_sec).expect("global_per_sec must be > 0"));
+        let per_min_quota = Quota::per_minute(
+            NonZeroU32::new(per_chat_per_min).expect("per_chat_per_min must be > 0"),
+        );
         Self {
-            global: RateLimiter::direct(quota),
+            global: RateLimiter::direct(global_quota),
+            per_chat_per_min: RateLimiter::keyed(per_min_quota),
             per_chat_interval,
             last_per_chat: DashMap::new(),
         }
     }
 
     /// Block until it is permissible to send to `chat_id`: first wait out the
-    /// per-chat interval, then acquire a global token.
+    /// per-chat 1s interval, then the per-chat 20/min cap, then a global token.
     ///
     /// Best-effort under concurrency: two concurrent `acquire` calls for the
-    /// same chat read the timestamp before either writes it, so they may both
-    /// proceed and briefly exceed the per-chat interval. The global governor
-    /// limiter remains the hard cap.
+    /// same chat read the 1s timestamp before either writes it, so they may both
+    /// proceed and briefly exceed the per-chat interval. The keyed per-minute
+    /// and global governor limiters remain the hard caps.
     pub(crate) async fn acquire(&self, chat_id: i64) {
         loop {
             let now = Instant::now();
@@ -109,8 +132,18 @@ impl Throttle {
             }
         }
         self.last_per_chat.insert(chat_id, Instant::now());
+        self.per_chat_per_min.until_key_ready(&chat_id).await;
         self.global.until_ready().await;
     }
+}
+
+/// The default outbound throttle matching teloxide `Limits::default()`.
+fn default_throttle() -> Throttle {
+    Throttle::new(
+        DEFAULT_GLOBAL_PER_SEC,
+        DEFAULT_PER_CHAT_INTERVAL,
+        DEFAULT_PER_CHAT_PER_MIN,
+    )
 }
 
 /// Extract the 429 `retry_after` seconds from a frankenstein error, if present.
@@ -198,10 +231,7 @@ impl RightBot {
             bot,
             token: Arc::new(token),
             me: Arc::new(placeholder_user()),
-            rate: Arc::new(Throttle::new(
-                DEFAULT_GLOBAL_PER_SEC,
-                DEFAULT_PER_CHAT_INTERVAL,
-            )),
+            rate: Arc::new(default_throttle()),
         }
     }
 
@@ -215,10 +245,7 @@ impl RightBot {
             bot,
             token: Arc::new(token),
             me: Arc::new(me),
-            rate: Arc::new(Throttle::new(
-                DEFAULT_GLOBAL_PER_SEC,
-                DEFAULT_PER_CHAT_INTERVAL,
-            )),
+            rate: Arc::new(default_throttle()),
         })
     }
 
@@ -235,34 +262,6 @@ impl RightBot {
     }
 
     // ---- core sends -------------------------------------------------------
-
-    /// Send an HTML-formatted message, optionally threaded, replying, and with
-    /// an inline keyboard. Returns the sent [`Message`] (callers read
-    /// `message_id`). Convenience wrapper over [`Self::send_message_opts`] with
-    /// `html = true`; retained as a named entry on the documented surface.
-    #[allow(dead_code)]
-    pub(crate) async fn send_html(
-        &self,
-        chat_id: i64,
-        thread: Option<i32>,
-        text: &str,
-        reply_to: Option<i32>,
-        markup: Option<InlineKeyboardMarkup>,
-    ) -> Result<Message, TgError> {
-        self.rate.acquire(chat_id).await;
-        let params = frankenstein::methods::SendMessageParams::builder()
-            .chat_id(chat_id)
-            .text(text)
-            .parse_mode(ParseMode::Html)
-            .maybe_message_thread_id(thread)
-            .maybe_reply_parameters(
-                reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
-            )
-            .maybe_reply_markup(markup.map(ReplyMarkup::InlineKeyboardMarkup))
-            .build();
-        let resp = with_retry(|| self.bot.send_message(&params)).await?;
-        Ok(resp.result)
-    }
 
     /// Send a plain-text message (no parse mode). Returns the sent [`Message`].
     pub(crate) async fn send_text(&self, chat_id: i64, text: &str) -> Result<Message, TgError> {
@@ -306,6 +305,11 @@ impl RightBot {
     /// Edit an existing message's HTML text and inline keyboard. The edited
     /// payload (`MessageOrBool`) is discarded — callers only care about
     /// success/failure.
+    ///
+    /// NOT throttled — teloxide put `editMessageText` in its un-throttled
+    /// passthrough block (only `send_*` were rate-limited). Keeping edits
+    /// un-throttled preserves that and keeps progress-banner edit streaming
+    /// responsive. The `with_retry` 429 backstop still covers a server flood.
     pub(crate) async fn edit_html(
         &self,
         chat_id: i64,
@@ -313,7 +317,6 @@ impl RightBot {
         text: &str,
         markup: Option<InlineKeyboardMarkup>,
     ) -> Result<(), TgError> {
-        self.rate.acquire(chat_id).await;
         let params = frankenstein::methods::EditMessageTextParams::builder()
             .chat_id(chat_id)
             .message_id(message_id)
@@ -840,7 +843,7 @@ mod throttle_tests {
 
     #[tokio::test(start_paused = true)]
     async fn per_chat_gate_spaces_same_chat_sends() {
-        let t = Throttle::new(30, Duration::from_millis(1000));
+        let t = Throttle::new(30, Duration::from_millis(1000), 20);
         let start = Instant::now();
         t.acquire(100).await;
         t.acquire(100).await;
@@ -849,7 +852,7 @@ mod throttle_tests {
 
     #[tokio::test(start_paused = true)]
     async fn different_chats_do_not_block_each_other_on_per_chat_gate() {
-        let t = Throttle::new(30, Duration::from_millis(1000));
+        let t = Throttle::new(30, Duration::from_millis(1000), 20);
         let start = Instant::now();
         t.acquire(1).await;
         t.acquire(2).await;
