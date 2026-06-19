@@ -681,18 +681,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let menu_hostname = global_cfg.tunnel.hostname.clone();
     let menu_agent = args.agent.clone();
     tokio::spawn(async move {
-        use teloxide::payloads::SetChatMenuButtonSetters as _;
-        use teloxide::prelude::Requester as _;
-        use teloxide::types::{MenuButton, WebAppInfo};
-
         match telegram::dashboard::dashboard_url(&menu_hostname, &menu_agent) {
             Ok(url) => {
                 if let Err(e) = menu_bot
-                    .set_chat_menu_button()
-                    .menu_button(MenuButton::WebApp {
-                        text: "Dashboard".to_string(),
-                        web_app: WebAppInfo { url },
-                    })
+                    .set_chat_menu_button_webapp("Dashboard", url.to_string())
                     .await
                 {
                     tracing::warn!("set_chat_menu_button failed: {e:#}");

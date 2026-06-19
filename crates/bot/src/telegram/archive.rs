@@ -2,10 +2,11 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
+use frankenstein::types::Message;
 use right_db::conversation::{ConversationMessage, ConversationRole, archive_message};
-use teloxide::types::{ChatKind, Message};
 
 use super::mention::{AddressKind, BotIdentity, is_bot_addressed};
+use super::msg_ext;
 use super::session::effective_thread_id;
 
 // Why 4: bounded so a Telegram traffic burst cannot queue unbounded
@@ -53,13 +54,13 @@ struct AssistantArchivePayload {
 }
 
 pub(crate) fn should_archive_seen_group_message(msg: &Message) -> bool {
-    !matches!(msg.chat.kind, ChatKind::Private(_))
+    !msg_ext::is_private(&msg.chat)
 }
 
 pub(crate) fn archive_content(msg: &Message) -> Option<String> {
     let mut parts = Vec::new();
 
-    if let Some(content) = msg.text().or(msg.caption()).map(str::trim)
+    if let Some(content) = msg_ext::text_or_caption(msg).map(str::trim)
         && !content.is_empty()
     {
         parts.push(content.to_string());
@@ -95,7 +96,7 @@ pub(crate) fn archive_routed_dm_message(
     msg: &Message,
     address: Option<AddressKind>,
 ) {
-    if !matches!(msg.chat.kind, ChatKind::Private(_)) {
+    if !msg_ext::is_private(&msg.chat) {
         return;
     }
 
@@ -127,11 +128,11 @@ impl ArchivePayload {
         Some(Self {
             agent_dir: agent_dir.to_path_buf(),
             content: archive_content(msg)?,
-            chat_id: msg.chat.id.0,
+            chat_id: msg.chat.id,
             thread_id: effective_thread_id(msg),
-            message_id: msg.id.0,
-            sender_user_id: msg.from.as_ref().map(|user| user.id.0 as i64),
-            sender_name: msg.from.as_ref().map(|user| user.full_name()),
+            message_id: msg.message_id,
+            sender_user_id: msg.from.as_ref().map(|user| user.id as i64),
+            sender_name: msg.from.as_ref().map(|user| msg_ext::full_name(user)),
             addressed_to_bot,
             routed_to_agent,
         })
@@ -353,7 +354,7 @@ async fn retry_archive_assistant_db_write(
 mod tests {
     use std::sync::LazyLock;
 
-    use teloxide::types::Message;
+    use frankenstein::types::Message;
 
     use super::super::mention::{AddressKind, BotIdentity};
 

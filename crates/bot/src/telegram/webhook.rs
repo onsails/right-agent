@@ -47,7 +47,7 @@ pub(crate) fn build_webhook_router(secret: String, ctx: Arc<HandlerCtx>) -> Rout
 
 async fn handle(State(st): State<WState>, headers: HeaderMap, body: Bytes) -> StatusCode {
     let provided = headers.get(SECRET_HEADER).and_then(|v| v.to_str().ok());
-    let parsed = serde_json::from_slice::<frankenstein::Update>(&body);
+    let parsed = serde_json::from_slice::<frankenstein::updates::Update>(&body);
     match router::webhook_outcome(provided, &st.secret, parsed.is_ok()) {
         WebhookOutcome::Unauthorized => StatusCode::UNAUTHORIZED,
         WebhookOutcome::AckIgnore => {
