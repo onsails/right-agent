@@ -5,7 +5,7 @@
 /// Which callback handler an inline-button `callback_query.data` routes to.
 /// Mirrors the `dptree` callback branch order in `dispatch.rs`.
 #[derive(Debug, PartialEq, Eq)]
-pub enum CallbackRoute {
+pub(crate) enum CallbackRoute {
     Model,
     Mode,
     Thinking,
@@ -17,7 +17,7 @@ pub enum CallbackRoute {
 /// Classify inline-button callback data by prefix. The `Stop` fallthrough
 /// matches the prior `.endpoint(handle_stop_callback)` default branch (also
 /// covers `None` data).
-pub fn classify_callback(data: Option<&str>) -> CallbackRoute {
+pub(crate) fn classify_callback(data: Option<&str>) -> CallbackRoute {
     match data {
         Some(d) if d.starts_with("model:") => CallbackRoute::Model,
         Some(d) if d.starts_with("mode:") || d.starts_with("modegroup:") => CallbackRoute::Mode,
@@ -30,7 +30,7 @@ pub fn classify_callback(data: Option<&str>) -> CallbackRoute {
 
 /// Outcome of authenticating + parsing an inbound webhook request.
 #[derive(Debug, PartialEq, Eq)]
-pub enum WebhookOutcome {
+pub(crate) enum WebhookOutcome {
     Unauthorized,
     AckIgnore,
     Routed,
@@ -40,7 +40,7 @@ pub enum WebhookOutcome {
 /// is `Unauthorized`; a valid secret with an unparseable body is `AckIgnore`
 /// (200 to stop Telegram retries); a valid secret with a parseable body is
 /// `Routed`.
-pub fn webhook_outcome(
+pub(crate) fn webhook_outcome(
     secret_header: Option<&str>,
     expected_secret: &str,
     body_parses: bool,

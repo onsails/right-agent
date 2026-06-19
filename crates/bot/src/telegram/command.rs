@@ -9,7 +9,7 @@
 /// One of the bot's slash commands. Variants carrying a `String` hold the raw
 /// (untrimmed) payload — everything after the first space.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BotCommand {
+pub(crate) enum BotCommand {
     Start(String),
     New(String),
     List,
@@ -74,7 +74,7 @@ const VISIBLE_COMMANDS: &[(&str, &str)] = &[
 ///
 /// Returns `None` for non-commands, unknown commands, and `@username`
 /// mismatches (which fall through to the text handler).
-pub fn parse(text: &str, bot_username: &str) -> Option<BotCommand> {
+pub(crate) fn parse(text: &str, bot_username: &str) -> Option<BotCommand> {
     let mut split = text.splitn(2, ' ');
     let command_token = split.next()?;
     let payload = split.next().unwrap_or("");
@@ -120,7 +120,7 @@ pub fn parse(text: &str, bot_username: &str) -> Option<BotCommand> {
 }
 
 /// Build the `setMyCommands` rows (visible commands only; `usage` is hidden).
-pub fn visible() -> Vec<frankenstein::types::BotCommand> {
+pub(crate) fn visible() -> Vec<frankenstein::types::BotCommand> {
     VISIBLE_COMMANDS
         .iter()
         .map(|(command, description)| {
