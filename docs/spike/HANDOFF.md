@@ -21,6 +21,11 @@ Conditions: **mimo's emulated forced-tool path** (synthetic `StructuredOutput` t
 - `kimi-k2-6`, `qwen3-5-9b` → `Grammar error: Unimplemented keys: ["propertyNames"]` — injected by the stack (NOT in our schemas), Venice-Kimi-endpoint-specific → **likely a Venice-side tooling bug; Kimi's true ability is UNMEASURED.**
 - `deepseek-v4-pro`, `hermes-3-llama-3.1-405b` → Venice `400 Bad Request` (provider param incompatibility, not model).
 
+**2026-06-19 re-measure delta** (full table in SPIKE-RESULTS.md "RE-MEASURE"):
+- **+3 new clean passes → whitelist:** `zai-org-glm-5-1`, `zai-org-glm-5-2`, `qwen3-235b-a22b-thinking-2507` (net ≈ **12** strong open families; baseline 9 unchanged, nothing regressed).
+- **propertyNames now reproduces on 5 models** (both Kimi + `qwen3-5-397b-a17b`, `qwen3-6-27b`, `qwen3-vl-235b-a22b`) while GLM-5/5-1/5-2 + qwen3-235b instruct/thinking pass on the identical request → **decisive that it's Venice per-model-endpoint server-side**, not schema/version/uniform-client-transform. Still tooling, NOT model incapacity.
+- **Venice param-400** also hit new `deepseek-v4-flash` + `z-ai-glm-5-turbo` (provider, not model).
+
 **The whitelist is `(model × provider × mechanism)`-specific — see the caveat below.**
 
 ## THE caveat that gates everything
@@ -33,7 +38,7 @@ The whitelist was measured on **mimo-emulated-forced-tool + Venice**. The produc
 
 ## Open work (continuation TODO, priority order)
 
-1. **NEW KIMI (user flagged a new release).** (a) `mimo models venice | grep -i kimi` for a newer id — currently only `kimi-k2-5` / `kimi-k2-6`; the new one may be `kimi-k2-7` / `k3` / a thinking variant, or only on Moonshot's own API yet. (b) Test it **both via Venice AND via a non-Venice provider** (Moonshot/Together) — this **isolates** whether the old `propertyNames` failure was Venice-tooling (then new-Kimi-via-Venice still fails) vs the model. If it passes anywhere → add to whitelist AND it confirms the failure was tooling, not Kimi.
+1. ~~**NEW KIMI (user flagged a new release).**~~ **DONE 2026-06-19 (negative) — see SPIKE-RESULTS.md "RE-MEASURE".** New Kimi = `venice/kimi-k2-7-code`. It fails the **identical** `propertyNames` grammar error as the `kimi-k2-6` control, both on Venice → the failure is **not** version-specific; it's the Venice Kimi-endpoint grammar engine, persisting across versions. **Remaining open (now blocked on provider auth):** measure Kimi's *intrinsic* ability via a **non-Venice provider** (Moonshot/Together/self-host vLLM). mimo's catalog exposes Kimi only under `venice/*`, so this needs the user to `mimo auth login` a non-Venice provider first (I must not handle their credentials). Until then Kimi's true ability stays unmeasured.
 2. **Re-measure the whitelist on the prod mechanism+provider** (spike was mimo+Venice). Re-run `docs/spike/harness/run_mimo_broad.py` (adapt for rig-native-`response_format` if that's the chosen path).
 3. **`propertyNames` fix.** Injected by the stack, NOT our schema, Venice-Kimi-specific, **likely Venice-server-side** (the `venice-ai-sdk-provider` adapter passes the schema as-is; client request is identical for GLM-5 which passes). Confirm the injecting layer: if client-side → strip unsupported JSON-Schema keywords before the grammar compile → unblocks Kimi/qwen-9b (→ ~11/13); if Venice-server → can't fix, route those models via another provider.
 4. **Retry loop (required even for whitelist models).** 3/9 passed the HARD schema but flaked the EASY one (EMPTY / ignored-tool / INVALID) → structured output is **not deterministic**; "supports it" ≠ "always emits it." Need retry-on-miss (mimo has `retryCount`; on rig build your own) + consider a **coerce/repair** layer (borrow Pi `validation.ts`/`json-parse.ts`, Goose `toolshim.rs`, Hermes `coerce_tool_args`). Decide policy + cap.

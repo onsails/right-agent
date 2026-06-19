@@ -11,7 +11,8 @@ emulated-StructuredOutput-tool path. NOT `mimo run` (no schema flag there).
 4. Schemas are read from `../schemas/*.json` (the real RightClaw `--json-schema` payloads).
 
 ## Scripts
-- `run_mimo_broad.py` — THE whitelist sweep: models × [prefilter, cron] → VALID / INVALID / NO_STRUCTURED / GRAMMAR_ERR / PROVIDER_400. **Edit the `models` list to add the new Kimi / other candidates.** Hard CRON oneOf is the gating schema.
+- `run_mimo_broad.py` — THE original whitelist sweep (baseline 2026-06-13): models × [prefilter, cron] → VALID / INVALID / NO_STRUCTURED / GRAMMAR_ERR / PROVIDER_400. **Edit the `models` list to add candidates.** Hard CRON oneOf is the gating schema. (Reads schemas from a job tmp `{SC}/schemas`.)
+- `run_kimi7_sweep.py` — **2026-06-19 re-measure** (new Kimi `kimi-k2-7-code` + new Venice models). Portable: reads schemas relative to itself (`../schemas`), mimo dir from `$SPIKE_SCRATCH` (default `~/.mimo-spike`). Results → `kimi7_sweep_results.json` (committed copy here). Verdict in `../SPIKE-RESULTS.md` "RE-MEASURE": new Kimi fails the same `propertyNames` as k2-6 (Venice per-model server bug, not version); +3 new clean passes (`glm-5-1`, `glm-5-2`, `qwen3-235b-thinking`).
 - `run_poll2.py`, `run_venice.py` — per-model conformance with poll-for-`info.finish` + retry-on-empty-turn.
 - `probe_propnames.py` — isolates the `propertyNames` failure (sends a MINIMAL flat schema; if it still errors → propertyNames is injected by the stack, not our schema).
 

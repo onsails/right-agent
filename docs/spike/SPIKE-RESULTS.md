@@ -121,3 +121,35 @@ Two caveats kept honest:
 - It is **injected by the tooling stack, unconditionally** (not by RightClaw's schema — proven), and is **Kimi-endpoint-specific** on Venice.
 - `serve.log` shows mimo reaches Venice via the bundled `venice-ai-sdk-provider`; that adapter passes the schema **as-is** (defaults `strict:true`), and the schema is sent as a synthetic `StructuredOutput` **tool** through the AI SDK's `prepareTools()`. Because the client request is identical for GLM-5 (works) and Kimi (fails), the differentiator is **Venice's server-side grammar compilation for the Kimi endpoint** — i.e. **most likely a Venice-side, per-model bug**, NOT MiMo's wrapper and NOT model incapacity. (Earlier wording "injected by MiMo's wrapper, fixable in a MiMo fork" is **corrected** — exact injecting layer not pinned, but evidence points to Venice-server, which RightClaw cannot fix; the practical answer is "don't use Kimi-via-Venice for structured output — it may work via another provider/quant".)
 - Consequence: Kimi's *actual* structured-output ability is **unmeasured** here (Venice's enforcement layer rejects before generation). It is not a "Kimi can't do structured output" result.
+
+## RE-MEASURE — new Kimi + new Venice models (2026-06-19)
+
+Same path (mimo serve emulated-StructuredOutput-tool + Venice, real schemas, hard CRON oneOf gate). Re-run to (a) resolve handoff TODO #1 — the user flagged a new Kimi release — and (b) sweep models that appeared in Venice's catalog since the baseline. Harness `docs/spike/harness/run_kimi7_sweep.py`; results `…/kimi7_sweep_results.json`.
+
+| Model (venice/…) | prefilter | cron (hard oneOf) | classification |
+|---|---|---|---|
+| zai-org-glm-5 *(anchor)* | ✅ VALID | ✅ VALID | clean pass — confirms harness+auth OK |
+| qwen3-235b-a22b-instruct-2507 *(anchor)* | ✅ VALID | ✅ VALID | clean pass |
+| **kimi-k2-7-code** *(NEW Kimi)* | ❌ GRAMMAR_ERR | ❌ GRAMMAR_ERR | **same `propertyNames` as k2-6** — new Kimi does NOT fix it on Venice |
+| kimi-k2-6 *(control)* | ❌ GRAMMAR_ERR | ❌ GRAMMAR_ERR | `propertyNames` — unchanged |
+| **zai-org-glm-5-1** *(new)* | ✅ VALID | ✅ VALID | **clean pass → whitelist** |
+| **zai-org-glm-5-2** *(new)* | ✅ VALID | ✅ VALID | **clean pass → whitelist** |
+| **qwen3-235b-a22b-thinking-2507** *(new)* | ✅ VALID | ✅ VALID | **clean pass → whitelist** |
+| z-ai-glm-5-turbo *(new)* | ❌ PROVIDER_400 | ❌ PROVIDER_400 | Venice "Provider returned error" (param) |
+| deepseek-v4-flash *(new)* | ❌ PROVIDER_400 | ❌ PROVIDER_400 | Venice 400 "Invalid request parameters" (same class as v4-pro) |
+| deepseek-v4-pro | ❌ PROVIDER_400 | ❌ PROVIDER_400 | Venice 400 — consistent with baseline |
+| qwen3-5-397b-a17b *(new)* | ❌ GRAMMAR_ERR | ❌ EMPTY/timeout | `propertyNames` |
+| qwen3-6-27b *(new)* | ❌ GRAMMAR_ERR | ❌ GRAMMAR_ERR | `propertyNames` |
+| qwen3-vl-235b-a22b *(new)* | ❌ GRAMMAR_ERR | ❌ GRAMMAR_ERR | `propertyNames` |
+
+### TODO #1 — RESOLVED (negative): the new Kimi does not unblock on Venice
+`kimi-k2-7-code` fails with the **identical** `Grammar error: Unimplemented keys: ["propertyNames"]` as the `kimi-k2-6` control, both on Venice in the same run. So the failure is **not Kimi-version-specific** — it is the Venice grammar engine for the Kimi-endpoint family, persisting across versions. Kimi's *intrinsic* structured-output ability remains **unmeasured** (Venice rejects before generation). Measuring it still requires a **non-Venice provider** (Moonshot / Together / self-host vLLM) — and the mimo catalog exposes Kimi **only** under `venice/*`, so this branch is **blocked on provider auth** (I cannot auth a provider with the user's credentials; the user must `mimo auth login` Moonshot/Together to run it).
+
+### Strengthened `propertyNames` conclusion (per-model Venice-server, decisive)
+The baseline saw `propertyNames` on 2 models (kimi-k2-6, qwen3-5-9b) and inferred "Venice-server, per-model." This run makes it **decisive**: the *same* error now reproduces on **5** models (both Kimi versions + qwen3-5-397b + qwen3-6-27b + qwen3-vl-235b) while glm-5/5-1/5-2 and qwen3-235b instruct+thinking pass on the **identical** client request. A uniform client-side schema transform would inject `propertyNames` for **all** models, not a subset — so the differentiator is **Venice's per-model-endpoint server-side grammar compilation** (the affected endpoints use a grammar lib that doesn't implement the keyword; our schemas contain neither `propertyNames` nor `additionalProperties` — re-verified). RightClaw cannot fix this server-side; the practical answers are: **route those models via another provider**, or **use a mechanism that doesn't synthesize the forced-tool schema at all** (rig native `response_format`) — which may dodge it entirely. The (model × provider × **mechanism**) caveat is now the dominant variable.
+
+### Whitelist delta
+- **+3 clean passes:** `zai-org-glm-5-1`, `zai-org-glm-5-2`, `qwen3-235b-a22b-thinking-2507`.
+- **propertyNames surface widened (still tooling, NOT model incapacity):** + `kimi-k2-7-code`, `qwen3-5-397b-a17b`, `qwen3-6-27b`, `qwen3-vl-235b-a22b`.
+- **Venice param-400 surface widened (provider, NOT model):** + `deepseek-v4-flash`, `z-ai-glm-5-turbo`.
+- **Net whitelist via mimo+Venice ≈ 12** strong open families (baseline 9 + the 3 new GLM/Qwen passes). The 9 strong families from the baseline are unchanged; nothing regressed.

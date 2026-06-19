@@ -1,0 +1,93 @@
+[
+ {
+  "model": "zai-org-glm-5",
+  "prefilter": "VALID",
+  "prefilter_d": "",
+  "cron": "VALID",
+  "cron_d": ""
+ },
+ {
+  "model": "qwen3-235b-a22b-instruct-2507",
+  "prefilter": "VALID",
+  "prefilter_d": "",
+  "cron": "VALID",
+  "cron_d": ""
+ },
+ {
+  "model": "kimi-k2-7-code",
+  "prefilter": "GRAMMAR_ERR",
+  "prefilter_d": "{\"name\": \"UnknownError\", \"data\": {\"message\": \"\\\"Grammar error: Unimplemented keys: [\\\\\\\"pr",
+  "cron": "GRAMMAR_ERR",
+  "cron_d": "{\"name\": \"UnknownError\", \"data\": {\"message\": \"\\\"Grammar error: Unimplemented keys: [\\\\\\\"pr"
+ },
+ {
+  "model": "kimi-k2-6",
+  "prefilter": "GRAMMAR_ERR",
+  "prefilter_d": "{\"name\": \"UnknownError\", \"data\": {\"message\": \"\\\"Grammar error: Unimplemented keys: [\\\\\\\"pr",
+  "cron": "GRAMMAR_ERR",
+  "cron_d": "{\"name\": \"UnknownError\", \"data\": {\"message\": \"\\\"Grammar error: Unimplemented keys: [\\\\\\\"pr"
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "prefilter": "PROVIDER_400",
+  "prefilter_d": "{\"name\": \"APIError\", \"data\": {\"message\": \"Bad Request: Invalid request parameters. For ass",
+  "cron": "PROVIDER_400",
+  "cron_d": "{\"name\": \"APIError\", \"data\": {\"message\": \"Bad Request: Invalid request parameters. For ass"
+ },
+ {
+  "model": "deepseek-v4-pro",
+  "prefilter": "PROVIDER_400",
+  "prefilter_d": "{\"name\": \"APIError\", \"data\": {\"message\": \"Bad Request: Invalid request parameters. For ass",
+  "cron": "PROVIDER_400",
+  "cron_d": "{\"name\": \"APIError\", \"data\": {\"message\": \"Bad Request: Invalid request parameters. For ass"
+ },
+ {
+  "model": "zai-org-glm-5-1",
+  "prefilter": "VALID",
+  "prefilter_d": "",
+  "cron": "VALID",
+  "cron_d": ""
+ },
+ {
+  "model": "zai-org-glm-5-2",
+  "prefilter": "VALID",
+  "prefilter_d": "",
+  "cron": "VALID",
+  "cron_d": ""
+ },
+ {
+  "model": "z-ai-glm-5-turbo",
+  "prefilter": "PROVIDER_400",
+  "prefilter_d": "{\"name\": \"APIError\", \"data\": {\"message\": \"Bad Request: Provider returned error\", \"statusCo",
+  "cron": "PROVIDER_400",
+  "cron_d": "{\"name\": \"APIError\", \"data\": {\"message\": \"Bad Request: Provider returned error\", \"statusCo"
+ },
+ {
+  "model": "qwen3-235b-a22b-thinking-2507",
+  "prefilter": "VALID",
+  "prefilter_d": "",
+  "cron": "VALID",
+  "cron_d": ""
+ },
+ {
+  "model": "qwen3-5-397b-a17b",
+  "prefilter": "GRAMMAR_ERR",
+  "prefilter_d": "{\"name\": \"UnknownError\", \"data\": {\"message\": \"\\\"Grammar error: Unimplemented keys: [\\\\\\\"pr",
+  "cron": "EMPTY",
+  "cron_d": "{\"_exc\": \"timed out\"}"
+ },
+ {
+  "model": "qwen3-6-27b",
+  "prefilter": "GRAMMAR_ERR",
+  "prefilter_d": "{\"name\": \"UnknownError\", \"data\": {\"message\": \"\\\"Grammar error: Unimplemented keys: [\\\\\\\"pr",
+  "cron": "GRAMMAR_ERR",
+  "cron_d": "{\"name\": \"UnknownError\", \"data\": {\"message\": \"\\\"Grammar error: Unimplemented keys: [\\\\\\\"pr"
+ },
+ {
+  "model": "qwen3-vl-235b-a22b",
+  "prefilter": "GRAMMAR_ERR",
+  "prefilter_d": "{\"name\": \"UnknownError\", \"data\": {\"message\": \"\\\"Grammar error: Unimplemented keys: [\\\\\\\"pr",
+  "cron": "GRAMMAR_ERR",
+  "cron_d": "{\"name\": \"UnknownError\", \"data\": {\"message\": \"\\\"Grammar error: Unimplemented keys: [\\\\\\\"pr"
+ }
+]
