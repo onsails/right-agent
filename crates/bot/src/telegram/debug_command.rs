@@ -91,22 +91,21 @@ pub(crate) fn apply_action(
     }
 }
 
-/// teloxide handler — registered in dispatch.rs. The `args` String comes from
-/// `BotCommand::Debug(args)` (whitespace-trimmed by teloxide).
+/// `/debug` handler. The `args` String comes from `BotCommand::Debug(args)`.
 pub(crate) async fn handle_debug(
-    bot: super::BotType,
-    msg: teloxide::types::Message,
+    ctx: &super::router::HandlerCtx,
+    msg: &frankenstein::types::Message,
     args: String,
-    settings: std::sync::Arc<super::handler::AgentSettings>,
-    agent_dir: std::sync::Arc<super::handler::AgentDir>,
-    allowlist: right_agent::agent::allowlist::AllowlistHandle,
-) -> teloxide::prelude::ResponseResult<()> {
-    if !super::handler::is_private_chat(&msg.chat.kind)
-        && !super::allowlist_commands::sender_is_trusted(&msg, &allowlist)
+) -> Result<(), super::tg_bot::TgError> {
+    let bot = &ctx.bot;
+    let settings = &ctx.settings;
+    let agent_dir = &ctx.agent_dir;
+    if !super::handler::is_private_chat(&msg.chat)
+        && !super::allowlist_commands::sender_is_trusted(msg, &ctx.allowlist)
     {
         tracing::debug!(
-            chat_id = msg.chat.id.0,
-            user_id = msg.from.as_ref().map(|u| u.id.0),
+            chat_id = msg.chat.id,
+            user_id = msg.from.as_ref().map(|u| u.id),
             "/debug ignored: non-trusted sender in group"
         );
         return Ok(());
@@ -115,7 +114,7 @@ pub(crate) async fn handle_debug(
     let action = match parse_debug_action(&args) {
         Ok(a) => a,
         Err(e) => {
-            send_reply(&bot, &msg, &e).await?;
+            send_reply(bot, msg, &e).await?;
             return Ok(());
         }
     };
@@ -133,23 +132,17 @@ pub(crate) async fn handle_debug(
         Err(e) => e,
     };
 
-    send_reply(&bot, &msg, &reply).await?;
+    send_reply(bot, msg, &reply).await?;
     Ok(())
 }
 
 async fn send_reply(
     bot: &super::BotType,
-    msg: &teloxide::types::Message,
+    msg: &frankenstein::types::Message,
     text: &str,
-) -> teloxide::prelude::ResponseResult<()> {
-    use teloxide::prelude::*;
-    let mut send = bot
-        .send_message(msg.chat.id, text)
-        .parse_mode(teloxide::types::ParseMode::Html);
-    if let Some(thread_id) = msg.thread_id {
-        send = send.message_thread_id(thread_id);
-    }
-    send.await?;
+) -> Result<(), super::tg_bot::TgError> {
+    bot.send_message_opts(msg.chat.id, text, true, msg.message_thread_id, None, None)
+        .await?;
     Ok(())
 }
 
