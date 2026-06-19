@@ -760,7 +760,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: McpCommands,
     },
-    /// Run the per-agent Telegram bot (long-polling, teloxide)
+    /// Run the per-agent Telegram bot (webhook)
     Bot {
         /// Agent name (resolves to $RIGHT_HOME/agents/<name>/)
         #[arg(long)]
