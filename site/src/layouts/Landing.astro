@@ -49,58 +49,10 @@ const starLabel = formatStars(await getStars());
     <slot />
 
     <script>
-      const sections = Array.from(document.querySelectorAll('.section')) as HTMLElement[];
-      let activeSection: HTMLElement | null = null;
-      const clearActiveSection = () => {
-        if (activeSection) {
-          activeSection.removeAttribute('data-active');
-          activeSection = null;
-        }
-        for (const section of sections) section.removeAttribute('data-active');
-      };
-      const updateActiveSection = () => {
-        // Active = the section the viewport center sits inside. Using a plain
-        // nearest-section argmin instead would activate the first section at
-        // page load (while the hero is on screen, it is the closest one), so
-        // that section would sit pre-zoomed and never do the scroll-in "pop"
-        // the others do. Containment leaves the hero region with no active
-        // section, so every section zooms in consistently on arrival.
-        const viewportCenter = innerHeight / 2;
-        let next: HTMLElement | null = null;
-        for (const section of sections) {
-          const rect = section.getBoundingClientRect();
-          if (rect.top <= viewportCenter && rect.bottom >= viewportCenter) {
-            next = section;
-            break;
-          }
-        }
-        if (next !== activeSection) {
-          clearActiveSection();
-          if (next) {
-            next.dataset.active = 'true';
-            activeSection = next;
-          }
-        }
-      };
-
-      const tick = () => {
-        updateActiveSection();
-
-        requestAnimationFrame(tick);
-      };
-      updateActiveSection();
-      requestAnimationFrame(tick);
       const io = new IntersectionObserver((es) => {
         for (const e of es) if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
       }, { threshold: .12 });
       document.querySelectorAll('.rev:not(.in)').forEach((el) => io.observe(el));
-      document.querySelectorAll<HTMLElement>('.card').forEach((c) => {
-        c.addEventListener('pointermove', (e) => {
-          const r = c.getBoundingClientRect();
-          c.style.setProperty('--gx', (e.clientX - r.left) + 'px');
-          c.style.setProperty('--gy', (e.clientY - r.top) + 'px');
-        }, { passive: true });
-      });
     </script>
   </body>
 </html>
