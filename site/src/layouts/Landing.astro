@@ -22,29 +22,31 @@ const starLabel = formatStars(await getStars());
   <body>
     <div class="fx void"></div>
 
-    <div class="wrap">
-      <nav class="topnav">
-        <a class="brand" href="/" aria-label="right agent">
-          <span class="clawwrap">
-            <svg class="claw" width="30" height="30" viewBox="0 0 100 100" aria-hidden="true">
-              <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-              <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke-width="8.5" stroke-linecap="round" fill="none"/>
-              <rect x="8" y="38" width="11" height="24" rx="5.5"/>
-              <path class="chk" d="M38 50 L46 58 L64 40" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-            </svg>
-          </span>
-          <span class="wm"><span class="r">right</span> <span class="a">agent</span></span>
-        </a>
-        <div class="navlinks">
-          <a href="/docs/">docs</a>
-          <a href="#install">install</a>
-          <a class="starchip" href="https://github.com/onsails/right-agent" aria-label="Star right agent on GitHub">
-            <svg class="ico" viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.7 1.6 7L12 18.3 5.8 21.2l1.6-7L2 9.5l7.1-.6z"/></svg>
-            <span>{starLabel ? `star · ${starLabel}` : 'star'}</span>
+    <header class="topbar">
+      <div class="wrap">
+        <nav class="topnav">
+          <a class="brand" href="/" aria-label="right agent">
+            <span class="clawwrap">
+              <svg class="claw" width="30" height="30" viewBox="0 0 100 100" aria-hidden="true">
+                <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+                <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+                <rect x="8" y="38" width="11" height="24" rx="5.5"/>
+                <path class="chk" d="M38 50 L46 58 L64 40" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+              </svg>
+            </span>
+            <span class="wm"><span class="r">right</span> <span class="a">agent</span></span>
           </a>
-        </div>
-      </nav>
-    </div>
+          <div class="navlinks">
+            <a href="/docs/">docs</a>
+            <a href="#install">install</a>
+            <a class="starchip" href="https://github.com/onsails/right-agent" aria-label="Star right agent on GitHub">
+              <svg class="ico" viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.7 1.6 7L12 18.3 5.8 21.2l1.6-7L2 9.5l7.1-.6z"/></svg>
+              <span>{starLabel ? `star · ${starLabel}` : 'star'}</span>
+            </a>
+          </div>
+        </nav>
+      </div>
+    </header>
 
     <slot />
 
