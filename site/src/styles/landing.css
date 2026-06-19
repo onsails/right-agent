@@ -116,7 +116,6 @@ h2 { font-family: var(--display); font-size: clamp(1.6rem, 3vw, 2.1rem); letter-
 .how-strip { border:1px solid var(--line); border-radius:18px; padding:1.6rem; background: color-mix(in srgb, var(--panel) 55%, transparent); }
 .how-strip.cred { border-color: color-mix(in srgb, var(--accent) 30%, transparent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .how-cap { display:flex; align-items:center; gap:.5rem; font-family:var(--mono); font-size:.64rem; letter-spacing:.18em; text-transform:uppercase; color:var(--dim); margin-bottom:1.1rem; }
-.how-cap .ic-sm { color:var(--accent); }
 .ic-sm { display:inline-flex; width:15px; height:15px; }
 .ic-sm svg { width:100%; height:100%; }
 
