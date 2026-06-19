@@ -25,7 +25,7 @@ stage on the dev server before the next.
 
 ## Stages
 
-1. [todo] Background ornaments — remove fake telemetry layers, paper texture, HUD corner-frame + readout; flat calm background.
+1. [planned] Background ornaments — remove fake telemetry layers, paper texture, HUD corner-frame + readout; flat calm background. spec:01-bg-ornaments-spec.md plan:01-bg-ornaments-plan.md wt:.worktrees/01-bg-ornaments mimo:bg-ornaments-3f9a
 2. [todo] Motion restraint — drop per-section scroll-zoom, logo spin ring, claw pulse, learning-dots, loopspark; keep at most a subtle reveal.
 3. [todo] Surface de-chrome — strip neon glows, heavy drop-shadows, backdrop-blur; hairline borders + flat panels across telem/cards/loop/diagram/control-plane.
 4. [todo] Rhythm & polish — whitespace + type scale, simplify mono eyebrow/label tags, prune dead CSS, final build + visual check.
