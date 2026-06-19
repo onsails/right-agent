@@ -10,7 +10,8 @@ import InstallBlock from '../components/InstallBlock.astro';
 import Footer from '../components/Footer.astro';
 ---
 <Landing>
-  <Hero />
+  <main>
+    <Hero />
 
   <div class="wrap">
     <div class="telem rev">
@@ -77,12 +78,14 @@ import Footer from '../components/Footer.astro';
     <CompareTable />
   </div></section>
 
-  <section class="section" id="install"><div class="wrap">
+    <section class="section" id="install"><div class="wrap">
     <div class="label rev">install</div>
     <h2 class="rev d1">one command to start</h2>
     <InstallBlock />
     <p class="note rev d1" style="margin-top:1.4rem;">one Claude subscription covers it: run as many agents as you want — cost scales with subscriptions, not agent count.</p>
   </div></section>
+
+  </main>
 
   <Footer />
 </Landing>
