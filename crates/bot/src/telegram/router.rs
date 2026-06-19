@@ -194,6 +194,85 @@ pub(crate) fn webhook_outcome(
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::path::PathBuf;
+
+    use dashmap::DashMap;
+    use right_agent::agent::allowlist::{AllowlistHandle, AllowlistState};
+
+    use super::super::handler::{
+        AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi,
+        PendingMcpAuthChoiceSlot, PendingTokenSlot, RightHome, SshConfigPath,
+    };
+
+    /// Build a `HandlerCtx` with dummy dependencies for handler-free tests
+    /// (e.g. the webhook secret-rejection paths, which short-circuit before any
+    /// handler runs). The bot is built via the sync `RightBot::new` (no network).
+    pub(crate) fn placeholder_ctx() -> HandlerCtx {
+        let settings = Arc::new(AgentSettings {
+            show_thinking: false,
+            model: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
+            resolved_sandbox: None,
+            hindsight: None,
+            prefetch_cache: None,
+            upgrade_lock: Arc::new(tokio::sync::RwLock::new(())),
+            debug: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            stt: None,
+            learning: right_agent::agent::types::LearningConfig::default(),
+            claude_health: crate::keepalive::ClaudeHealth::new(
+                "test".to_owned(),
+                PathBuf::from("/tmp/router-test"),
+                None,
+                None,
+                None,
+                None,
+            ),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            sandbox_runtime: {
+                let (h, _rx) = crate::sandbox_runtime::SandboxRuntimeHandle::new(
+                    crate::sandbox_runtime::SandboxHealth::Ready,
+                );
+                h
+            },
+        });
+        HandlerCtx {
+            bot: super::super::bot::build_bot("0:fake_token_for_router_tests".to_owned()),
+            allowlist: AllowlistHandle::new(AllowlistState::default()),
+            identity: Arc::new(BotIdentity {
+                username: "test_bot".to_owned(),
+                user_id: 1,
+            }),
+            worker_map: Arc::new(DashMap::new()),
+            agent_dir: Arc::new(AgentDir(PathBuf::from("/tmp/router-test"))),
+            pending_auth: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            home: Arc::new(RightHome(PathBuf::from("/tmp/router-test"))),
+            ssh_config: Arc::new(SshConfigPath(None)),
+            intercept_slots: Arc::new(InterceptSlots {
+                auth_code: Arc::new(tokio::sync::Mutex::new(None)),
+                auth_watcher: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+            pending_token_slot: Arc::new(PendingTokenSlot),
+            pending_auth_choice_slot: Arc::new(PendingMcpAuthChoiceSlot),
+            internal_api: Arc::new(InternalApi(Arc::new(
+                right_mcp::internal_client::InternalClient::new("/tmp/router-test.sock"),
+            ))),
+            settings,
+            idle_ts: Arc::new(IdleTimestamp(Arc::new(std::sync::atomic::AtomicI64::new(0)))),
+            worker_ctl: super::super::WorkerControlDeps {
+                stop_tokens: Arc::new(DashMap::new()),
+                session_locks: Arc::new(DashMap::new()),
+                bg_requests: Arc::new(DashMap::new()),
+                bg_handoff_gates: Arc::new(DashMap::new()),
+                thinking_visibility: Arc::new(DashMap::new()),
+                progress: super::super::progress::ProgressState::default(),
+                compact_timers: Arc::new(DashMap::new()),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

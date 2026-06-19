@@ -81,10 +81,6 @@ async fn webhook_register_loop(
     shutdown: tokio_util::sync::CancellationToken,
 ) {
     use std::sync::atomic::Ordering;
-    use teloxide::ApiError;
-    use teloxide::RequestError;
-    use teloxide::payloads::SetWebhookSetters as _;
-    use teloxide::requests::Requester as _;
     use tokio::time::Duration;
 
     let allowed = telegram::webhook::webhook_allowed_updates();
@@ -95,20 +91,17 @@ async fn webhook_register_loop(
             return;
         }
 
-        let req = bot
-            .set_webhook(url.clone())
-            .secret_token(secret.clone())
-            .allowed_updates(allowed.clone())
-            .max_connections(40);
-
-        match req.await {
-            Ok(_) => {
+        match bot
+            .set_webhook(url.as_str(), &secret, allowed.clone(), 40)
+            .await
+        {
+            Ok(()) => {
                 webhook_set.store(true, Ordering::Relaxed);
                 tracing::info!(target: "bot::webhook", url = %url, "webhook registered");
                 return;
             }
             Err(e) => {
-                if matches!(&e, RequestError::Api(ApiError::InvalidToken)) {
+                if e.is_invalid_token() {
                     tracing::error!(target: "bot::webhook", "bot token invalid; exiting");
                     std::process::exit(2);
                 }
@@ -600,11 +593,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .ok_or_else(|| miette::miette!("agent.yaml missing required `secret:` field"))?;
     let webhook_secret = right_mcp::derive_token(&agent_secret, "tg-webhook")?;
 
-    // Build the webhook listener + router. The listener is consumed by
-    // run_telegram → dispatcher.dispatch_with_listener; the router is mounted
-    // on the bot.sock UDS axum app so cloudflared can POST updates.
-    let (update_listener, _webhook_stop, webhook_router) =
-        telegram::webhook::build_webhook_router(webhook_secret.clone(), webhook_url.clone());
+    // The webhook router (an `axum::Router`) is produced by `setup_telegram`
+    // below, once all handler dependencies exist, then nested onto the bot.sock
+    // UDS axum app so cloudflared can POST updates.
 
     // Resolve sandbox name once — used throughout the bot lifetime.
     // None when running without sandbox (mode: none).
@@ -873,6 +864,89 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             doctor_checks: None,
         });
 
+    // --- Telegram handler dependencies (hoisted above the UDS spawn) ---
+    //
+    // The webhook router needs a fully-built `HandlerCtx`, which requires the
+    // per-session control maps, idle timestamp, keepalive health, and STT
+    // context. These are constructed here (once) and the resulting `Arc`s are
+    // shared with the cron/delivery/keepalive tasks spawned later.
+
+    // Per-main-session mutex map and per-(chat,thread) bg-request flags.
+    // Shared across worker, delivery, and callback handlers.
+    let session_locks: crate::telegram::SessionLocks = Arc::new(dashmap::DashMap::new());
+
+    // Shared idle timestamp: tracks last handler/worker interaction for async delivery gating.
+    use crate::telegram::handler::IdleTimestamp;
+    let idle_timestamp = Arc::new(IdleTimestamp(Arc::new(std::sync::atomic::AtomicI64::new(
+        chrono::Utc::now().timestamp(),
+    ))));
+
+    let compact_timers: crate::telegram::CompactTimers = Arc::new(dashmap::DashMap::new());
+    let bg_requests: crate::telegram::BgRequests = Arc::new(dashmap::DashMap::new());
+
+    // Upgrade lock: upgrade (write) vs CC sessions (read).
+    let upgrade_lock = Arc::new(tokio::sync::RwLock::new(()));
+
+    // Token keepalive health (shared with the keepalive task spawned later).
+    let claude_health = keepalive::ClaudeHealth::new(
+        args.agent.clone(),
+        agent_dir.clone(),
+        ssh_config_path.clone(),
+        resolved_sandbox.clone(),
+        health_sandbox_exec.clone(),
+        Some(std::sync::Arc::clone(&sandbox_runtime)),
+    );
+
+    // Build STT context once at startup — shared across all worker sessions via Arc.
+    let stt: Option<Arc<crate::stt::SttContext>> = if config.stt.enabled {
+        let model_path = right_stt::model_cache_path(&home, config.stt.model);
+        let transcriber = crate::stt::Transcriber::new(model_path);
+        let ffmpeg_available = right_stt::ffmpeg_available();
+        if !ffmpeg_available {
+            tracing::warn!(
+                "ffmpeg not found in PATH — voice messages will be answered with an error marker. \
+                 Install: brew install ffmpeg / apt install ffmpeg."
+            );
+        }
+        Some(Arc::new(crate::stt::SttContext {
+            transcriber,
+            ffmpeg_available,
+        }))
+    } else {
+        None
+    };
+
+    let stop_tokens_for_tg = Arc::clone(&dashboard_foreground);
+    let (webhook_router, telegram_lifecycle) = telegram::setup_telegram(
+        token.clone(),
+        allowlist.clone(),
+        config.allowed_chat_ids.clone(),
+        agent_dir.clone(),
+        Arc::clone(&debug_flag),
+        Arc::clone(&pending_auth),
+        home.clone(),
+        ssh_config_path.clone(),
+        config.show_thinking,
+        Arc::clone(&model_arc),
+        shutdown.clone(),
+        Arc::clone(&idle_timestamp),
+        Arc::clone(&internal_client),
+        resolved_sandbox.clone(),
+        hindsight_wrapper.clone(),
+        prefetch_cache.clone(),
+        Arc::clone(&upgrade_lock),
+        stt.clone(),
+        Arc::clone(&claude_health),
+        std::sync::Arc::clone(&sandbox_runtime),
+        Arc::clone(&session_locks),
+        Arc::clone(&bg_requests),
+        stop_tokens_for_tg,
+        progress_state.clone(),
+        Arc::clone(&compact_timers),
+        webhook_secret.clone(),
+    )
+    .await?;
+
     let (axum_ready_tx, axum_ready_rx) = tokio::sync::oneshot::channel::<()>();
     let axum_socket = socket_path.clone();
     let agent_name_for_uds = args.agent.clone();
@@ -910,10 +984,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         );
     }
 
-    // Upgrade lock: upgrade (write) vs CC sessions (read).
-    let upgrade_lock = Arc::new(tokio::sync::RwLock::new(()));
-
     // Startup upgrade: runs before cron/telegram — no lock contention.
+    // (`upgrade_lock` is built above, before `setup_telegram`.)
     if let Some(ref cfg_path) = ssh_config_path {
         // SAFETY: ssh_config_path is Some only when is_sandboxed is true, and
         // resolved_sandbox is always Some when is_sandboxed is true.
@@ -921,11 +993,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         upgrade::run_startup_upgrade(cfg_path, &args.agent, sandbox).await;
     }
 
-    // Per-main-session mutex map and per-(chat,thread) bg-request flags.
-    // Shared across worker, delivery, and callback handlers.
-    let session_locks: crate::telegram::SessionLocks = Arc::new(dashmap::DashMap::new());
-
-    // CRON-01: spawn cron task alongside Telegram dispatcher.
+    // CRON-01: spawn cron task alongside the Telegram webhook handler.
     // Cron results are persisted to DB; Telegram delivery is handled separately.
     let cron_agent_dir = agent_dir.clone();
     let cron_agent_name = args.agent.clone();
@@ -955,14 +1023,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .await;
     });
 
-    // Shared idle timestamp: tracks last handler/worker interaction for async delivery gating.
-    use crate::telegram::handler::IdleTimestamp;
-    let idle_timestamp = Arc::new(IdleTimestamp(Arc::new(std::sync::atomic::AtomicI64::new(
-        chrono::Utc::now().timestamp(),
-    ))));
-
-    let compact_timers: crate::telegram::CompactTimers = Arc::new(dashmap::DashMap::new());
-    let bg_requests: crate::telegram::BgRequests = Arc::new(dashmap::DashMap::new());
+    // (`idle_timestamp`, `compact_timers`, `bg_requests` are built above, before
+    // `setup_telegram`.)
 
     // Periodic sweeper: drop orphan mutex entries (entries whose only Arc holder
     // is the map itself). Without this, the map grows unboundedly on long-lived
@@ -1115,71 +1177,22 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         )
     });
 
-    // Token keepalive: periodic `claude -p "hi"` to prevent OAuth token expiration.
-    let claude_health = keepalive::ClaudeHealth::new(
-        args.agent.clone(),
-        agent_dir.clone(),
-        ssh_config_path.clone(),
-        resolved_sandbox.clone(),
-        health_sandbox_exec,
-        Some(std::sync::Arc::clone(&sandbox_runtime)),
-    );
+    // Token keepalive: periodic `claude -p "hi"` to prevent OAuth token
+    // expiration. `claude_health` was built above (before `setup_telegram`).
     let keepalive_handle = keepalive::spawn_keepalive(Arc::clone(&claude_health), shutdown.clone());
 
-    // Build STT context once at startup — shared across all worker sessions via Arc.
-    let stt: Option<Arc<crate::stt::SttContext>> = if config.stt.enabled {
-        let model_path = right_stt::model_cache_path(&home, config.stt.model);
-        let transcriber = crate::stt::Transcriber::new(model_path);
-        let ffmpeg_available = right_stt::ffmpeg_available();
-        if !ffmpeg_available {
-            tracing::warn!(
-                "ffmpeg not found in PATH — voice messages will be answered with an error marker. \
-                 Install: brew install ffmpeg / apt install ffmpeg."
-            );
-        }
-        Some(Arc::new(crate::stt::SttContext {
-            transcriber,
-            ffmpeg_available,
-        }))
-    } else {
-        None
-    };
-
-    let result = tokio::select! {
-        result = telegram::run_telegram(
-            token,
-            allowlist,
-            config.allowed_chat_ids.clone(),
-            agent_dir,
-            Arc::clone(&debug_flag),
-            Arc::clone(&pending_auth),
-            home.clone(),
-            ssh_config_path,
-            config.show_thinking,
-            model_arc,
-            shutdown.clone(),
-            Arc::clone(&idle_timestamp),
-            Arc::clone(&internal_client),
-            resolved_sandbox,
-            hindsight_wrapper,
-            prefetch_cache,
-            upgrade_lock,
-            stt,
-            Arc::clone(&claude_health),
-            std::sync::Arc::clone(&sandbox_runtime),
-            Arc::clone(&session_locks),
-            Arc::clone(&bg_requests),
-            Arc::clone(&dashboard_foreground),
-            progress_state,
-            Arc::clone(&compact_timers),
-            update_listener,
-        ) => result,
+    // The telegram lifecycle future (built by `setup_telegram`) resolves when
+    // the bot shuts down (SIGTERM/SIGINT or config change) after draining
+    // foreground background-handoff gates. The webhook router is already nested
+    // on the UDS app served by `axum_handle`; updates arrive over HTTP, so there
+    // is no dispatch loop to await here.
+    let result: miette::Result<()> = tokio::select! {
+        () = telegram_lifecycle => Ok(()),
         result = axum_handle => result
             .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,
     };
 
-    // Signal cron/sync tasks to stop. The teloxide dispatcher handles SIGTERM
-    // internally but doesn't cancel this token, so we must do it here.
+    // Signal cron/sync tasks to stop.
     shutdown.cancel();
 
     tracing::info!("waiting for cron to finish");

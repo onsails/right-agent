@@ -1,26 +1,27 @@
-//! Telegram webhook update listener and router.
+//! Telegram webhook HTTP handler.
 //!
-//! Wraps `teloxide::update_listeners::webhooks::axum_no_setup` to expose:
-//! - an `UpdateListener` for the dispatcher
-//! - the inner `axum::Router` mounted at `/` (caller nests under `/tg/<agent>`)
-//! - the explicit `AllowedUpdate` set used in `setWebhook`
-//!
-//! Secret-token enforcement is delegated to teloxide; the router returns 401
-//! when `X-Telegram-Bot-Api-Secret-Token` is missing or wrong.
+//! Replaces the former teloxide `axum_no_setup` update listener. Exposes an
+//! `axum::Router` mounted at `/` (the caller nests it under `/tg/<agent>` on the
+//! bot's UDS app) that authenticates the `X-Telegram-Bot-Api-Secret-Token`
+//! header, parses a `frankenstein::Update` from the body, and routes it via
+//! [`router::route_update`].
 
-use std::convert::Infallible;
-use std::future::Future;
+use std::sync::Arc;
 
-use teloxide::update_listeners::{
-    UpdateListener,
-    webhooks::{Options, axum_no_setup},
-};
-use url::Url;
+use axum::Router;
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::post;
+
+use super::router::{self, HandlerCtx, WebhookOutcome};
+
+const SECRET_HEADER: &str = "X-Telegram-Bot-Api-Secret-Token";
 
 /// The set of update types we accept on the webhook. Explicit, not "all".
 /// Add new variants here when the handler graph starts processing a new kind.
-pub fn webhook_allowed_updates() -> Vec<teloxide::types::AllowedUpdate> {
-    use teloxide::types::AllowedUpdate;
+pub fn webhook_allowed_updates() -> Vec<frankenstein::types::AllowedUpdate> {
+    use frankenstein::types::AllowedUpdate;
     vec![
         AllowedUpdate::Message,
         AllowedUpdate::EditedMessage,
@@ -28,48 +29,56 @@ pub fn webhook_allowed_updates() -> Vec<teloxide::types::AllowedUpdate> {
     ]
 }
 
+#[derive(Clone)]
+struct WState {
+    secret: String,
+    ctx: Arc<HandlerCtx>,
+}
+
 /// Build the per-agent webhook router for mounting on the bot's UDS axum app.
 ///
-/// Returns:
-///   - an `UpdateListener` for `Dispatcher::dispatch_with_listener(...)`
-///   - a future that resolves on stop (drives shutdown)
-///   - the `axum::Router` mounted at `/` — the caller nests it under
-///     `/tg/<agent_name>` on the outer app, so the public path is
-///     `/tg/<agent>/`.
-///
-/// The `webhook_url` is informational at this point — `setWebhook` is called
-/// elsewhere with the same URL + secret. `Options::address` is unused by
-/// `axum_no_setup`; we pass a dummy SocketAddr to satisfy the type.
-///
-/// IMPORTANT: we explicitly set `.path("/".to_string())` because
-/// `Options::new` defaults the path to `url.path()` — if `webhook_url`
-/// is `https://host/tg/agent/`, the default would be `/tg/agent/`, which
-/// when nested under `/tg/<agent>` produces a doubled path. Setting the
-/// inner path to `/` keeps the nesting clean.
-pub fn build_webhook_router(
-    secret: String,
-    webhook_url: Url,
-) -> (
-    impl UpdateListener<Err = Infallible>,
-    impl Future<Output = ()> + Send,
-    axum::Router,
-) {
-    let options = Options::new(([127, 0, 0, 1], 0).into(), webhook_url)
-        .path("/".to_string())
-        .secret_token(secret);
-    axum_no_setup(options)
+/// The router serves a single POST `/`; the caller nests it under
+/// `/tg/<agent_name>` so the public path is `/tg/<agent>`.
+pub(crate) fn build_webhook_router(secret: String, ctx: Arc<HandlerCtx>) -> Router {
+    Router::new()
+        .route("/", post(handle))
+        .with_state(WState { secret, ctx })
+}
+
+async fn handle(State(st): State<WState>, headers: HeaderMap, body: Bytes) -> StatusCode {
+    let provided = headers.get(SECRET_HEADER).and_then(|v| v.to_str().ok());
+    let parsed = serde_json::from_slice::<frankenstein::Update>(&body);
+    match router::webhook_outcome(provided, &st.secret, parsed.is_ok()) {
+        WebhookOutcome::Unauthorized => StatusCode::UNAUTHORIZED,
+        WebhookOutcome::AckIgnore => {
+            tracing::warn!("webhook: unparseable update body, acking to stop Telegram retries");
+            StatusCode::OK
+        }
+        WebhookOutcome::Routed => {
+            // `parsed` is Ok here (body_parses was true). Route best-effort: a
+            // single failed update must never propagate out of the handler.
+            if let Ok(update) = parsed {
+                router::route_update(update, &st.ctx).await;
+            }
+            StatusCode::OK
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::{HeaderValue, Request, StatusCode};
-    use teloxide::types::AllowedUpdate;
+    use axum::http::{HeaderValue, Request};
+    use frankenstein::types::AllowedUpdate;
     use tower::ServiceExt as _;
 
-    fn dummy_url() -> Url {
-        Url::parse("https://example.com/tg/test/").unwrap()
+    /// Build a router whose state has a placeholder ctx. The secret-rejection
+    /// paths short-circuit before `route_update` is reached, so an unconnected
+    /// bot is fine for these tests.
+    fn test_router(secret: &str) -> Router {
+        let ctx = Arc::new(super::super::router::test_support::placeholder_ctx());
+        build_webhook_router(secret.to_string(), ctx)
     }
 
     #[tokio::test]
@@ -82,8 +91,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_router_rejects_missing_secret_header() {
-        let (_listener, _stop, router) =
-            build_webhook_router("the-secret".to_string(), dummy_url());
+        let router = test_router("the-secret");
         let request = Request::builder()
             .method("POST")
             .uri("/")
@@ -95,18 +103,29 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_router_rejects_wrong_secret_header() {
-        let (_listener, _stop, router) =
-            build_webhook_router("the-secret".to_string(), dummy_url());
+        let router = test_router("the-secret");
         let request = Request::builder()
             .method("POST")
             .uri("/")
-            .header(
-                "X-Telegram-Bot-Api-Secret-Token",
-                HeaderValue::from_static("wrong-secret"),
-            )
+            .header(SECRET_HEADER, HeaderValue::from_static("wrong-secret"))
             .body(Body::from("{}"))
             .unwrap();
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn webhook_router_acks_correct_secret_with_unparseable_body() {
+        // Correct secret + body that is not a valid Update → 200 (AckIgnore),
+        // short-circuiting before any routing. `"{}"` lacks `update_id`.
+        let router = test_router("the-secret");
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(SECRET_HEADER, HeaderValue::from_static("the-secret"))
+            .body(Body::from("{}"))
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

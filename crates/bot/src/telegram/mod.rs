@@ -25,12 +25,11 @@ pub(crate) mod progress;
 pub(crate) mod reply_context;
 pub(crate) mod router;
 pub mod session;
-pub mod shutdown_listener;
 pub(crate) mod tg_bot;
 pub mod webhook;
 pub mod worker;
 
-pub(crate) use dispatch::run_telegram;
+pub(crate) use dispatch::setup_telegram;
 pub use session::effective_thread_id;
 
 /// Bot client used by `WorkerContext` and routing — the frankenstein-backed
