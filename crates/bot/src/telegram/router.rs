@@ -1,6 +1,142 @@
 //! Update routing. Replaces teloxide's Dispatcher/dptree. The pure
-//! classification fns here are unit-tested; route_update + HandlerCtx (Phase 2)
-//! map an UpdateContent to a handler call.
+//! classification fns here are unit-tested; `route_update` + [`HandlerCtx`] map
+//! an `UpdateContent` to a handler call.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use dashmap::DashMap;
+use right_agent::agent::allowlist::AllowlistHandle;
+use tokio::sync::mpsc;
+
+use super::BotType;
+use super::handler::{
+    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingMcpAuthChoiceSlot,
+    PendingTokenSlot, RightHome, SshConfigPath,
+};
+use super::mention::BotIdentity;
+use super::oauth_callback::PendingAuthMap;
+use super::worker::{DebounceMsg, SessionKey};
+
+/// Everything an update handler needs, replacing dptree's dependency injection.
+///
+/// One `HandlerCtx` is built in `run_telegram` and shared (via `Arc`) by the
+/// webhook handler; `route_update`/`on_message`/`on_callback` pass `&HandlerCtx`
+/// to the migrated `handle_*` endpoints. Fields mirror the former
+/// `dptree::deps![...]` list plus the resolved bot and identity.
+#[derive(Clone)]
+pub(crate) struct HandlerCtx {
+    pub(crate) bot: BotType,
+    pub(crate) allowlist: AllowlistHandle,
+    pub(crate) identity: Arc<BotIdentity>,
+    pub(crate) worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
+    pub(crate) agent_dir: Arc<AgentDir>,
+    pub(crate) pending_auth: PendingAuthMap,
+    pub(crate) home: Arc<RightHome>,
+    pub(crate) ssh_config: Arc<SshConfigPath>,
+    pub(crate) intercept_slots: Arc<InterceptSlots>,
+    pub(crate) pending_token_slot: Arc<PendingTokenSlot>,
+    pub(crate) pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
+    pub(crate) internal_api: Arc<InternalApi>,
+    pub(crate) settings: Arc<AgentSettings>,
+    pub(crate) idle_ts: Arc<IdleTimestamp>,
+    pub(crate) worker_ctl: super::WorkerControlDeps,
+}
+
+/// Route one update to the matching handler. Best-effort: handler errors are
+/// logged, never propagated — a single failed update must not stop the webhook
+/// server.
+pub(crate) async fn route_update(update: frankenstein::Update, ctx: &HandlerCtx) {
+    use frankenstein::updates::UpdateContent;
+    match update.content {
+        UpdateContent::Message(m) | UpdateContent::EditedMessage(m) => {
+            on_message(ctx, *m).await;
+        }
+        UpdateContent::CallbackQuery(q) => {
+            on_callback(ctx, *q).await;
+        }
+        _ => {}
+    }
+}
+
+/// Reproduce dispatch.rs's message branch: pre-filter log + group-archive, then
+/// allow-list routing, then command parse → matching `handle_*`, else
+/// `handle_message`. Errors are logged best-effort.
+async fn on_message(ctx: &HandlerCtx, msg: frankenstein::types::Message) {
+    use super::command::{self, BotCommand};
+    use super::handler;
+
+    let meta = super::dispatch::pre_filter_log_meta(&msg);
+    tracing::info!(
+        chat_id = meta.chat_id,
+        chat_kind = meta.chat_kind,
+        has_text = meta.has_text,
+        has_caption = meta.has_caption,
+        attachment_count = meta.attachment_count,
+        entity_count = meta.entity_count,
+        "message update received by webhook"
+    );
+    super::archive::archive_seen_group_message(&ctx.agent_dir.0, ctx.identity.as_ref(), &msg);
+
+    // Allow-list / addressing filter (was dptree `filter_map`).
+    let filter = super::filter::make_routing_filter(ctx.allowlist.clone(), (*ctx.identity).clone());
+    let Some(decision) = filter(msg.clone()) else {
+        return;
+    };
+
+    let bot_username = ctx.bot.me().username.as_deref().unwrap_or_default();
+    let parsed = super::msg_ext::text_or_caption(&msg)
+        .and_then(|text| command::parse(text, bot_username));
+
+    let result = match parsed {
+        Some(BotCommand::Start(payload)) => handler::handle_start(ctx, &msg, payload).await,
+        Some(BotCommand::New(name)) => handler::handle_new(ctx, &msg, name).await,
+        Some(BotCommand::List) => handler::handle_list(ctx, &msg).await,
+        Some(BotCommand::Switch(uuid)) => handler::handle_switch(ctx, &msg, uuid).await,
+        Some(BotCommand::Mcp(args)) => handler::handle_mcp(ctx, &msg, args).await,
+        Some(BotCommand::Providers(args)) => handler::handle_providers(ctx, &msg, args).await,
+        Some(BotCommand::SetFocus(args)) => handler::handle_set_focus(ctx, &msg, args).await,
+        Some(BotCommand::Doctor) => handler::handle_doctor(ctx, &msg).await,
+        Some(BotCommand::Model) => super::model_command::handle_model(ctx, &msg).await,
+        Some(BotCommand::Mode) => super::mode_command::handle_mode(ctx, &msg).await,
+        Some(BotCommand::ModeGroup) => super::mode_command::handle_mode_group(ctx, &msg).await,
+        Some(BotCommand::Dashboard) => handler::handle_dashboard(ctx, &msg).await,
+        Some(BotCommand::Debug(args)) => super::debug_command::handle_debug(ctx, &msg, args).await,
+        Some(BotCommand::Cron(args)) => handler::handle_cron(ctx, &msg, args).await,
+        Some(BotCommand::Usage(arg)) => handler::handle_usage(ctx, &msg, arg).await,
+        Some(BotCommand::Allow(args)) => {
+            super::allowlist_commands::handle_allow(ctx, &msg, args).await
+        }
+        Some(BotCommand::Deny(args)) => super::allowlist_commands::handle_deny(ctx, &msg, args).await,
+        Some(BotCommand::Allowed) => super::allowlist_commands::handle_allowed(ctx, &msg).await,
+        Some(BotCommand::AllowAll) => super::allowlist_commands::handle_allow_all(ctx, &msg).await,
+        Some(BotCommand::DenyAll) => super::allowlist_commands::handle_deny_all(ctx, &msg).await,
+        None => handler::handle_message(ctx, &msg, decision).await,
+    };
+    if let Err(e) = result {
+        tracing::warn!(chat_id = meta.chat_id, "message handler failed: {e}");
+    }
+}
+
+/// Reproduce dispatch.rs's callback branch: classify by data prefix → matching
+/// callback handler. Errors are logged best-effort.
+async fn on_callback(ctx: &HandlerCtx, q: frankenstein::types::CallbackQuery) {
+    use super::handler;
+
+    let result = match classify_callback(q.data.as_deref()) {
+        CallbackRoute::Model => super::model_command::handle_model_callback(ctx, &q).await,
+        CallbackRoute::Mode => super::mode_command::handle_mode_callback(ctx, &q).await,
+        CallbackRoute::Thinking => handler::handle_thinking_toggle_callback(ctx, &q).await,
+        CallbackRoute::Bg => handler::handle_bg_callback(ctx, &q).await,
+        CallbackRoute::ErrorDetails => {
+            super::error_details::handle_error_details_callback(ctx, &q).await
+        }
+        CallbackRoute::Stop => handler::handle_stop_callback(ctx, &q).await,
+    };
+    if let Err(e) = result {
+        tracing::warn!(callback_id = %q.id, "callback handler failed: {e}");
+    }
+}
 
 /// Which callback handler an inline-button `callback_query.data` routes to.
 /// Mirrors the `dptree` callback branch order in `dispatch.rs`.
