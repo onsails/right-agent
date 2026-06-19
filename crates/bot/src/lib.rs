@@ -458,21 +458,20 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Log bot identity at startup -- helps detect token conflicts with other
     // running CC sessions. Webhook registration happens later via the register
     // loop (after the UDS bind), not here.
-    {
-        use teloxide::requests::Requester as _;
-        let probe_bot = teloxide::Bot::new(token.clone());
-        match probe_bot.get_me().await {
-            Ok(me) => tracing::info!(
+    match telegram::tg_bot::RightBot::connect(token.clone()).await {
+        Ok(probe) => {
+            let me = probe.me();
+            tracing::info!(
                 agent = %args.agent,
-                bot_id = me.id.0,
-                bot_username = %me.username(),
+                bot_id = me.id,
+                bot_username = %me.username.as_deref().unwrap_or(""),
                 "bot identity confirmed"
-            ),
-            Err(e) => tracing::warn!(
-                agent = %args.agent,
-                "getMe failed (non-fatal, bot identity unknown): {e:#}"
-            ),
+            );
         }
+        Err(e) => tracing::warn!(
+            agent = %args.agent,
+            "getMe failed (non-fatal, bot identity unknown): {e:#}"
+        ),
     }
 
     // Log registered MCP servers at startup.
