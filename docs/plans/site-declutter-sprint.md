@@ -1,7 +1,7 @@
 # Site Declutter — Sprint
 
 Integration: feat/clean-site (worktree `.worktrees/clean-site`)  ·  Base: master @6676cc13
-Engine: mimo (model: openai/gpt-5.3-codex, variant: high, pinned)
+Engine: mimo (model: venice/openai-gpt-55, variant: high, pinned)
 Nesting: yes
 Legend: todo · brainstorming · planned · executing · review · blocked · done
 
@@ -26,7 +26,7 @@ stage on the dev server before the next.
 ## Stages
 
 1. [done] Background ornaments — removed both fake-telemetry layers, paper texture, HUD corner-frame + secure-by-default readout; flat calm var(--bg). spec:01-bg-ornaments-spec.md plan:01-bg-ornaments-plan.md (merged @0c40c819 · +1/−152 · 2 files · astro check 0 · bun build green 9 pages · grep gate clean · mimo bg-ornaments-3f9a). **Model: openai/gpt-5.3-codex REJECTED by OpenAI (codex unsupported on a ChatGPT-account) → mimo auto-substituted venice/claude-sonnet-4-6 high. Pin decision pending for stages 2–4.**
-2. [todo] Motion restraint — drop per-section scroll-zoom, logo spin ring, claw pulse, learning-dots, loopspark; keep at most a subtle reveal.
+2. [planned] Motion restraint — drop scroll-zoom, logo spin, claw pulse, learning-dots, loopspark, card cursor-spotlight; hero visible on load; keep ONE subtle below-fold reveal. spec:02-motion-spec.md plan:02-motion-plan.md wt:.worktrees/02-motion mimo:motion-8b3k
 3. [todo] Surface de-chrome — strip neon glows, heavy drop-shadows, backdrop-blur; hairline borders + flat panels across telem/cards/loop/diagram/control-plane.
 4. [todo] Rhythm & polish — whitespace + type scale, simplify mono eyebrow/label tags, prune dead CSS, final build + visual check.
 
