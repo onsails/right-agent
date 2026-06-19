@@ -62,10 +62,14 @@ pub(crate) enum TgError {
 
 /// Global + per-chat outbound rate gate, approximating teloxide's `Limits`.
 ///
-/// The global limiter is a [`governor`] direct rate limiter; the per-chat gate
-/// is a simple last-send timestamp map enforcing a minimum interval per chat.
-/// Both use `tokio::time::Instant` so the gate advances correctly under the
-/// tokio test clock (`start_paused = true`).
+/// The per-chat gate is a last-send timestamp map (keyed `tokio::time::Instant`)
+/// enforcing a minimum interval per chat; because it uses the tokio clock, it
+/// advances correctly under the tokio test clock (`start_paused = true`). The
+/// global limiter is a [`governor`] direct rate limiter on `DefaultClock`
+/// (governor's real monotonic wall-clock), so its `until_ready().await` sleeps
+/// in real time regardless of `start_paused` — it is therefore not exercised by
+/// the paused-clock unit tests (their volumes stay under the global cap, so it
+/// returns immediately).
 pub(crate) struct Throttle {
     global: RateLimiter<NotKeyed, InMemoryState, DefaultClock>,
     per_chat_interval: Duration,
@@ -85,6 +89,11 @@ impl Throttle {
 
     /// Block until it is permissible to send to `chat_id`: first wait out the
     /// per-chat interval, then acquire a global token.
+    ///
+    /// Best-effort under concurrency: two concurrent `acquire` calls for the
+    /// same chat read the timestamp before either writes it, so they may both
+    /// proceed and briefly exceed the per-chat interval. The global governor
+    /// limiter remains the hard cap.
     pub(crate) async fn acquire(&self, chat_id: i64) {
         loop {
             let now = Instant::now();
@@ -114,6 +123,31 @@ fn retry_after_secs(e: &frankenstein::Error) -> Option<u64> {
         resp.parameters.and_then(|p| p.retry_after).map(u64::from)
     } else {
         None
+    }
+}
+
+/// Run `call`, and on a 429 `retry_after` error sleep then retry exactly once.
+///
+/// `call` is a closure (not a future) because a single future cannot be awaited
+/// twice. The retry intentionally does NOT re-acquire the per-chat/global rate
+/// gate — it already sleeps the server-supplied `retry_after`, which is the
+/// authoritative backoff.
+async fn with_retry<F, Fut, T>(call: F) -> Result<T, TgError>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, frankenstein::Error>>,
+{
+    match call().await {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            if let Some(after) = retry_after_secs(&e) {
+                tracing::warn!(retry_after = after, "telegram 429 — retrying once");
+                tokio::time::sleep(Duration::from_secs(after)).await;
+                Ok(call().await?)
+            } else {
+                Err(e.into())
+            }
+        }
     }
 }
 
@@ -151,30 +185,6 @@ impl RightBot {
         &self.me
     }
 
-    // ---- retry helper -----------------------------------------------------
-
-    /// Run `call`, and on a 429 `retry_after` error sleep then retry exactly
-    /// once. `call` is a closure (not a future) because a single future cannot
-    /// be awaited twice.
-    async fn with_retry<F, Fut, T>(&self, call: F) -> Result<T, TgError>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<T, frankenstein::Error>>,
-    {
-        match call().await {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                if let Some(after) = retry_after_secs(&e) {
-                    tracing::warn!(retry_after = after, "telegram 429 — retrying once");
-                    tokio::time::sleep(Duration::from_secs(after)).await;
-                    Ok(call().await?)
-                } else {
-                    Err(e.into())
-                }
-            }
-        }
-    }
-
     // ---- core sends -------------------------------------------------------
 
     /// Send an HTML-formatted message, optionally threaded, replying, and with
@@ -199,7 +209,7 @@ impl RightBot {
             )
             .maybe_reply_markup(markup.map(ReplyMarkup::InlineKeyboardMarkup))
             .build();
-        let resp = self.with_retry(|| self.bot.send_message(&params)).await?;
+        let resp = with_retry(|| self.bot.send_message(&params)).await?;
         Ok(resp.result)
     }
 
@@ -210,7 +220,7 @@ impl RightBot {
             .chat_id(chat_id)
             .text(text)
             .build();
-        let resp = self.with_retry(|| self.bot.send_message(&params)).await?;
+        let resp = with_retry(|| self.bot.send_message(&params)).await?;
         Ok(resp.result)
     }
 
@@ -232,8 +242,7 @@ impl RightBot {
             .parse_mode(ParseMode::Html)
             .maybe_reply_markup(markup)
             .build();
-        self.with_retry(|| self.bot.edit_message_text(&params))
-            .await?;
+        with_retry(|| self.bot.edit_message_text(&params)).await?;
         Ok(())
     }
 
@@ -288,16 +297,24 @@ impl RightBot {
                 "get_file returned no file_path for file_id {file_id}"
             ))
         })?;
-        // Token-bearing URL — must never be logged.
+        // Token-bearing URL — must never be logged. Download through the bot's
+        // already-configured reqwest client (timeouts, pooling, TLS/proxy), and
+        // strip the URL from every reqwest error via `.without_url()` so the
+        // token can never leak through a `TgError::Download` Display chain
+        // (frankenstein's own paths do the same in its `From<reqwest::Error>`).
         let url = format!(
             "https://api.telegram.org/file/bot{}/{}",
             self.token, file_path
         );
-        let bytes = reqwest::get(&url)
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
+        let resp = self
+            .bot
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| e.without_url())?;
+        let resp = resp.error_for_status().map_err(|e| e.without_url())?;
+        let bytes = resp.bytes().await.map_err(|e| e.without_url())?;
         tokio::fs::write(dest, &bytes)
             .await
             .map_err(|e| TgError::Other(format!("{e:#}")))?;
@@ -399,7 +416,7 @@ impl RightBot {
                 reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
             )
             .build();
-        let resp = self.with_retry(|| self.bot.send_photo(&params)).await?;
+        let resp = with_retry(|| self.bot.send_photo(&params)).await?;
         Ok(resp.result)
     }
 
@@ -423,7 +440,7 @@ impl RightBot {
                 reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
             )
             .build();
-        let resp = self.with_retry(|| self.bot.send_document(&params)).await?;
+        let resp = with_retry(|| self.bot.send_document(&params)).await?;
         Ok(resp.result)
     }
 
@@ -443,7 +460,7 @@ impl RightBot {
             .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
             .maybe_message_thread_id(thread)
             .build();
-        let resp = self.with_retry(|| self.bot.send_video(&params)).await?;
+        let resp = with_retry(|| self.bot.send_video(&params)).await?;
         Ok(resp.result)
     }
 
@@ -463,7 +480,7 @@ impl RightBot {
             .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
             .maybe_message_thread_id(thread)
             .build();
-        let resp = self.with_retry(|| self.bot.send_voice(&params)).await?;
+        let resp = with_retry(|| self.bot.send_voice(&params)).await?;
         Ok(resp.result)
     }
 
@@ -483,7 +500,7 @@ impl RightBot {
             .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
             .maybe_message_thread_id(thread)
             .build();
-        let resp = self.with_retry(|| self.bot.send_audio(&params)).await?;
+        let resp = with_retry(|| self.bot.send_audio(&params)).await?;
         Ok(resp.result)
     }
 
@@ -503,7 +520,7 @@ impl RightBot {
             .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
             .maybe_message_thread_id(thread)
             .build();
-        let resp = self.with_retry(|| self.bot.send_animation(&params)).await?;
+        let resp = with_retry(|| self.bot.send_animation(&params)).await?;
         Ok(resp.result)
     }
 
@@ -520,9 +537,7 @@ impl RightBot {
             .video_note(media)
             .maybe_message_thread_id(thread)
             .build();
-        let resp = self
-            .with_retry(|| self.bot.send_video_note(&params))
-            .await?;
+        let resp = with_retry(|| self.bot.send_video_note(&params)).await?;
         Ok(resp.result)
     }
 
@@ -539,7 +554,7 @@ impl RightBot {
             .sticker(media)
             .maybe_message_thread_id(thread)
             .build();
-        let resp = self.with_retry(|| self.bot.send_sticker(&params)).await?;
+        let resp = with_retry(|| self.bot.send_sticker(&params)).await?;
         Ok(resp.result)
     }
 
@@ -557,9 +572,7 @@ impl RightBot {
             .media(media)
             .maybe_message_thread_id(thread)
             .build();
-        let resp = self
-            .with_retry(|| self.bot.send_media_group(&params))
-            .await?;
+        let resp = with_retry(|| self.bot.send_media_group(&params)).await?;
         Ok(resp.result)
     }
 
@@ -685,5 +698,97 @@ mod retry_after_tests {
     fn retry_after_secs_none_for_non_api_error() {
         let err = frankenstein::Error::ReadFile(std::io::Error::other("boom"));
         assert_eq!(retry_after_secs(&err), None);
+    }
+}
+
+#[cfg(test)]
+mod with_retry_tests {
+    use super::*;
+    use frankenstein::response::{ErrorResponse, ResponseParameters};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn api_429_retry_after_zero() -> frankenstein::Error {
+        frankenstein::Error::Api(ErrorResponse {
+            ok: false,
+            description: "Too Many Requests".to_string(),
+            error_code: 429,
+            parameters: Some(ResponseParameters {
+                migrate_to_chat_id: None,
+                // retry_after = 0 keeps the sleep instant under the paused clock.
+                retry_after: Some(0),
+            }),
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_once_on_retry_after_then_succeeds() {
+        let calls = AtomicUsize::new(0);
+        let result: Result<i32, TgError> = with_retry(|| {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    Err(api_429_retry_after_zero())
+                } else {
+                    Ok(42)
+                }
+            }
+        })
+        .await;
+        assert!(matches!(result, Ok(42)));
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "should call exactly twice");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn does_not_retry_non_retryable_error() {
+        let calls = AtomicUsize::new(0);
+        let result: Result<i32, TgError> = with_retry(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            // Api error with no parameters → no retry_after → not retryable.
+            async {
+                Err(frankenstein::Error::Api(ErrorResponse {
+                    ok: false,
+                    description: "Bad Request".to_string(),
+                    error_code: 400,
+                    parameters: None,
+                }))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(TgError::Api(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "should call exactly once");
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+
+    /// Regression guard for the token-leak fix in `download_file`: a token-bearing
+    /// download URL must never survive into the error's `Display` chain. We do not
+    /// hit the network — a closed local port yields a deterministic
+    /// connection-refused error, which we then run through the same
+    /// `.without_url()` mapping `download_file` uses.
+    #[tokio::test]
+    async fn reqwest_error_display_does_not_leak_token_after_without_url() {
+        const FAKE_TOKEN: &str = "123456:FAKE_SENTINEL_TOKEN_DO_NOT_LEAK";
+        let url = format!("http://127.0.0.1:1/file/bot{FAKE_TOKEN}/x");
+        let client = reqwest::Client::new();
+        let err = client
+            .get(&url)
+            .send()
+            .await
+            .expect_err("connecting to a closed local port must fail")
+            .without_url();
+        let rendered = format!("{err}");
+        assert!(
+            !rendered.contains(FAKE_TOKEN),
+            "token leaked into reqwest error Display: {rendered}"
+        );
+        // Sanity: also confirm wrapping into TgError::Download keeps it stripped.
+        let tg: TgError = err.into();
+        assert!(
+            !format!("{tg}").contains(FAKE_TOKEN),
+            "token leaked through TgError::Download Display"
+        );
     }
 }
