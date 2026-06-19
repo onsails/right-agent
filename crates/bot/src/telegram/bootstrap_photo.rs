@@ -5,9 +5,6 @@
 //! `crates/bot/assets` symlink so `cargo package --verify` resolves it from
 //! the dereferenced tarball copy as well as from the working tree.
 
-use teloxide::prelude::*;
-use teloxide::types::{InputFile, MessageId, ReplyParameters, ThreadId};
-
 const WELCOME_PNG: &[u8] = include_bytes!("../../assets/character-on-coal.png");
 
 // Telegram caption hard limit; HTML tags count toward it.
@@ -29,7 +26,7 @@ fn should_send(bootstrap_mode: bool, first_turn_in_chat: bool) -> bool {
 /// propagate; the text reply is the contract, the photo is presentation.
 pub(crate) async fn send_if_needed(
     bot: &super::BotType,
-    chat_id: ChatId,
+    chat_id: i64,
     eff_thread_id: i64,
     bootstrap_mode: bool,
     first_turn_in_chat: bool,
@@ -39,33 +36,20 @@ pub(crate) async fn send_if_needed(
     if !should_send(bootstrap_mode, first_turn_in_chat) {
         return false;
     }
-    let file = InputFile::memory(WELCOME_PNG).file_name("welcome.png");
-    let mut req = bot.send_photo(chat_id, file);
 
-    let caption_attached = match caption_html {
-        Some(html) if html.chars().count() <= CAPTION_LIMIT => {
-            req = req
-                .caption(html.to_owned())
-                .parse_mode(teloxide::types::ParseMode::Html);
-            true
-        }
-        _ => false,
-    };
+    // Attach the caption only when it fits Telegram's caption limit; otherwise
+    // the caller still sends it as a separate text part.
+    let caption = caption_html.filter(|html| html.chars().count() <= CAPTION_LIMIT);
+    let caption_attached = caption.is_some();
+    let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
 
-    if eff_thread_id != 0 {
-        req = req.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-    }
-    if let Some(id) = reply_to {
-        req = req.reply_parameters(ReplyParameters {
-            message_id: MessageId(id),
-            ..Default::default()
-        });
-    }
-
-    match req.await {
+    match bot
+        .send_photo_bytes(chat_id, WELCOME_PNG, "welcome.png", caption, thread, reply_to)
+        .await
+    {
         Ok(_) => caption_attached,
         Err(e) => {
-            tracing::warn!(%chat_id, eff_thread_id, "bootstrap welcome photo failed: {:#}", e);
+            tracing::warn!(chat_id, eff_thread_id, "bootstrap welcome photo failed: {:#}", e);
             false
         }
     }
