@@ -30,9 +30,9 @@ fn set_unavailable_then_health_reflects_it() {
 #[test]
 fn note_affected_dedupes_and_take_drains() {
     let (h, _rx) = SandboxRuntimeHandle::new(unavailable());
-    h.note_affected(teloxide::types::ChatId(7), 0);
-    h.note_affected(teloxide::types::ChatId(7), 0); // dup
-    h.note_affected(teloxide::types::ChatId(7), 42);
+    h.note_affected(7, 0);
+    h.note_affected(7, 0); // dup
+    h.note_affected(7, 42);
     let drained = h.take_affected();
     assert_eq!(drained.len(), 2);
     assert!(h.take_affected().is_empty()); // drained
