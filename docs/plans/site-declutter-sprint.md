@@ -25,7 +25,7 @@ stage on the dev server before the next.
 
 ## Stages
 
-1. [planned] Background ornaments — remove fake telemetry layers, paper texture, HUD corner-frame + readout; flat calm background. spec:01-bg-ornaments-spec.md plan:01-bg-ornaments-plan.md wt:.worktrees/01-bg-ornaments mimo:bg-ornaments-3f9a
+1. [done] Background ornaments — removed both fake-telemetry layers, paper texture, HUD corner-frame + secure-by-default readout; flat calm var(--bg). spec:01-bg-ornaments-spec.md plan:01-bg-ornaments-plan.md (merged @0c40c819 · +1/−152 · 2 files · astro check 0 · bun build green 9 pages · grep gate clean · mimo bg-ornaments-3f9a). **Model: openai/gpt-5.3-codex REJECTED by OpenAI (codex unsupported on a ChatGPT-account) → mimo auto-substituted venice/claude-sonnet-4-6 high. Pin decision pending for stages 2–4.**
 2. [todo] Motion restraint — drop per-section scroll-zoom, logo spin ring, claw pulse, learning-dots, loopspark; keep at most a subtle reveal.
 3. [todo] Surface de-chrome — strip neon glows, heavy drop-shadows, backdrop-blur; hairline borders + flat panels across telem/cards/loop/diagram/control-plane.
 4. [todo] Rhythm & polish — whitespace + type scale, simplify mono eyebrow/label tags, prune dead CSS, final build + visual check.
@@ -52,6 +52,20 @@ pass over landing + docs.
   checkout-churn rule. Based off master @6676cc13.
 - Dev server: `bun run dev --host 0.0.0.0` from the integration worktree
   (currently :4322; 4321 was in use). User reviews each landed stage there.
+
+## Stage 1 findings (feed later stages)
+
+- **Model pin broken.** `openai/gpt-5.3-codex` (and almost certainly every
+  `openai/*-codex` id) is rejected through mimo's ChatGPT-account auth:
+  "not supported when using Codex with a ChatGPT account." Stage 1 silently ran
+  on `venice/claude-sonnet-4-6` (high) and completed fine. **Pending user
+  decision for stages 2–4:** switch the pin to `venice/openai-gpt-53-codex`
+  (Venice-hosted codex mirror, uses Venice auth, honours "codex latest") vs.
+  accept `venice/claude-sonnet-4-6`.
+- **Reveal-on-load nit → stage 2.** Hero `.rev` copy is `opacity:0` at the very
+  top on fresh load until the IntersectionObserver fires. Above-the-fold content
+  must not require a scroll to appear — make the hero visible immediately;
+  reveal only below-the-fold sections (or drop reveal entirely).
 
 ## Open questions
 
