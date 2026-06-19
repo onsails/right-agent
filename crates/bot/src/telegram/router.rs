@@ -10,16 +10,14 @@ use tokio::sync::mpsc;
 
 use super::BotType;
 use super::handler::{
-    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingMcpAuthChoiceSlot,
-    PendingTokenSlot, RightHome, SshConfigPath,
+    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, RightHome, SshConfigPath,
 };
 use super::mention::BotIdentity;
-use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
 /// Everything an update handler needs, replacing dptree's dependency injection.
 ///
-/// One `HandlerCtx` is built in `run_telegram` and shared (via `Arc`) by the
+/// One `HandlerCtx` is built in `setup_telegram` and shared (via `Arc`) by the
 /// webhook handler; `route_update`/`on_message`/`on_callback` pass `&HandlerCtx`
 /// to the migrated `handle_*` endpoints. Fields mirror the former
 /// `dptree::deps![...]` list plus the resolved bot and identity.
@@ -30,18 +28,9 @@ pub(crate) struct HandlerCtx {
     pub(crate) identity: Arc<BotIdentity>,
     pub(crate) worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     pub(crate) agent_dir: Arc<AgentDir>,
-    // The former Telegram-based MCP auth/token prompt deps. The MCP flow is now
-    // dashboard-managed, so handlers no longer read these — kept on the context
-    // for parity with the prior dptree dependency set (mirrors the old DI bag).
-    #[allow(dead_code)]
-    pub(crate) pending_auth: PendingAuthMap,
     pub(crate) home: Arc<RightHome>,
     pub(crate) ssh_config: Arc<SshConfigPath>,
     pub(crate) intercept_slots: Arc<InterceptSlots>,
-    #[allow(dead_code)]
-    pub(crate) pending_token_slot: Arc<PendingTokenSlot>,
-    #[allow(dead_code)]
-    pub(crate) pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
     pub(crate) internal_api: Arc<InternalApi>,
     pub(crate) settings: Arc<AgentSettings>,
     pub(crate) idle_ts: Arc<IdleTimestamp>,
@@ -216,8 +205,8 @@ pub(crate) mod test_support {
     use right_agent::agent::allowlist::{AllowlistHandle, AllowlistState};
 
     use super::super::handler::{
-        AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi,
-        PendingMcpAuthChoiceSlot, PendingTokenSlot, RightHome, SshConfigPath,
+        AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, RightHome,
+        SshConfigPath,
     };
 
     /// Build a `HandlerCtx` with dummy dependencies for handler-free tests
@@ -282,15 +271,12 @@ pub(crate) mod test_support {
             }),
             worker_map: Arc::new(DashMap::new()),
             agent_dir: Arc::new(AgentDir(PathBuf::from("/tmp/router-test"))),
-            pending_auth: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             home: Arc::new(RightHome(PathBuf::from("/tmp/router-test"))),
             ssh_config: Arc::new(SshConfigPath(None)),
             intercept_slots: Arc::new(InterceptSlots {
                 auth_code: Arc::new(tokio::sync::Mutex::new(None)),
                 auth_watcher: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }),
-            pending_token_slot: Arc::new(PendingTokenSlot),
-            pending_auth_choice_slot: Arc::new(PendingMcpAuthChoiceSlot),
             internal_api: Arc::new(InternalApi(Arc::new(
                 right_mcp::internal_client::InternalClient::new("/tmp/router-test.sock"),
             ))),

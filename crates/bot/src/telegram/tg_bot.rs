@@ -86,6 +86,7 @@ pub(crate) enum TgError {
 /// volumes under both caps, so the calls return immediately).
 pub(crate) struct Throttle {
     global: RateLimiter<NotKeyed, InMemoryState, DefaultClock>,
+    // TODO: prune stale chat keys on a timer (bounded by allowlist in practice).
     per_chat_per_min: RateLimiter<i64, DefaultKeyedStateStore<i64>, DefaultClock>,
     per_chat_interval: Duration,
     last_per_chat: DashMap<i64, Instant>,
