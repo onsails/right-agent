@@ -13,9 +13,8 @@ use right_mcp::internal_client::{
 };
 use serde::Serialize;
 use subtle::ConstantTimeEq;
-use teloxide::payloads::{CreateForumTopicSetters, EditForumTopicSetters, SendMessageSetters};
-use teloxide::prelude::Requester;
-use teloxide::types::{ChatId, CustomEmojiId, MessageId, ParseMode, Rgb, ThreadId};
+
+use super::tg_bot::TgError;
 
 /// End-to-end timeout for the Telegram `send_message` call invoked by the
 /// progress UDS endpoint. Bounds how long the caller (aggregator's
@@ -172,7 +171,7 @@ async fn handle_progress_send(
             StatusCode::OK,
             Json(ProgressSendResponse {
                 ok: true,
-                message_id: Some(message.id.0),
+                message_id: Some(message.message_id),
             }),
         )
             .into_response(),
@@ -219,23 +218,16 @@ async fn send_text_message(
     bot: &super::BotType,
     target: &ProgressTarget,
     message: &str,
-) -> Result<Result<teloxide::types::Message, teloxide::RequestError>, tokio::time::error::Elapsed> {
+) -> Result<Result<frankenstein::types::Message, TgError>, tokio::time::error::Elapsed> {
     let html = crate::telegram::markdown::md_to_telegram_html(message);
-    let thread = if target.thread_id != 0 {
-        Some(ThreadId(MessageId(target.thread_id as i32)))
-    } else {
-        None
-    };
+    let thread = (target.thread_id != 0).then_some(target.thread_id as i32);
 
     // First attempt: HTML parse mode.
-    let mut send = bot
-        .send_message(ChatId(target.chat_id), html.clone())
-        .parse_mode(ParseMode::Html);
-    if let Some(tid) = thread {
-        send = send.message_thread_id(tid);
-    }
-
-    let outcome = tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await;
+    let outcome = tokio::time::timeout(
+        PROGRESS_SEND_TIMEOUT,
+        bot.send_message_opts(target.chat_id, &html, true, thread, None, None),
+    )
+    .await;
     match outcome {
         // Only retry on a deterministic, pre-delivery formatting rejection
         // (entity/URL parse failure or too-long). Network/5xx/timeout errors
@@ -247,11 +239,11 @@ async fn send_text_message(
             );
             // Fallback: strip HTML tags and retry without parse mode.
             let plain = crate::telegram::markdown::strip_html_tags(&html);
-            let mut send = bot.send_message(ChatId(target.chat_id), plain);
-            if let Some(tid) = thread {
-                send = send.message_thread_id(tid);
-            }
-            tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await
+            tokio::time::timeout(
+                PROGRESS_SEND_TIMEOUT,
+                bot.send_message_opts(target.chat_id, &plain, false, thread, None, None),
+            )
+            .await
         }
         other => other,
     }
@@ -292,7 +284,7 @@ async fn handle_message_send(
         .filter(|c| !c.is_empty())
     {
         match send_text_message(&state.bot, &target, content).await {
-            Ok(Ok(message)) => message_ids.push(message.id.0),
+            Ok(Ok(message)) => message_ids.push(message.message_id),
             Ok(Err(e)) => {
                 tracing::warn!(
                     invocation_id = %req.invocation_id,
@@ -332,7 +324,7 @@ async fn handle_message_send(
         if let Err(e) = crate::telegram::attachments::send_attachments(
             &outbound,
             &state.bot,
-            ChatId(target.chat_id),
+            target.chat_id,
             target.thread_id,
             &target.agent_dir,
             target.ssh_config_path.as_deref(),
@@ -387,21 +379,18 @@ async fn handle_forum_topic_create(
     if !target.token_matches(&req.token) {
         return forum_forbidden();
     }
-    let mut call = state
-        .bot
-        .create_forum_topic(ChatId(target.chat_id), req.name);
-    if let Some(color) = req.icon_color {
-        call = call.icon_color(Rgb::from_u32(color));
-    }
-    if let Some(emoji) = req.icon_custom_emoji_id {
-        call = call.icon_custom_emoji_id(CustomEmojiId(emoji));
-    }
+    let call = state.bot.create_forum_topic(
+        target.chat_id,
+        req.name,
+        req.icon_color,
+        req.icon_custom_emoji_id,
+    );
     match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, call).await {
-        Ok(Ok(topic)) => (
+        Ok(Ok(message_thread_id)) => (
             StatusCode::OK,
             Json(ForumTopicCreateResponse {
                 ok: true,
-                message_thread_id: topic.thread_id.0.0,
+                message_thread_id,
             }),
         )
             .into_response(),
@@ -420,16 +409,14 @@ async fn handle_forum_topic_edit(
     if !target.token_matches(&req.token) {
         return forum_forbidden();
     }
-    let thread = ThreadId(MessageId(req.message_thread_id));
-    let mut call = state.bot.edit_forum_topic(ChatId(target.chat_id), thread);
-    if let Some(name) = req.name {
-        call = call.name(name);
-    }
-    if let Some(emoji) = req.icon_custom_emoji_id {
-        call = call.icon_custom_emoji_id(CustomEmojiId(emoji));
-    }
+    let call = state.bot.edit_forum_topic(
+        target.chat_id,
+        req.message_thread_id,
+        req.name,
+        req.icon_custom_emoji_id,
+    );
     match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, call).await {
-        Ok(Ok(_)) => forum_ok(),
+        Ok(Ok(())) => forum_ok(),
         Ok(Err(e)) => forum_telegram_error(&req.invocation_id, e),
         Err(_) => forum_timeout(&req.invocation_id),
     }
@@ -445,10 +432,11 @@ async fn handle_forum_topic_close(
     if !target.token_matches(&req.token) {
         return forum_forbidden();
     }
-    let thread = ThreadId(MessageId(req.message_thread_id));
-    let call = state.bot.close_forum_topic(ChatId(target.chat_id), thread);
+    let call = state
+        .bot
+        .close_forum_topic(target.chat_id, req.message_thread_id);
     match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, call).await {
-        Ok(Ok(_)) => forum_ok(),
+        Ok(Ok(())) => forum_ok(),
         Ok(Err(e)) => forum_telegram_error(&req.invocation_id, e),
         Err(_) => forum_timeout(&req.invocation_id),
     }
@@ -464,10 +452,11 @@ async fn handle_forum_topic_reopen(
     if !target.token_matches(&req.token) {
         return forum_forbidden();
     }
-    let thread = ThreadId(MessageId(req.message_thread_id));
-    let call = state.bot.reopen_forum_topic(ChatId(target.chat_id), thread);
+    let call = state
+        .bot
+        .reopen_forum_topic(target.chat_id, req.message_thread_id);
     match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, call).await {
-        Ok(Ok(_)) => forum_ok(),
+        Ok(Ok(())) => forum_ok(),
         Ok(Err(e)) => forum_telegram_error(&req.invocation_id, e),
         Err(_) => forum_timeout(&req.invocation_id),
     }
@@ -512,10 +501,7 @@ fn forum_timeout(invocation_id: &str) -> axum::response::Response {
         .into_response()
 }
 
-fn forum_telegram_error(
-    invocation_id: &str,
-    e: teloxide::RequestError,
-) -> axum::response::Response {
+fn forum_telegram_error(invocation_id: &str, e: TgError) -> axum::response::Response {
     let raw = format!("{e:#}");
     tracing::warn!(invocation_id = %invocation_id, "forum topic op failed: {raw}");
     (
