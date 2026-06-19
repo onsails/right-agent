@@ -46,7 +46,7 @@ pub(crate) struct HandlerCtx {
 /// Route one update to the matching handler. Best-effort: handler errors are
 /// logged, never propagated — a single failed update must not stop the webhook
 /// server.
-pub(crate) async fn route_update(update: frankenstein::Update, ctx: &HandlerCtx) {
+pub(crate) async fn route_update(update: frankenstein::updates::Update, ctx: &HandlerCtx) {
     use frankenstein::updates::UpdateContent;
     match update.content {
         UpdateContent::Message(m) | UpdateContent::EditedMessage(m) => {

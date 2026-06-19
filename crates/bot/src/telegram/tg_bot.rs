@@ -169,6 +169,9 @@ fn placeholder_user() -> User {
         supports_inline_queries: None,
         can_connect_to_business: None,
         has_main_web_app: None,
+        has_topics_enabled: None,
+        allows_users_to_create_topics: None,
+        can_manage_bots: None,
     }
 }
 
