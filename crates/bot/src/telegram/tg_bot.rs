@@ -16,6 +16,7 @@
 //! `frankenstein` directly.
 
 use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -24,6 +25,24 @@ use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter};
 use thiserror::Error;
 use tokio::time::Instant;
+
+use frankenstein::AsyncTelegramApi;
+use frankenstein::ParseMode;
+use frankenstein::client_reqwest::Bot as FBot;
+use frankenstein::input_file::FileUpload;
+use frankenstein::input_media::MediaGroupInputMedia;
+use frankenstein::types::{
+    AllowedUpdate, BotCommand, BotCommandScope, ChatAction, InlineKeyboardMarkup, Message,
+    ReplyMarkup, ReplyParameters, User,
+};
+
+/// Default global send rate (messages/second) across all chats. Matches the
+/// teloxide `Limits::default()` global cap we relied on previously.
+const DEFAULT_GLOBAL_PER_SEC: u32 = 30;
+
+/// Default minimum spacing between two sends to the *same* chat. Matches the
+/// teloxide per-chat cap (~1 message/second/chat).
+const DEFAULT_PER_CHAT_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// Error type for every outbound Telegram operation routed through [`RightBot`].
 ///
@@ -85,6 +104,514 @@ impl Throttle {
     }
 }
 
+/// Extract the 429 `retry_after` seconds from a frankenstein error, if present.
+///
+/// Returns `Some(secs)` only for `Error::Api` responses carrying
+/// `parameters.retry_after`; any other error variant (transport, decode, …)
+/// returns `None`.
+fn retry_after_secs(e: &frankenstein::Error) -> Option<u64> {
+    if let frankenstein::Error::Api(resp) = e {
+        resp.parameters.and_then(|p| p.retry_after).map(u64::from)
+    } else {
+        None
+    }
+}
+
+/// Thin, rate-limited, identity-cached wrapper over the frankenstein reqwest
+/// client. Cloneable: clones share the same `reqwest::Client`, cached identity,
+/// and throttle.
+#[derive(Clone)]
+pub(crate) struct RightBot {
+    bot: FBot,
+    token: Arc<String>,
+    me: Arc<User>,
+    rate: Arc<Throttle>,
+}
+
+impl RightBot {
+    /// Construct and resolve identity (`get_me`) once — replaces teloxide
+    /// `CacheMe`. Performs one live network round-trip; do not call in unit
+    /// tests.
+    pub(crate) async fn connect(token: String) -> Result<Self, TgError> {
+        let bot = FBot::new(&token);
+        let me = bot.get_me().await?.result;
+        Ok(Self {
+            bot,
+            token: Arc::new(token),
+            me: Arc::new(me),
+            rate: Arc::new(Throttle::new(
+                DEFAULT_GLOBAL_PER_SEC,
+                DEFAULT_PER_CHAT_INTERVAL,
+            )),
+        })
+    }
+
+    /// The bot's own resolved identity (cached at `connect` time).
+    pub(crate) fn me(&self) -> &User {
+        &self.me
+    }
+
+    // ---- retry helper -----------------------------------------------------
+
+    /// Run `call`, and on a 429 `retry_after` error sleep then retry exactly
+    /// once. `call` is a closure (not a future) because a single future cannot
+    /// be awaited twice.
+    async fn with_retry<F, Fut, T>(&self, call: F) -> Result<T, TgError>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T, frankenstein::Error>>,
+    {
+        match call().await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                if let Some(after) = retry_after_secs(&e) {
+                    tracing::warn!(retry_after = after, "telegram 429 — retrying once");
+                    tokio::time::sleep(Duration::from_secs(after)).await;
+                    Ok(call().await?)
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
+    }
+
+    // ---- core sends -------------------------------------------------------
+
+    /// Send an HTML-formatted message, optionally threaded, replying, and with
+    /// an inline keyboard. Returns the sent [`Message`] (callers read
+    /// `message_id`).
+    pub(crate) async fn send_html(
+        &self,
+        chat_id: i64,
+        thread: Option<i32>,
+        text: &str,
+        reply_to: Option<i32>,
+        markup: Option<InlineKeyboardMarkup>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendMessageParams::builder()
+            .chat_id(chat_id)
+            .text(text)
+            .parse_mode(ParseMode::Html)
+            .maybe_message_thread_id(thread)
+            .maybe_reply_parameters(
+                reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
+            )
+            .maybe_reply_markup(markup.map(ReplyMarkup::InlineKeyboardMarkup))
+            .build();
+        let resp = self.with_retry(|| self.bot.send_message(&params)).await?;
+        Ok(resp.result)
+    }
+
+    /// Send a plain-text message (no parse mode). Returns the sent [`Message`].
+    pub(crate) async fn send_text(&self, chat_id: i64, text: &str) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendMessageParams::builder()
+            .chat_id(chat_id)
+            .text(text)
+            .build();
+        let resp = self.with_retry(|| self.bot.send_message(&params)).await?;
+        Ok(resp.result)
+    }
+
+    /// Edit an existing message's HTML text and inline keyboard. The edited
+    /// payload (`MessageOrBool`) is discarded — callers only care about
+    /// success/failure.
+    pub(crate) async fn edit_html(
+        &self,
+        chat_id: i64,
+        message_id: i32,
+        text: &str,
+        markup: Option<InlineKeyboardMarkup>,
+    ) -> Result<(), TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::EditMessageTextParams::builder()
+            .chat_id(chat_id)
+            .message_id(message_id)
+            .text(text)
+            .parse_mode(ParseMode::Html)
+            .maybe_reply_markup(markup)
+            .build();
+        self.with_retry(|| self.bot.edit_message_text(&params))
+            .await?;
+        Ok(())
+    }
+
+    /// Answer a callback query (optional toast text, optional alert popup).
+    /// Not retried — callback answers are short-lived and best-effort.
+    pub(crate) async fn answer_callback(
+        &self,
+        callback_query_id: &str,
+        text: Option<&str>,
+        show_alert: bool,
+    ) -> Result<(), TgError> {
+        let params = frankenstein::methods::AnswerCallbackQueryParams::builder()
+            .callback_query_id(callback_query_id)
+            .maybe_text(text)
+            .maybe_show_alert(show_alert.then_some(true))
+            .build();
+        self.bot.answer_callback_query(&params).await?;
+        Ok(())
+    }
+
+    /// Delete a message. Not retried — callers always discard the result.
+    pub(crate) async fn delete_message(
+        &self,
+        chat_id: i64,
+        message_id: i32,
+    ) -> Result<(), TgError> {
+        let params = frankenstein::methods::DeleteMessageParams::builder()
+            .chat_id(chat_id)
+            .message_id(message_id)
+            .build();
+        self.bot.delete_message(&params).await?;
+        Ok(())
+    }
+
+    // ---- file download ----------------------------------------------------
+
+    /// Resolve `file_id` to a file path via `get_file`, then download the bytes
+    /// from Telegram's file endpoint to `dest`.
+    ///
+    /// SECURITY: the download URL embeds the bot token; it is never logged.
+    pub(crate) async fn download_file(
+        &self,
+        file_id: &str,
+        dest: &std::path::Path,
+    ) -> Result<(), TgError> {
+        let params = frankenstein::methods::GetFileParams::builder()
+            .file_id(file_id.to_string())
+            .build();
+        let file = self.bot.get_file(&params).await?.result;
+        let file_path = file.file_path.ok_or_else(|| {
+            TgError::Other(format!(
+                "get_file returned no file_path for file_id {file_id}"
+            ))
+        })?;
+        // Token-bearing URL — must never be logged.
+        let url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            self.token, file_path
+        );
+        let bytes = reqwest::get(&url)
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        tokio::fs::write(dest, &bytes)
+            .await
+            .map_err(|e| TgError::Other(format!("{e:#}")))?;
+        Ok(())
+    }
+
+    // ---- webhook & commands ----------------------------------------------
+
+    /// Register the webhook URL with a secret token, allowed-update filter, and
+    /// max connections.
+    pub(crate) async fn set_webhook(
+        &self,
+        url: &str,
+        secret: &str,
+        allowed: Vec<AllowedUpdate>,
+        max_connections: u32,
+    ) -> Result<(), TgError> {
+        let params = frankenstein::methods::SetWebhookParams::builder()
+            .url(url)
+            .secret_token(secret)
+            .allowed_updates(allowed)
+            .max_connections(max_connections)
+            .build();
+        self.bot.set_webhook(&params).await?;
+        Ok(())
+    }
+
+    /// Set the bot's command list for a scope / language.
+    pub(crate) async fn set_my_commands(
+        &self,
+        commands: Vec<BotCommand>,
+        scope: Option<BotCommandScope>,
+        language_code: Option<String>,
+    ) -> Result<(), TgError> {
+        let params = frankenstein::methods::SetMyCommandsParams::builder()
+            .commands(commands)
+            .maybe_scope(scope)
+            .maybe_language_code(language_code)
+            .build();
+        self.bot.set_my_commands(&params).await?;
+        Ok(())
+    }
+
+    /// Clear the bot's command list for a scope / language.
+    pub(crate) async fn delete_my_commands(
+        &self,
+        scope: Option<BotCommandScope>,
+        language_code: Option<String>,
+    ) -> Result<(), TgError> {
+        let params = frankenstein::methods::DeleteMyCommandsParams::builder()
+            .maybe_scope(scope)
+            .maybe_language_code(language_code)
+            .build();
+        self.bot.delete_my_commands(&params).await?;
+        Ok(())
+    }
+
+    // ---- chat action ------------------------------------------------------
+
+    /// Send a chat action (e.g. `ChatAction::Typing`), optionally threaded.
+    pub(crate) async fn send_chat_action(
+        &self,
+        chat_id: i64,
+        action: ChatAction,
+        thread: Option<i32>,
+    ) -> Result<(), TgError> {
+        let params = frankenstein::methods::SendChatActionParams::builder()
+            .chat_id(chat_id)
+            .action(action)
+            .maybe_message_thread_id(thread)
+            .build();
+        self.bot.send_chat_action(&params).await?;
+        Ok(())
+    }
+
+    // ---- media sends ------------------------------------------------------
+    //
+    // `media` is a `frankenstein::input_file::FileUpload`: pass a `PathBuf` for
+    // a local-file upload (sandbox-outbox paths), or a `String` for a Telegram
+    // `file_id`/URL. `&str` does NOT auto-convert.
+
+    /// Send a photo, optional HTML caption, threaded, replying.
+    pub(crate) async fn send_photo(
+        &self,
+        chat_id: i64,
+        media: FileUpload,
+        caption_html: Option<&str>,
+        thread: Option<i32>,
+        reply_to: Option<i32>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendPhotoParams::builder()
+            .chat_id(chat_id)
+            .photo(media)
+            .maybe_caption(caption_html)
+            .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
+            .maybe_message_thread_id(thread)
+            .maybe_reply_parameters(
+                reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
+            )
+            .build();
+        let resp = self.with_retry(|| self.bot.send_photo(&params)).await?;
+        Ok(resp.result)
+    }
+
+    /// Send a document, optional HTML caption, threaded, replying.
+    pub(crate) async fn send_document(
+        &self,
+        chat_id: i64,
+        media: FileUpload,
+        caption_html: Option<&str>,
+        thread: Option<i32>,
+        reply_to: Option<i32>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendDocumentParams::builder()
+            .chat_id(chat_id)
+            .document(media)
+            .maybe_caption(caption_html)
+            .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
+            .maybe_message_thread_id(thread)
+            .maybe_reply_parameters(
+                reply_to.map(|r| ReplyParameters::builder().message_id(r).build()),
+            )
+            .build();
+        let resp = self.with_retry(|| self.bot.send_document(&params)).await?;
+        Ok(resp.result)
+    }
+
+    /// Send a video, optional HTML caption, threaded.
+    pub(crate) async fn send_video(
+        &self,
+        chat_id: i64,
+        media: FileUpload,
+        caption_html: Option<&str>,
+        thread: Option<i32>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendVideoParams::builder()
+            .chat_id(chat_id)
+            .video(media)
+            .maybe_caption(caption_html)
+            .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
+            .maybe_message_thread_id(thread)
+            .build();
+        let resp = self.with_retry(|| self.bot.send_video(&params)).await?;
+        Ok(resp.result)
+    }
+
+    /// Send a voice message, optional HTML caption, threaded.
+    pub(crate) async fn send_voice(
+        &self,
+        chat_id: i64,
+        media: FileUpload,
+        caption_html: Option<&str>,
+        thread: Option<i32>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendVoiceParams::builder()
+            .chat_id(chat_id)
+            .voice(media)
+            .maybe_caption(caption_html)
+            .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
+            .maybe_message_thread_id(thread)
+            .build();
+        let resp = self.with_retry(|| self.bot.send_voice(&params)).await?;
+        Ok(resp.result)
+    }
+
+    /// Send an audio file, optional HTML caption, threaded.
+    pub(crate) async fn send_audio(
+        &self,
+        chat_id: i64,
+        media: FileUpload,
+        caption_html: Option<&str>,
+        thread: Option<i32>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendAudioParams::builder()
+            .chat_id(chat_id)
+            .audio(media)
+            .maybe_caption(caption_html)
+            .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
+            .maybe_message_thread_id(thread)
+            .build();
+        let resp = self.with_retry(|| self.bot.send_audio(&params)).await?;
+        Ok(resp.result)
+    }
+
+    /// Send an animation (GIF/MP4), optional HTML caption, threaded.
+    pub(crate) async fn send_animation(
+        &self,
+        chat_id: i64,
+        media: FileUpload,
+        caption_html: Option<&str>,
+        thread: Option<i32>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendAnimationParams::builder()
+            .chat_id(chat_id)
+            .animation(media)
+            .maybe_caption(caption_html)
+            .maybe_parse_mode(caption_html.map(|_| ParseMode::Html))
+            .maybe_message_thread_id(thread)
+            .build();
+        let resp = self.with_retry(|| self.bot.send_animation(&params)).await?;
+        Ok(resp.result)
+    }
+
+    /// Send a video note (round video). No caption / parse mode in the API.
+    pub(crate) async fn send_video_note(
+        &self,
+        chat_id: i64,
+        media: FileUpload,
+        thread: Option<i32>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendVideoNoteParams::builder()
+            .chat_id(chat_id)
+            .video_note(media)
+            .maybe_message_thread_id(thread)
+            .build();
+        let resp = self
+            .with_retry(|| self.bot.send_video_note(&params))
+            .await?;
+        Ok(resp.result)
+    }
+
+    /// Send a sticker. No caption / parse mode in the API.
+    pub(crate) async fn send_sticker(
+        &self,
+        chat_id: i64,
+        media: FileUpload,
+        thread: Option<i32>,
+    ) -> Result<Message, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendStickerParams::builder()
+            .chat_id(chat_id)
+            .sticker(media)
+            .maybe_message_thread_id(thread)
+            .build();
+        let resp = self.with_retry(|| self.bot.send_sticker(&params)).await?;
+        Ok(resp.result)
+    }
+
+    /// Send a media group (album). Captions / parse modes / keyboards live on
+    /// each `MediaGroupInputMedia` member, not at the top level.
+    pub(crate) async fn send_media_group(
+        &self,
+        chat_id: i64,
+        media: Vec<MediaGroupInputMedia>,
+        thread: Option<i32>,
+    ) -> Result<Vec<Message>, TgError> {
+        self.rate.acquire(chat_id).await;
+        let params = frankenstein::methods::SendMediaGroupParams::builder()
+            .chat_id(chat_id)
+            .media(media)
+            .maybe_message_thread_id(thread)
+            .build();
+        let resp = self
+            .with_retry(|| self.bot.send_media_group(&params))
+            .await?;
+        Ok(resp.result)
+    }
+
+    // ---- forum topics -----------------------------------------------------
+
+    /// Close a forum topic.
+    pub(crate) async fn close_forum_topic(
+        &self,
+        chat_id: i64,
+        message_thread_id: i32,
+    ) -> Result<(), TgError> {
+        let params = frankenstein::methods::CloseForumTopicParams::builder()
+            .chat_id(chat_id)
+            .message_thread_id(message_thread_id)
+            .build();
+        self.bot.close_forum_topic(&params).await?;
+        Ok(())
+    }
+
+    /// Reopen a forum topic.
+    pub(crate) async fn reopen_forum_topic(
+        &self,
+        chat_id: i64,
+        message_thread_id: i32,
+    ) -> Result<(), TgError> {
+        let params = frankenstein::methods::ReopenForumTopicParams::builder()
+            .chat_id(chat_id)
+            .message_thread_id(message_thread_id)
+            .build();
+        self.bot.reopen_forum_topic(&params).await?;
+        Ok(())
+    }
+
+    /// Edit a forum topic's name and/or icon.
+    pub(crate) async fn edit_forum_topic(
+        &self,
+        chat_id: i64,
+        message_thread_id: i32,
+        name: Option<String>,
+        icon_custom_emoji_id: Option<String>,
+    ) -> Result<(), TgError> {
+        let params = frankenstein::methods::EditForumTopicParams::builder()
+            .chat_id(chat_id)
+            .message_thread_id(message_thread_id)
+            .maybe_name(name)
+            .maybe_icon_custom_emoji_id(icon_custom_emoji_id)
+            .build();
+        self.bot.edit_forum_topic(&params).await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod throttle_tests {
     use super::*;
@@ -107,5 +634,56 @@ mod throttle_tests {
         t.acquire(1).await;
         t.acquire(2).await;
         assert!(start.elapsed() < Duration::from_millis(1000));
+    }
+}
+
+#[cfg(test)]
+mod retry_after_tests {
+    use super::*;
+    use frankenstein::response::{ErrorResponse, ResponseParameters};
+
+    #[test]
+    fn retry_after_secs_extracts_from_api_error() {
+        let err = frankenstein::Error::Api(ErrorResponse {
+            ok: false,
+            description: "Too Many Requests".to_string(),
+            error_code: 429,
+            parameters: Some(ResponseParameters {
+                migrate_to_chat_id: None,
+                retry_after: Some(7),
+            }),
+        });
+        assert_eq!(retry_after_secs(&err), Some(7));
+    }
+
+    #[test]
+    fn retry_after_secs_none_without_parameters() {
+        let err = frankenstein::Error::Api(ErrorResponse {
+            ok: false,
+            description: "Bad Request".to_string(),
+            error_code: 400,
+            parameters: None,
+        });
+        assert_eq!(retry_after_secs(&err), None);
+    }
+
+    #[test]
+    fn retry_after_secs_none_when_parameters_lack_retry_after() {
+        let err = frankenstein::Error::Api(ErrorResponse {
+            ok: false,
+            description: "no retry_after".to_string(),
+            error_code: 429,
+            parameters: Some(ResponseParameters {
+                migrate_to_chat_id: Some(123),
+                retry_after: None,
+            }),
+        });
+        assert_eq!(retry_after_secs(&err), None);
+    }
+
+    #[test]
+    fn retry_after_secs_none_for_non_api_error() {
+        let err = frankenstein::Error::ReadFile(std::io::Error::other("boom"));
+        assert_eq!(retry_after_secs(&err), None);
     }
 }
