@@ -23,6 +23,7 @@ pub(crate) mod progress;
 pub(crate) mod reply_context;
 pub mod session;
 pub mod shutdown_listener;
+pub(crate) mod tg_bot;
 pub mod webhook;
 pub mod worker;
 
