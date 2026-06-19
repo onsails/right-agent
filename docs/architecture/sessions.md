@@ -59,7 +59,7 @@ provenance. The same foreground registration is the only source of scope for
 
 Telegram transcript archiving is separate from Hindsight memory:
 
-- Group pre-routing archive: every group message Teloxide delivers is archived
+- Group pre-routing archive: every group message Telegram delivers is archived
   before routing, even when the sender is untrusted, the bot was not addressed,
   or the topic is closed.
 - Routed DM archive: direct messages are archived only after auth-code and MCP
