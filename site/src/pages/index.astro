@@ -27,7 +27,6 @@ import Footer from '../components/Footer.astro';
     <p class="lead rev d1" style="margin-bottom:2.4rem;">you talk to your agent in Telegram. every chat — a dm, a group, or a topic inside a group — is its own Claude Code session, and they all share one memory.</p>
     <FlowStrip
       cap="every chat, its own session"
-      capIcon="message"
       note="start a fresh named session any time with /new, and move between them with /switch."
       nodes={[
         { icon: 'message', tint: 't-teal', name: 'your chats', note: 'a dm, a group, or a topic inside a group' },
@@ -51,7 +50,6 @@ import Footer from '../components/Footer.astro';
     <p class="lead rev d1" style="margin-bottom:2.4rem;">memory persists across every session and chat, and the agent treats it as untrusted data: what goes in is sanitized, what comes back is framed as information, never commands. recall shows when each memory formed and lets the model judge relevance, with no hidden staleness rules.</p>
     <FlowStrip
       cap="how a memory is handled"
-      capIcon="database"
       nodes={[
         { icon: 'shield', tint: 't-teal', name: 'on the way in', note: 'incoming memory is sanitized before it is ever stored' },
         { icon: 'database', tint: 't-gold', name: 'where it lives', note: 'Hindsight by default, with an agent-managed MEMORY.md file as fallback' },
