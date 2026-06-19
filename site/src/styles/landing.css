@@ -104,8 +104,8 @@ h1 .glow::after { content:''; position:absolute; left:0; right:0; bottom:.02em; 
 }
 .label { font-family:var(--mono); font-size:.72rem; letter-spacing:.24em; text-transform:uppercase; color:var(--warm); margin-bottom:1rem; display:flex; align-items:center; gap:.7rem; }
 .label::before { content:''; width:24px; height:1px; background: var(--warm); }
-h2 { font-family: var(--display); font-size: clamp(1.6rem, 3vw, 2.1rem); letter-spacing:-.01em; margin:0 0 2rem; font-weight:700; color: var(--text); max-width: 66ch; }
-.lead { color:var(--muted); max-width:66ch; font-size:1.05rem; }
+h2 { font-family: var(--display); font-size: clamp(1.6rem, 3vw, 2.1rem); letter-spacing:-.01em; margin:0 0 2rem; font-weight:700; color: var(--text); max-width: var(--readw); }
+.lead { color:var(--muted); max-width:var(--readw); font-size:1.05rem; }
 
 /* cards */
 .grid { display:grid; gap:1.1rem; grid-template-columns: repeat(auto-fit, minmax(17rem,1fr)); }
