@@ -1187,7 +1187,7 @@ pub async fn handle_stop_callback(ctx: &HandlerCtx, q: &CallbackQuery) -> Result
 }
 
 fn apply_thinking_toggle_callback(
-    thinking_visibility: &super::ThinkingVisibility,
+    thinking_visibility: &crate::telegram::ThinkingVisibility,
     data: &str,
 ) -> Option<&'static str> {
     let (key, action) = super::parse_thinking_toggle_callback(data)?;
@@ -1488,7 +1488,7 @@ mod tests {
 
     #[tokio::test]
     async fn thinking_toggle_show_updates_active_visibility() {
-        let map: super::ThinkingVisibility = Arc::new(DashMap::new());
+        let map: crate::telegram::ThinkingVisibility = Arc::new(DashMap::new());
         let key = (42_i64, 7_i64);
         map.insert(key, false);
 
@@ -1500,7 +1500,7 @@ mod tests {
 
     #[tokio::test]
     async fn thinking_toggle_hide_updates_active_visibility() {
-        let map: super::ThinkingVisibility = Arc::new(DashMap::new());
+        let map: crate::telegram::ThinkingVisibility = Arc::new(DashMap::new());
         let key = (42_i64, 7_i64);
         map.insert(key, true);
 
@@ -1512,7 +1512,7 @@ mod tests {
 
     #[tokio::test]
     async fn thinking_toggle_after_finish_reports_already_finished() {
-        let map: super::ThinkingVisibility = Arc::new(DashMap::new());
+        let map: crate::telegram::ThinkingVisibility = Arc::new(DashMap::new());
 
         let text = apply_thinking_toggle_callback(&map, "think:42:7:show");
         assert_eq!(text, Some("Already finished"));
@@ -1520,7 +1520,7 @@ mod tests {
 
     #[tokio::test]
     async fn thinking_toggle_malformed_callback_returns_none() {
-        let map: super::ThinkingVisibility = Arc::new(DashMap::new());
+        let map: crate::telegram::ThinkingVisibility = Arc::new(DashMap::new());
 
         assert_eq!(apply_thinking_toggle_callback(&map, "think:42:7"), None);
         assert_eq!(apply_thinking_toggle_callback(&map, "stop:42:7"), None);

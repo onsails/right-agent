@@ -128,4 +128,58 @@ mod tests {
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
+
+    /// A correct secret + a valid Update body is accepted (200) and routed. The
+    /// placeholder ctx's handlers are no-ops for an unauthorized DM sender, so
+    /// `route_update` returns without side effects; we assert the HTTP contract.
+    ///
+    /// (Adaptation note: the former teloxide integration test observed the
+    /// emitted Update via an `UpdateListener` stream. The frankenstein router
+    /// has no listener — it routes inline — so we assert the 200 + that a valid
+    /// body is accepted, matching the test's spirit.)
+    #[tokio::test]
+    async fn webhook_router_200_on_correct_secret_and_valid_body() {
+        let router = test_router("the-secret");
+        let body = serde_json::json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "date": 0,
+                "chat": {"id": 1, "type": "private", "first_name": "test"},
+                "from": {"id": 1, "is_bot": false, "first_name": "test"},
+                "text": "hello"
+            }
+        })
+        .to_string();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header(SECRET_HEADER, HeaderValue::from_static("the-secret"))
+            .body(Body::from(body))
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Regression: the bot UDS server nests the webhook router under
+    /// `/tg/<agent>`; axum 0.8 matches the no-trailing-slash form against the
+    /// inner `/` route. A nested POST must reach the inner handler (401 here on
+    /// secret mismatch), not 404.
+    #[tokio::test]
+    async fn nested_webhook_router_routes_no_trailing_slash() {
+        let inner = test_router("the-secret");
+        let outer = Router::new().nest("/tg/test", inner);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/tg/test")
+            .header(SECRET_HEADER, HeaderValue::from_static("wrong"))
+            .body(Body::from("{}"))
+            .unwrap();
+        let response = outer.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "expected nested router to reach inner handler at /tg/<agent>"
+        );
+    }
 }

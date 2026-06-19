@@ -57,7 +57,6 @@ hyper = { version = "1.10", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 sse-stream = "0.2"
 schemars = "1.1"
-teloxide = { version = "0.17", default-features = false, features = ["macros", "throttle", "cache-me", "rustls", "webhooks-axum"] }
 frankenstein = { version = "0.50", features = ["client-reqwest"] }
 governor = "0.10"
 uuid = { version = "1", features = ["v4"] }
