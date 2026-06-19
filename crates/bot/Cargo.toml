@@ -23,6 +23,8 @@ right-runtime-state = { path = "../right-runtime-state", version = "*" }
 right-stt = { path = "../right-stt", version = "*" }
 right-ui = { path = "../right-ui", version = "*" }
 teloxide = { workspace = true }
+frankenstein = { workspace = true }
+governor = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 miette = { workspace = true }
