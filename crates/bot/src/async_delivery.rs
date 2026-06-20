@@ -1207,8 +1207,7 @@ async fn deliver_through_session(
         let parts = crate::telegram::markdown::split_html_message(&html);
         let thread = target_thread_id.map(|t| t as i32);
         for part in &parts {
-            let send =
-                bot.send_message_opts(target_chat_id, part, true, thread, None, None);
+            let send = bot.send_message_opts(target_chat_id, part, true, thread, None, None);
             if let Err(e) =
                 run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, send).await?
             {
@@ -1255,8 +1254,7 @@ async fn deliver_through_session(
                 "async delivery: header HTML send failed, retrying plain: {e:#}"
             );
             let plain = strip_html_tags(header);
-            let fallback =
-                bot.send_message_opts(target_chat_id, &plain, false, thread, None, None);
+            let fallback = bot.send_message_opts(target_chat_id, &plain, false, thread, None, None);
             run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, fallback)
                 .await?
                 .map_err(|e2| format!("telegram header send failed; html: {e:#}; plain: {e2:#}"))?;

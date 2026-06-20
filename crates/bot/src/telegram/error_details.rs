@@ -25,13 +25,17 @@ pub(crate) fn parse_errdet_id(data: &str) -> Option<i64> {
 /// Build the one-button keyboard. `None` → empty markup (no button rendered).
 pub(crate) fn details_keyboard(details_id: Option<i64>) -> InlineKeyboardMarkup {
     let rows = match details_id {
-        Some(id) => vec![vec![InlineKeyboardButton::builder()
-            .text("🔍 Details")
-            .callback_data(format!("errdet:{id}"))
-            .build()]],
+        Some(id) => vec![vec![
+            InlineKeyboardButton::builder()
+                .text("🔍 Details")
+                .callback_data(format!("errdet:{id}"))
+                .build(),
+        ]],
         None => Vec::new(),
     };
-    InlineKeyboardMarkup::builder().inline_keyboard(rows).build()
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(rows)
+        .build()
 }
 
 /// How to deliver the raw JSON: inline `<pre>` HTML, or an attached file when

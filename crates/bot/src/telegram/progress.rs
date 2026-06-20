@@ -232,7 +232,7 @@ async fn send_text_message(
         // Only retry on a deterministic, pre-delivery formatting rejection
         // (entity/URL parse failure or too-long). Network/5xx/timeout errors
         // may have been delivered, so retrying them would double-post.
-        Ok(Err(e)) if super::attachments::is_retryable_format_error(&format!("{e}")) => {
+        Ok(Err(e)) if super::attachments::is_retryable_format_error(&e) => {
             tracing::warn!(
                 invocation_id = %target.invocation_id,
                 "HTML send failed, retrying as plain text: {e:#}",

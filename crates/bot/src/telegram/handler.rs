@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 
 use dashmap::DashMap;
 use frankenstein::types::{
-    CallbackQuery, Chat, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo,
+    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo,
 };
 
 use crate::cc::markdown_utils::{html_escape, strip_html_tags};
@@ -98,11 +98,6 @@ fn other_err(e: impl std::fmt::Display) -> TgError {
     TgError::Other(format!("{e:#}"))
 }
 
-/// True when the chat is a private (1:1) chat. Used by DM-only command gates.
-pub(crate) fn is_private_chat(chat: &Chat) -> bool {
-    msg_ext::is_private(chat)
-}
-
 /// Send an HTML-formatted message, respecting thread_id for topic replies.
 async fn send_html_reply(
     bot: &super::BotType,
@@ -155,7 +150,9 @@ pub(crate) async fn handle_message(
             user_id: Some(user.id as i64),
         },
         None => super::attachments::MessageAuthor {
-            name: msg_ext::chat_title(&msg.chat).unwrap_or("unknown").to_owned(),
+            name: msg_ext::chat_title(&msg.chat)
+                .unwrap_or("unknown")
+                .to_owned(),
             username: msg_ext::chat_username(&msg.chat).map(|u| format!("@{u}")),
             user_id: None,
         },
@@ -242,10 +239,7 @@ pub(crate) async fn handle_message(
         super::attachments::ChatContext::Group {
             id: msg.chat.id,
             title: msg_ext::chat_title(&msg.chat).map(|s| s.to_string()),
-            topic_id: msg
-                .message_thread_id
-                .map(i64::from)
-                .filter(|&n| n > 1),
+            topic_id: msg.message_thread_id.map(i64::from).filter(|&n| n > 1),
         }
     };
 
@@ -398,7 +392,7 @@ pub(crate) async fn handle_start(
     let bot = &ctx.bot;
     let home = &ctx.home;
     let agent_dir = &ctx.agent_dir;
-    if !is_private_chat(&msg.chat) {
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "start", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
@@ -435,22 +429,26 @@ pub(crate) async fn handle_start(
 /// Build a single-button inline keyboard launching a Mini App at `url`.
 fn webapp_keyboard(label: &str, url: url::Url) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::builder()
-        .inline_keyboard(vec![vec![InlineKeyboardButton::builder()
-            .text(label)
-            .web_app(WebAppInfo {
-                url: url.to_string(),
-            })
-            .build()]])
+        .inline_keyboard(vec![vec![
+            InlineKeyboardButton::builder()
+                .text(label)
+                .web_app(WebAppInfo {
+                    url: url.to_string(),
+                })
+                .build(),
+        ]])
         .build()
 }
 
 /// Build a single-button inline keyboard linking to `url`.
 fn url_keyboard(label: &str, url: url::Url) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::builder()
-        .inline_keyboard(vec![vec![InlineKeyboardButton::builder()
-            .text(label)
-            .url(url.to_string())
-            .build()]])
+        .inline_keyboard(vec![vec![
+            InlineKeyboardButton::builder()
+                .text(label)
+                .url(url.to_string())
+                .build(),
+        ]])
         .build()
 }
 
@@ -459,7 +457,7 @@ pub(crate) async fn handle_dashboard(ctx: &HandlerCtx, msg: &Message) -> Result<
     let bot = &ctx.bot;
     let home = &ctx.home;
     let agent_dir = &ctx.agent_dir;
-    if !is_private_chat(&msg.chat)
+    if !msg_ext::is_private(&msg.chat)
         && !super::allowlist_commands::sender_is_trusted(msg, &ctx.allowlist)
     {
         tracing::debug!(
@@ -488,16 +486,27 @@ pub(crate) async fn handle_dashboard(ctx: &HandlerCtx, msg: &Message) -> Result<
 
     let eff_thread_id = effective_thread_id(msg);
     let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
-    bot.send_message_opts(msg.chat.id, "Dashboard", false, thread, None, Some(keyboard))
-        .await?;
+    bot.send_message_opts(
+        msg.chat.id,
+        "Dashboard",
+        false,
+        thread,
+        None,
+        Some(keyboard),
+    )
+    .await?;
     Ok(())
 }
 
 /// Handle the /new command — start a new session.
-pub(crate) async fn handle_new(ctx: &HandlerCtx, msg: &Message, name: String) -> Result<(), TgError> {
+pub(crate) async fn handle_new(
+    ctx: &HandlerCtx,
+    msg: &Message,
+    name: String,
+) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let agent_dir = &ctx.agent_dir;
-    if !is_private_chat(&msg.chat) {
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "new", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
@@ -550,7 +559,7 @@ pub(crate) async fn handle_new(ctx: &HandlerCtx, msg: &Message, name: String) ->
 pub(crate) async fn handle_list(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let agent_dir = &ctx.agent_dir;
-    if !is_private_chat(&msg.chat) {
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "list", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
@@ -623,10 +632,14 @@ fn format_relative_time(iso_timestamp: &str) -> String {
 }
 
 /// Handle the /switch command — switch to a different session.
-pub(crate) async fn handle_switch(ctx: &HandlerCtx, msg: &Message, uuid: String) -> Result<(), TgError> {
+pub(crate) async fn handle_switch(
+    ctx: &HandlerCtx,
+    msg: &Message,
+    uuid: String,
+) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let agent_dir = &ctx.agent_dir;
-    if !is_private_chat(&msg.chat) {
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "switch", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
@@ -713,11 +726,15 @@ fn dashboard_mcp_button_label() -> &'static str {
 }
 
 /// Handle the /mcp command by opening the dashboard MCP view.
-pub(crate) async fn handle_mcp(ctx: &HandlerCtx, msg: &Message, _args: String) -> Result<(), TgError> {
+pub(crate) async fn handle_mcp(
+    ctx: &HandlerCtx,
+    msg: &Message,
+    _args: String,
+) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let agent_dir = &ctx.agent_dir;
     let home = &ctx.home;
-    if !is_private_chat(&msg.chat) {
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "mcp", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
@@ -760,7 +777,7 @@ pub(crate) async fn handle_providers(
     let bot = &ctx.bot;
     let agent_dir = &ctx.agent_dir;
     let home = &ctx.home;
-    if !is_private_chat(&msg.chat) {
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(
             cmd = "providers",
             "ignoring command in group chat (DM-only)"
@@ -804,8 +821,15 @@ pub(crate) async fn handle_providers(
 
     let eff_thread_id = effective_thread_id(msg);
     let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
-    bot.send_message_opts(msg.chat.id, "Providers", false, thread, None, Some(keyboard))
-        .await?;
+    bot.send_message_opts(
+        msg.chat.id,
+        "Providers",
+        false,
+        thread,
+        None,
+        Some(keyboard),
+    )
+    .await?;
     Ok(())
 }
 
@@ -832,7 +856,7 @@ pub(crate) async fn handle_set_focus(
     let home = &ctx.home;
     let identity = &ctx.identity;
     let eff_thread_id = effective_thread_id(msg);
-    if is_private_chat(&msg.chat) {
+    if msg_ext::is_private(&msg.chat) {
         tracing::info!(agent_dir = %agent_dir.0.display(), "set_focus: opening dashboard (DM)");
         return send_focus_webapp_button(
             bot,
@@ -917,10 +941,14 @@ async fn send_focus_webapp_button(
 // ---------------------------------------------------------------------------
 
 /// Handle the /cron command — routes to list (no args) or detail (job name).
-pub(crate) async fn handle_cron(ctx: &HandlerCtx, msg: &Message, args: String) -> Result<(), TgError> {
+pub(crate) async fn handle_cron(
+    ctx: &HandlerCtx,
+    msg: &Message,
+    args: String,
+) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let agent_dir = &ctx.agent_dir;
-    if !is_private_chat(&msg.chat) {
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "cron", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
@@ -946,7 +974,8 @@ async fn handle_cron_list(
         .map_err(|e| other_err(format!("load specs failed: {e:#}")))?;
 
     if specs.is_empty() {
-        bot.send_text(msg.chat.id, "No cron jobs configured.").await?;
+        bot.send_text(msg.chat.id, "No cron jobs configured.")
+            .await?;
         return Ok(());
     }
 
@@ -1075,7 +1104,7 @@ fn format_duration(start_iso: &str, end_iso: &str) -> String {
 pub(crate) async fn handle_doctor(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let home = &ctx.home;
-    if !is_private_chat(&msg.chat) {
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "doctor", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
@@ -1138,7 +1167,11 @@ fn format_doctor_result_body(checks: &[right_agent::doctor::DoctorCheck]) -> Str
 // ---------------------------------------------------------------------------
 
 /// Handle manual /usage compatibility by opening the dashboard.
-pub(crate) async fn handle_usage(ctx: &HandlerCtx, msg: &Message, _arg: String) -> Result<(), TgError> {
+pub(crate) async fn handle_usage(
+    ctx: &HandlerCtx,
+    msg: &Message,
+    _arg: String,
+) -> Result<(), TgError> {
     handle_dashboard(ctx, msg).await
 }
 
@@ -1150,7 +1183,10 @@ pub(crate) async fn handle_usage(ctx: &HandlerCtx, msg: &Message, _arg: String) 
 ///
 /// Callback data format: `stop:{chat_id}:{eff_thread_id}`
 /// Looks up the CancellationToken in StopTokens and cancels it.
-pub(crate) async fn handle_stop_callback(ctx: &HandlerCtx, q: &CallbackQuery) -> Result<(), TgError> {
+pub(crate) async fn handle_stop_callback(
+    ctx: &HandlerCtx,
+    q: &CallbackQuery,
+) -> Result<(), TgError> {
     let worker_ctl = &ctx.worker_ctl;
     let data = q.data.as_deref().unwrap_or("");
     let parts: Vec<&str> = data.splitn(3, ':').collect();
@@ -1200,9 +1236,10 @@ pub(crate) async fn handle_thinking_toggle_callback(
     ctx: &HandlerCtx,
     q: &CallbackQuery,
 ) -> Result<(), TgError> {
-    let text = q.data.as_deref().and_then(|data| {
-        apply_thinking_toggle_callback(&ctx.worker_ctl.thinking_visibility, data)
-    });
+    let text = q
+        .data
+        .as_deref()
+        .and_then(|data| apply_thinking_toggle_callback(&ctx.worker_ctl.thinking_visibility, data));
     ctx.bot.answer_callback(&q.id, text, false).await?;
     Ok(())
 }
@@ -1258,6 +1295,7 @@ pub(crate) async fn handle_bg_callback(ctx: &HandlerCtx, q: &CallbackQuery) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frankenstein::types::Chat;
     use std::any::TypeId;
 
     fn make_private_chat() -> Chat {
@@ -1279,9 +1317,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_private_chat_detects_dm() {
-        assert!(is_private_chat(&make_private_chat()));
-        assert!(!is_private_chat(&make_group_chat()));
+    async fn msg_ext_is_private_detects_dm() {
+        assert!(super::msg_ext::is_private(&make_private_chat()));
+        assert!(!super::msg_ext::is_private(&make_group_chat()));
     }
 
     /// Regression test: AgentDir and RightHome must have distinct TypeIds.

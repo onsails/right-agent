@@ -73,7 +73,9 @@ pub(crate) fn topic_keyboard(effective: ResponseMode, has_override: bool) -> Inl
     if has_override {
         rows.push(vec![callback_button("↩︎ Inherit group", "mode:clear")]);
     }
-    InlineKeyboardMarkup::builder().inline_keyboard(rows).build()
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(rows)
+        .build()
 }
 
 /// Build a callback button.
@@ -264,7 +266,7 @@ async fn send_in_thread(
 pub(crate) async fn handle_mode(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let allowlist = &ctx.allowlist;
-    if super::handler::is_private_chat(&msg.chat) {
+    if super::msg_ext::is_private(&msg.chat) {
         send_in_thread(bot, msg, "/mode is only valid in group chats", None).await?;
         return Ok(());
     }
@@ -308,7 +310,7 @@ pub(crate) async fn handle_mode(ctx: &HandlerCtx, msg: &Message) -> Result<(), T
 pub(crate) async fn handle_mode_group(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let allowlist = &ctx.allowlist;
-    if super::handler::is_private_chat(&msg.chat) {
+    if super::msg_ext::is_private(&msg.chat) {
         send_in_thread(bot, msg, "/mode_group is only valid in group chats", None).await?;
         return Ok(());
     }
@@ -337,7 +339,13 @@ pub(crate) async fn handle_mode_group(ctx: &HandlerCtx, msg: &Message) -> Result
         return Ok(());
     };
 
-    send_in_thread(bot, msg, &group_body(current), Some(group_keyboard(current))).await?;
+    send_in_thread(
+        bot,
+        msg,
+        &group_body(current),
+        Some(group_keyboard(current)),
+    )
+    .await?;
     Ok(())
 }
 
@@ -423,7 +431,9 @@ pub(crate) async fn handle_mode_callback(
         return Ok(());
     };
 
-    let edit = bot.edit_html(
+    // Plain text (teloxide parity): the mode menu body is not HTML; edit_html
+    // would force ParseMode::Html.
+    let edit = bot.edit_text(
         message_chat_id(message),
         message_id(message),
         &body,

@@ -362,6 +362,7 @@ pub(crate) async fn run_bot_uds_server(
     agent_name: String,
     started_at: std::time::Instant,
     webhook_set: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    shutdown: tokio_util::sync::CancellationToken,
     ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> miette::Result<()> {
     if socket_path.exists() {
@@ -387,7 +388,11 @@ pub(crate) async fn run_bot_uds_server(
         started_at,
         webhook_set,
     );
+    // Graceful shutdown: on `shutdown` cancellation, stop accepting new
+    // connections and drain in-flight requests (e.g. a webhook update mid-route)
+    // before returning, instead of being dropped mid-request at teardown.
     axum::serve(listener, router)
+        .with_graceful_shutdown(async move { shutdown.cancelled().await })
         .await
         .map_err(|e| miette::miette!("axum serve error: {e:#}"))
 }

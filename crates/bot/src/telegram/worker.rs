@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use right_agent::agent::allowlist::ResponseMode;
 use frankenstein::types::ChatAction;
+use right_agent::agent::allowlist::ResponseMode;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
@@ -2367,9 +2367,11 @@ pub fn spawn_worker(
                             tracing::info!(?key, %run_id, "background run spawned");
                             if let Some(msg_id) = thinking_msg_id {
                                 let banner = background_banner(reason);
+                                // Plain text (teloxide parity): the static banner
+                                // is not HTML; edit_html would force ParseMode::Html.
                                 let _ = ctx
                                     .bot
-                                    .edit_html(tg_chat_id, msg_id, banner, Some(empty_keyboard()))
+                                    .edit_text(tg_chat_id, msg_id, banner, Some(empty_keyboard()))
                                     .await;
                             }
                         }
@@ -4657,7 +4659,14 @@ async fn send_error_to_telegram_inner(
     let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
     if let Err(e) = ctx
         .bot
-        .send_message_opts(tg_chat_id, message, true, thread, None, reply_markup.clone())
+        .send_message_opts(
+            tg_chat_id,
+            message,
+            true,
+            thread,
+            None,
+            reply_markup.clone(),
+        )
         .await
     {
         tracing::warn!(
@@ -5675,9 +5684,7 @@ esac
             .unwrap()
             .into_iter()
             .map(|button| {
-                let data = button
-                    .callback_data
-                    .expect("button must use callback data");
+                let data = button.callback_data.expect("button must use callback data");
                 (button.text, data)
             })
             .collect()

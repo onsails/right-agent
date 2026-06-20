@@ -57,7 +57,12 @@ pub(crate) async fn send_if_needed(
     {
         Ok(_) => caption_attached,
         Err(e) => {
-            tracing::warn!(chat_id, eff_thread_id, "bootstrap welcome photo failed: {:#}", e);
+            tracing::warn!(
+                chat_id,
+                eff_thread_id,
+                "bootstrap welcome photo failed: {:#}",
+                e
+            );
             false
         }
     }
