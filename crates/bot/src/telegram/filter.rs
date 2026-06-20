@@ -14,79 +14,89 @@ pub struct RoutingDecision {
     pub group_open: bool,
 }
 
-// Return shape note: dptree 0.5.1 `filter_map` inserts the closure's `Option<T>`
-// into the DI bag as a single value — it does **not** unpack tuples. Since
-// `Update::filter_message()` already places `Message` in the bag, we return
-// only `Option<RoutingDecision>`. Returning `Option<(Message, RoutingDecision)>`
-// would leave `RoutingDecision` unreachable from downstream handlers.
-pub fn make_routing_filter(
-    allowlist: AllowlistHandle,
-    identity: BotIdentity,
-) -> impl Fn(Message) -> Option<RoutingDecision> + Send + Sync + Clone + 'static {
-    move |msg: Message| {
-        // No `from` means channel post or anonymous — ignore.
-        let sender = msg.from.as_ref()?;
-        let sender_id = sender.id as i64;
-        let chat_id = msg.chat.id;
+/// Allow-list / addressing decision for one inbound message. Borrows the message
+/// (no clone) and the shared `allowlist`/`identity` from `HandlerCtx` — the
+/// router calls this directly on the per-update hot path. Returns
+/// `Some(RoutingDecision)` to route the message, `None` to drop it (channel
+/// post, untrusted sender, unaddressed group message, bot loop, …).
+pub fn route_decision(
+    allowlist: &AllowlistHandle,
+    identity: &BotIdentity,
+    msg: &Message,
+) -> Option<RoutingDecision> {
+    // No `from` means channel post or anonymous — ignore.
+    let sender = msg.from.as_ref()?;
+    let sender_id = sender.id as i64;
+    let chat_id = msg.chat.id;
 
-        let state = allowlist.0.read().expect("allowlist lock poisoned");
-        let sender_trusted = state.is_user_trusted(sender_id);
-        let group_open = state.is_group_open(chat_id);
-        // Response mode is a group/topic concept; DMs are always `Addressed`, so
-        // skip the per-message group lookup for private chats (the routing filter
-        // runs on every update).
-        let response_mode = if msg_ext::is_private(&msg.chat) {
-            ResponseMode::Addressed
-        } else {
-            state.response_mode(chat_id, super::session::effective_thread_id(&msg))
-        };
-        drop(state);
+    let state = allowlist.0.read().expect("allowlist lock poisoned");
+    let sender_trusted = state.is_user_trusted(sender_id);
+    let group_open = state.is_group_open(chat_id);
+    // Response mode is a group/topic concept; DMs are always `Addressed`, so
+    // skip the per-message group lookup for private chats (this runs on every
+    // update).
+    let response_mode = if msg_ext::is_private(&msg.chat) {
+        ResponseMode::Addressed
+    } else {
+        state.response_mode(chat_id, super::session::effective_thread_id(msg))
+    };
+    drop(state);
 
-        let addressed = is_bot_addressed(&msg, &identity);
+    let addressed = is_bot_addressed(msg, identity);
 
-        if msg_ext::is_private(&msg.chat) {
-            if !sender_trusted {
-                return None;
-            }
-            return Some(RoutingDecision {
-                address: Some(AddressKind::DirectMessage),
-                response_mode: ResponseMode::Addressed,
-                sender_trusted: true,
-                group_open: false,
-            });
-        }
-
-        // Group contexts never route bot senders; this loop guard
-        // applies before both All-mode and addressed fallbacks.
-        if sender.is_bot {
+    if msg_ext::is_private(&msg.chat) {
+        if !sender_trusted {
             return None;
         }
-        // `All` mode in an open group answers everyone, no addressing.
-        if response_mode == ResponseMode::All && group_open {
-            return Some(RoutingDecision {
-                address: addressed,
-                response_mode,
-                sender_trusted,
-                group_open,
-            });
-        }
-        if !sender_trusted && !group_open {
-            return None;
-        }
-        // Non-album/non-forward group messages still require an explicit
-        // address. Album siblings and forwards are admitted unaddressed;
-        // the worker aggregates them and applies the post-debounce
-        // invocation gate before invoking CC.
-        if addressed.is_none() && msg.media_group_id.is_none() && msg.forward_origin.is_none() {
-            return None;
-        }
-        Some(RoutingDecision {
+        return Some(RoutingDecision {
+            address: Some(AddressKind::DirectMessage),
+            response_mode: ResponseMode::Addressed,
+            sender_trusted: true,
+            group_open: false,
+        });
+    }
+
+    // Group contexts never route bot senders; this loop guard
+    // applies before both All-mode and addressed fallbacks.
+    if sender.is_bot {
+        return None;
+    }
+    // `All` mode in an open group answers everyone, no addressing.
+    if response_mode == ResponseMode::All && group_open {
+        return Some(RoutingDecision {
             address: addressed,
             response_mode,
             sender_trusted,
             group_open,
-        })
+        });
     }
+    if !sender_trusted && !group_open {
+        return None;
+    }
+    // Non-album/non-forward group messages still require an explicit
+    // address. Album siblings and forwards are admitted unaddressed;
+    // the worker aggregates them and applies the post-debounce
+    // invocation gate before invoking CC.
+    if addressed.is_none() && msg.media_group_id.is_none() && msg.forward_origin.is_none() {
+        return None;
+    }
+    Some(RoutingDecision {
+        address: addressed,
+        response_mode,
+        sender_trusted,
+        group_open,
+    })
+}
+
+/// Test-only closure adapter over [`route_decision`]. Production code calls
+/// `route_decision` directly (no per-message closure allocation or identity
+/// clone).
+#[cfg(test)]
+fn make_routing_filter(
+    allowlist: AllowlistHandle,
+    identity: BotIdentity,
+) -> impl Fn(&Message) -> Option<RoutingDecision> {
+    move |msg: &Message| route_decision(&allowlist, &identity, msg)
 }
 
 #[cfg(test)]
@@ -249,7 +259,7 @@ mod tests {
 
         let f = make_routing_filter(allowlist, identity);
 
-        assert!(f(msg).is_none());
+        assert!(f(&msg).is_none());
     }
 
     #[tokio::test]
@@ -264,7 +274,7 @@ mod tests {
 
         let f = make_routing_filter(allowlist, identity);
 
-        assert!(f(msg).is_none());
+        assert!(f(&msg).is_none());
     }
 
     #[tokio::test]
@@ -278,7 +288,7 @@ mod tests {
         let allowlist = allowlist_with(vec![sender_id], vec![]);
 
         let f = make_routing_filter(allowlist, identity);
-        let decision = f(msg).expect("trusted private text should route");
+        let decision = f(&msg).expect("trusted private text should route");
 
         assert_eq!(decision.address, Some(AddressKind::DirectMessage));
         assert_eq!(decision.response_mode, ResponseMode::Addressed);
@@ -297,7 +307,7 @@ mod tests {
         let allowlist = allowlist_with(vec![sender_id], vec![]);
 
         let f = make_routing_filter(allowlist, identity);
-        let decision = f(msg).expect("trusted private media should route");
+        let decision = f(&msg).expect("trusted private media should route");
 
         assert_eq!(decision.address, Some(AddressKind::DirectMessage));
         assert_eq!(decision.response_mode, ResponseMode::Addressed);
@@ -315,7 +325,7 @@ mod tests {
         let allowlist = open_group_with_mode(chat_id, ResponseMode::All);
         let msg = plain_group_text(chat_id, 42, "какие у нас кроны есть?");
         let f = make_routing_filter(allowlist, identity);
-        let d = f(msg).expect("All mode admits plain text");
+        let d = f(&msg).expect("All mode admits plain text");
         assert!(d.address.is_none());
         assert_eq!(d.response_mode, ResponseMode::All);
         assert!(d.group_open);
@@ -331,7 +341,7 @@ mod tests {
         let allowlist = open_group_with_mode(chat_id, ResponseMode::Addressed);
         let msg = plain_group_text(chat_id, 42, "just chatting");
         let f = make_routing_filter(allowlist, identity);
-        assert!(f(msg).is_none());
+        assert!(f(&msg).is_none());
     }
 
     #[tokio::test]
@@ -351,7 +361,7 @@ mod tests {
         }))
         .unwrap();
         let f = make_routing_filter(allowlist, identity);
-        assert!(f(msg).is_none(), "All mode must not answer other bots");
+        assert!(f(&msg).is_none(), "All mode must not answer other bots");
     }
 
     #[tokio::test]
@@ -377,7 +387,7 @@ mod tests {
         .unwrap();
         let f = make_routing_filter(allowlist, identity);
         assert!(
-            f(msg).is_none(),
+            f(&msg).is_none(),
             "All mode must not answer addressed messages from other bots"
         );
     }
@@ -401,7 +411,7 @@ mod tests {
         );
 
         let f = make_routing_filter(allowlist, identity);
-        let d = f(msg).expect("media-group sibling should pass in open group");
+        let d = f(&msg).expect("media-group sibling should pass in open group");
         assert!(d.address.is_none());
         assert!(d.group_open);
     }
@@ -427,7 +437,7 @@ mod tests {
         .unwrap();
 
         let f = make_routing_filter(allowlist, identity);
-        assert!(f(msg).is_none());
+        assert!(f(&msg).is_none());
     }
 
     #[tokio::test]
@@ -450,7 +460,7 @@ mod tests {
         .unwrap();
 
         let f = make_routing_filter(allowlist, identity);
-        assert!(f(msg).is_none());
+        assert!(f(&msg).is_none());
     }
 
     #[tokio::test]
@@ -473,7 +483,7 @@ mod tests {
         );
 
         let f = make_routing_filter(allowlist, identity);
-        assert!(f(msg).is_none());
+        assert!(f(&msg).is_none());
     }
 
     #[tokio::test]
@@ -495,7 +505,7 @@ mod tests {
         );
 
         let f = make_routing_filter(allowlist, identity);
-        let d = f(msg).expect("captioned sibling must pass");
+        let d = f(&msg).expect("captioned sibling must pass");
         assert!(matches!(d.address, Some(AddressKind::GroupMentionText)));
     }
 
@@ -535,9 +545,9 @@ mod tests {
             &identity.username,
         );
 
-        assert!(f(s1).is_some(), "sibling 1 must reach handle_message");
-        assert!(f(s2).is_some(), "sibling 2 must reach handle_message");
-        let d3 = f(s3).expect("captioned sibling must reach handle_message");
+        assert!(f(&s1).is_some(), "sibling 1 must reach handle_message");
+        assert!(f(&s2).is_some(), "sibling 2 must reach handle_message");
+        let d3 = f(&s3).expect("captioned sibling must reach handle_message");
         assert!(d3.address.is_some());
     }
 
@@ -573,7 +583,7 @@ mod tests {
         .unwrap();
 
         let f = make_routing_filter(allowlist, identity);
-        let d = f(msg).expect("forward should pass in open group");
+        let d = f(&msg).expect("forward should pass in open group");
         assert!(d.address.is_none());
         assert!(d.group_open);
     }
@@ -610,7 +620,7 @@ mod tests {
         .unwrap();
 
         let f = make_routing_filter(allowlist, identity);
-        assert!(f(msg).is_none());
+        assert!(f(&msg).is_none());
     }
 
     #[tokio::test]
@@ -653,7 +663,7 @@ mod tests {
         .unwrap();
 
         let f = make_routing_filter(allowlist, identity);
-        let d = f(msg).expect("forward with caption mention must route");
+        let d = f(&msg).expect("forward with caption mention must route");
         assert_eq!(d.address, Some(AddressKind::GroupMentionText));
     }
 }

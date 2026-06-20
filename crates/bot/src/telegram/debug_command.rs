@@ -100,7 +100,7 @@ pub(crate) async fn handle_debug(
     let bot = &ctx.bot;
     let settings = &ctx.settings;
     let agent_dir = &ctx.agent_dir;
-    if !super::handler::is_private_chat(&msg.chat)
+    if !super::msg_ext::is_private(&msg.chat)
         && !super::allowlist_commands::sender_is_trusted(msg, &ctx.allowlist)
     {
         tracing::debug!(

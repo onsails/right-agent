@@ -139,7 +139,11 @@ async fn reply(bot: &super::BotType, msg: &Message, text: &str) -> Result<(), Tg
     Ok(())
 }
 
-pub(crate) async fn handle_allow(ctx: &HandlerCtx, msg: &Message, args: String) -> Result<(), TgError> {
+pub(crate) async fn handle_allow(
+    ctx: &HandlerCtx,
+    msg: &Message,
+    args: String,
+) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let allowlist = &ctx.allowlist;
     let agent_dir = &ctx.agent_dir;
@@ -149,30 +153,35 @@ pub(crate) async fn handle_allow(ctx: &HandlerCtx, msg: &Message, args: String) 
     }
 
     let target = resolve_user_target(msg, &args);
-    let (id, label) = match target {
-        UserTarget::NumericId(id) => (id, None),
-        UserTarget::Reply { id, name } | UserTarget::TextMention { id, name } => (id, name),
-        UserTarget::UnresolvableUsername(u) => {
-            reply(bot, msg,
+    let (id, label) =
+        match target {
+            UserTarget::NumericId(id) => (id, None),
+            UserTarget::Reply { id, name } | UserTarget::TextMention { id, name } => (id, name),
+            UserTarget::UnresolvableUsername(u) => {
+                reply(bot, msg,
                 &format!(
                     "\u{2717} cannot resolve @{u} — reply to their message or use numeric user_id"
                 ),
             )
             .await?;
-            return Ok(());
-        }
-        UserTarget::None => {
-            reply(bot, msg,
-                "\u{2717} usage: /allow (reply to user) or /allow <user_id>",
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+                return Ok(());
+            }
+            UserTarget::None => {
+                reply(
+                    bot,
+                    msg,
+                    "\u{2717} usage: /allow (reply to user) or /allow <user_id>",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
 
     // Reject negative IDs (groups/channels use /allow_all).
     if id < 0 {
-        reply(bot, msg,
+        reply(
+            bot,
+            msg,
             "\u{2717} user_id cannot be negative (groups/channels use /allow_all)",
         )
         .await?;
@@ -199,13 +208,12 @@ pub(crate) async fn handle_allow(ctx: &HandlerCtx, msg: &Message, args: String) 
                 return Ok(());
             }
             let disp = label.unwrap_or_else(|| id.to_string());
-            reply(bot, msg,
-                &format!("\u{2713} allowed user {disp} (id {id})"),
-            )
-            .await?;
+            reply(bot, msg, &format!("\u{2713} allowed user {disp} (id {id})")).await?;
         }
         AddOutcome::AlreadyPresent => {
-            reply(bot, msg,
+            reply(
+                bot,
+                msg,
                 &format!("\u{2713} user {id} already in allowlist"),
             )
             .await?;
@@ -214,7 +222,11 @@ pub(crate) async fn handle_allow(ctx: &HandlerCtx, msg: &Message, args: String) 
     Ok(())
 }
 
-pub(crate) async fn handle_deny(ctx: &HandlerCtx, msg: &Message, args: String) -> Result<(), TgError> {
+pub(crate) async fn handle_deny(
+    ctx: &HandlerCtx,
+    msg: &Message,
+    args: String,
+) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let allowlist = &ctx.allowlist;
     let agent_dir = &ctx.agent_dir;
@@ -224,32 +236,37 @@ pub(crate) async fn handle_deny(ctx: &HandlerCtx, msg: &Message, args: String) -
     }
 
     let target = resolve_user_target(msg, &args);
-    let id = match target {
-        UserTarget::NumericId(id) => id,
-        UserTarget::Reply { id, .. } | UserTarget::TextMention { id, .. } => id,
-        UserTarget::UnresolvableUsername(u) => {
-            reply(bot, msg,
+    let id =
+        match target {
+            UserTarget::NumericId(id) => id,
+            UserTarget::Reply { id, .. } | UserTarget::TextMention { id, .. } => id,
+            UserTarget::UnresolvableUsername(u) => {
+                reply(bot, msg,
                 &format!(
                     "\u{2717} cannot resolve @{u} — reply to their message or use numeric user_id"
                 ),
             )
             .await?;
-            return Ok(());
-        }
-        UserTarget::None => {
-            reply(bot, msg,
-                "\u{2717} usage: /deny (reply to user) or /deny <user_id>",
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+                return Ok(());
+            }
+            UserTarget::None => {
+                reply(
+                    bot,
+                    msg,
+                    "\u{2717} usage: /deny (reply to user) or /deny <user_id>",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
 
     // Self-deny rejection.
     if let Some(from) = msg.from.as_ref()
         && from.id as i64 == id
     {
-        reply(bot, msg,
+        reply(
+            bot,
+            msg,
             "\u{2717} cannot deny yourself — add another trusted user first",
         )
         .await?;
@@ -396,8 +413,8 @@ pub(crate) async fn handle_deny_all(ctx: &HandlerCtx, msg: &Message) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use right_agent::agent::allowlist::AllowlistFile;
     use frankenstein::types::Message;
+    use right_agent::agent::allowlist::AllowlistFile;
 
     fn dm_msg(from_id: u64, text: &str) -> Message {
         serde_json::from_value(serde_json::json!({

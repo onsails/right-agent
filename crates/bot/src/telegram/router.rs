@@ -81,15 +81,17 @@ async fn on_message(ctx: &HandlerCtx, msg: frankenstein::types::Message) {
     );
     super::archive::archive_seen_group_message(&ctx.agent_dir.0, ctx.identity.as_ref(), &msg);
 
-    // Allow-list / addressing filter (was dptree `filter_map`).
-    let filter = super::filter::make_routing_filter(ctx.allowlist.clone(), (*ctx.identity).clone());
-    let Some(decision) = filter(msg.clone()) else {
+    // Allow-list / addressing decision (was dptree `filter_map`). Borrows `msg`
+    // and the shared ctx handles directly — no per-update Message clone or
+    // closure rebuild.
+    let Some(decision) = super::filter::route_decision(&ctx.allowlist, ctx.identity.as_ref(), &msg)
+    else {
         return;
     };
 
     let bot_username = ctx.bot.me().username.as_deref().unwrap_or_default();
-    let parsed = super::msg_ext::text_or_caption(&msg)
-        .and_then(|text| command::parse(text, bot_username));
+    let parsed =
+        super::msg_ext::text_or_caption(&msg).and_then(|text| command::parse(text, bot_username));
 
     let result = match parsed {
         Some(BotCommand::Start(payload)) => handler::handle_start(ctx, &msg, payload).await,
@@ -110,7 +112,9 @@ async fn on_message(ctx: &HandlerCtx, msg: frankenstein::types::Message) {
         Some(BotCommand::Allow(args)) => {
             super::allowlist_commands::handle_allow(ctx, &msg, args).await
         }
-        Some(BotCommand::Deny(args)) => super::allowlist_commands::handle_deny(ctx, &msg, args).await,
+        Some(BotCommand::Deny(args)) => {
+            super::allowlist_commands::handle_deny(ctx, &msg, args).await
+        }
         Some(BotCommand::Allowed) => super::allowlist_commands::handle_allowed(ctx, &msg).await,
         Some(BotCommand::AllowAll) => super::allowlist_commands::handle_allow_all(ctx, &msg).await,
         Some(BotCommand::DenyAll) => super::allowlist_commands::handle_deny_all(ctx, &msg).await,
@@ -281,7 +285,9 @@ pub(crate) mod test_support {
                 right_mcp::internal_client::InternalClient::new("/tmp/router-test.sock"),
             ))),
             settings,
-            idle_ts: Arc::new(IdleTimestamp(Arc::new(std::sync::atomic::AtomicI64::new(0)))),
+            idle_ts: Arc::new(IdleTimestamp(Arc::new(std::sync::atomic::AtomicI64::new(
+                0,
+            )))),
             worker_ctl: super::super::WorkerControlDeps {
                 stop_tokens: Arc::new(DashMap::new()),
                 session_locks: Arc::new(DashMap::new()),

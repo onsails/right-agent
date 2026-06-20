@@ -19,11 +19,11 @@ pub(crate) struct ParsedEntity<'a> {
     pub(crate) text: String,
 }
 
-/// Slice the substring an entity covers from `source`, honoring Telegram's
-/// UTF-16 code-unit `offset`/`length`. Returns `None` if the range is out of
-/// bounds or lands on a surrogate boundary (malformed payload).
-fn slice_entity_text(source: &str, entity: &MessageEntity) -> Option<String> {
-    let units: Vec<u16> = source.encode_utf16().collect();
+/// Slice the substring an entity covers from the message's pre-encoded UTF-16
+/// code `units`, honoring Telegram's UTF-16 `offset`/`length`. Returns `None` if
+/// the range is out of bounds or lands on a surrogate boundary (malformed
+/// payload).
+fn slice_entity_text(units: &[u16], entity: &MessageEntity) -> Option<String> {
     let start = entity.offset as usize;
     let end = start.checked_add(entity.length as usize)?;
     let slice = units.get(start..end)?;
@@ -45,11 +45,15 @@ pub(crate) fn parse_entities(msg: &Message) -> Option<Vec<ParsedEntity<'_>>> {
 }
 
 fn collect_entities<'a>(source: &str, entities: &'a [MessageEntity]) -> Vec<ParsedEntity<'a>> {
+    // Encode the source to UTF-16 once, then slice it per entity (Telegram entity
+    // offsets/lengths are UTF-16 code units), rather than re-encoding the whole
+    // text once per entity.
+    let units: Vec<u16> = source.encode_utf16().collect();
     entities
         .iter()
         .map(|entity| ParsedEntity {
             entity,
-            text: slice_entity_text(source, entity).unwrap_or_default(),
+            text: slice_entity_text(&units, entity).unwrap_or_default(),
         })
         .collect()
 }

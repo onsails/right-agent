@@ -119,7 +119,7 @@ pub(crate) async fn handle_model(
 ) -> Result<(), super::tg_bot::TgError> {
     let bot = &ctx.bot;
     let settings = &ctx.settings;
-    if !super::handler::is_private_chat(&msg.chat)
+    if !super::msg_ext::is_private(&msg.chat)
         && !super::allowlist_commands::sender_is_trusted(msg, &ctx.allowlist)
     {
         tracing::debug!(
@@ -190,7 +190,7 @@ pub(crate) async fn handle_model_callback(
     // any group member can click). Fail-secure: missing q.message → treat
     // as group, require trust.
     let in_group = message
-        .map(|(_, _, chat)| !super::handler::is_private_chat(chat))
+        .map(|(_, _, chat)| !super::msg_ext::is_private(chat))
         .unwrap_or(true);
     if in_group {
         let user_id = q.from.id as i64;
@@ -242,7 +242,9 @@ pub(crate) async fn handle_model_callback(
     if let Some((chat_id, message_id, _)) = message {
         let new_body = render_menu_body(choice.model_id);
         let new_kb = render_keyboard(choice.model_id);
-        let edit = bot.edit_html(chat_id, message_id, &new_body, Some(new_kb));
+        // Plain text (teloxide parity): the menu body is not HTML; edit_html
+        // would force ParseMode::Html.
+        let edit = bot.edit_text(chat_id, message_id, &new_body, Some(new_kb));
         let toast = bot.answer_callback(&q.id, Some(&toast_text), false);
         let (edit_result, toast_result) = tokio::join!(edit, toast);
         if let Err(e) = edit_result {

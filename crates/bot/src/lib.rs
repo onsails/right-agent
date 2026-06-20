@@ -67,11 +67,15 @@ fn load_or_migrate_allowlist(
     Ok(AllowlistHandle::new(AllowlistState::from_file(file)))
 }
 
+/// Max time to wait for the bot UDS server (webhook/dashboard/oauth) to drain
+/// in-flight requests on shutdown before proceeding with teardown.
+const UDS_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Register the Telegram webhook with retry-and-backoff.
 ///
 /// Calls `setWebhook` with the derived URL, secret, and allowed updates.
 /// Retries with capped exponential backoff (2s → 60s, jittered) on transient
-/// errors. Exits with code 2 on a 401 invalid-token API response.
+/// errors. Exits with code 2 on an invalid-token API response (401/404).
 /// Cancels on shutdown.
 async fn webhook_register_loop(
     bot: telegram::BotType,
@@ -943,6 +947,11 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let webhook_set_for_axum = webhook_set_flag.clone();
     let progress_state_for_uds = progress_state.clone();
     let dashboard_router_for_uds = dashboard_router;
+    // Dedicated drain signal for the UDS server (webhook + dashboard + oauth):
+    // fired at shutdown so in-flight requests drain gracefully. Kept separate
+    // from the `shutdown` token so cron/sync teardown ordering is unchanged.
+    let uds_drain = tokio_util::sync::CancellationToken::new();
+    let uds_drain_for_server = uds_drain.clone();
     let axum_handle = tokio::spawn(async move {
         run_bot_uds_server(
             axum_socket,
@@ -953,6 +962,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             agent_name_for_uds,
             started_at,
             webhook_set_for_axum,
+            uds_drain_for_server,
             Some(axum_ready_tx),
         )
         .await
@@ -1173,12 +1183,25 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // The telegram lifecycle future (built by `setup_telegram`) resolves when
     // the bot shuts down (SIGTERM/SIGINT or config change) after draining
-    // foreground background-handoff gates. The webhook router is already nested
-    // on the UDS app served by `axum_handle`; updates arrive over HTTP, so there
-    // is no dispatch loop to await here.
+    // foreground background-handoff gates. The webhook router is nested on the
+    // UDS app served by `axum_handle`; updates arrive over HTTP. On normal
+    // shutdown we signal `uds_drain` and await the server briefly so an in-flight
+    // webhook update finishes routing instead of being dropped mid-request.
+    let mut axum_handle = axum_handle;
     let result: miette::Result<()> = tokio::select! {
-        () = telegram_lifecycle => Ok(()),
-        result = axum_handle => result
+        () = telegram_lifecycle => {
+            uds_drain.cancel();
+            match tokio::time::timeout(UDS_DRAIN_TIMEOUT, &mut axum_handle).await {
+                Ok(joined) => joined.map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,
+                Err(_) => {
+                    tracing::warn!(
+                        "bot UDS server did not drain within {UDS_DRAIN_TIMEOUT:?}; proceeding with shutdown"
+                    );
+                    Ok(())
+                }
+            }
+        }
+        result = &mut axum_handle => result
             .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,
     };
 

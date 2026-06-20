@@ -659,8 +659,14 @@ pub fn extract_attachments(msg: &Message) -> Vec<InboundAttachment> {
         });
     }
 
-    // Document
-    if let Some(doc) = msg.document.as_ref() {
+    // Document. Telegram mirrors an animation (GIF) into the `document` field
+    // for backward compatibility, so a GIF message carries BOTH `animation` and
+    // `document`. teloxide's `MediaKind` was mutually exclusive (a GIF was
+    // `Animation`, not `Document`); skip the document mirror when an animation
+    // is present so a single GIF yields one attachment, not two.
+    if let Some(doc) = msg.document.as_ref()
+        && msg.animation.is_none()
+    {
         out.push(InboundAttachment {
             file_id: doc.file_id.clone(),
             kind: AttachmentKind::Document,
@@ -798,7 +804,28 @@ pub(crate) async fn download_attachments(
 
         // Download from Telegram (resolve file_id → path and stream to disk).
         let host_path = tmp_dir.join(&file_name);
-        bot.download_file(&att.file_id, &host_path).await?;
+        if let Err(e) = bot.download_file(&att.file_id, &host_path).await {
+            // Telegram's getFile rejects files larger than 20 MB with "file is
+            // too big". When Telegram gave us no pre-download size to check
+            // (file_size absent), surface that rejection as the same friendly
+            // skip and continue with the rest of the batch rather than aborting
+            // every remaining attachment.
+            if att.file_size.is_none() && e.is_file_too_big() {
+                let msg = format!(
+                    "Skipping {} attachment — exceeds 20 MB Telegram download limit.",
+                    att.kind.as_str(),
+                );
+                if let Err(notify_err) =
+                    super::worker::send_tg(bot, chat_id, eff_thread_id, &msg).await
+                {
+                    tracing::warn!(
+                        "Failed to notify user about oversized attachment: {notify_err}"
+                    );
+                }
+                continue;
+            }
+            return Err(e.into());
+        }
 
         // STT short-circuit for voice / video_note (when context provided).
         if let Some(ctx) = stt {
@@ -1029,8 +1056,20 @@ fn is_media_group_validation_error_text(text: &str) -> bool {
 /// before the error surfaced, so retrying them would duplicate the message.
 /// Telegram returns formatting errors as a 400 *before* delivery, so a retry is
 /// safe.
-pub(crate) fn is_retryable_format_error(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
+///
+/// Gated on the typed Telegram `error_code == 400` rather than substring-
+/// searching the rendered Display: a 5xx/network/429 error whose text happens to
+/// contain "too long"/"parse entities" must NOT be treated as a safe-to-retry
+/// formatting rejection (the original send may have been delivered, so a retry
+/// would duplicate the message).
+pub(crate) fn is_retryable_format_error(err: &TgError) -> bool {
+    let TgError::Api(frankenstein::Error::Api(resp)) = err else {
+        return false;
+    };
+    if resp.error_code != 400 {
+        return false;
+    }
+    let lower = resp.description.to_ascii_lowercase();
     lower.contains("parse entities") || lower.contains("too long")
 }
 
@@ -1293,7 +1332,7 @@ async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), 
             Ok(()) => Ok(()),
             Err(e) => {
                 let reason = display_error_chain(&e);
-                if is_retryable_format_error(&reason) {
+                if is_retryable_format_error(&e) {
                     tracing::warn!("caption HTML send failed, retrying as plain text: {reason}");
                     let plain_cap = caption_to_plain(raw);
                     send_single_attempt(
@@ -1481,7 +1520,7 @@ async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(
                 // Real album incompatibility — degrade to individual sends
                 // (each send_single then runs its own HTML+plain fallback).
                 Err(SendError::FallbackToSingles { reason })
-            } else if is_retryable_format_error(&reason) {
+            } else if is_retryable_format_error(&e) {
                 // Caption formatting rejection (pre-delivery 400) — retry the
                 // album once with plain captions, preserving the album and
                 // dropping only the caption's formatting.
@@ -1624,6 +1663,57 @@ async fn cleanup_local_dir(
 mod tests {
     use super::*;
 
+    fn att_msg(json: serde_json::Value) -> Message {
+        serde_json::from_value(json).unwrap()
+    }
+
+    /// A Telegram animation (GIF) arrives with BOTH `animation` and `document`
+    /// populated (the `document` field is a documented backward-compat mirror).
+    /// teloxide's `MediaKind` was mutually exclusive, so a GIF yielded exactly
+    /// one attachment. Regression guard: `extract_attachments` must emit a single
+    /// `Animation`, not an `Animation` + a duplicate `Document` (which would
+    /// download and upload the same file twice).
+    #[test]
+    fn extract_attachments_gif_yields_single_animation_not_duplicate_document() {
+        let m = att_msg(serde_json::json!({
+            "message_id": 1, "date": 0,
+            "chat": {"id": 1, "type": "private", "first_name": "U"},
+            "from": {"id": 5, "is_bot": false, "first_name": "U"},
+            "animation": {
+                "file_id": "anim_fid", "file_unique_id": "au",
+                "width": 100, "height": 100, "duration": 2,
+                "file_name": "x.gif", "mime_type": "video/mp4", "file_size": 1000
+            },
+            // Telegram mirrors the animation into `document` for backward compat.
+            "document": {
+                "file_id": "doc_mirror_fid", "file_unique_id": "du",
+                "file_name": "x.gif", "mime_type": "video/mp4", "file_size": 1000
+            }
+        }));
+        let atts = extract_attachments(&m);
+        assert_eq!(atts.len(), 1, "a GIF must yield exactly one attachment");
+        assert_eq!(atts[0].kind, AttachmentKind::Animation);
+        assert_eq!(atts[0].file_id, "anim_fid");
+    }
+
+    /// A plain document (no animation) must still be extracted normally.
+    #[test]
+    fn extract_attachments_plain_document_still_extracted() {
+        let m = att_msg(serde_json::json!({
+            "message_id": 1, "date": 0,
+            "chat": {"id": 1, "type": "private", "first_name": "U"},
+            "from": {"id": 5, "is_bot": false, "first_name": "U"},
+            "document": {
+                "file_id": "doc_fid", "file_unique_id": "du",
+                "file_name": "report.pdf", "mime_type": "application/pdf", "file_size": 2048
+            }
+        }));
+        let atts = extract_attachments(&m);
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].kind, AttachmentKind::Document);
+        assert_eq!(atts[0].file_id, "doc_fid");
+    }
+
     #[test]
     fn caption_to_html_renders_bold() {
         assert_eq!(super::caption_to_html("**x**"), "<b>x</b>");
@@ -1650,24 +1740,47 @@ mod tests {
 
     #[test]
     fn is_retryable_format_error_gates_retry_correctly() {
-        // Deterministic pre-delivery formatting rejections → retry is safe.
-        assert!(super::is_retryable_format_error(
+        use frankenstein::response::ErrorResponse;
+        fn api_err(code: u64, desc: &str) -> TgError {
+            TgError::Api(frankenstein::Error::Api(ErrorResponse {
+                ok: false,
+                description: desc.to_string(),
+                error_code: code,
+                parameters: None,
+            }))
+        }
+        // Deterministic pre-delivery 400 formatting rejections → retry is safe.
+        assert!(super::is_retryable_format_error(&api_err(
+            400,
             "Bad Request: can't parse entities: Unsupported start tag \"x\""
-        ));
-        assert!(super::is_retryable_format_error(
+        )));
+        assert!(super::is_retryable_format_error(&api_err(
+            400,
             "Bad Request: can't parse entities: Unsupported URL protocol"
-        ));
-        assert!(super::is_retryable_format_error(
+        )));
+        assert!(super::is_retryable_format_error(&api_err(
+            400,
             "Bad Request: message caption is too long"
-        ));
-        // Transient / possibly-delivered errors → must NOT retry (would duplicate).
-        assert!(!super::is_retryable_format_error(
-            "Network error: connection reset by peer"
-        ));
-        assert!(!super::is_retryable_format_error(
+        )));
+        // A 400 unrelated to caption formatting → not retryable.
+        assert!(!super::is_retryable_format_error(&api_err(
+            400,
+            "Bad Request: chat not found"
+        )));
+        // 5xx / 429 even if the text contains the phrases → must NOT retry (the
+        // send may have been delivered, so a retry would duplicate the message).
+        assert!(!super::is_retryable_format_error(&api_err(
+            429,
             "Too Many Requests: retry after 5"
-        ));
-        assert!(!super::is_retryable_format_error("Internal Server Error"));
+        )));
+        assert!(!super::is_retryable_format_error(&api_err(
+            500,
+            "Internal Server Error: caption is too long"
+        )));
+        // Non-API (transport/other) error → not retryable.
+        assert!(!super::is_retryable_format_error(&TgError::Other(
+            "connection reset by peer".to_string()
+        )));
     }
 
     const HOST_OUTBOX: &str = "/Users/x/.right/agents/riskoff/outbox";
