@@ -70,7 +70,7 @@ jobs:
       # NOTE: .devenv here is devenv state, distinct from target/devenv (the
       # cargo target dir cached by Swatinem/rust-cache) — do not conflate.
       - name: Cache devenv eval layer
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/nix
@@ -186,7 +186,7 @@ jobs:
       # first devenv shell re-fetches inputs and re-evaluates from scratch on
       # every run (~12 min). Keyed on the lockfiles that pin the inputs.
       - name: Cache devenv eval layer
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/nix
@@ -218,7 +218,7 @@ jobs:
           df -h
           du -sh target/devenv ~/.cargo ~/.right ~/.right/cache/whisper /nix /tmp /home/runner/work 2>/dev/null || true
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.right/cache/whisper
           key: whisper-ggml-tiny-v1
