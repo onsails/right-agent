@@ -31,7 +31,7 @@ jobs:
     name: workspace tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           lfs: true
       # onsails/nix-action installs Determinate Nix + Devenv + FlakeHub Cache
@@ -160,7 +160,7 @@ jobs:
       RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS: "360"
       RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS: "120"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           lfs: true
       # Same Determinate Nix + Devenv + FlakeHub Cache combo as the workspace
