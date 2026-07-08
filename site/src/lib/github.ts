@@ -1,7 +1,7 @@
 // Build-time GitHub star count with a graceful fallback.
 // Fetched once per build (module-level cache dedupes multiple importers).
 // If the repo is private/unreachable, returns null and the UI hides the count.
-const REPO = 'onsails/right-agent';
+export const REPO = 'onsails/right-agent';
 
 let cache: Promise<number | null> | null = null;
 
