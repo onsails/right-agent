@@ -1,13 +1,11 @@
 ---
 import '../styles/landing.css';
 import PostHog from '../components/PostHog.astro';
-import { getStars, formatStars } from '../lib/github';
 interface Props { title?: string; description?: string; }
 const {
   title = 'right agent',
   description = 'an ai agent you run by messaging it. credentials stay outside the box.',
 } = Astro.props;
-const starLabel = formatStars(await getStars());
 ---
 <!doctype html>
 <html lang="en">
@@ -82,13 +80,36 @@ const starLabel = formatStars(await getStars());
           <a href="#install">install</a>
           <a class="starchip" href="https://github.com/onsails/right-agent" aria-label="Star right agent on GitHub">
             <svg class="ico" viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.7 1.6 7L12 18.3 5.8 21.2l1.6-7L2 9.5l7.1-.6z"/></svg>
-            <span>{starLabel ? `star · ${starLabel}` : 'star'}</span>
+            <span>star</span>
           </a>
         </div>
       </nav>
     </div>
 
     <slot />
+
+    <script>
+      // One live fetch of the GitHub star count for both badges on the page
+      // (nav chip + hero button), so they stay current between deploys with no
+      // build-time API call.
+      import { REPO, formatStars } from '../lib/github';
+      fetch(`https://api.github.com/repos/${REPO}`, {
+        headers: { Accept: 'application/vnd.github+json' },
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!d || typeof d.stargazers_count !== 'number') return;
+          const label = formatStars(d.stargazers_count);
+          const chip = document.querySelector('.starchip span');
+          if (chip instanceof HTMLElement) chip.textContent = `star · ${label}`;
+          const cnt = document.querySelector('.starbtn .cnt');
+          if (cnt instanceof HTMLElement) {
+            cnt.textContent = label;
+            cnt.hidden = false;
+          }
+        })
+        .catch(() => {});
+    </script>
 
     <script>
       const sections = Array.from(document.querySelectorAll('.section')) as HTMLElement[];
