@@ -1,8 +1,6 @@
 ---
 import { Image } from 'astro:assets';
 import screenshot from '../assets/screenshot.png';
-import { getStars, formatStars } from '../lib/github';
-const starLabel = formatStars(await getStars());
 ---
 <header class="hero">
   <div class="wrap">
@@ -20,7 +18,7 @@ const starLabel = formatStars(await getStars());
           <a class="btn" href="#install">install</a>
           <a class="starbtn" href="https://github.com/onsails/right-agent">
             <svg class="ico" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M12 2l2.9 6.9 7.1.6-5.4 4.7 1.6 7L12 18.3 5.8 21.2l1.6-7L2 9.5l7.1-.6z"/></svg>
-            star on github{starLabel && <span class="cnt">{starLabel}</span>}
+            star on github<span class="cnt" hidden></span>
           </a>
           <a class="ghost" href="/docs/">read the docs <span>→</span></a>
         </div>
