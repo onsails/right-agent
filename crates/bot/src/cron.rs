@@ -1484,8 +1484,6 @@ async fn execute_job(
 
                 let refl_ctx = crate::reflection::ReflectionContext {
                     session_uuid: run_id.clone(),
-                    failure: failure_kind,
-                    ring_buffer_tail: ring_tail,
                     limits: crate::reflection::ReflectionLimits::CRON,
                     agent_name: agent_name.to_string(),
                     agent_dir: agent_dir.to_path_buf(),
@@ -1498,7 +1496,8 @@ async fn execute_job(
                     debug: Some(std::sync::Arc::clone(&debug)),
                 };
 
-                match crate::reflection::reflect_on_failure(refl_ctx).await {
+                match crate::reflection::reflect_on_failure(refl_ctx, failure_kind, ring_tail).await
+                {
                     Ok(text) => {
                         tracing::info!(job = %job_name, "cron reflection reply produced");
                         text

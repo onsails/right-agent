@@ -22,7 +22,8 @@ use uuid::Uuid;
 use crate::cc::markdown_utils::{html_escape, strip_html_tags};
 pub use crate::cc::worker_reply::{ReplyOutput, parse_reply_output};
 use crate::cc::worker_reply::{
-    UsedSkillReceipt, append_used_skill_receipts, is_rightx_skill, should_accept_bootstrap,
+    UsedSkillReceipt, append_used_skill_receipts, is_rightx_skill, null_reply_needs_repair,
+    should_accept_bootstrap,
 };
 use crate::reflection::FailureKind;
 
@@ -1729,6 +1730,8 @@ pub fn spawn_worker(
                 cc_usage,
                 cc_wall_elapsed_ms,
                 cc_learning_invocation_id,
+                cc_last_assistant_text,
+                cc_send_message_used,
             ) = match invoke_cc(
                 InvokeCcRequest {
                     conn: &prepared.conn,
@@ -1756,6 +1759,8 @@ pub fn spawn_worker(
                     usage,
                     wall_elapsed_ms,
                     learning_invocation_id,
+                    last_assistant_text,
+                    send_message_used,
                 }) => (
                     Ok(output),
                     session_uuid,
@@ -1765,6 +1770,8 @@ pub fn spawn_worker(
                     usage,
                     wall_elapsed_ms,
                     learning_invocation_id,
+                    last_assistant_text,
+                    send_message_used,
                 ),
                 Err(failure) => {
                     if ctx.resolved_sandbox.is_some() {
@@ -1793,6 +1800,8 @@ pub fn spawn_worker(
                         crate::cc::stream::StreamUsage::default(),
                         0u64,
                         None,
+                        None,
+                        false,
                     )
                 }
             };
@@ -1869,6 +1878,64 @@ pub fn spawn_worker(
             let mut post_turn_probe_anchor: Option<ProbeAnchor> = None;
             match reply_result {
                 Ok(Some(mut output)) => {
+                    // Null-reply repair: `content: null` delivers nothing, but a
+                    // non-empty final text block means the agent intended to
+                    // reply. Resume the session once: re-emit via structured
+                    // `content`, or confirm intentional silence with another null.
+                    if null_reply_needs_repair(
+                        &output,
+                        cc_send_message_used,
+                        cc_last_assistant_text.as_deref(),
+                    ) {
+                        let discarded = cc_last_assistant_text.clone().unwrap_or_default();
+                        tracing::warn!(
+                            ?key,
+                            discarded_len = discarded.len(),
+                            "null reply with undelivered text block — running repair resume"
+                        );
+                        let repair_ctx = crate::reflection::ReflectionContext {
+                            session_uuid: session_uuid.clone(),
+                            limits: crate::reflection::ReflectionLimits::NULL_REPAIR,
+                            agent_name: ctx.agent_name.clone(),
+                            agent_dir: ctx.agent_dir.clone(),
+                            ssh_config_path: ctx.ssh_config_path.clone(),
+                            resolved_sandbox: ctx.resolved_sandbox.clone(),
+                            parent_source: crate::reflection::ParentSource::Worker {
+                                chat_id,
+                                thread_id: eff_thread_id,
+                            },
+                            model: crate::snapshot_model(&ctx.model),
+                            debug: Some(std::sync::Arc::clone(&ctx.debug)),
+                        };
+                        match crate::reflection::repair_null_reply(repair_ctx, &discarded).await {
+                            Ok(repaired)
+                                if repaired.content.is_some()
+                                    || repaired
+                                        .attachments
+                                        .as_ref()
+                                        .is_some_and(|a| !a.is_empty()) =>
+                            {
+                                tracing::info!(
+                                    ?key,
+                                    "null-reply repair produced a deliverable reply"
+                                );
+                                output = repaired;
+                            }
+                            Ok(_) => {
+                                tracing::info!(
+                                    ?key,
+                                    "agent confirmed intentional silence after repair prompt"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    ?key,
+                                    "null-reply repair failed: {e:#} — delivering raw text block"
+                                );
+                                output.content = Some(discarded);
+                            }
+                        }
+                    }
                     output.content = append_used_skill_receipts(
                         output.content,
                         output.used_skill_receipts.as_deref(),
@@ -2120,8 +2187,6 @@ pub fn spawn_worker(
                     // 2. Run reflection.
                     let refl_ctx = crate::reflection::ReflectionContext {
                         session_uuid: failed_session_uuid,
-                        failure: kind,
-                        ring_buffer_tail,
                         limits: crate::reflection::ReflectionLimits::WORKER,
                         agent_name: ctx.agent_name.clone(),
                         agent_dir: ctx.agent_dir.clone(),
@@ -2135,7 +2200,9 @@ pub fn spawn_worker(
                         debug: Some(std::sync::Arc::clone(&ctx.debug)),
                     };
 
-                    match crate::reflection::reflect_on_failure(refl_ctx).await {
+                    match crate::reflection::reflect_on_failure(refl_ctx, kind, ring_buffer_tail)
+                        .await
+                    {
                         Ok(reply_text) => {
                             tracing::info!(?key, "reflection reply produced");
                             // Delete the banner — reply is the substantive update.
@@ -2730,6 +2797,12 @@ pub(crate) struct CcReply {
     pub(crate) wall_elapsed_ms: u64,
     /// Learning invocation id used this turn (for probe-skip), if any.
     pub(crate) learning_invocation_id: Option<String>,
+    /// Last assistant text block seen in the stream this turn, if any. Feeds
+    /// the null-reply repair heuristic (undelivered-text detection).
+    pub(crate) last_assistant_text: Option<String>,
+    /// `true` when the turn called `mcp__right__send_message`; a terminal
+    /// `content: null` is then sanctioned and must not trigger repair.
+    pub(crate) send_message_used: bool,
 }
 
 #[derive(Debug)]
@@ -3580,6 +3653,8 @@ async fn invoke_cc(
             usage: crate::cc::stream::StreamUsage::default(),
             wall_elapsed_ms: 0,
             learning_invocation_id: learning_invocation_id.clone(),
+            last_assistant_text: None,
+            send_message_used: false,
         });
     }
     log_invoking_claude(&log_ctx, is_first_call, sandboxed);
@@ -3809,6 +3884,8 @@ async fn invoke_cc(
         .ok();
 
     let mut ring_buffer = crate::cc::stream::EventRingBuffer::new(5);
+    let mut last_assistant_text: Option<String> = None;
+    let mut send_message_used = false;
     let mut usage = crate::cc::stream::StreamUsage::default();
     let mut result_line: Option<String> = None;
     let mut api_key_source: Option<String> = None;
@@ -3868,6 +3945,24 @@ async fn invoke_cc(
                         }
 
                         let event = crate::cc::stream::parse_stream_event(&line);
+
+                        // Null-repair evidence: track the last assistant text block
+                        // and any send_message call across ALL content blocks
+                        // (parse_stream_event returns only the first block).
+                        for persisted in crate::cc::stream::parse_persisted_stream_events(&line) {
+                            match persisted.kind {
+                                crate::cc::stream::PersistedStreamEventKind::AssistantText => {
+                                    last_assistant_text = Some(persisted.content_text);
+                                }
+                                crate::cc::stream::PersistedStreamEventKind::ToolCall
+                                    if persisted.tool_name.as_deref()
+                                        == Some("mcp__right__send_message") =>
+                                {
+                                    send_message_used = true;
+                                }
+                                _ => {}
+                            }
+                        }
 
                         // Detect structured-output schema-rejection loops. These
                         // `tool_result` errors are dropped by the display parser,
@@ -4308,6 +4403,8 @@ async fn invoke_cc(
             usage: usage.clone(),
             wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
             learning_invocation_id: learning_invocation_id.clone(),
+            last_assistant_text: None,
+            send_message_used: false,
         });
     }
 
@@ -4419,6 +4516,8 @@ async fn invoke_cc(
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                         learning_invocation_id: learning_invocation_id.clone(),
+                        last_assistant_text: None,
+                        send_message_used: false,
                     });
                 } else {
                     // Token request already running — silent, don't spam.
@@ -4431,6 +4530,8 @@ async fn invoke_cc(
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                         learning_invocation_id: learning_invocation_id.clone(),
+                        last_assistant_text: None,
+                        send_message_used: false,
                     });
                 }
             } else {
@@ -4464,6 +4565,8 @@ async fn invoke_cc(
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                         learning_invocation_id: learning_invocation_id.clone(),
+                        last_assistant_text: None,
+                        send_message_used: false,
                     });
                 } else {
                     return Ok(CcReply {
@@ -4475,6 +4578,8 @@ async fn invoke_cc(
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                         learning_invocation_id: learning_invocation_id.clone(),
+                        last_assistant_text: None,
+                        send_message_used: false,
                     });
                 }
             }
@@ -4608,6 +4713,8 @@ async fn invoke_cc(
                 usage,
                 wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                 learning_invocation_id: learning_invocation_id.clone(),
+                last_assistant_text,
+                send_message_used,
             })
         }
         Err(reason) => {
