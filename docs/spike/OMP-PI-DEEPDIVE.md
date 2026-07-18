@@ -2,6 +2,8 @@
 
 *2026-07-18. Status: capstone-grade. Supersedes the omp/pi rows in FINAL-RANKING.md and extends PI-REEVAL.md (round 11) with (a) current-source deep dives at omp v17.0.4 and pi 0.80.10, and (b) EMPIRICAL probes run against a locally installed omp 17.0.0 driving real headless turns, a real MCP round-trip, session resume/fork, and prompt-footprint measurements. Every claim is marked **[E]=empirical (ran it)**, **[S]=source-verified (path cited)**, **[NPM/GH]=registry/API**, or **UNKNOWN**.*
 
+> **Round 14 addendum (same day, later): pi+extensions re-rates UP.** Two community packages eliminate round 13's "you build the MCP adapter / task tool" cost for pi — see §9. New empirical results: S2 setup-token PASS (omp+pi), S1 mechanism-C structured output PASS (omp 18/18; pi terminate:true cleaner), pi+pi-mcp-adapter vs the REAL aggregator PASS (omp still has an open MCP-registration issue in fresh profiles). **Verdict shifted: pi+extensions is now co-equal-to-leading vs omp.**
+
 ---
 
 ## 0. Headline
@@ -142,6 +144,55 @@ Original 3-way: rig (control) / Option C (models) / Goose (middle). **omp/pi is 
 8. pi: no NULL_PROMPT equivalent — the always-appended cwd line + skills XML is tolerable but not byte-exact; whether RightClaw cares depends on how S1 prompt assembly lands.
 9. omp OAuth-cred storage in agent.db vs RightClaw's credentials-outside-sandbox invariant — for sandbox runs use env-var auth only, never `omp auth login` inside a sandbox.
 
-## 8. Bottom line for the fork decision
+## 8. Bottom line for the fork decision (SUPERSEDED by §9 — round 14)
 
 If the weighting is "**adopt a harness, keep everything, multi-model, sandbox-drop-in, byte-exact prompt**", **omp is now the strongest adopt candidate — ahead of Goose** (byte-exact vs minijinja+forced-extras, verified MCP+skills+forks, bigger binary + worse governance are the costs). If the weighting is "**own the loop in Rust, minimal deps, absorb build cost**", rig's verdict is unchanged. **pi is the middle: omp's engine with better governance and smaller footprint, priced at one MCP adapter.** Option C remains the cheapest multi-model play and the fallback if S1 fails. **S2 (setup-token auth) is settled GREEN for both omp and pi — the subscription-credential path survives the migration.**
+
+---
+
+## 9. Round 14 — pi+extensions, S1/S2/S3 results, and the re-rate
+
+### 9.1 The ecosystem correction (user-supplied, verified)
+
+Round 13 priced pi as "build the MCP adapter + task tool". **Wrong — both exist as heavily-used community packages on the official pi.dev package index:**
+
+- **`pi-mcp-adapter`** (nicobailon) v2.11.0 [NPM]: **132.6K dl/mo**, MIT. Reads claude-format `.mcp.json` (+`~/.config/mcp/mcp.json`, `$PI_CODING_AGENT_DIR/mcp.json`, `.pi/mcp.json`); headers with env interpolation; **Bearer + full OAuth incl. headless auth-start/auth-complete**; StreamableHTTP+SSE; lifecycle lazy/eager/keep-alive; `directTools` (individual tool registration from cache) or a ~200-token proxy tool; output guards. Forks already exist (`pi-tidy-mcp-adapter`, `@vllnt/pi-mcp`).
+- **`pi-subagents`** (nicobailon) v0.35.1 [NPM]: **113.3K dl/mo**, MIT. Builtin agents (scout/worker/reviewer/oracle/planner…), chains+parallel+background runs with `status.json`/`events.jsonl` lifecycle artifacts, per-agent model overrides, watchdog. RightClaw note: the bot orchestrates subagent-like flows itself, so this is optional.
+
+Governance note: both are effectively single-author (nicopreme) — but leaf, forkable components with a large user base, vs omp where the *whole harness* is the single-maintainer component.
+
+### 9.2 S2 — setup-token auth: **PASS (omp + pi)**
+
+Agent `agent-b` `sk-ant-oat01-` token as `ANTHROPIC_OAUTH_TOKEN`, isolated profiles: omp completed a claude-sonnet-5 turn (stopReason stop, real usage/cost, 38-token prompt); pi printed OK. Nothing persisted to disk. Direct-curl control: 429 (rate-limited but authenticated). **Subscription-credential model survives migration; change is the env rename from `CLAUDE_CODE_OAUTH_TOKEN`.** Also learned: omp merges piped stdin with argv prompt — bot must pin stdin explicitly.
+
+### 9.3 S1 — mechanism-C structured output on RightClaw schemas: **PASS both, pi cleaner**
+
+Extension registers `structured_output` with plain-JSON-Schema `parameters` (cron oneOf, prefilter); loop-level validation rejects invalid payloads back to the model as isError (natural retry).
+
+- **omp (18 runs: claude-sonnet-5, kimi-code/k3, gpt-5.4-mini × cron-notify/cron-silent/prefilter ×2): 18/18 schema-valid, 17/18 first-try, 1 self-corrected retry; all semantically correct** (notify↔silent branches, create_new + `rightx-nginx-reverse-proxy` pattern). [E] Caveat: omp dropped generic `terminate` — after the accepted call the model emits a trailing text turn (harmless; bot ignores or suppresses). Kimi k3 (non-Venice) passes the hard oneOf — **S5 partially closed**.
+- **pi (claude-sonnet-5 × cron-notify/cron-silent): 2/2 valid, `terminate:true` ends the loop — no trailing turn.** [E]
+
+### 9.4 MCP vs the REAL aggregator (`127.0.0.1:8100`, agent-b's Bearer, 43 tools)
+
+- **pi + pi-mcp-adapter: PASS.** Handshake + Bearer auth, full tools/list discovery (`right_chat_search`, `right_cron_*`…), live `tools/call` round-trip: `chat_search` → aggregator's server-side scope error `conversation_scope_unavailable` (CORRECT for an unregistered invocation — proves the full path). Tool naming `right_<tool>`. [E]
+- **omp: OPEN ISSUE.** Against the real aggregator the handshake completes and tools/list returns 200 with all 43 tools (wire captured via logging proxy), but in **fresh/isolated agent dirs the tools never register to the model** (macOS and sandbox). In the default macOS profile (existing `~/.omp/agent`) project-scope `.mcp.json` works. Evidence points at omp's capability-discovery layer behaving differently in a fresh profile (user-scope MCP also ignores `PI_CODING_AGENT_DIR` — loads from the default agent dir). Root cause not yet pinned; next step is a focused read of `loadCapability` profile-dependent paths. [E]
+
+### 9.5 S3 sandbox E2E (omp): deployment green, MCP blocked by §9.4
+
+`omp-linux-arm64` uploaded to `test-sandbox-20260516-1649` (aarch64, glibc 2.39 ✓), sha256-verified, runs over the existing SSH slot, completes an Anthropic turn inside the sandbox with the setup-token. Aggregator reachable from sandbox (`401` without Bearer ✓). MCP registration blocked by the §9.4 fresh-profile issue. [E]
+
+### 9.6 The re-rated fork
+
+| | **pi + extensions** | omp |
+|---|---|---|
+| Per-turn NDJSON/resume/fork | ✅ (+ `--session-id` pre-seed) | ✅ (no `--session-id`) |
+| Structured output | ✅ terminate:true, cleanest | ✅ works, trailing text |
+| MCP vs aggregator | ✅ **verified E2E** | ⚠️ open registration issue |
+| Skills `.claude` | one-line opt-in / `--skill` | ✅ native |
+| Byte-exact prompt | ⚠️ residue (cwd line + skills XML; cache-stable, acceptable) | ✅ NULL_PROMPT |
+| Binary | ~43MB | ~166MB |
+| Governance | core team + explicit policy; extensions single-author but forkable | ❌ single maintainer, monthly majors |
+| Weak-model dialects | per-provider compat | ✅ `tools.format` dialects |
+| Build remaining | structured-output extension (~40 lines) + config layout + skills opt-in | nothing (once §9.4 closes) |
+
+**pi + pi-mcp-adapter (+ optional pi-subagents) is now the leading adopt candidate**: every hard requirement is empirically green, the core is team-governed with an explicit breaking policy, and the two community extensions are popular, MIT, and forkable. omp remains the byte-exact/all-builtin alternative pending §9.4 and carries the highest governance risk. Remaining spikes: **S3-pi** (pi binary + adapter inside a real sandbox against the live aggregator — mirror of §9.5), **S4** (MCP-health redesign — both harnesses degrade silently; bot-side aggregator probe), **S6** (version-pin + vendor strategy: pi core + 2 extensions + omp are all fast-moving; decide pin/bump cadence).
