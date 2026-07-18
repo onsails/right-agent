@@ -208,13 +208,15 @@ call it to give the agent a short `--resume`-d turn wrapped in
 human-friendly summary of the failure.
 
 Reflection never reflects on itself. Hindsight `memory_retain` is skipped
-for reflection turns. `async_runs.status` gates delivery: `'failed'`
-routes to `DELIVERY_INSTRUCTION_FAILURE`; any other status routes to
-`DELIVERY_INSTRUCTION_SUCCESS` (verbatim relay).
+for reflection turns.
 
 The worker aborts after 3 consecutive structured-output schema rejections
 and routes to reflection (`FailureKind::StructuredOutputLoop`); reflection
 runs on a separate path and never triggers the detector.
+
+A successful turn with `content: null` but undelivered assistant text gets
+one repair resume; a second null confirms intentional silence (see
+`docs/architecture/sessions.md`).
 
 See: `docs/architecture/sessions.md` for `ReflectionLimits` (worker vs
 cron), usage-event accounting, and label-routing detail.
