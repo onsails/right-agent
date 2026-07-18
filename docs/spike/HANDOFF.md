@@ -71,6 +71,9 @@ The spike scripts are committed under `docs/spike/harness/` (they were in an eph
 - `~/.claude/.../memory/project_harness_migration.md` — the running memory (decision state, all corrections).
 - Branch: `worktree-harness-migration-research`.
 
+## Round 13 addendum (2026-07-18, later same day)
+**omp/pi re-evaluated in depth — see `docs/spike/OMP-PI-DEEPDIVE.md`.** omp 17 is now an EMPIRICALLY-VERIFIED `claude -p` drop-in shape (NDJSON per-turn, resume+fork, `.mcp.json`+Bearer E2E, `.claude/skills` drop-in, byte-exact prompt via `NULL_PROMPT`, 36 providers incl non-Venice Kimi) with three priced gaps: mechanism-C structured-output port, MCP-health signal redesign, `mcp__right__*`→`mcp__right_*` rename. This adds a FOURTH fork option (adopt-TS-harness with prompt control, between Goose and rig); Goose demoted unless omp's S1/S2 spikes fail.
+
 ## One-line restart
 
 *Keep structured output, whitelist the models that do it (9/13 strong open families pass today via mimo+Venice); the next concrete steps are: test the new Kimi (on Venice + a non-Venice provider), re-measure the whitelist on the chosen prod mechanism/provider, and add a retry/coerce-repair loop — because even whitelist models flake.*
