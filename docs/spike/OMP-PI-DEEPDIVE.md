@@ -3,6 +3,8 @@
 *2026-07-18. Status: capstone-grade. Supersedes the omp/pi rows in FINAL-RANKING.md and extends PI-REEVAL.md (round 11) with (a) current-source deep dives at omp v17.0.4 and pi 0.80.10, and (b) EMPIRICAL probes run against a locally installed omp 17.0.0 driving real headless turns, a real MCP round-trip, session resume/fork, and prompt-footprint measurements. Every claim is marked **[E]=empirical (ran it)**, **[S]=source-verified (path cited)**, **[NPM/GH]=registry/API**, or **UNKNOWN**.*
 
 > **Round 14 addendum (same day, later): pi+extensions re-rates UP.** Two community packages eliminate round 13's "you build the MCP adapter / task tool" cost for pi — see §9. New empirical results: S2 setup-token PASS (omp+pi), S1 mechanism-C structured output PASS (omp 18/18; pi terminate:true cleaner), pi+pi-mcp-adapter vs the REAL aggregator PASS (omp still has an open MCP-registration issue in fresh profiles). **Verdict shifted: pi+extensions is now co-equal-to-leading vs omp.**
+>
+> **Round 15 addendum (same day, evening): the omp "MCP bug" is SOLVED (not a bug), S3 is GREEN, scope mechanism mapped.** (1) RightClaw's invocation-scope binding is a **per-request HTTP header** baked into the bot-written per-invocation mcp.json — subagents sharing the config inherit parent scope correctly; no aggregator change needed. (2) omp's "fresh-profile MCP failure" = **`NULL_PROMPT=true` wipes the xd:// tool inventory that MCP tools are exposed through when `tools.xdev=true`** (default); fix = `tools.xdev: false` (native direct tools, prompt-independent). (3) With the fix, **full sandbox E2E PASS**: all 43 aggregator tools registered in-sandbox, live `chat_search` call returned the correct scope error. (4) User-weighted criteria (subagents+IRC, token efficiency, programmable access, forks, auto-skills) favor **omp 3/5 with parity on forks; auto-skills moot vs RightClaw's own learning pipeline**. See §10.
 
 ---
 
@@ -196,3 +198,47 @@ Extension registers `structured_output` with plain-JSON-Schema `parameters` (cro
 | Build remaining | structured-output extension (~40 lines) + config layout + skills opt-in | nothing (once §9.4 closes) |
 
 **pi + pi-mcp-adapter (+ optional pi-subagents) is now the leading adopt candidate**: every hard requirement is empirically green, the core is team-governed with an explicit breaking policy, and the two community extensions are popular, MIT, and forkable. omp remains the byte-exact/all-builtin alternative pending §9.4 and carries the highest governance risk. Remaining spikes: **S3-pi** (pi binary + adapter inside a real sandbox against the live aggregator — mirror of §9.5), **S4** (MCP-health redesign — both harnesses degrade silently; bot-side aggregator probe), **S6** (version-pin + vendor strategy: pi core + 2 extensions + omp are all fast-moving; decide pin/bump cadence).
+
+> **§9.6 is SUPERSEDED by §10.5 (round 15):** the omp §9.4 "registration issue" was the NULL_PROMPT×xdev interaction (§10.2), not a bug — and with it fixed, omp's sandbox E2E is green (§10.3). The round-15 verdict flips the lead to **omp** on the user-weighted criteria.
+
+---
+
+## 10. Round 15 — scope mechanism, the NULL_PROMPT×xdev root cause, S3 green, criteria-weighted verdict
+
+### 10.1 RightClaw invocation scope = per-request header (subagent inheritance works)
+
+Code trail: bot generates `invocation_id` (uuid v4) → `progress_register` on the aggregator's internal Unix socket (`worker.rs:2889-2915`) → bot writes per-invocation `mcp-{id}.json` adding **`PROGRESS_INVOCATION_HEADER: \<invocation_id\>` into `mcpServers.right.headers`** next to the Bearer (`cc/invocation.rs:139-173`) → aggregator reads `context.invocation_id` **from each request's header** and resolves `(chat_id, thread_id)` (`right_backend.rs:1239-1245`); missing header → `conversation_scope_unavailable` (`:1914`).
+
+**Consequence:** any process connecting with the same headers inherits the scope. pi/omp subagents read the same `mcp.json` as the parent → children get scoped tools (`send_message`, `thread_search`, `cron_*`) scoped to the parent's (chat, thread), sharing the 20-calls/turn cap. The "scope never from agent args" invariant holds (id comes from a bot-written file and maps to exactly one conversation). Whether children SHOULD see `send_message` is a policy knob (adapter `excludeTools` / agent frontmatter `tools:`), not a mechanism gap. **The v2 "invocation family" aggregator change is NOT needed.** Verified live: ad-hoc connection without a registered invocation gets `conversation_scope_unavailable`.
+
+### 10.2 The omp "fresh-profile MCP bug" was NULL_PROMPT × xdev (solved, with fix)
+
+A 3-hour bisect (12+ probe runs across profiles, projects, caches, models, races) ruled out: profile isolation, project trust, agent.db settings, tool cache, attach timing/race, server payload, protocol version. The discriminator: **`NULL_PROMPT=true`**. Mechanism:
+
+- With `tools.xdev=true` (default), MCP tools attached at startup are exposed to the model **via the xd:// device inventory rendered into the system prompt**. `NULL_PROMPT=true` zeroes the system prompt (`system-prompt.ts:524-526`) → startup-attached MCP tools become **invisible** (they register: handshake + tools/list complete — verified on the wire — but the model never sees them).
+- Mid-turn attaches arrive as inventory **notices** (turn-level injections, not system prompt) → visible even under NULL_PROMPT. This is why slower user-scope servers (context7 etc.) appeared in fresh profiles while fast localhost servers (probe, aggregator) didn't.
+- **Fix: `tools.xdev: false`** (config.yml or `--config` overlay) → MCP tools register as **native direct tools** (function-calling payload), prompt-independent. Verified: NULL_PROMPT + xdev:false → direct `mcp__probe_ping` call succeeds; byte-exact prompt preserved (tool defs ride the provider's tool channel, not prompt tokens).
+
+**Port requirement:** RightClaw ships `tools.xdev: false` in the sandbox agent config (or per-invocation `--config` overlay) whenever `NULL_PROMPT` is used.
+
+### 10.3 S3 sandbox E2E — **GREEN (omp)**
+
+`omp-linux-arm64` in `test-sandbox-20260516-1649` (aarch64/glibc 2.39): with the xdev fix, **all 43 aggregator tools registered** (`mcp__right_bootstrap_done`, `mcp__right_browser_use_*`, `mcp__right_chat_search`, `mcp__right_composio_*`, …) and a live `mcp__right_chat_search` call returned the correct `conversation_scope_unavailable` (expected without a registered invocation). Full path: sandbox omp → policy egress → `host.openshell.internal:8100` → Bearer → tools/call → structured error. [E]
+
+### 10.4 Criteria-weighted comparison (user's five)
+
+| Criterion | omp 17 | pi 0.80 + extensions | Edge |
+|---|---|---|---|
+| **Subagents stable+efficient** | builtin `task`: isolated settings snapshot, own JSONL transcript, worktree isolation, `spawns` allowlist + `taskDepth`, 500KB/5000-line caps, sync/async/batch, AJV `outputSchema`, model roles (`@task`/`@smol`), revivable children, **+ peer IRC (`hub` tool, `irc_message` events, `irc.timeoutMs`)** | pi-subagents (community, 113K dl/mo): builtin roles, chains/parallel/background, watchdog, model overrides, lifecycle artifacts. **No peer IRC** (children report to parent) | **omp** |
+| **Token efficiency** | hashline compact patch format (edit tokens + stale-anchor rejection), prewalk (plan strong → execute cheap), model roles (smol/tiny), `tools.format` dialects (fewer weak-model retries), snapcompact; xd:// schema-on-demand (incompatible w/ NULL_PROMPT) | lean default prompt; adapter **proxy mode** (~200 tokens for the whole MCP surface, NULL_PROMPT-compatible); datetime removed for cache stability; subagent context isolation | **omp** (more levers; both mitigate the 43-tool surface) |
+| **Programmable access** | `--mode rpc` (full bidirectional JSON-RPC), `rpc-ui`, **`--mode acp` native (Zed ACP)**, Python `omp_rpc` wheel, rich ExtensionAPI (25+ events, registerTool/Command/Flag) | `--mode rpc` (prompt/steer/follow_up/set_model/compact/fork), pi-orchestrator (experimental), compiled SDK (cleaner for consumers), ACP via third-party pi-acp (MVP) | **omp** |
+| **Forks** | `--fork` verified (new id, full parent context); hidden flag | `--fork` + `SessionManager.forkFrom` + in-place tree (`branch`/`branchWithSummary`/`createBranchedSession`) + `--session-id` create-if-missing | **parity** (pi richer API) |
+| **Auto-skills** | builtin autolearn (`learn`/`manage_skill`, managed-skills controller) | none | **moot** — RightClaw's own learning pipeline replaces it; both pick up bot-written `rightx-*` SKILL.md |
+
+### 10.5 Round-15 verdict
+
+**omp** wins the user-weighted matrix (3/5 + parity on forks + auto-skills moot) and is empirically green on EVERY axis: S1 structured output 18/18, S2 setup-token, S3 sandbox E2E with 43 live tools, forks, `.claude/skills`, byte-exact prompt (`NULL_PROMPT` + `tools.xdev:false` + `--append-system-prompt`), MCP with invocation-header inheritance for subagents, Kimi device-flow OAuth built in (pi lacks it). Costs accepted with eyes open: single-maintainer governance + monthly majors (**mitigation: pin + vendor the binary, deliberate upgrade events — same posture as OpenShell alpha**), 166MB glibc binary, `mcp__right__*`→`mcp__right_*` rename, no `--session-id` (capture uuid from the first-turn `session` event), MCP-health via bot-side aggregator probe (both harnesses degrade silently — redesign needed regardless).
+
+**pi + pi-mcp-adapter (+pi-subagents) remains the strong fallback**: better core governance, 43MB, cleaner `terminate:true` structured output, `--session-id`; priced at: no native IRC/dialects/hashline/prewalk/roles, community-extension compatibility matrix, no Kimi OAuth, its sandbox E2E not yet run.
+
+Remaining pre-port work: **S4** (bot-side MCP-health probe design), **S6** (pin/vendor strategy), **S8** (codex `auth.json` regen flow — only if pi path chosen; omp reads `ANTHROPIC_OAUTH_TOKEN`/env for all and has native Kimi OAuth).
