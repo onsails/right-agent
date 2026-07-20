@@ -53,8 +53,10 @@ pub enum ResponseMode {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum GroupKind {
+    /// A Telegram group or supergroup.
     #[default]
     Group,
+    /// A Telegram channel.
     Channel,
 }
 

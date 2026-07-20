@@ -88,6 +88,22 @@ groups:
     }
 
     #[test]
+    fn group_kind_parses_group_and_rejects_unknown_values() {
+        let group = parse_yaml(
+            "version: 2\nusers: []\ngroups:\n  - id: -100\n    opened_at: 2026-01-01T00:00:00Z\n    kind: group\n",
+        )
+        .unwrap();
+        assert_eq!(group.groups[0].kind, GroupKind::Group);
+
+        assert!(
+            parse_yaml(
+                "version: 2\nusers: []\ngroups:\n  - id: -100\n    opened_at: 2026-01-01T00:00:00Z\n    kind: bogus\n",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn opened_channels_lists_only_channel_entries() {
         let mut state = AllowlistState::default();
         let now = Utc::now();
