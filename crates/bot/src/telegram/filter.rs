@@ -104,7 +104,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use right_agent::agent::allowlist::{
-        AllowedGroup, AllowedUser, AllowlistFile, AllowlistState, ResponseMode,
+        AllowedGroup, AllowedUser, AllowlistFile, AllowlistState, GroupKind, ResponseMode,
     };
     use std::sync::Arc;
 
@@ -128,6 +128,7 @@ mod tests {
                 opened_at: now,
                 mode: ResponseMode::Addressed,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             })
             .collect();
         let file = AllowlistFile {
@@ -148,6 +149,7 @@ mod tests {
             opened_at: Utc::now(),
             mode,
             topics: vec![],
+            kind: GroupKind::Group,
         };
         let file = AllowlistFile {
             version: right_agent::agent::allowlist::CURRENT_VERSION,

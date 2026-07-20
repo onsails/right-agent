@@ -48,6 +48,16 @@ pub enum ResponseMode {
     All,
 }
 
+/// What a `groups` entry actually is. Default `Group` keeps every existing
+/// allowlist.yaml valid.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupKind {
+    #[default]
+    Group,
+    Channel,
+}
+
 /// A per-topic override of the group's default mode. `thread_id` is the
 /// normalised effective thread id (General = 0).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -70,6 +80,8 @@ pub struct AllowedGroup {
     pub mode: ResponseMode,
     #[serde(default)]
     pub topics: Vec<TopicMode>,
+    #[serde(default)]
+    pub kind: GroupKind,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -154,6 +166,9 @@ pub fn serialize_yaml(file: &AllowlistFile) -> String {
             .unwrap();
             if g.mode != ResponseMode::default() {
                 writeln!(out, "    mode: {}", response_mode_str(g.mode)).unwrap();
+            }
+            if g.kind == GroupKind::Channel {
+                writeln!(out, "    kind: channel").unwrap();
             }
             if !g.topics.is_empty() {
                 out.push_str("    topics:\n");
@@ -257,6 +272,23 @@ impl AllowlistState {
     /// Is this group opened (members may talk to bot with mention/reply)?
     pub fn is_group_open(&self, chat_id: i64) -> bool {
         self.inner.groups.iter().any(|g| g.id == chat_id)
+    }
+
+    /// Opened channels (kind == Channel).
+    pub fn opened_channels(&self) -> Vec<&AllowedGroup> {
+        self.inner
+            .groups
+            .iter()
+            .filter(|g| g.kind == GroupKind::Channel)
+            .collect()
+    }
+
+    /// Is this chat id an opened channel?
+    pub fn is_channel_open(&self, chat_id: i64) -> bool {
+        self.inner
+            .groups
+            .iter()
+            .any(|g| g.id == chat_id && g.kind == GroupKind::Channel)
     }
 
     /// True iff the given chat id is either a trusted user or an opened group.
@@ -493,6 +525,7 @@ pub fn migrate_from_legacy(
                 opened_at: now,
                 mode: ResponseMode::Addressed,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             });
             mg += 1;
         }

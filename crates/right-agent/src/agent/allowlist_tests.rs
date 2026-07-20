@@ -61,6 +61,62 @@ groups:
     }
 
     #[test]
+    fn group_kind_defaults_to_group_and_serializes_only_when_channel() {
+        // Parse without kind → Group.
+        let text =
+            "version: 2\nusers: []\ngroups:\n  - id: -100\n    opened_at: 2026-01-01T00:00:00Z\n";
+        let file = parse_yaml(text).unwrap();
+        assert_eq!(file.groups[0].kind, GroupKind::Group);
+
+        // Serialize a channel entry → contains `kind: channel`.
+        let mut g = file.groups[0].clone();
+        g.kind = GroupKind::Channel;
+        let out = serialize_yaml(&AllowlistFile {
+            version: CURRENT_VERSION,
+            users: vec![],
+            groups: vec![g],
+        });
+        assert!(out.contains("kind: channel"), "serialized: {out}");
+
+        // Round-trip.
+        let back = parse_yaml(&out).unwrap();
+        assert_eq!(back.groups[0].kind, GroupKind::Channel);
+
+        // Group kind is NOT serialized (clean default).
+        let out2 = serialize_yaml(&file);
+        assert!(!out2.contains("kind:"), "serialized: {out2}");
+    }
+
+    #[test]
+    fn opened_channels_lists_only_channel_entries() {
+        let mut state = AllowlistState::default();
+        let now = Utc::now();
+        state.add_group(AllowedGroup {
+            id: -100,
+            label: None,
+            opened_by: None,
+            opened_at: now,
+            mode: ResponseMode::Addressed,
+            topics: vec![],
+            kind: GroupKind::Group,
+        });
+        state.add_group(AllowedGroup {
+            id: -200,
+            label: Some("chan".into()),
+            opened_by: None,
+            opened_at: now,
+            mode: ResponseMode::Addressed,
+            topics: vec![],
+            kind: GroupKind::Channel,
+        });
+        let channels = state.opened_channels();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].id, -200);
+        assert!(state.is_channel_open(-200));
+        assert!(!state.is_channel_open(-100));
+    }
+
+    #[test]
     fn parse_v1_file_upgrades_to_v2_addressed() {
         let yaml = "version: 1\nusers: []\ngroups:\n  - id: -100\n    label: null\n    opened_by: null\n    opened_at: 2026-06-06T00:00:00Z\n";
         let file = parse_yaml(yaml).expect("v1 must parse");
@@ -84,6 +140,7 @@ groups:
                 thread_id: 8,
                 mode: ResponseMode::Addressed,
             }],
+            kind: GroupKind::Group,
         });
         let text = serialize_yaml(&file);
         let reparsed = parse_yaml(&text).expect("v2 roundtrip");
@@ -109,6 +166,7 @@ groups:
                 .with_timezone(&chrono::Utc),
             mode: ResponseMode::Addressed,
             topics: vec![],
+            kind: GroupKind::Group,
         });
         let text = serialize_yaml(&file);
         assert!(!text.contains("mode:"), "no mode line:\n{text}");
@@ -132,6 +190,7 @@ groups:
                 opened_at: "2026-04-16T12:30:00Z".parse().unwrap(),
                 mode: ResponseMode::Addressed,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             }],
         };
         let yaml = serialize_yaml(&file);
@@ -249,6 +308,7 @@ groups: []
                 opened_at: "2026-04-16T12:30:00Z".parse().unwrap(),
                 mode: ResponseMode::Addressed,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             }],
         };
         let yaml = serialize_yaml(&file);
@@ -269,6 +329,7 @@ mod state_tests {
             opened_at: chrono::Utc::now(),
             mode,
             topics,
+            kind: GroupKind::Group,
         }
     }
 
@@ -324,6 +385,7 @@ mod state_tests {
             opened_at: t(),
             mode: ResponseMode::Addressed,
             topics: Vec::new(),
+            kind: GroupKind::Group,
         });
         assert!(s.is_group_open(-1));
     }
@@ -417,6 +479,7 @@ mod io_tests {
                 opened_at: t(),
                 mode: ResponseMode::Addressed,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             }],
         };
         write_file(dir.path(), &file).unwrap();
@@ -539,6 +602,7 @@ fn is_chat_allowed_matches_user_or_group() {
         opened_at: now,
         mode: ResponseMode::Addressed,
         topics: Vec::new(),
+        kind: GroupKind::Group,
     });
 
     assert!(state.is_chat_allowed(100), "trusted user must match");

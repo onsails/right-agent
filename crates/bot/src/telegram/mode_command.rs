@@ -452,7 +452,7 @@ pub(crate) async fn handle_mode_callback(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use right_agent::agent::allowlist::{AllowedGroup, AllowlistFile};
+    use right_agent::agent::allowlist::{AllowedGroup, AllowlistFile, GroupKind};
 
     fn opened_state(chat_id: i64, mode: ResponseMode) -> AllowlistState {
         AllowlistState::from_file(AllowlistFile {
@@ -463,6 +463,7 @@ mod tests {
                 opened_at: Utc::now(),
                 mode,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             }],
             ..Default::default()
         })

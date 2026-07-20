@@ -398,7 +398,8 @@ mod tests {
     #[tokio::test]
     async fn chat_scope_cleanup_ids_include_legacy_and_current_allowlist() {
         use right_agent::agent::allowlist::{
-            AllowedGroup, AllowedUser, AllowlistFile, AllowlistHandle, AllowlistState, ResponseMode,
+            AllowedGroup, AllowedUser, AllowlistFile, AllowlistHandle, AllowlistState, GroupKind,
+            ResponseMode,
         };
         let now: chrono::DateTime<chrono::Utc> = "2026-05-19T12:00:00Z".parse().unwrap();
         let allowlist = AllowlistHandle::new(AllowlistState::from_file(AllowlistFile {
@@ -416,6 +417,7 @@ mod tests {
                 opened_at: now,
                 mode: ResponseMode::Addressed,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             }],
         }));
 
