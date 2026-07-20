@@ -76,7 +76,7 @@ pub(crate) async fn route_update(update: frankenstein::updates::Update, ctx: &Ha
         }
         UpdateContent::MyChatMember(u) => {
             if let Err(e) = super::channel_confirm::handle_my_chat_member(ctx, &u).await {
-                tracing::warn!("my_chat_member handler failed: {e}");
+                tracing::warn!(chat_id = u.chat.id, "my_chat_member handler failed: {e}");
             }
         }
         _ => {}
