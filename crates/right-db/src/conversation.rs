@@ -2,6 +2,7 @@ use crate::{Connection, DbError};
 
 type Result<T> = std::result::Result<T, DbError>;
 const SEARCH_SNIPPET_MAX_CHARS: usize = 180;
+// Keep in sync with `crates/right/src/right_backend.rs::CHANNEL_READ_MAX_LIMIT`.
 const CHANNEL_READ_MAX_LIMIT: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -284,6 +284,28 @@ async fn channel_read_rejects_channel_not_opened() {
 }
 
 #[tokio::test]
+async fn channel_read_rejects_group_kind_allowlist_entry() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    write_allowlist_with_group_kinds(&agent_dir, &[(-100, GroupKind::Group)]);
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "channel_read",
+            json!({ "channel": -100 }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("channel_read should return a tool-level error");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "channel_not_opened");
+}
+
+#[tokio::test]
 async fn channel_read_returns_last_posts_newest_first() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
@@ -333,6 +355,57 @@ async fn channel_read_returns_last_posts_newest_first() {
     assert_eq!(posts[1]["message_id"], 2);
     assert_eq!(posts[0]["snippet"], "post 3");
     assert_eq!(posts[1]["snippet"], "post 2");
+}
+
+#[tokio::test]
+async fn channel_read_returns_posts_truncated_to_one_hundred_eighty_characters() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    write_allowlist_with_group_kinds(&agent_dir, &[(-200, GroupKind::Channel)]);
+    let post = "x".repeat(500);
+    {
+        let conn = right_db::open_connection(&agent_dir, false)
+            .await
+            .expect("open db");
+        right_db::conversation::archive_message(
+            &conn,
+            right_db::conversation::ConversationMessage {
+                platform: "telegram",
+                chat_id: -200,
+                thread_id: 0,
+                message_id: Some(1),
+                sender_user_id: Some(9001),
+                sender_name: Some("Channel"),
+                addressed_to_bot: false,
+                routed_to_agent: false,
+                root_session_id: None,
+                turn_id: None,
+                role: right_db::conversation::ConversationRole::User,
+                content: &post,
+            },
+        )
+        .await
+        .expect("archive post");
+    }
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "channel_read",
+            json!({ "channel": -200 }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("channel_read should succeed");
+
+    let posts = extract_json_body(&result);
+    let snippet = posts[0]["snippet"].as_str().expect("post snippet");
+    let truncated = snippet
+        .strip_suffix("...")
+        .expect("long posts should carry a truncation marker");
+    assert_eq!(truncated.len(), 180);
+    assert_eq!(truncated, &post[..180]);
 }
 
 #[tokio::test]
