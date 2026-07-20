@@ -28,6 +28,8 @@ pub(crate) fn channel_admin_promotion(update: &ChatMemberUpdated) -> Option<i64>
     }
 }
 
+/// Parses a channel-confirm callback payload, returning `None` when it is
+/// malformed or lacks the channel-confirm prefix.
 pub(crate) fn parse_chanconf_data(data: &str) -> Option<i64> {
     data.strip_prefix(CHANCONF_PREFIX)?.parse().ok()
 }
@@ -52,26 +54,24 @@ pub(crate) async fn handle_my_chat_member(
     let Some(chat_id) = channel_admin_promotion(update) else {
         return Ok(());
     };
-    let Some(trusted) = ctx
-        .allowlist
-        .0
-        .read()
-        .expect("allowlist lock poisoned")
-        .users()
-        .first()
-        .map(|u| u.id)
-    else {
+    let trusted = {
+        let allowlist = ctx.allowlist.0.read().expect("allowlist lock poisoned");
+        if allowlist.is_group_open(chat_id) {
+            return Ok(());
+        }
+        allowlist.users().first().map(|u| u.id)
+    };
+    let Some(trusted) = trusted else {
         tracing::warn!(
             chat_id,
             "bot added to channel but no trusted users to confirm"
         );
         return Ok(());
     };
-    let title = ctx
-        .bot
-        .get_chat_title(chat_id)
-        .await
-        .unwrap_or_else(|_| chat_id.to_string());
+    let title = ctx.bot.get_chat_title(chat_id).await.unwrap_or_else(|e| {
+        tracing::debug!(chat_id, "get_chat title lookup failed: {e}");
+        chat_id.to_string()
+    });
     let text = format!(
         "I was added as admin to channel <b>{}</b>.\nOpen it for read + post access?",
         super::markdown::html_escape(&title)
@@ -89,6 +89,10 @@ pub(crate) async fn handle_my_chat_member(
     Ok(())
 }
 
+/// Confirms a channel-opening request from a trusted user.
+///
+/// Only trusted users can write the allowlist; every callback path is
+/// acknowledged; and successful writes are idempotent.
 pub(crate) async fn handle_channel_confirm_callback(
     ctx: &HandlerCtx,
     q: &frankenstein::types::CallbackQuery,
@@ -114,7 +118,15 @@ pub(crate) async fn handle_channel_confirm_callback(
         return Ok(());
     }
 
-    let title = ctx.bot.get_chat_title(chat_id).await.ok();
+    let title = ctx
+        .bot
+        .get_chat_title(chat_id)
+        .await
+        .map_err(|e| {
+            tracing::debug!(chat_id, "get_chat title lookup failed: {e}");
+            e
+        })
+        .ok();
     let opened_by = q.from.id as i64;
     let outcome = match super::allowlist_commands::update_locked(
         &ctx.allowlist,
