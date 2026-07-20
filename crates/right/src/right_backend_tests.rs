@@ -177,12 +177,12 @@ fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
     // 9 cron + 1 mcp + 1 progress + 1 send_message + 2 learning + 3 conversation
-    // + 2 channel + 5 forum + 1 conversation focus + 1 bootstrap
-    // + 1 provider capabilities = 27
+    // + 3 channel + 5 forum + 1 conversation focus + 1 bootstrap
+    // + 1 provider capabilities = 28
     assert_eq!(
         tools.len(),
-        27,
-        "expected 27 tools, got {}: {:?}",
+        28,
+        "expected 28 tools, got {}: {:?}",
         tools.len(),
         tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
     );
@@ -212,6 +212,7 @@ fn tools_list_includes_channel_tools() {
 
     assert!(names.contains(&"channel_list"), "missing channel_list");
     assert!(names.contains(&"channel_read"), "missing channel_read");
+    assert!(names.contains(&"channel_post"), "missing channel_post");
 }
 
 #[tokio::test]
@@ -303,6 +304,59 @@ async fn channel_read_rejects_group_kind_allowlist_entry() {
     assert_eq!(result.is_error, Some(true));
     let body = extract_error_body(&result);
     assert_eq!(body["error"]["code"], "channel_not_opened");
+}
+
+#[tokio::test]
+async fn channel_post_rejects_unopened_channel_before_uds() {
+    let (backend, agents_dir, tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    register_foreground_learning(
+        &backend,
+        "inv",
+        tmp.path().join("channel-post-should-not-connect.sock"),
+    )
+    .await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "channel_post",
+            json!({ "channel": -200, "text": "hello" }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv".to_owned()),
+            },
+        )
+        .await
+        .expect("unopened channel must return a tool-level error before UDS");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "channel_not_opened");
+}
+
+#[tokio::test]
+async fn channel_post_requires_registered_invocation() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    write_allowlist_with_group_kinds(&agent_dir, &[(-200, GroupKind::Channel)]);
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "channel_post",
+            json!({ "channel": -200, "text": "hello" }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("unknown".to_owned()),
+            },
+        )
+        .await
+        .expect("unknown invocation must return a tool-level error");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "channel_post_unavailable");
 }
 
 #[tokio::test]

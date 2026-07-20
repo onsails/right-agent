@@ -116,6 +116,7 @@ pub(crate) fn build_progress_router(state: ProgressEndpointState) -> Router {
     Router::new()
         .route("/progress/send", post(handle_progress_send))
         .route("/message/send", post(handle_message_send))
+        .route("/channel/post", post(handle_channel_post))
         .route("/forum-topic/create", post(handle_forum_topic_create))
         .route("/forum-topic/edit", post(handle_forum_topic_edit))
         .route("/forum-topic/close", post(handle_forum_topic_close))
@@ -354,6 +355,106 @@ async fn handle_message_send(
         }),
     )
         .into_response()
+}
+
+/// Publish a Markdown post to an opened Telegram channel. The invocation
+/// token and the current allowlist are both authoritative: the aggregator's
+/// earlier validation is only a fast rejection before the UDS round-trip.
+async fn handle_channel_post(
+    State(state): State<ProgressEndpointState>,
+    Json(req): Json<right_mcp::internal_client::ChannelPostRequest>,
+) -> axum::response::Response {
+    let fail = |status: StatusCode, message: String| {
+        (
+            status,
+            Json(right_mcp::internal_client::ChannelPostResponse {
+                ok: false,
+                message_id: None,
+                error: Some(message),
+            }),
+        )
+            .into_response()
+    };
+
+    let Some(target) = state.progress.get(&req.invocation_id) else {
+        return fail(StatusCode::NOT_FOUND, "unknown invocation".to_owned());
+    };
+    if !target.token_matches(&req.token) {
+        return fail(StatusCode::FORBIDDEN, "token mismatch".to_owned());
+    }
+
+    let is_channel = match right_agent::agent::allowlist::read_file(&target.agent_dir) {
+        Ok(Some(file)) => file.groups.iter().any(|group| {
+            group.id == req.chat_id
+                && group.kind == right_agent::agent::allowlist::GroupKind::Channel
+        }),
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(
+                invocation_id = %req.invocation_id,
+                "channel post allowlist read failed: {e:#}",
+            );
+            return fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "channel allowlist unavailable".to_owned(),
+            );
+        }
+    };
+    if !is_channel {
+        return fail(StatusCode::BAD_REQUEST, "channel_not_opened".to_owned());
+    }
+
+    // Reuse the ordinary Markdown renderer and its safe plain-text retry, but
+    // direct the send to the validated channel without a forum thread.
+    let channel_target = ProgressTarget {
+        chat_id: req.chat_id,
+        thread_id: 0,
+        ..target.clone()
+    };
+    match send_text_message(&state.bot, &channel_target, &req.text).await {
+        Ok(Ok(message)) => {
+            if let Err(e) = crate::telegram::archive::archive_outbound_channel_post(
+                &target.agent_dir,
+                req.chat_id,
+                message.message_id,
+                &req.text,
+            )
+            .await
+            {
+                tracing::warn!(
+                    invocation_id = %req.invocation_id,
+                    chat_id = req.chat_id,
+                    "channel post archive failed: {e:#}",
+                );
+            }
+            Json(right_mcp::internal_client::ChannelPostResponse {
+                ok: true,
+                message_id: Some(message.message_id),
+                error: None,
+            })
+            .into_response()
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                invocation_id = %req.invocation_id,
+                chat_id = req.chat_id,
+                "channel post failed: {e:#}",
+            );
+            fail(StatusCode::BAD_GATEWAY, format!("{e:#}"))
+        }
+        Err(_) => {
+            tracing::warn!(
+                invocation_id = %req.invocation_id,
+                chat_id = req.chat_id,
+                "channel post timed out after {}s",
+                PROGRESS_SEND_TIMEOUT.as_secs(),
+            );
+            fail(
+                StatusCode::GATEWAY_TIMEOUT,
+                "telegram_send_timeout".to_owned(),
+            )
+        }
+    }
 }
 
 /// Map a teloxide forum error description to a clear, actionable sentence for
@@ -639,6 +740,29 @@ mod tests {
         response.status()
     }
 
+    fn channel_post_request_json(invocation_id: &str, token: &str, chat_id: i64) -> Vec<u8> {
+        let req = right_mcp::internal_client::ChannelPostRequest {
+            invocation_id: invocation_id.to_owned(),
+            token: token.to_owned(),
+            chat_id,
+            text: "hello".to_owned(),
+        };
+        serde_json::to_vec(&req).expect("serialize ChannelPostRequest")
+    }
+
+    async fn post_channel_post(state: ProgressEndpointState, body: Vec<u8>) -> StatusCode {
+        use tower::ServiceExt as _;
+        let app = build_progress_router(state);
+        let request = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/channel/post")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .expect("build request");
+        let response = app.oneshot(request).await.expect("router oneshot");
+        response.status()
+    }
+
     #[tokio::test]
     async fn message_send_unknown_invocation_is_404() {
         let state = test_state(ProgressState::default());
@@ -663,5 +787,46 @@ mod tests {
         let body = message_send_request_json("inv", "wrong");
         let status = post_message_send(state, body).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn handle_channel_post_rejects_non_channel_allowlist_entry() {
+        let agent_dir = tempfile::tempdir().expect("agent dir");
+        right_agent::agent::allowlist::write_file(
+            agent_dir.path(),
+            &right_agent::agent::allowlist::AllowlistFile {
+                version: right_agent::agent::allowlist::CURRENT_VERSION,
+                users: Vec::new(),
+                groups: vec![right_agent::agent::allowlist::AllowedGroup {
+                    id: -100,
+                    label: None,
+                    opened_by: None,
+                    opened_at: chrono::Utc::now(),
+                    mode: right_agent::agent::allowlist::ResponseMode::Addressed,
+                    topics: Vec::new(),
+                    kind: right_agent::agent::allowlist::GroupKind::Group,
+                }],
+            },
+        )
+        .expect("write allowlist");
+
+        let progress = ProgressState::default();
+        progress.register(ProgressTarget {
+            invocation_id: "inv".to_owned(),
+            token: "right".to_owned(),
+            chat_id: 42,
+            thread_id: 0,
+            agent_dir: agent_dir.path().to_owned(),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+        });
+
+        let status = post_channel_post(
+            test_state(progress),
+            channel_post_request_json("inv", "right", -100),
+        )
+        .await;
+
+        assert!(status.is_client_error(), "expected 4xx, got {status}");
     }
 }

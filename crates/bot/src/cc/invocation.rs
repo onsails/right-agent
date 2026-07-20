@@ -69,6 +69,17 @@ pub(crate) fn disallow_send_message(mut tools: Vec<String>) -> Vec<String> {
     tools
 }
 
+/// `channel_post` is foreground+cron only: hide it from background-continuation,
+/// delivery, and reflection invocations. It intentionally does not belong in
+/// the shared foreground-only chains because cron uses those chains.
+pub(crate) fn disallow_channel_post(mut tools: Vec<String>) -> Vec<String> {
+    const TOOL: &str = right_mcp::internal_client::CHANNEL_POST_MCP_TOOL;
+    if !tools.iter().any(|tool| tool == TOOL) {
+        tools.push(TOOL.to_owned());
+    }
+    tools
+}
+
 pub(crate) fn disallow_learning_tools(mut tools: Vec<String>) -> Vec<String> {
     for tool_name in [
         right_mcp::internal_client::SKILL_LEARNING_START_MCP_TOOL,
@@ -1055,6 +1066,17 @@ mod tests {
         let count = tools
             .iter()
             .filter(|tool| tool.as_str() == SEND_PROGRESS_MCP_TOOL)
+            .count();
+
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn disallow_channel_post_adds_the_tool_once() {
+        let tools = disallow_channel_post(disallow_channel_post(Vec::new()));
+        let count = tools
+            .iter()
+            .filter(|tool| tool.as_str() == right_mcp::internal_client::CHANNEL_POST_MCP_TOOL)
             .count();
 
         assert_eq!(count, 1);

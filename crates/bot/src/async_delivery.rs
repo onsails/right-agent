@@ -972,8 +972,10 @@ fn build_delivery_invocation_args(
         // Delivery is a relay, but harness built-ins are still available — apply
         // baseline so the relay can't self-loop or escape via harness
         // orchestration tools (Cron*, ScheduleWakeup, plan mode, etc.).
-        disallowed_tools: crate::cc::invocation::disallow_foreground_only_tools(
-            crate::cc::invocation::baseline_disallowed_tools(),
+        disallowed_tools: crate::cc::invocation::disallow_channel_post(
+            crate::cc::invocation::disallow_foreground_only_tools(
+                crate::cc::invocation::baseline_disallowed_tools(),
+            ),
         ),
         extra_args: vec![],
         prompt: None, // stdin-piped
