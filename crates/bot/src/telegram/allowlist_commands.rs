@@ -66,6 +66,22 @@ pub fn resolve_user_target(msg: &Message, args: &str) -> UserTarget {
     UserTarget::None
 }
 
+/// DM requires an explicit numeric chat ID argument; groups default to the
+/// current chat. `None` indicates that the command should show its usage.
+pub(crate) fn deny_all_target(is_private: bool, chat_id: i64, args: &str) -> Option<i64> {
+    let trimmed = args.trim();
+    if is_private {
+        if trimmed.is_empty() {
+            return None;
+        }
+        trimmed.parse().ok()
+    } else if trimmed.is_empty() {
+        Some(chat_id)
+    } else {
+        trimmed.parse().ok()
+    }
+}
+
 /// Persist the proposed `AllowlistState` atomically to disk, then swap it
 /// into the in-memory handle on success.
 ///
@@ -375,7 +391,11 @@ pub(crate) async fn handle_allow_all(ctx: &HandlerCtx, msg: &Message) -> Result<
     Ok(())
 }
 
-pub(crate) async fn handle_deny_all(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+pub(crate) async fn handle_deny_all(
+    ctx: &HandlerCtx,
+    msg: &Message,
+    args: String,
+) -> Result<(), TgError> {
     let bot = &ctx.bot;
     let allowlist = &ctx.allowlist;
     let agent_dir = &ctx.agent_dir;
@@ -384,11 +404,15 @@ pub(crate) async fn handle_deny_all(ctx: &HandlerCtx, msg: &Message) -> Result<(
         return Ok(());
     }
 
-    if msg_ext::is_private(&msg.chat) {
-        reply(bot, msg, "\u{2717} /deny_all is only valid in group chats").await?;
+    let Some(chat_id) = deny_all_target(msg_ext::is_private(&msg.chat), msg.chat.id, &args) else {
+        reply(
+            bot,
+            msg,
+            "\u{2717} usage: /deny_all <chat_id> (from DM) or /deny_all inside the group",
+        )
+        .await?;
         return Ok(());
-    }
-    let chat_id = msg.chat.id;
+    };
     let (outcome, new_state) = {
         let current = allowlist.0.read().expect("allowlist lock poisoned").clone();
         let mut next = current;
@@ -402,10 +426,10 @@ pub(crate) async fn handle_deny_all(ctx: &HandlerCtx, msg: &Message) -> Result<(
                 reply(bot, msg, &format!("\u{2717} persist failed: {e}")).await?;
                 return Ok(());
             }
-            reply(bot, msg, "\u{2713} group closed").await?;
+            reply(bot, msg, "\u{2713} chat closed").await?;
         }
         RemoveOutcome::NotFound => {
-            reply(bot, msg, "\u{2713} group was not opened").await?;
+            reply(bot, msg, "\u{2713} chat was not opened").await?;
         }
     }
     Ok(())
@@ -416,6 +440,14 @@ mod tests {
     use super::*;
     use frankenstein::types::Message;
     use right_agent::agent::allowlist::AllowlistFile;
+
+    #[test]
+    fn deny_all_target_resolves_arg_in_dm_and_chat_in_group() {
+        assert_eq!(deny_all_target(true, 555, "-100123"), Some(-100123));
+        assert_eq!(deny_all_target(true, 555, ""), None);
+        assert_eq!(deny_all_target(false, -100999, ""), Some(-100999));
+        assert_eq!(deny_all_target(true, 555, "abc"), None);
+    }
 
     fn dm_msg(from_id: u64, text: &str) -> Message {
         serde_json::from_value(serde_json::json!({

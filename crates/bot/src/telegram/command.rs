@@ -28,7 +28,7 @@ pub(crate) enum BotCommand {
     Deny(String),
     Allowed,
     AllowAll,
-    DenyAll,
+    DenyAll(String),
     Usage(String),
 }
 
@@ -58,7 +58,7 @@ const VISIBLE_COMMANDS: &[(&str, &str)] = &[
     ("deny", "Remove trusted user"),
     ("allowed", "List trusted users and opened groups"),
     ("allow_all", "Open this group for all members (group only)"),
-    ("deny_all", "Close this group (group only)"),
+    ("deny_all", "Close an opened group or channel"),
 ];
 
 /// Parse a Telegram message text into a [`BotCommand`].
@@ -112,7 +112,7 @@ pub(crate) fn parse(text: &str, bot_username: &str) -> Option<BotCommand> {
         "deny" => BotCommand::Deny(payload),
         "allowed" => BotCommand::Allowed,
         "allow_all" => BotCommand::AllowAll,
-        "deny_all" => BotCommand::DenyAll,
+        "deny_all" => BotCommand::DenyAll(payload),
         "usage" => BotCommand::Usage(payload),
         _ => return None,
     };
@@ -164,7 +164,22 @@ mod tests {
         );
         assert_eq!(parse("/mode_group", BOT), Some(BotCommand::ModeGroup));
         assert_eq!(parse("/allow_all", BOT), Some(BotCommand::AllowAll));
-        assert_eq!(parse("/deny_all", BOT), Some(BotCommand::DenyAll));
+        assert_eq!(
+            parse("/deny_all", BOT),
+            Some(BotCommand::DenyAll(String::new()))
+        );
+    }
+
+    #[test]
+    fn deny_all_carries_optional_chat_id_payload() {
+        assert_eq!(
+            parse("/deny_all", BOT),
+            Some(BotCommand::DenyAll(String::new()))
+        );
+        assert_eq!(
+            parse("/deny_all -100123", BOT),
+            Some(BotCommand::DenyAll("-100123".into()))
+        );
     }
 
     #[test]
