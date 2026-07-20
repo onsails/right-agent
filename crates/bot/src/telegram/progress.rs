@@ -790,6 +790,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_channel_post_unknown_invocation_is_404() {
+        let status = post_channel_post(
+            test_state(ProgressState::default()),
+            channel_post_request_json("missing", "t", -100),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn handle_channel_post_wrong_token_is_403() {
+        let progress = ProgressState::default();
+        progress.register(ProgressTarget {
+            invocation_id: "inv".to_owned(),
+            token: "right".to_owned(),
+            chat_id: 42,
+            thread_id: 0,
+            agent_dir: std::path::PathBuf::from("/tmp"),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+        });
+
+        let status = post_channel_post(
+            test_state(progress),
+            channel_post_request_json("inv", "wrong", -100),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn handle_channel_post_rejects_non_channel_allowlist_entry() {
         let agent_dir = tempfile::tempdir().expect("agent dir");
         right_agent::agent::allowlist::write_file(
@@ -827,6 +860,6 @@ mod tests {
         )
         .await;
 
-        assert!(status.is_client_error(), "expected 4xx, got {status}");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

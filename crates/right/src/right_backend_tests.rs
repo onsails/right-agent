@@ -360,6 +360,37 @@ async fn channel_post_requires_registered_invocation() {
 }
 
 #[tokio::test]
+async fn channel_post_rejects_nonforeground_noncron_invocation() {
+    let (backend, agents_dir, tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    write_allowlist_with_group_kinds(&agent_dir, &[(-200, GroupKind::Channel)]);
+    register_learning_kind(
+        &backend,
+        "background",
+        crate::progress::ProgressInvocationKind::BackgroundReview,
+        tmp.path().join("channel-post-should-not-connect.sock"),
+    )
+    .await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "channel_post",
+            json!({ "channel": -200, "text": "hello" }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("background".to_owned()),
+            },
+        )
+        .await
+        .expect("forbidden invocation must return a tool-level error");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "channel_post_forbidden");
+}
+
+#[tokio::test]
 async fn channel_read_returns_last_posts_newest_first() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;

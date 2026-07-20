@@ -54,7 +54,7 @@ pub async fn archive_message(conn: &Connection, message: ConversationMessage<'_>
     let addressed_to_bot = i64::from(message.addressed_to_bot);
     let routed_to_agent = i64::from(message.routed_to_agent);
 
-    if matches!(message.role, ConversationRole::Assistant) || message.message_id.is_none() {
+    if message.message_id.is_none() {
         return conn
             .query_one(
                 "INSERT INTO conversation_messages (
@@ -69,6 +69,39 @@ pub async fn archive_message(conn: &Connection, message: ConversationMessage<'_>
                     message.platform,
                     message.chat_id,
                     message.thread_id,
+                    message.sender_user_id,
+                    message.sender_name,
+                    addressed_to_bot,
+                    routed_to_agent,
+                    message.root_session_id,
+                    turn_id,
+                    role,
+                    content,
+                ],
+                |r| r.get(0),
+            )
+            .await;
+    }
+
+    if matches!(message.role, ConversationRole::Assistant) {
+        // Worker-generated assistant replies have no Telegram message id and
+        // continue through the NULL path above. Outbound channel posts do have
+        // an authoritative Telegram id, which channel_read must retain.
+        return conn
+            .query_one(
+                "INSERT INTO conversation_messages (
+                    platform, chat_id, thread_id, message_id, sender_user_id, sender_name,
+                    addressed_to_bot, routed_to_agent, root_session_id, turn_id, role, content
+                 ) VALUES (
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?
+                 )
+                 RETURNING id",
+                crate::params![
+                    message.platform,
+                    message.chat_id,
+                    message.thread_id,
+                    message.message_id,
                     message.sender_user_id,
                     message.sender_name,
                     addressed_to_bot,
@@ -617,6 +650,53 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn archive_message_preserves_outbound_assistant_message_id_only_when_provided() {
+        let conn = migrated_connection().await;
+        archive_message(
+            &conn,
+            ConversationMessage {
+                platform: "telegram",
+                chat_id: -100,
+                thread_id: 0,
+                message_id: Some(77),
+                sender_user_id: None,
+                sender_name: None,
+                addressed_to_bot: false,
+                routed_to_agent: true,
+                root_session_id: None,
+                turn_id: None,
+                role: ConversationRole::Assistant,
+                content: "outbound channel post",
+            },
+        )
+        .await
+        .expect("archive outbound assistant row");
+
+        let outbound_message_id: Option<i32> = conn
+            .query_one(
+                "SELECT message_id FROM conversation_messages
+                 WHERE platform = 'telegram' AND chat_id = -100 AND role = 'assistant'",
+                (),
+                |row| row.get(0),
+            )
+            .await
+            .expect("outbound message id");
+        assert_eq!(outbound_message_id, Some(77));
+
+        archive_assistant_row(&conn, "existing-session", 1, "ordinary assistant reply").await;
+        let ordinary_message_id: Option<i32> = conn
+            .query_one(
+                "SELECT message_id FROM conversation_messages
+                 WHERE root_session_id = 'existing-session' AND role = 'assistant'",
+                (),
+                |row| row.get(0),
+            )
+            .await
+            .expect("ordinary assistant message id");
+        assert_eq!(ordinary_message_id, None);
     }
 
     #[tokio::test]

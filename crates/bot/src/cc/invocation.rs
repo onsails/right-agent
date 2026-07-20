@@ -1576,6 +1576,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn shared_foreground_only_disallow_chains_keep_channel_post_available() {
+        let kept = disallow_foreground_only_tools_keep_learning(baseline_disallowed_tools());
+        let full = disallow_foreground_only_tools(baseline_disallowed_tools());
+        let channel_post = right_mcp::internal_client::CHANNEL_POST_MCP_TOOL;
+
+        assert!(!kept.iter().any(|tool| tool == channel_post));
+        assert!(!full.iter().any(|tool| tool == channel_post));
+    }
+
     fn process_exists(pid: u32) -> bool {
         std::process::Command::new("kill")
             .arg("-0")
