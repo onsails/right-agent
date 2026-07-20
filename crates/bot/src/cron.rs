@@ -2691,8 +2691,10 @@ mod tests {
                 .expect("respond to registration");
         });
 
-        let mut learning = right_agent_config::LearningConfig::default();
-        learning.prefilter_enabled = false;
+        let learning = right_agent_config::LearningConfig {
+            prefilter_enabled: false,
+            ..Default::default()
+        };
         let internal_client = Arc::new(right_mcp::internal_client::InternalClient::new(
             &socket_path,
         ));
