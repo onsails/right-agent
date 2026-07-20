@@ -116,8 +116,10 @@ pub(crate) async fn handle_channel_confirm_callback(
 
     let title = ctx.bot.get_chat_title(chat_id).await.ok();
     let opened_by = q.from.id as i64;
-    let outcome =
-        super::allowlist_commands::update_locked(&ctx.allowlist, &ctx.agent_dir.0, move |next| {
+    let outcome = match super::allowlist_commands::update_locked(
+        &ctx.allowlist,
+        &ctx.agent_dir.0,
+        move |next| {
             next.add_group(AllowedGroup {
                 id: chat_id,
                 label: title,
@@ -127,9 +129,23 @@ pub(crate) async fn handle_channel_confirm_callback(
                 topics: Vec::new(),
                 kind: GroupKind::Channel,
             })
-        })
-        .await
-        .map_err(TgError::Other)?;
+        },
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            ctx.bot
+                .answer_callback(&q.id, Some("save failed, try again"), true)
+                .await
+                .map_err(|answer_err| {
+                    TgError::Other(format!(
+                        "allowlist persist failed: {e}; callback answer failed: {answer_err}"
+                    ))
+                })?;
+            return Err(TgError::Other(e));
+        }
+    };
     match outcome {
         AddOutcome::Inserted => {
             ctx.bot
