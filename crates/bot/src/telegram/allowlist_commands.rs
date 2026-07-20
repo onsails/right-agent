@@ -6,8 +6,8 @@
 use chrono::Utc;
 use frankenstein::types::{Message, MessageEntityType};
 use right_agent::agent::allowlist::{
-    self, AddOutcome, AllowedGroup, AllowedUser, AllowlistHandle, AllowlistState, RemoveOutcome,
-    ResponseMode,
+    self, AddOutcome, AllowedGroup, AllowedUser, AllowlistHandle, AllowlistState, GroupKind,
+    RemoveOutcome, ResponseMode,
 };
 
 use super::msg_ext;
@@ -355,6 +355,7 @@ pub(crate) async fn handle_allow_all(ctx: &HandlerCtx, msg: &Message) -> Result<
             opened_at: Utc::now(),
             mode: ResponseMode::Addressed,
             topics: Vec::new(),
+            kind: GroupKind::Group,
         });
         (outcome, next)
     };
@@ -436,6 +437,7 @@ mod tests {
                 opened_at: Utc::now(),
                 mode,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             }],
             ..Default::default()
         })

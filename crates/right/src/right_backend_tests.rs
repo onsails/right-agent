@@ -2042,7 +2042,7 @@ async fn ci_openshell_bootstrap_done_sandbox_files_missing() {
 // Allowlist validation tests for cron_create
 // ---------------------------------------------------------------------------
 
-use right_agent::agent::allowlist::{AllowedUser, AllowlistFile, ResponseMode};
+use right_agent::agent::allowlist::{AllowedUser, AllowlistFile, GroupKind, ResponseMode};
 
 fn write_allowlist(agent_dir: &std::path::Path, users: &[i64], groups: &[i64]) {
     let now = chrono::Utc::now();
@@ -2064,6 +2064,7 @@ fn write_allowlist(agent_dir: &std::path::Path, users: &[i64], groups: &[i64]) {
                 opened_at: now,
                 mode: ResponseMode::Addressed,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             });
     }
     right_agent::agent::allowlist::write_file(agent_dir, &file).unwrap();

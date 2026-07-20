@@ -2205,7 +2205,7 @@ mod tests {
         groups: &[i64],
     ) -> right_agent::agent::allowlist::AllowlistState {
         use right_agent::agent::allowlist::{
-            AllowedGroup, AllowedUser, AllowlistState, ResponseMode,
+            AllowedGroup, AllowedUser, AllowlistState, GroupKind, ResponseMode,
         };
         let now = chrono::Utc::now();
         let mut state = AllowlistState::default();
@@ -2225,6 +2225,7 @@ mod tests {
                 opened_at: now,
                 mode: ResponseMode::Addressed,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             });
         }
         state
