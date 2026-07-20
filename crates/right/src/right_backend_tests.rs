@@ -177,11 +177,12 @@ fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
     // 9 cron + 1 mcp + 1 progress + 1 send_message + 2 learning + 3 conversation
-    // + 5 forum + 1 conversation focus + 1 bootstrap + 1 provider capabilities = 25
+    // + 2 channel + 5 forum + 1 conversation focus + 1 bootstrap
+    // + 1 provider capabilities = 27
     assert_eq!(
         tools.len(),
-        25,
-        "expected 25 tools, got {}: {:?}",
+        27,
+        "expected 27 tools, got {}: {:?}",
         tools.len(),
         tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
     );
@@ -201,6 +202,208 @@ fn tools_list_includes_learning_tools() {
         names.contains(&"skill_learning_finish"),
         "missing skill_learning_finish: {names:?}"
     );
+}
+
+#[test]
+fn tools_list_includes_channel_tools() {
+    let (backend, _, _tmp) = make_backend();
+    let tools = backend.tools_list();
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+
+    assert!(names.contains(&"channel_list"), "missing channel_list");
+    assert!(names.contains(&"channel_read"), "missing channel_read");
+}
+
+#[tokio::test]
+async fn channel_list_returns_only_opened_channels() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    write_allowlist_with_group_kinds(
+        &agent_dir,
+        &[(-100, GroupKind::Group), (-200, GroupKind::Channel)],
+    );
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "channel_list",
+            json!({}),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("channel_list should succeed");
+
+    assert_ne!(result.is_error, Some(true));
+    let channels = extract_json_body(&result);
+    assert_eq!(channels.as_array().map(Vec::len), Some(1));
+    assert_eq!(channels[0]["id"], -200);
+    assert_eq!(channels[0]["label"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn channel_list_rejects_unknown_params() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "channel_list",
+            json!({ "unexpected": true }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("invalid channel_list params should be a tool-level error");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+}
+
+#[tokio::test]
+async fn channel_read_rejects_channel_not_opened() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "channel_read",
+            json!({ "channel": -200 }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("channel_read should return a tool-level error");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "channel_not_opened");
+}
+
+#[tokio::test]
+async fn channel_read_returns_last_posts_newest_first() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    write_allowlist_with_group_kinds(&agent_dir, &[(-200, GroupKind::Channel)]);
+    {
+        let conn = right_db::open_connection(&agent_dir, false)
+            .await
+            .expect("open db");
+        for message_id in 1..=3 {
+            right_db::conversation::archive_message(
+                &conn,
+                right_db::conversation::ConversationMessage {
+                    platform: "telegram",
+                    chat_id: -200,
+                    thread_id: 0,
+                    message_id: Some(message_id),
+                    sender_user_id: Some(9001),
+                    sender_name: Some("Channel"),
+                    addressed_to_bot: false,
+                    routed_to_agent: false,
+                    root_session_id: None,
+                    turn_id: None,
+                    role: right_db::conversation::ConversationRole::User,
+                    content: &format!("post {message_id}"),
+                },
+            )
+            .await
+            .expect("archive post");
+        }
+    }
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "channel_read",
+            json!({ "channel": -200, "limit": 2 }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("channel_read should succeed");
+
+    assert_ne!(result.is_error, Some(true));
+    let posts = extract_json_body(&result);
+    assert_eq!(posts.as_array().map(Vec::len), Some(2));
+    assert_eq!(posts[0]["message_id"], 3);
+    assert_eq!(posts[1]["message_id"], 2);
+    assert_eq!(posts[0]["snippet"], "post 3");
+    assert_eq!(posts[1]["snippet"], "post 2");
+}
+
+#[tokio::test]
+async fn channel_read_rejects_invalid_params_as_tool_error() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "channel_read",
+            json!({ "channel": "not-a-chat-id" }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("invalid channel_read params should be a tool-level error");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+}
+
+#[tokio::test]
+async fn channel_read_caps_results_at_one_hundred_posts() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent").await;
+    write_allowlist_with_group_kinds(&agent_dir, &[(-200, GroupKind::Channel)]);
+    {
+        let conn = right_db::open_connection(&agent_dir, false)
+            .await
+            .expect("open db");
+        for message_id in 1..=101 {
+            right_db::conversation::archive_message(
+                &conn,
+                right_db::conversation::ConversationMessage {
+                    platform: "telegram",
+                    chat_id: -200,
+                    thread_id: 0,
+                    message_id: Some(message_id),
+                    sender_user_id: Some(9001),
+                    sender_name: Some("Channel"),
+                    addressed_to_bot: false,
+                    routed_to_agent: false,
+                    root_session_id: None,
+                    turn_id: None,
+                    role: right_db::conversation::ConversationRole::User,
+                    content: &format!("post {message_id}"),
+                },
+            )
+            .await
+            .expect("archive post");
+        }
+    }
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "channel_read",
+            json!({ "channel": -200, "limit": 101 }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("channel_read should succeed");
+
+    assert_ne!(result.is_error, Some(true));
+    let posts = extract_json_body(&result);
+    assert_eq!(posts.as_array().map(Vec::len), Some(100));
+    assert_eq!(posts[0]["message_id"], 101);
+    assert_eq!(posts[99]["message_id"], 2);
 }
 
 #[test]
@@ -2065,6 +2268,24 @@ fn write_allowlist(agent_dir: &std::path::Path, users: &[i64], groups: &[i64]) {
                 mode: ResponseMode::Addressed,
                 topics: Vec::new(),
                 kind: GroupKind::Group,
+            });
+    }
+    right_agent::agent::allowlist::write_file(agent_dir, &file).unwrap();
+}
+
+fn write_allowlist_with_group_kinds(agent_dir: &std::path::Path, groups: &[(i64, GroupKind)]) {
+    let now = chrono::Utc::now();
+    let mut file = AllowlistFile::default();
+    for &(id, kind) in groups {
+        file.groups
+            .push(right_agent::agent::allowlist::AllowedGroup {
+                id,
+                label: None,
+                opened_by: None,
+                opened_at: now,
+                mode: ResponseMode::Addressed,
+                topics: Vec::new(),
+                kind,
             });
     }
     right_agent::agent::allowlist::write_file(agent_dir, &file).unwrap();

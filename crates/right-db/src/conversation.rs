@@ -2,6 +2,7 @@ use crate::{Connection, DbError};
 
 type Result<T> = std::result::Result<T, DbError>;
 const SEARCH_SNIPPET_MAX_CHARS: usize = 180;
+const CHANNEL_READ_MAX_LIMIT: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationRole {
@@ -239,7 +240,7 @@ pub async fn last_n_in_chat(
     chat_id: i64,
     limit: usize,
 ) -> Result<Vec<ConversationSearchResult>> {
-    let limit = clamped_limit(limit);
+    let limit = limit.clamp(1, CHANNEL_READ_MAX_LIMIT) as i64;
     conn.query_all(
         "SELECT
             m.id,
@@ -1176,9 +1177,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn last_n_in_chat_clamps_limit_to_fifty() {
+    async fn last_n_in_chat_clamps_limit_to_one_hundred() {
         let conn = migrated_connection().await;
-        for message_id in 1..=51 {
+        for message_id in 1..=101 {
             archive_message(
                 &conn,
                 user_message(-100, 0, message_id, &format!("post {message_id}")),
@@ -1187,10 +1188,10 @@ mod tests {
             .unwrap();
         }
 
-        let rows = last_n_in_chat(&conn, -100, 51).await.unwrap();
+        let rows = last_n_in_chat(&conn, -100, 101).await.unwrap();
 
-        assert_eq!(rows.len(), 50);
-        assert_eq!(rows[0].message_id, Some(51));
+        assert_eq!(rows.len(), 100);
+        assert_eq!(rows[0].message_id, Some(101));
         assert_eq!(rows.last().and_then(|row| row.message_id), Some(2));
     }
 
