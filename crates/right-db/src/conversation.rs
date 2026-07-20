@@ -231,6 +231,37 @@ pub async fn search_chat(
     .await
 }
 
+/// Last `limit` archived messages in a chat (any thread), newest first.
+/// Used by the channel_read MCP tool; no FTS — chronological scan over
+/// idx_conversation_messages_chat_created.
+pub async fn last_n_in_chat(
+    conn: &Connection,
+    chat_id: i64,
+    limit: usize,
+) -> Result<Vec<ConversationSearchResult>> {
+    let limit = clamped_limit(limit);
+    conn.query_all(
+        "SELECT
+            m.id,
+            m.role,
+            m.content,
+            m.sender_user_id,
+            m.sender_name,
+            m.created_at,
+            m.thread_id,
+            m.message_id,
+            m.root_session_id
+         FROM conversation_messages m
+         WHERE m.platform = 'telegram'
+           AND m.chat_id = ?
+         ORDER BY m.created_at DESC, m.id DESC
+         LIMIT ?",
+        crate::params![chat_id, limit],
+        search_result_from_row,
+    )
+    .await
+}
+
 /// A message fetched by id for on-demand reply recovery.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FetchedMessage {
@@ -1097,6 +1128,70 @@ mod tests {
                 .iter()
                 .all(|r| r.thread_id == 10 || r.thread_id == 11)
         );
+    }
+
+    #[tokio::test]
+    async fn last_n_in_chat_returns_newest_first_and_scopes_to_chat() {
+        let conn = migrated_connection().await;
+        for (chat_id, thread_id, message_id) in [(-100, 7, 1), (-100, 9, 2), (-200, 0, 3)] {
+            archive_message(
+                &conn,
+                user_message(
+                    chat_id,
+                    thread_id,
+                    message_id,
+                    &format!("post {message_id}"),
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        archive_message(&conn, message("discord", -100, 0, 4, "other platform"))
+            .await
+            .unwrap();
+        conn.execute(
+            "UPDATE conversation_messages
+             SET created_at = '2020-01-01T00:00:00Z'
+             WHERE platform = 'telegram' AND chat_id = -100",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let rows = last_n_in_chat(&conn, -100, 10).await.unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].snippet, "post 2");
+        assert_eq!(rows[1].snippet, "post 1");
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.thread_id, row.message_id))
+                .collect::<Vec<_>>(),
+            vec![(9, Some(2)), (7, Some(1))]
+        );
+
+        let one = last_n_in_chat(&conn, -100, 1).await.unwrap();
+
+        assert_eq!(one.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn last_n_in_chat_clamps_limit_to_fifty() {
+        let conn = migrated_connection().await;
+        for message_id in 1..=51 {
+            archive_message(
+                &conn,
+                user_message(-100, 0, message_id, &format!("post {message_id}")),
+            )
+            .await
+            .unwrap();
+        }
+
+        let rows = last_n_in_chat(&conn, -100, 51).await.unwrap();
+
+        assert_eq!(rows.len(), 50);
+        assert_eq!(rows[0].message_id, Some(51));
+        assert_eq!(rows.last().and_then(|row| row.message_id), Some(2));
     }
 
     #[tokio::test]
