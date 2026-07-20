@@ -314,6 +314,16 @@ impl RightBot {
         &self.me
     }
 
+    /// Resolve a chat's title, falling back to its numeric id when Telegram
+    /// does not provide one.
+    pub(crate) async fn get_chat_title(&self, chat_id: i64) -> Result<String, TgError> {
+        let params = frankenstein::methods::GetChatParams::builder()
+            .chat_id(chat_id)
+            .build();
+        let resp = self.bot.get_chat(&params).await?;
+        Ok(resp.result.title.unwrap_or_else(|| chat_id.to_string()))
+    }
+
     /// The raw bot token. Used for token-derived focus-scope MACs. Never log.
     pub(crate) fn token(&self) -> &str {
         &self.token

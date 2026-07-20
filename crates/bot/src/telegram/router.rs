@@ -51,13 +51,15 @@ pub(crate) fn should_archive_channel_post(allowlist: &AllowlistHandle, chat_id: 
 /// logged, never propagated — a single failed update must not stop the webhook
 /// server.
 ///
-/// Fresh `Message` and `CallbackQuery` updates are routed. `ChannelPost`
-/// updates are archived only when their channel is open; they never route to a
-/// worker. `EditedMessage` is deliberately ignored (falls through to `_ => {}`):
-/// the former teloxide dispatcher used `Update::filter_message()`, which
-/// matched only `Message` and had no edited-message branch — so edits were
-/// received (they're in `allowed_updates`) but silently dropped rather than
-/// starting a new agent turn. We preserve that. `EditedMessage` stays in
+/// Fresh `Message` and `CallbackQuery` updates are routed. `MyChatMember`
+/// updates initiate channel registration when the bot becomes a channel admin.
+/// `ChannelPost` updates are archived only when their channel is open; they
+/// never route to a worker. `EditedMessage` is deliberately ignored (falls
+/// through to `_ => {}`): the former teloxide dispatcher used
+/// `Update::filter_message()`, which matched only `Message` and had no
+/// edited-message branch — so edits were received (they're in
+/// `allowed_updates`) but silently dropped rather than starting a new agent
+/// turn. We preserve that. `EditedMessage` stays in
 /// `webhook::webhook_allowed_updates()` so `setWebhook` registration is
 /// byte-identical to before.
 pub(crate) async fn route_update(update: frankenstein::updates::Update, ctx: &HandlerCtx) {
@@ -71,6 +73,11 @@ pub(crate) async fn route_update(update: frankenstein::updates::Update, ctx: &Ha
         }
         UpdateContent::ChannelPost(m) => {
             on_channel_post(ctx, *m).await;
+        }
+        UpdateContent::MyChatMember(u) => {
+            if let Err(e) = super::channel_confirm::handle_my_chat_member(ctx, &u).await {
+                tracing::warn!("my_chat_member handler failed: {e}");
+            }
         }
         _ => {}
     }
@@ -163,6 +170,9 @@ async fn on_callback(ctx: &HandlerCtx, q: frankenstein::types::CallbackQuery) {
         CallbackRoute::ErrorDetails => {
             super::error_details::handle_error_details_callback(ctx, &q).await
         }
+        CallbackRoute::ChannelConfirm => {
+            super::channel_confirm::handle_channel_confirm_callback(ctx, &q).await
+        }
         CallbackRoute::Stop => handler::handle_stop_callback(ctx, &q).await,
     };
     if let Err(e) = result {
@@ -179,6 +189,7 @@ pub(crate) enum CallbackRoute {
     Thinking,
     Bg,
     ErrorDetails,
+    ChannelConfirm,
     Stop,
 }
 
@@ -192,6 +203,9 @@ pub(crate) fn classify_callback(data: Option<&str>) -> CallbackRoute {
         Some(d) if d.starts_with("think:") => CallbackRoute::Thinking,
         Some(d) if d.starts_with("bg:") => CallbackRoute::Bg,
         Some(d) if d.starts_with("errdet:") => CallbackRoute::ErrorDetails,
+        Some(d) if d.starts_with(super::channel_confirm::CHANCONF_PREFIX) => {
+            CallbackRoute::ChannelConfirm
+        }
         _ => CallbackRoute::Stop,
     }
 }
@@ -367,6 +381,22 @@ mod tests {
         assert_eq!(
             classify_callback(Some("errdet:1")),
             CallbackRoute::ErrorDetails
+        );
+        assert_eq!(
+            classify_callback(Some("chanconf:-100123")),
+            CallbackRoute::ChannelConfirm
+        );
+    }
+
+    #[test]
+    fn classify_callback_routes_channel_confirm() {
+        assert_eq!(
+            classify_callback(Some("chanconf:-100123")),
+            CallbackRoute::ChannelConfirm
+        );
+        assert_eq!(
+            classify_callback(Some("chanconf:")),
+            CallbackRoute::ChannelConfirm
         );
     }
 
