@@ -37,16 +37,27 @@ pub(crate) struct HandlerCtx {
     pub(crate) worker_ctl: super::WorkerControlDeps,
 }
 
+/// Channel posts are archived iff the channel is an opened channel in the
+/// allowlist. They NEVER route to the worker (read-only channel support).
+pub(crate) fn should_archive_channel_post(allowlist: &AllowlistHandle, chat_id: i64) -> bool {
+    allowlist
+        .0
+        .read()
+        .expect("allowlist lock poisoned")
+        .is_channel_open(chat_id)
+}
+
 /// Route one update to the matching handler. Best-effort: handler errors are
 /// logged, never propagated — a single failed update must not stop the webhook
 /// server.
 ///
-/// Only fresh `Message` and `CallbackQuery` updates are routed. `EditedMessage`
-/// is deliberately ignored (falls through to `_ => {}`): the former teloxide
-/// dispatcher used `Update::filter_message()`, which matched only `Message` and
-/// had no edited-message branch — so edits were received (they're in
-/// `allowed_updates`) but silently dropped rather than starting a new agent
-/// turn. We preserve that. `EditedMessage` stays in
+/// Fresh `Message` and `CallbackQuery` updates are routed. `ChannelPost`
+/// updates are archived only when their channel is open; they never route to a
+/// worker. `EditedMessage` is deliberately ignored (falls through to `_ => {}`):
+/// the former teloxide dispatcher used `Update::filter_message()`, which
+/// matched only `Message` and had no edited-message branch — so edits were
+/// received (they're in `allowed_updates`) but silently dropped rather than
+/// starting a new agent turn. We preserve that. `EditedMessage` stays in
 /// `webhook::webhook_allowed_updates()` so `setWebhook` registration is
 /// byte-identical to before.
 pub(crate) async fn route_update(update: frankenstein::updates::Update, ctx: &HandlerCtx) {
@@ -58,8 +69,22 @@ pub(crate) async fn route_update(update: frankenstein::updates::Update, ctx: &Ha
         UpdateContent::CallbackQuery(q) => {
             on_callback(ctx, *q).await;
         }
+        UpdateContent::ChannelPost(m) => {
+            on_channel_post(ctx, *m).await;
+        }
         _ => {}
     }
+}
+
+async fn on_channel_post(ctx: &HandlerCtx, msg: frankenstein::types::Message) {
+    if !should_archive_channel_post(&ctx.allowlist, msg.chat.id) {
+        tracing::debug!(
+            chat_id = msg.chat.id,
+            "channel post skipped: channel not opened"
+        );
+        return;
+    }
+    super::archive::archive_user_message_for_router(&ctx.agent_dir.0, &msg);
 }
 
 /// Reproduce dispatch.rs's message branch: pre-filter log + group-archive, then
@@ -304,6 +329,33 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use right_agent::agent::allowlist::AllowlistState;
+
+    fn allowlist_with_channel(chat_id: i64) -> AllowlistHandle {
+        use right_agent::agent::allowlist::{
+            AllowedGroup, AllowlistState, GroupKind, ResponseMode,
+        };
+
+        let mut state = AllowlistState::default();
+        state.add_group(AllowedGroup {
+            id: chat_id,
+            label: None,
+            opened_by: None,
+            opened_at: chrono::Utc::now(),
+            mode: ResponseMode::Addressed,
+            topics: vec![],
+            kind: GroupKind::Channel,
+        });
+        AllowlistHandle::new(state)
+    }
+
+    #[test]
+    fn channel_post_archived_only_when_channel_open() {
+        let open = allowlist_with_channel(-100);
+        let closed = AllowlistHandle::new(AllowlistState::default());
+        assert!(should_archive_channel_post(&open, -100));
+        assert!(!should_archive_channel_post(&closed, -100));
+    }
 
     #[test]
     fn classify_callback_routes_each_prefix() {
