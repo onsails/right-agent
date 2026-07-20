@@ -84,7 +84,7 @@ async fn on_channel_post(ctx: &HandlerCtx, msg: frankenstein::types::Message) {
         );
         return;
     }
-    super::archive::archive_user_message_for_router(&ctx.agent_dir.0, &msg);
+    super::archive::archive_channel_post(&ctx.agent_dir.0, &msg);
 }
 
 /// Reproduce dispatch.rs's message branch: pre-filter log + group-archive, then
