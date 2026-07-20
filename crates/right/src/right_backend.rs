@@ -1023,7 +1023,7 @@ impl RightBackend {
             }
             Err(crate::progress::ProgressError::Forbidden) => {
                 return Ok(tool_error(
-                    "channel_post_unavailable",
+                    "channel_post_forbidden",
                     "channel_post is available only for foreground and cron invocations",
                     None,
                 ));
