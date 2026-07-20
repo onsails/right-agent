@@ -26,6 +26,8 @@ pub fn webhook_allowed_updates() -> Vec<frankenstein::types::AllowedUpdate> {
         AllowedUpdate::Message,
         AllowedUpdate::EditedMessage,
         AllowedUpdate::CallbackQuery,
+        AllowedUpdate::ChannelPost,
+        AllowedUpdate::MyChatMember,
     ]
 }
 
@@ -87,6 +89,8 @@ mod tests {
         assert!(allowed.contains(&AllowedUpdate::Message));
         assert!(allowed.contains(&AllowedUpdate::EditedMessage));
         assert!(allowed.contains(&AllowedUpdate::CallbackQuery));
+        assert!(allowed.contains(&AllowedUpdate::ChannelPost));
+        assert!(allowed.contains(&AllowedUpdate::MyChatMember));
     }
 
     #[tokio::test]
