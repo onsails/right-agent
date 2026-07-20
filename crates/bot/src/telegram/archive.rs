@@ -103,7 +103,7 @@ pub(crate) fn archive_routed_dm_message(
     archive_user_message(agent_dir, msg, address.is_some(), true);
 }
 
-pub(crate) fn archive_user_message_for_router(agent_dir: &Path, msg: &Message) {
+pub(crate) fn archive_channel_post(agent_dir: &Path, msg: &Message) {
     archive_user_message(agent_dir, msg, false, false);
 }
 
@@ -394,6 +394,21 @@ mod tests {
         let payload = super::ArchivePayload::from_message(dir.path(), &msg, false, false).unwrap();
         assert_eq!(payload.sender_user_id, None);
         assert_eq!(payload.sender_name.as_deref(), Some("agent-a"));
+    }
+
+    #[test]
+    fn archive_payload_prefers_from_over_sender_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let msg = message(serde_json::json!({
+            "message_id": 8,
+            "date": 0,
+            "chat": {"id": -1001234567890_i64, "type": "channel", "title": "agent-a"},
+            "from": {"id": 42, "is_bot": false, "first_name": "User"},
+            "sender_chat": {"id": -1001234567890_i64, "type": "channel", "title": "Chan"},
+            "text": "both senders"
+        }));
+        let payload = super::ArchivePayload::from_message(dir.path(), &msg, false, false).unwrap();
+        assert_eq!(payload.sender_name.as_deref(), Some("User"));
     }
 
     fn bot_identity() -> BotIdentity {
