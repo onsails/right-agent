@@ -168,6 +168,7 @@ pub(crate) async fn run(ctx: ProbeWriterContext, anchor: ProbeAnchor, skill_inde
             kind: right_mcp::internal_client::ProgressInvocationKindDto::ProbeWriter,
             chat_id: Some(ctx.chat_id),
             thread_id: Some(ctx.thread_id),
+            progress_state: None,
         },
     )
     .await

@@ -1006,6 +1006,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let cron_debug = Arc::clone(&debug_flag);
     let cron_learning = config.learning.clone();
     let cron_session_locks = Arc::clone(&session_locks);
+    let cron_progress_state = progress_state.clone();
+
     let cron_handle = tokio::spawn(async move {
         cron::run_cron_task(
             cron_agent_dir,
@@ -1019,6 +1021,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             cron_debug,
             cron_learning,
             cron_session_locks,
+            cron_progress_state,
         )
         .await;
     });
