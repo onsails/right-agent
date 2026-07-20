@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use right_mcp::internal_client::{
-    ForumTopicCreateRequest, ForumTopicCreateResponse, ForumTopicEditRequest,
+    ChannelPostRequest, ForumTopicCreateRequest, ForumTopicCreateResponse, ForumTopicEditRequest,
     ForumTopicThreadRequest, InternalClient, InternalClientError, ProgressSendRequest,
     SKILL_LEARNING_FINISH_TOOL, SKILL_LEARNING_START_TOOL, SendMessageRequest,
 };
@@ -66,6 +66,15 @@ pub(crate) struct ChannelReadParams {
     pub(crate) channel: i64,
     /// Max posts to return (default 20, capped at 100). Newest first.
     pub(crate) limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChannelPostParams {
+    /// Channel chat id (from channel_list).
+    pub(crate) channel: i64,
+    /// Post text (Markdown).
+    pub(crate) text: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -223,6 +232,11 @@ impl RightBackend {
                 schema_for_type::<crate::progress::SendMessageParams>(),
             ),
             Tool::new(
+                right_mcp::internal_client::CHANNEL_POST_TOOL,
+                "Publish a post to an opened Telegram channel (see channel_list). Always call channel_read first to match the channel's style and avoid duplicates. Foreground and cron invocations only. Max 10 calls per turn.",
+                schema_for_type::<ChannelPostParams>(),
+            ),
+            Tool::new(
                 SKILL_LEARNING_START_TOOL,
                 "Stage 1 foreground metadata/progress for learned skill create/update. Call before writing or patching skill package files. action=create and action=update both require rightx-* skill names. Accepts skill names only, never paths.",
                 schema_for_type::<SkillLearningStartParams>(),
@@ -333,6 +347,9 @@ impl RightBackend {
             crate::progress::SEND_PROGRESS_TOOL => self.call_send_progress(context, &args).await,
             right_mcp::internal_client::SEND_MESSAGE_TOOL => {
                 self.call_send_message(context, &args).await
+            }
+            right_mcp::internal_client::CHANNEL_POST_TOOL => {
+                self.call_channel_post(agent_dir, context, &args).await
             }
             SKILL_LEARNING_START_TOOL => {
                 self.call_skill_learning_start(agent_name, agent_dir, context, &args)
@@ -948,6 +965,99 @@ impl RightBackend {
             Err(_) => Ok(tool_error(
                 "send_message_failed",
                 "send_message timed out",
+                None,
+            )),
+        }
+    }
+
+    async fn call_channel_post(
+        &self,
+        agent_dir: &Path,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: ChannelPostParams = match serde_json::from_value(args.clone()) {
+            Ok(params) => params,
+            Err(e) => {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    format!("invalid channel_post params: {e:#}"),
+                    None,
+                ));
+            }
+        };
+        if params.text.trim().is_empty() {
+            return Ok(tool_error("empty_content", "text must be non-empty", None));
+        }
+
+        let file = right_agent::agent::allowlist::read_file(agent_dir)
+            .map_err(|e| anyhow::anyhow!("allowlist read: {e}"))?
+            .unwrap_or_default();
+        let opened = file.groups.iter().any(|group| {
+            group.id == params.channel
+                && group.kind == right_agent::agent::allowlist::GroupKind::Channel
+        });
+        if !opened {
+            return Ok(tool_error(
+                "channel_not_opened",
+                "channel is not opened for this agent; see channel_list",
+                None,
+            ));
+        }
+
+        let Some(invocation_id) = context.invocation_id else {
+            return Ok(tool_error(
+                "channel_post_unavailable",
+                "channel_post requires a registered invocation",
+                None,
+            ));
+        };
+        let target = match self.progress.begin_channel_post(&invocation_id).await {
+            Ok(target) => target,
+            Err(crate::progress::ProgressError::RateLimited { .. }) => {
+                return Ok(tool_error(
+                    "channel_post_limit",
+                    "max 10 channel posts per turn",
+                    None,
+                ));
+            }
+            Err(crate::progress::ProgressError::Forbidden) => {
+                return Ok(tool_error(
+                    "channel_post_unavailable",
+                    "channel_post is available only for foreground and cron invocations",
+                    None,
+                ));
+            }
+            Err(crate::progress::ProgressError::Unavailable) => {
+                return Ok(tool_error(
+                    "channel_post_unavailable",
+                    "channel_post requires a registered invocation",
+                    None,
+                ));
+            }
+        };
+
+        let client = InternalClient::new(target.bot_socket_path);
+        let request = ChannelPostRequest {
+            invocation_id,
+            token: target.bot_send_token,
+            chat_id: params.channel,
+            text: params.text,
+        };
+        match tokio::time::timeout(SEND_MESSAGE_TIMEOUT, client.channel_post(&request)).await {
+            Ok(Ok(resp)) if resp.ok => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::json!({ "status": "sent", "message_id": resp.message_id }).to_string(),
+            )])),
+            Ok(Ok(resp)) => Ok(tool_error(
+                "channel_post_failed",
+                resp.error
+                    .unwrap_or_else(|| "bot rejected channel post".to_owned()),
+                None,
+            )),
+            Ok(Err(e)) => Ok(tool_error("channel_post_failed", format!("{e:#}"), None)),
+            Err(_) => Ok(tool_error(
+                "channel_post_timeout",
+                "bot did not respond in time",
                 None,
             )),
         }

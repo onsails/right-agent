@@ -310,7 +310,9 @@ async fn run_notice_resume(
         disallowed_tools: {
             let mut d = crate::cc::invocation::baseline_disallowed_tools();
             d.push("Agent".into());
-            crate::cc::invocation::disallow_foreground_only_tools(d)
+            crate::cc::invocation::disallow_channel_post(
+                crate::cc::invocation::disallow_foreground_only_tools(d),
+            )
         },
         extra_args: vec![],
         prompt: None,

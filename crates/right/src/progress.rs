@@ -146,6 +146,8 @@ struct ProgressInvocation {
     last_sent_at: Option<Instant>,
     /// Count of `send_message` calls this turn; capped at MAX_SEND_MESSAGE_PER_TURN.
     message_send_count: u32,
+    /// Count of `channel_post` calls this turn; capped at MAX_CHANNEL_POST_PER_TURN.
+    channel_post_count: u32,
 }
 
 impl std::fmt::Debug for ProgressInvocation {
@@ -157,6 +159,7 @@ impl std::fmt::Debug for ProgressInvocation {
             .field("conversation_scope", &self.conversation_scope)
             .field("last_sent_at", &self.last_sent_at)
             .field("message_send_count", &self.message_send_count)
+            .field("channel_post_count", &self.channel_post_count)
             .finish()
     }
 }
@@ -173,6 +176,7 @@ impl ProgressRegistry {
                 conversation_scope: registration.conversation_scope,
                 last_sent_at: None,
                 message_send_count: 0,
+                channel_post_count: 0,
             },
         );
     }
@@ -244,6 +248,35 @@ impl ProgressRegistry {
             });
         }
         invocation.message_send_count += 1;
+        Ok(ProgressSendTarget {
+            bot_socket_path: invocation.bot_socket_path.clone(),
+            bot_send_token: invocation.bot_send_token.clone(),
+        })
+    }
+
+    /// Admission gate for `channel_post`: foreground and cron invocations only,
+    /// capped at MAX_CHANNEL_POST_PER_TURN per invocation. The count tracks
+    /// attempts and is never rolled back if delivery fails.
+    pub(crate) async fn begin_channel_post(
+        &self,
+        invocation_id: &str,
+    ) -> Result<ProgressSendTarget, ProgressError> {
+        let mut guard = self.inner.lock().await;
+        let invocation = guard
+            .get_mut(invocation_id)
+            .ok_or(ProgressError::Unavailable)?;
+        if !matches!(
+            invocation.kind,
+            ProgressInvocationKind::Foreground | ProgressInvocationKind::Cron
+        ) {
+            return Err(ProgressError::Forbidden);
+        }
+        if invocation.channel_post_count >= right_mcp::internal_client::MAX_CHANNEL_POST_PER_TURN {
+            return Err(ProgressError::RateLimited {
+                retry_after: Duration::ZERO,
+            });
+        }
+        invocation.channel_post_count += 1;
         Ok(ProgressSendTarget {
             bot_socket_path: invocation.bot_socket_path.clone(),
             bot_send_token: invocation.bot_send_token.clone(),
@@ -635,6 +668,7 @@ mod tests {
             conversation_scope: None,
             last_sent_at: None,
             message_send_count: 0,
+            channel_post_count: 0,
         };
         let s = format!("{invocation:?}");
         assert!(
@@ -675,6 +709,52 @@ mod tests {
             ProgressError::RateLimited {
                 retry_after: std::time::Duration::ZERO
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_channel_post_allows_foreground_and_cron_caps_at_10() {
+        let registry = ProgressRegistry::default();
+        registry.register(foreground_registration()).await;
+        for _ in 0..right_mcp::internal_client::MAX_CHANNEL_POST_PER_TURN {
+            registry
+                .begin_channel_post("inv-1")
+                .await
+                .expect("foreground stays under cap");
+        }
+        assert_eq!(
+            registry.begin_channel_post("inv-1").await.unwrap_err(),
+            ProgressError::RateLimited {
+                retry_after: Duration::ZERO,
+            }
+        );
+
+        registry
+            .register(ProgressRegistration {
+                invocation_id: "cron".to_owned(),
+                kind: ProgressInvocationKind::Cron,
+                bot_socket_path: PathBuf::from("/tmp/bot.sock"),
+                bot_send_token: "send-token".to_owned(),
+                conversation_scope: None,
+            })
+            .await;
+        registry
+            .begin_channel_post("cron")
+            .await
+            .expect("cron may post to channels");
+
+        registry
+            .register(ProgressRegistration {
+                invocation_id: "background".to_owned(),
+                kind: ProgressInvocationKind::BackgroundReview,
+                bot_socket_path: PathBuf::from("/tmp/bot.sock"),
+                bot_send_token: "send-token".to_owned(),
+                conversation_scope: None,
+            })
+            .await;
+        assert_eq!(
+            registry.begin_channel_post("background").await.unwrap_err(),
+            ProgressError::Forbidden
         );
     }
 

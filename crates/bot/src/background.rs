@@ -76,8 +76,10 @@ pub(crate) async fn spawn_background_continuation(
         new_session_id: Some(request.run_id.clone()),
         fork_session: true,
         allowed_tools: vec![],
-        disallowed_tools: crate::cc::invocation::disallow_foreground_only_tools(
-            crate::cc::invocation::baseline_disallowed_tools(),
+        disallowed_tools: crate::cc::invocation::disallow_channel_post(
+            crate::cc::invocation::disallow_foreground_only_tools(
+                crate::cc::invocation::baseline_disallowed_tools(),
+            ),
         ),
         extra_args: vec![],
         prompt: Some(request.prompt.clone()),
