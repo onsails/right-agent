@@ -103,6 +103,10 @@ pub(crate) fn archive_routed_dm_message(
     archive_user_message(agent_dir, msg, address.is_some(), true);
 }
 
+pub(crate) fn archive_user_message_for_router(agent_dir: &Path, msg: &Message) {
+    archive_user_message(agent_dir, msg, false, false);
+}
+
 fn archive_user_message(
     agent_dir: &Path,
     msg: &Message,
@@ -132,7 +136,15 @@ impl ArchivePayload {
             thread_id: effective_thread_id(msg),
             message_id: msg.message_id,
             sender_user_id: msg.from.as_ref().map(|user| user.id as i64),
-            sender_name: msg.from.as_ref().map(|user| msg_ext::full_name(user)),
+            sender_name: msg
+                .from
+                .as_ref()
+                .map(|user| msg_ext::full_name(user))
+                .or_else(|| {
+                    msg.sender_chat
+                        .as_ref()
+                        .and_then(|chat| msg_ext::chat_title(chat).map(str::to_owned))
+                }),
             addressed_to_bot,
             routed_to_agent,
         })
@@ -367,6 +379,21 @@ mod tests {
 
     fn message(payload: serde_json::Value) -> Message {
         serde_json::from_value(payload).unwrap()
+    }
+
+    #[test]
+    fn archive_payload_falls_back_to_sender_chat_for_channel_posts() {
+        let dir = tempfile::tempdir().unwrap();
+        let msg: Message = serde_json::from_value(serde_json::json!({
+            "message_id": 7, "date": 0,
+            "chat": {"id": -1001234567890_i64, "type": "channel", "title": "RiskOff"},
+            "sender_chat": {"id": -1001234567890_i64, "type": "channel", "title": "RiskOff"},
+            "text": "hello channel"
+        }))
+        .unwrap();
+        let payload = super::ArchivePayload::from_message(dir.path(), &msg, false, false).unwrap();
+        assert_eq!(payload.sender_user_id, None);
+        assert_eq!(payload.sender_name.as_deref(), Some("RiskOff"));
     }
 
     fn bot_identity() -> BotIdentity {
