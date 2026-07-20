@@ -445,6 +445,32 @@ async fn stdio_conversation_search_returns_scope_unavailable() {
 }
 
 #[tokio::test]
+async fn stdio_channel_tools_return_unavailable() {
+    let (server, _dir) = setup_server().await;
+
+    let list_result = server
+        .channel_list(Parameters(crate::right_backend::ChannelListParams {}))
+        .await
+        .expect("channel_list dispatch should be Ok with operation error");
+    assert_eq!(list_result.is_error, Some(true));
+    let list_body: serde_json::Value =
+        serde_json::from_str(&call_result_text(list_result)).expect("body must be valid JSON");
+    assert_eq!(list_body["error"]["code"], "channel_tools_unavailable");
+
+    let read_result = server
+        .channel_read(Parameters(crate::right_backend::ChannelReadParams {
+            channel: -200,
+            limit: Some(2),
+        }))
+        .await
+        .expect("channel_read dispatch should be Ok with operation error");
+    assert_eq!(read_result.is_error, Some(true));
+    let read_body: serde_json::Value =
+        serde_json::from_str(&call_result_text(read_result)).expect("body must be valid JSON");
+    assert_eq!(read_body["error"]["code"], "channel_tools_unavailable");
+}
+
+#[tokio::test]
 async fn test_get_info_mentions_cron_and_mcp_tools() {
     let (server, _dir) = setup_server_with_dir().await;
     let info = server.get_info();
