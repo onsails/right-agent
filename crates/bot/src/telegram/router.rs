@@ -149,7 +149,9 @@ async fn on_message(ctx: &HandlerCtx, msg: frankenstein::types::Message) {
         }
         Some(BotCommand::Allowed) => super::allowlist_commands::handle_allowed(ctx, &msg).await,
         Some(BotCommand::AllowAll) => super::allowlist_commands::handle_allow_all(ctx, &msg).await,
-        Some(BotCommand::DenyAll) => super::allowlist_commands::handle_deny_all(ctx, &msg).await,
+        Some(BotCommand::DenyAll(args)) => {
+            super::allowlist_commands::handle_deny_all(ctx, &msg, args).await
+        }
         None => handler::handle_message(ctx, &msg, decision).await,
     };
     if let Err(e) = result {
