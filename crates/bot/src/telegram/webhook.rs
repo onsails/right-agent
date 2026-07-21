@@ -57,10 +57,13 @@ async fn handle(State(st): State<WState>, headers: HeaderMap, body: Bytes) -> St
             StatusCode::OK
         }
         WebhookOutcome::Routed => {
-            // `parsed` is Ok here (body_parses was true). Route best-effort: a
-            // single failed update must never propagate out of the handler.
-            if let Ok(update) = parsed {
-                router::route_update(update, &st.ctx).await;
+            // `parsed` is Ok here (body_parses was true). `MyChatMember`
+            // handler failures surface as 500 so Telegram retries the one-shot
+            // membership update; all other routing is best-effort.
+            if let Ok(update) = parsed
+                && router::route_update(update, &st.ctx).await.is_err()
+            {
+                return StatusCode::INTERNAL_SERVER_ERROR;
             }
             StatusCode::OK
         }

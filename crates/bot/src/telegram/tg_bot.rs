@@ -33,8 +33,9 @@ use frankenstein::client_reqwest::Bot as FBot;
 use frankenstein::input_file::{FileUpload, InputFile};
 use frankenstein::input_media::MediaGroupInputMedia;
 use frankenstein::types::{
-    AllowedUpdate, BotCommand, BotCommandScope, ChatAction, InlineKeyboardMarkup, MenuButton,
-    MenuButtonWebApp, Message, ReplyMarkup, ReplyParameters, User, WebAppInfo,
+    AllowedUpdate, BotCommand, BotCommandScope, ChatAction, ChatMember, InlineKeyboardButton,
+    InlineKeyboardMarkup, MenuButton, MenuButtonWebApp, Message, ReplyMarkup, ReplyParameters,
+    User, WebAppInfo,
 };
 
 /// Default global send rate (messages/second) across all chats. Matches the
@@ -322,6 +323,41 @@ impl RightBot {
             .build();
         let resp = self.bot.get_chat(&params).await?;
         Ok(resp.result.title.unwrap_or_else(|| chat_id.to_string()))
+    }
+
+    /// Fetch a user's membership in a chat. Used to verify the bot is still a
+    /// channel administrator before committing an allowlist write.
+    pub(crate) async fn get_chat_member(
+        &self,
+        chat_id: i64,
+        user_id: u64,
+    ) -> Result<ChatMember, TgError> {
+        let params = frankenstein::methods::GetChatMemberParams::builder()
+            .chat_id(chat_id)
+            .user_id(user_id)
+            .build();
+        let resp = with_retry(|| self.bot.get_chat_member(&params)).await?;
+        Ok(resp.result)
+    }
+
+    /// Remove the inline keyboard from a message (empty markup). Used to retire
+    /// one-shot confirm buttons after they are consumed.
+    pub(crate) async fn remove_reply_keyboard(
+        &self,
+        chat_id: i64,
+        message_id: i32,
+    ) -> Result<(), TgError> {
+        let params = frankenstein::methods::EditMessageReplyMarkupParams::builder()
+            .chat_id(chat_id)
+            .message_id(message_id)
+            .reply_markup(
+                InlineKeyboardMarkup::builder()
+                    .inline_keyboard(Vec::<Vec<InlineKeyboardButton>>::new())
+                    .build(),
+            )
+            .build();
+        with_retry(|| self.bot.edit_message_reply_markup(&params)).await?;
+        Ok(())
     }
 
     /// The raw bot token. Used for token-derived focus-scope MACs. Never log.

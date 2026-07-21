@@ -272,8 +272,12 @@ impl AllowlistState {
     }
 
     /// Is this group opened (members may talk to bot with mention/reply)?
+    /// `kind: channel` entries NEVER authorize group routing.
     pub fn is_group_open(&self, chat_id: i64) -> bool {
-        self.inner.groups.iter().any(|g| g.id == chat_id)
+        self.inner
+            .groups
+            .iter()
+            .any(|g| g.id == chat_id && g.kind == GroupKind::Group)
     }
 
     /// Opened channels (kind == Channel).
@@ -302,8 +306,14 @@ impl AllowlistState {
 
     /// Effective response mode for a scope. Precedence: explicit topic entry →
     /// group default → built-in `Addressed`. Unknown (closed) group → `Addressed`.
+    /// Channel entries carry no response mode — they never route messages.
     pub fn response_mode(&self, chat_id: i64, thread_id: i64) -> ResponseMode {
-        let Some(g) = self.inner.groups.iter().find(|g| g.id == chat_id) else {
+        let Some(g) = self
+            .inner
+            .groups
+            .iter()
+            .find(|g| g.id == chat_id && g.kind == GroupKind::Group)
+        else {
             return ResponseMode::Addressed;
         };
         if let Some(t) = g.topics.iter().find(|t| t.thread_id == thread_id) {
@@ -314,7 +324,12 @@ impl AllowlistState {
 
     /// Set the group-level default mode. Returns false if the group is not open.
     pub fn set_group_mode(&mut self, chat_id: i64, mode: ResponseMode) -> bool {
-        match self.inner.groups.iter_mut().find(|g| g.id == chat_id) {
+        match self
+            .inner
+            .groups
+            .iter_mut()
+            .find(|g| g.id == chat_id && g.kind == GroupKind::Group)
+        {
             Some(g) => {
                 g.mode = mode;
                 true
@@ -326,7 +341,12 @@ impl AllowlistState {
     /// Set (or overwrite) a per-topic mode override. Returns false if the group
     /// is not open.
     pub fn set_topic_mode(&mut self, chat_id: i64, thread_id: i64, mode: ResponseMode) -> bool {
-        let Some(g) = self.inner.groups.iter_mut().find(|g| g.id == chat_id) else {
+        let Some(g) = self
+            .inner
+            .groups
+            .iter_mut()
+            .find(|g| g.id == chat_id && g.kind == GroupKind::Group)
+        else {
             return false;
         };
         match g.topics.iter_mut().find(|t| t.thread_id == thread_id) {
@@ -338,7 +358,12 @@ impl AllowlistState {
 
     /// Remove a per-topic override. Returns true iff an override was removed.
     pub fn clear_topic_mode(&mut self, chat_id: i64, thread_id: i64) -> bool {
-        let Some(g) = self.inner.groups.iter_mut().find(|g| g.id == chat_id) else {
+        let Some(g) = self
+            .inner
+            .groups
+            .iter_mut()
+            .find(|g| g.id == chat_id && g.kind == GroupKind::Group)
+        else {
             return false;
         };
         let before = g.topics.len();
@@ -373,8 +398,16 @@ impl AllowlistState {
     }
 
     pub fn add_group(&mut self, group: AllowedGroup) -> AddOutcome {
-        if self.is_group_open(group.id) {
-            return AddOutcome::AlreadyPresent;
+        if let Some(existing) = self.inner.groups.iter_mut().find(|g| g.id == group.id) {
+            if existing.kind == group.kind {
+                return AddOutcome::AlreadyPresent;
+            }
+            // Telegram chat ids are globally unique across chat types, so a
+            // same-id entry of the opposite kind is necessarily stale or
+            // misclassified (e.g. a channel added as a group before channel
+            // support). Replace it so the requested permission takes effect.
+            *existing = group;
+            return AddOutcome::Inserted;
         }
         self.inner.groups.push(group);
         AddOutcome::Inserted

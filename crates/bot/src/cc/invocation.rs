@@ -337,6 +337,7 @@ pub(crate) async fn register_non_foreground_invocation(
             agent_dir: registration.agent_dir.clone(),
             ssh_config_path: registration.ssh_config_path.clone(),
             resolved_sandbox: registration.resolved_sandbox.clone(),
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         });
     }
 

@@ -1187,12 +1187,33 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // The telegram lifecycle future (built by `setup_telegram`) resolves when
     // the bot shuts down (SIGTERM/SIGINT or config change) after draining
     // foreground background-handoff gates. The webhook router is nested on the
-    // UDS app served by `axum_handle`; updates arrive over HTTP. On normal
-    // shutdown we signal `uds_drain` and await the server briefly so an in-flight
-    // webhook update finishes routing instead of being dropped mid-request.
+    // UDS app served by `axum_handle`; updates arrive over HTTP.
+    //
+    // Teardown order matters: cron jobs post through the bot-local UDS
+    // (progress/message/channel endpoints), so on normal shutdown we stop the
+    // cron reconciler and await its in-flight jobs BEFORE draining the UDS
+    // server; only then do we signal `uds_drain` so an in-flight webhook
+    // update finishes routing instead of being dropped mid-request.
     let mut axum_handle = axum_handle;
-    let result: miette::Result<()> = tokio::select! {
-        () = telegram_lifecycle => {
+    let mut axum_result: Option<miette::Result<()>> = None;
+    tokio::select! {
+        () = telegram_lifecycle => {}
+        result = &mut axum_handle => {
+            axum_result = Some(result.map_err(|e| miette::miette!("axum task panicked: {e:#}"))?);
+        }
+    }
+
+    // Signal cron/sync tasks to stop and wait for cron BEFORE draining the bot
+    // UDS so in-flight cron jobs keep their channel-post endpoint while they
+    // finish.
+    shutdown.cancel();
+
+    tracing::info!("waiting for cron to finish");
+    let _ = cron_handle.await;
+
+    let result: miette::Result<()> = match axum_result {
+        Some(result) => result,
+        None => {
             uds_drain.cancel();
             match tokio::time::timeout(UDS_DRAIN_TIMEOUT, &mut axum_handle).await {
                 Ok(joined) => joined.map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,
@@ -1204,15 +1225,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 }
             }
         }
-        result = &mut axum_handle => result
-            .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,
     };
 
-    // Signal cron/sync tasks to stop.
-    shutdown.cancel();
-
-    tracing::info!("waiting for cron to finish");
-    let _ = cron_handle.await;
     tracing::info!("waiting for async delivery to finish");
     let mut delivery_handle = delivery_handle;
     let delivery_loop_finished = wait_for_delivery_loop_shutdown(

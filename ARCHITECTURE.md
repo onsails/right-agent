@@ -120,8 +120,9 @@ Conversation transcript scope is server-enforced.
 `mcp__right__thread_search` searches only the current
 `(chat_id, effective_thread_id)`. `mcp__right__chat_search` searches only
 the current `chat_id` (a DM only that DM; a group the whole group across
-topics). `mcp__right__get_messages_by_id` is scoped identically; agents
-supply only `message_ids`, and ids outside scope or not archived are absent.
+topics). `mcp__right__get_messages_by_id` is scoped to the same
+chat/thread pair; agents supply only `message_ids`, and ids outside scope
+or not archived are absent.
 Agents must never be allowed to pass chat_id, thread_id, user ids, session
 ids, or a broader scope to these tools.
 `mcp__right__thread_focus_set` writes agent focus for the current
@@ -132,9 +133,10 @@ topics, resolved server-side. Forum write tools (`forum_topic_create`/`_edit`/
 `_close`/`_reopen`) resolve `chat_id` identically, never from agent args; no
 delete tool exists.
 
-`mcp__right__channel_list`/`channel_read`/`channel_post` are the exception:
+`mcp__right__channel_read`/`channel_post` are the exception:
 they accept an agent-supplied `channel` id, valid only against `kind:
 channel` allowlist entries, validated on both aggregator and bot sides.
+`channel_list` takes no parameters.
 
 `mcp__right__cron_trigger` resolves the origin chat for a `then` follow-up from
 the foreground invocation's conversation scope; agents never pass it.

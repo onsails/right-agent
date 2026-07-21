@@ -722,8 +722,11 @@ async fn execute_job(
 
     // Every cron invocation needs a per-invocation MCP config and a bot-local
     // UDS target. Skill learning only changes which tools CC may invoke.
+    // Registration is mandatory: without it channel_post is rejected as
+    // unavailable and the run would record a misleading result, so a failure
+    // marks the run failed instead of degrading.
     let learning_inline_enabled = learning.prefilter_enabled;
-    let mut registered_cron = match crate::cc::invocation::register_non_foreground_invocation(
+    let registered_cron = match crate::cc::invocation::register_non_foreground_invocation(
         crate::cc::invocation::NonForegroundInvocationRegistration {
             agent_name: agent_name.to_owned(),
             agent_dir: agent_dir.to_path_buf(),
@@ -738,38 +741,26 @@ async fn execute_job(
     )
     .await
     {
-        Ok(active) => Some(active),
+        Ok(active) => active,
         Err(e) => {
-            tracing::warn!(
-                job = %job_name,
-                "failed to register cron invocation; channel_post and learning routes are unavailable: {e:#}"
-            );
-            None
+            tracing::error!(job = %job_name, "failed to register cron invocation: {e:#}");
+            update_failed_run_record(&conn, &run_id, None).await;
+            std::fs::remove_file(&lock_path).ok();
+            return;
         }
     };
-    let cron_invocation_id: Option<String> = registered_cron
-        .as_ref()
-        .map(|active| active.invocation_id().to_owned());
+    let cron_invocation_id: Option<String> = Some(registered_cron.invocation_id().to_owned());
 
-    let (disallowed_tools, mcp_path) = if let Some(active) = registered_cron.as_ref() {
-        let disallowed_tools = if learning_inline_enabled {
-            crate::cc::invocation::disallow_foreground_only_tools_keep_learning(
-                crate::cc::invocation::baseline_disallowed_tools(),
-            )
-        } else {
-            crate::cc::invocation::disallow_foreground_only_tools(
-                crate::cc::invocation::baseline_disallowed_tools(),
-            )
-        };
-        (disallowed_tools, active.mcp_config_path().to_owned())
+    let disallowed_tools = if learning_inline_enabled {
+        crate::cc::invocation::disallow_foreground_only_tools_keep_learning(
+            crate::cc::invocation::baseline_disallowed_tools(),
+        )
     } else {
-        (
-            crate::cc::invocation::disallow_foreground_only_tools(
-                crate::cc::invocation::baseline_disallowed_tools(),
-            ),
-            crate::cc::invocation::mcp_config_path(ssh_config_path, agent_dir),
+        crate::cc::invocation::disallow_foreground_only_tools(
+            crate::cc::invocation::baseline_disallowed_tools(),
         )
     };
+    let mcp_path = registered_cron.mcp_config_path().to_owned();
 
     // Per-agent notice token for the trusted `## Platform Notice Token` prompt
     // section and for stamping the force-notify / extra-instruction SYSTEM_NOTICE
@@ -778,9 +769,7 @@ async fn execute_job(
         Ok(t) => t,
         Err(e) => {
             tracing::error!(job = %job_name, "notice token fetch failed: {e:#}");
-            if let Some(active) = registered_cron.take() {
-                active.cleanup().await;
-            }
+            registered_cron.cleanup().await;
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
@@ -865,9 +854,7 @@ async fn execute_job(
         crate::cc::invocation::guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)
     {
         tracing::error!(job = %job_name, "{e:#}");
-        if let Some(active) = registered_cron.take() {
-            active.cleanup().await;
-        }
+        registered_cron.cleanup().await;
         update_failed_run_record(&conn, &run_id, None).await;
         std::fs::remove_file(&lock_path).ok();
         return;
@@ -929,9 +916,7 @@ async fn execute_job(
         );
         if which::which("claude").is_err() && which::which("claude-bun").is_err() {
             tracing::error!(job = %job_name, "claude binary not found in PATH");
-            if let Some(active) = registered_cron.take() {
-                active.cleanup().await;
-            }
+            registered_cron.cleanup().await;
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
@@ -939,9 +924,7 @@ async fn execute_job(
         let host_log_dir = agent_dir.join("crons").join("logs");
         if let Err(e) = std::fs::create_dir_all(&host_log_dir) {
             tracing::error!(job = %job_name, "failed to create log dir: {e:#}");
-            if let Some(active) = registered_cron.take() {
-                active.cleanup().await;
-            }
+            registered_cron.cleanup().await;
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
@@ -974,9 +957,7 @@ async fn execute_job(
     let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
-            if let Some(active) = registered_cron.take() {
-                active.cleanup().await;
-            }
+            registered_cron.cleanup().await;
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
@@ -1001,9 +982,7 @@ async fn execute_job(
     // outcome-specific processing (the `match outcome` below, reflection, usage
     // insert) happens after it. The finish rows persist past cleanup, so the
     // downstream probe-skip check still works.
-    if let Some(active) = registered_cron.take() {
-        active.cleanup().await;
-    }
+    registered_cron.cleanup().await;
 
     // Post-stream-loop cleanup. ProcessGroupChild::Drop kills the slave's
     // group on function return, so a hang here can never outlive `execute_job`.
