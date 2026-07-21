@@ -35,6 +35,8 @@ pub(crate) struct HandlerCtx {
     pub(crate) settings: Arc<AgentSettings>,
     pub(crate) idle_ts: Arc<IdleTimestamp>,
     pub(crate) worker_ctl: super::WorkerControlDeps,
+    /// Pending channel-open confirmations (single-use, expiring).
+    pub(crate) channel_confirms: super::channel_confirm::ChannelConfirms,
 }
 
 /// Channel posts are archived iff the channel is an opened channel in the
@@ -47,9 +49,10 @@ pub(crate) fn should_archive_channel_post(allowlist: &AllowlistHandle, chat_id: 
         .is_channel_open(chat_id)
 }
 
-/// Route one update to the matching handler. Best-effort: handler errors are
-/// logged, never propagated — a single failed update must not stop the webhook
-/// server.
+/// Route one update to the matching handler. `Message` and `CallbackQuery`
+/// handler errors are logged best-effort — a single failed update must not
+/// stop the webhook server. `MyChatMember` errors PROPAGATE so the webhook
+/// fails the request and Telegram retries the one-shot membership update.
 ///
 /// Fresh `Message` and `CallbackQuery` updates are routed. `MyChatMember`
 /// updates initiate channel registration when the bot becomes a channel admin.
@@ -62,7 +65,10 @@ pub(crate) fn should_archive_channel_post(allowlist: &AllowlistHandle, chat_id: 
 /// turn. We preserve that. `EditedMessage` stays in
 /// `webhook::webhook_allowed_updates()` so `setWebhook` registration is
 /// byte-identical to before.
-pub(crate) async fn route_update(update: frankenstein::updates::Update, ctx: &HandlerCtx) {
+pub(crate) async fn route_update(
+    update: frankenstein::updates::Update,
+    ctx: &HandlerCtx,
+) -> Result<(), super::tg_bot::TgError> {
     use frankenstein::updates::UpdateContent;
     match update.content {
         UpdateContent::Message(m) => {
@@ -75,12 +81,16 @@ pub(crate) async fn route_update(update: frankenstein::updates::Update, ctx: &Ha
             on_channel_post(ctx, *m).await;
         }
         UpdateContent::MyChatMember(u) => {
-            if let Err(e) = super::channel_confirm::handle_my_chat_member(ctx, &u).await {
-                tracing::warn!(chat_id = u.chat.id, "my_chat_member handler failed: {e}");
-            }
+            super::channel_confirm::handle_my_chat_member(ctx, &u)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(chat_id = u.chat.id, "my_chat_member handler failed: {e}");
+                    e
+                })?;
         }
         _ => {}
     }
+    Ok(())
 }
 
 async fn on_channel_post(ctx: &HandlerCtx, msg: frankenstein::types::Message) {
@@ -338,6 +348,7 @@ pub(crate) mod test_support {
                 progress: super::super::progress::ProgressState::default(),
                 compact_timers: Arc::new(DashMap::new()),
             },
+            channel_confirms: super::super::channel_confirm::ChannelConfirms::default(),
         }
     }
 }

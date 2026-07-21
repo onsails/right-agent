@@ -2902,6 +2902,7 @@ async fn start_progress_invocation(
             agent_dir: ctx.agent_dir.clone(),
             ssh_config_path: ctx.ssh_config_path.clone(),
             resolved_sandbox: ctx.resolved_sandbox.clone(),
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         });
 
     let register_req = right_mcp::internal_client::ProgressRegisterRequest {
@@ -5583,6 +5584,7 @@ esac
             agent_dir: std::path::PathBuf::from("/tmp/agent"),
             ssh_config_path: None,
             resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
 
         assert_eq!(target.thread_id, 7);

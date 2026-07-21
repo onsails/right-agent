@@ -22,6 +22,11 @@ use super::tg_bot::TgError;
 /// own timeout — both ends must bound independently.
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Local content ceiling for a channel post, matching Telegram's 4096-char
+/// message limit. Rejected before any send so an oversized post fails with a
+/// deterministic local error instead of a Telegram API rejection.
+const CHANNEL_POST_MAX_CHARS: usize = 4096;
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ProgressState {
     targets: Arc<DashMap<String, ProgressTarget>>,
@@ -41,6 +46,21 @@ impl ProgressState {
             .get(invocation_id)
             .map(|entry| entry.value().clone())
     }
+
+    /// Atomically claim one `channel_post` attempt slot for `invocation_id`.
+    /// Returns false when the invocation is unknown or the per-turn cap
+    /// (`MAX_CHANNEL_POST_PER_TURN`) is exhausted. Attempts are never rolled
+    /// back on delivery failure, mirroring the aggregator-side gate; this is
+    /// the authoritative cap for any caller that reaches the bot UDS directly.
+    pub(crate) fn claim_channel_post(&self, invocation_id: &str) -> bool {
+        let Some(entry) = self.targets.get(invocation_id) else {
+            return false;
+        };
+        let claimed = entry
+            .channel_post_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        claimed < right_mcp::internal_client::MAX_CHANNEL_POST_PER_TURN
+    }
 }
 
 #[derive(Clone)]
@@ -52,6 +72,8 @@ pub(crate) struct ProgressTarget {
     pub(crate) agent_dir: std::path::PathBuf,
     pub(crate) ssh_config_path: Option<std::path::PathBuf>,
     pub(crate) resolved_sandbox: Option<String>,
+    /// Per-turn `channel_post` attempts; capped at MAX_CHANNEL_POST_PER_TURN.
+    pub(crate) channel_post_count: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl std::fmt::Debug for ProgressTarget {
@@ -383,6 +405,26 @@ async fn handle_channel_post(
         return fail(StatusCode::FORBIDDEN, "token mismatch".to_owned());
     }
 
+    // Content validation before consuming an attempt slot.
+    if req.text.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "empty_post".to_owned());
+    }
+    if req.text.chars().count() > CHANNEL_POST_MAX_CHARS {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            format!("post_too_long: exceeds {CHANNEL_POST_MAX_CHARS} chars"),
+        );
+    }
+
+    // Bot-side per-turn cap. The aggregator enforces the same cap before the
+    // UDS round-trip; this is authoritative for direct UDS callers.
+    if !state.progress.claim_channel_post(&req.invocation_id) {
+        return fail(
+            StatusCode::TOO_MANY_REQUESTS,
+            "channel_post_cap_reached".to_owned(),
+        );
+    }
+
     let is_channel = match right_agent::agent::allowlist::read_file(&target.agent_dir) {
         Ok(Some(file)) => file.groups.iter().any(|group| {
             group.id == req.chat_id
@@ -426,6 +468,17 @@ async fn handle_channel_post(
                     chat_id = req.chat_id,
                     "channel post archive failed: {e:#}",
                 );
+                // The post IS published; report the archive loss explicitly so
+                // the agent knows `channel_read` is missing this message.
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(right_mcp::internal_client::ChannelPostResponse {
+                        ok: false,
+                        message_id: Some(message.message_id),
+                        error: Some(format!("published but archive failed: {e:#}")),
+                    }),
+                )
+                    .into_response();
             }
             Json(right_mcp::internal_client::ChannelPostResponse {
                 ok: true,
@@ -661,6 +714,7 @@ mod tests {
             agent_dir: std::path::PathBuf::from("/tmp/agent"),
             ssh_config_path: None,
             resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
 
         state.register(target.clone());
@@ -684,6 +738,7 @@ mod tests {
             agent_dir: std::path::PathBuf::from("/tmp/agent"),
             ssh_config_path: None,
             resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
         let s = format!("{target:?}");
         assert!(!s.contains("supersecret"), "Debug must redact token: {s}");
@@ -700,6 +755,7 @@ mod tests {
             agent_dir: std::path::PathBuf::from("/tmp/agent"),
             ssh_config_path: None,
             resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
 
         assert!(target.token_matches("secret-token"));
@@ -741,11 +797,20 @@ mod tests {
     }
 
     fn channel_post_request_json(invocation_id: &str, token: &str, chat_id: i64) -> Vec<u8> {
+        channel_post_request_json_with_text(invocation_id, token, chat_id, "hello")
+    }
+
+    fn channel_post_request_json_with_text(
+        invocation_id: &str,
+        token: &str,
+        chat_id: i64,
+        text: &str,
+    ) -> Vec<u8> {
         let req = right_mcp::internal_client::ChannelPostRequest {
             invocation_id: invocation_id.to_owned(),
             token: token.to_owned(),
             chat_id,
-            text: "hello".to_owned(),
+            text: text.to_owned(),
         };
         serde_json::to_vec(&req).expect("serialize ChannelPostRequest")
     }
@@ -782,6 +847,7 @@ mod tests {
             agent_dir: std::path::PathBuf::from("/tmp"),
             ssh_config_path: None,
             resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         });
         let state = test_state(progress);
         let body = message_send_request_json("inv", "wrong");
@@ -811,6 +877,7 @@ mod tests {
             agent_dir: std::path::PathBuf::from("/tmp"),
             ssh_config_path: None,
             resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         });
 
         let status = post_channel_post(
@@ -820,6 +887,58 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    fn registered_target(agent_dir: &std::path::Path) -> ProgressTarget {
+        ProgressTarget {
+            invocation_id: "inv".to_owned(),
+            token: "right".to_owned(),
+            chat_id: 42,
+            thread_id: 0,
+            agent_dir: agent_dir.to_owned(),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }
+    }
+
+    #[test]
+    fn claim_channel_post_caps_attempts_per_invocation() {
+        let progress = ProgressState::default();
+        progress.register(registered_target(std::path::Path::new("/tmp")));
+        for _ in 0..right_mcp::internal_client::MAX_CHANNEL_POST_PER_TURN {
+            assert!(progress.claim_channel_post("inv"));
+        }
+        assert!(
+            !progress.claim_channel_post("inv"),
+            "attempt beyond the cap must be rejected"
+        );
+        assert!(
+            !progress.claim_channel_post("missing"),
+            "unknown invocation must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_channel_post_rejects_empty_post_before_claiming() {
+        let agent_dir = tempfile::tempdir().expect("agent dir");
+        let progress = ProgressState::default();
+        let target = registered_target(agent_dir.path());
+        let counter = target.channel_post_count.clone();
+        progress.register(target);
+
+        let status = post_channel_post(
+            test_state(progress),
+            channel_post_request_json_with_text("inv", "right", -100, "   "),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a rejected post must not consume an attempt slot"
+        );
     }
 
     #[tokio::test]
@@ -852,6 +971,7 @@ mod tests {
             agent_dir: agent_dir.path().to_owned(),
             ssh_config_path: None,
             resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         });
 
         let status = post_channel_post(

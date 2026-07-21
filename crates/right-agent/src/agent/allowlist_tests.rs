@@ -349,6 +349,18 @@ mod state_tests {
         }
     }
 
+    fn channel(id: i64) -> AllowedGroup {
+        AllowedGroup {
+            id,
+            label: None,
+            opened_by: None,
+            opened_at: chrono::Utc::now(),
+            mode: ResponseMode::Addressed,
+            topics: Vec::new(),
+            kind: GroupKind::Channel,
+        }
+    }
+
     #[test]
     fn add_user_inserted_then_already_present() {
         let mut s = AllowlistState::default();
@@ -404,6 +416,42 @@ mod state_tests {
             kind: GroupKind::Group,
         });
         assert!(s.is_group_open(-1));
+    }
+
+    #[test]
+    fn channel_entry_does_not_open_group_routing() {
+        let mut s = AllowlistState::default();
+        s.add_group(channel(-100));
+        assert!(s.is_channel_open(-100));
+        assert!(
+            !s.is_group_open(-100),
+            "channel entries must not authorize group routing"
+        );
+        assert!(
+            !s.is_chat_allowed(-100),
+            "channels are not valid cron/delivery targets"
+        );
+    }
+
+    #[test]
+    fn add_group_same_id_opposite_kind_replaces_stale_entry() {
+        let mut s = AllowlistState::default();
+        s.add_group(group(-100, ResponseMode::Addressed, vec![]));
+        assert_eq!(s.add_group(channel(-100)), AddOutcome::Inserted);
+        assert!(s.is_channel_open(-100));
+        assert!(!s.is_group_open(-100));
+        assert_eq!(s.groups().len(), 1);
+        assert_eq!(s.add_group(channel(-100)), AddOutcome::AlreadyPresent);
+    }
+
+    #[test]
+    fn mode_mutations_ignore_channel_entries() {
+        let mut s = AllowlistState::default();
+        s.add_group(channel(-100));
+        assert!(!s.set_group_mode(-100, ResponseMode::All));
+        assert!(!s.set_topic_mode(-100, 0, ResponseMode::All));
+        assert!(!s.clear_topic_mode(-100, 0));
+        assert_eq!(s.response_mode(-100, 0), ResponseMode::Addressed);
     }
 
     #[test]

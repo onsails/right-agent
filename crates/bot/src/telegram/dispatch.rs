@@ -194,6 +194,7 @@ pub(crate) async fn setup_telegram(
         settings: settings_arc,
         idle_ts,
         worker_ctl,
+        channel_confirms: super::channel_confirm::ChannelConfirms::default(),
     });
 
     // SIGTERM/SIGINT listener -- runs in a dedicated std thread because signal-hook's
