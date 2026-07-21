@@ -66,6 +66,14 @@ const SUPERGROUP_CHANNEL_ID_THRESHOLD: i64 = -1_000_000_000_000;
 /// bot that sends to many distinct chats.
 const THROTTLE_PRUNE_INTERVAL: u64 = 256;
 
+/// Per-attempt ceiling for text-class Telegram API calls (message sends,
+/// edits, chat actions). frankenstein's default reqwest client allows 500s per
+/// request — far too long for the worker's turn path: a blackholed
+/// api.telegram.org parked the thinking-anchor send before the CC turn
+/// deadline was even armed, wedging the chat queue until restart
+/// (riskoff, 2026-07-19). Media uploads keep the client's 500s cap.
+const TELEGRAM_TEXT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Maximum automatic retries on a 429 `retry_after` response. teloxide re-queued
 /// throttled sends until success; we bound it so a persistent 429 cannot block a
 /// single send indefinitely.
@@ -88,6 +96,8 @@ pub(crate) enum TgError {
     Api(#[from] frankenstein::Error),
     #[error("file download: {0}")]
     Download(#[from] reqwest::Error),
+    #[error("telegram request timed out after {0:?}")]
+    Timeout(Duration),
     #[error("{0}")]
     Other(String),
 }
@@ -221,15 +231,45 @@ fn retry_after_secs(e: &frankenstein::Error) -> Option<u64> {
 ///
 /// `call` is a closure (not a future) because a single future cannot be awaited
 /// twice. Each retry sleeps the server-supplied `retry_after` (the authoritative
-/// backoff) and intentionally does NOT re-acquire the per-chat/global rate gate.
+/// backoff) and intentionally does not re-acquire the per-chat/global rate gate.
 async fn with_retry<F, Fut, T>(call: F) -> Result<T, TgError>
 where
     F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T, frankenstein::Error>>,
+    Fut: Future<Output = Result<T, frankenstein::Error>>,
+{
+    with_retry_bounded(call, None).await
+}
+
+/// [`with_retry`] for text-class calls, with a per-attempt ceiling of
+/// [`TELEGRAM_TEXT_TIMEOUT`] so a stalled api.telegram.org cannot park the
+/// worker. A timed-out attempt is terminal (no retry): retrying a blackholed
+/// endpoint would just stall again.
+async fn with_retry_text<F, Fut, T>(call: F) -> Result<T, TgError>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<T, frankenstein::Error>>,
+{
+    with_retry_bounded(call, Some(TELEGRAM_TEXT_TIMEOUT)).await
+}
+
+async fn with_retry_bounded<F, Fut, T>(
+    call: F,
+    attempt_timeout: Option<Duration>,
+) -> Result<T, TgError>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<T, frankenstein::Error>>,
 {
     let mut attempt: u32 = 0;
     loop {
-        match call().await {
+        let outcome = match attempt_timeout {
+            Some(d) => match tokio::time::timeout(d, call()).await {
+                Err(_) => return Err(TgError::Timeout(d)),
+                Ok(r) => r,
+            },
+            None => call().await,
+        };
+        match outcome {
             Ok(v) => return Ok(v),
             Err(e) => match retry_after_secs(&e) {
                 Some(after) if attempt < MAX_429_RETRIES => {
@@ -289,6 +329,19 @@ impl RightBot {
         Self {
             bot,
             token: Arc::new(token),
+            me: Arc::new(placeholder_user()),
+            rate: Arc::new(default_throttle()),
+        }
+    }
+
+    /// Test-only constructor pointed at a stub API base URL (e.g. a local
+    /// stall server), for exercising send-path behavior without Telegram.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(api_url: String) -> Self {
+        let bot = FBot::builder().api_url(api_url).build();
+        Self {
+            bot,
+            token: Arc::new("test-token".to_owned()),
             me: Arc::new(placeholder_user()),
             rate: Arc::new(default_throttle()),
         }
@@ -374,7 +427,7 @@ impl RightBot {
             .chat_id(chat_id)
             .text(text)
             .build();
-        let resp = with_retry(|| self.bot.send_message(&params)).await?;
+        let resp = with_retry_text(|| self.bot.send_message(&params)).await?;
         Ok(resp.result)
     }
 
@@ -402,7 +455,7 @@ impl RightBot {
             )
             .maybe_reply_markup(markup.map(ReplyMarkup::InlineKeyboardMarkup))
             .build();
-        let resp = with_retry(|| self.bot.send_message(&params)).await?;
+        let resp = with_retry_text(|| self.bot.send_message(&params)).await?;
         Ok(resp.result)
     }
 
@@ -428,7 +481,7 @@ impl RightBot {
             .parse_mode(ParseMode::Html)
             .maybe_reply_markup(markup)
             .build();
-        with_retry(|| self.bot.edit_message_text(&params)).await?;
+        with_retry_text(|| self.bot.edit_message_text(&params)).await?;
         Ok(())
     }
 
@@ -453,7 +506,7 @@ impl RightBot {
             .text(text)
             .maybe_reply_markup(markup)
             .build();
-        with_retry(|| self.bot.edit_message_text(&params)).await?;
+        with_retry_text(|| self.bot.edit_message_text(&params)).await?;
         Ok(())
     }
 
@@ -603,7 +656,11 @@ impl RightBot {
             .action(action)
             .maybe_message_thread_id(thread)
             .build();
-        self.bot.send_chat_action(&params).await?;
+        // Text-class call: bound it like the other worker-path sends so a
+        // stalled api.telegram.org cannot park the worker before a turn.
+        tokio::time::timeout(TELEGRAM_TEXT_TIMEOUT, self.bot.send_chat_action(&params))
+            .await
+            .map_err(|_| TgError::Timeout(TELEGRAM_TEXT_TIMEOUT))??;
         Ok(())
     }
 
@@ -1208,6 +1265,84 @@ mod with_retry_tests {
             (MAX_429_RETRIES + 1) as usize,
             "should call once + MAX_429_RETRIES retries, then give up"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_attempt_times_out_instead_of_pending_forever() {
+        let calls = AtomicUsize::new(0);
+        let result: Result<i32, TgError> = with_retry_bounded(
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::future::pending()
+            },
+            Some(Duration::from_millis(10)),
+        )
+        .await;
+        assert!(matches!(result, Err(TgError::Timeout(_))));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a stalled attempt is terminal, not retried"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_attempt_within_timeout_succeeds() {
+        let result: Result<i32, TgError> = with_retry_bounded(
+            || async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Ok(7)
+            },
+            Some(Duration::from_secs(30)),
+        )
+        .await;
+        assert!(matches!(result, Ok(7)));
+    }
+}
+
+#[cfg(test)]
+mod stalled_api_tests {
+    use super::*;
+
+    /// Regression: 2026-07-19 riskoff worker wedge. A blackholed
+    /// api.telegram.org (TCP accepted, response never sent) parked the
+    /// worker's thinking-anchor send for frankenstein's 500s client default,
+    /// before the CC turn deadline was even armed — the chat queue wedged
+    /// until the bot was restarted. Text-class sends must abort promptly.
+    async fn stall_server() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stall server");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                // Hold the connection open without ever answering.
+                std::mem::forget(stream);
+            }
+        });
+        addr
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn send_message_opts_aborts_when_api_stalls() {
+        let addr = stall_server().await;
+        let bot = RightBot::new_for_test(format!("http://{addr}/botTEST-TOKEN"));
+        let err = bot
+            .send_message_opts(1, "hi", false, None, None, None)
+            .await
+            .expect_err("a stalled Telegram API must not pend the send forever");
+        assert!(matches!(err, TgError::Timeout(_)), "got: {err:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn send_chat_action_aborts_when_api_stalls() {
+        let addr = stall_server().await;
+        let bot = RightBot::new_for_test(format!("http://{addr}/botTEST-TOKEN"));
+        let err = bot
+            .send_chat_action(1, ChatAction::Typing, None)
+            .await
+            .expect_err("a stalled Telegram API must not pend the chat action forever");
+        assert!(matches!(err, TgError::Timeout(_)), "got: {err:?}");
     }
 }
 
