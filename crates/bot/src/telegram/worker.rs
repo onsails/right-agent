@@ -604,6 +604,18 @@ pub fn is_auth_error(stdout: &str) -> bool {
     matches!(classify_cc_result(stdout), CcResultClass::Auth)
 }
 
+/// CC stderr signature emitted when `--resume` references a session whose
+/// conversation file no longer exists on the CC side (e.g. the session JSONL
+/// was removed from the sandbox). Detecting it lets the worker retire the
+/// stale DB session so the next message starts fresh instead of every
+/// subsequent turn failing on the same dead resume.
+const MISSING_CC_SESSION_STDERR_MARKER: &str = "No conversation found with session ID";
+
+/// Returns true when CC stderr reports the resume target session is missing.
+pub(crate) fn is_missing_cc_session(stderr: &str) -> bool {
+    stderr.contains(MISSING_CC_SESSION_STDERR_MARKER)
+}
+
 /// Extract an OAuth URL from process log lines.
 ///
 /// Scans for `https://` URLs containing OAuth-specific path segments
@@ -4606,6 +4618,35 @@ async fn invoke_cc(
                 .ok();
         }
 
+        // Stale session: CC found no conversation for --resume (the session
+        // JSONL is gone from the sandbox). Deactivate the DB record so the
+        // next message starts a fresh session instead of every subsequent
+        // turn failing on the same dead resume.
+        if !is_first_call && is_missing_cc_session(&stderr_str) {
+            tracing::warn!(
+                chat_id = log_ctx.chat_id,
+                eff_thread_id = log_ctx.eff_thread_id,
+                key = ?log_ctx.key(),
+                session_uuid = %log_ctx.session_uuid,
+                turn_id = log_ctx.turn_id,
+                "CC session missing on resume; deactivating stale session"
+            );
+            deactivate_session_if_active(conn, chat_id, eff_thread_id, &session_uuid)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        chat_id = log_ctx.chat_id,
+                        eff_thread_id = log_ctx.eff_thread_id,
+                        key = ?log_ctx.key(),
+                        session_uuid = %log_ctx.session_uuid,
+                        turn_id = log_ctx.turn_id,
+                        "deactivate_session_if_active on missing CC session: {:#}",
+                        e
+                    )
+                })
+                .ok();
+        }
+
         // Persist the raw JSON we classified, for the "🔍 Details" button.
         // Best-effort: a store failure logs and yields no button — delivering
         // the user-facing error message is the primary obligation (mirrors the
@@ -5549,6 +5590,21 @@ esac
     async fn classify_is_error_false_is_not_error() {
         let stdout = r#"{"is_error":false,"result":"ok"}"#;
         assert_eq!(classify_cc_result(stdout), CcResultClass::NotError);
+    }
+
+    // is_missing_cc_session tests
+    #[tokio::test]
+    async fn missing_session_detected_on_stderr_marker() {
+        let stderr = "No conversation found with session ID: 3b688914-7a0c-4fe7-b954-46790126cd70";
+        assert!(is_missing_cc_session(stderr));
+    }
+
+    #[tokio::test]
+    async fn missing_session_not_detected_for_unrelated_stderr() {
+        assert!(!is_missing_cc_session(""));
+        assert!(!is_missing_cc_session("Error: spawn claude ENOENT"));
+        // Near-miss: mentions a session but not the missing-conversation marker.
+        assert!(!is_missing_cc_session("Resuming session 3b688914"));
     }
 
     // RATE_LIMIT_MESSAGE / format_human_error tests
