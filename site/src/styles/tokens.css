@@ -25,6 +25,7 @@
   --sans: 'Saira Variable', system-ui, -apple-system, sans-serif;
   --mono: 'Martian Mono Variable', ui-monospace, monospace;
   --mono-code: 'JetBrains Mono Variable', ui-monospace, monospace;
+  --headline: 'JetBrains Mono Variable', ui-monospace, monospace;
 
   /* legacy aliases kept for any unmigrated references */
   --ra-font-sans: var(--sans);

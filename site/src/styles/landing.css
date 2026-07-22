@@ -42,8 +42,8 @@ nav.topnav { display: flex; align-items: center; justify-content: space-between;
 .hero-grid { display:grid; grid-template-columns: 1.05fr .95fr; gap: 0; align-items: stretch; }
 .hero-copy { border-right: 1px solid var(--line); padding-right: 3rem; display: flex; flex-direction: column; justify-content: center; }
 .eyebrow { font-family: var(--mono); font-size: .72rem; letter-spacing: .14em; text-transform: uppercase; color: var(--warm); display:flex; gap:1rem; align-items:center; flex-wrap:wrap; margin-bottom: 1.6rem; }
-h1 { font-family: var(--display); font-size: clamp(2.4rem, 5.5vw, 4rem); line-height: 1.04; letter-spacing: -.02em; font-weight: 700; margin: 0 0 1.4rem; max-width: 20ch; color: var(--text); }
-h1 .glow { color: var(--ink); display: inline-block; position: relative; transform: skewX(-18deg); }
+h1 { font-family: var(--headline); font-size: clamp(2.4rem, 5.5vw, 4rem); line-height: 1.04; letter-spacing: -.04em; font-weight: 700; margin: 0 0 1.4rem; max-width: 20ch; color: var(--text); }
+h1 .glow { color: var(--ink); display: inline-block; position: relative; }
 h1 .glow::after { content:''; position:absolute; left:0; right:0; bottom:.02em; height:.08em; background: var(--accent); }
 .sub { font-size: 1.15rem; color: var(--muted); max-width: 60ch; margin: 0 0 2rem; }
 .note { font-size: .9rem; color: var(--dim); margin-top: 1.5rem; }
@@ -98,7 +98,7 @@ h1 .glow::after { content:''; position:absolute; left:0; right:0; bottom:.02em; 
 }
 .label { font-family:var(--mono); font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; color:var(--warm); margin-bottom:1rem; display:flex; align-items:center; gap:.7rem; }
 .label::before { content:''; width:24px; height:1px; background: var(--warm); }
-h2 { font-family: var(--display); font-size: clamp(1.6rem, 3vw, 2.1rem); letter-spacing:-.01em; margin:0 0 2rem; font-weight:700; color: var(--text); max-width: var(--readw); }
+h2 { font-family: var(--headline); font-size: clamp(1.6rem, 3vw, 2.1rem); letter-spacing:-.03em; margin:0 0 2rem; font-weight:700; color: var(--text); max-width: var(--readw); }
 .lead { color:var(--muted); max-width:var(--readw); font-size:1.05rem; }
 
 /* cards */
