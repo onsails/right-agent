@@ -49,7 +49,7 @@ which = "8.0"
 # Pinned to pre-release; cargo's "0.7" range does not match 0.x.y-pre.z. Bump explicitly when upgrading.
 turso = { version = "0.7.0-pre.7", features = ["sync"] }
 turso_core = "0.7.0-pre.7"
-rmcp ={ version = "1.7", default-features = false, features = ["client", "server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }
+rmcp ={ version = "2.2", default-features = false, features = ["client", "server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }
 futures = "0.3"
 http = "1.4"
 http-body-util = "0.1"
@@ -67,7 +67,7 @@ flate2 = "1"
 tempfile = "3.27"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
-cron = "0.16"
+cron = "0.17"
 cron-descriptor = "0.1"
 sha2 = "0.11"
 hmac = "0.13"
