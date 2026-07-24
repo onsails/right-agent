@@ -48,7 +48,7 @@ tokio = { version = "1.52", features = ["full"] }
 which = "8.0"
 turso = { version = "0.7", features = ["sync"] }
 turso_core = "0.7"
-rmcp ={ version = "1.7", default-features = false, features = ["client", "server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }
+rmcp ={ version = "2.2", default-features = false, features = ["client", "server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }
 futures = "0.3"
 http = "1.4"
 http-body-util = "0.1"
@@ -66,12 +66,12 @@ flate2 = "1"
 tempfile = "3.27"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
-cron = "0.16"
+cron = "0.17"
 cron-descriptor = "0.1"
 sha2 = "0.11"
 hmac = "0.13"
 rand = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 subtle = "2.6"
 axum = "0.8"
 shlex = "2.0"
