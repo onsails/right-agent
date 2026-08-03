@@ -656,6 +656,7 @@ async fn execute_job(
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent_config::LearningConfig,
     session_locks: &crate::telegram::SessionLocks,
+    progress_state: &crate::telegram::progress::ProgressState,
 ) {
     use std::process::Stdio;
 
@@ -719,61 +720,47 @@ async fn execute_job(
         return;
     }
 
-    // Inline skill authoring: when learning is enabled, register a Cron learning
-    // invocation so this cron CC turn can call skill_learning_start/finish. The
-    // invocation MUST outlive the CC run and be cleaned up only after the child
-    // exits (see the single cleanup point after `consume_cron_stream`).
+    // Every cron invocation needs a per-invocation MCP config and a bot-local
+    // UDS target. Skill learning only changes which tools CC may invoke.
+    // Registration is mandatory: without it channel_post is rejected as
+    // unavailable and the run would record a misleading result, so a failure
+    // marks the run failed instead of degrading.
     let learning_inline_enabled = learning.prefilter_enabled;
-    let mut registered_learning: Option<crate::cc::invocation::RegisteredNonForegroundInvocation> =
-        if learning_inline_enabled {
-            match crate::cc::invocation::register_non_foreground_invocation(
-                crate::cc::invocation::NonForegroundInvocationRegistration {
-                    agent_name: agent_name.to_owned(),
-                    agent_dir: agent_dir.to_path_buf(),
-                    ssh_config_path: ssh_config_path.map(|p| p.to_path_buf()),
-                    resolved_sandbox: resolved_sandbox.map(|s| s.to_owned()),
-                    internal_client: Arc::clone(internal_client),
-                    kind: right_mcp::internal_client::ProgressInvocationKindDto::Cron,
-                    chat_id: spec.target_chat_id,
-                    thread_id: spec.target_thread_id,
-                },
-            )
-            .await
-            {
-                Ok(active) => Some(active),
-                Err(e) => {
-                    tracing::warn!(
-                        job = %job_name,
-                        "failed to register cron learning invocation; proceeding without inline authoring: {e:#}"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-    let cron_invocation_id: Option<String> = registered_learning
-        .as_ref()
-        .map(|a| a.invocation_id().to_owned());
+    let registered_cron = match crate::cc::invocation::register_non_foreground_invocation(
+        crate::cc::invocation::NonForegroundInvocationRegistration {
+            agent_name: agent_name.to_owned(),
+            agent_dir: agent_dir.to_path_buf(),
+            ssh_config_path: ssh_config_path.map(|p| p.to_path_buf()),
+            resolved_sandbox: resolved_sandbox.map(|s| s.to_owned()),
+            internal_client: Arc::clone(internal_client),
+            kind: right_mcp::internal_client::ProgressInvocationKindDto::Cron,
+            chat_id: spec.target_chat_id,
+            thread_id: spec.target_thread_id,
+            progress_state: Some(progress_state.clone()),
+        },
+    )
+    .await
+    {
+        Ok(active) => active,
+        Err(e) => {
+            tracing::error!(job = %job_name, "failed to register cron invocation: {e:#}");
+            update_failed_run_record(&conn, &run_id, None).await;
+            std::fs::remove_file(&lock_path).ok();
+            return;
+        }
+    };
+    let cron_invocation_id: Option<String> = Some(registered_cron.invocation_id().to_owned());
 
-    // The disallowed-tool set and the MCP config path both depend on whether a
-    // learning invocation is registered: keep skill_learning_* tools allowed and
-    // point CC at the per-invocation MCP config so progress/learning routes work.
-    let (disallowed_tools, mcp_path) = if let Some(active) = registered_learning.as_ref() {
-        (
-            crate::cc::invocation::disallow_foreground_only_tools_keep_learning(
-                crate::cc::invocation::baseline_disallowed_tools(),
-            ),
-            active.mcp_config_path().to_owned(),
+    let disallowed_tools = if learning_inline_enabled {
+        crate::cc::invocation::disallow_foreground_only_tools_keep_learning(
+            crate::cc::invocation::baseline_disallowed_tools(),
         )
     } else {
-        (
-            crate::cc::invocation::disallow_foreground_only_tools(
-                crate::cc::invocation::baseline_disallowed_tools(),
-            ),
-            crate::cc::invocation::mcp_config_path(ssh_config_path, agent_dir),
+        crate::cc::invocation::disallow_foreground_only_tools(
+            crate::cc::invocation::baseline_disallowed_tools(),
         )
     };
+    let mcp_path = registered_cron.mcp_config_path().to_owned();
 
     // Per-agent notice token for the trusted `## Platform Notice Token` prompt
     // section and for stamping the force-notify / extra-instruction SYSTEM_NOTICE
@@ -782,9 +769,7 @@ async fn execute_job(
         Ok(t) => t,
         Err(e) => {
             tracing::error!(job = %job_name, "notice token fetch failed: {e:#}");
-            if let Some(active) = registered_learning.take() {
-                active.cleanup().await;
-            }
+            registered_cron.cleanup().await;
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
@@ -869,9 +854,7 @@ async fn execute_job(
         crate::cc::invocation::guard_no_sandboxed_host_exec(resolved_sandbox, ssh_config_path)
     {
         tracing::error!(job = %job_name, "{e:#}");
-        if let Some(active) = registered_learning.take() {
-            active.cleanup().await;
-        }
+        registered_cron.cleanup().await;
         update_failed_run_record(&conn, &run_id, None).await;
         std::fs::remove_file(&lock_path).ok();
         return;
@@ -933,9 +916,7 @@ async fn execute_job(
         );
         if which::which("claude").is_err() && which::which("claude-bun").is_err() {
             tracing::error!(job = %job_name, "claude binary not found in PATH");
-            if let Some(active) = registered_learning.take() {
-                active.cleanup().await;
-            }
+            registered_cron.cleanup().await;
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
@@ -943,9 +924,7 @@ async fn execute_job(
         let host_log_dir = agent_dir.join("crons").join("logs");
         if let Err(e) = std::fs::create_dir_all(&host_log_dir) {
             tracing::error!(job = %job_name, "failed to create log dir: {e:#}");
-            if let Some(active) = registered_learning.take() {
-                active.cleanup().await;
-            }
+            registered_cron.cleanup().await;
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
@@ -978,9 +957,7 @@ async fn execute_job(
     let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
-            if let Some(active) = registered_learning.take() {
-                active.cleanup().await;
-            }
+            registered_cron.cleanup().await;
             update_failed_run_record(&conn, &run_id, None).await;
             std::fs::remove_file(&lock_path).ok();
             return;
@@ -1005,9 +982,7 @@ async fn execute_job(
     // outcome-specific processing (the `match outcome` below, reflection, usage
     // insert) happens after it. The finish rows persist past cleanup, so the
     // downstream probe-skip check still works.
-    if let Some(active) = registered_learning.take() {
-        active.cleanup().await;
-    }
+    registered_cron.cleanup().await;
 
     // Post-stream-loop cleanup. ProcessGroupChild::Drop kills the slave's
     // group on function return, so a hang here can never outlive `execute_job`.
@@ -1484,8 +1459,6 @@ async fn execute_job(
 
                 let refl_ctx = crate::reflection::ReflectionContext {
                     session_uuid: run_id.clone(),
-                    failure: failure_kind,
-                    ring_buffer_tail: ring_tail,
                     limits: crate::reflection::ReflectionLimits::CRON,
                     agent_name: agent_name.to_string(),
                     agent_dir: agent_dir.to_path_buf(),
@@ -1498,7 +1471,8 @@ async fn execute_job(
                     debug: Some(std::sync::Arc::clone(&debug)),
                 };
 
-                match crate::reflection::reflect_on_failure(refl_ctx).await {
+                match crate::reflection::reflect_on_failure(refl_ctx, failure_kind, ring_tail).await
+                {
                     Ok(text) => {
                         tracing::info!(job = %job_name, "cron reflection reply produced");
                         text
@@ -1940,6 +1914,7 @@ pub(crate) async fn run_cron_task(
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: right_agent_config::LearningConfig,
     session_locks: crate::telegram::SessionLocks,
+    progress_state: crate::telegram::progress::ProgressState,
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
@@ -1973,13 +1948,14 @@ pub(crate) async fn run_cron_task(
         &debug,
         &learning,
         &session_locks,
+        &progress_state,
     )
     .await;
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock, &debug, &learning, &session_locks).await;
+                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock, &debug, &learning, &session_locks, &progress_state).await;
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
@@ -1988,7 +1964,6 @@ pub(crate) async fn run_cron_task(
         }
     }
 
-    // Phase 1: Abort all job scheduler loops (sleeping until next fire time).
     // This does NOT kill in-flight execute_job tasks — they are separate spawns.
     let scheduler_count = handles.len();
     for (name, (_, handle)) in handles {
@@ -2128,6 +2103,7 @@ fn fire_one_shot_specs(
     debug: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent_config::LearningConfig,
     session_locks: &crate::telegram::SessionLocks,
+    progress_state: &crate::telegram::progress::ProgressState,
 ) {
     for (name, spec) in specs {
         let lock_ttl = effective_lock_ttl(&spec);
@@ -2152,6 +2128,8 @@ fn fire_one_shot_specs(
         let dbg = debug.clone();
         let learn = learning.clone();
         let slk = session_locks.clone();
+        let progress = progress_state.clone();
+
         let one_shot_deleter = OneShotSpecDeleter {
             agent_dir: ad.clone(),
             job_name: jn.clone(),
@@ -2171,6 +2149,7 @@ fn fire_one_shot_specs(
                 dbg,
                 &learn,
                 &slk,
+                &progress,
             )
             .await;
         });
@@ -2197,6 +2176,7 @@ async fn reconcile_jobs(
     debug: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: &right_agent_config::LearningConfig,
     session_locks: &crate::telegram::SessionLocks,
+    progress_state: &crate::telegram::progress::ProgressState,
 ) {
     // Clean up finished triggered handles
     triggered_handles.retain(|h| !h.is_finished());
@@ -2231,6 +2211,7 @@ async fn reconcile_jobs(
         debug,
         learning,
         session_locks,
+        progress_state,
     );
 
     // Fire Immediate specs (every tick — they are one-shot)
@@ -2255,6 +2236,7 @@ async fn reconcile_jobs(
         debug,
         learning,
         session_locks,
+        progress_state,
     );
 
     // Abort handles for removed or changed jobs (CRON-06)
@@ -2293,6 +2275,7 @@ async fn reconcile_jobs(
         let job_debug = debug.clone();
         let job_learning = learning.clone();
         let job_session_locks = session_locks.clone();
+        let job_progress_state = progress_state.clone();
 
         let handle = tokio::spawn(async move {
             run_job_loop(
@@ -2309,6 +2292,7 @@ async fn reconcile_jobs(
                 job_debug,
                 job_learning,
                 job_session_locks,
+                job_progress_state,
             )
             .await;
         });
@@ -2344,6 +2328,8 @@ async fn reconcile_jobs(
             let dbg = debug.clone();
             let learn = learning.clone();
             let slk = session_locks.clone();
+            let progress = progress_state.clone();
+
             tracing::info!(job = %name, "executing triggered job");
             let trigger_name = name.clone();
             let handle = tokio::spawn(async move {
@@ -2360,6 +2346,7 @@ async fn reconcile_jobs(
                     dbg,
                     &learn,
                     &slk,
+                    &progress,
                 )
                 .await;
             });
@@ -2390,6 +2377,7 @@ async fn run_job_loop(
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     learning: right_agent_config::LearningConfig,
     session_locks: crate::telegram::SessionLocks,
+    progress_state: crate::telegram::progress::ProgressState,
 ) {
     use cron::Schedule;
     use std::str::FromStr;
@@ -2441,6 +2429,8 @@ async fn run_job_loop(
         let dbg = debug.clone();
         let learn = learning.clone();
         let slk = session_locks.clone();
+        let progress = progress_state.clone();
+
         let one_shot_deleter = spec
             .schedule_kind
             .is_one_shot()
@@ -2463,6 +2453,7 @@ async fn run_job_loop(
                 dbg,
                 &learn,
                 &slk,
+                &progress,
             )
             .await;
         });
@@ -2635,6 +2626,96 @@ mod tests {
             without.iter().any(|t| t == start),
             "learning-disabled cron must disallow it"
         );
+        let channel_post = right_mcp::internal_client::CHANNEL_POST_MCP_TOOL;
+        assert!(
+            !with.iter().any(|tool| tool == channel_post),
+            "learning-enabled cron must allow channel_post"
+        );
+        assert!(
+            !without.iter().any(|tool| tool == channel_post),
+            "learning-disabled cron must allow channel_post"
+        );
+    }
+    #[tokio::test]
+    async fn cron_registers_channel_post_target_when_learning_is_disabled() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let agent_dir = tempdir().expect("agent dir");
+        std::fs::write(
+            agent_dir.path().join("mcp.json"),
+            r#"{"mcpServers":{"right":{"headers":{}}}}"#,
+        )
+        .expect("write MCP config");
+        right_db::open_connection(agent_dir.path(), true)
+            .await
+            .expect("create agent database");
+
+        let socket_dir = tempdir().expect("socket dir");
+        let socket_path = socket_dir.path().join("internal.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind internal socket");
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept registration");
+            let mut request = vec![0; 4096];
+            let read = stream.read(&mut request).await.expect("read registration");
+            request.truncate(read);
+            request_tx
+                .send(String::from_utf8(request).expect("UTF-8 request"))
+                .expect("deliver captured registration");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n{\"ok\":true}",
+                )
+                .await
+                .expect("respond to registration");
+        });
+
+        let learning = right_agent_config::LearningConfig {
+            prefilter_enabled: false,
+            ..Default::default()
+        };
+        let internal_client = Arc::new(right_mcp::internal_client::InternalClient::new(
+            &socket_path,
+        ));
+        let spec = sample_cron_spec();
+        let agent_path = agent_dir.path().to_path_buf();
+        let session_locks = Arc::new(dashmap::DashMap::new());
+        let progress_state = crate::telegram::progress::ProgressState::default();
+        let job = tokio::spawn(async move {
+            execute_job(
+                "default-learning-job",
+                &spec,
+                &agent_path,
+                "agent-1",
+                None,
+                None,
+                &internal_client,
+                None,
+                Arc::new(tokio::sync::RwLock::new(())),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                &learning,
+                &session_locks,
+                &progress_state,
+            )
+            .await;
+        });
+
+        let request = tokio::time::timeout(std::time::Duration::from_secs(2), request_rx)
+            .await
+            .expect("cron must register before invoking Claude")
+            .expect("registration request");
+        assert!(
+            request.starts_with("POST /progress/register HTTP/1.1"),
+            "unexpected request: {request}"
+        );
+        assert!(
+            request.contains(r#""kind":"cron""#),
+            "cron registration must identify its invocation kind: {request}"
+        );
+
+        job.abort();
+        let _ = job.await;
+        server.await.expect("registration server");
     }
 
     #[test]
@@ -3396,6 +3477,7 @@ mod tests {
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             right_agent_config::LearningConfig::default(),
             Arc::new(dashmap::DashMap::new()),
+            crate::telegram::progress::ProgressState::default(),
         ));
 
         // Give cron engine time to reconcile and spawn the job loop

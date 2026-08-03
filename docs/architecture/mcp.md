@@ -397,6 +397,47 @@ sandbox before delivery, `ProgressTarget` now also carries `agent_dir`,
 `ssh_config_path`, and `resolved_sandbox`; for `sandbox: mode: none` agents the
 `/sandbox/outbox/` paths resolve directly on the host instead.
 
+## Telegram channel tools
+
+`mcp__right__channel_list`, `mcp__right__channel_read`, and
+`mcp__right__channel_post` are built-in RightBackend tools for agent-monitored
+Telegram channels. A channel becomes visible when the bot is promoted to
+channel admin: the `my_chat_member` update triggers a DM to the first trusted
+user with a single-use confirm button (`chanconf:{chat_id}:{nonce}` callback).
+The pending confirmation is held in memory (lost on restart → stale-button
+answer), bound to the recipient user, expires after 24h, and is consumed on
+success or revocation. The callback re-verifies the bot is still a channel
+admin (`get_chat_member`) and rechecks the clicker's trust inside the locked
+allowlist write before inserting the `kind: channel` entry. Losing channel
+admin (demotion/removal `my_chat_member`) drops the pending confirmation and
+revokes the allowlist entry, so re-adding the bot requires fresh approval.
+`my_chat_member` handler errors propagate to the webhook (HTTP 500) so
+Telegram retries the one-shot membership update. Inbound `channel_post`
+updates for opened channels are archived into `conversation_messages` and
+NEVER routed to the worker — channels never start agent turns.
+
+`channel_list`/`channel_read` are read-only, available in every invocation
+kind, and take no invocation scope; `channel_read` returns archived posts
+newest first (default 20, max 100, bodies truncated to 180 chars).
+`channel_post` publishes via the bot's `POST /channel/post` UDS route. It is
+the only built-in whose agent-supplied `channel` chat id is accepted —
+validated against the operator-confirmed allowlist (`kind == Channel`) on BOTH
+the aggregator (pre-flight, `channel_not_opened`) and the bot route
+(authoritative, re-read from disk at delivery). Admission is gated on BOTH
+sides: the aggregator's `ProgressRegistry::begin_channel_post` (Foreground and
+Cron kinds only — others `channel_post_forbidden` — max 10 attempts per
+invocation, `channel_post_limit`, no rollback on delivery failure) and the
+bot's `ProgressState::claim_channel_post` (same 10-attempt cap, authoritative
+for any direct UDS caller). The bot route also rejects empty/whitespace posts
+and posts over 4096 chars before any send. The tool is hidden from
+background/delivery/reflection turns via `disallow_channel_post` at those call
+sites — deliberately NOT in the shared `disallow_foreground_only_tools*`
+chains, which cron uses. Delivered posts are archived as assistant rows
+(preserving the Telegram message_id) so `channel_read` sees the agent's own
+posts; an archive failure after a successful Telegram send returns an explicit
+`published but archive failed` error (HTTP 502 with the message_id) instead of
+silent success.
+
 ## Learned Skill MCP Tools
 
 `mcp__right__skill_learning_start` and

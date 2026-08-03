@@ -59,7 +59,7 @@ provenance. The same foreground registration is the only source of scope for
 
 Telegram transcript archiving is separate from Hindsight memory:
 
-- Group pre-routing archive: every group message Teloxide delivers is archived
+- Group pre-routing archive: every group message Telegram delivers is archived
   before routing, even when the sender is untrusted, the bot was not addressed,
   or the topic is closed.
 - Routed DM archive: direct messages are archived only after auth-code and MCP
@@ -311,6 +311,41 @@ structured-output demand with a delivered summary, so the next resumed state is
 no longer an unsatisfied schema request. Reflection runs on a separate path and
 never feeds the detector, so the guard cannot recurse on its own reflection
 turn.
+
+### Null-reply repair
+
+The delivery contract makes `content: null` mean "send nothing", which an
+agent can emit by mistake after writing its reply as a plain assistant text
+block (text blocks are never delivered). The worker detects the suspicious
+shape and runs one repair resume instead of silently dropping the reply.
+
+Trigger (all required, `worker_reply::null_reply_needs_repair`): `content` is
+null; no attachments (media-only replies are legitimate nulls); no
+`mcp__right__send_message` call this turn (terminal null after send_message is
+sanctioned); the last assistant text block is non-empty. The worker captures
+the evidence while streaming: `parse_persisted_stream_events` yields every
+content block, so multi-block assistant messages cannot hide a `send_message`
+call or a trailing text block.
+
+The repair (`reflection::repair_null_reply`) shares the reflection plumbing
+(`run_notice_resume`): `--resume` on the same session, `REPLY_SCHEMA_JSON`,
+`ReflectionLimits::NULL_REPAIR` (= WORKER: 3 turns, $0.20, 90s), a tokened
+SYSTEM_NOTICE that shows the discarded text and offers an explicit escape
+hatch — "return `content: null` again to confirm intentional silence". Outcomes:
+
+- repaired output has content or attachments → delivered through the normal
+  reply path (receipts, threading, attachments all apply);
+- second null → intentional silence confirmed, nothing sent, incident closed
+  (this keeps group lurk mode safe);
+- repair itself fails (spawn/timeout/parse) → the discarded text block is
+  delivered raw as a last resort.
+
+Repair runs at most once per turn and is never re-triggered by its own
+output. Usage is accounted as `source = "reflection"` (worker parent); fires
+are logged (`null reply with undelivered text block`) so prompt-side fixes
+can be evaluated against the fire rate. Cron turns need no repair: the cron
+schema makes silence an explicit `delivery.kind = "silent"` with a required
+reason.
 
 Cron success output stores `async_runs.run_note` plus a structured
 `delivery_json` decision. `delivery.kind = "notify"` enters the async delivery

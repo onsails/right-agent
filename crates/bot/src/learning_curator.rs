@@ -539,6 +539,7 @@ pub(crate) async fn run_if_due(
             kind: right_mcp::internal_client::ProgressInvocationKindDto::Curator,
             chat_id: None,
             thread_id: None,
+            progress_state: None,
         },
     )
     .await
@@ -773,6 +774,7 @@ async fn run_report_only_pass(
             kind: right_mcp::internal_client::ProgressInvocationKindDto::Curator,
             chat_id: None,
             thread_id: None,
+            progress_state: None,
         },
     )
     .await

@@ -1,5 +1,5 @@
 //! End-to-end test of /model — writes to a fixture agent.yaml and verifies
-//! the in-memory ArcSwap is updated. Does NOT exercise teloxide HTTP — the
+//! the in-memory ArcSwap is updated. Does NOT exercise the bot HTTP layer — the
 //! handler-level logic (allowlist gate + persist + swap) is what we cover.
 
 use std::sync::Arc;

@@ -3,19 +3,16 @@
 //! Every handler is gated to trusted users only. Non-trusted senders'
 //! commands are silently ignored (no reply, no warning — per spec §Command Routing Rules).
 
-use std::sync::Arc;
-
 use chrono::Utc;
+use frankenstein::types::{Message, MessageEntityType};
 use right_agent::agent::allowlist::{
-    self, AddOutcome, AllowedGroup, AllowedUser, AllowlistHandle, AllowlistState, RemoveOutcome,
-    ResponseMode,
+    self, AddOutcome, AllowedGroup, AllowedUser, AllowlistHandle, AllowlistState, GroupKind,
+    RemoveOutcome, ResponseMode,
 };
-use teloxide::RequestError;
-use teloxide::prelude::*;
-use teloxide::types::{ChatKind, Message, MessageEntityKind};
 
-use super::BotType;
-use super::handler::AgentDir;
+use super::msg_ext;
+use super::router::HandlerCtx;
+use super::tg_bot::TgError;
 
 /// Who the sender intends to add/remove.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,21 +33,23 @@ pub enum UserTarget {
 
 pub fn resolve_user_target(msg: &Message, args: &str) -> UserTarget {
     // 1) reply-to-message
-    if let Some(reply) = msg.reply_to_message()
+    if let Some(reply) = msg.reply_to_message.as_ref()
         && let Some(from) = reply.from.as_ref()
     {
         return UserTarget::Reply {
-            id: from.id.0 as i64,
-            name: Some(from.full_name()),
+            id: from.id as i64,
+            name: Some(msg_ext::full_name(from)),
         };
     }
     // 2) TextMention entity in this message
-    if let Some(entities) = msg.entities() {
+    if let Some(entities) = msg.entities.as_ref() {
         for e in entities {
-            if let MessageEntityKind::TextMention { user } = &e.kind {
+            if e.type_field == MessageEntityType::TextMention
+                && let Some(user) = e.user.as_ref()
+            {
                 return UserTarget::TextMention {
-                    id: user.id.0 as i64,
-                    name: Some(user.full_name()),
+                    id: user.id as i64,
+                    name: Some(msg_ext::full_name(user)),
                 };
             }
         }
@@ -65,6 +64,22 @@ pub fn resolve_user_target(msg: &Message, args: &str) -> UserTarget {
         return UserTarget::UnresolvableUsername(u.to_string());
     }
     UserTarget::None
+}
+
+/// DM requires an explicit numeric chat ID argument; groups default to the
+/// current chat. `None` indicates that the command should show its usage.
+pub(crate) fn deny_all_target(is_private: bool, chat_id: i64, args: &str) -> Option<i64> {
+    let trimmed = args.trim();
+    if is_private {
+        if trimmed.is_empty() {
+            return None;
+        }
+        trimmed.parse().ok()
+    } else if trimmed.is_empty() {
+        Some(chat_id)
+    } else {
+        trimmed.parse().ok()
+    }
 }
 
 /// Persist the proposed `AllowlistState` atomically to disk, then swap it
@@ -124,62 +139,65 @@ pub(crate) fn sender_is_trusted(msg: &Message, allowlist: &AllowlistHandle) -> b
         .0
         .read()
         .expect("allowlist lock poisoned")
-        .is_user_trusted(sender.id.0 as i64)
+        .is_user_trusted(sender.id as i64)
 }
 
-async fn reply(bot: &BotType, msg: &Message, text: &str) -> Result<(), RequestError> {
-    bot.send_message(msg.chat.id, text)
-        .reply_parameters(teloxide::types::ReplyParameters {
-            message_id: msg.id,
-            ..Default::default()
-        })
-        .await?;
+async fn reply(bot: &super::BotType, msg: &Message, text: &str) -> Result<(), TgError> {
+    bot.send_message_opts(
+        msg.chat.id,
+        text,
+        false,
+        msg.message_thread_id,
+        Some(msg.message_id),
+        None,
+    )
+    .await?;
     Ok(())
 }
 
-pub async fn handle_allow(
-    bot: BotType,
-    msg: Message,
+pub(crate) async fn handle_allow(
+    ctx: &HandlerCtx,
+    msg: &Message,
     args: String,
-    allowlist: AllowlistHandle,
-    agent_dir: Arc<AgentDir>,
-) -> ResponseResult<()> {
-    if !sender_is_trusted(&msg, &allowlist) {
+) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let allowlist = &ctx.allowlist;
+    let agent_dir = &ctx.agent_dir;
+    if !sender_is_trusted(msg, allowlist) {
         tracing::debug!("/allow ignored: non-trusted sender");
         return Ok(());
     }
 
-    let target = resolve_user_target(&msg, &args);
-    let (id, label) = match target {
-        UserTarget::NumericId(id) => (id, None),
-        UserTarget::Reply { id, name } | UserTarget::TextMention { id, name } => (id, name),
-        UserTarget::UnresolvableUsername(u) => {
-            reply(
-                &bot,
-                &msg,
+    let target = resolve_user_target(msg, &args);
+    let (id, label) =
+        match target {
+            UserTarget::NumericId(id) => (id, None),
+            UserTarget::Reply { id, name } | UserTarget::TextMention { id, name } => (id, name),
+            UserTarget::UnresolvableUsername(u) => {
+                reply(bot, msg,
                 &format!(
                     "\u{2717} cannot resolve @{u} — reply to their message or use numeric user_id"
                 ),
             )
             .await?;
-            return Ok(());
-        }
-        UserTarget::None => {
-            reply(
-                &bot,
-                &msg,
-                "\u{2717} usage: /allow (reply to user) or /allow <user_id>",
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+                return Ok(());
+            }
+            UserTarget::None => {
+                reply(
+                    bot,
+                    msg,
+                    "\u{2717} usage: /allow (reply to user) or /allow <user_id>",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
 
     // Reject negative IDs (groups/channels use /allow_all).
     if id < 0 {
         reply(
-            &bot,
-            &msg,
+            bot,
+            msg,
             "\u{2717} user_id cannot be negative (groups/channels use /allow_all)",
         )
         .await?;
@@ -192,7 +210,7 @@ pub async fn handle_allow(
         let outcome = next.add_user(AllowedUser {
             id,
             label: label.clone(),
-            added_by: msg.from.as_ref().map(|u| u.id.0 as i64),
+            added_by: msg.from.as_ref().map(|u| u.id as i64),
             added_at: Utc::now(),
         });
         (outcome, next)
@@ -200,23 +218,18 @@ pub async fn handle_allow(
 
     match outcome {
         AddOutcome::Inserted => {
-            if let Err(e) = persist_new(&allowlist, &agent_dir.0, new_state).await {
+            if let Err(e) = persist_new(allowlist, &agent_dir.0, new_state).await {
                 tracing::error!(error = %e, "allowlist persist failed for /allow");
-                reply(&bot, &msg, &format!("\u{2717} persist failed: {e}")).await?;
+                reply(bot, msg, &format!("\u{2717} persist failed: {e}")).await?;
                 return Ok(());
             }
             let disp = label.unwrap_or_else(|| id.to_string());
-            reply(
-                &bot,
-                &msg,
-                &format!("\u{2713} allowed user {disp} (id {id})"),
-            )
-            .await?;
+            reply(bot, msg, &format!("\u{2713} allowed user {disp} (id {id})")).await?;
         }
         AddOutcome::AlreadyPresent => {
             reply(
-                &bot,
-                &msg,
+                bot,
+                msg,
                 &format!("\u{2713} user {id} already in allowlist"),
             )
             .await?;
@@ -225,51 +238,51 @@ pub async fn handle_allow(
     Ok(())
 }
 
-pub async fn handle_deny(
-    bot: BotType,
-    msg: Message,
+pub(crate) async fn handle_deny(
+    ctx: &HandlerCtx,
+    msg: &Message,
     args: String,
-    allowlist: AllowlistHandle,
-    agent_dir: Arc<AgentDir>,
-) -> ResponseResult<()> {
-    if !sender_is_trusted(&msg, &allowlist) {
+) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let allowlist = &ctx.allowlist;
+    let agent_dir = &ctx.agent_dir;
+    if !sender_is_trusted(msg, allowlist) {
         tracing::debug!("/deny ignored: non-trusted sender");
         return Ok(());
     }
 
-    let target = resolve_user_target(&msg, &args);
-    let id = match target {
-        UserTarget::NumericId(id) => id,
-        UserTarget::Reply { id, .. } | UserTarget::TextMention { id, .. } => id,
-        UserTarget::UnresolvableUsername(u) => {
-            reply(
-                &bot,
-                &msg,
+    let target = resolve_user_target(msg, &args);
+    let id =
+        match target {
+            UserTarget::NumericId(id) => id,
+            UserTarget::Reply { id, .. } | UserTarget::TextMention { id, .. } => id,
+            UserTarget::UnresolvableUsername(u) => {
+                reply(bot, msg,
                 &format!(
                     "\u{2717} cannot resolve @{u} — reply to their message or use numeric user_id"
                 ),
             )
             .await?;
-            return Ok(());
-        }
-        UserTarget::None => {
-            reply(
-                &bot,
-                &msg,
-                "\u{2717} usage: /deny (reply to user) or /deny <user_id>",
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+                return Ok(());
+            }
+            UserTarget::None => {
+                reply(
+                    bot,
+                    msg,
+                    "\u{2717} usage: /deny (reply to user) or /deny <user_id>",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
 
     // Self-deny rejection.
     if let Some(from) = msg.from.as_ref()
-        && from.id.0 as i64 == id
+        && from.id as i64 == id
     {
         reply(
-            &bot,
-            &msg,
+            bot,
+            msg,
             "\u{2717} cannot deny yourself — add another trusted user first",
         )
         .await?;
@@ -284,26 +297,24 @@ pub async fn handle_deny(
     };
     match outcome {
         RemoveOutcome::Removed => {
-            if let Err(e) = persist_new(&allowlist, &agent_dir.0, new_state).await {
+            if let Err(e) = persist_new(allowlist, &agent_dir.0, new_state).await {
                 tracing::error!(error = %e, "allowlist persist failed for /deny");
-                reply(&bot, &msg, &format!("\u{2717} persist failed: {e}")).await?;
+                reply(bot, msg, &format!("\u{2717} persist failed: {e}")).await?;
                 return Ok(());
             }
-            reply(&bot, &msg, &format!("\u{2713} user {id} removed")).await?;
+            reply(bot, msg, &format!("\u{2713} user {id} removed")).await?;
         }
         RemoveOutcome::NotFound => {
-            reply(&bot, &msg, &format!("\u{2717} user {id} not in allowlist")).await?;
+            reply(bot, msg, &format!("\u{2717} user {id} not in allowlist")).await?;
         }
     }
     Ok(())
 }
 
-pub async fn handle_allowed(
-    bot: BotType,
-    msg: Message,
-    allowlist: AllowlistHandle,
-) -> ResponseResult<()> {
-    if !sender_is_trusted(&msg, &allowlist) {
+pub(crate) async fn handle_allowed(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let allowlist = &ctx.allowlist;
+    if !sender_is_trusted(msg, allowlist) {
         tracing::debug!("/allowed ignored: non-trusted sender");
         return Ok(());
     }
@@ -330,84 +341,78 @@ pub async fn handle_allowed(
             text.push_str(&format!("  • {} {}\n", g.id, label));
         }
     }
-    bot.send_message(msg.chat.id, text)
-        .parse_mode(teloxide::types::ParseMode::Html)
+    bot.send_message_opts(msg.chat.id, &text, true, msg.message_thread_id, None, None)
         .await?;
     Ok(())
 }
 
-pub async fn handle_allow_all(
-    bot: BotType,
-    msg: Message,
-    allowlist: AllowlistHandle,
-    agent_dir: Arc<AgentDir>,
-) -> ResponseResult<()> {
-    if !sender_is_trusted(&msg, &allowlist) {
+pub(crate) async fn handle_allow_all(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let allowlist = &ctx.allowlist;
+    let agent_dir = &ctx.agent_dir;
+    if !sender_is_trusted(msg, allowlist) {
         tracing::debug!("/allow_all ignored: non-trusted sender");
         return Ok(());
     }
 
-    if matches!(msg.chat.kind, ChatKind::Private(_)) {
-        reply(
-            &bot,
-            &msg,
-            "\u{2717} /allow_all is only valid in group chats",
-        )
-        .await?;
+    if msg_ext::is_private(&msg.chat) {
+        reply(bot, msg, "\u{2717} /allow_all is only valid in group chats").await?;
         return Ok(());
     }
-    let chat_id = msg.chat.id.0;
-    let label = msg.chat.title().map(|s| s.to_string());
+    let chat_id = msg.chat.id;
+    let label = msg_ext::chat_title(&msg.chat).map(|s| s.to_string());
     let (outcome, new_state) = {
         let current = allowlist.0.read().expect("allowlist lock poisoned").clone();
         let mut next = current;
         let outcome = next.add_group(AllowedGroup {
             id: chat_id,
             label: label.clone(),
-            opened_by: msg.from.as_ref().map(|u| u.id.0 as i64),
+            opened_by: msg.from.as_ref().map(|u| u.id as i64),
             opened_at: Utc::now(),
             mode: ResponseMode::Addressed,
             topics: Vec::new(),
+            kind: GroupKind::Group,
         });
         (outcome, next)
     };
     match outcome {
         AddOutcome::Inserted => {
-            if let Err(e) = persist_new(&allowlist, &agent_dir.0, new_state).await {
+            if let Err(e) = persist_new(allowlist, &agent_dir.0, new_state).await {
                 tracing::error!(error = %e, "allowlist persist failed for /allow_all");
-                reply(&bot, &msg, &format!("\u{2717} persist failed: {e}")).await?;
+                reply(bot, msg, &format!("\u{2717} persist failed: {e}")).await?;
                 return Ok(());
             }
-            reply(&bot, &msg, "\u{2713} group opened").await?;
+            reply(bot, msg, "\u{2713} group opened").await?;
         }
         AddOutcome::AlreadyPresent => {
-            reply(&bot, &msg, "\u{2713} group already opened").await?;
+            reply(bot, msg, "\u{2713} group already opened").await?;
         }
     }
     Ok(())
 }
 
-pub async fn handle_deny_all(
-    bot: BotType,
-    msg: Message,
-    allowlist: AllowlistHandle,
-    agent_dir: Arc<AgentDir>,
-) -> ResponseResult<()> {
-    if !sender_is_trusted(&msg, &allowlist) {
+pub(crate) async fn handle_deny_all(
+    ctx: &HandlerCtx,
+    msg: &Message,
+    args: String,
+) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let allowlist = &ctx.allowlist;
+    let agent_dir = &ctx.agent_dir;
+    if !sender_is_trusted(msg, allowlist) {
         tracing::debug!("/deny_all ignored: non-trusted sender");
         return Ok(());
     }
 
-    if matches!(msg.chat.kind, ChatKind::Private(_)) {
+    let Some(chat_id) = deny_all_target(msg_ext::is_private(&msg.chat), msg.chat.id, &args) else {
         reply(
-            &bot,
-            &msg,
-            "\u{2717} /deny_all is only valid in group chats",
+            bot,
+            msg,
+            "\u{2717} usage: /deny_all <chat_id> (from DM) or /deny_all inside the group",
         )
         .await?;
         return Ok(());
-    }
-    let chat_id = msg.chat.id.0;
+    };
     let (outcome, new_state) = {
         let current = allowlist.0.read().expect("allowlist lock poisoned").clone();
         let mut next = current;
@@ -416,15 +421,15 @@ pub async fn handle_deny_all(
     };
     match outcome {
         RemoveOutcome::Removed => {
-            if let Err(e) = persist_new(&allowlist, &agent_dir.0, new_state).await {
+            if let Err(e) = persist_new(allowlist, &agent_dir.0, new_state).await {
                 tracing::error!(error = %e, "allowlist persist failed for /deny_all");
-                reply(&bot, &msg, &format!("\u{2717} persist failed: {e}")).await?;
+                reply(bot, msg, &format!("\u{2717} persist failed: {e}")).await?;
                 return Ok(());
             }
-            reply(&bot, &msg, "\u{2713} group closed").await?;
+            reply(bot, msg, "\u{2713} chat closed").await?;
         }
         RemoveOutcome::NotFound => {
-            reply(&bot, &msg, "\u{2713} group was not opened").await?;
+            reply(bot, msg, "\u{2713} chat was not opened").await?;
         }
     }
     Ok(())
@@ -433,8 +438,16 @@ pub async fn handle_deny_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frankenstein::types::Message;
     use right_agent::agent::allowlist::AllowlistFile;
-    use teloxide::types::Message;
+
+    #[test]
+    fn deny_all_target_resolves_arg_in_dm_and_chat_in_group() {
+        assert_eq!(deny_all_target(true, 555, "-100123"), Some(-100123));
+        assert_eq!(deny_all_target(true, 555, ""), None);
+        assert_eq!(deny_all_target(false, -100999, ""), Some(-100999));
+        assert_eq!(deny_all_target(true, 555, "abc"), None);
+    }
 
     fn dm_msg(from_id: u64, text: &str) -> Message {
         serde_json::from_value(serde_json::json!({
@@ -456,6 +469,7 @@ mod tests {
                 opened_at: Utc::now(),
                 mode,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             }],
             ..Default::default()
         })

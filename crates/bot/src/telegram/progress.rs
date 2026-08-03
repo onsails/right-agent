@@ -13,15 +13,19 @@ use right_mcp::internal_client::{
 };
 use serde::Serialize;
 use subtle::ConstantTimeEq;
-use teloxide::payloads::{CreateForumTopicSetters, EditForumTopicSetters, SendMessageSetters};
-use teloxide::prelude::Requester;
-use teloxide::types::{ChatId, CustomEmojiId, MessageId, ParseMode, Rgb, ThreadId};
+
+use super::tg_bot::TgError;
 
 /// End-to-end timeout for the Telegram `send_message` call invoked by the
 /// progress UDS endpoint. Bounds how long the caller (aggregator's
 /// `call_send_progress`) can wait if Telegram stalls. Mirrors the aggregator's
 /// own timeout — both ends must bound independently.
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Local content ceiling for a channel post, matching Telegram's 4096-char
+/// message limit. Rejected before any send so an oversized post fails with a
+/// deterministic local error instead of a Telegram API rejection.
+const CHANNEL_POST_MAX_CHARS: usize = 4096;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ProgressState {
@@ -42,6 +46,21 @@ impl ProgressState {
             .get(invocation_id)
             .map(|entry| entry.value().clone())
     }
+
+    /// Atomically claim one `channel_post` attempt slot for `invocation_id`.
+    /// Returns false when the invocation is unknown or the per-turn cap
+    /// (`MAX_CHANNEL_POST_PER_TURN`) is exhausted. Attempts are never rolled
+    /// back on delivery failure, mirroring the aggregator-side gate; this is
+    /// the authoritative cap for any caller that reaches the bot UDS directly.
+    pub(crate) fn claim_channel_post(&self, invocation_id: &str) -> bool {
+        let Some(entry) = self.targets.get(invocation_id) else {
+            return false;
+        };
+        let claimed = entry
+            .channel_post_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        claimed < right_mcp::internal_client::MAX_CHANNEL_POST_PER_TURN
+    }
 }
 
 #[derive(Clone)]
@@ -53,6 +72,8 @@ pub(crate) struct ProgressTarget {
     pub(crate) agent_dir: std::path::PathBuf,
     pub(crate) ssh_config_path: Option<std::path::PathBuf>,
     pub(crate) resolved_sandbox: Option<String>,
+    /// Per-turn `channel_post` attempts; capped at MAX_CHANNEL_POST_PER_TURN.
+    pub(crate) channel_post_count: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl std::fmt::Debug for ProgressTarget {
@@ -117,6 +138,7 @@ pub(crate) fn build_progress_router(state: ProgressEndpointState) -> Router {
     Router::new()
         .route("/progress/send", post(handle_progress_send))
         .route("/message/send", post(handle_message_send))
+        .route("/channel/post", post(handle_channel_post))
         .route("/forum-topic/create", post(handle_forum_topic_create))
         .route("/forum-topic/edit", post(handle_forum_topic_edit))
         .route("/forum-topic/close", post(handle_forum_topic_close))
@@ -172,7 +194,7 @@ async fn handle_progress_send(
             StatusCode::OK,
             Json(ProgressSendResponse {
                 ok: true,
-                message_id: Some(message.id.0),
+                message_id: Some(message.message_id),
             }),
         )
             .into_response(),
@@ -219,39 +241,32 @@ async fn send_text_message(
     bot: &super::BotType,
     target: &ProgressTarget,
     message: &str,
-) -> Result<Result<teloxide::types::Message, teloxide::RequestError>, tokio::time::error::Elapsed> {
+) -> Result<Result<frankenstein::types::Message, TgError>, tokio::time::error::Elapsed> {
     let html = crate::telegram::markdown::md_to_telegram_html(message);
-    let thread = if target.thread_id != 0 {
-        Some(ThreadId(MessageId(target.thread_id as i32)))
-    } else {
-        None
-    };
+    let thread = (target.thread_id != 0).then_some(target.thread_id as i32);
 
     // First attempt: HTML parse mode.
-    let mut send = bot
-        .send_message(ChatId(target.chat_id), html.clone())
-        .parse_mode(ParseMode::Html);
-    if let Some(tid) = thread {
-        send = send.message_thread_id(tid);
-    }
-
-    let outcome = tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await;
+    let outcome = tokio::time::timeout(
+        PROGRESS_SEND_TIMEOUT,
+        bot.send_message_opts(target.chat_id, &html, true, thread, None, None),
+    )
+    .await;
     match outcome {
         // Only retry on a deterministic, pre-delivery formatting rejection
         // (entity/URL parse failure or too-long). Network/5xx/timeout errors
         // may have been delivered, so retrying them would double-post.
-        Ok(Err(e)) if super::attachments::is_retryable_format_error(&format!("{e}")) => {
+        Ok(Err(e)) if super::attachments::is_retryable_format_error(&e) => {
             tracing::warn!(
                 invocation_id = %target.invocation_id,
                 "HTML send failed, retrying as plain text: {e:#}",
             );
             // Fallback: strip HTML tags and retry without parse mode.
             let plain = crate::telegram::markdown::strip_html_tags(&html);
-            let mut send = bot.send_message(ChatId(target.chat_id), plain);
-            if let Some(tid) = thread {
-                send = send.message_thread_id(tid);
-            }
-            tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send).await
+            tokio::time::timeout(
+                PROGRESS_SEND_TIMEOUT,
+                bot.send_message_opts(target.chat_id, &plain, false, thread, None, None),
+            )
+            .await
         }
         other => other,
     }
@@ -292,7 +307,7 @@ async fn handle_message_send(
         .filter(|c| !c.is_empty())
     {
         match send_text_message(&state.bot, &target, content).await {
-            Ok(Ok(message)) => message_ids.push(message.id.0),
+            Ok(Ok(message)) => message_ids.push(message.message_id),
             Ok(Err(e)) => {
                 tracing::warn!(
                     invocation_id = %req.invocation_id,
@@ -332,7 +347,7 @@ async fn handle_message_send(
         if let Err(e) = crate::telegram::attachments::send_attachments(
             &outbound,
             &state.bot,
-            ChatId(target.chat_id),
+            target.chat_id,
             target.thread_id,
             &target.agent_dir,
             target.ssh_config_path.as_deref(),
@@ -364,6 +379,137 @@ async fn handle_message_send(
         .into_response()
 }
 
+/// Publish a Markdown post to an opened Telegram channel. The invocation
+/// token and the current allowlist are both authoritative: the aggregator's
+/// earlier validation is only a fast rejection before the UDS round-trip.
+async fn handle_channel_post(
+    State(state): State<ProgressEndpointState>,
+    Json(req): Json<right_mcp::internal_client::ChannelPostRequest>,
+) -> axum::response::Response {
+    let fail = |status: StatusCode, message: String| {
+        (
+            status,
+            Json(right_mcp::internal_client::ChannelPostResponse {
+                ok: false,
+                message_id: None,
+                error: Some(message),
+            }),
+        )
+            .into_response()
+    };
+
+    let Some(target) = state.progress.get(&req.invocation_id) else {
+        return fail(StatusCode::NOT_FOUND, "unknown invocation".to_owned());
+    };
+    if !target.token_matches(&req.token) {
+        return fail(StatusCode::FORBIDDEN, "token mismatch".to_owned());
+    }
+
+    // Content validation before consuming an attempt slot.
+    if req.text.trim().is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "empty_post".to_owned());
+    }
+    if req.text.chars().count() > CHANNEL_POST_MAX_CHARS {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            format!("post_too_long: exceeds {CHANNEL_POST_MAX_CHARS} chars"),
+        );
+    }
+
+    // Bot-side per-turn cap. The aggregator enforces the same cap before the
+    // UDS round-trip; this is authoritative for direct UDS callers.
+    if !state.progress.claim_channel_post(&req.invocation_id) {
+        return fail(
+            StatusCode::TOO_MANY_REQUESTS,
+            "channel_post_cap_reached".to_owned(),
+        );
+    }
+
+    let is_channel = match right_agent::agent::allowlist::read_file(&target.agent_dir) {
+        Ok(Some(file)) => file.groups.iter().any(|group| {
+            group.id == req.chat_id
+                && group.kind == right_agent::agent::allowlist::GroupKind::Channel
+        }),
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(
+                invocation_id = %req.invocation_id,
+                "channel post allowlist read failed: {e:#}",
+            );
+            return fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "channel allowlist unavailable".to_owned(),
+            );
+        }
+    };
+    if !is_channel {
+        return fail(StatusCode::BAD_REQUEST, "channel_not_opened".to_owned());
+    }
+
+    // Reuse the ordinary Markdown renderer and its safe plain-text retry, but
+    // direct the send to the validated channel without a forum thread.
+    let channel_target = ProgressTarget {
+        chat_id: req.chat_id,
+        thread_id: 0,
+        ..target.clone()
+    };
+    match send_text_message(&state.bot, &channel_target, &req.text).await {
+        Ok(Ok(message)) => {
+            if let Err(e) = crate::telegram::archive::archive_outbound_channel_post(
+                &target.agent_dir,
+                req.chat_id,
+                message.message_id,
+                &req.text,
+            )
+            .await
+            {
+                tracing::warn!(
+                    invocation_id = %req.invocation_id,
+                    chat_id = req.chat_id,
+                    "channel post archive failed: {e:#}",
+                );
+                // The post IS published; report the archive loss explicitly so
+                // the agent knows `channel_read` is missing this message.
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(right_mcp::internal_client::ChannelPostResponse {
+                        ok: false,
+                        message_id: Some(message.message_id),
+                        error: Some(format!("published but archive failed: {e:#}")),
+                    }),
+                )
+                    .into_response();
+            }
+            Json(right_mcp::internal_client::ChannelPostResponse {
+                ok: true,
+                message_id: Some(message.message_id),
+                error: None,
+            })
+            .into_response()
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                invocation_id = %req.invocation_id,
+                chat_id = req.chat_id,
+                "channel post failed: {e:#}",
+            );
+            fail(StatusCode::BAD_GATEWAY, format!("{e:#}"))
+        }
+        Err(_) => {
+            tracing::warn!(
+                invocation_id = %req.invocation_id,
+                chat_id = req.chat_id,
+                "channel post timed out after {}s",
+                PROGRESS_SEND_TIMEOUT.as_secs(),
+            );
+            fail(
+                StatusCode::GATEWAY_TIMEOUT,
+                "telegram_send_timeout".to_owned(),
+            )
+        }
+    }
+}
+
 /// Map a teloxide forum error description to a clear, actionable sentence for
 /// the agent to relay. Falls back to the raw description.
 fn forum_error_message(raw: &str) -> String {
@@ -387,21 +533,18 @@ async fn handle_forum_topic_create(
     if !target.token_matches(&req.token) {
         return forum_forbidden();
     }
-    let mut call = state
-        .bot
-        .create_forum_topic(ChatId(target.chat_id), req.name);
-    if let Some(color) = req.icon_color {
-        call = call.icon_color(Rgb::from_u32(color));
-    }
-    if let Some(emoji) = req.icon_custom_emoji_id {
-        call = call.icon_custom_emoji_id(CustomEmojiId(emoji));
-    }
+    let call = state.bot.create_forum_topic(
+        target.chat_id,
+        req.name,
+        req.icon_color,
+        req.icon_custom_emoji_id,
+    );
     match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, call).await {
-        Ok(Ok(topic)) => (
+        Ok(Ok(message_thread_id)) => (
             StatusCode::OK,
             Json(ForumTopicCreateResponse {
                 ok: true,
-                message_thread_id: topic.thread_id.0.0,
+                message_thread_id,
             }),
         )
             .into_response(),
@@ -420,16 +563,14 @@ async fn handle_forum_topic_edit(
     if !target.token_matches(&req.token) {
         return forum_forbidden();
     }
-    let thread = ThreadId(MessageId(req.message_thread_id));
-    let mut call = state.bot.edit_forum_topic(ChatId(target.chat_id), thread);
-    if let Some(name) = req.name {
-        call = call.name(name);
-    }
-    if let Some(emoji) = req.icon_custom_emoji_id {
-        call = call.icon_custom_emoji_id(CustomEmojiId(emoji));
-    }
+    let call = state.bot.edit_forum_topic(
+        target.chat_id,
+        req.message_thread_id,
+        req.name,
+        req.icon_custom_emoji_id,
+    );
     match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, call).await {
-        Ok(Ok(_)) => forum_ok(),
+        Ok(Ok(())) => forum_ok(),
         Ok(Err(e)) => forum_telegram_error(&req.invocation_id, e),
         Err(_) => forum_timeout(&req.invocation_id),
     }
@@ -445,10 +586,11 @@ async fn handle_forum_topic_close(
     if !target.token_matches(&req.token) {
         return forum_forbidden();
     }
-    let thread = ThreadId(MessageId(req.message_thread_id));
-    let call = state.bot.close_forum_topic(ChatId(target.chat_id), thread);
+    let call = state
+        .bot
+        .close_forum_topic(target.chat_id, req.message_thread_id);
     match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, call).await {
-        Ok(Ok(_)) => forum_ok(),
+        Ok(Ok(())) => forum_ok(),
         Ok(Err(e)) => forum_telegram_error(&req.invocation_id, e),
         Err(_) => forum_timeout(&req.invocation_id),
     }
@@ -464,10 +606,11 @@ async fn handle_forum_topic_reopen(
     if !target.token_matches(&req.token) {
         return forum_forbidden();
     }
-    let thread = ThreadId(MessageId(req.message_thread_id));
-    let call = state.bot.reopen_forum_topic(ChatId(target.chat_id), thread);
+    let call = state
+        .bot
+        .reopen_forum_topic(target.chat_id, req.message_thread_id);
     match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, call).await {
-        Ok(Ok(_)) => forum_ok(),
+        Ok(Ok(())) => forum_ok(),
         Ok(Err(e)) => forum_telegram_error(&req.invocation_id, e),
         Err(_) => forum_timeout(&req.invocation_id),
     }
@@ -512,10 +655,7 @@ fn forum_timeout(invocation_id: &str) -> axum::response::Response {
         .into_response()
 }
 
-fn forum_telegram_error(
-    invocation_id: &str,
-    e: teloxide::RequestError,
-) -> axum::response::Response {
+fn forum_telegram_error(invocation_id: &str, e: TgError) -> axum::response::Response {
     let raw = format!("{e:#}");
     tracing::warn!(invocation_id = %invocation_id, "forum topic op failed: {raw}");
     (
@@ -574,6 +714,7 @@ mod tests {
             agent_dir: std::path::PathBuf::from("/tmp/agent"),
             ssh_config_path: None,
             resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
 
         state.register(target.clone());
@@ -597,6 +738,7 @@ mod tests {
             agent_dir: std::path::PathBuf::from("/tmp/agent"),
             ssh_config_path: None,
             resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
         let s = format!("{target:?}");
         assert!(!s.contains("supersecret"), "Debug must redact token: {s}");
@@ -613,6 +755,7 @@ mod tests {
             agent_dir: std::path::PathBuf::from("/tmp/agent"),
             ssh_config_path: None,
             resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
 
         assert!(target.token_matches("secret-token"));
@@ -653,6 +796,38 @@ mod tests {
         response.status()
     }
 
+    fn channel_post_request_json(invocation_id: &str, token: &str, chat_id: i64) -> Vec<u8> {
+        channel_post_request_json_with_text(invocation_id, token, chat_id, "hello")
+    }
+
+    fn channel_post_request_json_with_text(
+        invocation_id: &str,
+        token: &str,
+        chat_id: i64,
+        text: &str,
+    ) -> Vec<u8> {
+        let req = right_mcp::internal_client::ChannelPostRequest {
+            invocation_id: invocation_id.to_owned(),
+            token: token.to_owned(),
+            chat_id,
+            text: text.to_owned(),
+        };
+        serde_json::to_vec(&req).expect("serialize ChannelPostRequest")
+    }
+
+    async fn post_channel_post(state: ProgressEndpointState, body: Vec<u8>) -> StatusCode {
+        use tower::ServiceExt as _;
+        let app = build_progress_router(state);
+        let request = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/channel/post")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .expect("build request");
+        let response = app.oneshot(request).await.expect("router oneshot");
+        response.status()
+    }
+
     #[tokio::test]
     async fn message_send_unknown_invocation_is_404() {
         let state = test_state(ProgressState::default());
@@ -672,10 +847,139 @@ mod tests {
             agent_dir: std::path::PathBuf::from("/tmp"),
             ssh_config_path: None,
             resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         });
         let state = test_state(progress);
         let body = message_send_request_json("inv", "wrong");
         let status = post_message_send(state, body).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn handle_channel_post_unknown_invocation_is_404() {
+        let status = post_channel_post(
+            test_state(ProgressState::default()),
+            channel_post_request_json("missing", "t", -100),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn handle_channel_post_wrong_token_is_403() {
+        let progress = ProgressState::default();
+        progress.register(ProgressTarget {
+            invocation_id: "inv".to_owned(),
+            token: "right".to_owned(),
+            chat_id: 42,
+            thread_id: 0,
+            agent_dir: std::path::PathBuf::from("/tmp"),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        });
+
+        let status = post_channel_post(
+            test_state(progress),
+            channel_post_request_json("inv", "wrong", -100),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    fn registered_target(agent_dir: &std::path::Path) -> ProgressTarget {
+        ProgressTarget {
+            invocation_id: "inv".to_owned(),
+            token: "right".to_owned(),
+            chat_id: 42,
+            thread_id: 0,
+            agent_dir: agent_dir.to_owned(),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }
+    }
+
+    #[test]
+    fn claim_channel_post_caps_attempts_per_invocation() {
+        let progress = ProgressState::default();
+        progress.register(registered_target(std::path::Path::new("/tmp")));
+        for _ in 0..right_mcp::internal_client::MAX_CHANNEL_POST_PER_TURN {
+            assert!(progress.claim_channel_post("inv"));
+        }
+        assert!(
+            !progress.claim_channel_post("inv"),
+            "attempt beyond the cap must be rejected"
+        );
+        assert!(
+            !progress.claim_channel_post("missing"),
+            "unknown invocation must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_channel_post_rejects_empty_post_before_claiming() {
+        let agent_dir = tempfile::tempdir().expect("agent dir");
+        let progress = ProgressState::default();
+        let target = registered_target(agent_dir.path());
+        let counter = target.channel_post_count.clone();
+        progress.register(target);
+
+        let status = post_channel_post(
+            test_state(progress),
+            channel_post_request_json_with_text("inv", "right", -100, "   "),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a rejected post must not consume an attempt slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_channel_post_rejects_non_channel_allowlist_entry() {
+        let agent_dir = tempfile::tempdir().expect("agent dir");
+        right_agent::agent::allowlist::write_file(
+            agent_dir.path(),
+            &right_agent::agent::allowlist::AllowlistFile {
+                version: right_agent::agent::allowlist::CURRENT_VERSION,
+                users: Vec::new(),
+                groups: vec![right_agent::agent::allowlist::AllowedGroup {
+                    id: -100,
+                    label: None,
+                    opened_by: None,
+                    opened_at: chrono::Utc::now(),
+                    mode: right_agent::agent::allowlist::ResponseMode::Addressed,
+                    topics: Vec::new(),
+                    kind: right_agent::agent::allowlist::GroupKind::Group,
+                }],
+            },
+        )
+        .expect("write allowlist");
+
+        let progress = ProgressState::default();
+        progress.register(ProgressTarget {
+            invocation_id: "inv".to_owned(),
+            token: "right".to_owned(),
+            chat_id: 42,
+            thread_id: 0,
+            agent_dir: agent_dir.path().to_owned(),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        });
+
+        let status = post_channel_post(
+            test_state(progress),
+            channel_post_request_json("inv", "right", -100),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

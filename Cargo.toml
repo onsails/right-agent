@@ -46,9 +46,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio = { version = "1.52", features = ["full"] }
 which = "8.0"
-# Pinned to pre-release; cargo's "0.7" range does not match 0.x.y-pre.z. Bump explicitly when upgrading.
-turso = { version = "0.7.0-pre.7", features = ["sync"] }
-turso_core = "0.7.0-pre.7"
+turso = { version = "0.7", features = ["sync"] }
+turso_core = "0.7"
 rmcp ={ version = "1.7", default-features = false, features = ["client", "server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }
 futures = "0.3"
 http = "1.4"
@@ -57,7 +56,8 @@ hyper = { version = "1.10", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 sse-stream = "0.2"
 schemars = "1.1"
-teloxide = { version = "0.17", default-features = false, features = ["macros", "throttle", "cache-me", "rustls", "webhooks-axum"] }
+frankenstein = { version = "0.50", features = ["client-reqwest"] }
+governor = "0.10"
 uuid = { version = "1", features = ["v4"] }
 dashmap = "6.2"
 tokio-util = { version = "0.7", features = ["rt"] }

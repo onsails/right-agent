@@ -2,6 +2,8 @@ use crate::{Connection, DbError};
 
 type Result<T> = std::result::Result<T, DbError>;
 const SEARCH_SNIPPET_MAX_CHARS: usize = 180;
+// Keep in sync with `crates/right/src/right_backend.rs::CHANNEL_READ_MAX_LIMIT`.
+const CHANNEL_READ_MAX_LIMIT: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationRole {
@@ -52,7 +54,7 @@ pub async fn archive_message(conn: &Connection, message: ConversationMessage<'_>
     let addressed_to_bot = i64::from(message.addressed_to_bot);
     let routed_to_agent = i64::from(message.routed_to_agent);
 
-    if matches!(message.role, ConversationRole::Assistant) || message.message_id.is_none() {
+    if message.message_id.is_none() {
         return conn
             .query_one(
                 "INSERT INTO conversation_messages (
@@ -67,6 +69,39 @@ pub async fn archive_message(conn: &Connection, message: ConversationMessage<'_>
                     message.platform,
                     message.chat_id,
                     message.thread_id,
+                    message.sender_user_id,
+                    message.sender_name,
+                    addressed_to_bot,
+                    routed_to_agent,
+                    message.root_session_id,
+                    turn_id,
+                    role,
+                    content,
+                ],
+                |r| r.get(0),
+            )
+            .await;
+    }
+
+    if matches!(message.role, ConversationRole::Assistant) {
+        // Worker-generated assistant replies have no Telegram message id and
+        // continue through the NULL path above. Outbound channel posts do have
+        // an authoritative Telegram id, which channel_read must retain.
+        return conn
+            .query_one(
+                "INSERT INTO conversation_messages (
+                    platform, chat_id, thread_id, message_id, sender_user_id, sender_name,
+                    addressed_to_bot, routed_to_agent, root_session_id, turn_id, role, content
+                 ) VALUES (
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?
+                 )
+                 RETURNING id",
+                crate::params![
+                    message.platform,
+                    message.chat_id,
+                    message.thread_id,
+                    message.message_id,
                     message.sender_user_id,
                     message.sender_name,
                     addressed_to_bot,
@@ -226,6 +261,37 @@ pub async fn search_chat(
          ORDER BY m.created_at DESC, m.id DESC
          LIMIT ?",
         crate::params![query, chat_id, limit],
+        search_result_from_row,
+    )
+    .await
+}
+
+/// Last `limit` archived messages in a chat (any thread), newest first.
+/// Used by the channel_read MCP tool; no FTS — chronological scan over
+/// idx_conversation_messages_chat_created.
+pub async fn last_n_in_chat(
+    conn: &Connection,
+    chat_id: i64,
+    limit: usize,
+) -> Result<Vec<ConversationSearchResult>> {
+    let limit = limit.clamp(1, CHANNEL_READ_MAX_LIMIT) as i64;
+    conn.query_all(
+        "SELECT
+            m.id,
+            m.role,
+            m.content,
+            m.sender_user_id,
+            m.sender_name,
+            m.created_at,
+            m.thread_id,
+            m.message_id,
+            m.root_session_id
+         FROM conversation_messages m
+         WHERE m.platform = 'telegram'
+           AND m.chat_id = ?
+         ORDER BY m.created_at DESC, m.id DESC
+         LIMIT ?",
+        crate::params![chat_id, limit],
         search_result_from_row,
     )
     .await
@@ -584,6 +650,53 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn archive_message_preserves_outbound_assistant_message_id_only_when_provided() {
+        let conn = migrated_connection().await;
+        archive_message(
+            &conn,
+            ConversationMessage {
+                platform: "telegram",
+                chat_id: -100,
+                thread_id: 0,
+                message_id: Some(77),
+                sender_user_id: None,
+                sender_name: None,
+                addressed_to_bot: false,
+                routed_to_agent: true,
+                root_session_id: None,
+                turn_id: None,
+                role: ConversationRole::Assistant,
+                content: "outbound channel post",
+            },
+        )
+        .await
+        .expect("archive outbound assistant row");
+
+        let outbound_message_id: Option<i32> = conn
+            .query_one(
+                "SELECT message_id FROM conversation_messages
+                 WHERE platform = 'telegram' AND chat_id = -100 AND role = 'assistant'",
+                (),
+                |row| row.get(0),
+            )
+            .await
+            .expect("outbound message id");
+        assert_eq!(outbound_message_id, Some(77));
+
+        archive_assistant_row(&conn, "existing-session", 1, "ordinary assistant reply").await;
+        let ordinary_message_id: Option<i32> = conn
+            .query_one(
+                "SELECT message_id FROM conversation_messages
+                 WHERE root_session_id = 'existing-session' AND role = 'assistant'",
+                (),
+                |row| row.get(0),
+            )
+            .await
+            .expect("ordinary assistant message id");
+        assert_eq!(ordinary_message_id, None);
     }
 
     #[tokio::test]
@@ -1097,6 +1210,70 @@ mod tests {
                 .iter()
                 .all(|r| r.thread_id == 10 || r.thread_id == 11)
         );
+    }
+
+    #[tokio::test]
+    async fn last_n_in_chat_returns_newest_first_and_scopes_to_chat() {
+        let conn = migrated_connection().await;
+        for (chat_id, thread_id, message_id) in [(-100, 7, 1), (-100, 9, 2), (-200, 0, 3)] {
+            archive_message(
+                &conn,
+                user_message(
+                    chat_id,
+                    thread_id,
+                    message_id,
+                    &format!("post {message_id}"),
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        archive_message(&conn, message("discord", -100, 0, 4, "other platform"))
+            .await
+            .unwrap();
+        conn.execute(
+            "UPDATE conversation_messages
+             SET created_at = '2020-01-01T00:00:00Z'
+             WHERE platform = 'telegram' AND chat_id = -100",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let rows = last_n_in_chat(&conn, -100, 10).await.unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].snippet, "post 2");
+        assert_eq!(rows[1].snippet, "post 1");
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.thread_id, row.message_id))
+                .collect::<Vec<_>>(),
+            vec![(9, Some(2)), (7, Some(1))]
+        );
+
+        let one = last_n_in_chat(&conn, -100, 1).await.unwrap();
+
+        assert_eq!(one.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn last_n_in_chat_clamps_limit_to_one_hundred() {
+        let conn = migrated_connection().await;
+        for message_id in 1..=101 {
+            archive_message(
+                &conn,
+                user_message(-100, 0, message_id, &format!("post {message_id}")),
+            )
+            .await
+            .unwrap();
+        }
+
+        let rows = last_n_in_chat(&conn, -100, 101).await.unwrap();
+
+        assert_eq!(rows.len(), 100);
+        assert_eq!(rows[0].message_id, Some(101));
+        assert_eq!(rows.last().and_then(|row| row.message_id), Some(2));
     }
 
     #[tokio::test]

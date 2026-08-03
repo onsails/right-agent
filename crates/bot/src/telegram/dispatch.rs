@@ -1,165 +1,92 @@
-//! Teloxide long-polling dispatcher with:
+//! Telegram bot setup + lifecycle (webhook transport).
+//!
 //! - DashMap per-session worker map (SES-05, D-11)
-//! - BotCommand schema for /new, /list, /switch (multi-session)
+//! - `BotCommand` parse for /new, /list, /switch (multi-session) — see `command.rs`
 //! - ChatId allow-list filter (BOT-05, via filter.rs)
 //! - SIGTERM + SIGINT graceful shutdown (BOT-04)
 //! - BOT-04 subprocess cleanup via kill_on_drop(true) in each worker (no children registry)
+//!
+//! Update routing is in `router.rs` (replaces the former teloxide
+//! `Dispatcher`/`dptree`); the webhook HTTP handler is in `webhook.rs`.
 //!
 //! GOTCHA: queued messages in a worker channel are lost on worker task panic.
 //! When the worker is respawned (Pitfall 7), the in-progress batch is discarded.
 //! This is an accepted trade-off -- retrying arbitrary messages is not safe.
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use frankenstein::types::{BotCommandScope, BotCommandScopeChat, Message};
 use right_agent::agent::allowlist::AllowlistHandle;
-use teloxide::RequestError;
-use teloxide::dispatching::{DefaultKey, UpdateFilterExt};
-use teloxide::prelude::*;
-use teloxide::types::{BotCommand as TelegramBotCommand, ChatKind, Message, PublicChatKind};
-use teloxide::utils::command::BotCommands;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::BotType;
-use super::bot::build_bot;
-use super::filter::make_routing_filter;
 use super::handler::{
-    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingMcpAuthChoiceSlot,
-    PendingTokenSlot, RightHome, SshConfigPath, handle_bg_callback, handle_cron, handle_dashboard,
-    handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_providers,
-    handle_set_focus, handle_start, handle_stop_callback, handle_switch,
-    handle_thinking_toggle_callback, handle_usage,
+    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, RightHome, SshConfigPath,
 };
 use super::mention::BotIdentity;
-use super::mode_command::{handle_mode, handle_mode_callback, handle_mode_group};
-use super::model_command::{handle_model, handle_model_callback};
-use super::oauth_callback::PendingAuthMap;
+use super::router::HandlerCtx;
+use super::tg_bot::RightBot;
 use super::worker::{DebounceMsg, SessionKey};
 
-#[derive(BotCommands, Clone)]
-#[command(rename_rule = "lowercase")]
-enum BotCommand {
-    #[command(description = "Start interacting with this agent")]
-    Start(String),
-    #[command(description = "Start a new conversation")]
-    New(String),
-    #[command(description = "List all sessions")]
-    List,
-    #[command(description = "Switch to another session")]
-    Switch(String),
-    #[command(description = "Open MCP dashboard")]
-    Mcp(String),
-    #[command(description = "Open providers dashboard")]
-    Providers(String),
-    #[command(
-        description = "Set the focus for this conversation",
-        rename = "set_focus"
-    )]
-    SetFocus(String),
-    #[command(description = "Run diagnostics")]
-    Doctor,
-    #[command(description = "Switch Claude model (menu)")]
-    Model,
-    #[command(description = "Set response mode for this topic")]
-    Mode,
-    #[command(
-        description = "Set response mode for this group",
-        rename = "mode_group"
-    )]
-    ModeGroup,
-    #[command(description = "Open dashboard")]
-    Dashboard,
-    /// Toggle hot-reloadable debug mode. Use `/debug` for status, `/debug on`,
-    /// `/debug off`. When on, claude -p runs with --debug --debug-file=...
-    #[command(description = "Toggle debug mode (on/off/status)")]
-    Debug(String),
-    #[command(description = "Cron job status (list or detail)")]
-    Cron(String),
-    #[command(description = "Add trusted user (reply to user, or /allow <user_id>)")]
-    Allow(String),
-    #[command(description = "Remove trusted user")]
-    Deny(String),
-    #[command(description = "List trusted users and opened groups")]
-    Allowed,
-    #[command(
-        description = "Open this group for all members (group only)",
-        rename = "allow_all"
-    )]
-    AllowAll,
-    #[command(description = "Close this group (group only)", rename = "deny_all")]
-    DenyAll,
-    #[command(description = "Show usage summary (add 'detail' for raw tokens)")]
-    Usage(String),
-}
-
-fn visible_bot_commands() -> Vec<TelegramBotCommand> {
-    BotCommand::bot_commands()
-        .into_iter()
-        .filter(|command| command.command.trim_start_matches('/') != "usage")
-        .collect()
+/// Visible-command rows for `setMyCommands` (`usage` hidden) — see `command.rs`.
+fn visible_bot_commands() -> Vec<frankenstein::types::BotCommand> {
+    super::command::visible()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PreFilterLogMeta {
-    chat_id: i64,
-    chat_kind: &'static str,
-    has_text: bool,
-    has_caption: bool,
-    attachment_count: usize,
-    entity_count: usize,
+pub(crate) struct PreFilterLogMeta {
+    pub(crate) chat_id: i64,
+    pub(crate) chat_kind: &'static str,
+    pub(crate) has_text: bool,
+    pub(crate) has_caption: bool,
+    pub(crate) attachment_count: usize,
+    pub(crate) entity_count: usize,
 }
 
-fn pre_filter_log_meta(msg: &Message) -> PreFilterLogMeta {
+pub(crate) fn pre_filter_log_meta(msg: &Message) -> PreFilterLogMeta {
     PreFilterLogMeta {
-        chat_id: msg.chat.id.0,
-        chat_kind: chat_kind_label(&msg.chat.kind),
-        has_text: msg.text().is_some(),
-        has_caption: msg.caption().is_some(),
+        chat_id: msg.chat.id,
+        chat_kind: super::msg_ext::chat_type_label(&msg.chat),
+        has_text: msg.text.is_some(),
+        has_caption: msg.caption.is_some(),
         attachment_count: super::attachments::extract_attachments(msg).len(),
         entity_count: message_entity_count(msg),
     }
 }
 
-fn chat_kind_label(kind: &ChatKind) -> &'static str {
-    match kind {
-        ChatKind::Private(_) => "private",
-        ChatKind::Public(public) => match &public.kind {
-            PublicChatKind::Channel(_) => "channel",
-            PublicChatKind::Group => "group",
-            PublicChatKind::Supergroup(_) => "supergroup",
-        },
-    }
-}
-
 fn message_entity_count(msg: &Message) -> usize {
-    let text_entities = msg.entities().map_or(0, |entities| entities.len());
-    let caption_entities = msg.caption_entities().map_or(0, |entities| entities.len());
+    let text_entities = msg.entities.as_ref().map_or(0, |entities| entities.len());
+    let caption_entities = msg
+        .caption_entities
+        .as_ref()
+        .map_or(0, |entities| entities.len());
 
     text_entities + caption_entities
 }
 
-/// Run the teloxide long-polling dispatcher.
+/// Set up the Telegram bot and return the webhook router plus a lifecycle future.
 ///
-/// - Accepts agent_dir for session DB access and CC subprocess invocation.
-/// - Creates a DashMap<SessionKey, Sender<DebounceMsg>> for per-session workers.
-/// - Schema: filter by chat_id -> branch /new, /list, /switch commands -> dispatch text messages.
-/// - SIGTERM/SIGINT: kill in-flight subprocesses, shutdown dispatcher.
+/// - Connects the bot (`getMe` once) and resolves identity for group-mention
+///   detection.
+/// - Builds the shared [`HandlerCtx`].
+/// - Registers commands across the Default / AllPrivateChats / AllGroupChats
+///   scopes and cleans up stale per-chat / per-language / admin scopes.
+/// - Spawns the SIGTERM/SIGINT signal listener and the shutdown task.
 ///
-/// BOT-04 subprocess cleanup strategy: use kill_on_drop(true) on each Child in invoke_cc.
-/// When a worker task exits (channel closed, panic, or /new), the Child is dropped, which
-/// kills the subprocess. No explicit children registry is needed or maintained.
-/// Rationale: Arc<Mutex<Vec<Child>>> was rejected because invoke_cc never added children
-/// to the registry, making the kill loop dead code. kill_on_drop is sufficient.
+/// The returned `axum::Router` is nested into the bot's UDS app by `lib.rs`
+/// (so cloudflared can POST updates); the returned future resolves when the
+/// bot shuts down and drains in-flight background handoffs.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_telegram<L>(
+pub(crate) async fn setup_telegram(
     token: String,
     allowlist: AllowlistHandle,
     legacy_chat_scope_ids: Vec<i64>,
     agent_dir: PathBuf,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pending_auth: PendingAuthMap,
     home: PathBuf,
     ssh_config_path: Option<PathBuf>,
     show_thinking: bool,
@@ -179,24 +106,21 @@ pub(crate) async fn run_telegram<L>(
     stop_tokens: super::StopTokens,
     progress_state: super::progress::ProgressState,
     compact_timers: super::CompactTimers,
-    update_listener: L,
-) -> miette::Result<()>
-where
-    L: teloxide::update_listeners::UpdateListener<Err = std::convert::Infallible> + Send + 'static,
-{
-    let bot = build_bot(token);
-
-    // Resolve bot identity (username + user_id) via getMe — required for group mention detection.
-    let me = bot
-        .get_me()
+    webhook_secret: String,
+) -> miette::Result<(axum::Router, impl Future<Output = ()> + Send)> {
+    let bot = RightBot::connect(token)
         .await
-        .map_err(|e| miette::miette!("bot.get_me() failed: {e:#}"))?;
-    let username = me.user.username.clone().ok_or_else(|| {
+        .map_err(|e| miette::miette!("bot connect (getMe) failed: {e:#}"))?;
+
+    // Resolve bot identity (username + user_id) from the cached getMe — required
+    // for group mention detection.
+    let me = bot.me();
+    let username = me.username.clone().ok_or_else(|| {
         miette::miette!("bot has no username; cannot set up group-mention detection")
     })?;
     let identity = BotIdentity {
         username: username.clone(),
-        user_id: me.user.id.0,
+        user_id: me.id,
     };
     tracing::info!(%username, user_id = identity.user_id, "bot identity resolved");
     let identity_arc = Arc::new(identity);
@@ -208,7 +132,6 @@ where
     let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> = Arc::new(DashMap::new());
     let agent_dir_arc: Arc<AgentDir> = Arc::new(AgentDir(agent_dir));
     let ssh_config_arc: Arc<SshConfigPath> = Arc::new(SshConfigPath(ssh_config_path));
-    let pending_auth_arc: PendingAuthMap = pending_auth;
     let home_arc: Arc<RightHome> = Arc::new(RightHome(home));
     let auth_watcher_arc: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -217,8 +140,6 @@ where
         auth_code: Arc::clone(&auth_code_arc),
         auth_watcher: Arc::clone(&auth_watcher_arc),
     });
-    let pending_token_slot_arc: Arc<PendingTokenSlot> = Arc::new(PendingTokenSlot);
-    let pending_auth_choice_slot = Arc::new(PendingMcpAuthChoiceSlot);
     let internal_api_arc: Arc<InternalApi> = Arc::new(InternalApi(internal_client));
     let worker_shutdown = CancellationToken::new();
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
@@ -250,37 +171,37 @@ where
         );
     }
 
-    let mut dispatcher = build_dispatcher(
-        bot.clone(),
-        allowlist.clone(),
-        Arc::clone(&identity_arc),
-        Arc::clone(&worker_map),
-        Arc::clone(&agent_dir_arc),
-        pending_auth_arc,
-        Arc::clone(&home_arc),
-        Arc::clone(&ssh_config_arc),
-        Arc::clone(&intercept_slots_arc),
-        Arc::clone(&pending_token_slot_arc),
-        Arc::clone(&pending_auth_choice_slot),
-        Arc::clone(&internal_api_arc),
-        Arc::clone(&settings_arc),
-        Arc::clone(&stop_tokens),
-        Arc::clone(&thinking_visibility),
-        Arc::clone(&idle_ts),
-        Arc::clone(&session_locks),
-        Arc::clone(&bg_requests),
-        Arc::clone(&bg_handoff_gates),
-        progress_state,
+    let worker_ctl = super::WorkerControlDeps {
+        stop_tokens: Arc::clone(&stop_tokens),
+        session_locks,
+        bg_requests: Arc::clone(&bg_requests),
+        bg_handoff_gates: Arc::clone(&bg_handoff_gates),
+        thinking_visibility,
+        progress: progress_state,
         compact_timers,
-    );
+    };
 
-    let shutdown_token = dispatcher.shutdown_token();
+    let ctx = Arc::new(HandlerCtx {
+        bot: bot.clone(),
+        allowlist: allowlist.clone(),
+        identity: Arc::clone(&identity_arc),
+        worker_map,
+        agent_dir: Arc::clone(&agent_dir_arc),
+        home: home_arc,
+        ssh_config: ssh_config_arc,
+        intercept_slots: intercept_slots_arc,
+        internal_api: internal_api_arc,
+        settings: settings_arc,
+        idle_ts,
+        worker_ctl,
+        channel_confirms: super::channel_confirm::ChannelConfirms::default(),
+    });
 
     // SIGTERM/SIGINT listener -- runs in a dedicated std thread because signal-hook's
     // SignalsInfo<WithOrigin> iterator is blocking. The thread reads siginfo_t origin
     // (PID + UID of the sender), looks up the sender's command line via `ps`, logs it,
     // then cancels `signal_cancel`. The tokio task below observes the cancellation and
-    // drives the actual dispatcher shutdown on the runtime.
+    // drives the actual shutdown on the runtime.
     let signal_cancel = CancellationToken::new();
     let signal_cancel_thread = signal_cancel.clone();
     std::thread::Builder::new()
@@ -328,12 +249,13 @@ where
     let bg_requests_for_shutdown = Arc::clone(&bg_requests);
     let bg_handoff_gates_for_shutdown = Arc::clone(&bg_handoff_gates);
     let worker_shutdown_for_signal = worker_shutdown.clone();
+    let shutdown_for_task = shutdown.clone();
     tokio::spawn(async move {
         tokio::select! {
             _ = signal_cancel_task.cancelled() => {
                 // Signal listener thread already logged the PID/cmd. Nothing else to log here.
             }
-            _ = shutdown.cancelled() => {
+            _ = shutdown_for_task.cancelled() => {
                 tracing::info!("config change detected -- initiating graceful shutdown");
                 signal_cancel_task.cancel();
             }
@@ -349,16 +271,6 @@ where
             active_foreground = requested,
             "shutdown: requested foreground background handoff"
         );
-
-        match shutdown_token.shutdown() {
-            Ok(fut) => {
-                fut.await;
-                tracing::info!("dispatcher stopped");
-            }
-            Err(_idle) => {
-                tracing::debug!("dispatcher was idle at shutdown -- already stopped");
-            }
-        }
     });
 
     // Pre-delete any language-scoped command lists from prior deployments.
@@ -366,15 +278,13 @@ where
     // stale language-scoped entries shadow our fresh per-scope set. Best-effort,
     // errors ignored (e.g. the slot was never populated).
     for scope in [
-        teloxide::types::BotCommandScope::Default,
-        teloxide::types::BotCommandScope::AllPrivateChats,
-        teloxide::types::BotCommandScope::AllGroupChats,
+        BotCommandScope::Default,
+        BotCommandScope::AllPrivateChats,
+        BotCommandScope::AllGroupChats,
     ] {
         for lang in ["en", "ru"] {
             let _ = bot
-                .delete_my_commands()
-                .scope(scope.clone())
-                .language_code(lang.to_string())
+                .delete_my_commands(Some(scope.clone()), Some(lang.to_string()))
                 .await;
         }
     }
@@ -386,13 +296,12 @@ where
     // per Telegram's resolution order and shadows Default.
     let commands = visible_bot_commands();
     for scope in [
-        teloxide::types::BotCommandScope::Default,
-        teloxide::types::BotCommandScope::AllPrivateChats,
-        teloxide::types::BotCommandScope::AllGroupChats,
+        BotCommandScope::Default,
+        BotCommandScope::AllPrivateChats,
+        BotCommandScope::AllGroupChats,
     ] {
         if let Err(e) = bot
-            .set_my_commands(commands.clone())
-            .scope(scope.clone())
+            .set_my_commands(commands.clone(), Some(scope.clone()), None)
             .await
         {
             tracing::warn!(?scope, "set_my_commands failed: {e:#}");
@@ -400,40 +309,33 @@ where
     }
     // Clean any stale commands in the admins-only scope we do not populate.
     if let Err(e) = bot
-        .delete_my_commands()
-        .scope(teloxide::types::BotCommandScope::AllChatAdministrators)
+        .delete_my_commands(Some(BotCommandScope::AllChatAdministrators), None)
         .await
     {
         tracing::warn!("delete_my_commands (all_chat_administrators): {e:#}");
     }
 
-    // Wrap the listener so its update stream ends as soon as `signal_cancel`
-    // is fired. Without this wrapper, teloxide 0.17's `axum_no_setup`
-    // listener feeds updates from an `UnboundedReceiverStream` whose sender
-    // is only closed by an incoming HTTP request observing a stop flag —
-    // during shutdown no such request arrives, so the dispatcher would hang
-    // in `stream.next()` until process-compose's `timeout_seconds` SIGKILL.
-    let update_listener =
-        super::shutdown_listener::ShutdownAware::new(update_listener, signal_cancel.clone());
+    let router = super::webhook::build_webhook_router(webhook_secret, Arc::clone(&ctx));
 
-    tracing::info!("teloxide dispatcher starting (webhook)");
-    dispatcher
-        .dispatch_with_listener(
-            update_listener,
-            teloxide::error_handlers::LoggingErrorHandler::new(),
+    // Lifecycle future: returns when shutdown fires, then drains foreground
+    // handoff gates and finally cancels the worker-shutdown token.
+    let lifecycle = async move {
+        signal_cancel.cancelled().await;
+        tracing::info!("telegram shutdown signalled -- draining handoff gates");
+        let handoffs_done = super::wait_for_handoff_gates_empty(
+            &bg_handoff_gates,
+            std::time::Duration::from_secs(30),
         )
         .await;
-    tracing::info!("dispatcher exited cleanly");
-    let handoffs_done =
-        super::wait_for_handoff_gates_empty(&bg_handoff_gates, std::time::Duration::from_secs(30))
-            .await;
-    if handoffs_done {
-        tracing::info!("shutdown: foreground handoff gates drained");
-    } else {
-        tracing::warn!("shutdown: timed out waiting for foreground handoff gates");
-    }
-    worker_shutdown.cancel();
-    Ok(())
+        if handoffs_done {
+            tracing::info!("shutdown: foreground handoff gates drained");
+        } else {
+            tracing::warn!("shutdown: timed out waiting for foreground handoff gates");
+        }
+        worker_shutdown.cancel();
+    };
+
+    Ok((router, lifecycle))
 }
 
 fn chat_scope_cleanup_ids(allowlist: &AllowlistHandle, legacy_chat_ids: &[i64]) -> Vec<i64> {
@@ -452,13 +354,11 @@ async fn delete_stale_chat_command_scopes(
     allowlist: &AllowlistHandle,
     legacy_chat_ids: &[i64],
 ) {
-    use teloxide::types::{BotCommandScope, ChatId, Recipient};
-
     for chat_id in chat_scope_cleanup_ids(allowlist, legacy_chat_ids) {
-        let scope = BotCommandScope::Chat {
-            chat_id: Recipient::Id(ChatId(chat_id)),
-        };
-        if let Err(e) = bot.delete_my_commands().scope(scope).await {
+        let scope = BotCommandScope::Chat(BotCommandScopeChat {
+            chat_id: frankenstein::types::ChatId::Integer(chat_id),
+        });
+        if let Err(e) = bot.delete_my_commands(Some(scope), None).await {
             tracing::warn!(chat_id, "delete_my_commands(chat) failed: {e:#}");
         }
     }
@@ -492,292 +392,16 @@ fn lookup_sender_cmd(pid: i32) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-/// Build the teloxide `Dispatcher` with the full handler schema and dependency map.
-///
-/// Extracted from `run_telegram` so that dptree dependency-injection type checking
-/// (which runs inside `DispatcherBuilder::build()`) can be smoke-tested without
-/// going through the full bot startup path. See `dispatcher_builds_without_panic`.
-#[allow(clippy::too_many_arguments)]
-fn build_dispatcher(
-    bot: BotType,
-    allowlist: AllowlistHandle,
-    identity_arc: Arc<BotIdentity>,
-    worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
-    agent_dir_arc: Arc<AgentDir>,
-    pending_auth_arc: PendingAuthMap,
-    home_arc: Arc<RightHome>,
-    ssh_config_arc: Arc<SshConfigPath>,
-    intercept_slots_arc: Arc<InterceptSlots>,
-    pending_token_slot_arc: Arc<PendingTokenSlot>,
-    pending_auth_choice_slot_arc: Arc<PendingMcpAuthChoiceSlot>,
-    internal_api_arc: Arc<InternalApi>,
-    settings_arc: Arc<AgentSettings>,
-    stop_tokens: super::StopTokens,
-    thinking_visibility: super::ThinkingVisibility,
-    idle_ts: Arc<IdleTimestamp>,
-    session_locks: super::SessionLocks,
-    bg_requests: super::BgRequests,
-    bg_handoff_gates: super::BgHandoffGates,
-    progress_state: super::progress::ProgressState,
-    compact_timers: super::CompactTimers,
-) -> teloxide::dispatching::Dispatcher<BotType, RequestError, DefaultKey> {
-    let worker_ctl = super::WorkerControlDeps {
-        stop_tokens,
-        session_locks,
-        bg_requests,
-        bg_handoff_gates,
-        thinking_visibility,
-        progress: progress_state,
-        compact_timers,
-    };
-    let filter = make_routing_filter(allowlist.clone(), (*identity_arc).clone());
-    let archive_agent_dir = Arc::clone(&agent_dir_arc);
-    let archive_identity = Arc::clone(&identity_arc);
-
-    // Dispatch schema (RESEARCH.md Pattern 1)
-    let command_handler = dptree::entry()
-        .filter_command::<BotCommand>()
-        .branch(dptree::case![BotCommand::Start(payload)].endpoint(handle_start))
-        .branch(dptree::case![BotCommand::New(name)].endpoint(handle_new))
-        .branch(dptree::case![BotCommand::List].endpoint(handle_list))
-        .branch(dptree::case![BotCommand::Switch(uuid)].endpoint(handle_switch))
-        .branch(dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp))
-        .branch(dptree::case![BotCommand::Providers(args)].endpoint(handle_providers))
-        .branch(dptree::case![BotCommand::SetFocus(args)].endpoint(handle_set_focus))
-        .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor))
-        .branch(dptree::case![BotCommand::Model].endpoint(handle_model))
-        .branch(dptree::case![BotCommand::Mode].endpoint(handle_mode))
-        .branch(dptree::case![BotCommand::ModeGroup].endpoint(handle_mode_group))
-        .branch(dptree::case![BotCommand::Dashboard].endpoint(handle_dashboard))
-        .branch(dptree::case![BotCommand::Debug(args)].endpoint(super::debug_command::handle_debug))
-        .branch(dptree::case![BotCommand::Cron(args)].endpoint(handle_cron))
-        .branch(dptree::case![BotCommand::Usage(arg)].endpoint(handle_usage))
-        .branch(
-            dptree::case![BotCommand::Allow(args)]
-                .endpoint(super::allowlist_commands::handle_allow),
-        )
-        .branch(
-            dptree::case![BotCommand::Deny(args)].endpoint(super::allowlist_commands::handle_deny),
-        )
-        .branch(
-            dptree::case![BotCommand::Allowed].endpoint(super::allowlist_commands::handle_allowed),
-        )
-        .branch(
-            dptree::case![BotCommand::AllowAll]
-                .endpoint(super::allowlist_commands::handle_allow_all),
-        )
-        .branch(
-            dptree::case![BotCommand::DenyAll].endpoint(super::allowlist_commands::handle_deny_all),
-        );
-
-    let message_handler = Update::filter_message()
-        .inspect(move |msg: Message| {
-            let meta = pre_filter_log_meta(&msg);
-            tracing::info!(
-                chat_id = meta.chat_id,
-                chat_kind = meta.chat_kind,
-                has_text = meta.has_text,
-                has_caption = meta.has_caption,
-                attachment_count = meta.attachment_count,
-                entity_count = meta.entity_count,
-                "message update received by dispatcher"
-            );
-            super::archive::archive_seen_group_message(
-                &archive_agent_dir.0,
-                archive_identity.as_ref(),
-                &msg,
-            );
-        })
-        .filter_map(filter)
-        .inspect(|msg: Message| {
-            // Log after allow-list filter, before command parsing.
-            // If this appears but no command/handle_message log follows,
-            // the message was swallowed by filter_command (e.g. /command with
-            // formatting entities that prevent parsing).
-            let starts_with_slash = msg.text().is_some_and(|t| t.starts_with('/'));
-            if starts_with_slash {
-                tracing::info!(
-                    chat_id = msg.chat.id.0,
-                    text = msg.text().unwrap_or(""),
-                    "pre-command: message starts with /, attempting command parse"
-                );
-            }
-        })
-        .branch(command_handler)
-        .endpoint(handle_message);
-
-    let callback_handler = Update::filter_callback_query()
-        .branch(
-            dptree::filter(|q: CallbackQuery| {
-                q.data.as_deref().is_some_and(|d| d.starts_with("model:"))
-            })
-            .endpoint(handle_model_callback),
-        )
-        .branch(
-            dptree::filter(|q: CallbackQuery| {
-                q.data
-                    .as_deref()
-                    .is_some_and(|d| d.starts_with("mode:") || d.starts_with("modegroup:"))
-            })
-            .endpoint(handle_mode_callback),
-        )
-        .branch(
-            dptree::filter(|q: CallbackQuery| {
-                q.data.as_deref().is_some_and(|d| d.starts_with("think:"))
-            })
-            .endpoint(handle_thinking_toggle_callback),
-        )
-        .branch(
-            dptree::filter(|q: CallbackQuery| {
-                q.data.as_deref().is_some_and(|d| d.starts_with("bg:"))
-            })
-            .endpoint(handle_bg_callback),
-        )
-        .branch(
-            dptree::filter(|q: CallbackQuery| {
-                q.data.as_deref().is_some_and(|d| d.starts_with("errdet:"))
-            })
-            .endpoint(super::error_details::handle_error_details_callback),
-        )
-        .endpoint(handle_stop_callback);
-
-    let schema = dptree::entry()
-        .branch(message_handler)
-        .branch(callback_handler);
-
-    Dispatcher::builder(bot, schema)
-        .dependencies(dptree::deps![
-            worker_map,
-            agent_dir_arc,
-            pending_auth_arc,
-            home_arc,
-            ssh_config_arc,
-            intercept_slots_arc,
-            pending_token_slot_arc,
-            pending_auth_choice_slot_arc,
-            internal_api_arc,
-            settings_arc,
-            idle_ts,
-            identity_arc,
-            allowlist,
-            worker_ctl
-        ])
-        .build()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, AtomicI64};
-
-    use right_agent::agent::allowlist::{
-        AllowedGroup, AllowedUser, AllowlistFile, AllowlistHandle, AllowlistState, ResponseMode,
-    };
-    use right_mcp::internal_client::InternalClient;
-    use right_memory::prefetch::PrefetchCache;
-    use tokio::sync::{Mutex, RwLock};
-
-    /// Smoke test: construct the real dispatcher with dummy deps. If a handler
-    /// in the tree declares a DI parameter type that is not supplied by either
-    /// `.dependencies(...)` or an upstream combinator (filter_map etc.), dptree's
-    /// runtime `type_check` panics inside `DispatcherBuilder::build()`. We exercise
-    /// exactly that path so the regression is caught at `cargo test` time.
-    ///
-    /// History: commit 34b7a84 wired `make_routing_filter` returning
-    /// `Option<(Message, RoutingDecision)>` into `filter_map`. dptree 0.5.1 does
-    /// not unpack tuples — the bag received `(Message, RoutingDecision)` as a
-    /// single type, leaving `handle_message`'s `decision: RoutingDecision`
-    /// parameter unsatisfied and aborting every bot on startup.
-    #[tokio::test]
-    async fn dispatcher_builds_without_panic() {
-        let bot = build_bot("0:fake_token_for_smoke_test".to_string());
-
-        let allowlist =
-            AllowlistHandle(Arc::new(std::sync::RwLock::new(AllowlistState::default())));
-        let identity = Arc::new(BotIdentity {
-            username: "smoke_bot".to_string(),
-            user_id: 1,
-        });
-        let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> =
-            Arc::new(DashMap::new());
-        let agent_dir = Arc::new(AgentDir(PathBuf::from("/tmp/smoke")));
-        let pending_auth: PendingAuthMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let home = Arc::new(RightHome(PathBuf::from("/tmp/smoke")));
-        let ssh_config = Arc::new(SshConfigPath(None));
-        let intercept_slots = Arc::new(InterceptSlots {
-            auth_code: Arc::new(Mutex::new(None)),
-            auth_watcher: Arc::new(AtomicBool::new(false)),
-        });
-        let pending_token_slot = Arc::new(PendingTokenSlot);
-        let pending_auth_choice_slot = Arc::new(PendingMcpAuthChoiceSlot);
-        let internal_api = Arc::new(InternalApi(Arc::new(InternalClient::new(
-            "/tmp/smoke.sock",
-        ))));
-        let settings = Arc::new(AgentSettings {
-            show_thinking: false,
-            model: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
-            resolved_sandbox: None,
-            hindsight: None,
-            prefetch_cache: Some(PrefetchCache::new()),
-            upgrade_lock: Arc::new(RwLock::new(())),
-            debug: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            stt: None,
-            learning: right_agent::agent::types::LearningConfig::default(),
-            claude_health: crate::keepalive::ClaudeHealth::new(
-                "smoke".to_owned(),
-                PathBuf::from("/tmp/smoke"),
-                None,
-                None,
-                None,
-                None,
-            ),
-            shutdown: CancellationToken::new(),
-            sandbox_runtime: {
-                let (h, _rx) = crate::sandbox_runtime::SandboxRuntimeHandle::new(
-                    crate::sandbox_runtime::SandboxHealth::Ready,
-                );
-                h
-            },
-        });
-        let stop_tokens: super::super::StopTokens = Arc::new(DashMap::new());
-        let thinking_visibility: super::super::ThinkingVisibility = Arc::new(DashMap::new());
-        let session_locks: super::super::SessionLocks = Arc::new(DashMap::new());
-        let bg_requests: super::super::BgRequests = Arc::new(DashMap::new());
-        let bg_handoff_gates: super::super::BgHandoffGates = Arc::new(DashMap::new());
-        let progress_state = super::super::progress::ProgressState::default();
-        let compact_timers: super::super::CompactTimers = Arc::new(DashMap::new());
-        let idle_ts = Arc::new(IdleTimestamp(Arc::new(AtomicI64::new(0))));
-
-        // The call under test. If dptree type_check fails, this aborts the
-        // test process.
-        let _dispatcher = build_dispatcher(
-            bot,
-            allowlist,
-            identity,
-            worker_map,
-            agent_dir,
-            pending_auth,
-            home,
-            ssh_config,
-            intercept_slots,
-            pending_token_slot,
-            pending_auth_choice_slot,
-            internal_api,
-            settings,
-            stop_tokens,
-            thinking_visibility,
-            idle_ts,
-            session_locks,
-            bg_requests,
-            bg_handoff_gates,
-            progress_state,
-            compact_timers,
-        );
-    }
 
     #[tokio::test]
     async fn chat_scope_cleanup_ids_include_legacy_and_current_allowlist() {
+        use right_agent::agent::allowlist::{
+            AllowedGroup, AllowedUser, AllowlistFile, AllowlistHandle, AllowlistState, GroupKind,
+            ResponseMode,
+        };
         let now: chrono::DateTime<chrono::Utc> = "2026-05-19T12:00:00Z".parse().unwrap();
         let allowlist = AllowlistHandle::new(AllowlistState::from_file(AllowlistFile {
             version: 1,
@@ -794,6 +418,7 @@ mod tests {
                 opened_at: now,
                 mode: ResponseMode::Addressed,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             }],
         }));
 
@@ -814,8 +439,8 @@ mod tests {
         assert!(names.contains(&"dashboard"));
         assert!(!names.contains(&"usage"));
         assert!(matches!(
-            BotCommand::parse("/usage detail", "right_bot").unwrap(),
-            BotCommand::Usage(arg) if arg == "detail"
+            super::super::command::parse("/usage detail", "right_bot").unwrap(),
+            super::super::command::BotCommand::Usage(arg) if arg == "detail"
         ));
     }
 
@@ -830,14 +455,14 @@ mod tests {
         assert!(names.contains(&"set_focus"));
         assert!(!names.contains(&"setfocus"));
         assert!(matches!(
-            BotCommand::parse("/set_focus now", "right_bot").unwrap(),
-            BotCommand::SetFocus(arg) if arg == "now"
+            super::super::command::parse("/set_focus now", "right_bot").unwrap(),
+            super::super::command::BotCommand::SetFocus(arg) if arg == "now"
         ));
     }
 
     #[tokio::test]
     async fn pre_filter_log_meta_omits_private_text_and_caption_content() {
-        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+        let msg: frankenstein::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 10,
             "date": 0,
             "chat": {"id": 42, "type": "private", "first_name": "Spammer"},

@@ -12,11 +12,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
-use teloxide::{
-    payloads::SendMessageSetters as _,
-    prelude::Requester as _,
-    types::{ChatId, MessageId, ThreadId},
-};
 
 use super::mcp::parse_json_body;
 use super::{DashboardState, authenticate_api, json_error};
@@ -120,10 +115,15 @@ async fn send_focus_notification_with_bot(
     bot: &crate::telegram::BotType,
     notification: FocusNotification,
 ) -> Result<(), FocusNotificationError> {
-    let mut send = bot.send_message(ChatId(notification.chat_id), notification.text);
-    if notification.thread_id != 0 {
-        send = send.message_thread_id(ThreadId(MessageId(notification.thread_id as i32)));
-    }
+    let thread = (notification.thread_id != 0).then_some(notification.thread_id as i32);
+    let send = bot.send_message_opts(
+        notification.chat_id,
+        &notification.text,
+        false,
+        thread,
+        None,
+        None,
+    );
 
     tokio::time::timeout(FOCUS_NOTIFICATION_TIMEOUT, send)
         .await

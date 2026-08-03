@@ -47,8 +47,12 @@ pub const SEND_MESSAGE_TOOL: &str = "send_message";
 pub const SEND_MESSAGE_MCP_TOOL: &str = "mcp__right__send_message";
 /// Max standalone `send_message` calls per foreground turn.
 pub const MAX_SEND_MESSAGE_PER_TURN: u32 = 20;
+/// Max `channel_post` calls per foreground or cron turn.
+pub const MAX_CHANNEL_POST_PER_TURN: u32 = 10;
 /// Required prefix for `send_message` attachment paths (sandbox outbox).
 pub const SANDBOX_OUTBOX_PREFIX: &str = "/sandbox/outbox/";
+pub const CHANNEL_POST_TOOL: &str = "channel_post";
+pub const CHANNEL_POST_MCP_TOOL: &str = "mcp__right__channel_post";
 
 /// Maximum length (in Unicode scalar values) of a `send_progress` message.
 ///
@@ -266,6 +270,14 @@ impl InternalClient {
         request: &SendMessageRequest,
     ) -> Result<SendMessageResponse, InternalClientError> {
         self.post("/message/send", request).await
+    }
+
+    /// Ask the bot-local UDS endpoint to publish a channel post.
+    pub async fn channel_post(
+        &self,
+        request: &ChannelPostRequest,
+    ) -> Result<ChannelPostResponse, InternalClientError> {
+        self.post("/channel/post", request).await
     }
 
     /// Create a forum topic via the bot-local UDS endpoint.
@@ -743,6 +755,38 @@ pub struct SendMessageResponse {
     pub ok: bool,
     #[serde(default)]
     pub message_ids: Vec<i32>,
+}
+
+// ---------------------------------------------------------------------------
+// channel_post (channel delivery)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ChannelPostRequest {
+    pub invocation_id: String,
+    pub token: String,
+    pub chat_id: i64,
+    pub text: String,
+}
+
+impl std::fmt::Debug for ChannelPostRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelPostRequest")
+            .field("invocation_id", &self.invocation_id)
+            .field("token", &"<redacted>")
+            .field("chat_id", &self.chat_id)
+            .field("text", &self.text)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelPostResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub message_id: Option<i32>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

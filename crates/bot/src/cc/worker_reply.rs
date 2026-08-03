@@ -20,6 +20,25 @@ pub struct ReplyOutput {
     pub bootstrap_complete: Option<bool>,
 }
 
+/// Decide whether a null structured reply is a suspected delivery-channel
+/// mistake worth one repair resume. All conditions must hold:
+/// - `content` is null (nothing was delivered);
+/// - no attachments (media-only replies legitimately use `content: null`);
+/// - no `mcp__right__send_message` call this turn (terminal null is
+///   sanctioned after send_message);
+/// - the turn's last assistant text block is non-empty (the agent tried to
+///   say something; intentional silence produces no text block).
+pub(crate) fn null_reply_needs_repair(
+    output: &ReplyOutput,
+    send_message_used: bool,
+    last_assistant_text: Option<&str>,
+) -> bool {
+    output.content.is_none()
+        && output.attachments.as_ref().is_none_or(Vec::is_empty)
+        && !send_message_used
+        && last_assistant_text.is_some_and(|t| !t.trim().is_empty())
+}
+
 /// Host-mode bootstrap completion check.
 ///
 /// Sandboxed bootstrap is verified in `telegram::worker` by reconciling the
@@ -324,6 +343,59 @@ mod tests {
         let (output, _) = parse_reply_output(json).unwrap();
         assert_eq!(output.content.as_deref(), Some("plain text fallback"));
         assert!(output.attachments.is_none());
+    }
+
+    fn bare_output() -> ReplyOutput {
+        ReplyOutput {
+            content: None,
+            reply_to_message_id: None,
+            attachments: None,
+            used_skill_receipts: None,
+            bootstrap_complete: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn null_reply_repair_triggers_on_null_content_with_undelivered_text() {
+        let output = bare_output();
+        assert!(null_reply_needs_repair(
+            &output,
+            false,
+            Some("Done. Rescheduled.")
+        ));
+    }
+
+    #[tokio::test]
+    async fn null_reply_repair_skips_when_content_present() {
+        let mut output = bare_output();
+        output.content = Some("delivered".into());
+        assert!(!null_reply_needs_repair(&output, false, Some("extra")));
+    }
+
+    #[tokio::test]
+    async fn null_reply_repair_skips_media_only_reply() {
+        let mut output = bare_output();
+        output.attachments = Some(vec![crate::cc::attachments_dto::OutboundAttachment {
+            kind: crate::cc::attachments_dto::OutboundKind::Photo,
+            path: "/sandbox/outbox/img.png".into(),
+            filename: None,
+            caption: Some("caption carries the text".into()),
+            media_group_id: None,
+        }]);
+        assert!(!null_reply_needs_repair(&output, false, Some("text")));
+    }
+
+    #[tokio::test]
+    async fn null_reply_repair_skips_after_send_message() {
+        let output = bare_output();
+        assert!(!null_reply_needs_repair(&output, true, Some("text")));
+    }
+
+    #[tokio::test]
+    async fn null_reply_repair_skips_intentional_silence_without_text() {
+        let output = bare_output();
+        assert!(!null_reply_needs_repair(&output, false, None));
+        assert!(!null_reply_needs_repair(&output, false, Some("   ")));
     }
 
     #[tokio::test]

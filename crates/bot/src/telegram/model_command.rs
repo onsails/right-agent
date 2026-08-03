@@ -90,8 +90,8 @@ pub(crate) fn render_menu_body(current: Option<&str>) -> String {
 }
 
 /// Render the inline keyboard — 2 columns × 2 rows, with `✓` prefix on the active button.
-pub(crate) fn render_keyboard(current: Option<&str>) -> teloxide::types::InlineKeyboardMarkup {
-    use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+pub(crate) fn render_keyboard(current: Option<&str>) -> frankenstein::types::InlineKeyboardMarkup {
+    use frankenstein::types::{InlineKeyboardButton, InlineKeyboardMarkup};
     let active = active_choice(current);
     let button = |c: &ModelChoice| -> InlineKeyboardButton {
         let label = if active.map(|a| a.alias) == Some(c.alias) {
@@ -99,28 +99,32 @@ pub(crate) fn render_keyboard(current: Option<&str>) -> teloxide::types::InlineK
         } else {
             c.label.to_string()
         };
-        InlineKeyboardButton::callback(label, format!("model:{}", c.alias))
+        InlineKeyboardButton::builder()
+            .text(label)
+            .callback_data(format!("model:{}", c.alias))
+            .build()
     };
-    InlineKeyboardMarkup::new(vec![
-        vec![button(&MODEL_CHOICES[0]), button(&MODEL_CHOICES[1])],
-        vec![button(&MODEL_CHOICES[2]), button(&MODEL_CHOICES[3])],
-    ])
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(vec![
+            vec![button(&MODEL_CHOICES[0]), button(&MODEL_CHOICES[1])],
+            vec![button(&MODEL_CHOICES[2]), button(&MODEL_CHOICES[3])],
+        ])
+        .build()
 }
 
 /// Open the `/model` menu. Allowlist-gated in groups.
 pub(crate) async fn handle_model(
-    bot: super::BotType,
-    msg: teloxide::types::Message,
-    settings: std::sync::Arc<super::handler::AgentSettings>,
-    allowlist: right_agent::agent::allowlist::AllowlistHandle,
-) -> teloxide::prelude::ResponseResult<()> {
-    use teloxide::prelude::*;
-    if !super::handler::is_private_chat(&msg.chat.kind)
-        && !super::allowlist_commands::sender_is_trusted(&msg, &allowlist)
+    ctx: &super::router::HandlerCtx,
+    msg: &frankenstein::types::Message,
+) -> Result<(), super::tg_bot::TgError> {
+    let bot = &ctx.bot;
+    let settings = &ctx.settings;
+    if !super::msg_ext::is_private(&msg.chat)
+        && !super::allowlist_commands::sender_is_trusted(msg, &ctx.allowlist)
     {
         tracing::debug!(
-            chat_id = msg.chat.id.0,
-            user_id = msg.from.as_ref().map(|u| u.id.0),
+            chat_id = msg.chat.id,
+            user_id = msg.from.as_ref().map(|u| u.id),
             "/model ignored: non-trusted sender in group"
         );
         return Ok(());
@@ -131,11 +135,15 @@ pub(crate) async fn handle_model(
     let body = render_menu_body(current_str);
     let keyboard = render_keyboard(current_str);
 
-    let mut send = bot.send_message(msg.chat.id, body).reply_markup(keyboard);
-    if let Some(thread_id) = msg.thread_id {
-        send = send.message_thread_id(thread_id);
-    }
-    send.await?;
+    bot.send_message_opts(
+        msg.chat.id,
+        &body,
+        false,
+        msg.message_thread_id,
+        None,
+        Some(keyboard),
+    )
+    .await?;
     Ok(())
 }
 
@@ -145,49 +153,55 @@ pub(crate) async fn handle_model(
 /// Re-checks the allowlist on every click — the keyboard stays in the chat
 /// and any group member could click it, not just the `/model` invoker.
 pub(crate) async fn handle_model_callback(
-    bot: super::BotType,
-    q: teloxide::types::CallbackQuery,
-    settings: std::sync::Arc<super::handler::AgentSettings>,
-    agent_dir: std::sync::Arc<super::handler::AgentDir>,
-    allowlist: right_agent::agent::allowlist::AllowlistHandle,
-) -> teloxide::prelude::ResponseResult<()> {
-    use teloxide::prelude::*;
+    ctx: &super::router::HandlerCtx,
+    q: &frankenstein::types::CallbackQuery,
+) -> Result<(), super::tg_bot::TgError> {
+    use frankenstein::types::MaybeInaccessibleMessage;
+    let bot = &ctx.bot;
+    let settings = &ctx.settings;
+    let agent_dir = &ctx.agent_dir;
+    let allowlist = &ctx.allowlist;
 
     let Some(data) = q.data.as_deref() else {
         // Ack so Telegram clears the loading spinner.
-        bot.answer_callback_query(q.id).await?;
+        bot.answer_callback(&q.id, None, false).await?;
         return Ok(());
     };
     let Some(alias) = data.strip_prefix("model:") else {
-        bot.answer_callback_query(q.id).await?;
+        bot.answer_callback(&q.id, None, false).await?;
         return Ok(());
     };
 
     let Some(choice) = lookup(alias) else {
         tracing::warn!(callback_data = data, "unknown /model alias");
-        bot.answer_callback_query(q.id)
-            .text("Unknown option")
+        bot.answer_callback(&q.id, Some("Unknown option"), false)
             .await?;
         return Ok(());
+    };
+
+    // The accessible message (if any) carries the chat + message id for the
+    // group-gate check and the menu edit.
+    let message = match q.message.as_ref() {
+        Some(MaybeInaccessibleMessage::Message(m)) => Some((m.chat.id, m.message_id, &m.chat)),
+        _ => None,
     };
 
     // Re-check group gate on every click (the keyboard persists in chat,
     // any group member can click). Fail-secure: missing q.message → treat
     // as group, require trust.
-    let in_group = q
-        .message
-        .as_ref()
-        .map(|m| !super::handler::is_private_chat(&m.chat().kind))
+    let in_group = message
+        .map(|(_, _, chat)| !super::msg_ext::is_private(chat))
         .unwrap_or(true);
     if in_group {
-        let user_id = q.from.id.0 as i64;
+        let user_id = q.from.id as i64;
         let trusted = allowlist
             .0
             .read()
             .expect("allowlist lock poisoned")
             .is_user_trusted(user_id);
         if !trusted {
-            bot.answer_callback_query(q.id).text("Not allowed").await?;
+            bot.answer_callback(&q.id, Some("Not allowed"), false)
+                .await?;
             return Ok(());
         }
     }
@@ -200,8 +214,7 @@ pub(crate) async fn handle_model_callback(
         right_agent::agent::types::write_agent_yaml_model(&agent_yaml_path, choice.model_id)
     {
         tracing::error!(error = %format!("{e:#}"), "/model: failed to write agent.yaml");
-        bot.answer_callback_query(q.id)
-            .text("Failed to save model — see bot logs")
+        bot.answer_callback(&q.id, Some("Failed to save model — see bot logs"), false)
             .await?;
         return Ok(());
     }
@@ -215,8 +228,8 @@ pub(crate) async fn handle_model_callback(
     tracing::info!(
         from = ?old_value.as_deref().unwrap_or("inherit"),
         to = ?choice.model_id.unwrap_or("inherit"),
-        chat_id = q.message.as_ref().map(|m| m.chat().id.0),
-        user_id = q.from.id.0,
+        chat_id = message.map(|(chat_id, _, _)| chat_id),
+        user_id = q.from.id,
         "model switched via /model"
     );
 
@@ -225,22 +238,21 @@ pub(crate) async fn handle_model_callback(
     // truth; the visible menu is a courtesy. Telegram requires
     // answerCallbackQuery within ~3s to clear the spinner — running it
     // concurrent with the edit avoids that timeout on slow networks.
-    let toast = bot
-        .answer_callback_query(q.id)
-        .text(format!("Switched to {}", choice.label));
-    if let Some(message) = q.message.as_ref() {
+    let toast_text = format!("Switched to {}", choice.label);
+    if let Some((chat_id, message_id, _)) = message {
         let new_body = render_menu_body(choice.model_id);
         let new_kb = render_keyboard(choice.model_id);
-        let edit = bot
-            .edit_message_text(message.chat().id, message.id(), new_body)
-            .reply_markup(new_kb);
-        let (edit_result, toast_result) = tokio::join!(edit.send(), toast.send());
+        // Plain text (teloxide parity): the menu body is not HTML; edit_html
+        // would force ParseMode::Html.
+        let edit = bot.edit_text(chat_id, message_id, &new_body, Some(new_kb));
+        let toast = bot.answer_callback(&q.id, Some(&toast_text), false);
+        let (edit_result, toast_result) = tokio::join!(edit, toast);
         if let Err(e) = edit_result {
             tracing::warn!(error = %e, "failed to edit /model menu after switch");
         }
         toast_result?;
     } else {
-        toast.await?;
+        bot.answer_callback(&q.id, Some(&toast_text), false).await?;
     }
     Ok(())
 }
@@ -367,10 +379,7 @@ mod tests {
             .inline_keyboard
             .iter()
             .flatten()
-            .filter_map(|b| match &b.kind {
-                teloxide::types::InlineKeyboardButtonKind::CallbackData(d) => Some(d.clone()),
-                _ => None,
-            })
+            .filter_map(|b| b.callback_data.clone())
             .collect();
         assert_eq!(
             data,

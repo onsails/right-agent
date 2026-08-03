@@ -12,23 +12,20 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use dashmap::DashMap;
-use right_agent::agent::allowlist::AllowlistHandle;
-use teloxide::RequestError;
-use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message};
-use tokio::sync::mpsc;
+use frankenstein::types::{
+    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo,
+};
 
 use crate::cc::markdown_utils::{html_escape, strip_html_tags};
 
-use super::BotType;
-#[cfg(test)]
-use super::ThinkingVisibility;
-use super::oauth_callback::PendingAuthMap;
+use super::msg_ext;
+use super::router::HandlerCtx;
 use super::session::{
     activate_session, create_session, deactivate_current, effective_thread_id,
     find_sessions_by_uuid, list_sessions, truncate_label,
 };
-use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
+use super::tg_bot::TgError;
+use super::worker::{SessionKey, WorkerContext, spawn_worker};
 
 /// Newtype wrapper for the agent directory passed via dptree dependencies.
 /// Distinct from RightHome to prevent TypeId collision in dptree.
@@ -43,14 +40,6 @@ pub struct SshConfigPath(pub Option<PathBuf>);
 /// Distinct from AgentDir to prevent TypeId collision in dptree.
 #[derive(Clone)]
 pub struct RightHome(pub PathBuf);
-
-/// Compatibility dependency for the former Telegram MCP token prompt flow.
-#[derive(Clone)]
-pub struct PendingTokenSlot;
-
-/// Compatibility dependency for the former Telegram MCP auth-choice prompt flow.
-#[derive(Clone)]
-pub struct PendingMcpAuthChoiceSlot;
 
 /// Bundle of message-intercept slots to reduce dptree DI parameter count.
 /// Contains the auth code intercept slot plus the auth-watcher-active flag.
@@ -103,32 +92,22 @@ pub struct AgentSettings {
     pub sandbox_runtime: std::sync::Arc<crate::sandbox_runtime::SandboxRuntimeHandle>,
 }
 
-/// Convert an arbitrary error into `RequestError::Io` so it propagates through `ResponseResult`.
-fn to_request_err(e: impl std::fmt::Display) -> RequestError {
-    RequestError::Io(std::io::Error::other(e.to_string()).into())
-}
-
-/// True when the chat is a private (1:1) chat. Used by DM-only command gates.
-pub(crate) fn is_private_chat(kind: &teloxide::types::ChatKind) -> bool {
-    matches!(kind, teloxide::types::ChatKind::Private(_))
+/// Wrap an arbitrary error as a `TgError::Other`, preserving the full source
+/// chain via alternate Display.
+fn other_err(e: impl std::fmt::Display) -> TgError {
+    TgError::Other(format!("{e:#}"))
 }
 
 /// Send an HTML-formatted message, respecting thread_id for topic replies.
 async fn send_html_reply(
-    bot: &BotType,
-    chat_id: teloxide::types::ChatId,
+    bot: &super::BotType,
+    chat_id: i64,
     eff_thread_id: i64,
     text: &str,
-) -> Result<teloxide::types::Message, RequestError> {
-    let mut send = bot
-        .send_message(chat_id, text)
-        .parse_mode(teloxide::types::ParseMode::Html);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
-            eff_thread_id as i32,
-        )));
-    }
-    send.await
+) -> Result<frankenstein::types::Message, TgError> {
+    let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
+    bot.send_message_opts(chat_id, text, true, thread, None, None)
+        .await
 }
 
 /// Handle an incoming text message.
@@ -139,31 +118,24 @@ async fn send_html_reply(
 ///
 /// Serialisation guarantee (SES-05): all messages to the same (chat_id, thread_id)
 /// go through the same mpsc channel -> worker processes them serially.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_message(
-    bot: BotType,
-    msg: Message,
+pub(crate) async fn handle_message(
+    ctx: &HandlerCtx,
+    msg: &Message,
     decision: super::filter::RoutingDecision,
-    worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
-    agent_dir: Arc<AgentDir>,
-    ssh_config: Arc<SshConfigPath>,
-    intercept_slots: Arc<InterceptSlots>,
-    settings: Arc<AgentSettings>,
-    idle_ts: Arc<IdleTimestamp>,
-    internal_api: Arc<InternalApi>,
-    identity: Arc<super::mention::BotIdentity>,
-    worker_ctl: super::WorkerControlDeps,
-) -> ResponseResult<()> {
-    idle_ts.0.store(
+) -> Result<(), TgError> {
+    use super::worker::DebounceMsg;
+    let settings = &ctx.settings;
+    let identity = &ctx.identity;
+    ctx.idle_ts.0.store(
         chrono::Utc::now().timestamp(),
         std::sync::atomic::Ordering::Relaxed,
     );
 
     // Extract text from message body OR caption (media messages use captions)
-    let text = msg.text().or(msg.caption()).map(|t| t.to_string());
+    let text = msg_ext::text_or_caption(msg).map(|t| t.to_string());
 
     // Extract attachments from all media types
-    let attachments = super::attachments::extract_attachments(&msg);
+    let attachments = super::attachments::extract_attachments(msg);
 
     // Skip messages with neither text nor attachments
     if text.is_none() && attachments.is_empty() {
@@ -173,69 +145,71 @@ pub async fn handle_message(
     // Extract author from sender
     let author = match msg.from.as_ref() {
         Some(user) => super::attachments::MessageAuthor {
-            name: user.full_name(),
+            name: msg_ext::full_name(user),
             username: user.username.as_ref().map(|u| format!("@{u}")),
-            user_id: Some(user.id.0 as i64),
+            user_id: Some(user.id as i64),
         },
         None => super::attachments::MessageAuthor {
-            name: msg.chat.title().unwrap_or("unknown").to_owned(),
-            username: msg.chat.username().map(|u| format!("@{u}")),
+            name: msg_ext::chat_title(&msg.chat)
+                .unwrap_or("unknown")
+                .to_owned(),
+            username: msg_ext::chat_username(&msg.chat).map(|u| format!("@{u}")),
             user_id: None,
         },
     };
 
     // Extract forward origin
-    let forward_info = msg.forward_origin().map(|origin| {
-        use teloxide::types::MessageOrigin;
-        let (from, date) = match origin {
-            MessageOrigin::User { sender_user, date } => (
+    let forward_info = msg.forward_origin.as_ref().map(|origin| {
+        use frankenstein::types::MessageOrigin;
+        let (from, date) = match origin.as_ref() {
+            MessageOrigin::User(o) => (
                 super::attachments::MessageAuthor {
-                    name: sender_user.full_name(),
-                    username: sender_user.username.as_ref().map(|u| format!("@{u}")),
-                    user_id: Some(sender_user.id.0 as i64),
+                    name: msg_ext::full_name(&o.sender_user),
+                    username: o.sender_user.username.as_ref().map(|u| format!("@{u}")),
+                    user_id: Some(o.sender_user.id as i64),
                 },
-                *date,
+                o.date,
             ),
-            MessageOrigin::HiddenUser {
-                sender_user_name,
-                date,
-            } => (
+            MessageOrigin::HiddenUser(o) => (
                 super::attachments::MessageAuthor {
-                    name: sender_user_name.clone(),
+                    name: o.sender_user_name.clone(),
                     username: None,
                     user_id: None,
                 },
-                *date,
+                o.date,
             ),
-            MessageOrigin::Chat {
-                sender_chat, date, ..
-            } => (
+            MessageOrigin::Chat(o) => (
                 super::attachments::MessageAuthor {
-                    name: sender_chat.title().unwrap_or("unknown").to_owned(),
-                    username: sender_chat.username().map(|u| format!("@{u}")),
+                    name: msg_ext::chat_title(&o.sender_chat)
+                        .unwrap_or("unknown")
+                        .to_owned(),
+                    username: msg_ext::chat_username(&o.sender_chat).map(|u| format!("@{u}")),
                     user_id: None,
                 },
-                *date,
+                o.date,
             ),
-            MessageOrigin::Channel { chat, date, .. } => (
+            MessageOrigin::Channel(o) => (
                 super::attachments::MessageAuthor {
-                    name: chat.title().unwrap_or("unknown").to_owned(),
-                    username: chat.username().map(|u| format!("@{u}")),
+                    name: msg_ext::chat_title(&o.chat).unwrap_or("unknown").to_owned(),
+                    username: msg_ext::chat_username(&o.chat).map(|u| format!("@{u}")),
                     user_id: None,
                 },
-                *date,
+                o.date,
             ),
         };
-        super::attachments::ForwardInfo { from, date }
+        super::attachments::ForwardInfo {
+            from,
+            date: chrono::DateTime::from_timestamp(date as i64, 0).unwrap_or_default(),
+        }
     });
 
     // Extract reply-to message ID
-    let reply_to_id = msg.reply_to_message().map(|m| m.id.0);
-    let quoted_text = msg.quote().map(|q| q.text.clone());
+    let reply_to_id = msg.reply_to_message.as_ref().map(|m| m.message_id);
+    let quoted_text = msg_ext::quote_text(msg);
 
     // Intercept auth code: if login flow is waiting for a code, forward this message.
     if let Some(ref text_val) = text {
-        let mut slot = intercept_slots.auth_code.lock().await;
+        let mut slot = ctx.intercept_slots.auth_code.lock().await;
         if let Some(sender) = slot.take() {
             tracing::info!("handle_message: forwarding message as auth code");
             let _ = sender.send(text_val.clone());
@@ -244,11 +218,11 @@ pub async fn handle_message(
     }
 
     let chat_id = msg.chat.id;
-    let eff_thread_id = effective_thread_id(&msg);
-    super::archive::archive_routed_dm_message(&agent_dir.0, &msg, decision.address.clone());
+    let eff_thread_id = effective_thread_id(msg);
+    super::archive::archive_routed_dm_message(&ctx.agent_dir.0, msg, decision.address.clone());
 
-    let key: SessionKey = (chat_id.0, eff_thread_id);
-    let worker_exists = worker_map.contains_key(&key);
+    let key: SessionKey = (chat_id, eff_thread_id);
+    let worker_exists = ctx.worker_map.contains_key(&key);
     tracing::info!(
         ?key,
         worker_exists,
@@ -259,43 +233,42 @@ pub async fn handle_message(
 
     // Build ChatContext: DM emits nothing; Group emits id/title/topic_id.
     // General topic has thread_id = 1 in supergroups — normalise to "no topic".
-    let chat_ctx = match &msg.chat.kind {
-        teloxide::types::ChatKind::Private(_) => {
-            super::attachments::ChatContext::Private { id: msg.chat.id.0 }
+    let chat_ctx = if msg_ext::is_private(&msg.chat) {
+        super::attachments::ChatContext::Private { id: msg.chat.id }
+    } else {
+        super::attachments::ChatContext::Group {
+            id: msg.chat.id,
+            title: msg_ext::chat_title(&msg.chat).map(|s| s.to_string()),
+            topic_id: msg.message_thread_id.map(i64::from).filter(|&n| n > 1),
         }
-        _ => super::attachments::ChatContext::Group {
-            id: msg.chat.id.0,
-            title: msg.chat.title().map(|s| s.to_string()),
-            topic_id: msg.thread_id.map(|t| i64::from(t.0.0)).filter(|&n| n > 1),
-        },
     };
 
     // Capture the replied-to message for all targets. The worker gate decides
     // whether to render full text, a locator, or a note.
-    let (reply_to_body, reply_to_attachments) = match msg.reply_to_message() {
+    let (reply_to_body, reply_to_attachments) = match msg.reply_to_message.as_ref() {
         Some(r) => {
             let from = r.from.as_ref();
             let is_bot_target = from
-                .map(|f| f.is_bot && f.id.0 == identity.user_id)
+                .map(|f| f.is_bot && f.id == identity.user_id)
                 .unwrap_or(false);
             let author = match from {
                 Some(f) => super::attachments::MessageAuthor {
-                    name: f.full_name(),
+                    name: msg_ext::full_name(f),
                     username: f.username.as_ref().map(|u| format!("@{u}")),
-                    user_id: Some(f.id.0 as i64),
+                    user_id: Some(f.id as i64),
                 },
                 // No `from` (channel auto-forward / anonymous admin): attribute
                 // to the sending chat, mirroring the primary-message author path
                 // rather than emitting an empty name.
                 None => super::attachments::MessageAuthor {
-                    name: r.chat.title().unwrap_or("unknown").to_owned(),
-                    username: r.chat.username().map(|u| format!("@{u}")),
+                    name: msg_ext::chat_title(&r.chat).unwrap_or("unknown").to_owned(),
+                    username: msg_ext::chat_username(&r.chat).map(|u| format!("@{u}")),
                     user_id: None,
                 },
             };
             let body = super::attachments::RawReply {
                 author,
-                text: r.text().or(r.caption()).map(|t| t.to_string()),
+                text: msg_ext::text_or_caption(r).map(|t| t.to_string()),
                 attachments: vec![],
                 is_bot_target,
             };
@@ -312,7 +285,7 @@ pub async fn handle_message(
         .filter(|t| !t.trim().is_empty());
 
     let debounce_msg = DebounceMsg {
-        message_id: msg.id.0,
+        message_id: msg.message_id,
         text,
         timestamp: chrono::Utc::now(),
         attachments,
@@ -326,7 +299,7 @@ pub async fn handle_message(
         chat: chat_ctx,
         reply_to_body,
         reply_to_attachments,
-        media_group_id: msg.media_group_id().map(|m| m.0.clone()),
+        media_group_id: msg.media_group_id.clone(),
     };
 
     // Check for existing worker or spawn a new one.
@@ -334,37 +307,39 @@ pub async fn handle_message(
     // Note: DashMap read guard is NOT held across .await to avoid blocking. Clone the
     // sender before awaiting.
     loop {
-        let maybe_tx = worker_map.get(&key).map(|entry| entry.value().clone());
+        let maybe_tx = ctx.worker_map.get(&key).map(|entry| entry.value().clone());
         match maybe_tx {
             Some(tx) => match tx.send(debounce_msg.clone()).await {
                 Ok(_) => break,
                 Err(e) => {
                     // Worker task panicked or exited -- remove stale sender and respawn
                     tracing::warn!(?key, "worker send failed, respawning: {:#}", e);
-                    worker_map.remove(&key);
+                    ctx.worker_map.remove(&key);
                     // fall through to spawn new worker below on next loop iteration
                 }
             },
             None => {
                 // No sender yet -- spawn a new worker task
-                let agent_name = agent_dir
+                let agent_name = ctx
+                    .agent_dir
                     .0
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
                     .to_string();
-                let ctx = WorkerContext {
+                let worker_ctl = &ctx.worker_ctl;
+                let wctx = WorkerContext {
                     chat_id,
                     effective_thread_id: eff_thread_id,
-                    agent_dir: agent_dir.0.clone(),
+                    agent_dir: ctx.agent_dir.0.clone(),
                     agent_name,
-                    bot: bot.clone(),
-                    agent_db_dir: agent_dir.0.clone(),
+                    bot: ctx.bot.clone(),
+                    agent_db_dir: ctx.agent_dir.0.clone(),
                     debug: Arc::clone(&settings.debug),
-                    ssh_config_path: ssh_config.0.clone(),
+                    ssh_config_path: ctx.ssh_config.0.clone(),
                     resolved_sandbox: settings.resolved_sandbox.clone(),
-                    auth_watcher_active: Arc::clone(&intercept_slots.auth_watcher),
-                    auth_code_tx: Arc::clone(&intercept_slots.auth_code),
+                    auth_watcher_active: Arc::clone(&ctx.intercept_slots.auth_watcher),
+                    auth_code_tx: Arc::clone(&ctx.intercept_slots.auth_code),
                     show_thinking: settings.show_thinking,
                     model: settings.model.clone(),
                     stop_tokens: Arc::clone(&worker_ctl.stop_tokens),
@@ -373,8 +348,8 @@ pub async fn handle_message(
                     bg_requests: Arc::clone(&worker_ctl.bg_requests),
                     bg_handoff_gates: Arc::clone(&worker_ctl.bg_handoff_gates),
                     thinking_visibility: Arc::clone(&worker_ctl.thinking_visibility),
-                    idle_timestamp: Arc::clone(&idle_ts.0),
-                    internal_client: Arc::clone(&internal_api.0),
+                    idle_timestamp: Arc::clone(&ctx.idle_ts.0),
+                    internal_client: Arc::clone(&ctx.internal_api.0),
                     progress_state: worker_ctl.progress.clone(),
                     hindsight: settings.hindsight.clone(),
                     prefetch_cache: settings.prefetch_cache.clone(),
@@ -386,8 +361,8 @@ pub async fn handle_message(
                     shutdown: settings.shutdown.clone(),
                     sandbox_runtime: Arc::clone(&settings.sandbox_runtime),
                 };
-                let tx = spawn_worker(key, ctx, Arc::clone(&worker_map));
-                worker_map.insert(key, tx.clone());
+                let tx = spawn_worker(key, wctx, Arc::clone(&ctx.worker_map));
+                ctx.worker_map.insert(key, tx.clone());
                 // Send to the freshly spawned worker
                 if let Err(e) = tx.send(debounce_msg).await {
                     tracing::error!(?key, "send to freshly spawned worker failed: {:#}", e);
@@ -409,14 +384,15 @@ pub async fn handle_message(
 /// `/set_focus` in a group/topic) re-emits the focus Mini App button here in the
 /// DM, scoped to the originating conversation. Inline `web_app` buttons are
 /// private-chat-only, so the group bounces the operator through this DM path.
-pub async fn handle_start(
-    bot: BotType,
-    msg: Message,
+pub(crate) async fn handle_start(
+    ctx: &HandlerCtx,
+    msg: &Message,
     payload: String,
-    home: Arc<RightHome>,
-    agent_dir: Arc<AgentDir>,
-) -> ResponseResult<()> {
-    if !is_private_chat(&msg.chat.kind) {
+) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let home = &ctx.home;
+    let agent_dir = &ctx.agent_dir;
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "start", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
@@ -436,97 +412,118 @@ pub async fn handle_start(
             "start: focus deep-link → focus button"
         );
         return send_focus_webapp_button(
-            &bot,
+            bot,
             msg.chat.id,
-            &home,
-            &agent_dir,
+            home,
+            agent_dir,
             scope_chat,
             scope_thread,
         )
         .await;
     }
-    bot.send_message(msg.chat.id, "Agent is running. Send a message to start.")
+    bot.send_text(msg.chat.id, "Agent is running. Send a message to start.")
         .await?;
     Ok(())
 }
 
+/// Build a single-button inline keyboard launching a Mini App at `url`.
+fn webapp_keyboard(label: &str, url: url::Url) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(vec![vec![
+            InlineKeyboardButton::builder()
+                .text(label)
+                .web_app(WebAppInfo {
+                    url: url.to_string(),
+                })
+                .build(),
+        ]])
+        .build()
+}
+
+/// Build a single-button inline keyboard linking to `url`.
+fn url_keyboard(label: &str, url: url::Url) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(vec![vec![
+            InlineKeyboardButton::builder()
+                .text(label)
+                .url(url.to_string())
+                .build(),
+        ]])
+        .build()
+}
+
 /// Handle the /dashboard command -- send a Telegram Mini App launch button.
-pub async fn handle_dashboard(
-    bot: BotType,
-    msg: Message,
-    home: Arc<RightHome>,
-    agent_dir: Arc<AgentDir>,
-    allowlist: AllowlistHandle,
-) -> ResponseResult<()> {
-    if !is_private_chat(&msg.chat.kind)
-        && !super::allowlist_commands::sender_is_trusted(&msg, &allowlist)
+pub(crate) async fn handle_dashboard(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let home = &ctx.home;
+    let agent_dir = &ctx.agent_dir;
+    if !msg_ext::is_private(&msg.chat)
+        && !super::allowlist_commands::sender_is_trusted(msg, &ctx.allowlist)
     {
         tracing::debug!(
-            chat_id = msg.chat.id.0,
-            user_id = msg.from.as_ref().map(|user| user.id.0),
+            chat_id = msg.chat.id,
+            user_id = msg.from.as_ref().map(|user| user.id),
             "/dashboard ignored: non-trusted sender in group"
         );
         return Ok(());
     }
 
     let global_config = right_config::read_global_config(&home.0)
-        .map_err(|e| to_request_err(format!("dashboard: read config.yaml: {e:#}")))?;
+        .map_err(|e| other_err(format!("dashboard: read config.yaml: {e:#}")))?;
     let agent_name = agent_dir
         .0
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            to_request_err(format!(
+            other_err(format!(
                 "dashboard: invalid agent directory name: {}",
                 agent_dir.0.display()
             ))
         })?;
     let url = super::dashboard::dashboard_url(&global_config.tunnel.hostname, agent_name)
-        .map_err(|e| to_request_err(format!("dashboard: invalid URL: {e:#}")))?;
-    let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::web_app(
-        "Open dashboard",
-        teloxide::types::WebAppInfo { url },
-    )]]);
+        .map_err(|e| other_err(format!("dashboard: invalid URL: {e:#}")))?;
+    let keyboard = webapp_keyboard("Open dashboard", url);
 
-    let mut send = bot
-        .send_message(msg.chat.id, "Dashboard")
-        .reply_markup(keyboard);
-    let eff_thread_id = effective_thread_id(&msg);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
-            eff_thread_id as i32,
-        )));
-    }
-    send.await?;
+    let eff_thread_id = effective_thread_id(msg);
+    let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
+    bot.send_message_opts(
+        msg.chat.id,
+        "Dashboard",
+        false,
+        thread,
+        None,
+        Some(keyboard),
+    )
+    .await?;
     Ok(())
 }
 
 /// Handle the /new command — start a new session.
-pub async fn handle_new(
-    bot: BotType,
-    msg: Message,
+pub(crate) async fn handle_new(
+    ctx: &HandlerCtx,
+    msg: &Message,
     name: String,
-    worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
-    agent_dir: Arc<AgentDir>,
-) -> ResponseResult<()> {
-    if !is_private_chat(&msg.chat.kind) {
+) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let agent_dir = &ctx.agent_dir;
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "new", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
     let chat_id = msg.chat.id;
-    let eff_thread_id = effective_thread_id(&msg);
-    let key: SessionKey = (chat_id.0, eff_thread_id);
+    let eff_thread_id = effective_thread_id(msg);
+    let key: SessionKey = (chat_id, eff_thread_id);
 
     let conn = right_db::open_connection(&agent_dir.0, false)
         .await
-        .map_err(|e| to_request_err(format!("new: open DB: {:#}", e)))?;
+        .map_err(|e| other_err(format!("new: open DB: {:#}", e)))?;
 
-    let prev_uuid = deactivate_current(&conn, chat_id.0, eff_thread_id)
+    let prev_uuid = deactivate_current(&conn, chat_id, eff_thread_id)
         .await
-        .map_err(|e| to_request_err(format!("new: deactivate: {:#}", e)))?;
+        .map_err(|e| other_err(format!("new: deactivate: {:#}", e)))?;
 
     // Kill worker — channel closes, CC subprocess killed via kill_on_drop
-    worker_map.remove(&key);
+    ctx.worker_map.remove(&key);
 
     let name = name.trim().to_string();
     let mut reply = String::new();
@@ -534,9 +531,9 @@ pub async fn handle_new(
     if !name.is_empty() {
         let new_uuid = uuid::Uuid::new_v4().to_string();
         let label = truncate_label(&name);
-        create_session(&conn, chat_id.0, eff_thread_id, &new_uuid, Some(label))
+        create_session(&conn, chat_id, eff_thread_id, &new_uuid, Some(label))
             .await
-            .map_err(|e| to_request_err(format!("new: create session: {:#}", e)))?;
+            .map_err(|e| other_err(format!("new: create session: {:#}", e)))?;
         reply.push_str(&format!("New session: {name}\n"));
     } else {
         reply.push_str("Session cleared.\n");
@@ -552,35 +549,33 @@ pub async fn handle_new(
         reply.push_str("\nSend a message to start a new conversation.");
     }
 
-    send_html_reply(&bot, chat_id, eff_thread_id, &reply).await?;
+    send_html_reply(bot, chat_id, eff_thread_id, &reply).await?;
 
     tracing::info!(?key, "new session");
     Ok(())
 }
 
 /// Handle the /list command — show all sessions for this chat+thread.
-pub async fn handle_list(
-    bot: BotType,
-    msg: Message,
-    agent_dir: Arc<AgentDir>,
-) -> ResponseResult<()> {
-    if !is_private_chat(&msg.chat.kind) {
+pub(crate) async fn handle_list(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let agent_dir = &ctx.agent_dir;
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "list", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
     let chat_id = msg.chat.id;
-    let eff_thread_id = effective_thread_id(&msg);
+    let eff_thread_id = effective_thread_id(msg);
 
     let conn = right_db::open_connection(&agent_dir.0, false)
         .await
-        .map_err(|e| to_request_err(format!("list: open DB: {:#}", e)))?;
+        .map_err(|e| other_err(format!("list: open DB: {:#}", e)))?;
 
-    let sessions = list_sessions(&conn, chat_id.0, eff_thread_id)
+    let sessions = list_sessions(&conn, chat_id, eff_thread_id)
         .await
-        .map_err(|e| to_request_err(format!("list: query: {:#}", e)))?;
+        .map_err(|e| other_err(format!("list: query: {:#}", e)))?;
 
     if sessions.is_empty() {
-        bot.send_message(chat_id, "No sessions yet. Send a message to start one.")
+        bot.send_text(chat_id, "No sessions yet. Send a message to start one.")
             .await?;
         return Ok(());
     }
@@ -590,7 +585,7 @@ pub async fn handle_list(
         text.push_str(&format_session_line(s));
     }
 
-    send_html_reply(&bot, chat_id, eff_thread_id, &text).await?;
+    send_html_reply(bot, chat_id, eff_thread_id, &text).await?;
     Ok(())
 }
 
@@ -637,24 +632,24 @@ fn format_relative_time(iso_timestamp: &str) -> String {
 }
 
 /// Handle the /switch command — switch to a different session.
-pub async fn handle_switch(
-    bot: BotType,
-    msg: Message,
+pub(crate) async fn handle_switch(
+    ctx: &HandlerCtx,
+    msg: &Message,
     uuid: String,
-    worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
-    agent_dir: Arc<AgentDir>,
-) -> ResponseResult<()> {
-    if !is_private_chat(&msg.chat.kind) {
+) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let agent_dir = &ctx.agent_dir;
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "switch", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
     let chat_id = msg.chat.id;
-    let eff_thread_id = effective_thread_id(&msg);
-    let key: SessionKey = (chat_id.0, eff_thread_id);
+    let eff_thread_id = effective_thread_id(msg);
+    let key: SessionKey = (chat_id, eff_thread_id);
     let uuid = uuid.trim().to_string();
 
     if uuid.is_empty() {
-        bot.send_message(
+        bot.send_text(
             chat_id,
             "Usage: /switch <uuid>\nUse /list to see available sessions.",
         )
@@ -664,16 +659,16 @@ pub async fn handle_switch(
 
     let conn = right_db::open_connection(&agent_dir.0, false)
         .await
-        .map_err(|e| to_request_err(format!("switch: open DB: {:#}", e)))?;
+        .map_err(|e| other_err(format!("switch: open DB: {:#}", e)))?;
 
-    let matches = find_sessions_by_uuid(&conn, chat_id.0, eff_thread_id, &uuid)
+    let matches = find_sessions_by_uuid(&conn, chat_id, eff_thread_id, &uuid)
         .await
-        .map_err(|e| to_request_err(format!("switch: query: {:#}", e)))?;
+        .map_err(|e| other_err(format!("switch: query: {:#}", e)))?;
 
     match matches.len() {
         0 => {
             send_html_reply(
-                &bot,
+                bot,
                 chat_id,
                 eff_thread_id,
                 &format!(
@@ -685,20 +680,20 @@ pub async fn handle_switch(
         1 => {
             let target = &matches[0];
             if target.is_active {
-                bot.send_message(chat_id, "Already active.").await?;
+                bot.send_text(chat_id, "Already active.").await?;
                 return Ok(());
             }
 
             // activate_session atomically deactivates any other active session
             activate_session(&conn, target.id)
                 .await
-                .map_err(|e| to_request_err(format!("switch: activate: {:#}", e)))?;
+                .map_err(|e| other_err(format!("switch: activate: {:#}", e)))?;
 
-            worker_map.remove(&key);
+            ctx.worker_map.remove(&key);
 
             let label = target.label.as_deref().unwrap_or("(unnamed)");
             send_html_reply(
-                &bot,
+                bot,
                 chat_id,
                 eff_thread_id,
                 &format!(
@@ -716,7 +711,7 @@ pub async fn handle_switch(
                 text.push_str(&format_session_line(m));
             }
             text.push_str("\nBe more specific.");
-            send_html_reply(&bot, chat_id, eff_thread_id, &text).await?;
+            send_html_reply(bot, chat_id, eff_thread_id, &text).await?;
         }
     }
     Ok(())
@@ -731,54 +726,41 @@ fn dashboard_mcp_button_label() -> &'static str {
 }
 
 /// Handle the /mcp command by opening the dashboard MCP view.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_mcp(
-    bot: BotType,
-    msg: Message,
+pub(crate) async fn handle_mcp(
+    ctx: &HandlerCtx,
+    msg: &Message,
     _args: String,
-    agent_dir: Arc<AgentDir>,
-    _pending_auth: PendingAuthMap,
-    home: Arc<RightHome>,
-    _internal: Arc<InternalApi>,
-    _pending_token_slot: Arc<PendingTokenSlot>,
-    _pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
-    _ssh_config: Arc<SshConfigPath>,
-    _settings: Arc<AgentSettings>,
-) -> ResponseResult<()> {
-    if !is_private_chat(&msg.chat.kind) {
+) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let agent_dir = &ctx.agent_dir;
+    let home = &ctx.home;
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "mcp", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
     tracing::info!(agent_dir = %agent_dir.0.display(), "mcp: opening dashboard");
     let global_config = right_config::read_global_config(&home.0)
-        .map_err(|e| to_request_err(format!("mcp dashboard: read config.yaml: {e:#}")))?;
+        .map_err(|e| other_err(format!("mcp dashboard: read config.yaml: {e:#}")))?;
     let agent_name = agent_dir
         .0
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            to_request_err(format!(
+            other_err(format!(
                 "mcp dashboard: invalid agent directory name: {}",
                 agent_dir.0.display()
             ))
         })?;
     let mut url = super::dashboard::dashboard_url(&global_config.tunnel.hostname, agent_name)
-        .map_err(|e| to_request_err(format!("mcp dashboard: invalid URL: {e:#}")))?;
+        .map_err(|e| other_err(format!("mcp dashboard: invalid URL: {e:#}")))?;
     url.set_query(Some("view=mcp"));
 
-    let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::web_app(
-        dashboard_mcp_button_label(),
-        teloxide::types::WebAppInfo { url },
-    )]]);
+    let keyboard = webapp_keyboard(dashboard_mcp_button_label(), url);
 
-    let mut send = bot.send_message(msg.chat.id, "MCP").reply_markup(keyboard);
-    let eff_thread_id = effective_thread_id(&msg);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
-            eff_thread_id as i32,
-        )));
-    }
-    send.await?;
+    let eff_thread_id = effective_thread_id(msg);
+    let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
+    bot.send_message_opts(msg.chat.id, "MCP", false, thread, None, Some(keyboard))
+        .await?;
     Ok(())
 }
 
@@ -787,21 +769,15 @@ pub async fn handle_mcp(
 // ---------------------------------------------------------------------------
 
 /// Handle the /providers command by opening the dashboard providers view.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_providers(
-    bot: BotType,
-    msg: Message,
+pub(crate) async fn handle_providers(
+    ctx: &HandlerCtx,
+    msg: &Message,
     _args: String,
-    agent_dir: Arc<AgentDir>,
-    _pending_auth: PendingAuthMap,
-    home: Arc<RightHome>,
-    _internal: Arc<InternalApi>,
-    _pending_token_slot: Arc<PendingTokenSlot>,
-    _pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
-    _ssh_config: Arc<SshConfigPath>,
-    _settings: Arc<AgentSettings>,
-) -> ResponseResult<()> {
-    if !is_private_chat(&msg.chat.kind) {
+) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let agent_dir = &ctx.agent_dir;
+    let home = &ctx.home;
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(
             cmd = "providers",
             "ignoring command in group chat (DM-only)"
@@ -814,20 +790,20 @@ pub async fn handle_providers(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            to_request_err(format!(
+            other_err(format!(
                 "providers dashboard: invalid agent directory name: {}",
                 agent_dir.0.display()
             ))
         })?;
     let cfg = right_agent::agent::discovery::parse_agent_config(&agent_dir.0)
-        .map_err(|e| to_request_err(format!("providers dashboard: load agent.yaml: {e:#}")))?;
+        .map_err(|e| other_err(format!("providers dashboard: load agent.yaml: {e:#}")))?;
     let mode = cfg
         .as_ref()
         .map(|c| *c.sandbox_mode())
         .unwrap_or(right_agent_config::SandboxMode::Openshell);
     if mode != right_agent_config::SandboxMode::Openshell {
         let _ = bot
-            .send_message(
+            .send_text(
                 msg.chat.id,
                 "Providers are only available for sandboxed agents. This agent runs in host mode.",
             )
@@ -836,26 +812,24 @@ pub async fn handle_providers(
     }
     tracing::info!(agent_dir = %agent_dir.0.display(), "providers: opening dashboard");
     let global_config = right_config::read_global_config(&home.0)
-        .map_err(|e| to_request_err(format!("providers dashboard: read config.yaml: {e:#}")))?;
+        .map_err(|e| other_err(format!("providers dashboard: read config.yaml: {e:#}")))?;
     let mut url = super::dashboard::dashboard_url(&global_config.tunnel.hostname, agent_name)
-        .map_err(|e| to_request_err(format!("providers dashboard: invalid URL: {e:#}")))?;
+        .map_err(|e| other_err(format!("providers dashboard: invalid URL: {e:#}")))?;
     url.set_query(Some("view=providers"));
 
-    let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::web_app(
-        "Open providers dashboard",
-        teloxide::types::WebAppInfo { url },
-    )]]);
+    let keyboard = webapp_keyboard("Open providers dashboard", url);
 
-    let mut send = bot
-        .send_message(msg.chat.id, "Providers")
-        .reply_markup(keyboard);
-    let eff_thread_id = effective_thread_id(&msg);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
-            eff_thread_id as i32,
-        )));
-    }
-    send.await?;
+    let eff_thread_id = effective_thread_id(msg);
+    let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
+    bot.send_message_opts(
+        msg.chat.id,
+        "Providers",
+        false,
+        thread,
+        None,
+        Some(keyboard),
+    )
+    .await?;
     Ok(())
 }
 
@@ -872,55 +846,49 @@ pub async fn handle_providers(
 /// `t.me/<bot>?start=<scope>` deep-link `url` button instead. Tapping it opens
 /// the DM and delivers `/start <scope>`, where `handle_start` re-emits the
 /// `web_app` button scoped to this conversation.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_set_focus(
-    bot: BotType,
-    msg: Message,
+pub(crate) async fn handle_set_focus(
+    ctx: &HandlerCtx,
+    msg: &Message,
     _args: String,
-    agent_dir: Arc<AgentDir>,
-    _pending_auth: PendingAuthMap,
-    home: Arc<RightHome>,
-    _internal: Arc<InternalApi>,
-    _pending_token_slot: Arc<PendingTokenSlot>,
-    _pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
-    _ssh_config: Arc<SshConfigPath>,
-    _settings: Arc<AgentSettings>,
-    identity: Arc<super::mention::BotIdentity>,
-) -> ResponseResult<()> {
-    let eff_thread_id = effective_thread_id(&msg);
-    if is_private_chat(&msg.chat.kind) {
+) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let agent_dir = &ctx.agent_dir;
+    let home = &ctx.home;
+    let identity = &ctx.identity;
+    let eff_thread_id = effective_thread_id(msg);
+    if msg_ext::is_private(&msg.chat) {
         tracing::info!(agent_dir = %agent_dir.0.display(), "set_focus: opening dashboard (DM)");
         return send_focus_webapp_button(
-            &bot,
+            bot,
             msg.chat.id,
-            &home,
-            &agent_dir,
-            msg.chat.id.0,
+            home,
+            agent_dir,
+            msg.chat.id,
             eff_thread_id,
         )
         .await;
     }
 
     tracing::info!(
-        chat_id = msg.chat.id.0,
+        chat_id = msg.chat.id,
         thread_id = eff_thread_id,
         "set_focus: sending DM deep-link button (group/topic)"
     );
-    let param = super::focus_deeplink::encode_focus_start_param(msg.chat.id.0, eff_thread_id);
+    let param = super::focus_deeplink::encode_focus_start_param(msg.chat.id, eff_thread_id);
     let link = format!("https://t.me/{}?start={}", identity.username, param);
     let url = url::Url::parse(&link)
-        .map_err(|e| to_request_err(format!("set_focus: build deep link: {e:#}")))?;
-    let keyboard =
-        InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::url("Set focus", url)]]);
-    let mut send = bot
-        .send_message(msg.chat.id, "Open focus settings:")
-        .reply_markup(keyboard);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
-            eff_thread_id as i32,
-        )));
-    }
-    send.await?;
+        .map_err(|e| other_err(format!("set_focus: build deep link: {e:#}")))?;
+    let keyboard = url_keyboard("Set focus", url);
+    let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
+    bot.send_message_opts(
+        msg.chat.id,
+        "Open focus settings:",
+        false,
+        thread,
+        None,
+        Some(keyboard),
+    )
+    .await?;
     Ok(())
 }
 
@@ -929,29 +897,29 @@ pub async fn handle_set_focus(
 /// buttons outside private chats, so the scope of the conversation being focused
 /// is carried in the URL/token rather than implied by the send target.
 async fn send_focus_webapp_button(
-    bot: &BotType,
-    send_to: teloxide::types::ChatId,
+    bot: &super::BotType,
+    send_to: i64,
     home: &RightHome,
     agent_dir: &AgentDir,
     scope_chat: i64,
     scope_thread: i64,
-) -> ResponseResult<()> {
+) -> Result<(), TgError> {
     let global_config = right_config::read_global_config(&home.0)
-        .map_err(|e| to_request_err(format!("set_focus dashboard: read config.yaml: {e:#}")))?;
+        .map_err(|e| other_err(format!("set_focus dashboard: read config.yaml: {e:#}")))?;
     let agent_name = agent_dir
         .0
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            to_request_err(format!(
+            other_err(format!(
                 "set_focus dashboard: invalid agent directory name: {}",
                 agent_dir.0.display()
             ))
         })?;
     let mut url = super::dashboard::dashboard_url(&global_config.tunnel.hostname, agent_name)
-        .map_err(|e| to_request_err(format!("set_focus dashboard: invalid URL: {e:#}")))?;
+        .map_err(|e| other_err(format!("set_focus dashboard: invalid URL: {e:#}")))?;
     let focus_token = super::dashboard::generate_focus_scope_token(
-        bot.inner().inner().token(),
+        bot.token(),
         agent_name,
         scope_chat,
         scope_thread,
@@ -962,12 +930,8 @@ async fn send_focus_webapp_button(
         .append_pair("thread_id", &scope_thread.to_string())
         .append_pair("token", &focus_token);
 
-    let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::web_app(
-        "Set focus",
-        teloxide::types::WebAppInfo { url },
-    )]]);
-    bot.send_message(send_to, "Focus")
-        .reply_markup(keyboard)
+    let keyboard = webapp_keyboard("Set focus", url);
+    bot.send_message_opts(send_to, "Focus", false, None, None, Some(keyboard))
         .await?;
     Ok(())
 }
@@ -977,41 +941,40 @@ async fn send_focus_webapp_button(
 // ---------------------------------------------------------------------------
 
 /// Handle the /cron command — routes to list (no args) or detail (job name).
-pub async fn handle_cron(
-    bot: BotType,
-    msg: Message,
+pub(crate) async fn handle_cron(
+    ctx: &HandlerCtx,
+    msg: &Message,
     args: String,
-    agent_dir: Arc<AgentDir>,
-) -> ResponseResult<()> {
-    if !is_private_chat(&msg.chat.kind) {
+) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let agent_dir = &ctx.agent_dir;
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "cron", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
-    let result = if args.trim().is_empty() {
-        handle_cron_list(&bot, &msg, &agent_dir.0).await
+    if args.trim().is_empty() {
+        handle_cron_list(bot, msg, &agent_dir.0).await
     } else {
-        handle_cron_detail(&bot, &msg, args.trim(), &agent_dir.0).await
-    };
-    result.map_err(|e| to_request_err(format!("{e:#}")))?;
-    Ok(())
+        handle_cron_detail(bot, msg, args.trim(), &agent_dir.0).await
+    }
 }
 
 /// `/cron` — list all cron jobs with human-readable schedule and last run status.
 async fn handle_cron_list(
-    bot: &BotType,
+    bot: &super::BotType,
     msg: &Message,
     agent_dir: &Path,
-) -> Result<(), RequestError> {
+) -> Result<(), TgError> {
     let conn = right_db::open_connection(agent_dir, false)
         .await
-        .map_err(|e| to_request_err(format!("DB open failed: {e:#}")))?;
+        .map_err(|e| other_err(format!("DB open failed: {e:#}")))?;
 
     let specs = right_agent::cron_spec::load_specs_from_db(&conn)
         .await
-        .map_err(|e| to_request_err(format!("load specs failed: {e:#}")))?;
+        .map_err(|e| other_err(format!("load specs failed: {e:#}")))?;
 
     if specs.is_empty() {
-        bot.send_message(msg.chat.id, "No cron jobs configured.")
+        bot.send_text(msg.chat.id, "No cron jobs configured.")
             .await?;
         return Ok(());
     }
@@ -1033,7 +996,7 @@ async fn handle_cron_list(
 
         let last_run = right_agent::cron_spec::get_recent_runs(&conn, name, 1)
             .await
-            .map_err(|e| to_request_err(format!("get runs failed: {e:#}")))?;
+            .map_err(|e| other_err(format!("get runs failed: {e:#}")))?;
 
         let status_str = match last_run.first() {
             Some(run) => {
@@ -1056,21 +1019,21 @@ async fn handle_cron_list(
 
 /// `/cron <job-name>` — show job detail + last 5 runs.
 async fn handle_cron_detail(
-    bot: &BotType,
+    bot: &super::BotType,
     msg: &Message,
     job_name: &str,
     agent_dir: &Path,
-) -> Result<(), RequestError> {
+) -> Result<(), TgError> {
     let conn = right_db::open_connection(agent_dir, false)
         .await
-        .map_err(|e| to_request_err(format!("DB open failed: {e:#}")))?;
+        .map_err(|e| other_err(format!("DB open failed: {e:#}")))?;
 
     let detail = right_agent::cron_spec::get_spec_detail(&conn, job_name)
         .await
-        .map_err(|e| to_request_err(format!("query failed: {e:#}")))?;
+        .map_err(|e| other_err(format!("query failed: {e:#}")))?;
 
     let Some(detail) = detail else {
-        bot.send_message(msg.chat.id, format!("Cron job '{job_name}' not found."))
+        bot.send_text(msg.chat.id, &format!("Cron job '{job_name}' not found."))
             .await?;
         return Ok(());
     };
@@ -1091,7 +1054,7 @@ async fn handle_cron_detail(
 
     let runs = right_agent::cron_spec::get_recent_runs(&conn, job_name, 5)
         .await
-        .map_err(|e| to_request_err(format!("get runs failed: {e:#}")))?;
+        .map_err(|e| other_err(format!("get runs failed: {e:#}")))?;
 
     if runs.is_empty() {
         text.push_str("\n\nNo runs yet.");
@@ -1138,8 +1101,10 @@ fn format_duration(start_iso: &str, end_iso: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Handle the /doctor command -- run all doctor checks and return results.
-pub async fn handle_doctor(bot: BotType, msg: Message, home: Arc<RightHome>) -> ResponseResult<()> {
-    if !is_private_chat(&msg.chat.kind) {
+pub(crate) async fn handle_doctor(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let home = &ctx.home;
+    if !msg_ext::is_private(&msg.chat) {
         tracing::debug!(cmd = "doctor", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
@@ -1147,13 +1112,11 @@ pub async fn handle_doctor(bot: BotType, msg: Message, home: Arc<RightHome>) -> 
     let checks = right_agent::doctor::run_doctor(&home.0).await;
     for text in format_doctor_result_messages(&checks) {
         if let Err(e) = bot
-            .send_message(msg.chat.id, &text)
-            .parse_mode(teloxide::types::ParseMode::Html)
+            .send_message_opts(msg.chat.id, &text, true, None, None, None)
             .await
         {
             tracing::error!("handle_doctor: Telegram rejected HTML message: {e:#}");
-            bot.send_message(msg.chat.id, strip_html_tags(&text))
-                .await?;
+            bot.send_text(msg.chat.id, &strip_html_tags(&text)).await?;
         }
     }
     Ok(())
@@ -1204,15 +1167,12 @@ fn format_doctor_result_body(checks: &[right_agent::doctor::DoctorCheck]) -> Str
 // ---------------------------------------------------------------------------
 
 /// Handle manual /usage compatibility by opening the dashboard.
-pub async fn handle_usage(
-    bot: BotType,
-    msg: Message,
+pub(crate) async fn handle_usage(
+    ctx: &HandlerCtx,
+    msg: &Message,
     _arg: String,
-    home: Arc<RightHome>,
-    agent_dir: Arc<AgentDir>,
-    allowlist: AllowlistHandle,
-) -> ResponseResult<()> {
-    handle_dashboard(bot, msg, home, agent_dir, allowlist).await
+) -> Result<(), TgError> {
+    handle_dashboard(ctx, msg).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1223,14 +1183,13 @@ pub async fn handle_usage(
 ///
 /// Callback data format: `stop:{chat_id}:{eff_thread_id}`
 /// Looks up the CancellationToken in StopTokens and cancels it.
-pub async fn handle_stop_callback(
-    bot: BotType,
-    q: CallbackQuery,
-    worker_ctl: super::WorkerControlDeps,
-) -> ResponseResult<()> {
+pub(crate) async fn handle_stop_callback(
+    ctx: &HandlerCtx,
+    q: &CallbackQuery,
+) -> Result<(), TgError> {
+    let worker_ctl = &ctx.worker_ctl;
     let data = q.data.as_deref().unwrap_or("");
     let parts: Vec<&str> = data.splitn(3, ':').collect();
-    let qid = q.id;
 
     let text = if parts.len() == 3
         && parts[0] == "stop"
@@ -1251,17 +1210,12 @@ pub async fn handle_stop_callback(
         None
     };
 
-    let mut answer = bot.answer_callback_query(qid);
-    if let Some(t) = text {
-        answer = answer.text(t);
-    }
-    answer.await?;
-
+    ctx.bot.answer_callback(&q.id, text, false).await?;
     Ok(())
 }
 
 fn apply_thinking_toggle_callback(
-    thinking_visibility: &super::ThinkingVisibility,
+    thinking_visibility: &crate::telegram::ThinkingVisibility,
     data: &str,
 ) -> Option<&'static str> {
     let (key, action) = super::parse_thinking_toggle_callback(data)?;
@@ -1278,23 +1232,15 @@ fn apply_thinking_toggle_callback(
 /// Handle Show/Hide thinking callback queries from thinking messages.
 ///
 /// Callback data format: `think:{chat_id}:{eff_thread_id}:{show|hide}`.
-pub async fn handle_thinking_toggle_callback(
-    bot: BotType,
-    q: CallbackQuery,
-    worker_ctl: super::WorkerControlDeps,
-) -> ResponseResult<()> {
-    let qid = q.id;
+pub(crate) async fn handle_thinking_toggle_callback(
+    ctx: &HandlerCtx,
+    q: &CallbackQuery,
+) -> Result<(), TgError> {
     let text = q
         .data
         .as_deref()
-        .and_then(|data| apply_thinking_toggle_callback(&worker_ctl.thinking_visibility, data));
-
-    let mut answer = bot.answer_callback_query(qid);
-    if let Some(t) = text {
-        answer = answer.text(t);
-    }
-    answer.await?;
-
+        .and_then(|data| apply_thinking_toggle_callback(&ctx.worker_ctl.thinking_visibility, data));
+    ctx.bot.answer_callback(&q.id, text, false).await?;
     Ok(())
 }
 
@@ -1307,14 +1253,10 @@ pub async fn handle_thinking_toggle_callback(
 /// Callback data format: `bg:{chat_id}:{eff_thread_id}`
 /// Sets the bg flag in `BgRequests` and cancels the worker's stop token —
 /// the worker reads the flag after kill+wait and emits Backgrounded.
-pub async fn handle_bg_callback(
-    bot: BotType,
-    q: CallbackQuery,
-    worker_ctl: super::WorkerControlDeps,
-) -> ResponseResult<()> {
+pub(crate) async fn handle_bg_callback(ctx: &HandlerCtx, q: &CallbackQuery) -> Result<(), TgError> {
+    let worker_ctl = &ctx.worker_ctl;
     let data = q.data.as_deref().unwrap_or("");
     let parts: Vec<&str> = data.splitn(3, ':').collect();
-    let qid = q.id;
 
     let text = if parts.len() == 3
         && parts[0] == "bg"
@@ -1346,30 +1288,28 @@ pub async fn handle_bg_callback(
         None
     };
 
-    let mut answer = bot.answer_callback_query(qid);
-    if let Some(t) = text {
-        answer = answer.text(t);
-    }
-    answer.await?;
-
+    ctx.bot.answer_callback(&q.id, text, false).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frankenstein::types::Chat;
     use std::any::TypeId;
 
-    fn make_private_chat_kind() -> teloxide::types::ChatKind {
+    fn make_private_chat() -> Chat {
         serde_json::from_value(serde_json::json!({
+            "id": 1,
             "type": "private",
             "first_name": "Test"
         }))
         .unwrap()
     }
 
-    fn make_group_chat_kind() -> teloxide::types::ChatKind {
+    fn make_group_chat() -> Chat {
         serde_json::from_value(serde_json::json!({
+            "id": -1,
             "type": "group",
             "title": "Group"
         }))
@@ -1377,9 +1317,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_private_chat_detects_dm() {
-        assert!(is_private_chat(&make_private_chat_kind()));
-        assert!(!is_private_chat(&make_group_chat_kind()));
+    async fn msg_ext_is_private_detects_dm() {
+        assert!(super::msg_ext::is_private(&make_private_chat()));
+        assert!(!super::msg_ext::is_private(&make_group_chat()));
     }
 
     /// Regression test: AgentDir and RightHome must have distinct TypeIds.
@@ -1578,7 +1518,7 @@ mod tests {
 
     #[tokio::test]
     async fn thinking_toggle_show_updates_active_visibility() {
-        let map: super::ThinkingVisibility = Arc::new(DashMap::new());
+        let map: crate::telegram::ThinkingVisibility = Arc::new(DashMap::new());
         let key = (42_i64, 7_i64);
         map.insert(key, false);
 
@@ -1590,7 +1530,7 @@ mod tests {
 
     #[tokio::test]
     async fn thinking_toggle_hide_updates_active_visibility() {
-        let map: super::ThinkingVisibility = Arc::new(DashMap::new());
+        let map: crate::telegram::ThinkingVisibility = Arc::new(DashMap::new());
         let key = (42_i64, 7_i64);
         map.insert(key, true);
 
@@ -1602,7 +1542,7 @@ mod tests {
 
     #[tokio::test]
     async fn thinking_toggle_after_finish_reports_already_finished() {
-        let map: super::ThinkingVisibility = Arc::new(DashMap::new());
+        let map: crate::telegram::ThinkingVisibility = Arc::new(DashMap::new());
 
         let text = apply_thinking_toggle_callback(&map, "think:42:7:show");
         assert_eq!(text, Some("Already finished"));
@@ -1610,7 +1550,7 @@ mod tests {
 
     #[tokio::test]
     async fn thinking_toggle_malformed_callback_returns_none() {
-        let map: super::ThinkingVisibility = Arc::new(DashMap::new());
+        let map: crate::telegram::ThinkingVisibility = Arc::new(DashMap::new());
 
         assert_eq!(apply_thinking_toggle_callback(&map, "think:42:7"), None);
         assert_eq!(apply_thinking_toggle_callback(&map, "stop:42:7"), None);

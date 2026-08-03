@@ -69,6 +69,17 @@ pub(crate) fn disallow_send_message(mut tools: Vec<String>) -> Vec<String> {
     tools
 }
 
+/// `channel_post` is foreground+cron only: hide it from background-continuation,
+/// delivery, and reflection invocations. It intentionally does not belong in
+/// the shared foreground-only chains because cron uses those chains.
+pub(crate) fn disallow_channel_post(mut tools: Vec<String>) -> Vec<String> {
+    const TOOL: &str = right_mcp::internal_client::CHANNEL_POST_MCP_TOOL;
+    if !tools.iter().any(|tool| tool == TOOL) {
+        tools.push(TOOL.to_owned());
+    }
+    tools
+}
+
 pub(crate) fn disallow_learning_tools(mut tools: Vec<String>) -> Vec<String> {
     for tool_name in [
         right_mcp::internal_client::SKILL_LEARNING_START_MCP_TOOL,
@@ -183,6 +194,10 @@ pub(crate) struct NonForegroundInvocationRegistration {
     pub(crate) kind: right_mcp::internal_client::ProgressInvocationKindDto,
     pub(crate) chat_id: Option<i64>,
     pub(crate) thread_id: Option<i64>,
+    /// Bot-local UDS progress registry for invocations that need Telegram
+    /// delivery. Background learning callers without a bot-local route leave
+    /// this absent.
+    pub(crate) progress_state: Option<crate::telegram::progress::ProgressState>,
 }
 
 #[must_use = "registered invocations must be cleaned up with cleanup().await"]
@@ -194,6 +209,8 @@ pub(crate) struct RegisteredNonForegroundInvocation {
     claude_mcp_config_path: String,
     resolved_sandbox: Option<String>,
     sandbox_mcp_config_path: Option<String>,
+    progress_state: Option<crate::telegram::progress::ProgressState>,
+
     cleaned: bool,
 }
 
@@ -218,6 +235,10 @@ impl RegisteredNonForegroundInvocation {
     /// Sync — safe for `Drop`. Does NOT unregister the invocation (only the
     /// async `cleanup()` path does that).
     fn cleanup_local_and_sandbox(&mut self) {
+        if let Some(progress_state) = &self.progress_state {
+            progress_state.unregister(&self.invocation_id);
+        }
+
         remove_invocation_mcp_config_file(&self.local_mcp_config_path);
         if let Some(sandbox_path) = self.sandbox_mcp_config_path.take() {
             spawn_sandbox_invocation_mcp_cleanup(
@@ -307,6 +328,19 @@ pub(crate) async fn register_non_foreground_invocation(
             (local_mcp_config_path.to_string_lossy().into_owned(), None)
         };
 
+    if let Some(progress_state) = registration.progress_state.as_ref() {
+        progress_state.register(crate::telegram::progress::ProgressTarget {
+            invocation_id: invocation_id.clone(),
+            token: register_req.bot_send_token.clone(),
+            chat_id: registration.chat_id.unwrap_or_default(),
+            thread_id: registration.thread_id.unwrap_or_default(),
+            agent_dir: registration.agent_dir.clone(),
+            ssh_config_path: registration.ssh_config_path.clone(),
+            resolved_sandbox: registration.resolved_sandbox.clone(),
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        });
+    }
+
     Ok(RegisteredNonForegroundInvocation {
         invocation_id,
         agent_name: registration.agent_name,
@@ -315,6 +349,7 @@ pub(crate) async fn register_non_foreground_invocation(
         claude_mcp_config_path,
         resolved_sandbox: registration.resolved_sandbox,
         sandbox_mcp_config_path,
+        progress_state: registration.progress_state,
         cleaned: false,
     })
 }
@@ -1060,6 +1095,17 @@ mod tests {
         assert_eq!(count, 1);
     }
 
+    #[test]
+    fn disallow_channel_post_adds_the_tool_once() {
+        let tools = disallow_channel_post(disallow_channel_post(Vec::new()));
+        let count = tools
+            .iter()
+            .filter(|tool| tool.as_str() == right_mcp::internal_client::CHANNEL_POST_MCP_TOOL)
+            .count();
+
+        assert_eq!(count, 1);
+    }
+
     #[tokio::test]
     async fn disallow_learning_tools_adds_full_mcp_tool_names() {
         let tools = disallow_learning_tools(vec!["Agent".to_owned()]);
@@ -1158,6 +1204,7 @@ mod tests {
             kind: right_mcp::internal_client::ProgressInvocationKindDto::ProbeWriter,
             chat_id: Some(42),
             thread_id: Some(7),
+            progress_state: None,
         })
         .await
         .unwrap();
@@ -1183,7 +1230,6 @@ mod tests {
         );
 
         active.cleanup().await;
-
         let unregister = requests.recv().await.unwrap();
         assert_eq!(unregister.path, "/progress/unregister");
         assert_eq!(
@@ -1195,6 +1241,81 @@ mod tests {
             "cleanup should remove per-invocation MCP config"
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cron_registration_is_visible_to_the_bot_uds_router() {
+        use tower::ServiceExt as _;
+
+        let agent_dir = tempfile::tempdir().expect("agent dir");
+        write_base_mcp_config(agent_dir.path());
+        let socket_dir = tempfile::tempdir().expect("socket dir");
+        let socket_path = socket_dir.path().join("internal.sock");
+        let (mut requests, server) = spawn_progress_api(socket_path.clone(), 2);
+        let progress_state = crate::telegram::progress::ProgressState::default();
+
+        let active = register_non_foreground_invocation(NonForegroundInvocationRegistration {
+            agent_name: "agent-1".to_owned(),
+            agent_dir: agent_dir.path().to_path_buf(),
+            ssh_config_path: None,
+            resolved_sandbox: None,
+            internal_client: Arc::new(right_mcp::internal_client::InternalClient::new(
+                &socket_path,
+            )),
+            kind: right_mcp::internal_client::ProgressInvocationKindDto::Cron,
+            chat_id: None,
+            thread_id: None,
+            progress_state: Some(progress_state.clone()),
+        })
+        .await
+        .expect("register cron invocation");
+
+        let register = requests
+            .recv()
+            .await
+            .expect("progress registration request");
+        assert_eq!(register.path, "/progress/register");
+        assert_eq!(register.body["kind"], "cron");
+
+        let app = crate::telegram::progress::build_progress_router(
+            crate::telegram::progress::ProgressEndpointState {
+                bot: crate::telegram::bot::build_bot("123:test".to_owned()),
+                progress: progress_state.clone(),
+            },
+        );
+        let invocation_id = active.invocation_id().to_owned();
+        let body = serde_json::to_vec(&right_mcp::internal_client::ChannelPostRequest {
+            invocation_id: invocation_id.clone(),
+            token: "wrong-token".to_owned(),
+            chat_id: -100,
+            text: "test".to_owned(),
+        })
+        .expect("serialize channel post");
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/channel/post")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(body))
+                    .expect("build channel post request"),
+            )
+            .await
+            .expect("router request");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::FORBIDDEN,
+            "the registered cron invocation must reach the channel-post token gate"
+        );
+
+        active.cleanup().await;
+        assert!(
+            progress_state.get(&invocation_id).is_none(),
+            "cleanup must remove the bot-local UDS target"
+        );
+        let unregister = requests.recv().await.expect("progress unregister request");
+        assert_eq!(unregister.path, "/progress/unregister");
+        server.await.expect("progress API server");
     }
 
     #[tokio::test]
@@ -1216,6 +1337,7 @@ mod tests {
             kind: right_mcp::internal_client::ProgressInvocationKindDto::Curator,
             chat_id: None,
             thread_id: None,
+            progress_state: None,
         })
         .await
         .unwrap();
@@ -1269,6 +1391,7 @@ mod tests {
             kind: right_mcp::internal_client::ProgressInvocationKindDto::ProbeWriter,
             chat_id: Some(42),
             thread_id: Some(7),
+            progress_state: None,
         })
         .await
         .unwrap();
@@ -1552,6 +1675,16 @@ mod tests {
             full.iter()
                 .any(|t| t == right_mcp::internal_client::SKILL_LEARNING_START_MCP_TOOL)
         );
+    }
+
+    #[test]
+    fn shared_foreground_only_disallow_chains_keep_channel_post_available() {
+        let kept = disallow_foreground_only_tools_keep_learning(baseline_disallowed_tools());
+        let full = disallow_foreground_only_tools(baseline_disallowed_tools());
+        let channel_post = right_mcp::internal_client::CHANNEL_POST_MCP_TOOL;
+
+        assert!(!kept.iter().any(|tool| tool == channel_post));
+        assert!(!full.iter().any(|tool| tool == channel_post));
     }
 
     fn process_exists(pid: u32) -> bool {
