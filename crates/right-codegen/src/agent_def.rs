@@ -22,7 +22,7 @@ pub const BOOTSTRAP_INSTRUCTIONS: &str = include_str!("../templates/right/agent/
 /// Source: `templates/right/prompt/CRON_INSTRUCTIONS.md`
 pub const CRON_INSTRUCTIONS: &str = include_str!("../templates/right/prompt/CRON_INSTRUCTIONS.md");
 
-/// JSON schema for the structured reply format used by teloxide agents (D-02).
+/// JSON schema for the structured reply format used by the Telegram bot (D-02).
 ///
 /// Agents write replies as JSON conforming to this schema.
 /// `content` is required (may be null for media-only replies).
@@ -275,9 +275,10 @@ Identity files are always-loaded durable context. Right Agent explains their pur
 ## Response Rules
 
 Your final response MUST be self-contained. The user ONLY sees your final response — \
-they do NOT see tool calls, intermediate text, or thinking. Never say \"see above\", \
-\"as shown above\", or reference previous output. If you gathered data, include it in \
-your final response.
+they do NOT see tool calls, intermediate text, or thinking. Only the structured reply's \
+`content` field is delivered: assistant text blocks never reach the user, and \
+`content: null` sends nothing. Never say \"see above\", \"as shown above\", or reference \
+previous output. If you gathered data, include it in your final response.
 
 A turn is work done, then reported. When your reply promises an action you can take \
 now, the turn is unfinished: take it with your tools, then report the result. Defer \

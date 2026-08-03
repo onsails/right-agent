@@ -12,9 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use frankenstein::types::ChatAction;
 use right_agent::agent::allowlist::ResponseMode;
-use teloxide::prelude::*;
-use teloxide::types::{ChatAction, MessageId, ReplyParameters, ThreadId};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
@@ -23,7 +22,8 @@ use uuid::Uuid;
 use crate::cc::markdown_utils::{html_escape, strip_html_tags};
 pub use crate::cc::worker_reply::{ReplyOutput, parse_reply_output};
 use crate::cc::worker_reply::{
-    UsedSkillReceipt, append_used_skill_receipts, is_rightx_skill, should_accept_bootstrap,
+    UsedSkillReceipt, append_used_skill_receipts, is_rightx_skill, null_reply_needs_repair,
+    should_accept_bootstrap,
 };
 use crate::reflection::FailureKind;
 
@@ -85,18 +85,25 @@ fn working_keyboard(
     chat_id: i64,
     eff_thread_id: i64,
     mode: ThinkingKeyboardMode,
-) -> teloxide::types::InlineKeyboardMarkup {
+) -> frankenstein::types::InlineKeyboardMarkup {
+    use frankenstein::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+    let btn = |label: &str, data: String| {
+        InlineKeyboardButton::builder()
+            .text(label)
+            .callback_data(data)
+            .build()
+    };
     let mut row = Vec::new();
 
     match mode {
         ThinkingKeyboardMode::Collapsed => {
-            row.push(teloxide::types::InlineKeyboardButton::callback(
+            row.push(btn(
                 "\u{1f4ad} Show thinking",
                 format!("think:{chat_id}:{eff_thread_id}:show"),
             ));
         }
         ThinkingKeyboardMode::ExpandedDirect => {
-            row.push(teloxide::types::InlineKeyboardButton::callback(
+            row.push(btn(
                 "\u{1f4ad} Hide thinking",
                 format!("think:{chat_id}:{eff_thread_id}:hide"),
             ));
@@ -104,16 +111,25 @@ fn working_keyboard(
         ThinkingKeyboardMode::ExpandedGroup => {}
     }
 
-    row.push(teloxide::types::InlineKeyboardButton::callback(
+    row.push(btn(
         "\u{1f6d1} Stop",
         format!("stop:{chat_id}:{eff_thread_id}"),
     ));
-    row.push(teloxide::types::InlineKeyboardButton::callback(
+    row.push(btn(
         "\u{2699}\u{fe0f} Background it",
         format!("bg:{chat_id}:{eff_thread_id}"),
     ));
 
-    teloxide::types::InlineKeyboardMarkup::new(vec![row])
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(vec![row])
+        .build()
+}
+
+/// An empty inline keyboard — used to clear the buttons off a message on edit.
+fn empty_keyboard() -> frankenstein::types::InlineKeyboardMarkup {
+    frankenstein::types::InlineKeyboardMarkup::builder()
+        .inline_keyboard(Vec::new())
+        .build()
 }
 
 fn thinking_anchor_text(
@@ -130,7 +146,7 @@ fn thinking_anchor_text(
 
 struct ThinkingAnchorRender {
     text: String,
-    keyboard: teloxide::types::InlineKeyboardMarkup,
+    keyboard: frankenstein::types::InlineKeyboardMarkup,
 }
 
 fn build_thinking_anchor_render(
@@ -154,26 +170,29 @@ fn build_thinking_anchor_render(
 #[allow(clippy::too_many_arguments)]
 async fn send_thinking_anchor(
     ctx: &WorkerContext,
-    tg_chat_id: teloxide::types::ChatId,
+    tg_chat_id: i64,
     chat_id: i64,
     eff_thread_id: i64,
     expanded: bool,
     is_group: bool,
     events: &VecDeque<crate::cc::stream::StreamEvent>,
     usage: &crate::cc::stream::StreamUsage,
-) -> Option<teloxide::types::MessageId> {
+) -> Option<i32> {
     let render =
         build_thinking_anchor_render(chat_id, eff_thread_id, expanded, is_group, events, usage);
-    let mut send = ctx
-        .bot
-        .send_message(tg_chat_id, &render.text)
-        .parse_mode(teloxide::types::ParseMode::Html)
-        .reply_markup(render.keyboard);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-    }
-
-    send.await.ok().map(|msg| msg.id)
+    let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
+    ctx.bot
+        .send_message_opts(
+            tg_chat_id,
+            &render.text,
+            true,
+            thread,
+            None,
+            Some(render.keyboard),
+        )
+        .await
+        .ok()
+        .map(|msg| msg.message_id)
 }
 
 fn should_trigger_mcp_repair_from_init(line: &str) -> bool {
@@ -261,12 +280,12 @@ pub struct DebounceMsg {
 /// Context passed to each worker task when it is spawned.
 #[derive(Clone)]
 pub struct WorkerContext {
-    pub chat_id: teloxide::types::ChatId,
+    pub chat_id: i64,
     pub effective_thread_id: i64,
     pub agent_dir: PathBuf,
     /// Agent name for --agent flag on first CC invocation (AGDEF-02).
     pub agent_name: String,
-    pub bot: super::BotType,
+    pub(crate) bot: super::BotType,
     /// Agent directory, passed separately so worker opens its own DB connection.
     pub agent_db_dir: PathBuf,
     /// Hot-reloadable debug flag. When true, CC subprocesses run with --debug --debug-file=...
@@ -583,6 +602,18 @@ pub(crate) fn classify_cc_result(stdout: &str) -> CcResultClass {
 /// parse errors, or non-auth errors.
 pub fn is_auth_error(stdout: &str) -> bool {
     matches!(classify_cc_result(stdout), CcResultClass::Auth)
+}
+
+/// CC stderr signature emitted when `--resume` references a session whose
+/// conversation file no longer exists on the CC side (e.g. the session JSONL
+/// was removed from the sandbox). Detecting it lets the worker retire the
+/// stale DB session so the next message starts fresh instead of every
+/// subsequent turn failing on the same dead resume.
+const MISSING_CC_SESSION_STDERR_MARKER: &str = "No conversation found with session ID";
+
+/// Returns true when CC stderr reports the resume target session is missing.
+pub(crate) fn is_missing_cc_session(stderr: &str) -> bool {
+    stderr.contains(MISSING_CC_SESSION_STDERR_MARKER)
 }
 
 /// Extract an OAuth URL from process log lines.
@@ -1399,7 +1430,7 @@ pub fn spawn_worker(
             if ctx.shutdown.is_cancelled() {
                 tracing::warn!(
                     ?key,
-                    chat_id = tg_chat_id.0,
+                    chat_id = tg_chat_id,
                     eff_thread_id,
                     dropped_message_ids = ?batch.iter().map(|m| m.message_id).collect::<Vec<_>>(),
                     "worker shutdown -- abandoning unprocessed batch (foreground turn not yet registered)"
@@ -1535,7 +1566,7 @@ pub fn spawn_worker(
             if ctx.shutdown.is_cancelled() {
                 tracing::warn!(
                     ?key,
-                    chat_id = tg_chat_id.0,
+                    chat_id = tg_chat_id,
                     eff_thread_id,
                     dropped_message_ids = ?batch.iter().map(|m| m.message_id).collect::<Vec<_>>(),
                     "worker shutdown -- abandoning unprocessed batch (foreground turn not yet registered)"
@@ -1549,14 +1580,13 @@ pub fn spawn_worker(
             let bot_clone = ctx.bot.clone();
             let typing_task = tokio::spawn(async move {
                 loop {
-                    let mut action = bot_clone.send_chat_action(tg_chat_id, ChatAction::Typing);
-                    if eff_thread_id != 0 {
-                        action =
-                            action.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-                    }
-                    if let Err(e) = action.await {
+                    let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
+                    if let Err(e) = bot_clone
+                        .send_chat_action(tg_chat_id, ChatAction::Typing, thread)
+                        .await
+                    {
                         tracing::warn!(
-                            chat_id = tg_chat_id.0,
+                            chat_id = tg_chat_id,
                             eff_thread_id,
                             "send_chat_action failed: {e:#}"
                         );
@@ -1573,7 +1603,7 @@ pub fn spawn_worker(
             if ctx.shutdown.is_cancelled() {
                 tracing::warn!(
                     ?key,
-                    chat_id = tg_chat_id.0,
+                    chat_id = tg_chat_id,
                     eff_thread_id,
                     dropped_message_ids = ?batch.iter().map(|m| m.message_id).collect::<Vec<_>>(),
                     "worker shutdown -- abandoning unprocessed batch (foreground turn not yet registered)"
@@ -1712,6 +1742,8 @@ pub fn spawn_worker(
                 cc_usage,
                 cc_wall_elapsed_ms,
                 cc_learning_invocation_id,
+                cc_last_assistant_text,
+                cc_send_message_used,
             ) = match invoke_cc(
                 InvokeCcRequest {
                     conn: &prepared.conn,
@@ -1739,6 +1771,8 @@ pub fn spawn_worker(
                     usage,
                     wall_elapsed_ms,
                     learning_invocation_id,
+                    last_assistant_text,
+                    send_message_used,
                 }) => (
                     Ok(output),
                     session_uuid,
@@ -1748,6 +1782,8 @@ pub fn spawn_worker(
                     usage,
                     wall_elapsed_ms,
                     learning_invocation_id,
+                    last_assistant_text,
+                    send_message_used,
                 ),
                 Err(failure) => {
                     if ctx.resolved_sandbox.is_some() {
@@ -1776,6 +1812,8 @@ pub fn spawn_worker(
                         crate::cc::stream::StreamUsage::default(),
                         0u64,
                         None,
+                        None,
+                        false,
                     )
                 }
             };
@@ -1852,6 +1890,64 @@ pub fn spawn_worker(
             let mut post_turn_probe_anchor: Option<ProbeAnchor> = None;
             match reply_result {
                 Ok(Some(mut output)) => {
+                    // Null-reply repair: `content: null` delivers nothing, but a
+                    // non-empty final text block means the agent intended to
+                    // reply. Resume the session once: re-emit via structured
+                    // `content`, or confirm intentional silence with another null.
+                    if null_reply_needs_repair(
+                        &output,
+                        cc_send_message_used,
+                        cc_last_assistant_text.as_deref(),
+                    ) {
+                        let discarded = cc_last_assistant_text.clone().unwrap_or_default();
+                        tracing::warn!(
+                            ?key,
+                            discarded_len = discarded.len(),
+                            "null reply with undelivered text block — running repair resume"
+                        );
+                        let repair_ctx = crate::reflection::ReflectionContext {
+                            session_uuid: session_uuid.clone(),
+                            limits: crate::reflection::ReflectionLimits::NULL_REPAIR,
+                            agent_name: ctx.agent_name.clone(),
+                            agent_dir: ctx.agent_dir.clone(),
+                            ssh_config_path: ctx.ssh_config_path.clone(),
+                            resolved_sandbox: ctx.resolved_sandbox.clone(),
+                            parent_source: crate::reflection::ParentSource::Worker {
+                                chat_id,
+                                thread_id: eff_thread_id,
+                            },
+                            model: crate::snapshot_model(&ctx.model),
+                            debug: Some(std::sync::Arc::clone(&ctx.debug)),
+                        };
+                        match crate::reflection::repair_null_reply(repair_ctx, &discarded).await {
+                            Ok(repaired)
+                                if repaired.content.is_some()
+                                    || repaired
+                                        .attachments
+                                        .as_ref()
+                                        .is_some_and(|a| !a.is_empty()) =>
+                            {
+                                tracing::info!(
+                                    ?key,
+                                    "null-reply repair produced a deliverable reply"
+                                );
+                                output = repaired;
+                            }
+                            Ok(_) => {
+                                tracing::info!(
+                                    ?key,
+                                    "agent confirmed intentional silence after repair prompt"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    ?key,
+                                    "null-reply repair failed: {e:#} — delivering raw text block"
+                                );
+                                output.content = Some(discarded);
+                            }
+                        }
+                    }
                     output.content = append_used_skill_receipts(
                         output.content,
                         output.used_skill_receipts.as_deref(),
@@ -1922,20 +2018,13 @@ pub fn spawn_worker(
 
                         let start = if caption_consumed { 1 } else { 0 };
                         let mut sent_any_text_message = false;
+                        let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
                         for part in &parts[start..] {
-                            let mut send = ctx.bot.send_message(tg_chat_id, part);
-                            send = send.parse_mode(teloxide::types::ParseMode::Html);
-                            if eff_thread_id != 0 {
-                                send = send
-                                    .message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-                            }
-                            if let Some(ref_id) = reply_to {
-                                send = send.reply_parameters(ReplyParameters {
-                                    message_id: MessageId(ref_id),
-                                    ..Default::default()
-                                });
-                            }
-                            match send.await {
+                            match ctx
+                                .bot
+                                .send_message_opts(tg_chat_id, part, true, thread, reply_to, None)
+                                .await
+                            {
                                 Ok(_) => {
                                     sent_any_text_message = true;
                                 }
@@ -1946,19 +2035,13 @@ pub fn spawn_worker(
                                         e
                                     );
                                     let plain = strip_html_tags(part);
-                                    let mut fallback = ctx.bot.send_message(tg_chat_id, &plain);
-                                    if eff_thread_id != 0 {
-                                        fallback = fallback.message_thread_id(ThreadId(MessageId(
-                                            eff_thread_id as i32,
-                                        )));
-                                    }
-                                    if let Some(ref_id) = reply_to {
-                                        fallback = fallback.reply_parameters(ReplyParameters {
-                                            message_id: MessageId(ref_id),
-                                            ..Default::default()
-                                        });
-                                    }
-                                    match fallback.await {
+                                    match ctx
+                                        .bot
+                                        .send_message_opts(
+                                            tg_chat_id, &plain, false, thread, reply_to, None,
+                                        )
+                                        .await
+                                    {
                                         Ok(_) => {
                                             sent_any_text_message = true;
                                         }
@@ -2056,9 +2139,7 @@ pub fn spawn_worker(
                         Some(msg_id) => {
                             let edit_result = ctx
                                 .bot
-                                .edit_message_text(tg_chat_id, msg_id, &message)
-                                .parse_mode(teloxide::types::ParseMode::Html)
-                                .reply_markup(keyboard.clone())
+                                .edit_html(tg_chat_id, msg_id, &message, Some(keyboard.clone()))
                                 .await;
                             if let Err(edit_err) = edit_result {
                                 tracing::warn!(
@@ -2111,17 +2192,13 @@ pub fn spawn_worker(
                     if let Some(msg_id) = thinking_msg_id {
                         let _ = ctx
                             .bot
-                            .edit_message_text(tg_chat_id, msg_id, &banner)
-                            .parse_mode(teloxide::types::ParseMode::Html)
-                            .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
+                            .edit_html(tg_chat_id, msg_id, &banner, Some(empty_keyboard()))
                             .await;
                     }
 
                     // 2. Run reflection.
                     let refl_ctx = crate::reflection::ReflectionContext {
                         session_uuid: failed_session_uuid,
-                        failure: kind,
-                        ring_buffer_tail,
                         limits: crate::reflection::ReflectionLimits::WORKER,
                         agent_name: ctx.agent_name.clone(),
                         agent_dir: ctx.agent_dir.clone(),
@@ -2135,7 +2212,9 @@ pub fn spawn_worker(
                         debug: Some(std::sync::Arc::clone(&ctx.debug)),
                     };
 
-                    match crate::reflection::reflect_on_failure(refl_ctx).await {
+                    match crate::reflection::reflect_on_failure(refl_ctx, kind, ring_buffer_tail)
+                        .await
+                    {
                         Ok(reply_text) => {
                             tracing::info!(?key, "reflection reply produced");
                             // Delete the banner — reply is the substantive update.
@@ -2150,46 +2229,34 @@ pub fn spawn_worker(
                             let parts = super::markdown::split_html_message(&html);
                             let keyboard = super::error_details::details_keyboard(details_id);
                             let last_idx = parts.len().saturating_sub(1);
+                            let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
                             for (idx, part) in parts.iter().enumerate() {
-                                let mut send = ctx.bot.send_message(tg_chat_id, part);
-                                send = send.parse_mode(teloxide::types::ParseMode::Html);
-                                if eff_thread_id != 0 {
-                                    send = send.message_thread_id(ThreadId(MessageId(
-                                        eff_thread_id as i32,
-                                    )));
-                                }
-                                if let Some(ref_id) = reply_to {
-                                    send = send.reply_parameters(ReplyParameters {
-                                        message_id: MessageId(ref_id),
-                                        ..Default::default()
-                                    });
-                                }
-                                if idx == last_idx {
-                                    send = send.reply_markup(keyboard.clone());
-                                }
-                                if let Err(e) = send.await {
+                                let markup = (idx == last_idx).then(|| keyboard.clone());
+                                if let Err(e) = ctx
+                                    .bot
+                                    .send_message_opts(
+                                        tg_chat_id,
+                                        part,
+                                        true,
+                                        thread,
+                                        reply_to,
+                                        markup.clone(),
+                                    )
+                                    .await
+                                {
                                     tracing::warn!(
                                         ?key,
                                         "reflection HTML send failed, retrying plain: {:#}",
                                         e
                                     );
                                     let plain = strip_html_tags(part);
-                                    let mut fb = ctx.bot.send_message(tg_chat_id, &plain);
-                                    if eff_thread_id != 0 {
-                                        fb = fb.message_thread_id(ThreadId(MessageId(
-                                            eff_thread_id as i32,
-                                        )));
-                                    }
-                                    if let Some(ref_id) = reply_to {
-                                        fb = fb.reply_parameters(ReplyParameters {
-                                            message_id: MessageId(ref_id),
-                                            ..Default::default()
-                                        });
-                                    }
-                                    if idx == last_idx {
-                                        fb = fb.reply_markup(keyboard.clone());
-                                    }
-                                    if let Err(e2) = fb.await {
+                                    if let Err(e2) = ctx
+                                        .bot
+                                        .send_message_opts(
+                                            tg_chat_id, &plain, false, thread, reply_to, markup,
+                                        )
+                                        .await
+                                    {
                                         tracing::error!(
                                             ?key,
                                             "reflection plain-text fallback also failed: {:#}",
@@ -2211,9 +2278,12 @@ pub fn spawn_worker(
                                     // fallback path.
                                     let edit_result = ctx
                                         .bot
-                                        .edit_message_text(tg_chat_id, msg_id, &raw_message)
-                                        .parse_mode(teloxide::types::ParseMode::Html)
-                                        .reply_markup(keyboard.clone())
+                                        .edit_html(
+                                            tg_chat_id,
+                                            msg_id,
+                                            &raw_message,
+                                            Some(keyboard.clone()),
+                                        )
                                         .await;
                                     if let Err(edit_err) = edit_result {
                                         tracing::warn!(
@@ -2376,10 +2446,11 @@ pub fn spawn_worker(
                             tracing::info!(?key, %run_id, "background run spawned");
                             if let Some(msg_id) = thinking_msg_id {
                                 let banner = background_banner(reason);
+                                // Plain text (teloxide parity): the static banner
+                                // is not HTML; edit_html would force ParseMode::Html.
                                 let _ = ctx
                                     .bot
-                                    .edit_message_text(tg_chat_id, msg_id, banner)
-                                    .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
+                                    .edit_text(tg_chat_id, msg_id, banner, Some(empty_keyboard()))
                                     .await;
                             }
                         }
@@ -2392,9 +2463,7 @@ pub fn spawn_worker(
                             if let Some(msg_id) = thinking_msg_id {
                                 let edit_result = ctx
                                     .bot
-                                    .edit_message_text(tg_chat_id, msg_id, &text)
-                                    .parse_mode(teloxide::types::ParseMode::Html)
-                                    .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
+                                    .edit_html(tg_chat_id, msg_id, &text, Some(empty_keyboard()))
                                     .await;
                                 if edit_result.is_err() {
                                     send_error_to_telegram(&ctx, tg_chat_id, eff_thread_id, &text)
@@ -2534,48 +2603,36 @@ pub fn spawn_worker(
 /// mode. Preserves the topic thread id. Shared body for [`send_tg`]/[`send_tg_html`].
 async fn send_tg_inner(
     bot: &super::BotType,
-    chat_id: teloxide::types::ChatId,
+    chat_id: i64,
     eff_thread_id: i64,
     text: &str,
-    parse_mode: Option<teloxide::types::ParseMode>,
-) -> Result<(), teloxide::RequestError> {
-    let mut send = bot.send_message(chat_id, text);
-    if let Some(mode) = parse_mode {
-        send = send.parse_mode(mode);
-    }
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-    }
-    send.await?;
+    html: bool,
+) -> Result<(), super::tg_bot::TgError> {
+    let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
+    bot.send_message_opts(chat_id, text, html, thread, None, None)
+        .await?;
     Ok(())
 }
 
 /// Send a Telegram message, optionally in a thread.
 pub(crate) async fn send_tg(
     bot: &super::BotType,
-    chat_id: teloxide::types::ChatId,
+    chat_id: i64,
     eff_thread_id: i64,
     text: &str,
-) -> Result<(), teloxide::RequestError> {
-    send_tg_inner(bot, chat_id, eff_thread_id, text, None).await
+) -> Result<(), super::tg_bot::TgError> {
+    send_tg_inner(bot, chat_id, eff_thread_id, text, false).await
 }
 
 /// Like `send_tg` but renders HTML (`ParseMode::Html`). Use for bot-authored
 /// messages that contain HTML-escaped dynamic text. Preserves the topic thread id.
 pub(crate) async fn send_tg_html(
     bot: &super::BotType,
-    chat_id: teloxide::types::ChatId,
+    chat_id: i64,
     eff_thread_id: i64,
     text: &str,
-) -> Result<(), teloxide::RequestError> {
-    send_tg_inner(
-        bot,
-        chat_id,
-        eff_thread_id,
-        text,
-        Some(teloxide::types::ParseMode::Html),
-    )
-    .await
+) -> Result<(), super::tg_bot::TgError> {
+    send_tg_inner(bot, chat_id, eff_thread_id, text, true).await
 }
 
 /// Spawn a background task that requests a setup-token from the user.
@@ -2583,11 +2640,7 @@ pub(crate) async fn send_tg_html(
 /// 1. Sends instruction to user via Telegram.
 /// 2. Waits for token from Telegram message intercept.
 /// 3. Saves token to data.db.
-fn spawn_token_request(
-    ctx: &WorkerContext,
-    tg_chat_id: teloxide::types::ChatId,
-    eff_thread_id: i64,
-) {
+fn spawn_token_request(ctx: &WorkerContext, tg_chat_id: i64, eff_thread_id: i64) {
     let agent_name = ctx.agent_name.clone();
     let bot = ctx.bot.clone();
     let agent_db_dir = ctx.agent_db_dir.clone();
@@ -2596,14 +2649,17 @@ fn spawn_token_request(
 
     tokio::spawn(async move {
         // Send instruction to user (with HTML parse mode for <pre> formatting)
-        let send_result = {
-            let mut msg = bot.send_message(tg_chat_id, crate::login::auth_instruction_message());
-            msg = msg.parse_mode(teloxide::types::ParseMode::Html);
-            if eff_thread_id != 0 {
-                msg = msg.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-            }
-            msg.await
-        };
+        let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
+        let send_result = bot
+            .send_message_opts(
+                tg_chat_id,
+                crate::login::auth_instruction_message(),
+                true,
+                thread,
+                None,
+                None,
+            )
+            .await;
         if let Err(e) = send_result {
             tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
             active_flag.store(false, Ordering::SeqCst);
@@ -2696,7 +2752,7 @@ pub(crate) enum InvokeCcFailure {
         /// `spawn_worker` edits this into a banner before reflection and deletes
         /// it on reflection success (so the reflection reply is the substantive
         /// final update).
-        thinking_msg_id: Option<teloxide::types::MessageId>,
+        thinking_msg_id: Option<i32>,
         /// Row id in `error_details` for the `🔍 Details` button, if stored.
         details_id: Option<i64>,
     },
@@ -2709,7 +2765,7 @@ pub(crate) enum InvokeCcFailure {
     /// sends it as a new message when there is no thinking message.
     RateLimited {
         message: String,
-        thinking_msg_id: Option<teloxide::types::MessageId>,
+        thinking_msg_id: Option<i32>,
         /// Row id in `error_details` for the `🔍 Details` button, if stored.
         details_id: Option<i64>,
     },
@@ -2721,7 +2777,7 @@ pub(crate) enum InvokeCcFailure {
         /// UUID of the main session from which the background job should fork.
         main_session_id: String,
         /// The live "thinking" message to edit with a backgrounded banner.
-        thinking_msg_id: Option<teloxide::types::MessageId>,
+        thinking_msg_id: Option<i32>,
         /// Foreground main-session lock, held until background fork init is confirmed
         /// or handoff failure is persisted after killing the child.
         session_guard: tokio::sync::OwnedMutexGuard<()>,
@@ -2753,6 +2809,12 @@ pub(crate) struct CcReply {
     pub(crate) wall_elapsed_ms: u64,
     /// Learning invocation id used this turn (for probe-skip), if any.
     pub(crate) learning_invocation_id: Option<String>,
+    /// Last assistant text block seen in the stream this turn, if any. Feeds
+    /// the null-reply repair heuristic (undelivered-text detection).
+    pub(crate) last_assistant_text: Option<String>,
+    /// `true` when the turn called `mcp__right__send_message`; a terminal
+    /// `content: null` is then sanctioned and must not trigger repair.
+    pub(crate) send_message_used: bool,
 }
 
 #[derive(Debug)]
@@ -2852,6 +2914,7 @@ async fn start_progress_invocation(
             agent_dir: ctx.agent_dir.clone(),
             ssh_config_path: ctx.ssh_config_path.clone(),
             resolved_sandbox: ctx.resolved_sandbox.clone(),
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         });
 
     let register_req = right_mcp::internal_client::ProgressRegisterRequest {
@@ -3603,6 +3666,8 @@ async fn invoke_cc(
             usage: crate::cc::stream::StreamUsage::default(),
             wall_elapsed_ms: 0,
             learning_invocation_id: learning_invocation_id.clone(),
+            last_assistant_text: None,
+            send_message_used: false,
         });
     }
     log_invoking_claude(&log_ctx, is_first_call, sandboxed);
@@ -3832,11 +3897,13 @@ async fn invoke_cc(
         .ok();
 
     let mut ring_buffer = crate::cc::stream::EventRingBuffer::new(5);
+    let mut last_assistant_text: Option<String> = None;
+    let mut send_message_used = false;
     let mut usage = crate::cc::stream::StreamUsage::default();
     let mut result_line: Option<String> = None;
     let mut api_key_source: Option<String> = None;
     let mut cache_miss_reason: Option<String> = None;
-    let mut thinking_msg_id: Option<teloxide::types::MessageId> = None;
+    let mut thinking_msg_id: Option<i32> = None;
     let mut last_edit: tokio::time::Instant;
     let mut last_rendered_event_count: u32 = 0;
     let mut ui_tick = tokio::time::interval(Duration::from_millis(500));
@@ -3891,6 +3958,24 @@ async fn invoke_cc(
                         }
 
                         let event = crate::cc::stream::parse_stream_event(&line);
+
+                        // Null-repair evidence: track the last assistant text block
+                        // and any send_message call across ALL content blocks
+                        // (parse_stream_event returns only the first block).
+                        for persisted in crate::cc::stream::parse_persisted_stream_events(&line) {
+                            match persisted.kind {
+                                crate::cc::stream::PersistedStreamEventKind::AssistantText => {
+                                    last_assistant_text = Some(persisted.content_text);
+                                }
+                                crate::cc::stream::PersistedStreamEventKind::ToolCall
+                                    if persisted.tool_name.as_deref()
+                                        == Some("mcp__right__send_message") =>
+                                {
+                                    send_message_used = true;
+                                }
+                                _ => {}
+                            }
+                        }
 
                         // Detect structured-output schema-rejection loops. These
                         // `tool_result` errors are dropped by the display parser,
@@ -4038,9 +4123,7 @@ async fn invoke_cc(
                     if let Some(msg_id) = thinking_msg_id {
                         let _ = ctx
                             .bot
-                            .edit_message_text(tg_chat_id, msg_id, &text)
-                            .parse_mode(teloxide::types::ParseMode::Html)
-                            .reply_markup(kb)
+                            .edit_html(tg_chat_id, msg_id, &text, Some(kb))
                             .await;
                         last_rendered_expanded = expanded;
                         last_rendered_event_count = total_assistant_events;
@@ -4284,18 +4367,14 @@ async fn invoke_cc(
             };
             let _ = ctx
                 .bot
-                .edit_message_text(tg_chat_id, msg_id, &text)
-                .parse_mode(teloxide::types::ParseMode::Html)
-                .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
+                .edit_html(tg_chat_id, msg_id, &text, Some(empty_keyboard()))
                 .await;
         } else if !will_reflect && final_expanded {
             // Normal finish with thinking — final cost/turns, remove keyboard.
             let text = crate::cc::stream::format_thinking_message(ring_buffer.events(), &usage);
             let _ = ctx
                 .bot
-                .edit_message_text(tg_chat_id, msg_id, &text)
-                .parse_mode(teloxide::types::ParseMode::Html)
-                .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
+                .edit_html(tg_chat_id, msg_id, &text, Some(empty_keyboard()))
                 .await;
         } else if !will_reflect {
             // Normal finish without expanded thinking — delete the anchor message.
@@ -4337,6 +4416,8 @@ async fn invoke_cc(
             usage: usage.clone(),
             wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
             learning_invocation_id: learning_invocation_id.clone(),
+            last_assistant_text: None,
+            send_message_used: false,
         });
     }
 
@@ -4448,6 +4529,8 @@ async fn invoke_cc(
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                         learning_invocation_id: learning_invocation_id.clone(),
+                        last_assistant_text: None,
+                        send_message_used: false,
                     });
                 } else {
                     // Token request already running — silent, don't spam.
@@ -4460,6 +4543,8 @@ async fn invoke_cc(
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                         learning_invocation_id: learning_invocation_id.clone(),
+                        last_assistant_text: None,
+                        send_message_used: false,
                     });
                 }
             } else {
@@ -4493,6 +4578,8 @@ async fn invoke_cc(
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                         learning_invocation_id: learning_invocation_id.clone(),
+                        last_assistant_text: None,
+                        send_message_used: false,
                     });
                 } else {
                     return Ok(CcReply {
@@ -4504,6 +4591,8 @@ async fn invoke_cc(
                         usage: usage.clone(),
                         wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                         learning_invocation_id: learning_invocation_id.clone(),
+                        last_assistant_text: None,
+                        send_message_used: false,
                     });
                 }
             }
@@ -4523,6 +4612,35 @@ async fn invoke_cc(
                         session_uuid = %log_ctx.session_uuid,
                         turn_id = log_ctx.turn_id,
                         "deactivate_session_if_active on first-call failure: {:#}",
+                        e
+                    )
+                })
+                .ok();
+        }
+
+        // Stale session: CC found no conversation for --resume (the session
+        // JSONL is gone from the sandbox). Deactivate the DB record so the
+        // next message starts a fresh session instead of every subsequent
+        // turn failing on the same dead resume.
+        if !is_first_call && is_missing_cc_session(&stderr_str) {
+            tracing::warn!(
+                chat_id = log_ctx.chat_id,
+                eff_thread_id = log_ctx.eff_thread_id,
+                key = ?log_ctx.key(),
+                session_uuid = %log_ctx.session_uuid,
+                turn_id = log_ctx.turn_id,
+                "CC session missing on resume; deactivating stale session"
+            );
+            deactivate_session_if_active(conn, chat_id, eff_thread_id, &session_uuid)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        chat_id = log_ctx.chat_id,
+                        eff_thread_id = log_ctx.eff_thread_id,
+                        key = ?log_ctx.key(),
+                        session_uuid = %log_ctx.session_uuid,
+                        turn_id = log_ctx.turn_id,
+                        "deactivate_session_if_active on missing CC session: {:#}",
                         e
                     )
                 })
@@ -4637,6 +4755,8 @@ async fn invoke_cc(
                 usage,
                 wall_elapsed_ms: turn_started_at.elapsed().as_millis() as u64,
                 learning_invocation_id: learning_invocation_id.clone(),
+                last_assistant_text,
+                send_message_used,
             })
         }
         Err(reason) => {
@@ -4655,7 +4775,7 @@ async fn invoke_cc(
 
 async fn send_error_to_telegram(
     ctx: &WorkerContext,
-    tg_chat_id: teloxide::types::ChatId,
+    tg_chat_id: i64,
     eff_thread_id: i64,
     message: &str,
 ) {
@@ -4667,10 +4787,10 @@ async fn send_error_to_telegram(
 /// send failure.
 async fn send_error_to_telegram_with_markup(
     ctx: &WorkerContext,
-    tg_chat_id: teloxide::types::ChatId,
+    tg_chat_id: i64,
     eff_thread_id: i64,
     message: &str,
-    reply_markup: teloxide::types::InlineKeyboardMarkup,
+    reply_markup: frankenstein::types::InlineKeyboardMarkup,
 ) {
     send_error_to_telegram_inner(ctx, tg_chat_id, eff_thread_id, message, Some(reply_markup)).await;
 }
@@ -4680,40 +4800,38 @@ async fn send_error_to_telegram_with_markup(
 /// `None` omits the keyboard entirely, preserving the no-markup send path.
 async fn send_error_to_telegram_inner(
     ctx: &WorkerContext,
-    tg_chat_id: teloxide::types::ChatId,
+    tg_chat_id: i64,
     eff_thread_id: i64,
     message: &str,
-    reply_markup: Option<teloxide::types::InlineKeyboardMarkup>,
+    reply_markup: Option<frankenstein::types::InlineKeyboardMarkup>,
 ) {
-    use teloxide::types::{MessageId, ThreadId};
-    let mut send = ctx
+    let thread = (eff_thread_id != 0).then_some(eff_thread_id as i32);
+    if let Err(e) = ctx
         .bot
-        .send_message(tg_chat_id, message)
-        .parse_mode(teloxide::types::ParseMode::Html);
-    if let Some(markup) = reply_markup.clone() {
-        send = send.reply_markup(markup);
-    }
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-    }
-    if let Err(e) = send.await {
+        .send_message_opts(
+            tg_chat_id,
+            message,
+            true,
+            thread,
+            None,
+            reply_markup.clone(),
+        )
+        .await
+    {
         tracing::warn!(
-            chat_id = ?tg_chat_id,
+            chat_id = tg_chat_id,
             eff_thread_id,
             "HTML error send failed, retrying plain text: {:#}",
             e
         );
         let plain = strip_html_tags(message);
-        let mut fallback = ctx.bot.send_message(tg_chat_id, &plain);
-        if let Some(markup) = reply_markup {
-            fallback = fallback.reply_markup(markup);
-        }
-        if eff_thread_id != 0 {
-            fallback = fallback.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-        }
-        if let Err(e2) = fallback.await {
+        if let Err(e2) = ctx
+            .bot
+            .send_message_opts(tg_chat_id, &plain, false, thread, None, reply_markup)
+            .await
+        {
             tracing::error!(
-                chat_id = ?tg_chat_id,
+                chat_id = tg_chat_id,
                 eff_thread_id,
                 "plain text fallback also failed: {:#}",
                 e2
@@ -5095,7 +5213,7 @@ mod tests {
             crate::sandbox_runtime::SandboxHealth::Ready,
         );
         WorkerContext {
-            chat_id: teloxide::types::ChatId(42),
+            chat_id: 42,
             effective_thread_id: 0,
             agent_dir: agent_dir.to_path_buf(),
             agent_name: "test-agent".into(),
@@ -5474,6 +5592,21 @@ esac
         assert_eq!(classify_cc_result(stdout), CcResultClass::NotError);
     }
 
+    // is_missing_cc_session tests
+    #[tokio::test]
+    async fn missing_session_detected_on_stderr_marker() {
+        let stderr = "No conversation found with session ID: 3b688914-7a0c-4fe7-b954-46790126cd70";
+        assert!(is_missing_cc_session(stderr));
+    }
+
+    #[tokio::test]
+    async fn missing_session_not_detected_for_unrelated_stderr() {
+        assert!(!is_missing_cc_session(""));
+        assert!(!is_missing_cc_session("Error: spawn claude ENOENT"));
+        // Near-miss: mentions a session but not the missing-conversation marker.
+        assert!(!is_missing_cc_session("Resuming session 3b688914"));
+    }
+
     // RATE_LIMIT_MESSAGE / format_human_error tests
     #[tokio::test]
     async fn rate_limit_message_is_reassuring_and_not_about_usage() {
@@ -5507,6 +5640,7 @@ esac
             agent_dir: std::path::PathBuf::from("/tmp/agent"),
             ssh_config_path: None,
             resolved_sandbox: None,
+            channel_post_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
 
         assert_eq!(target.thread_id, 7);
@@ -5707,7 +5841,7 @@ esac
         assert!(!url.contains(" to continue"));
     }
 
-    fn keyboard_row(kb: teloxide::types::InlineKeyboardMarkup) -> Vec<(String, String)> {
+    fn keyboard_row(kb: frankenstein::types::InlineKeyboardMarkup) -> Vec<(String, String)> {
         let rows = kb.inline_keyboard;
         assert_eq!(rows.len(), 1, "single row");
         rows.into_iter()
@@ -5715,10 +5849,7 @@ esac
             .unwrap()
             .into_iter()
             .map(|button| {
-                let data = match button.kind {
-                    teloxide::types::InlineKeyboardButtonKind::CallbackData(data) => data,
-                    _ => panic!("button must use callback data"),
-                };
+                let data = button.callback_data.expect("button must use callback data");
                 (button.text, data)
             })
             .collect()

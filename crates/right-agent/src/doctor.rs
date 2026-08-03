@@ -1506,7 +1506,9 @@ mod tests;
 #[cfg(test)]
 mod cron_target_tests {
     use super::*;
-    use crate::agent::allowlist::{AllowedGroup, AllowedUser, AllowlistFile, ResponseMode};
+    use crate::agent::allowlist::{
+        AllowedGroup, AllowedUser, AllowlistFile, GroupKind, ResponseMode,
+    };
 
     fn write_allowlist(agent_dir: &std::path::Path, users: &[i64], groups: &[i64]) {
         let now = chrono::Utc::now();
@@ -1527,6 +1529,7 @@ mod cron_target_tests {
                 opened_at: now,
                 mode: ResponseMode::Addressed,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             });
         }
         crate::agent::allowlist::write_file(agent_dir, &file).unwrap();

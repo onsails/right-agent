@@ -62,14 +62,16 @@ impl ReflectionLimits {
         max_budget_usd: 0.40,
         process_timeout: Duration::from_secs(180),
     };
+    /// Null-reply repair runs worker-side only, with the same risk profile
+    /// as a worker reflection: short resume, tight caps.
+    pub(crate) const NULL_REPAIR: Self = Self::WORKER;
 }
 
-/// All inputs required to run one reflection pass.
+/// All inputs required to run one notice-resume pass (failure reflection or
+/// null-reply repair).
 #[derive(Debug, Clone)]
 pub(crate) struct ReflectionContext {
     pub(crate) session_uuid: String,
-    pub(crate) failure: FailureKind,
-    pub(crate) ring_buffer_tail: VecDeque<StreamEvent>,
     pub(crate) limits: ReflectionLimits,
     pub(crate) agent_name: String,
     pub(crate) agent_dir: PathBuf,
@@ -182,46 +184,118 @@ pub(crate) fn build_reflection_prompt(
 /// parses the final `result` stream event, accounts the usage row, and returns
 /// the agent's reply text. Any failure of the reflection itself returns `Err`
 /// — the caller is responsible for a raw-error fallback.
-pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String, ReflectionError> {
+pub(crate) async fn reflect_on_failure(
+    ctx: ReflectionContext,
+    failure: FailureKind,
+    ring_buffer_tail: VecDeque<StreamEvent>,
+) -> Result<String, ReflectionError> {
     let span = tracing::info_span!(
         "reflection",
         session_uuid = %ctx.session_uuid,
         parent = ?ctx.parent_source,
-        failure = ?ctx.failure,
+        failure = ?failure,
     );
     let _enter = span.enter();
 
     tracing::info!("reflection starting");
 
-    // Per-agent notice token for the trusted `## Platform Notice Token` prompt
-    // section, so the agent can verify SYSTEM_NOTICE markers. Fetched before the
-    // prompt build so the reflection notice carries the token.
-    let notice_token = {
-        let conn = right_db::open_connection(&ctx.agent_dir, false)
-            .await
-            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
-        right_mcp::credentials::get_or_create_notice_token(&conn)
-            .await
-            .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?
-    };
-
-    // 1. Build stdin prompt from pure helpers.
+    let notice_token = fetch_notice_token(&ctx.agent_dir).await?;
     let input = build_reflection_prompt(
-        &ctx.failure,
-        &ctx.ring_buffer_tail,
+        &failure,
+        &ring_buffer_tail,
         ctx.limits.max_turns,
         &notice_token,
     );
+    let (reply_output, _raw) = run_notice_resume(&ctx, input, &notice_token).await?;
+    reply_output
+        .content
+        .ok_or_else(|| ReflectionError::Parse("reply content was null".into()))
+}
 
-    // 2. Reply schema (reuse worker's — sandbox vs no-sandbox both read same file).
+/// Maximum chars of the discarded text block embedded in the repair prompt.
+const NULL_REPAIR_SNIPPET_LEN: usize = 2000;
+
+/// Build the stdin prompt for a null-reply repair `claude -p --resume` call.
+pub(crate) fn build_null_repair_prompt(last_text: &str, max_turns: u32, token: &str) -> String {
+    let snippet: String = last_text
+        .trim()
+        .chars()
+        .take(NULL_REPAIR_SNIPPET_LEN)
+        .collect();
+    let body = format!(
+        "\n\
+         Your previous reply was NOT delivered to the user.\n\
+         \n\
+         Reason: your structured output had `content: null`. Only the structured\n\
+         `content` field reaches Telegram — assistant text blocks are discarded.\n\
+         \n\
+         The discarded text block was:\n\
+         \"\"\"\n\
+         {snippet}\n\
+         \"\"\"\n\
+         \n\
+         If you intended to reply: rewrite it now and return it in the structured\n\
+         output `content` field.\n\
+         If you intentionally stay silent: return `content: null` again — nothing\n\
+         will be sent and no further repair will be attempted.\n\
+         \n\
+         Stay within {max_turns} turns. Do NOT call Agent or other long-running tools.\n"
+    );
+    crate::cc::system_notice::wrap_system_notice(token, &body)
+}
+
+/// Run one repair pass for a suspicious null reply: resume the session and ask
+/// the agent to re-emit its reply via structured `content` (or confirm
+/// intentional silence with another null). Returns the parsed reply as-is —
+/// a second null is a valid outcome the caller must respect.
+pub(crate) async fn repair_null_reply(
+    ctx: ReflectionContext,
+    last_assistant_text: &str,
+) -> Result<crate::cc::worker_reply::ReplyOutput, ReflectionError> {
+    let span = tracing::info_span!(
+        "null_reply_repair",
+        session_uuid = %ctx.session_uuid,
+        parent = ?ctx.parent_source,
+    );
+    let _enter = span.enter();
+
+    tracing::info!("null-reply repair starting");
+
+    let notice_token = fetch_notice_token(&ctx.agent_dir).await?;
+    let input = build_null_repair_prompt(last_assistant_text, ctx.limits.max_turns, &notice_token);
+    let (reply_output, _raw) = run_notice_resume(&ctx, input, &notice_token).await?;
+    Ok(reply_output)
+}
+
+/// Fetch the per-agent notice token used to wrap trusted SYSTEM_NOTICE prompts,
+/// so the agent can verify SYSTEM_NOTICE markers.
+async fn fetch_notice_token(agent_dir: &std::path::Path) -> Result<String, ReflectionError> {
+    let conn = right_db::open_connection(agent_dir, false)
+        .await
+        .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))?;
+    right_mcp::credentials::get_or_create_notice_token(&conn)
+        .await
+        .map_err(|e| ReflectionError::Spawn(format!("{e:#}")))
+}
+
+/// Shared `claude -p --resume` plumbing for reflection and null-reply repair:
+/// pipes a SYSTEM_NOTICE prompt via stdin, parses the final `result` stream
+/// event, and accounts the usage row. Null-tolerant: returns the parsed reply
+/// as-is together with the raw result line.
+async fn run_notice_resume(
+    ctx: &ReflectionContext,
+    input: String,
+    notice_token: &str,
+) -> Result<(crate::cc::worker_reply::ReplyOutput, String), ReflectionError> {
+    // 1. Reply schema (reuse worker's — sandbox vs no-sandbox both read same file).
     let schema_path = ctx.agent_dir.join(".claude").join("reply-schema.json");
     let reply_schema = std::fs::read_to_string(&schema_path)?;
 
-    // 3. MCP config path (reuse worker's helper).
+    // 2. MCP config path (reuse worker's helper).
     let mcp_path =
         crate::cc::invocation::mcp_config_path(ctx.ssh_config_path.as_deref(), &ctx.agent_dir);
 
-    // 4. ClaudeInvocation — resume, stream-json, tight caps, no Agent tool.
+    // 3. ClaudeInvocation — resume, stream-json, tight caps, no Agent tool.
     let invocation = ClaudeInvocation {
         mcp_config_path: Some(mcp_path),
         json_schema: Some(reply_schema),
@@ -236,7 +310,9 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         disallowed_tools: {
             let mut d = crate::cc::invocation::baseline_disallowed_tools();
             d.push("Agent".into());
-            crate::cc::invocation::disallow_foreground_only_tools(d)
+            crate::cc::invocation::disallow_channel_post(
+                crate::cc::invocation::disallow_foreground_only_tools(d),
+            )
         },
         extra_args: vec![],
         prompt: None,
@@ -244,7 +320,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     };
     let claude_args = invocation.into_args();
 
-    // 5. System-prompt assembly (match worker's pattern; no MCP refresh, no memory).
+    // 4. System-prompt assembly (match worker's pattern; no MCP refresh, no memory).
     let (sandbox_mode, home_dir) = if ctx.ssh_config_path.is_some() {
         (
             right_agent::agent::types::SandboxMode::Openshell,
@@ -282,7 +358,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
             None, // no memory section
             None,
             None,
-            Some(&notice_token),
+            Some(notice_token),
         );
         if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir).await {
             let escaped = token.replace('\'', "'\\''");
@@ -313,7 +389,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
             None,
             None,
             None,
-            Some(&notice_token),
+            Some(notice_token),
         );
         let mut c = tokio::process::Command::new("bash");
         c.arg("-c");
@@ -365,7 +441,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     if timed_out {
         tracing::warn!(
             duration_ms = ctx.limits.process_timeout.as_millis() as u64,
-            "reflection timed out"
+            "notice-resume timed out"
         );
         return Err(ReflectionError::Timeout(ctx.limits.process_timeout));
     }
@@ -385,9 +461,6 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     // Parse reply via the shared helper (handles content: Option<String>, nested result, etc.).
     let (reply_output, _session_id) = crate::cc::worker_reply::parse_reply_output(&result_line)
         .map_err(ReflectionError::Parse)?;
-    let content = reply_output
-        .content
-        .ok_or_else(|| ReflectionError::Parse("reply content was null".into()))?;
 
     // Account usage (best-effort — log but don't fail reflection on usage insert error).
     if let Some(breakdown) = crate::cc::stream::parse_usage_full(&result_line) {
@@ -422,10 +495,10 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
             .get("num_turns")
             .and_then(|v| v.as_u64())
             .unwrap_or(0),
-        "reflection completed"
+        "notice-resume completed"
     );
 
-    Ok(content)
+    Ok((reply_output, result_line))
 }
 
 #[cfg(test)]
@@ -505,6 +578,29 @@ mod tests {
         assert!(p.contains("called Read"));
         assert!(p.contains("partial finding"));
         assert!(p.contains("stay within 3 turns"));
+    }
+
+    #[tokio::test]
+    async fn null_repair_prompt_has_markers_snippet_and_escape_hatch() {
+        let p = build_null_repair_prompt("Done. Rescheduled news-live.", 3, "deadbeef");
+        assert!(p.starts_with("\u{27e8}\u{27e8}SYSTEM_NOTICE:deadbeef\u{27e9}\u{27e9}"));
+        assert!(p.contains("\u{27e8}\u{27e8}/SYSTEM_NOTICE:deadbeef\u{27e9}\u{27e9}"));
+        assert!(p.contains("content: null"), "{p}");
+        assert!(p.contains("Done. Rescheduled news-live."), "{p}");
+        // Explicit intentional-silence escape hatch keeps lurk mode safe.
+        assert!(p.contains("intentionally stay silent"), "{p}");
+        assert!(p.contains("Stay within 3 turns"), "{p}");
+    }
+
+    #[tokio::test]
+    async fn null_repair_prompt_truncates_long_text() {
+        let long = "x".repeat(NULL_REPAIR_SNIPPET_LEN + 500);
+        let p = build_null_repair_prompt(&long, 3, "deadbeef");
+        assert!(
+            p.chars().count() < NULL_REPAIR_SNIPPET_LEN + 1500,
+            "prompt must stay bounded, got {} chars",
+            p.chars().count()
+        );
     }
 
     #[tokio::test]

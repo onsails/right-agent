@@ -122,9 +122,9 @@
 
 ### right-bot
 
-- `lib.rs` — entry: resolve agent dir, open `data.db`, sandbox lifecycle, start teloxide.
+- `lib.rs` — entry: resolve agent dir, open `data.db`, sandbox lifecycle, start the Telegram bot (frankenstein webhook).
 - `cc/` — generic Claude Code subprocess plumbing: invocation builder, prompt assembly, stream parser, structured-reply parser, outbound DTOs, and shared markdown helpers.
-- `telegram/` — bot adaptor, dispatcher, handler, per-session worker, session table, chat-ID filter, OAuth callback server, Telegram markdown rendering/splitting, dashboard routes, and attachment delivery (with STT integration).
+- `telegram/` — frankenstein `RightBot` client wrapper (`tg_bot.rs`), update router (`router.rs`), command parser (`command.rs`), `Message` field helpers (`msg_ext.rs`), handler, per-session worker, session table, chat-ID filter, OAuth callback server, Telegram markdown rendering/splitting, dashboard routes, and attachment delivery (with STT integration).
 - `telegram/dashboard.rs` — Axum route mounting for `/dashboard/<agent>/`, dashboard API handlers, Telegram menu/button setup, and injected bot-owned auth/runtime state.
 - `telegram/dashboard/health.rs` — explicit read-only `/health/*` probes for doctor output and bounded sandbox disk/memory/process snapshots.
 - `telegram/dashboard/identity.rs` — sandbox-first bounded identity file reads with host-mirror fallback.

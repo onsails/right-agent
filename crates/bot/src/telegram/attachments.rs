@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
+use frankenstein::types::Message;
 use std::path::PathBuf;
-use teloxide::types::Message;
 
+use super::tg_bot::TgError;
 pub use crate::cc::attachments_dto::{OutboundAttachment, OutboundKind};
 
 /// All Telegram media types we handle.
@@ -40,7 +41,7 @@ pub struct InboundAttachment {
     pub kind: AttachmentKind,
     pub mime_type: Option<String>,
     pub filename: Option<String>,
-    pub file_size: Option<u32>,
+    pub file_size: Option<u64>,
 }
 
 /// After download, with resolved filesystem path.
@@ -646,99 +647,105 @@ pub fn extract_attachments(msg: &Message) -> Vec<InboundAttachment> {
     let mut out = Vec::new();
 
     // Photo: array of sizes, last = highest resolution. Always JPEG.
-    if let Some(sizes) = msg.photo()
+    if let Some(sizes) = msg.photo.as_ref()
         && let Some(best) = sizes.last()
     {
         out.push(InboundAttachment {
-            file_id: best.file.id.0.clone(),
+            file_id: best.file_id.clone(),
             kind: AttachmentKind::Photo,
             mime_type: Some("image/jpeg".to_owned()),
             filename: None,
-            file_size: Some(best.file.size),
+            file_size: best.file_size,
         });
     }
 
-    // Document
-    if let Some(doc) = msg.document() {
+    // Document. Telegram mirrors an animation (GIF) into the `document` field
+    // for backward compatibility, so a GIF message carries BOTH `animation` and
+    // `document`. teloxide's `MediaKind` was mutually exclusive (a GIF was
+    // `Animation`, not `Document`); skip the document mirror when an animation
+    // is present so a single GIF yields one attachment, not two.
+    if let Some(doc) = msg.document.as_ref()
+        && msg.animation.is_none()
+    {
         out.push(InboundAttachment {
-            file_id: doc.file.id.0.clone(),
+            file_id: doc.file_id.clone(),
             kind: AttachmentKind::Document,
-            mime_type: doc.mime_type.as_ref().map(|m| m.to_string()),
+            mime_type: doc.mime_type.clone(),
             filename: doc.file_name.clone(),
-            file_size: Some(doc.file.size),
+            file_size: doc.file_size,
         });
     }
 
     // Video
-    if let Some(vid) = msg.video() {
+    if let Some(vid) = msg.video.as_ref() {
         out.push(InboundAttachment {
-            file_id: vid.file.id.0.clone(),
+            file_id: vid.file_id.clone(),
             kind: AttachmentKind::Video,
-            mime_type: vid.mime_type.as_ref().map(|m| m.to_string()),
+            mime_type: vid.mime_type.clone(),
             filename: vid.file_name.clone(),
-            file_size: Some(vid.file.size),
+            file_size: vid.file_size,
         });
     }
 
     // Audio
-    if let Some(aud) = msg.audio() {
+    if let Some(aud) = msg.audio.as_ref() {
         out.push(InboundAttachment {
-            file_id: aud.file.id.0.clone(),
+            file_id: aud.file_id.clone(),
             kind: AttachmentKind::Audio,
-            mime_type: aud.mime_type.as_ref().map(|m| m.to_string()),
+            mime_type: aud.mime_type.clone(),
             filename: aud.file_name.clone(),
-            file_size: Some(aud.file.size),
+            file_size: aud.file_size,
         });
     }
 
     // Voice
-    if let Some(voice) = msg.voice() {
+    if let Some(voice) = msg.voice.as_ref() {
         out.push(InboundAttachment {
-            file_id: voice.file.id.0.clone(),
+            file_id: voice.file_id.clone(),
             kind: AttachmentKind::Voice,
-            mime_type: voice.mime_type.as_ref().map(|m| m.to_string()),
+            mime_type: voice.mime_type.clone(),
             filename: None,
-            file_size: Some(voice.file.size),
+            file_size: voice.file_size,
         });
     }
 
     // VideoNote — always mp4, no filename
-    if let Some(vn) = msg.video_note() {
+    if let Some(vn) = msg.video_note.as_ref() {
         out.push(InboundAttachment {
-            file_id: vn.file.id.0.clone(),
+            file_id: vn.file_id.clone(),
             kind: AttachmentKind::VideoNote,
             mime_type: Some("video/mp4".to_owned()),
             filename: None,
-            file_size: Some(vn.file.size),
+            file_size: vn.file_size,
         });
     }
 
     // Sticker — mime depends on format
-    if let Some(stk) = msg.sticker() {
-        let mime = if stk.is_video() {
+    if let Some(stk) = msg.sticker.as_ref() {
+        let mime = if stk.is_video {
             "video/webm"
-        } else if stk.is_animated() {
+        } else if stk.is_animated {
             "application/x-tgsticker"
         } else {
             "image/webp"
         };
         out.push(InboundAttachment {
-            file_id: stk.file.id.0.clone(),
+            file_id: stk.file_id.clone(),
             kind: AttachmentKind::Sticker,
             mime_type: Some(mime.to_owned()),
             filename: None,
-            file_size: Some(stk.file.size),
+            file_size: stk.file_size,
         });
     }
 
     // Animation (GIF)
-    if let Some(anim) = msg.animation() {
+    if let Some(anim) = msg.animation.as_ref() {
         out.push(InboundAttachment {
-            file_id: anim.file.id.0.clone(),
+            file_id: anim.file_id.clone(),
             kind: AttachmentKind::Animation,
-            mime_type: anim.mime_type.as_ref().map(|m| m.to_string()),
+            mime_type: anim.mime_type.clone(),
             filename: anim.file_name.clone(),
-            file_size: Some(anim.file.size),
+            file_size: anim.file_size,
         });
     }
 
@@ -750,21 +757,17 @@ pub fn extract_attachments(msg: &Message) -> Vec<InboundAttachment> {
 /// Returns `(resolved, voice_markers)`. Voice and VideoNote attachments are transcribed (when
 /// `stt` is `Some`) and emitted as text markers instead of `ResolvedAttachment` entries.
 #[allow(clippy::too_many_arguments)]
-pub async fn download_attachments(
+pub(crate) async fn download_attachments(
     attachments: &[InboundAttachment],
     message_id: i32,
     bot: &super::BotType,
     agent_dir: &std::path::Path,
     ssh_config_path: Option<&std::path::Path>,
     resolved_sandbox: Option<&str>,
-    chat_id: teloxide::types::ChatId,
+    chat_id: i64,
     eff_thread_id: i64,
     stt: Option<&crate::stt::SttContext>,
 ) -> Result<(Vec<ResolvedAttachment>, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
-    use teloxide::net::Download;
-    use teloxide::requests::Requester;
-    use tokio::io::AsyncWriteExt;
-
     let tmp_dir = agent_dir.join("tmp/inbox");
     tokio::fs::create_dir_all(&tmp_dir).await?;
 
@@ -779,12 +782,12 @@ pub async fn download_attachments(
     for (idx, att) in attachments.iter().enumerate() {
         // Check size limit
         if let Some(size) = att.file_size
-            && u64::from(size) > TELEGRAM_DOWNLOAD_LIMIT
+            && size > TELEGRAM_DOWNLOAD_LIMIT
         {
             let msg = format!(
                 "Skipping {} attachment ({:.1} MB) — exceeds 20 MB Telegram download limit.",
                 att.kind.as_str(),
-                f64::from(size) / (1024.0 * 1024.0),
+                size as f64 / (1024.0 * 1024.0),
             );
             if let Err(e) = super::worker::send_tg(bot, chat_id, eff_thread_id, &msg).await {
                 tracing::warn!("Failed to notify user about oversized attachment: {e}");
@@ -799,14 +802,30 @@ pub async fn download_attachments(
         let ext = mime_to_extension(mime);
         let file_name = format!("{}_{message_id}_{idx}.{ext}", att.kind.as_str());
 
-        // Download from Telegram
-        let file = bot
-            .get_file(teloxide::types::FileId(att.file_id.clone()))
-            .await?;
+        // Download from Telegram (resolve file_id → path and stream to disk).
         let host_path = tmp_dir.join(&file_name);
-        let mut dst = tokio::fs::File::create(&host_path).await?;
-        bot.download_file(&file.path, &mut dst).await?;
-        dst.flush().await?;
+        if let Err(e) = bot.download_file(&att.file_id, &host_path).await {
+            // Telegram's getFile rejects files larger than 20 MB with "file is
+            // too big". When Telegram gave us no pre-download size to check
+            // (file_size absent), surface that rejection as the same friendly
+            // skip and continue with the rest of the batch rather than aborting
+            // every remaining attachment.
+            if att.file_size.is_none() && e.is_file_too_big() {
+                let msg = format!(
+                    "Skipping {} attachment — exceeds 20 MB Telegram download limit.",
+                    att.kind.as_str(),
+                );
+                if let Err(notify_err) =
+                    super::worker::send_tg(bot, chat_id, eff_thread_id, &msg).await
+                {
+                    tracing::warn!(
+                        "Failed to notify user about oversized attachment: {notify_err}"
+                    );
+                }
+                continue;
+            }
+            return Err(e.into());
+        }
 
         // STT short-circuit for voice / video_note (when context provided).
         if let Some(ctx) = stt {
@@ -852,10 +871,10 @@ pub async fn download_attachments(
 }
 
 /// Download outbound attachments from sandbox and send to Telegram.
-pub async fn send_attachments(
+pub(crate) async fn send_attachments(
     attachments: &[OutboundAttachment],
     bot: &super::BotType,
-    chat_id: teloxide::types::ChatId,
+    chat_id: i64,
     eff_thread_id: i64,
     agent_dir: &std::path::Path,
     ssh_config_path: Option<&std::path::Path>,
@@ -981,7 +1000,7 @@ async fn send_group_items_as_singles(
 /// attachments under the host outbox).
 struct SendCtx<'a> {
     bot: &'a super::BotType,
-    chat_id: teloxide::types::ChatId,
+    chat_id: i64,
     eff_thread_id: i64,
     agent_dir: &'a std::path::Path,
     resolved_sandbox: Option<&'a str>,
@@ -1000,7 +1019,7 @@ enum SendError {
     /// Path validation / download / metadata / size failure — always WARN.
     Skip(String),
     /// Telegram API call failed — always ERROR.
-    Api(teloxide::RequestError),
+    Api(TgError),
     /// Media group cannot be sent as an album and should be retried item-by-item.
     FallbackToSingles { reason: String },
 }
@@ -1037,8 +1056,20 @@ fn is_media_group_validation_error_text(text: &str) -> bool {
 /// before the error surfaced, so retrying them would duplicate the message.
 /// Telegram returns formatting errors as a 400 *before* delivery, so a retry is
 /// safe.
-pub(crate) fn is_retryable_format_error(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
+///
+/// Gated on the typed Telegram `error_code == 400` rather than substring-
+/// searching the rendered Display: a 5xx/network/429 error whose text happens to
+/// contain "too long"/"parse entities" must NOT be treated as a safe-to-retry
+/// formatting rejection (the original send may have been delivered, so a retry
+/// would duplicate the message).
+pub(crate) fn is_retryable_format_error(err: &TgError) -> bool {
+    let TgError::Api(frankenstein::Error::Api(resp)) = err else {
+        return false;
+    };
+    if resp.error_code != 400 {
+        return false;
+    }
+    let lower = resp.description.to_ascii_lowercase();
     lower.contains("parse entities") || lower.contains("too long")
 }
 
@@ -1055,8 +1086,8 @@ impl SendError {
     }
 }
 
-impl From<teloxide::RequestError> for SendError {
-    fn from(e: teloxide::RequestError) -> Self {
+impl From<TgError> for SendError {
+    fn from(e: TgError) -> Self {
         Self::Api(e)
     }
 }
@@ -1230,82 +1261,78 @@ async fn send_single_attempt(
     ctx: &SendCtx<'_>,
     host_path: &std::path::Path,
     kind: OutboundKind,
-    thread_id: Option<teloxide::types::ThreadId>,
+    thread_id: Option<i32>,
     caption: Option<&str>,
     html: bool,
-) -> Result<(), teloxide::RequestError> {
-    use teloxide::payloads::{
-        SendAnimationSetters, SendAudioSetters, SendDocumentSetters, SendPhotoSetters,
-        SendVideoSetters, SendVoiceSetters,
+) -> Result<(), TgError> {
+    use frankenstein::input_file::{FileUpload, InputFile};
+
+    let upload = || {
+        FileUpload::InputFile(InputFile {
+            path: host_path.to_path_buf(),
+        })
     };
-    use teloxide::requests::Requester;
-    use teloxide::types::{InputFile, ParseMode};
 
-    let input_file = InputFile::file(host_path.to_path_buf());
-
-    macro_rules! captioned {
-        ($req:expr) => {{
-            let mut req = $req;
-            if let Some(cap) = caption {
-                req = req.caption(cap);
-                if html {
-                    req = req.parse_mode(ParseMode::Html);
-                }
-            }
-            if let Some(tid) = thread_id {
-                req = req.message_thread_id(tid);
-            }
-            req.await.map(|_| ())
-        }};
-    }
-
+    let chat_id = ctx.chat_id;
     match kind {
-        OutboundKind::Photo => captioned!(ctx.bot.send_photo(ctx.chat_id, input_file)),
-        OutboundKind::Document => captioned!(ctx.bot.send_document(ctx.chat_id, input_file)),
-        OutboundKind::Video => captioned!(ctx.bot.send_video(ctx.chat_id, input_file)),
-        OutboundKind::Audio => captioned!(ctx.bot.send_audio(ctx.chat_id, input_file)),
-        OutboundKind::Voice => captioned!(ctx.bot.send_voice(ctx.chat_id, input_file)),
-        OutboundKind::Animation => captioned!(ctx.bot.send_animation(ctx.chat_id, input_file)),
-        OutboundKind::VideoNote => {
-            use teloxide::payloads::SendVideoNoteSetters;
-            let mut req = ctx.bot.send_video_note(ctx.chat_id, input_file);
-            if let Some(tid) = thread_id {
-                req = req.message_thread_id(tid);
-            }
-            req.await.map(|_| ())
-        }
-        OutboundKind::Sticker => {
-            use teloxide::payloads::SendStickerSetters;
-            let mut req = ctx.bot.send_sticker(ctx.chat_id, input_file);
-            if let Some(tid) = thread_id {
-                req = req.message_thread_id(tid);
-            }
-            req.await.map(|_| ())
-        }
+        OutboundKind::Photo => ctx
+            .bot
+            .send_photo(chat_id, upload(), caption, html, thread_id, None)
+            .await
+            .map(|_| ()),
+        OutboundKind::Document => ctx
+            .bot
+            .send_document(chat_id, upload(), caption, html, thread_id, None)
+            .await
+            .map(|_| ()),
+        OutboundKind::Video => ctx
+            .bot
+            .send_video(chat_id, upload(), caption, html, thread_id)
+            .await
+            .map(|_| ()),
+        OutboundKind::Audio => ctx
+            .bot
+            .send_audio(chat_id, upload(), caption, html, thread_id)
+            .await
+            .map(|_| ()),
+        OutboundKind::Voice => ctx
+            .bot
+            .send_voice(chat_id, upload(), caption, html, thread_id)
+            .await
+            .map(|_| ()),
+        OutboundKind::Animation => ctx
+            .bot
+            .send_animation(chat_id, upload(), caption, html, thread_id)
+            .await
+            .map(|_| ()),
+        OutboundKind::VideoNote => ctx
+            .bot
+            .send_video_note(chat_id, upload(), thread_id)
+            .await
+            .map(|_| ()),
+        OutboundKind::Sticker => ctx
+            .bot
+            .send_sticker(chat_id, upload(), thread_id)
+            .await
+            .map(|_| ()),
     }
 }
 
 async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), SendError> {
-    use teloxide::types::{MessageId, ThreadId};
-
     let host_path = resolve_host_path(att, ctx, "skipping")
         .await
         .map_err(SendError::Skip)?;
 
-    let thread_id = if ctx.eff_thread_id != 0 {
-        Some(ThreadId(MessageId(ctx.eff_thread_id as i32)))
-    } else {
-        None
-    };
+    let thread_id = (ctx.eff_thread_id != 0).then_some(ctx.eff_thread_id as i32);
 
-    let result: Result<(), teloxide::RequestError> = if let Some(raw) = att.caption.as_deref() {
+    let result: Result<(), TgError> = if let Some(raw) = att.caption.as_deref() {
         let html_cap = caption_to_html(raw);
         match send_single_attempt(ctx, &host_path, att.kind, thread_id, Some(&html_cap), true).await
         {
             Ok(()) => Ok(()),
             Err(e) => {
                 let reason = display_error_chain(&e);
-                if is_retryable_format_error(&reason) {
+                if is_retryable_format_error(&e) {
                     tracing::warn!("caption HTML send failed, retrying as plain text: {reason}");
                     let plain_cap = caption_to_plain(raw);
                     send_single_attempt(
@@ -1379,13 +1406,18 @@ fn build_group_input_media(
     att: &OutboundAttachment,
     host_path: &std::path::Path,
     html: bool,
-) -> teloxide::types::InputMedia {
-    use teloxide::types::{
-        InputFile, InputMedia, InputMediaAudio, InputMediaDocument, InputMediaPhoto,
-        InputMediaVideo, ParseMode,
+) -> frankenstein::input_media::MediaGroupInputMedia {
+    use frankenstein::ParseMode;
+    use frankenstein::input_file::{FileUpload, InputFile};
+    use frankenstein::input_media::{
+        InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo, MediaGroupInputMedia,
     };
 
-    let file = InputFile::file(host_path.to_path_buf());
+    let file = || {
+        FileUpload::InputFile(InputFile {
+            path: host_path.to_path_buf(),
+        })
+    };
     let cap = att.caption.as_deref().map(|raw| {
         if html {
             caption_to_html(raw)
@@ -1393,62 +1425,49 @@ fn build_group_input_media(
             caption_to_plain(raw)
         }
     });
+    let parse_mode = (cap.is_some() && html).then_some(ParseMode::Html);
     match att.kind {
-        OutboundKind::Photo => {
-            let mut media = InputMediaPhoto::new(file);
-            if let Some(caption) = cap {
-                media = media.caption(caption);
-                if html {
-                    media = media.parse_mode(ParseMode::Html);
-                }
-            }
-            InputMedia::Photo(media)
-        }
-        OutboundKind::Video => {
-            let mut media = InputMediaVideo::new(file);
-            if let Some(caption) = cap {
-                media = media.caption(caption);
-                if html {
-                    media = media.parse_mode(ParseMode::Html);
-                }
-            }
-            InputMedia::Video(media)
-        }
-        OutboundKind::Document => {
-            let mut media = InputMediaDocument::new(file);
-            media.disable_content_type_detection = Some(true);
-            if let Some(caption) = cap {
-                media = media.caption(caption);
-                if html {
-                    media = media.parse_mode(ParseMode::Html);
-                }
-            }
-            InputMedia::Document(media)
-        }
-        OutboundKind::Audio => {
-            let mut media = InputMediaAudio::new(file);
-            if let Some(caption) = cap {
-                media = media.caption(caption);
-                if html {
-                    media = media.parse_mode(ParseMode::Html);
-                }
-            }
-            InputMedia::Audio(media)
-        }
+        OutboundKind::Photo => MediaGroupInputMedia::Photo(
+            InputMediaPhoto::builder()
+                .media(file())
+                .maybe_caption(cap)
+                .maybe_parse_mode(parse_mode)
+                .build(),
+        ),
+        OutboundKind::Video => MediaGroupInputMedia::Video(
+            InputMediaVideo::builder()
+                .media(file())
+                .maybe_caption(cap)
+                .maybe_parse_mode(parse_mode)
+                .build(),
+        ),
+        OutboundKind::Document => MediaGroupInputMedia::Document(
+            InputMediaDocument::builder()
+                .media(file())
+                .disable_content_type_detection(true)
+                .maybe_caption(cap)
+                .maybe_parse_mode(parse_mode)
+                .build(),
+        ),
+        OutboundKind::Audio => MediaGroupInputMedia::Audio(
+            InputMediaAudio::builder()
+                .media(file())
+                .maybe_caption(cap)
+                .maybe_parse_mode(parse_mode)
+                .build(),
+        ),
         _ => {
             tracing::error!(
                 "send_group received ungroupable kind {:?} for {} - classifier bug",
                 att.kind,
                 att.path,
             );
-            InputMedia::Document(InputMediaDocument::new(file))
+            MediaGroupInputMedia::Document(InputMediaDocument::builder().media(file()).build())
         }
     }
 }
 
 async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(), SendError> {
-    use teloxide::types::{MessageId, ThreadId};
-
     // All-or-nothing: Telegram's sendMediaGroup requires the full set in one
     // call. If any member fails path validation, download, metadata read, or
     // the size check, the whole group is aborted — already-downloaded temp
@@ -1472,34 +1491,25 @@ async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(
         return Err(SendError::FallbackToSingles { reason });
     }
 
-    let thread_id = if ctx.eff_thread_id != 0 {
-        Some(ThreadId(MessageId(ctx.eff_thread_id as i32)))
-    } else {
-        None
-    };
+    let thread_id = (ctx.eff_thread_id != 0).then_some(ctx.eff_thread_id as i32);
 
     // Send an album once with the given caption rendering.
     async fn send_album(
         ctx: &SendCtx<'_>,
         items: &[OutboundAttachment],
         host_paths: &[PathBuf],
-        thread_id: Option<ThreadId>,
+        thread_id: Option<i32>,
         html: bool,
-    ) -> Result<(), teloxide::RequestError> {
-        use teloxide::payloads::SendMediaGroupSetters;
-        use teloxide::requests::Requester;
-        use teloxide::types::InputMedia;
-
-        let media: Vec<InputMedia> = items
+    ) -> Result<(), TgError> {
+        let media: Vec<frankenstein::input_media::MediaGroupInputMedia> = items
             .iter()
             .zip(host_paths.iter())
             .map(|(att, host)| build_group_input_media(att, host, html))
             .collect();
-        let mut req = ctx.bot.send_media_group(ctx.chat_id, media);
-        if let Some(tid) = thread_id {
-            req = req.message_thread_id(tid);
-        }
-        req.await.map(|_| ())
+        ctx.bot
+            .send_media_group(ctx.chat_id, media, thread_id)
+            .await
+            .map(|_| ())
     }
 
     let result = match send_album(ctx, items, &host_paths, thread_id, true).await {
@@ -1510,7 +1520,7 @@ async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(
                 // Real album incompatibility — degrade to individual sends
                 // (each send_single then runs its own HTML+plain fallback).
                 Err(SendError::FallbackToSingles { reason })
-            } else if is_retryable_format_error(&reason) {
+            } else if is_retryable_format_error(&e) {
                 // Caption formatting rejection (pre-delivery 400) — retry the
                 // album once with plain captions, preserving the album and
                 // dropping only the caption's formatting.
@@ -1653,6 +1663,57 @@ async fn cleanup_local_dir(
 mod tests {
     use super::*;
 
+    fn att_msg(json: serde_json::Value) -> Message {
+        serde_json::from_value(json).unwrap()
+    }
+
+    /// A Telegram animation (GIF) arrives with BOTH `animation` and `document`
+    /// populated (the `document` field is a documented backward-compat mirror).
+    /// teloxide's `MediaKind` was mutually exclusive, so a GIF yielded exactly
+    /// one attachment. Regression guard: `extract_attachments` must emit a single
+    /// `Animation`, not an `Animation` + a duplicate `Document` (which would
+    /// download and upload the same file twice).
+    #[test]
+    fn extract_attachments_gif_yields_single_animation_not_duplicate_document() {
+        let m = att_msg(serde_json::json!({
+            "message_id": 1, "date": 0,
+            "chat": {"id": 1, "type": "private", "first_name": "U"},
+            "from": {"id": 5, "is_bot": false, "first_name": "U"},
+            "animation": {
+                "file_id": "anim_fid", "file_unique_id": "au",
+                "width": 100, "height": 100, "duration": 2,
+                "file_name": "x.gif", "mime_type": "video/mp4", "file_size": 1000
+            },
+            // Telegram mirrors the animation into `document` for backward compat.
+            "document": {
+                "file_id": "doc_mirror_fid", "file_unique_id": "du",
+                "file_name": "x.gif", "mime_type": "video/mp4", "file_size": 1000
+            }
+        }));
+        let atts = extract_attachments(&m);
+        assert_eq!(atts.len(), 1, "a GIF must yield exactly one attachment");
+        assert_eq!(atts[0].kind, AttachmentKind::Animation);
+        assert_eq!(atts[0].file_id, "anim_fid");
+    }
+
+    /// A plain document (no animation) must still be extracted normally.
+    #[test]
+    fn extract_attachments_plain_document_still_extracted() {
+        let m = att_msg(serde_json::json!({
+            "message_id": 1, "date": 0,
+            "chat": {"id": 1, "type": "private", "first_name": "U"},
+            "from": {"id": 5, "is_bot": false, "first_name": "U"},
+            "document": {
+                "file_id": "doc_fid", "file_unique_id": "du",
+                "file_name": "report.pdf", "mime_type": "application/pdf", "file_size": 2048
+            }
+        }));
+        let atts = extract_attachments(&m);
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].kind, AttachmentKind::Document);
+        assert_eq!(atts[0].file_id, "doc_fid");
+    }
+
     #[test]
     fn caption_to_html_renders_bold() {
         assert_eq!(super::caption_to_html("**x**"), "<b>x</b>");
@@ -1679,24 +1740,47 @@ mod tests {
 
     #[test]
     fn is_retryable_format_error_gates_retry_correctly() {
-        // Deterministic pre-delivery formatting rejections → retry is safe.
-        assert!(super::is_retryable_format_error(
+        use frankenstein::response::ErrorResponse;
+        fn api_err(code: u64, desc: &str) -> TgError {
+            TgError::Api(frankenstein::Error::Api(ErrorResponse {
+                ok: false,
+                description: desc.to_string(),
+                error_code: code,
+                parameters: None,
+            }))
+        }
+        // Deterministic pre-delivery 400 formatting rejections → retry is safe.
+        assert!(super::is_retryable_format_error(&api_err(
+            400,
             "Bad Request: can't parse entities: Unsupported start tag \"x\""
-        ));
-        assert!(super::is_retryable_format_error(
+        )));
+        assert!(super::is_retryable_format_error(&api_err(
+            400,
             "Bad Request: can't parse entities: Unsupported URL protocol"
-        ));
-        assert!(super::is_retryable_format_error(
+        )));
+        assert!(super::is_retryable_format_error(&api_err(
+            400,
             "Bad Request: message caption is too long"
-        ));
-        // Transient / possibly-delivered errors → must NOT retry (would duplicate).
-        assert!(!super::is_retryable_format_error(
-            "Network error: connection reset by peer"
-        ));
-        assert!(!super::is_retryable_format_error(
+        )));
+        // A 400 unrelated to caption formatting → not retryable.
+        assert!(!super::is_retryable_format_error(&api_err(
+            400,
+            "Bad Request: chat not found"
+        )));
+        // 5xx / 429 even if the text contains the phrases → must NOT retry (the
+        // send may have been delivered, so a retry would duplicate the message).
+        assert!(!super::is_retryable_format_error(&api_err(
+            429,
             "Too Many Requests: retry after 5"
-        ));
-        assert!(!super::is_retryable_format_error("Internal Server Error"));
+        )));
+        assert!(!super::is_retryable_format_error(&api_err(
+            500,
+            "Internal Server Error: caption is too long"
+        )));
+        // Non-API (transport/other) error → not retryable.
+        assert!(!super::is_retryable_format_error(&TgError::Other(
+            "connection reset by peer".to_string()
+        )));
     }
 
     const HOST_OUTBOX: &str = "/Users/x/.right/agents/riskoff/outbox";
@@ -2821,7 +2905,7 @@ mod tests {
         let media = build_group_input_media(&att, std::path::Path::new("/tmp/report.pdf"), true);
 
         match media {
-            teloxide::types::InputMedia::Document(document) => {
+            frankenstein::input_media::MediaGroupInputMedia::Document(document) => {
                 assert_eq!(document.disable_content_type_detection, Some(true));
             }
             _ => panic!("expected document media"),

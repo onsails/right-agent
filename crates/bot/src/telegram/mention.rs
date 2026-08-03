@@ -1,7 +1,9 @@
 //! Detect whether a group message addresses the bot, and prepare the
 //! cleaned-up prompt text.
 
-use teloxide::types::{Message, MessageEntityKind};
+use frankenstein::types::{Message, MessageEntityType};
+
+use super::msg_ext;
 
 /// Bot identity: username (without '@') and user_id. Cached at bot startup.
 #[derive(Debug, Clone)]
@@ -23,66 +25,64 @@ pub enum AddressKind {
 /// Returns `Some(AddressKind)` when the message should be treated as addressed
 /// to the bot; `None` in groups where the message is unrelated.
 pub fn is_bot_addressed(msg: &Message, identity: &BotIdentity) -> Option<AddressKind> {
-    use teloxide::types::ChatKind;
-    match &msg.chat.kind {
-        ChatKind::Private(_) => Some(AddressKind::DirectMessage),
-        _ => {
-            // 1) reply to bot's message -- but NOT the forum-topic-root service
-            //    message. Telegram threads topic membership via a reply to the
-            //    `forum_topic_created` message, whose author is the topic
-            //    creator; when the bot created the topic this would otherwise
-            //    make every message look like a reply to the bot.
-            if let Some(reply) = msg.reply_to_message()
-                && reply.forum_topic_created().is_none()
-                && let Some(from) = reply.from.as_ref()
-                && from.id.0 == identity.user_id
-            {
-                return Some(AddressKind::GroupReplyToBot);
-            }
+    if msg_ext::is_private(&msg.chat) {
+        return Some(AddressKind::DirectMessage);
+    }
+    // 1) reply to bot's message -- but NOT the forum-topic-root service
+    //    message. Telegram threads topic membership via a reply to the
+    //    `forum_topic_created` message, whose author is the topic
+    //    creator; when the bot created the topic this would otherwise
+    //    make every message look like a reply to the bot.
+    if let Some(reply) = msg.reply_to_message.as_ref()
+        && reply.forum_topic_created.is_none()
+        && let Some(from) = reply.from.as_ref()
+        && from.id == identity.user_id
+    {
+        return Some(AddressKind::GroupReplyToBot);
+    }
 
-            // 2) parse entities with correct UTF-8 offsets (teloxide converts
-            //    from UTF-16 code units). Use text entities first, fall back
-            //    to caption entities.
-            let entities = msg
-                .parse_entities()
-                .or_else(|| msg.parse_caption_entities());
-            if let Some(entities) = entities {
-                for e in entities {
-                    match e.kind() {
-                        MessageEntityKind::TextMention { user }
-                            if user.id.0 == identity.user_id =>
-                        {
-                            return Some(AddressKind::GroupMentionEntity);
-                        }
-                        MessageEntityKind::Mention => {
-                            // Slice is e.g. "@botname"; compare case-insensitively.
-                            if e.text()
-                                .strip_prefix('@')
-                                .map(|u| u.eq_ignore_ascii_case(&identity.username))
-                                .unwrap_or(false)
-                            {
-                                return Some(AddressKind::GroupMentionText);
-                            }
-                        }
-                        MessageEntityKind::BotCommand => {
-                            let slice = e.text();
-                            // Accept /cmd (no suffix — only one bot in chat or we're the default)
-                            // or /cmd@botname (explicit).
-                            if let Some((_, maybe_user)) = slice.split_once('@') {
-                                if maybe_user.eq_ignore_ascii_case(&identity.username) {
-                                    return Some(AddressKind::GroupSlashCommand);
-                                }
-                            } else {
-                                return Some(AddressKind::GroupSlashCommand);
-                            }
-                        }
-                        _ => {}
+    // 2) parse entities, slicing with correct UTF-16 offsets (frankenstein
+    //    keeps the Bot-API UTF-16 code units; `msg_ext` converts). Text
+    //    entities first, then caption entities.
+    if let Some(entities) = msg_ext::parse_entities(msg) {
+        for parsed in entities {
+            match parsed.entity.type_field {
+                MessageEntityType::TextMention
+                    if parsed
+                        .entity
+                        .user
+                        .as_ref()
+                        .is_some_and(|user| user.id == identity.user_id) =>
+                {
+                    return Some(AddressKind::GroupMentionEntity);
+                }
+                MessageEntityType::Mention => {
+                    // Slice is e.g. "@botname"; compare case-insensitively.
+                    if parsed
+                        .text
+                        .strip_prefix('@')
+                        .map(|u| u.eq_ignore_ascii_case(&identity.username))
+                        .unwrap_or(false)
+                    {
+                        return Some(AddressKind::GroupMentionText);
                     }
                 }
+                MessageEntityType::BotCommand => {
+                    // Accept /cmd (no suffix — only one bot in chat or we're the default)
+                    // or /cmd@botname (explicit).
+                    if let Some((_, maybe_user)) = parsed.text.split_once('@') {
+                        if maybe_user.eq_ignore_ascii_case(&identity.username) {
+                            return Some(AddressKind::GroupSlashCommand);
+                        }
+                    } else {
+                        return Some(AddressKind::GroupSlashCommand);
+                    }
+                }
+                _ => {}
             }
-            None
         }
     }
+    None
 }
 
 /// Strip `@botname` mentions from `text` for prompt cleanup.
@@ -167,7 +167,7 @@ mod tests {
 
     #[tokio::test]
     async fn dm_returns_direct_message() {
-        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+        let msg: frankenstein::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,
             "chat": {"id": 1, "type": "private", "first_name": "U"},
@@ -187,7 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn group_non_mention_returns_none() {
-        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+        let msg: frankenstein::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 1,
             "date": 0,
             "chat": {"id": -1001, "type": "group", "title": "g"},
@@ -207,7 +207,7 @@ mod tests {
         // A plain message in a bot-created topic: reply_to_message is the
         // forum_topic_created service message whose `from` is the bot.
         // It must NOT count as addressing. (teloxide-core fixture shape.)
-        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+        let msg: frankenstein::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 5, "date": 0,
             "chat": {"id": -1001, "is_forum": true, "type": "supergroup", "title": "g"},
             "from": {"id": 42, "is_bot": false, "first_name": "U"},
@@ -233,7 +233,7 @@ mod tests {
 
     #[tokio::test]
     async fn real_reply_to_bot_is_addressing() {
-        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+        let msg: frankenstein::types::Message = serde_json::from_value(serde_json::json!({
             "message_id": 6, "date": 0,
             "chat": {"id": -1001, "type": "supergroup", "title": "g"},
             "from": {"id": 42, "is_bot": false, "first_name": "U"},

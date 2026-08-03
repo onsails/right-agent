@@ -6,7 +6,6 @@ use right_openshell::diagnosis::GatewayDiagnosis;
 use right_openshell::sandbox_exec::SandboxExec;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use teloxide::types::ChatId;
 use tokio::sync::mpsc;
 
 /// Current usability of the sandbox backend.
@@ -58,11 +57,11 @@ impl SandboxRuntimeHandle {
     }
 
     /// Record a chat that saw an "unavailable" reply, for the back-online notice.
-    pub fn note_affected(&self, chat: ChatId, eff_thread_id: i64) {
+    pub fn note_affected(&self, chat_id: i64, eff_thread_id: i64) {
         self.affected
             .lock()
             .expect("affected mutex poisoned")
-            .insert((chat.0, eff_thread_id));
+            .insert((chat_id, eff_thread_id));
     }
 
     /// Ask the supervisor to verify the backend. Coalesced; never blocks.
@@ -87,10 +86,9 @@ impl SandboxRuntimeHandle {
         self.sandbox.store(Arc::new(None));
     }
 
-    pub(crate) fn take_affected(&self) -> Vec<(ChatId, i64)> {
+    pub(crate) fn take_affected(&self) -> Vec<(i64, i64)> {
         std::mem::take(&mut *self.affected.lock().expect("affected mutex poisoned"))
             .into_iter()
-            .map(|(c, t)| (ChatId(c), t))
             .collect()
     }
 }

@@ -119,27 +119,29 @@ attachment paths MUST be under `/sandbox/outbox/`.
 Conversation transcript scope is server-enforced.
 `mcp__right__thread_search` searches only the current
 `(chat_id, effective_thread_id)`. `mcp__right__chat_search` searches only
-the current `chat_id`; in DMs this is only that DM, and in groups this is
-the whole group across topics. `mcp__right__get_messages_by_id` is scoped to
-the current `(chat_id, effective_thread_id)`; the agent supplies only
-`message_ids`, and ids outside scope or not archived are absent. Agents must
-never be allowed to pass chat_id, thread_id, user ids, session ids, or a
-broader scope to these tools.
+the current `chat_id` (a DM only that DM; a group the whole group across
+topics). `mcp__right__get_messages_by_id` is scoped to the same
+chat/thread pair; agents supply only `message_ids`, and ids outside scope
+or not archived are absent.
+Agents must never be allowed to pass chat_id, thread_id, user ids, session
+ids, or a broader scope to these tools.
 `mcp__right__thread_focus_set` writes agent focus for the current
-`(chat_id, effective_thread_id)`; scope comes from `conversation_scope`, never
-agent args.
+conversation scope, never agent args.
 
-`mcp__right__forum_topic_list` is scoped the same way: it returns only the
-current `chat_id`'s tracked topics, resolved server-side from the invocation —
-never agent-supplied. Forum write tools (`forum_topic_create`/`_edit`/`_close`/
-`_reopen`) resolve `chat_id` identically and never accept it as an argument; no
+`mcp__right__forum_topic_list` returns only the current `chat_id`'s tracked
+topics, resolved server-side. Forum write tools (`forum_topic_create`/`_edit`/
+`_close`/`_reopen`) resolve `chat_id` identically, never from agent args; no
 delete tool exists.
+
+`mcp__right__channel_read`/`channel_post` are the exception:
+they accept an agent-supplied `channel` id, valid only against `kind:
+channel` allowlist entries, validated on both aggregator and bot sides.
+`channel_list` takes no parameters.
 
 `mcp__right__cron_trigger` resolves the origin chat for a `then` follow-up from
 the foreground invocation's conversation scope; agents never pass it.
 
-See: `docs/architecture/mcp.md` for the internal REST surface, progress
-register/send wiring, dispatch detail, and rationale.
+See: `docs/architecture/mcp.md` for the REST surface and dispatch detail.
 
 ### Prompting Architecture
 
@@ -208,13 +210,15 @@ call it to give the agent a short `--resume`-d turn wrapped in
 human-friendly summary of the failure.
 
 Reflection never reflects on itself. Hindsight `memory_retain` is skipped
-for reflection turns. `async_runs.status` gates delivery: `'failed'`
-routes to `DELIVERY_INSTRUCTION_FAILURE`; any other status routes to
-`DELIVERY_INSTRUCTION_SUCCESS` (verbatim relay).
+for reflection turns.
 
 The worker aborts after 3 consecutive structured-output schema rejections
 and routes to reflection (`FailureKind::StructuredOutputLoop`); reflection
 runs on a separate path and never triggers the detector.
+
+A successful turn with `content: null` but undelivered assistant text gets
+one repair resume; a second null confirms intentional silence (see
+`docs/architecture/sessions.md`).
 
 See: `docs/architecture/sessions.md` for `ReflectionLimits` (worker vs
 cron), usage-event accounting, and label-routing detail.

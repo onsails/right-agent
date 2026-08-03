@@ -4,6 +4,8 @@ pub(crate) mod archive;
 pub mod attachments;
 pub(crate) mod bootstrap_photo;
 pub mod bot;
+pub(crate) mod channel_confirm;
+pub(crate) mod command;
 pub(crate) mod dashboard;
 pub(crate) mod debug_command;
 pub mod dispatch;
@@ -17,35 +19,30 @@ pub mod memory_alerts;
 pub mod mention;
 pub(crate) mod mode_command;
 pub(crate) mod model_command;
+pub(crate) mod msg_ext;
 pub mod oauth_callback;
 pub(crate) mod oauth_status;
 pub(crate) mod progress;
 pub(crate) mod reply_context;
+pub(crate) mod router;
 pub mod session;
-pub mod shutdown_listener;
+pub(crate) mod tg_bot;
 pub mod webhook;
 pub mod worker;
 
-pub(crate) use dispatch::run_telegram;
+pub(crate) use dispatch::setup_telegram;
 pub use session::effective_thread_id;
 
-/// Bot adaptor type alias used by WorkerContext and dispatch logic.
-/// Ordering: CacheMe<Throttle<Bot>> per BOT-03 (Throttle inner, CacheMe outer).
-pub type BotType =
-    teloxide::adaptors::CacheMe<teloxide::adaptors::throttle::Throttle<teloxide::Bot>>;
+/// Bot client used by `WorkerContext` and routing — the frankenstein-backed
+/// [`tg_bot::RightBot`] wrapper (centralizes throttle, cached `get_me`, uniform
+/// error + parse-mode/thread defaults). Cloneable.
+pub(crate) type BotType = tg_bot::RightBot;
 
 /// Best-effort broadcast to a list of chat IDs. Errors are logged and swallowed
 /// (alerts shouldn't fail hard if one chat is unreachable).
-pub(crate) async fn broadcast_to_chats<R>(bot: &R, chat_ids: &[i64], text: &str)
-where
-    R: teloxide::prelude::Requester + Send + Sync,
-    R::Err: std::fmt::Display,
-{
+pub(crate) async fn broadcast_to_chats(bot: &BotType, chat_ids: &[i64], text: &str) {
     for &chat_id in chat_ids {
-        if let Err(e) = bot
-            .send_message(teloxide::types::ChatId(chat_id), text)
-            .await
-        {
+        if let Err(e) = bot.send_text(chat_id, text).await {
             tracing::warn!(chat_id, "broadcast_to_chats send failed: {e}");
         }
     }

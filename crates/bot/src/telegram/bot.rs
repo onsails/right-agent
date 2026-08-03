@@ -1,12 +1,13 @@
-use teloxide::adaptors::throttle::Limits;
-use teloxide::adaptors::{CacheMe, Throttle};
-use teloxide::prelude::*;
+//! Bot construction helper.
 
-/// Construct the bot adaptor with correct ordering: CacheMe<Throttle<Bot>>.
+use super::BotType;
+
+/// Construct an auxiliary send-only [`BotType`] (no `get_me` round-trip).
 ///
-/// Ordering per BOT-03 and teloxide issue #516:
-/// `.throttle(Limits::default()).cache_me()` — Throttle is inner, CacheMe is outer.
-/// NEVER use Throttle<CacheMe<Bot>> — deadlock risk.
-pub fn build_bot(token: String) -> CacheMe<Throttle<Bot>> {
-    Bot::new(token).throttle(Limits::default()).cache_me()
+/// Used for the menu, webhook-register, supervisor, delivery, and focus-notifier
+/// bots that only send and never need the bot's own identity. The
+/// identity-bearing dispatcher bot is built via `RightBot::connect` inside
+/// `setup_telegram`.
+pub(crate) fn build_bot(token: String) -> BotType {
+    super::tg_bot::RightBot::new(token)
 }

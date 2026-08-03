@@ -2,10 +2,11 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
+use frankenstein::types::Message;
 use right_db::conversation::{ConversationMessage, ConversationRole, archive_message};
-use teloxide::types::{ChatKind, Message};
 
 use super::mention::{AddressKind, BotIdentity, is_bot_addressed};
+use super::msg_ext;
 use super::session::effective_thread_id;
 
 // Why 4: bounded so a Telegram traffic burst cannot queue unbounded
@@ -53,13 +54,13 @@ struct AssistantArchivePayload {
 }
 
 pub(crate) fn should_archive_seen_group_message(msg: &Message) -> bool {
-    !matches!(msg.chat.kind, ChatKind::Private(_))
+    !msg_ext::is_private(&msg.chat)
 }
 
 pub(crate) fn archive_content(msg: &Message) -> Option<String> {
     let mut parts = Vec::new();
 
-    if let Some(content) = msg.text().or(msg.caption()).map(str::trim)
+    if let Some(content) = msg_ext::text_or_caption(msg).map(str::trim)
         && !content.is_empty()
     {
         parts.push(content.to_string());
@@ -95,11 +96,15 @@ pub(crate) fn archive_routed_dm_message(
     msg: &Message,
     address: Option<AddressKind>,
 ) {
-    if !matches!(msg.chat.kind, ChatKind::Private(_)) {
+    if !msg_ext::is_private(&msg.chat) {
         return;
     }
 
     archive_user_message(agent_dir, msg, address.is_some(), true);
+}
+
+pub(crate) fn archive_channel_post(agent_dir: &Path, msg: &Message) {
+    archive_user_message(agent_dir, msg, false, false);
 }
 
 fn archive_user_message(
@@ -127,11 +132,19 @@ impl ArchivePayload {
         Some(Self {
             agent_dir: agent_dir.to_path_buf(),
             content: archive_content(msg)?,
-            chat_id: msg.chat.id.0,
+            chat_id: msg.chat.id,
             thread_id: effective_thread_id(msg),
-            message_id: msg.id.0,
-            sender_user_id: msg.from.as_ref().map(|user| user.id.0 as i64),
-            sender_name: msg.from.as_ref().map(|user| user.full_name()),
+            message_id: msg.message_id,
+            sender_user_id: msg.from.as_ref().map(|user| user.id as i64),
+            sender_name: msg
+                .from
+                .as_ref()
+                .map(|user| msg_ext::full_name(user))
+                .or_else(|| {
+                    msg.sender_chat
+                        .as_ref()
+                        .and_then(|chat| msg_ext::chat_title(chat).map(str::to_owned))
+                }),
             addressed_to_bot,
             routed_to_agent,
         })
@@ -166,6 +179,36 @@ pub(crate) fn archive_assistant_message(
         message_id: None,
     };
     with_archive_permit(meta, move || write_assistant_payload(payload));
+}
+
+/// Archive a channel post sent through the MCP UDS endpoint so `channel_read`
+/// can include the agent's own publication.
+pub(crate) async fn archive_outbound_channel_post(
+    agent_dir: &Path,
+    chat_id: i64,
+    message_id: i32,
+    content: &str,
+) -> anyhow::Result<()> {
+    let conn = right_db::open_connection(agent_dir, false).await?;
+    archive_message(
+        &conn,
+        ConversationMessage {
+            platform: "telegram",
+            chat_id,
+            thread_id: 0,
+            message_id: Some(message_id),
+            sender_user_id: None,
+            sender_name: None,
+            addressed_to_bot: false,
+            routed_to_agent: true,
+            root_session_id: None,
+            turn_id: None,
+            role: ConversationRole::Assistant,
+            content,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 fn spawn_archive_write(payload: ArchivePayload) {
@@ -353,7 +396,7 @@ async fn retry_archive_assistant_db_write(
 mod tests {
     use std::sync::LazyLock;
 
-    use teloxide::types::Message;
+    use frankenstein::types::Message;
 
     use super::super::mention::{AddressKind, BotIdentity};
 
@@ -366,6 +409,67 @@ mod tests {
 
     fn message(payload: serde_json::Value) -> Message {
         serde_json::from_value(payload).unwrap()
+    }
+
+    #[test]
+    fn archive_payload_falls_back_to_sender_chat_for_channel_posts() {
+        let dir = tempfile::tempdir().unwrap();
+        let msg: Message = serde_json::from_value(serde_json::json!({
+            "message_id": 7, "date": 0,
+            "chat": {"id": -1001234567890_i64, "type": "channel", "title": "RiskOff"},
+            "sender_chat": {"id": -1001234567890_i64, "type": "channel", "title": "RiskOff"},
+            "text": "hello channel"
+        }))
+        .unwrap();
+        let payload = super::ArchivePayload::from_message(dir.path(), &msg, false, false).unwrap();
+        assert_eq!(payload.sender_user_id, None);
+        assert_eq!(payload.sender_name.as_deref(), Some("RiskOff"));
+    }
+
+    #[test]
+    fn archive_payload_prefers_from_over_sender_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let msg = message(serde_json::json!({
+            "message_id": 8,
+            "date": 0,
+            "chat": {"id": -1001234567890_i64, "type": "channel", "title": "RiskOff"},
+            "from": {"id": 42, "is_bot": false, "first_name": "User"},
+            "sender_chat": {"id": -1001234567890_i64, "type": "channel", "title": "Chan"},
+            "text": "both senders"
+        }));
+        let payload = super::ArchivePayload::from_message(dir.path(), &msg, false, false).unwrap();
+        assert_eq!(payload.sender_name.as_deref(), Some("User"));
+    }
+
+    #[tokio::test]
+    async fn archive_outbound_channel_post_writes_assistant_row() {
+        let dir = tempfile::tempdir().expect("agent dir");
+        right_db::open_connection(dir.path(), true)
+            .await
+            .expect("create database");
+
+        super::archive_outbound_channel_post(dir.path(), -100, 7, "published post")
+            .await
+            .expect("archive outbound channel post");
+
+        let conn = right_db::open_connection(dir.path(), false)
+            .await
+            .expect("open database");
+        let row: (String, String, i64) = conn
+            .query_row(
+                "SELECT role, content, thread_id
+                 FROM conversation_messages
+                 WHERE platform = 'telegram' AND chat_id = ?1",
+                [-100],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .await
+            .expect("outbound row");
+
+        assert_eq!(
+            row,
+            ("assistant".to_owned(), "published post".to_owned(), 0)
+        );
     }
 
     fn bot_identity() -> BotIdentity {

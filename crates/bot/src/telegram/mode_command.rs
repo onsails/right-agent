@@ -2,16 +2,13 @@
 //! toggles for the per-scope response mode. Trusted-only, group-only.
 //! Mirrors `model_command.rs`.
 
-use std::sync::Arc;
-
-use right_agent::agent::allowlist::{AllowlistHandle, AllowlistState, ResponseMode};
-use teloxide::prelude::*;
-use teloxide::types::{
+use frankenstein::types::{
     InlineKeyboardButton, InlineKeyboardMarkup, MaybeInaccessibleMessage, Message,
 };
+use right_agent::agent::allowlist::{AllowlistState, ResponseMode};
 
-use super::BotType;
-use super::handler::AgentDir;
+use super::router::HandlerCtx;
+use super::tg_bot::TgError;
 
 /// Which scope a `/mode*` interaction targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,19 +64,26 @@ pub(crate) fn topic_keyboard(effective: ResponseMode, has_override: bool) -> Inl
         } else {
             mode_label(m).to_string()
         };
-        InlineKeyboardButton::callback(label, format!("mode:{data}"))
+        callback_button(&label, &format!("mode:{data}"))
     };
     let mut rows = vec![vec![
         btn(ResponseMode::Addressed, "addressed"),
         btn(ResponseMode::All, "all"),
     ]];
     if has_override {
-        rows.push(vec![InlineKeyboardButton::callback(
-            "↩︎ Inherit group",
-            "mode:clear",
-        )]);
+        rows.push(vec![callback_button("↩︎ Inherit group", "mode:clear")]);
     }
-    InlineKeyboardMarkup::new(rows)
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(rows)
+        .build()
+}
+
+/// Build a callback button.
+fn callback_button(label: &str, data: &str) -> InlineKeyboardButton {
+    InlineKeyboardButton::builder()
+        .text(label)
+        .callback_data(data)
+        .build()
 }
 
 /// Group keyboard: [Addressed][All], `✓` on the active default.
@@ -90,12 +94,14 @@ pub(crate) fn group_keyboard(current: ResponseMode) -> InlineKeyboardMarkup {
         } else {
             mode_label(m).to_string()
         };
-        InlineKeyboardButton::callback(label, format!("modegroup:{data}"))
+        callback_button(&label, &format!("modegroup:{data}"))
     };
-    InlineKeyboardMarkup::new(vec![vec![
-        btn(ResponseMode::Addressed, "addressed"),
-        btn(ResponseMode::All, "all"),
-    ]])
+    InlineKeyboardMarkup::builder()
+        .inline_keyboard(vec![vec![
+            btn(ResponseMode::Addressed, "addressed"),
+            btn(ResponseMode::All, "all"),
+        ]])
+        .build()
 }
 
 fn topic_body(effective: ResponseMode, has_override: bool) -> String {
@@ -191,10 +197,34 @@ fn callback_target_from_regular_message(
         ModeScope::Topic => {
             let message = message.ok_or("Mode menu unavailable")?;
             Ok((
-                message.chat.id.0,
+                message.chat.id,
                 super::session::effective_thread_id(message),
             ))
         }
+    }
+}
+
+/// The accessible (regular) message inside a `MaybeInaccessibleMessage`, if any.
+fn regular_message(message: &MaybeInaccessibleMessage) -> Option<&Message> {
+    match message {
+        MaybeInaccessibleMessage::Message(m) => Some(m),
+        MaybeInaccessibleMessage::InaccessibleMessage(_) => None,
+    }
+}
+
+/// The chat id of a `MaybeInaccessibleMessage` (both variants carry the chat).
+fn message_chat_id(message: &MaybeInaccessibleMessage) -> i64 {
+    match message {
+        MaybeInaccessibleMessage::Message(m) => m.chat.id,
+        MaybeInaccessibleMessage::InaccessibleMessage(m) => m.chat.id,
+    }
+}
+
+/// The message id of a `MaybeInaccessibleMessage` (both variants carry it).
+fn message_id(message: &MaybeInaccessibleMessage) -> i32 {
+    match message {
+        MaybeInaccessibleMessage::Message(m) => m.message_id,
+        MaybeInaccessibleMessage::InaccessibleMessage(m) => m.message_id,
     }
 }
 
@@ -205,61 +235,60 @@ fn callback_target(
     match scope {
         ModeScope::Group => callback_target_from_regular_message(
             scope,
-            message.regular_message(),
-            message.chat().id.0,
+            regular_message(message),
+            message_chat_id(message),
         ),
         ModeScope::Topic => {
-            callback_target_from_regular_message(scope, message.regular_message(), 0)
+            callback_target_from_regular_message(scope, regular_message(message), 0)
         }
     }
 }
 
 async fn send_in_thread(
-    bot: &BotType,
+    bot: &super::BotType,
     msg: &Message,
-    text: impl Into<String>,
+    text: &str,
     reply_markup: Option<InlineKeyboardMarkup>,
-) -> ResponseResult<()> {
-    let mut send = bot.send_message(msg.chat.id, text);
-    if let Some(reply_markup) = reply_markup {
-        send = send.reply_markup(reply_markup);
-    }
-    if let Some(thread_id) = msg.thread_id {
-        send = send.message_thread_id(thread_id);
-    }
-    send.await?;
+) -> Result<(), TgError> {
+    bot.send_message_opts(
+        msg.chat.id,
+        text,
+        false,
+        msg.message_thread_id,
+        None,
+        reply_markup,
+    )
+    .await?;
     Ok(())
 }
 
 /// Open the current-topic `/mode` menu.
-pub(crate) async fn handle_mode(
-    bot: BotType,
-    msg: Message,
-    allowlist: AllowlistHandle,
-) -> ResponseResult<()> {
-    if super::handler::is_private_chat(&msg.chat.kind) {
-        send_in_thread(&bot, &msg, "/mode is only valid in group chats", None).await?;
+pub(crate) async fn handle_mode(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let allowlist = &ctx.allowlist;
+    if super::msg_ext::is_private(&msg.chat) {
+        send_in_thread(bot, msg, "/mode is only valid in group chats", None).await?;
         return Ok(());
     }
 
-    if !super::allowlist_commands::sender_is_trusted(&msg, &allowlist) {
+    if !super::allowlist_commands::sender_is_trusted(msg, allowlist) {
         tracing::debug!(
-            chat_id = msg.chat.id.0,
-            user_id = msg.from.as_ref().map(|u| u.id.0),
+            chat_id = msg.chat.id,
+            user_id = msg.from.as_ref().map(|u| u.id),
             "/mode ignored: non-trusted sender in group"
         );
         return Ok(());
     }
 
-    let chat_id = msg.chat.id.0;
-    let thread_id = super::session::effective_thread_id(&msg);
+    let chat_id = msg.chat.id;
+    let thread_id = super::session::effective_thread_id(msg);
     let Some((effective, has_override)) = ({
         let state = allowlist.0.read().expect("allowlist lock poisoned");
         topic_mode_state(&state, chat_id, thread_id)
     }) else {
         send_in_thread(
-            &bot,
-            &msg,
+            bot,
+            msg,
             "Open the group first with /allow_all, then set a mode",
             None,
         )
@@ -268,9 +297,9 @@ pub(crate) async fn handle_mode(
     };
 
     send_in_thread(
-        &bot,
-        &msg,
-        topic_body(effective, has_override),
+        bot,
+        msg,
+        &topic_body(effective, has_override),
         Some(topic_keyboard(effective, has_override)),
     )
     .await?;
@@ -278,33 +307,31 @@ pub(crate) async fn handle_mode(
 }
 
 /// Open the whole-group `/mode_group` menu.
-pub(crate) async fn handle_mode_group(
-    bot: BotType,
-    msg: Message,
-    allowlist: AllowlistHandle,
-) -> ResponseResult<()> {
-    if super::handler::is_private_chat(&msg.chat.kind) {
-        send_in_thread(&bot, &msg, "/mode_group is only valid in group chats", None).await?;
+pub(crate) async fn handle_mode_group(ctx: &HandlerCtx, msg: &Message) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let allowlist = &ctx.allowlist;
+    if super::msg_ext::is_private(&msg.chat) {
+        send_in_thread(bot, msg, "/mode_group is only valid in group chats", None).await?;
         return Ok(());
     }
 
-    if !super::allowlist_commands::sender_is_trusted(&msg, &allowlist) {
+    if !super::allowlist_commands::sender_is_trusted(msg, allowlist) {
         tracing::debug!(
-            chat_id = msg.chat.id.0,
-            user_id = msg.from.as_ref().map(|u| u.id.0),
+            chat_id = msg.chat.id,
+            user_id = msg.from.as_ref().map(|u| u.id),
             "/mode_group ignored: non-trusted sender in group"
         );
         return Ok(());
     }
 
-    let chat_id = msg.chat.id.0;
+    let chat_id = msg.chat.id;
     let Some(current) = ({
         let state = allowlist.0.read().expect("allowlist lock poisoned");
         group_mode(&state, chat_id)
     }) else {
         send_in_thread(
-            &bot,
-            &msg,
+            bot,
+            msg,
             "Open the group first with /allow_all, then set a mode",
             None,
         )
@@ -313,9 +340,9 @@ pub(crate) async fn handle_mode_group(
     };
 
     send_in_thread(
-        &bot,
-        &msg,
-        group_body(current),
+        bot,
+        msg,
+        &group_body(current),
         Some(group_keyboard(current)),
     )
     .await?;
@@ -324,47 +351,48 @@ pub(crate) async fn handle_mode_group(
 
 /// Handle a click on a `/mode` or `/mode_group` keyboard button.
 pub(crate) async fn handle_mode_callback(
-    bot: BotType,
-    q: teloxide::types::CallbackQuery,
-    agent_dir: Arc<AgentDir>,
-    allowlist: AllowlistHandle,
-) -> ResponseResult<()> {
+    ctx: &HandlerCtx,
+    q: &frankenstein::types::CallbackQuery,
+) -> Result<(), TgError> {
+    let bot = &ctx.bot;
+    let allowlist = &ctx.allowlist;
+    let agent_dir = &ctx.agent_dir;
     let Some(data) = q.data.as_deref() else {
-        bot.answer_callback_query(q.id).await?;
+        bot.answer_callback(&q.id, None, false).await?;
         return Ok(());
     };
     let Some((scope, action)) = parse_callback(data) else {
-        bot.answer_callback_query(q.id).await?;
+        bot.answer_callback(&q.id, None, false).await?;
         return Ok(());
     };
 
-    let user_id = q.from.id.0 as i64;
+    let user_id = q.from.id as i64;
     let trusted = allowlist
         .0
         .read()
         .expect("allowlist lock poisoned")
         .is_user_trusted(user_id);
     if !trusted {
-        bot.answer_callback_query(q.id).text("Not allowed").await?;
+        bot.answer_callback(&q.id, Some("Not allowed"), false)
+            .await?;
         return Ok(());
     }
 
     let Some(message) = q.message.as_ref() else {
-        bot.answer_callback_query(q.id)
-            .text("Mode menu unavailable")
+        bot.answer_callback(&q.id, Some("Mode menu unavailable"), false)
             .await?;
         return Ok(());
     };
     let (chat_id, thread_id) = match callback_target(scope, message) {
         Ok(target) => target,
         Err(text) => {
-            bot.answer_callback_query(q.id).text(text).await?;
+            bot.answer_callback(&q.id, Some(text), false).await?;
             return Ok(());
         }
     };
 
     let updated =
-        match super::allowlist_commands::update_locked(&allowlist, &agent_dir.0, move |state| {
+        match super::allowlist_commands::update_locked(allowlist, &agent_dir.0, move |state| {
             apply_mode_action(state, chat_id, thread_id, scope, action)
         })
         .await
@@ -372,17 +400,19 @@ pub(crate) async fn handle_mode_callback(
             Ok(updated) => updated,
             Err(e) => {
                 tracing::error!(error = %e, "/mode: failed to persist allowlist");
-                bot.answer_callback_query(q.id)
-                    .text("Failed to save — see bot logs")
+                bot.answer_callback(&q.id, Some("Failed to save — see bot logs"), false)
                     .await?;
                 return Ok(());
             }
         };
 
     if !updated {
-        bot.answer_callback_query(q.id)
-            .text("Open the group first with /allow_all, then set a mode")
-            .await?;
+        bot.answer_callback(
+            &q.id,
+            Some("Open the group first with /allow_all, then set a mode"),
+            false,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -392,17 +422,25 @@ pub(crate) async fn handle_mode_callback(
     };
 
     let Some((body, keyboard)) = rendered else {
-        bot.answer_callback_query(q.id)
-            .text("Open the group first with /allow_all, then set a mode")
-            .await?;
+        bot.answer_callback(
+            &q.id,
+            Some("Open the group first with /allow_all, then set a mode"),
+            false,
+        )
+        .await?;
         return Ok(());
     };
 
-    let edit = bot
-        .edit_message_text(message.chat().id, message.id(), body)
-        .reply_markup(keyboard);
-    let toast = bot.answer_callback_query(q.id).text("Mode updated");
-    let (edit_result, toast_result) = tokio::join!(edit.send(), toast.send());
+    // Plain text (teloxide parity): the mode menu body is not HTML; edit_html
+    // would force ParseMode::Html.
+    let edit = bot.edit_text(
+        message_chat_id(message),
+        message_id(message),
+        &body,
+        Some(keyboard),
+    );
+    let toast = bot.answer_callback(&q.id, Some("Mode updated"), false);
+    let (edit_result, toast_result) = tokio::join!(edit, toast);
     if let Err(e) = edit_result {
         tracing::warn!(error = %e, "failed to edit /mode menu after update");
     }
@@ -414,8 +452,7 @@ pub(crate) async fn handle_mode_callback(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use right_agent::agent::allowlist::{AllowedGroup, AllowlistFile};
-    use teloxide::types::InlineKeyboardButtonKind;
+    use right_agent::agent::allowlist::{AllowedGroup, AllowlistFile, GroupKind};
 
     fn opened_state(chat_id: i64, mode: ResponseMode) -> AllowlistState {
         AllowlistState::from_file(AllowlistFile {
@@ -426,6 +463,7 @@ mod tests {
                 opened_at: Utc::now(),
                 mode,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             }],
             ..Default::default()
         })
@@ -449,10 +487,7 @@ mod tests {
             .inline_keyboard
             .iter()
             .flatten()
-            .filter_map(|button| match &button.kind {
-                InlineKeyboardButtonKind::CallbackData(data) => Some(data.clone()),
-                _ => None,
-            })
+            .filter_map(|button| button.callback_data.clone())
             .collect()
     }
 

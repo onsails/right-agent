@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use right_db::OptionalExtension as _;
-use teloxide::payloads::SendMessageSetters as _;
 
 use crate::cc::markdown_utils::strip_html_tags;
 use crate::telegram::handler::IdleTimestamp;
@@ -973,8 +972,10 @@ fn build_delivery_invocation_args(
         // Delivery is a relay, but harness built-ins are still available — apply
         // baseline so the relay can't self-loop or escape via harness
         // orchestration tools (Cron*, ScheduleWakeup, plan mode, etc.).
-        disallowed_tools: crate::cc::invocation::disallow_foreground_only_tools(
-            crate::cc::invocation::baseline_disallowed_tools(),
+        disallowed_tools: crate::cc::invocation::disallow_channel_post(
+            crate::cc::invocation::disallow_foreground_only_tools(
+                crate::cc::invocation::baseline_disallowed_tools(),
+            ),
         ),
         extra_args: vec![],
         prompt: None, // stdin-piped
@@ -1203,19 +1204,12 @@ async fn deliver_through_session(
     if let Some(ref content) = reply.content
         && !content.trim().is_empty()
     {
-        use teloxide::prelude::Requester as _;
-        use teloxide::types::{ChatId, MessageId, ThreadId};
         let html = crate::telegram::markdown::md_to_telegram_html(content);
         let html = prepend_delivery_header(header, &html);
         let parts = crate::telegram::markdown::split_html_message(&html);
-        let chat_id = ChatId(target_chat_id);
+        let thread = target_thread_id.map(|t| t as i32);
         for part in &parts {
-            let mut send = bot
-                .send_message(chat_id, part)
-                .parse_mode(teloxide::types::ParseMode::Html);
-            if let Some(t) = target_thread_id {
-                send = send.message_thread_id(ThreadId(MessageId(t as i32)));
-            }
+            let send = bot.send_message_opts(target_chat_id, part, true, thread, None, None);
             if let Err(e) =
                 run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, send).await?
             {
@@ -1224,10 +1218,8 @@ async fn deliver_through_session(
                     "async delivery: HTML send failed, retrying plain: {e:#}"
                 );
                 let plain = strip_html_tags(part);
-                let mut fallback = bot.send_message(chat_id, &plain);
-                if let Some(t) = target_thread_id {
-                    fallback = fallback.message_thread_id(ThreadId(MessageId(t as i32)));
-                }
+                let fallback =
+                    bot.send_message_opts(target_chat_id, &plain, false, thread, None, None);
                 if let Err(e2) =
                     run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, fallback)
                         .await?
@@ -1252,15 +1244,8 @@ async fn deliver_through_session(
     // Attachments-only delivery (no text content): the header would otherwise be
     // lost, so send it as a standalone text message before the attachment batch.
     if !has_content && has_attachments {
-        use teloxide::prelude::Requester as _;
-        use teloxide::types::{ChatId, MessageId, ThreadId};
-        let chat_id = ChatId(target_chat_id);
-        let mut send = bot
-            .send_message(chat_id, header)
-            .parse_mode(teloxide::types::ParseMode::Html);
-        if let Some(t) = target_thread_id {
-            send = send.message_thread_id(ThreadId(MessageId(t as i32)));
-        }
+        let thread = target_thread_id.map(|t| t as i32);
+        let send = bot.send_message_opts(target_chat_id, header, true, thread, None, None);
         if let Err(e) =
             run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, send).await?
         {
@@ -1271,10 +1256,7 @@ async fn deliver_through_session(
                 "async delivery: header HTML send failed, retrying plain: {e:#}"
             );
             let plain = strip_html_tags(header);
-            let mut fallback = bot.send_message(chat_id, &plain);
-            if let Some(t) = target_thread_id {
-                fallback = fallback.message_thread_id(ThreadId(MessageId(t as i32)));
-            }
+            let fallback = bot.send_message_opts(target_chat_id, &plain, false, thread, None, None);
             run_telegram_request_with_shutdown(shutdown, report.total_sent() > 0, fallback)
                 .await?
                 .map_err(|e2| format!("telegram header send failed; html: {e:#}; plain: {e2:#}"))?;
@@ -1291,7 +1273,7 @@ async fn deliver_through_session(
             crate::telegram::attachments::send_attachments(
                 atts,
                 bot,
-                teloxide::types::ChatId(target_chat_id),
+                target_chat_id,
                 target_thread_id.unwrap_or(0),
                 agent_dir,
                 ssh_config_path,
@@ -2225,7 +2207,7 @@ mod tests {
         groups: &[i64],
     ) -> right_agent::agent::allowlist::AllowlistState {
         use right_agent::agent::allowlist::{
-            AllowedGroup, AllowedUser, AllowlistState, ResponseMode,
+            AllowedGroup, AllowedUser, AllowlistState, GroupKind, ResponseMode,
         };
         let now = chrono::Utc::now();
         let mut state = AllowlistState::default();
@@ -2245,6 +2227,7 @@ mod tests {
                 opened_at: now,
                 mode: ResponseMode::Addressed,
                 topics: Vec::new(),
+                kind: GroupKind::Group,
             });
         }
         state

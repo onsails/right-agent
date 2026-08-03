@@ -22,7 +22,7 @@ pub(crate) fn report_sync_failure(handle: Option<&SandboxRuntimeHandle>) {
     }
 }
 
-/// Run one sync cycle. Called synchronously at startup before teloxide starts,
+/// Run one sync cycle. Called synchronously at startup before the Telegram bot starts,
 /// ensuring sandbox has correct config before any `claude -p` invocations.
 pub(crate) async fn initial_sync(
     agent_dir: &Path,
