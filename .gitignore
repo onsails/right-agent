@@ -19,3 +19,4 @@ crates/right-dashboard/static/
 # Local SDK verification artifacts (generated, not part of the repo)
 .sdk-verify/
 .claude/scheduled_tasks.lock
+.entire/

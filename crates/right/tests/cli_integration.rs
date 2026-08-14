@@ -710,7 +710,7 @@ async fn ci_openshell_policy_validates_against_openshell() {
         other => panic!("OpenShell not ready: {other:?}"),
     };
 
-    let sandbox_name = "right-test-policy-validate";
+    let sandbox_name = "rt-policy-validate";
 
     right_openshell::test_cleanup::pkill_test_orphans(sandbox_name);
     right_openshell::test_cleanup::register_test_sandbox(sandbox_name);

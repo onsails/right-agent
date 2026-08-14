@@ -121,15 +121,17 @@ pub fn init_agent(
         };
         yaml.push_str(&format!("\nnetwork_policy: {policy_str}\n"));
 
-        // Sandbox config.
+        // Sandbox config. The name goes through the shared helper so it always
+        // fits the upstream 19-char routable-name cap (OpenShell v0.0.105).
+        let sb_name = right_openshell::openshell::sandbox_name(name);
         match ov.sandbox_mode {
             SandboxMode::Openshell => {
                 yaml.push_str(&format!(
-                    "\nsandbox:\n  mode: openshell\n  policy_file: policy.yaml\n  name: right-{name}\n"
+                    "\nsandbox:\n  mode: openshell\n  policy_file: policy.yaml\n  name: {sb_name}\n"
                 ));
             }
             SandboxMode::None => {
-                yaml.push_str(&format!("\nsandbox:\n  mode: none\n  name: right-{name}\n"));
+                yaml.push_str(&format!("\nsandbox:\n  mode: none\n  name: {sb_name}\n"));
             }
         }
 
@@ -1370,6 +1372,21 @@ mod tests {
         assert!(
             yaml.contains("name: right-foo"),
             "agent.yaml must contain explicit sandbox.name 'right-foo'; got:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn init_agent_fits_long_sandbox_name_within_upstream_cap() {
+        let dir = tempdir().unwrap();
+        // right-{agent} would be 20 chars — over the upstream 19-char cap.
+        let agent_dir = init_agent(dir.path(), "fourteenchars1", None).unwrap();
+
+        let yaml = std::fs::read_to_string(agent_dir.join("agent.yaml")).unwrap();
+        let expected = right_openshell::openshell::sandbox_name("fourteenchars1");
+        assert!(expected.len() <= right_openshell::openshell::MAX_SANDBOX_NAME_LEN);
+        assert!(
+            yaml.contains(&format!("name: {expected}")),
+            "agent.yaml must contain fitted sandbox.name '{expected}'; got:\n{yaml}"
         );
     }
 }

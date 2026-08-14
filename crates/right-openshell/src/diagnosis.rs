@@ -59,7 +59,10 @@ impl GatewayCause {
         let (summary, fixes): (&str, Vec<&str>) = match &self {
             GatewayCause::NotInstalled => (
                 "the sandbox backend isn't installed",
-                vec!["Install OpenShell from https://github.com/NVIDIA/OpenShell"],
+                vec![
+                    "Install OpenShell from https://github.com/NVIDIA/OpenShell",
+                    "Then run: systemctl --user enable --now openshell-gateway",
+                ],
             ),
             GatewayCause::DockerDown => (
                 "Docker isn't running",
@@ -67,11 +70,13 @@ impl GatewayCause {
             ),
             GatewayCause::GatewayNotStarted => (
                 "the sandbox gateway isn't running",
-                vec!["Run: openshell gateway start"],
+                vec!["Run: systemctl --user restart openshell-gateway"],
             ),
             GatewayCause::BrokenCerts(_) => (
                 "the sandbox gateway is missing its security certificates",
-                vec!["Run: openshell gateway destroy && openshell gateway start"],
+                vec![
+                    "Run: systemctl --user restart openshell-gateway (it regenerates mTLS certs on start)",
+                ],
             ),
             GatewayCause::VersionTooOld { .. } => (
                 "the installed OpenShell is too old",
@@ -101,7 +106,7 @@ impl GatewayCause {
                 "I can't reach the sandbox backend",
                 vec![
                     "Check Docker is running",
-                    "Run: openshell gateway start",
+                    "Run: systemctl --user restart openshell-gateway",
                     "Check OpenShell version (openshell --version)",
                 ],
             ),

@@ -1,3 +1,3 @@
-tag: v0.0.62
-fetched: 2026-06-13T07:00:33Z
+tag: v0.0.105
+fetched: 2026-08-13T15:44:21Z
 upstream: https://github.com/NVIDIA/OpenShell

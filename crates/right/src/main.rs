@@ -2673,8 +2673,13 @@ async fn cmd_agent_init(
         right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
         let policy_path = agent_dir.join("policy.yaml");
-        // Must match `sandbox.name: right-{agent}` written by init_agent into agent.yaml.
-        let sb_name = format!("right-{name}");
+        // Read the configured name (init_agent wrote it; the supervisor's
+        // name migration may have rewritten it since). Re-deriving from the
+        // agent name here would mis-target after such a rewrite.
+        let configured_name = right_agent::agent::discovery::parse_agent_config(&agent_dir)?
+            .and_then(|c| c.sandbox.as_ref().and_then(|s| s.name.clone()));
+        let sb_name =
+            right_openshell::openshell::resolve_sandbox_name(name, configured_name.as_deref());
         // --force-recreate always recreates; fresh agent (didn't exist before) always creates;
         // otherwise prompt if stale sandbox exists.
         let recreate_sandbox = if force_recreate || !agent_existed {
@@ -3114,7 +3119,7 @@ fn managed_profile_attachments(
         let Some(sandbox) = cfg.sandbox.as_ref() else {
             continue;
         };
-        // Match the creation convention (`rightclaw-<agent>` when no explicit
+        // Match the creation convention (`right-<agent>`, fitted, when no explicit
         // name) and the supervisor's resolved name — a bare `<agent>` fallback
         // would target a non-existent sandbox, so the heal's delete would hit the
         // real sandbox's still-referenced profile and re-trigger the abort.
@@ -3282,9 +3287,6 @@ async fn cmd_up(
                     println!();
                     match right_openshell::openshell::preflight_check() {
                         right_openshell::openshell::OpenShellStatus::Ready(_) => {}
-                        right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
-                            start_openshell_gateway()?;
-                        }
                         other => return Err(openshell_status_error(other)),
                     }
                 } else {
@@ -3294,12 +3296,7 @@ async fn cmd_up(
                     ));
                 }
             }
-            right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
-                start_openshell_gateway()?;
-            }
-            status @ right_openshell::openshell::OpenShellStatus::BrokenGateway(_) => {
-                return Err(openshell_status_error(status));
-            }
+            status => return Err(openshell_status_error(status)),
         }
     }
     tracing::info!(
@@ -3495,42 +3492,6 @@ async fn cmd_up(
     Ok(())
 }
 
-/// Prompt the user to start an OpenShell gateway, then verify it came up.
-fn start_openshell_gateway() -> miette::Result<()> {
-    println!("OpenShell gateway is not running. Sandbox mode requires a running gateway.");
-    println!("Note: OpenShell requires Docker to be installed and running.");
-    println!();
-    let start = inquire::Confirm::new("start openshell gateway now?")
-        .with_default(true)
-        .prompt()
-        .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
-    if !start {
-        return Err(miette::miette!(
-            help = "Run `openshell gateway start` manually, or set `sandbox: mode: none` in agent.yaml",
-            "OpenShell gateway is required for sandbox mode"
-        ));
-    }
-    println!("Starting OpenShell gateway (this may take a minute on first run)...");
-    let status = std::process::Command::new("openshell")
-        .args(["gateway", "start"])
-        .status()
-        .map_err(|e| miette::miette!("failed to run `openshell gateway start`: {e:#}"))?;
-    if !status.success() {
-        return Err(miette::miette!(
-            help = "Check `openshell doctor check` for prerequisites (Docker must be running)",
-            "`openshell gateway start` failed"
-        ));
-    }
-    // Verify certs are now present.
-    match right_openshell::openshell::preflight_check() {
-        right_openshell::openshell::OpenShellStatus::Ready(_) => {
-            println!("OpenShell gateway started successfully.");
-            Ok(())
-        }
-        status => Err(openshell_status_error(status)),
-    }
-}
-
 /// Convert an `OpenShellStatus` into a user-facing miette error.
 fn openshell_status_error(status: right_openshell::openshell::OpenShellStatus) -> miette::Report {
     match status {
@@ -3540,11 +3501,13 @@ fn openshell_status_error(status: right_openshell::openshell::OpenShellStatus) -
             "OpenShell is not installed"
         ),
         right_openshell::openshell::OpenShellStatus::NoGateway(_) => miette::miette!(
-            help = "Run `openshell gateway start`, or set `sandbox: mode: none` in agent.yaml",
+            help = "Run `systemctl --user restart openshell-gateway`\n  \
+                    (the unit ships with the OpenShell installer),\n  \
+                    or set `sandbox: mode: none` in agent.yaml",
             "OpenShell gateway is not running"
         ),
         right_openshell::openshell::OpenShellStatus::BrokenGateway(mtls_dir) => miette::miette!(
-            help = "Try `openshell gateway destroy && openshell gateway start` to recreate,\n  \
+            help = "Run `systemctl --user restart openshell-gateway` to regenerate the mTLS certs,\n  \
                     or set `sandbox: mode: none` in agent.yaml",
             "OpenShell gateway exists but mTLS certificates are missing at {}\n\n  \
              The gateway may be in a broken state.",
@@ -3943,7 +3906,9 @@ async fn cmd_agent_restore(
             let config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
 
             let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
-            let new_sandbox_name = format!("right-{agent_name}-{timestamp}");
+            let new_sandbox_name = right_openshell::openshell::fit_sandbox_name(&format!(
+                "right-{agent_name}-{timestamp}"
+            ));
 
             // We need codegen for staging dir. Create a minimal IDENTITY.md placeholder
             // so discover_single_agent succeeds (the real one is inside the tar).
@@ -5410,7 +5375,7 @@ mod tests {
 
     #[test]
     fn managed_profile_attachments_resolves_unnamed_sandbox_to_creation_convention() {
-        // sandbox.name = None must resolve to `rightclaw-<agent>` (the creation
+        // sandbox.name = None must resolve to `right-<agent>` (the creation
         // convention) — a bare `<agent>` would target a non-existent sandbox, so
         // the heal's delete would hit the real sandbox's still-referenced profile.
         let config = config_with_provider(generic_provider("right-acme"));
@@ -5418,7 +5383,7 @@ mod tests {
         let id = right_openshell::managed_profiles::generic_provider_profile_id("right-acme");
         let atts = map.get(&id).expect("attachment for the generic profile");
         assert_eq!(atts.len(), 1);
-        assert_eq!(atts[0].sandbox_name, "rightclaw-agent-a");
+        assert_eq!(atts[0].sandbox_name, "right-agent-a");
         assert_eq!(atts[0].provider_name, "right-acme");
     }
 
@@ -7043,7 +7008,8 @@ async fn perform_migration(
     );
 
     // --- Step 2/6: Create new sandbox ---
-    let new_sandbox = format!("right-{agent_name}-{timestamp}");
+    let new_sandbox =
+        right_openshell::openshell::fit_sandbox_name(&format!("right-{agent_name}-{timestamp}"));
     println!("Step 2/6: Creating new sandbox '{new_sandbox}'...");
 
     // Run codegen for staging dir.

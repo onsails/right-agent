@@ -58,6 +58,25 @@ pub fn parse_agent_config(agent_dir: &Path) -> miette::Result<Option<AgentConfig
             reason: format!("{e}"),
         })?;
 
+    // Over-long explicit `sandbox.name` predates the upstream 19-char
+    // routable-name cap (OpenShell v0.0.86+). Not a hard error: an existing
+    // long-named sandbox stays usable (upstream validates at create only);
+    // the bot's sandbox supervisor migrates the config to the fitted name
+    // when the sandbox is absent. Warn so the operator sees it.
+    if let Some(name) = config
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.name.as_deref())
+        .filter(|n| n.len() > right_openshell::openshell::MAX_SANDBOX_NAME_LEN)
+    {
+        tracing::warn!(
+            agent_dir = %agent_dir.display(),
+            sandbox_name = %name,
+            fitted = %right_openshell::openshell::fit_sandbox_name(name),
+            "sandbox.name exceeds the 19-char OpenShell cap; it will be migrated on next recreate"
+        );
+    }
+
     Ok(Some(config))
 }
 

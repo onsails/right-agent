@@ -134,10 +134,10 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::RwLock;
 
-    /// Regression: upgrade.rs must use ssh_host_for_sandbox(resolved_sandbox), NOT
-    /// ssh_host(agent_name). New agents have explicit sandbox.name = right-{agent}
-    /// in agent.yaml; their SSH config carries Host openshell-right-{agent} and
-    /// targeting openshell-rightclaw-{agent} would fail.
+    /// Regression: upgrade.rs must use ssh_host_for_sandbox(resolved_sandbox),
+    /// never an agent-name-derived alias. Agents carry explicit
+    /// sandbox.name = right-{agent} in agent.yaml; their SSH config carries
+    /// Host openshell-right-{agent}.
     #[tokio::test]
     async fn upgrade_uses_resolved_sandbox_not_agent_name() {
         let src = include_str!("upgrade.rs");

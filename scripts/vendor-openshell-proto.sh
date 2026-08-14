@@ -4,8 +4,8 @@
 # Usage: scripts/vendor-openshell-proto.sh <tag>
 # Example: scripts/vendor-openshell-proto.sh v0.0.50
 #
-# Re-pulls datamodel.proto, sandbox.proto, openshell.proto from
-# https://raw.githubusercontent.com/NVIDIA/OpenShell/<tag>/proto/
+# Re-pulls datamodel.proto, sandbox.proto, openshell.proto and their
+# upstream-local imports (options.proto since v0.0.104) from
 # into crates/right-openshell/proto/openshell/ and writes the tag +
 # fetch timestamp into crates/right-openshell/proto/UPSTREAM.md.
 set -euo pipefail
@@ -22,7 +22,7 @@ fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-for f in datamodel.proto sandbox.proto openshell.proto; do
+for f in datamodel.proto sandbox.proto openshell.proto options.proto; do
     url="https://raw.githubusercontent.com/NVIDIA/OpenShell/${TAG}/proto/${f}"
     echo "fetching $url"
     curl -fsSL "$url" -o "$TMP/$f"

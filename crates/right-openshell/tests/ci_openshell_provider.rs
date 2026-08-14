@@ -99,7 +99,10 @@ async fn ci_openshell_provider_update_empty_maps_preserves_existing_fields() {
     .unwrap();
 
     let raw = client
-        .get_provider(proto_v1::GetProviderRequest { name: name.clone() })
+        .get_provider(proto_v1::GetProviderRequest {
+            name: name.clone(),
+            workspace: String::new(),
+        })
         .await
         .unwrap()
         .into_inner()
@@ -124,7 +127,10 @@ async fn ci_openshell_provider_update_empty_maps_preserves_existing_fields() {
     .unwrap();
 
     let after_empty_update = client
-        .get_provider(proto_v1::GetProviderRequest { name: name.clone() })
+        .get_provider(proto_v1::GetProviderRequest {
+            name: name.clone(),
+            workspace: String::new(),
+        })
         .await
         .unwrap()
         .into_inner()
@@ -213,8 +219,11 @@ async fn ci_openshell_provider_update_rejects_type_change() {
                 credentials: Default::default(),
                 config: Default::default(),
                 credential_expires_at_ms: Default::default(),
+                credential_handles: Default::default(),
+                profile_workspace: String::new(),
             }),
             credential_expires_at_ms: Default::default(),
+            workspace: String::new(),
         })
         .await
         .err()
@@ -270,6 +279,9 @@ async fn ci_openshell_provider_attach_detach() {
 #[tokio::test]
 #[ignore = "ci-openshell: requires a live OpenShell gateway"]
 async fn ci_openshell_provider_create_attach_env_visible() {
+    use right_openshell::managed_profiles::{
+        author_generic_profile, delete_profile, generic_provider_profile_id, lint_and_import,
+    };
     use right_openshell::providers::*;
     use right_openshell::test_support::TestSandbox;
     let mtls_dir = right_openshell::openshell::default_mtls_dir();
@@ -279,13 +291,30 @@ async fn ci_openshell_provider_create_attach_env_visible() {
 
     let pid = std::process::id();
     let prov = format!("rightprobe-{pid}-envvisible");
+    // OpenShell v0.0.105 has no implicit `generic` profile: without one the
+    // gateway logs "provider type has no profile; skipping provider policy
+    // layer" and no env var is injected. Author + import a minimal profile.
+    let profile_id = generic_provider_profile_id(&prov);
+    let _ = delete_provider(&mut client, &prov).await;
+    let _ = delete_profile(&mut client, &profile_id).await;
+    lint_and_import(
+        &mut client,
+        author_generic_profile(
+            &profile_id,
+            &[ECHO_HOST.to_string()],
+            None,
+            "RIGHTPROBE_ENVVISIBLE",
+        ),
+    )
+    .await
+    .expect("import env-visible profile");
     let mut creds = std::collections::HashMap::new();
     creds.insert("RIGHTPROBE_ENVVISIBLE".into(), "secret".into());
     create_provider(
         &mut client,
         &ProviderSpec {
             name: prov.clone(),
-            type_: "generic".into(),
+            type_: profile_id.clone(),
             credentials: creds,
             config: Default::default(),
         },
@@ -325,6 +354,9 @@ async fn ci_openshell_provider_create_attach_env_visible() {
 #[tokio::test]
 #[ignore = "ci-openshell: requires a live OpenShell gateway"]
 async fn ci_openshell_provider_rotate_no_restart() {
+    use right_openshell::managed_profiles::{
+        author_generic_profile, delete_profile, generic_provider_profile_id, lint_and_import,
+    };
     use right_openshell::providers::*;
     use right_openshell::test_support::TestSandbox;
     let mtls_dir = right_openshell::openshell::default_mtls_dir();
@@ -334,13 +366,24 @@ async fn ci_openshell_provider_rotate_no_restart() {
 
     let pid = std::process::id();
     let prov = format!("rightprobe-{pid}-rotate");
+    // No implicit `generic` profile on v0.0.105 — import one so env
+    // injection/rotation is exercised.
+    let profile_id = generic_provider_profile_id(&prov);
+    let _ = delete_provider(&mut client, &prov).await;
+    let _ = delete_profile(&mut client, &profile_id).await;
+    lint_and_import(
+        &mut client,
+        author_generic_profile(&profile_id, &[ECHO_HOST.to_string()], None, "ROT_TOKEN"),
+    )
+    .await
+    .expect("import rotate profile");
     let mut creds = std::collections::HashMap::new();
     creds.insert("ROT_TOKEN".into(), "first".into());
     create_provider(
         &mut client,
         &ProviderSpec {
             name: prov.clone(),
-            type_: "generic".into(),
+            type_: profile_id.clone(),
             credentials: creds,
             config: Default::default(),
         },
@@ -368,7 +411,7 @@ async fn ci_openshell_provider_rotate_no_restart() {
         &mut client,
         &ProviderSpec {
             name: prov.clone(),
-            type_: "generic".into(),
+            type_: profile_id.clone(),
             credentials: creds2,
             config: Default::default(),
         },
@@ -396,7 +439,12 @@ async fn ci_openshell_provider_rotate_no_restart() {
 /// Same filesystem/landlock section as `test_support::MINIMAL_POLICY` so a
 /// later `policy set --wait` (composition reload) is accepted on the live
 /// sandbox. Network section is intentionally minimal — provider-profile
-/// composition adds the upstream endpoint.
+/// composition adds the upstream endpoint. OpenShell v0.0.97+ rejects
+/// endpoint overlap on a port with conflicting metadata (egress-pipeline
+/// consolidation, NVIDIA/OpenShell#2373): any 443 endpoint we declare here
+/// (even `tls: skip` + `allowed_ips`) conflicts with the composed provider
+/// endpoint, so port 443 belongs to the provider profile alone. Port 80
+/// stays as the connectivity floor.
 const EXPERIMENT_POLICY: &str = "\
 version: 1
 filesystem_policy:
@@ -410,11 +458,10 @@ process:
 network_policies:
   outbound:
     endpoints:
-      - port: 443
+      - port: 80
         allowed_ips:
           - \"1.1.1.1/32\"
-        protocol: rest
-        access: full
+        tls: skip
     binaries:
       - path: \"**\"
 ";
@@ -527,18 +574,18 @@ async fn ci_openshell_generic_provider_substitutes_on_egress() {
     );
 }
 
-// Probe FAL_KEY (built-in provider) via the echo host: substitution is keyed
-// by env-var name on ANY terminated host, so a built-in credential's value is
-// observable through the generic echo endpoint.
-const EGRESS_PROBE_FAL_CMD: &str =
-    "curl -sk --max-time 30 -H \"Authorization: Key $FAL_KEY\" https://postman-echo.com/get";
+// Probe FAL_KEY (built-in provider) against fal's own endpoint. OpenShell
+// v0.0.103+ binds static credentials to their provider endpoints
+// (`credential_endpoint_mismatch` on any other host), so the old cross-host
+// echo probe can no longer observe the substituted value. The fal profile
+// terminates TLS on `fal.run`; an unknown path returns a fal router 404
+// page, which contains the placeholder only if substitution did NOT happen.
+const EGRESS_PROBE_FAL_CMD: &str = "curl -sk --max-time 30 -H \"Authorization: Key $FAL_KEY\" https://fal.run/api/v0/nonexistent-probe";
 
 /// End-to-end RESOLUTION guard for a BUILT-IN provider (`right-fal`), the
-/// category that failed in production. `FAL_KEY` is observed through the echo
-/// host because substitution is keyed by env-var name on any terminated
-/// endpoint (documented quirk), and `fal.run` itself does not reflect headers.
-/// Asserts a built-in credential resolves on egress, not just that its
-/// placeholder is visible.
+/// category that failed in production. Asserts the FAL_KEY placeholder never
+/// reaches the wire on fal's own endpoint (it is substituted) — cross-host
+/// observation is impossible by design since v0.0.103 endpoint binding.
 #[tokio::test]
 #[ignore = "ci-openshell: requires a live OpenShell gateway"]
 async fn ci_openshell_builtin_provider_substitutes_on_egress() {
@@ -648,9 +695,11 @@ async fn ci_openshell_builtin_provider_substitutes_on_egress() {
 
     let (out, rc) = sandbox.exec(&["sh", "-c", EGRESS_PROBE_FAL_CMD]).await;
     eprintln!("FAL EGRESS rc={rc} body:\n{out}");
-    let substituted = out.contains(&fal_secret);
+    // With endpoint binding (v0.0.103+) the credential value cannot be
+    // observed off-host; what we CAN prove is that the raw placeholder never
+    // reaches the wire on fal's own endpoint (substitution happened).
     let placeholder_leaked = out.contains("openshell:resolve:env:");
-    eprintln!("FAL SUBSTITUTED={substituted} PLACEHOLDER_LEAKED={placeholder_leaked}");
+    eprintln!("FAL PLACEHOLDER_LEAKED={placeholder_leaked}");
 
     detach_from_sandbox(&mut client, sandbox.name(), &fal_prov)
         .await
@@ -663,8 +712,8 @@ async fn ci_openshell_builtin_provider_substitutes_on_egress() {
     delete_profile(&mut client, &echo_profile_id).await.ok();
 
     assert!(
-        substituted && !placeholder_leaked,
-        "built-in fal FAL_KEY must substitute on egress (substituted={substituted}, leaked={placeholder_leaked})"
+        !placeholder_leaked,
+        "built-in fal FAL_KEY placeholder must not reach the wire on fal.run (leaked={placeholder_leaked})"
     );
 }
 

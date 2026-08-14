@@ -37,7 +37,7 @@ use right_openshell::test_cleanup;
 /// destroys the sandbox. Caller is responsible for calling
 /// [`cleanup_sandbox`] on success paths.
 async fn spawn_with_policy(test_name: &str, policy_yaml: &str) -> String {
-    let name = format!("right-test-{test_name}");
+    let name = openshell::fit_sandbox_name(&format!("rt-{test_name}"));
 
     // Clean up any leftover from prior SIGKILLed runs.
     test_cleanup::pkill_test_orphans(&name);

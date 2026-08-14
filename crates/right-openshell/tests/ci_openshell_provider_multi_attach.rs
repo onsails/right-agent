@@ -41,11 +41,10 @@ process:
 network_policies:
   outbound:
     endpoints:
-      - port: 443
+      - port: 80
         allowed_ips:
           - \"1.1.1.1/32\"
-        protocol: rest
-        access: full
+        tls: skip
     binaries:
       - path: \"**\"
 ";

@@ -638,6 +638,94 @@ impl OpenShell for MockOpenShell {
     ) -> Result<tonic::Response<os_proto::v1::GetDraftHistoryResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented("stub"))
     }
+
+    // --- New v0.0.105 identity/gateway stubs ---
+    async fn get_current_user(
+        &self,
+        _: tonic::Request<os_proto::v1::GetCurrentUserRequest>,
+    ) -> Result<tonic::Response<os_proto::v1::GetCurrentUserResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stub"))
+    }
+
+    async fn get_gateway_info(
+        &self,
+        _: tonic::Request<os_proto::v1::GetGatewayInfoRequest>,
+    ) -> Result<tonic::Response<os_proto::v1::GetGatewayInfoResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stub"))
+    }
+
+    // --- New v0.0.105 sandbox stop/start stubs ---
+    async fn stop_sandbox(
+        &self,
+        _: tonic::Request<os_proto::v1::StopSandboxRequest>,
+    ) -> Result<tonic::Response<os_proto::v1::SandboxResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stub"))
+    }
+
+    async fn start_sandbox(
+        &self,
+        _: tonic::Request<os_proto::v1::StartSandboxRequest>,
+    ) -> Result<tonic::Response<os_proto::v1::SandboxResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stub"))
+    }
+
+    // --- New v0.0.105 provider profile update stub ---
+    async fn update_provider_profiles(
+        &self,
+        _: tonic::Request<os_proto::v1::UpdateProviderProfilesRequest>,
+    ) -> Result<tonic::Response<os_proto::v1::UpdateProviderProfilesResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stub"))
+    }
+
+    // --- New v0.0.105 workspace stubs ---
+    async fn create_workspace(
+        &self,
+        _: tonic::Request<os_proto::v1::CreateWorkspaceRequest>,
+    ) -> Result<tonic::Response<os_proto::v1::CreateWorkspaceResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stub"))
+    }
+
+    async fn get_workspace(
+        &self,
+        _: tonic::Request<os_proto::v1::GetWorkspaceRequest>,
+    ) -> Result<tonic::Response<os_proto::v1::GetWorkspaceResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stub"))
+    }
+
+    async fn list_workspaces(
+        &self,
+        _: tonic::Request<os_proto::v1::ListWorkspacesRequest>,
+    ) -> Result<tonic::Response<os_proto::v1::ListWorkspacesResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stub"))
+    }
+
+    async fn delete_workspace(
+        &self,
+        _: tonic::Request<os_proto::v1::DeleteWorkspaceRequest>,
+    ) -> Result<tonic::Response<os_proto::v1::DeleteWorkspaceResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stub"))
+    }
+
+    async fn add_workspace_member(
+        &self,
+        _: tonic::Request<os_proto::v1::AddWorkspaceMemberRequest>,
+    ) -> Result<tonic::Response<os_proto::v1::AddWorkspaceMemberResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stub"))
+    }
+
+    async fn remove_workspace_member(
+        &self,
+        _: tonic::Request<os_proto::v1::RemoveWorkspaceMemberRequest>,
+    ) -> Result<tonic::Response<os_proto::v1::RemoveWorkspaceMemberResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stub"))
+    }
+
+    async fn list_workspace_members(
+        &self,
+        _: tonic::Request<os_proto::v1::ListWorkspaceMembersRequest>,
+    ) -> Result<tonic::Response<os_proto::v1::ListWorkspaceMembersResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stub"))
+    }
 }
 
 /// Spin up mock server; returns (bound address, shutdown sender).

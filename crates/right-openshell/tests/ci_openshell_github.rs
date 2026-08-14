@@ -263,6 +263,10 @@ async fn manual_live_full_access_allows_post() {
         binaries: vec![],
         inference_capable: false,
         discovery: None,
+        annotations: Default::default(),
+        resource_version: 0,
+        source: String::new(),
+        scope: String::new(),
     };
 
     lint_and_import(&mut client, profile)

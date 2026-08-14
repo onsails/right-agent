@@ -32,14 +32,104 @@ impl Drop for EnvGuard {
 
 #[test]
 fn sandbox_name_prefixes_agent_name() {
-    assert_eq!(sandbox_name("brain"), "rightclaw-brain");
-    assert_eq!(sandbox_name("worker-1"), "rightclaw-worker-1");
+    assert_eq!(sandbox_name("brain"), "right-brain");
+    assert_eq!(sandbox_name("worker-1"), "right-worker-1");
 }
 
 #[test]
-fn ssh_host_prefixes_sandbox_name() {
-    assert_eq!(ssh_host("brain"), "openshell-rightclaw-brain");
-    assert_eq!(ssh_host("worker-1"), "openshell-rightclaw-worker-1");
+fn sandbox_name_fits_within_upstream_routable_limit() {
+    assert_eq!(sandbox_name("agent-b"), "test-sandbox");
+    let name = sandbox_name("fourteenchars1"); // right-{agent} would be 20 chars
+    assert!(name.len() <= MAX_SANDBOX_NAME_LEN);
+    assert!(name.starts_with("right-"));
+    assert_eq!(name, sandbox_name("fourteenchars1")); // deterministic
+    // common 8-char prefixes must not collide
+    assert_ne!(
+        sandbox_name("aaaaaaaaaaaaaaaa1"),
+        sandbox_name("aaaaaaaaaaaaaaaa2")
+    );
+}
+
+#[test]
+fn fit_sandbox_name_boundary() {
+    let nineteen = "abcdefghijklmnopqrs"; // exactly at the cap
+    assert_eq!(fit_sandbox_name(nineteen), nineteen);
+    let twenty = "abcdefghijklmnopqrst";
+    let fitted = fit_sandbox_name(twenty);
+    assert_eq!(fitted.len(), MAX_SANDBOX_NAME_LEN);
+    assert!(fitted.starts_with("abcdefghijklmn-")); // first 14 chars kept
+}
+
+#[test]
+fn fit_sandbox_name_truncates_multibyte_on_byte_cap() {
+    // Non-ASCII is outside the DNS-1123 charset and sanitizes to dashes;
+    // an all-`é` input collapses to a bare hash-suffixed label.
+    let multibyte = "é".repeat(15);
+    let fitted = fit_sandbox_name(&multibyte);
+    assert!(fitted.len() <= MAX_SANDBOX_NAME_LEN);
+    assert!(!fitted.contains('é'));
+    // Mixed input keeps the ASCII prefix and stays byte-safe at the cap.
+    let mixed = fit_sandbox_name("agent-émile-xxxxxxxxxxxxxxxx");
+    assert!(mixed.len() <= MAX_SANDBOX_NAME_LEN);
+    assert!(mixed.starts_with("agent-"));
+}
+
+#[test]
+fn fit_sandbox_name_produces_dns1123_labels() {
+    // Upstream v0.0.105 validates DNS-1123 at create: lowercase alnum + '-',
+    // no leading/trailing '-', no '--'. Every output must satisfy it.
+    let assert_label = |name: &str| {
+        assert!(!name.is_empty());
+        assert!(name.len() <= MAX_SANDBOX_NAME_LEN);
+        assert!(
+            name.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+            "bad chars: {name}"
+        );
+        assert!(
+            !name.starts_with('-') && !name.ends_with('-'),
+            "edge hyphen: {name}"
+        );
+        assert!(!name.contains("--"), "double hyphen: {name}");
+    };
+    // Hyphen at the truncation boundary must not produce `prefix--hash`.
+    assert_label(&sandbox_name("abcdefgh-klmnop"));
+    // Uppercase, underscore, spaces, non-ASCII all sanitize.
+    assert_label(&sandbox_name("My_Agent X"));
+    assert_label(&sandbox_name("emile-long-agent-name-é"));
+    // Collapse runs and edge hyphens.
+    assert_label(&sandbox_name("a--b__c"));
+    // Deterministic + distinct through sanitization.
+    assert_eq!(sandbox_name("My_Agent X"), sandbox_name("My_Agent X"));
+    assert_ne!(sandbox_name("My_Agent X1"), sandbox_name("My_Agent X2"));
+}
+
+#[test]
+fn oversized_name_action_in_cap_names_need_nothing() {
+    assert_eq!(oversized_name_action("test-sandbox", false), None);
+    assert_eq!(oversized_name_action("test-sandbox", true), None);
+}
+
+#[test]
+fn oversized_name_action_keeps_existing_long_named_sandbox() {
+    // Upstream validates the cap at create only; reads of an existing
+    // long-named sandbox keep working (v0.0.105 validation.rs vs service.rs).
+    let long = "rightclaw-brain-20260415-1430";
+    assert_eq!(
+        oversized_name_action(long, true),
+        Some(OversizedNameAction::KeepExisting)
+    );
+}
+
+#[test]
+fn oversized_name_action_migrates_when_sandbox_absent() {
+    let long = "rightclaw-brain-20260415-1430";
+    let expected = fit_sandbox_name(long);
+    assert_eq!(
+        oversized_name_action(long, false),
+        Some(OversizedNameAction::Migrate(expected.clone()))
+    );
+    assert!(expected.len() <= MAX_SANDBOX_NAME_LEN);
 }
 
 #[test]
@@ -52,14 +142,14 @@ fn resolve_sandbox_name_with_explicit_name() {
 
 #[test]
 fn resolve_sandbox_name_falls_back_to_deterministic() {
-    assert_eq!(resolve_sandbox_name("brain", None), "rightclaw-brain");
+    assert_eq!(resolve_sandbox_name("brain", None), "right-brain");
 }
 
 #[test]
 fn ssh_host_for_sandbox_formats_correctly() {
     assert_eq!(
-        ssh_host_for_sandbox("rightclaw-brain-20260415"),
-        "openshell-rightclaw-brain-20260415"
+        ssh_host_for_sandbox("right-brain"),
+        "openshell-right-brain.default"
     );
 }
 
@@ -879,9 +969,9 @@ async fn ci_openshell_verify_sandbox_files_detects_missing_and_reuploads() {
 #[tokio::test]
 async fn ci_openshell_exec_immediately_after_sandbox_create_reproduces_init_flow() {
     let _slot = super::acquire_sandbox_slot();
-    // ensure_sandbox takes the explicit sandbox name. Use the same legacy
-    // `sandbox_name()` helper here so the test asserts against a stable prefix
-    // even if the production `right init` flow chooses a different one.
+    // ensure_sandbox takes the explicit sandbox name. Derive it via the
+    // production `sandbox_name()` helper — the same helper `right init` uses —
+    // so the created name always fits the upstream 19-char cap.
     const AGENT: &str = "test-lifecycle";
     let sandbox = super::sandbox_name(AGENT);
 
@@ -1336,11 +1426,11 @@ async fn ci_openshell_test_sandbox_holds_name_lock() {
     let sandbox = TestSandbox::create("name-lock-holds").await;
 
     // While `sandbox` is alive, acquire_test_name_lock with the same logical
-    // name (the full sandbox name `right-test-name-lock-holds`) MUST block.
+    // name (the full fitted sandbox name `rt-name-lock-holds`) MUST block.
     let acquired = Arc::new(AtomicBool::new(false));
     let acquired_clone = Arc::clone(&acquired);
     let handle = std::thread::spawn(move || {
-        let _lock = super::acquire_test_name_lock("right-test-name-lock-holds");
+        let _lock = super::acquire_test_name_lock("rt-name-lock-holds");
         acquired_clone.store(true, Ordering::SeqCst);
     });
 

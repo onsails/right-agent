@@ -46,6 +46,29 @@ pub(crate) struct SandboxBringUp {
     pub ssh_config_path: PathBuf,
 }
 
+/// Bring-up cannot continue in this process because agent.yaml was migrated
+/// to a new sandbox name mid-flight: every downstream handle (ssh config
+/// path, resolved sandbox, provider reconcile) is keyed on the old name.
+/// The bot caller converts this into a graceful restart; the restarted
+/// process re-resolves the fitted name and brings the sandbox up cleanly.
+#[derive(Debug)]
+pub(crate) struct SandboxNameMigrated {
+    pub(crate) old: String,
+    pub(crate) new: String,
+}
+
+impl std::fmt::Display for SandboxNameMigrated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "sandbox.name migrated '{}' -> '{}' in agent.yaml; restart required",
+            self.old, self.new
+        )
+    }
+}
+
+impl std::error::Error for SandboxNameMigrated {}
+
 /// Map an `openshell_preflight` failure to a [`GatewayDiagnosis`].
 ///
 /// The version-too-old variants carry `found`/`required` cleanly, so they map
@@ -443,6 +466,48 @@ pub(crate) async fn bring_up_sandbox(
                 return Ok(Err(diagnose_gateway().await));
             }
         };
+    let phase_status = match phase_status {
+        SandboxPhaseStatus::NotFound
+            if let Some(right_openshell::openshell::OversizedNameAction::Migrate(fitted)) =
+                right_openshell::openshell::oversized_name_action(&sandbox, false) =>
+        {
+            // Pre-cap name (e.g. `rightclaw-{agent}` fallback or a long
+            // explicit `sandbox.name`) with no live sandbox: rewrite
+            // agent.yaml to the fitted name and retry the phase query once.
+            // The existing-sandbox case (KeepExisting) never reaches here —
+            // reads of a live long-named sandbox are not length-validated
+            // upstream, so its phase query succeeds.
+            tracing::info!(
+                agent = %agent,
+                old = %sandbox,
+                new = %fitted,
+                "migrating over-long sandbox name in agent.yaml"
+            );
+            let yaml_path = agent_dir.join("agent.yaml");
+            right_codegen::contract::write_merged_rmw(&yaml_path, |existing| {
+                let existing = existing.ok_or_else(|| {
+                    miette::miette!("agent.yaml missing at {}", yaml_path.display())
+                })?;
+                rewrite_sandbox_name_line(existing, &sandbox, &fitted).ok_or_else(|| {
+                    miette::miette!(
+                        "sandbox.name migration failed: no `name: {sandbox}` line in {}",
+                        yaml_path.display()
+                    )
+                })
+            })?;
+            // The migration rewrote agent.yaml, but this process still holds
+            // the old name everywhere downstream (ssh config path formula,
+            // resolved_sandbox, provider reconcile). Continuing would trip
+            // the ssh-config-path debug_assert and mis-target policy/SSH;
+            // ask the caller for a graceful restart instead — the watcher
+            // will also see the write, but an explicit signal is not racy.
+            return Err(miette::miette!(SandboxNameMigrated {
+                old: sandbox.clone(),
+                new: fitted,
+            }));
+        }
+        status => status,
+    };
     if let Some(diag) = bring_up_phase_diagnosis(phase_status, &sandbox) {
         return Ok(Err(diag));
     }
@@ -984,6 +1049,38 @@ async fn notify_back_online(handle: &Arc<SandboxRuntimeHandle>, bot: &crate::tel
 #[path = "sandbox_supervisor_phase_tests.rs"]
 mod phase_tests;
 
+/// Rewrite the `sandbox.name` line in agent.yaml content from `old` to
+/// `fitted`: line-anchored (no substring prefix corruption, no provider-entry
+/// `name:` lines), tolerant of single/double-quoted legacy values (rewritten
+/// unquoted — both parse identically). Returns `None` when no exact line
+/// matches.
+fn rewrite_sandbox_name_line(existing: &str, old: &str, fitted: &str) -> Option<String> {
+    let mut lines: Vec<String> = existing.lines().map(str::to_owned).collect();
+    let mut replaced = false;
+    for line in &mut lines {
+        let trimmed = line.trim_start();
+        for quote in ["", "\"", "'"] {
+            if trimmed == format!("name: {quote}{old}{quote}") {
+                let indent = &line[..line.len() - trimmed.len()];
+                *line = format!("{indent}name: {fitted}");
+                replaced = true;
+                break;
+            }
+        }
+        if replaced {
+            break;
+        }
+    }
+    if !replaced {
+        return None;
+    }
+    let mut out = lines.join("\n");
+    if existing.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1167,5 +1264,45 @@ mod tests {
             !profiles.iter().any(|p| p.id() == borrowed_id),
             "borrowed profile must NOT be ensured; got: {profiles:?}"
         );
+    }
+
+    #[test]
+    fn rewrite_sandbox_name_line_rewrites_plain_and_quoted() {
+        let yaml = "sandbox:\n  mode: openshell\n  name: rightclaw-brain-2026\n";
+        let out = rewrite_sandbox_name_line(yaml, "rightclaw-brain-2026", "right-x").unwrap();
+        assert!(out.contains("  name: right-x\n"), "{out}");
+
+        for quote in ["'", "\""] {
+            let yaml = format!("sandbox:\n  name: {quote}rightclaw-brain-2026{quote}\n");
+            let out = rewrite_sandbox_name_line(&yaml, "rightclaw-brain-2026", "right-x").unwrap();
+            assert!(out.contains("name: right-x"), "{out}");
+        }
+    }
+
+    #[test]
+    fn rewrite_sandbox_name_line_rejects_prefix_collision_and_missing() {
+        // `name: right-foo` must NOT match a line carrying `right-foo-bar`.
+        let yaml = "sandbox:\n  name: right-foo-bar\n";
+        assert!(rewrite_sandbox_name_line(yaml, "right-foo", "right-x").is_none());
+        // A provider entry with the same value is a different line shape
+        // (`- name:`) and must not be rewritten.
+        let yaml = "providers:\n  - name: right-foo\n";
+        assert!(rewrite_sandbox_name_line(yaml, "right-foo", "right-x").is_none());
+        // Missing name entirely.
+        assert!(
+            rewrite_sandbox_name_line("sandbox:\n  mode: openshell\n", "right-foo", "right-x")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rewrite_sandbox_name_line_preserves_indent_and_trailing_newline() {
+        let yaml = "sandbox:\n    name: right-foo-old\nmodel: opus\n";
+        let out = rewrite_sandbox_name_line(yaml, "right-foo-old", "right-foo").unwrap();
+        assert_eq!(out, "sandbox:\n    name: right-foo\nmodel: opus\n");
+        // No trailing newline preserved as none.
+        let out =
+            rewrite_sandbox_name_line("name: right-foo-old", "right-foo-old", "right-foo").unwrap();
+        assert_eq!(out, "name: right-foo");
     }
 }

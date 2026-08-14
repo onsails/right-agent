@@ -102,6 +102,8 @@ async fn get_provider_decodes_provider_payload() {
                     config: HashMap::new(),
                     credentials: HashMap::new(),
                     credential_expires_at_ms: HashMap::new(),
+                    credential_handles: HashMap::new(),
+                    profile_workspace: String::new(),
                 }),
             })
         })),
@@ -319,6 +321,7 @@ async fn ensure_v2_enabled_upserts_global_bool_setting() {
                 policy_hash: String::new(),
                 settings_revision: 1,
                 deleted: false,
+                annotations: HashMap::new(),
             })
         })),
         ..Default::default()
@@ -431,6 +434,7 @@ async fn reconcile_recreates_legacy_generic_provider_when_type_update_is_rejecte
                 policy_hash: String::new(),
                 settings_revision: 1,
                 deleted: false,
+                annotations: HashMap::new(),
             })
         })),
         mock_list_sandbox_providers: Some(Box::new(|_| {
@@ -453,6 +457,8 @@ async fn reconcile_recreates_legacy_generic_provider_when_type_update_is_rejecte
                     config,
                     credentials,
                     credential_expires_at_ms: HashMap::new(),
+                    credential_handles: HashMap::new(),
+                    profile_workspace: String::new(),
                 }),
             })
         })),
@@ -536,6 +542,7 @@ async fn reconcile_repairs_legacy_generic_provider_type_before_attaching() {
                 policy_hash: String::new(),
                 settings_revision: 1,
                 deleted: false,
+                annotations: HashMap::new(),
             })
         })),
         mock_list_sandbox_providers: Some(Box::new(|_| {
@@ -555,6 +562,8 @@ async fn reconcile_repairs_legacy_generic_provider_type_before_attaching() {
                     config: HashMap::new(),
                     credentials: HashMap::new(),
                     credential_expires_at_ms: HashMap::new(),
+                    credential_handles: HashMap::new(),
+                    profile_workspace: String::new(),
                 }),
             })
         })),
@@ -627,6 +636,7 @@ async fn reconcile_repairs_already_attached_legacy_generic_provider_via_detach_r
                 policy_hash: String::new(),
                 settings_revision: 1,
                 deleted: false,
+                annotations: HashMap::new(),
             })
         })),
         mock_list_sandbox_providers: Some(Box::new(|_| {
@@ -651,6 +661,8 @@ async fn reconcile_repairs_already_attached_legacy_generic_provider_via_detach_r
                     config: HashMap::new(),
                     credentials: HashMap::new(),
                     credential_expires_at_ms: HashMap::new(),
+                    credential_handles: HashMap::new(),
+                    profile_workspace: String::new(),
                 }),
             })
         })),
@@ -722,6 +734,7 @@ async fn reconcile_reports_legacy_generic_repair_errors_and_skips_attach() {
                 policy_hash: String::new(),
                 settings_revision: 1,
                 deleted: false,
+                annotations: HashMap::new(),
             })
         })),
         mock_list_sandbox_providers: Some(Box::new(|_| {
@@ -740,6 +753,8 @@ async fn reconcile_reports_legacy_generic_repair_errors_and_skips_attach() {
                     config: HashMap::new(),
                     credentials: HashMap::new(),
                     credential_expires_at_ms: HashMap::new(),
+                    credential_handles: HashMap::new(),
+                    profile_workspace: String::new(),
                 }),
             })
         })),
@@ -802,6 +817,7 @@ async fn reconcile_skips_legacy_recreate_for_borrowed_record() {
                 policy_hash: String::new(),
                 settings_revision: 1,
                 deleted: false,
+                annotations: HashMap::new(),
             })
         })),
         // Record is already attached.
@@ -833,6 +849,8 @@ async fn reconcile_skips_legacy_recreate_for_borrowed_record() {
                     config,
                     credentials,
                     credential_expires_at_ms: HashMap::new(),
+                    credential_handles: HashMap::new(),
+                    profile_workspace: String::new(),
                 }),
             })
         })),
@@ -889,6 +907,8 @@ async fn get_sandbox_provider_environment_returns_map() {
                 provider_env_revision: 1,
                 credential_expires_at_ms: HashMap::new(),
                 dynamic_credentials: HashMap::new(),
+                static_credential_bindings: HashMap::new(),
+                non_secret_environment_keys: Vec::new(),
             })
         })),
         ..Default::default()

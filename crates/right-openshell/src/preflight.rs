@@ -12,12 +12,11 @@ use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
 /// Minimum supported OpenShell version (both CLI and gateway).
 ///
 /// Below 0.0.50 the provider gRPC surface is incomplete (no
-/// `AttachSandboxProvider` etc.). 0.0.56 relocated the sandbox lifecycle
-/// phase from `Sandbox.phase` into `SandboxStatus.phase`; the vendored proto
-/// and readiness logic now read the new location, so older gateways (which
-/// still send the phase at the reserved top-level field) would always decode
-/// as UNSPECIFIED and wedge the supervisor. Right will not start below this.
-pub const MIN_OPENSHELL_VERSION: Version = Version::new(0, 0, 56);
+/// `AttachSandboxProvider` etc.). 0.0.105 adds workspace scoping across the
+/// API surface (a `workspace` field on sandbox/provider/profile requests) and
+/// new `SandboxPhase` variants; the vendored proto and request payloads now
+/// target that shape, so Right will not start below this.
+pub const MIN_OPENSHELL_VERSION: Version = Version::new(0, 0, 105);
 
 /// Preflight failure modes. Each variant carries enough context for an
 /// actionable diagnostic written to `tracing::error!` before exit.

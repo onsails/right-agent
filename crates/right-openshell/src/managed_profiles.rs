@@ -166,6 +166,12 @@ pub fn fal_profile() -> proto_v1::ProviderProfile {
         }],
         inference_capable: false,
         discovery: None,
+        // New profile files use 0; gateway sets it on stored custom profiles.
+        resource_version: 0,
+        annotations: Default::default(),
+        // Server-set provenance/visibility; ignored on import payloads.
+        source: String::new(),
+        scope: String::new(),
     }
 }
 
@@ -213,6 +219,10 @@ pub fn author_generic_profile(
         }],
         inference_capable: false,
         discovery: None,
+        resource_version: 0,
+        annotations: Default::default(),
+        source: String::new(),
+        scope: String::new(),
     }
 }
 
@@ -434,7 +444,11 @@ pub async fn get_profile(
     client: &mut OpenShellClient<Channel>,
     id: &str,
 ) -> Result<Option<proto_v1::ProviderProfile>, ManagedProfileError> {
-    let req = proto_v1::GetProviderProfileRequest { id: id.to_string() };
+    let req = proto_v1::GetProviderProfileRequest {
+        id: id.to_string(),
+        // Single-tenant: empty workspace = platform scope.
+        workspace: String::new(),
+    };
     match client.get_provider_profile(req).await {
         Ok(resp) => Ok(resp.into_inner().profile),
         Err(s) if s.code() == tonic::Code::NotFound => Ok(None),
@@ -456,6 +470,7 @@ pub async fn lint_and_import(
     let lint = client
         .lint_provider_profiles(proto_v1::LintProviderProfilesRequest {
             profiles: vec![item.clone()],
+            workspace: String::new(),
         })
         .await
         .map_err(grpc_err)?
@@ -473,6 +488,7 @@ pub async fn lint_and_import(
     client
         .import_provider_profiles(proto_v1::ImportProviderProfilesRequest {
             profiles: vec![item],
+            workspace: String::new(),
         })
         .await
         .map_err(grpc_err)?;
@@ -485,7 +501,10 @@ pub async fn delete_profile(
     id: &str,
 ) -> Result<(), ManagedProfileError> {
     client
-        .delete_provider_profile(proto_v1::DeleteProviderProfileRequest { id: id.to_string() })
+        .delete_provider_profile(proto_v1::DeleteProviderProfileRequest {
+            id: id.to_string(),
+            workspace: String::new(),
+        })
         .await
         .map_err(grpc_err)?;
     Ok(())
@@ -598,6 +617,7 @@ mod tests {
             binaries: vec![],
             inference_capable: false,
             discovery: None,
+            ..Default::default()
         }
     }
 

@@ -382,10 +382,10 @@ pub struct SandboxConfig {
     /// Required when mode is openshell.
     pub policy_file: Option<PathBuf>,
     /// Explicit sandbox name. When set, overrides the deterministic
-    /// `rightclaw-{agent_name}` fallback (kept for backward compatibility
-    /// with agents created before the right-agent rename). New agents
-    /// (created via `right agent init`) get `right-{agent_name}` written
-    /// here explicitly.
+    /// `right_openshell::openshell::sandbox_name(agent)` derivation
+    /// (`right-{agent_name}`, fitted to the 19-char upstream cap).
+    /// New agents (created via `right agent init`) get the derived name
+    /// written here explicitly.
     #[serde(default)]
     pub name: Option<String>,
     /// Providers attached to this sandbox. Empty by default. Per-agent source of truth.

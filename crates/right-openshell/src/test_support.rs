@@ -50,8 +50,16 @@ impl Drop for PathGuard {
 const SANDBOX_READY_TIMEOUT_ENV: &str = "RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS";
 const SANDBOX_SSH_TIMEOUT_ENV: &str = "RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS";
 
-/// Minimal fast-startup policy: public `allowed_ips` endpoint on 443, all
+/// Minimal fast-startup policy: public `allowed_ips` endpoint on 80, all
 /// binaries allowed. Shared by [`TestSandbox::create`] and [`shared_sandbox`].
+///
+/// OpenShell v0.0.97+ rejects endpoint overlap on a port with conflicting
+/// metadata (egress-pipeline consolidation, NVIDIA/OpenShell#2373): an
+/// `allowed_ips`/rest-`full` 443 endpoint here conflicts with a composed
+/// `_provider_*` endpoint and wedges provider attach (a wildcard-host
+/// `tls: skip` 443 endpoint demonstrably coexists — see
+/// ci_openshell_github.rs). Port 443 is intentionally left to provider
+/// profiles.
 pub(crate) const MINIMAL_POLICY: &str = "\
 version: 1
 filesystem_policy:
@@ -65,11 +73,10 @@ process:
 network_policies:
   outbound:
     endpoints:
-      - port: 443
+      - port: 80
         allowed_ips:
           - \"1.1.1.1/32\"
-        protocol: rest
-        access: full
+        tls: skip
     binaries:
       - path: \"**\"
 ";
@@ -105,7 +112,8 @@ pub struct TestSandbox {
 
 impl TestSandbox {
     /// Create an ephemeral sandbox for testing. Cleans up any leftover from
-    /// previous runs. The sandbox name is `right-test-<test_name>`. Uses a
+    /// previous runs. The sandbox name is `rt-<test_name>`, shortened by
+    /// `fit_sandbox_name` when it would exceed the 19-char upstream cap. Uses a
     /// minimal fast-startup policy; use [`create_with_policy`] when a test
     /// needs the sandbox to boot with a specific policy (e.g. so a later
     /// `policy set` only changes the network section and OpenShell does not
@@ -122,7 +130,7 @@ impl TestSandbox {
     /// `policy set` afterward must create with a policy whose
     /// filesystem/landlock matches what it will later apply.
     pub async fn create_with_policy(test_name: &str, policy: &str) -> Self {
-        let name = format!("right-test-{test_name}");
+        let name = openshell::fit_sandbox_name(&format!("rt-{test_name}"));
 
         // Hold one global sandbox slot for the sandbox lifetime. CI can set the
         // slot limit to 1 to serialize only live sandbox tests, not the whole
@@ -193,7 +201,7 @@ impl TestSandbox {
         }
     }
 
-    /// Sandbox name (already prefixed with `right-test-`).
+    /// Sandbox name (`rt-<test_name>`, fitted to the 19-char upstream cap).
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -244,7 +252,7 @@ pub struct SharedSandboxRef {
 }
 
 impl SharedSandboxRef {
-    /// Sandbox name (already prefixed with `right-test-shared-`).
+    /// Sandbox name (`rt-<label>-<runid>`, fitted to the 19-char upstream cap).
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -265,13 +273,13 @@ impl SharedSandboxRef {
 ///
 /// Safety: the coordination lock is advisory and held ONLY across this
 /// create-or-attach block (kernel releases it on process death). The sandbox
-/// name is run-scoped (`right-test-shared-<label>-<runid>`), so concurrent
+/// name is run-scoped (`rt-<label>-<runid>`, fitted to ≤19 chars), so concurrent
 /// runs/worktrees never block on each other's lock or delete each other's live
 /// sandbox. Attach is gated on liveness (`exists && ready`), never on mere
 /// existence. The sandbox slot is held only during boot.
 pub async fn shared_sandbox(label: &str) -> SharedSandboxRef {
     let runid = test_run_id();
-    let name = format!("right-test-shared-{label}-{runid}");
+    let name = openshell::fit_sandbox_name(&format!("rt-{label}-{runid}"));
 
     // Coordination lock — released when `_create_lock` drops on return.
     let _create_lock = openshell::acquire_test_name_lock(&format!("shared-create-{name}"));

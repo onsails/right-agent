@@ -2289,14 +2289,17 @@ network_policies:
 #[tokio::test]
 async fn ci_openshell_bootstrap_done_sandbox_files_present() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
-    let sandbox_name = "rightclaw-test-bootstrap-present";
+    // Sandbox name must match the production derivation `sandbox_name(agent)`
+    // (fitted to the 19-char upstream cap).
+    let agent_name = "test-bootstrap-present";
+    let sandbox_name = right_openshell::openshell::sandbox_name(agent_name);
 
     let mtls_dir = match right_openshell::openshell::preflight_check() {
         right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
         other => panic!("OpenShell not ready: {other:?}"),
     };
 
-    let sbox = create_test_sandbox(&mtls_dir, sandbox_name).await;
+    let sbox = create_test_sandbox(&mtls_dir, &sandbox_name).await;
 
     // Create identity files inside sandbox.
     for name in ["IDENTITY.md", "SOUL.md", "USER.md"] {
@@ -2307,8 +2310,6 @@ async fn ci_openshell_bootstrap_done_sandbox_files_present() {
         assert_eq!(code, 0, "failed to create {name} in sandbox");
     }
 
-    // Agent name must match the sandbox_name derivation: "rightclaw-{agent_name}".
-    let agent_name = "test-bootstrap-present";
     let tmp = TempDir::new().unwrap();
     let agents_dir = tmp.path().join("agents");
     let agent_dir = agents_dir.join(agent_name);
@@ -2338,22 +2339,23 @@ async fn ci_openshell_bootstrap_done_sandbox_files_present() {
         "BOOTSTRAP.md should be removed from host"
     );
 
-    right_openshell::openshell::delete_sandbox(sandbox_name).await;
-    right_openshell::test_cleanup::unregister_test_sandbox(sandbox_name);
+    right_openshell::openshell::delete_sandbox(&sandbox_name).await;
+    right_openshell::test_cleanup::unregister_test_sandbox(&sandbox_name);
 }
 
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn ci_openshell_bootstrap_done_sandbox_files_missing() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
-    let sandbox_name = "rightclaw-test-bootstrap-missing";
+    let agent_name = "test-bootstrap-missing";
+    let sandbox_name = right_openshell::openshell::sandbox_name(agent_name);
 
     let mtls_dir = match right_openshell::openshell::preflight_check() {
         right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
         other => panic!("OpenShell not ready: {other:?}"),
     };
 
-    let sbox = create_test_sandbox(&mtls_dir, sandbox_name).await;
+    let sbox = create_test_sandbox(&mtls_dir, &sandbox_name).await;
 
     // Create only IDENTITY.md — SOUL.md and USER.md are missing.
     let (_, code) = sbox
@@ -2362,7 +2364,6 @@ async fn ci_openshell_bootstrap_done_sandbox_files_missing() {
         .unwrap();
     assert_eq!(code, 0);
 
-    let agent_name = "test-bootstrap-missing";
     let tmp = TempDir::new().unwrap();
     let agents_dir = tmp.path().join("agents");
     let agent_dir = agents_dir.join(agent_name);
@@ -2395,8 +2396,8 @@ async fn ci_openshell_bootstrap_done_sandbox_files_missing() {
         "should mention USER.md as missing, got: {text}"
     );
 
-    right_openshell::openshell::delete_sandbox(sandbox_name).await;
-    right_openshell::test_cleanup::unregister_test_sandbox(sandbox_name);
+    right_openshell::openshell::delete_sandbox(&sandbox_name).await;
+    right_openshell::test_cleanup::unregister_test_sandbox(&sandbox_name);
 }
 
 // ---------------------------------------------------------------------------

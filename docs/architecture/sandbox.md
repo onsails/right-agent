@@ -87,6 +87,13 @@ Platform store (/sandbox/.platform/ inside sandbox):
   └─ GC removes stale entries after each sync cycle
 ```
 
+Sandbox names use the `right-{agent}` scheme when the candidate is at most 19
+characters. Longer candidates are passed through
+`right_openshell::openshell::fit_sandbox_name`: the first 14 characters are
+followed by `-` and the first four lowercase hexadecimal characters of the
+SHA-256 hash of the full candidate, keeping the result within OpenShell's
+19-character routable-name cap.
+
 Learned skill packages are agent-owned directories under
 `/sandbox/.claude/skills/rightx-*`. The learning MCP tools do not patch
 non-`rightx-*` skill directories and do not copy skill files from sandbox to

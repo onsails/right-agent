@@ -682,19 +682,19 @@ lives in the backend; the UI optimizes for user clarity.
   host.
 - **CLI for**: file upload/download (SSH+tar under the hood), policy
   apply (`openshell policy set`).
-- **Vendored proto compatibility is load-bearing**: OpenShell `v0.0.56`
+- **Vendored proto compatibility is load-bearing**: OpenShell `v0.0.105`
   is the minimum supported version (CLI and gateway).
   `crates/right-openshell/proto/UPSTREAM.md` records the pinned tag and
   fetch date. To bump: run `scripts/vendor-openshell-proto.sh <tag>` and
-  `cargo check -p right-openshell` to regenerate stubs. Older protos
-  lacked `AttachSandboxProvider` / `DetachSandboxProvider` /
-  `ListSandboxProviders` RPCs — the providers feature depends on them.
+  `cargo check -p right-openshell` to regenerate stubs.
   `right_openshell::preflight::openshell_preflight` enforces this at
   bot startup; both CLI (`openshell --version`) and gateway (Health
   RPC) must report `>= MIN_OPENSHELL_VERSION`.
   `resolve_sandbox_id` must read `metadata.id`;
   `ci_openshell_policy_validates_against_openshell` is the live
   regression gate.
+- **Sandbox names MUST be ≤19 chars** (upstream routable-name limit).
+  Generate them via `right_openshell::openshell::fit_sandbox_name`.
 - **NEVER use the CLI for in-sandbox command execution**: `openshell
   sandbox exec` CLI has unreliable argument parsing. Always use gRPC
   `exec_in_sandbox`.

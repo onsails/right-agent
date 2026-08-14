@@ -214,6 +214,10 @@ fn proto_provider_from_spec(spec: &ProviderSpec) -> datamodel::Provider {
         credentials: spec.credentials.clone(),
         config: spec.config.clone(),
         credential_expires_at_ms: HashMap::new(),
+        // Internal gateway state, never user-authored input.
+        credential_handles: HashMap::new(),
+        // Single-tenant: empty = platform scope.
+        profile_workspace: String::new(),
     }
 }
 
@@ -240,6 +244,8 @@ async fn create_provider_proto(
         .unwrap_or_else(|| "<unnamed-provider>".to_string());
     let req = proto_v1::CreateProviderRequest {
         provider: Some(provider),
+        // Single-tenant: empty workspace defaults to "default".
+        workspace: String::new(),
     };
     let resp = client
         .create_provider(req)
@@ -289,6 +295,7 @@ async fn get_provider_proto(
 ) -> Result<datamodel::Provider, ProviderError> {
     let req = proto_v1::GetProviderRequest {
         name: name.to_string(),
+        workspace: String::new(),
     };
     let resp = client
         .get_provider(req)
@@ -306,6 +313,7 @@ pub async fn update_provider(
     let req = proto_v1::UpdateProviderRequest {
         provider: Some(proto_provider_from_spec(spec)),
         credential_expires_at_ms: HashMap::new(),
+        workspace: String::new(),
     };
     let resp = client
         .update_provider(req)
@@ -324,6 +332,7 @@ pub async fn delete_provider(
 ) -> Result<(), ProviderError> {
     let req = proto_v1::DeleteProviderRequest {
         name: name.to_string(),
+        workspace: String::new(),
     };
     client
         .delete_provider(req)
@@ -342,6 +351,8 @@ pub async fn list_providers_by_prefix(
             // required for typical per-agent fan-out (< few dozen).
             limit: 0,
             offset: 0,
+            workspace: String::new(),
+            all_workspaces: false,
         })
         .await
         .map_err(|s| classify_status(s, "<list>"))?
@@ -374,6 +385,7 @@ pub async fn attach_to_sandbox(
         sandbox_name: sandbox_name.to_string(),
         provider_name: provider_name.to_string(),
         expected_resource_version: 0,
+        workspace: String::new(),
     };
     client
         .attach_sandbox_provider(req)
@@ -392,6 +404,7 @@ pub async fn detach_from_sandbox(
         sandbox_name: sandbox_name.to_string(),
         provider_name: provider_name.to_string(),
         expected_resource_version: 0,
+        workspace: String::new(),
     };
     client
         .detach_sandbox_provider(req)
@@ -407,6 +420,7 @@ pub async fn list_attached(
 ) -> Result<Vec<String>, ProviderError> {
     let req = proto_v1::ListSandboxProvidersRequest {
         sandbox_name: sandbox_name.to_string(),
+        workspace: String::new(),
     };
     let resp = client
         .list_sandbox_providers(req)
@@ -516,6 +530,9 @@ pub async fn get_sandbox_provider_environment(
 ) -> Result<HashMap<String, String>, ProviderError> {
     let req = proto_v1::GetSandboxProviderEnvironmentRequest {
         sandbox_id: sandbox_id.to_string(),
+        // Test-only helper with no production callers; the in-sandbox
+        // supervisor is the real consumer and sets this itself.
+        supports_static_credential_bindings: false,
     };
     let resp = client
         .get_sandbox_provider_environment(req)
@@ -610,6 +627,9 @@ fn provider_recreate_payload_with_type(
         credentials: provider.credentials.clone(),
         config: provider.config.clone(),
         credential_expires_at_ms: provider.credential_expires_at_ms.clone(),
+        // Internal gateway state, never user-authored input.
+        credential_handles: HashMap::new(),
+        profile_workspace: String::new(),
     }
 }
 
@@ -922,6 +942,8 @@ mod tests {
             credentials,
             config: Default::default(),
             credential_expires_at_ms: Default::default(),
+            credential_handles: Default::default(),
+            profile_workspace: String::new(),
         };
 
         let out = credentials_from_proto(&p);

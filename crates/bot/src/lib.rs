@@ -752,37 +752,58 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             resolved_sandbox: &resolved,
             config: &config,
         };
-        let (initial_health, sbox_opt) =
-            match sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await? {
-                Ok(sandbox_supervisor::SandboxBringUp {
-                    sandbox: sbox,
-                    ssh_config_path: generated_ssh_config,
-                }) => {
-                    // The path bring-up generated MUST equal the stable path
-                    // (same formula). We thread `stable_ssh_config` below so
-                    // degrade/recovery share one snapshot; assert they agree.
-                    debug_assert_eq!(
-                        generated_ssh_config, stable_ssh_config,
-                        "bring-up ssh-config path diverged from the stable path formula"
-                    );
-                    (sandbox_runtime::SandboxHealth::Ready, Some(sbox))
-                }
-                Err(diag) => {
-                    tracing::error!(
+        let bring_up_result = match sandbox_supervisor::bring_up_sandbox(&bring_up_ctx).await {
+            Ok(res) => res,
+            Err(e) => {
+                // The supervisor migrated an over-long sandbox.name in
+                // agent.yaml; this process still keys everything on the old
+                // name, so trigger the same graceful restart the config
+                // watcher would — the restarted process re-resolves the
+                // fitted name and brings the sandbox up cleanly.
+                if let Some(m) = e.downcast_ref::<sandbox_supervisor::SandboxNameMigrated>() {
+                    tracing::info!(
                         agent = %args.agent,
-                        cause = ?diag.cause,
-                        fixes = ?diag.fixes,
-                        "sandbox backend unavailable — starting DEGRADED (auto-recovers): {}",
-                        diag.summary
+                        old = %m.old,
+                        new = %m.new,
+                        "sandbox name migrated — initiating graceful restart"
                     );
-                    (
-                        sandbox_runtime::SandboxHealth::Unavailable {
-                            diagnosis: std::sync::Arc::new(diag),
-                        },
-                        None,
-                    )
+                    config_changed.store(true, Ordering::Release);
+                    shutdown.cancel();
+                    return Ok(true);
                 }
-            };
+                return Err(e);
+            }
+        };
+        let (initial_health, sbox_opt) = match bring_up_result {
+            Ok(sandbox_supervisor::SandboxBringUp {
+                sandbox: sbox,
+                ssh_config_path: generated_ssh_config,
+            }) => {
+                // The path bring-up generated MUST equal the stable path
+                // (same formula). We thread `stable_ssh_config` below so
+                // degrade/recovery share one snapshot; assert they agree.
+                debug_assert_eq!(
+                    generated_ssh_config, stable_ssh_config,
+                    "bring-up ssh-config path diverged from the stable path formula"
+                );
+                (sandbox_runtime::SandboxHealth::Ready, Some(sbox))
+            }
+            Err(diag) => {
+                tracing::error!(
+                    agent = %args.agent,
+                    cause = ?diag.cause,
+                    fixes = ?diag.fixes,
+                    "sandbox backend unavailable — starting DEGRADED (auto-recovers): {}",
+                    diag.summary
+                );
+                (
+                    sandbox_runtime::SandboxHealth::Unavailable {
+                        diagnosis: std::sync::Arc::new(diag),
+                    },
+                    None,
+                )
+            }
+        };
 
         let (handle, failure_rx) = sandbox_runtime::SandboxRuntimeHandle::new(initial_health);
         if let Some(ref sbox) = sbox_opt {

@@ -155,7 +155,7 @@ jobs:
       # Pinned floor for PR/push gating. Must be >= MIN_OPENSHELL_VERSION
       # (crates/right-openshell/src/preflight.rs). The `schedule` run overrides
       # this with the latest release (see "Resolve OpenShell version" below).
-      OPENSHELL_VERSION: "v0.0.56"
+      OPENSHELL_VERSION: "v0.0.105"
       OPENSHELL_DRIVERS: "docker"
       RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS: "360"
       RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS: "120"

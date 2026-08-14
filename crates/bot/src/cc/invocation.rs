@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(std_cmd.get_program(), "ssh");
         assert_eq!(ssh_args[0], "-F");
         assert_eq!(ssh_args[1], "config");
-        assert_eq!(ssh_args[2], "openshell-example");
+        assert_eq!(ssh_args[2], "openshell-example.default");
         assert_eq!(ssh_args[3], "--");
         assert_eq!(
             ssh_args[4..].len(),

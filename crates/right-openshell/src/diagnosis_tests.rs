@@ -109,3 +109,44 @@ fn provider_composition_diagnosis_names_provider_without_startup_copy() {
     assert!(!fixes.contains("docker"));
     assert!(!fixes.contains("gateway start"));
 }
+
+#[test]
+fn gateway_fixes_point_at_the_systemd_user_service() {
+    // `openshell gateway start`/`destroy` were removed in OpenShell v0.0.37;
+    // the gateway runs as the systemd user unit `openshell-gateway.service`.
+    let restart = "systemctl --user restart openshell-gateway";
+
+    let not_installed = GatewayCause::NotInstalled.diagnose().fixes.join(" ");
+    assert!(
+        not_installed.contains("systemctl --user enable --now openshell-gateway"),
+        "fixes: {not_installed}"
+    );
+
+    let not_started = GatewayCause::GatewayNotStarted.diagnose().fixes.join(" ");
+    assert!(not_started.contains(restart), "fixes: {not_started}");
+    assert!(
+        !not_started.contains("gateway start"),
+        "fixes: {not_started}"
+    );
+
+    let broken_certs = GatewayCause::BrokenCerts(std::path::PathBuf::from("/tmp/mtls"))
+        .diagnose()
+        .fixes
+        .join(" ");
+    assert!(broken_certs.contains(restart), "fixes: {broken_certs}");
+    assert!(
+        broken_certs.contains("regenerates mTLS certs"),
+        "fixes: {broken_certs}"
+    );
+    assert!(
+        !broken_certs.contains("gateway destroy"),
+        "fixes: {broken_certs}"
+    );
+
+    let unreachable = GatewayCause::Unreachable.diagnose().fixes.join(" ");
+    assert!(unreachable.contains(restart), "fixes: {unreachable}");
+    assert!(
+        !unreachable.contains("gateway start"),
+        "fixes: {unreachable}"
+    );
+}

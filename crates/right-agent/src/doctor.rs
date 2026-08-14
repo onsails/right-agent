@@ -1051,7 +1051,10 @@ async fn check_openshell_gateway_health() -> DoctorCheck {
             name: "openshell-gateway".to_string(),
             status: CheckStatus::Fail,
             detail: format!("gateway unreachable: {e}"),
-            fix: Some("Ensure OpenShell gateway is running: `openshell gateway start`".to_string()),
+            fix: Some(
+                "Ensure OpenShell gateway is running: `systemctl --user restart openshell-gateway`"
+                    .to_string(),
+            ),
         },
     }
 }

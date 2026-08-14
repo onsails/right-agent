@@ -25,11 +25,11 @@ fn single_line_with_fix() {
     let s = status(Glyph::Err)
         .noun("openshell")
         .verb("gateway unreachable")
-        .fix("openshell gateway start")
+        .fix("systemctl --user restart openshell-gateway")
         .render(Theme::Mono);
     assert_eq!(
         s,
-        "▐  ✗ openshell  gateway unreachable\n▐    fix: openshell gateway start"
+        "▐  ✗ openshell  gateway unreachable\n▐    fix: systemctl --user restart openshell-gateway"
     );
 }
 

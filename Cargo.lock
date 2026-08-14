@@ -3939,6 +3939,7 @@ dependencies = [
  "semver",
  "serde-saphyr",
  "serde_json",
+ "sha2",
  "shlex 2.0.1",
  "tempfile",
  "thiserror 2.0.18",

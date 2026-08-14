@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
@@ -33,23 +34,86 @@ pub const SANDBOX_MCP_JSON_PATH: &str = "/sandbox/mcp.json";
 const DEFAULT_GATEWAY_ENDPOINT: &str = "https://127.0.0.1:8080";
 pub const DEFAULT_REBUILDABLE_BACKUP_EXCLUDES: &[&str] = &[".cache", ".venv", ".npm", ".uv"];
 
-/// Generate deterministic fallback sandbox name from agent name.
+/// Maximum length of an OpenShell sandbox name.
 ///
-/// This deliberately still returns `rightclaw-{agent_name}` after the
-/// `right-agent` rename to keep existing pre-rename agents working —
-/// their `agent.yaml` has no explicit `sandbox.name`, so this fallback
-/// is what their bot uses to find their existing sandbox.
-///
-/// New agents (created via `right agent init`) get an explicit
-/// `sandbox.name: right-{agent_name}` written into `agent.yaml` and
-/// never hit this fallback.
-pub fn sandbox_name(agent_name: &str) -> String {
-    format!("rightclaw-{agent_name}")
+/// Mirrors upstream `MAX_ROUTABLE_NAME_LEN` (OpenShell v0.0.86+,
+/// `openshell-server/src/grpc/mod.rs`): DNS-routable names are composed as
+/// `workspace--sandbox--service` and must fit a 63-char DNS label —
+/// 19+2+19+2+19 = 61. Longer names are rejected at sandbox create with
+/// `INVALID_ARGUMENT`.
+pub const MAX_SANDBOX_NAME_LEN: usize = 19;
+
+/// Number of `raw` bytes kept as the prefix when [`fit_sandbox_name`] must
+/// shorten: 14 prefix bytes + `-` + 4 hash chars = [`MAX_SANDBOX_NAME_LEN`].
+/// (Truncation lands on a char boundary at or under this many bytes.)
+const FIT_PREFIX_CHARS: usize = MAX_SANDBOX_NAME_LEN - 1 - 4;
+
+/// Sanitize to the upstream DNS-1123 label charset (lowercase alnum + `-`,
+/// no leading/trailing `-`, no `--`) — enforced at sandbox create since
+/// OpenShell v0.0.86 (`validate_dns1123_label`).
+fn sanitize_dns1123(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_dash = false;
+    for ch in raw.chars().flat_map(char::to_lowercase) {
+        let ok = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        if ok {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            // Any invalid char (incl. non-ASCII, '_', '.') collapses to one
+            // dash; runs and leading dashes are skipped.
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
-/// SSH host alias for an agent's sandbox (used in SSH config).
-pub fn ssh_host(agent_name: &str) -> String {
-    format!("openshell-rightclaw-{agent_name}")
+/// Fit `raw` into the upstream routable-name cap ([`MAX_SANDBOX_NAME_LEN`])
+/// and DNS-1123 charset.
+///
+/// Returns `raw` unchanged when it already fits AND is a valid label.
+/// Otherwise sanitizes to DNS-1123 and, when still too long, returns
+/// `{sanitized prefix ≤14 bytes}-{hash4}` (≤19 chars), where `hash4` is the
+/// first 4 lowercase hex chars of the SHA-256 of the full `raw` string. The
+/// hash keeps names with long common prefixes distinct; the result is
+/// deterministic. Truncation lands on a char boundary (upstream compares
+/// bytes) and the prefix is trimmed of trailing dashes so the hash join
+/// never yields `--`.
+pub fn fit_sandbox_name(raw: &str) -> String {
+    if raw.len() <= MAX_SANDBOX_NAME_LEN && sanitize_dns1123(raw) == raw {
+        return raw.to_owned();
+    }
+    let sanitized = sanitize_dns1123(raw);
+    if sanitized.len() <= MAX_SANDBOX_NAME_LEN {
+        return sanitized;
+    }
+    let boundary = sanitized
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|&i| i <= FIT_PREFIX_CHARS)
+        .last()
+        .unwrap_or(0);
+    let prefix = sanitized[..boundary].trim_end_matches('-');
+    let digest = Sha256::digest(raw.as_bytes());
+    format!("{prefix}-{:02x}{:02x}", digest[0], digest[1])
+}
+
+/// Generate deterministic sandbox name from agent name.
+///
+/// Returns `right-{agent_name}`, shortened via [`fit_sandbox_name`] when it
+/// exceeds the upstream routable-name cap (OpenShell v0.0.105 rejects longer
+/// names at create).
+///
+/// Explicit `sandbox.name` in `agent.yaml` still wins — see
+/// [`resolve_sandbox_name`]. Names written before the 19-char cap (including
+/// the pre-rename `rightclaw-{agent_name}` fallback) are migrated to the
+/// fitted name by the bot's sandbox supervisor when the sandbox is recreated.
+pub fn sandbox_name(agent_name: &str) -> String {
+    fit_sandbox_name(&format!("right-{agent_name}"))
 }
 
 /// Resolve sandbox name: explicit from config, or deterministic fallback.
@@ -59,9 +123,40 @@ pub fn resolve_sandbox_name(agent_name: &str, explicit_name: Option<&str>) -> St
         .unwrap_or_else(|| sandbox_name(agent_name))
 }
 
+/// What a caller should do with an over-long sandbox name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OversizedNameAction {
+    /// The over-long-named sandbox already exists upstream. Keep using it:
+    /// upstream validates the 19-char cap at create only, never on reads
+    /// (v0.0.105 `openshell-server/src/grpc/validation.rs` vs `service.rs`).
+    KeepExisting,
+    /// No such sandbox exists — migrate to the fitted name before creating.
+    Migrate(String),
+}
+
+/// Decide how to handle a sandbox name that exceeds
+/// [`MAX_SANDBOX_NAME_LEN`]: keep it when a live sandbox already carries it
+/// (reads are not length-validated upstream), otherwise migrate to the
+/// [`fit_sandbox_name`] output. Names within the cap return `None`.
+pub fn oversized_name_action(raw: &str, sandbox_exists: bool) -> Option<OversizedNameAction> {
+    if raw.len() <= MAX_SANDBOX_NAME_LEN {
+        return None;
+    }
+    if sandbox_exists {
+        Some(OversizedNameAction::KeepExisting)
+    } else {
+        Some(OversizedNameAction::Migrate(fit_sandbox_name(raw)))
+    }
+}
+
 /// SSH host alias from sandbox name (not agent name).
+///
+/// Matches the `Host` line emitted by `openshell sandbox ssh-config`:
+/// OpenShell v0.0.86+ qualifies the alias with the workspace
+/// (`openshell-<name>.default`; right is single-tenant and always uses the
+/// `default` workspace).
 pub fn ssh_host_for_sandbox(sandbox_name: &str) -> String {
-    format!("openshell-{sandbox_name}")
+    format!("openshell-{sandbox_name}.default")
 }
 
 /// Filesystem path to the OpenSSH ControlMaster socket for a sandbox.
@@ -126,8 +221,8 @@ pub enum OpenShellStatus {
 
 /// Check whether the OpenShell environment is ready for sandbox mode.
 ///
-/// Returns a diagnostic enum that callers can use to give targeted
-/// guidance (install, gateway start, or destroy+recreate).
+/// Returns a diagnostic enum that callers can use to give targeted guidance
+/// (install, gateway service restart, or cert regeneration).
 pub fn preflight_check() -> OpenShellStatus {
     let mtls_dir = default_mtls_dir();
 
@@ -286,6 +381,8 @@ pub async fn sandbox_exists(
     match client
         .get_sandbox(GetSandboxRequest {
             name: name.to_owned(),
+            // Single-tenant: empty workspace defaults to "default".
+            workspace: String::new(),
         })
         .await
     {
@@ -486,6 +583,7 @@ async fn get_sandbox_readiness(
     let resp = match client
         .get_sandbox(GetSandboxRequest {
             name: name.to_owned(),
+            workspace: String::new(),
         })
         .await
     {
@@ -508,8 +606,11 @@ fn sandbox_phase_name(phase: i32) -> &'static str {
     match SandboxPhase::try_from(phase) {
         Ok(SandboxPhase::Unspecified) => "UNSPECIFIED",
         Ok(SandboxPhase::Provisioning) => "PROVISIONING",
+        Ok(SandboxPhase::Starting) => "STARTING",
         Ok(SandboxPhase::Ready) => "READY",
         Ok(SandboxPhase::Error) => "ERROR",
+        Ok(SandboxPhase::Stopping) => "STOPPING",
+        Ok(SandboxPhase::Stopped) => "STOPPED",
         Ok(SandboxPhase::Deleting) => "DELETING",
         Ok(SandboxPhase::Unknown) => "UNKNOWN",
         Err(_) => "UNRECOGNIZED",
@@ -1639,14 +1740,14 @@ pub async fn ensure_sandbox(
         }
         OpenShellStatus::NoGateway(_) => {
             return Err(miette::miette!(
-                help = "Run `openshell gateway start`,\n  \
+                help = "Run `systemctl --user restart openshell-gateway`,\n  \
                         or use `--sandbox-mode none`",
                 "OpenShell gateway is not running"
             ));
         }
         OpenShellStatus::BrokenGateway(dir) => {
             return Err(miette::miette!(
-                help = "Try `openshell gateway destroy && openshell gateway start`,\n  \
+                help = "Run `systemctl --user restart openshell-gateway` (it regenerates mTLS certs on start),\n  \
                         or use `--sandbox-mode none`",
                 "OpenShell gateway exists but mTLS certificates are missing at {}",
                 dir.display()
@@ -1714,6 +1815,7 @@ pub async fn resolve_sandbox_id(
     let resp = client
         .get_sandbox(GetSandboxRequest {
             name: name.to_owned(),
+            workspace: String::new(),
         })
         .await
         .map_err(|e| miette::miette!("GetSandbox failed for '{name}': {e:#}"))?;
@@ -2068,6 +2170,7 @@ pub async fn get_active_policy(
             name: name.to_owned(),
             version: 0, // latest
             global: false,
+            workspace: String::new(),
         })
         .await
         .map_err(|e| miette::miette!("GetSandboxPolicyStatus RPC failed: {e:#}"))?;
